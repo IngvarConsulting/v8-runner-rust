@@ -429,6 +429,18 @@ impl AppConfig {
         conn
     }
 
+    /// Address that hash memory is bound to, without credentials or executor choice.
+    /// `None` when the address is not recognised: such a target must never share memory.
+    pub fn infobase_memory_address(&self, base_path: &Path) -> Option<String> {
+        match &self.infobase.standalone {
+            Some(standalone) => standalone
+                .gate_endpoint()
+                .ok()
+                .map(|(host, port)| format!("standalone:{host}:{port}")),
+            None => self.v8_connection().snapshot_identity(base_path),
+        }
+    }
+
     /// Kind of the target infobase, as declared by the connection contract.
     pub fn target_kind(&self) -> TargetKind {
         if self.infobase.standalone.is_some() {
@@ -540,6 +552,16 @@ pub enum SourceSetPurpose {
 impl SourceSetPurpose {
     pub const fn is_external(self) -> bool {
         matches!(self, Self::ExternalDataProcessors | Self::ExternalReports)
+    }
+
+    /// The YAML `type` spelling. Stable: it is also persisted in hash-memory bindings.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configuration => "CONFIGURATION",
+            Self::Extension => "EXTENSION",
+            Self::ExternalDataProcessors => "EXTERNAL_DATA_PROCESSORS",
+            Self::ExternalReports => "EXTERNAL_REPORTS",
+        }
     }
 }
 

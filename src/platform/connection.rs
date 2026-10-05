@@ -79,6 +79,37 @@ impl V8Connection {
             .map(|(_, value)| value)
     }
 
+    /// Stable address identity, excluding credentials and the selected executor.
+    pub fn snapshot_identity(&self, base_path: &std::path::Path) -> Option<String> {
+        use crate::support::path::{nearest_existing_canonical_path, snapshot_path_identity};
+        if let Some(path) = self.file_path() {
+            let path = std::path::Path::new(unquote_connection_value(path));
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                base_path.join(path)
+            };
+            let canonical = nearest_existing_canonical_path(&absolute).unwrap_or(absolute);
+            return Some(format!(
+                "file:{} ({})",
+                snapshot_path_identity(&canonical),
+                canonical.display()
+            ));
+        }
+        // Cluster host and infobase names are case-insensitive for the platform.
+        if let Some(address) = declared_server_address(&self.raw) {
+            return Some(format!(
+                "server:{}\\{}",
+                address.server.to_lowercase(),
+                address.reference.to_lowercase()
+            ));
+        }
+        self.connection_args
+            .windows(2)
+            .find(|pair| pair[0].eq_ignore_ascii_case("/s") || pair[0].eq_ignore_ascii_case("-s"))
+            .map(|pair| format!("server:{}", pair[1].to_lowercase()))
+    }
+
     /// Returns whether the raw value has a supported file or server connection shape.
     /// The declared form is answered by [`declared_server_address`], the same predicate
     /// that decides how the address reaches the platform.
@@ -203,11 +234,15 @@ pub fn declared_parameters(raw: &str) -> Option<Vec<(String, &str)>> {
     raw.split(';')
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .map(|part| {
-            part.split_once('=')
-                .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim()))
-        })
+        .map(declared_parameter)
         .collect()
+}
+
+/// Одна часть объявленной формы: ключ строчными без пробелов, значение без пробелов
+/// по краям. Загрузчик конфигурации разбирает части той же функцией.
+pub fn declared_parameter(part: &str) -> Option<(String, &str)> {
+    part.split_once('=')
+        .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim()))
 }
 
 /// Значение параметра строки подключения без обрамляющих кавычек: платформа принимает
@@ -263,6 +298,57 @@ fn split_arg_string(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::V8Connection;
+
+    #[test]
+    fn snapshot_address_identity_ignores_credentials_and_canonicalizes_file_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("db")).expect("db");
+        let declared = V8Connection::from_connection_string("File='db';Usr=a;Pwd=secret");
+        let absolute = V8Connection::from_connection_string(&format!(
+            "/F \"{}\"",
+            dir.path().join("db").display()
+        ));
+        assert_eq!(
+            declared.snapshot_identity(dir.path()),
+            absolute.snapshot_identity(dir.path())
+        );
+        let server = V8Connection::from_connection_string("Srvr='host';Ref='db';Pwd=secret");
+        let args = V8Connection::from_connection_string(r"/S host\db /N alice /P other");
+        assert_eq!(
+            server.snapshot_identity(dir.path()),
+            args.snapshot_identity(dir.path())
+        );
+        let spelled = V8Connection::from_connection_string("srvr=HOST;ref=DB");
+        let flagged = V8Connection::from_connection_string(r"/S Host\Db");
+        assert_eq!(
+            V8Connection::from_connection_string("Srvr=host;Ref=БАЗА")
+                .snapshot_identity(dir.path()),
+            V8Connection::from_connection_string(r"/S host\база").snapshot_identity(dir.path()),
+            "Cyrillic infobase names are case-insensitive too"
+        );
+        assert_eq!(
+            spelled.snapshot_identity(dir.path()),
+            server.snapshot_identity(dir.path()),
+            "server and infobase names are case-insensitive"
+        );
+        assert_eq!(
+            flagged.snapshot_identity(dir.path()),
+            server.snapshot_identity(dir.path())
+        );
+        for connection in [&declared, &server, &args] {
+            let identity = connection.snapshot_identity(dir.path()).expect("identity");
+            for secret in ["secret", "alice", "other"] {
+                assert!(
+                    !identity.contains(secret),
+                    "credentials must not reach identity: {identity}"
+                );
+            }
+        }
+        assert_eq!(
+            V8Connection::from_connection_string("unknown").snapshot_identity(dir.path()),
+            None
+        );
+    }
 
     #[test]
     fn wraps_plain_connection_string_as_flag_and_value() {

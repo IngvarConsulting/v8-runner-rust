@@ -6,6 +6,7 @@ check:
   - src/change_detection/source_sets.rs::analysis_state_lies_under_the_work_path_by_logical_context
   - src/change_detection/scanner.rs::a_known_file_is_hashed_only_when_touched_within_the_margin
   - src/change_detection/analyzer.rs::a_file_rewritten_with_the_same_content_is_not_a_change
+  - src/change_detection/source_sets.rs::ad_hoc_analysis_never_reads_or_writes_memory_and_empty_sources_skip
   - src/change_detection/scanner.rs::service_and_generated_paths_are_never_scanned
   - tests/architecture_guardrails.rs::change_detection_has_no_background_watcher
   - tests/architecture_guardrails.rs::change_detection_never_reads_the_executor_choice
@@ -17,6 +18,9 @@ check:
 сборке, экспорте или загрузке. Состояние анализа лежит под `workPath` по логическому
 контексту набора.
 
+Отсутствующий снимок не объявляется ошибкой хранилища: первая сборка видит существующие
+файлы как добавленные, пустой набор пропускается.
+
 Кандидаты отбираются по времени изменения с запасом и подтверждаются хешем; служебные и
-порождённые каталоги в обход не входят. Анализ отвечает только на вопрос, что делать, —
-выбора исполнителя он не касается.
+порождённые дочерние каталоги в обход не входят. Анализ отвечает только на вопрос, что
+делать, — выбора исполнителя он не касается.

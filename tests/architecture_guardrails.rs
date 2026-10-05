@@ -2616,10 +2616,8 @@ fn every_staged_publication_rechecks_its_target_first() {
         "crate::use_cases::artifacts::agent::run_external_agent_export",
         "crate::use_cases::artifacts::run_designer_export",
         "crate::use_cases::artifacts::run_external_designer_export",
-        "crate::use_cases::dump_config::agent::publish_full",
         "crate::use_cases::dump_config::finalize_edt_dump",
-        "crate::use_cases::dump_config::run_full_dump_designer",
-        "crate::use_cases::dump_config::run_full_dump_ibcmd",
+        "crate::use_cases::dump_config::publish_full_dump",
         "crate::use_cases::infobase_export::execute_configuration_export",
         "crate::use_cases::infobase_export::execute_infobase_snapshot",
     ];
@@ -2669,6 +2667,60 @@ fn every_staged_publication_rechecks_its_target_first() {
         sites, SITES,
         "the staged publications changed; name each one here after it re-checks its target"
     );
+}
+
+#[test]
+fn a_full_pull_records_the_staged_tree_it_publishes() {
+    // Корень #53: полная выгрузка заменяла дерево, не обновляя хеши, и следующая отправка
+    // грузила то же дерево обратно. Владелец записи памяти после полной выгрузки один —
+    // `publish_full_dump`: хеши считаются по запечатанной копии до публикации и
+    // записываются после неё, опубликованное дерево заново не обходится (правка,
+    // сделанная после публикации, должна остаться изменением). Выгрузка в каталог
+    // исходников в обход этого владельца снова оставила бы память старой.
+    const OWNER: &str = "crate::use_cases::dump_config::publish_full_dump";
+    const EDT: &str = "crate::use_cases::dump_config::finalize_edt_dump";
+
+    let index = SourceIndex::of_src();
+    let scenarios = path_of("crate::use_cases");
+    let mut publishers = Vec::new();
+    let mut owner_tokens = None;
+    for body in production_bodies(&index) {
+        if !body.module.starts_with(&scenarios) {
+            continue;
+        }
+        let tokens = normalize_tokens(body.block);
+        let site = format!("{}::{}", body.module.join("::"), body.context);
+        if tokens.contains("DUMP_BACKUP_PREFIX") && tokens.contains(".publish_dir(") {
+            publishers.push(site.clone());
+        }
+        if site == OWNER {
+            owner_tokens = Some(tokens);
+        }
+    }
+    publishers.sort();
+    assert_eq!(
+        publishers,
+        [EDT, OWNER],
+        "a source dump is published outside `publish_full_dump`, which records its memory"
+    );
+    let tokens = owner_tokens.expect("publish_full_dump is indexed");
+    let prepared = tokens
+        .find("prepare_full_snapshot(")
+        .expect("hashes the staged tree");
+    let published = tokens.find(".publish_dir(").expect("publishes");
+    let committed = tokens
+        .find("commit_full_snapshot(")
+        .expect("records memory");
+    assert!(
+        prepared < published && published < committed,
+        "publish_full_dump must hash staging, then publish, then record memory"
+    );
+    for rescan in ["rescan_and_commit_full(", "scanner::", "analyze_context("] {
+        assert!(
+            !tokens.contains(rescan),
+            "publish_full_dump must not scan the published tree again: `{rescan}`"
+        );
+    }
 }
 
 /// Вызовы публикации и подготовки у владельца промежуточной копии — в виде, в котором их

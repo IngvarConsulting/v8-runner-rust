@@ -416,7 +416,9 @@ pub(super) fn commit_full_rescan(
     match analyzer::rescan_and_commit_full(context, work_path) {
         Ok(()) => Ok(()),
         Err(_error) if recover_storage && storage_needs_recovery(context, work_path) => {
-            let storage_path = context.storage_path(work_path);
+            let Some(storage_path) = context.storage_path(work_path) else {
+                return Ok(());
+            };
             remove_storage_path(&storage_path).map_err(|remove_error| {
                 AppError::Runtime(format!(
                     "failed to remove corrupt storage '{}': {remove_error}",
@@ -456,7 +458,9 @@ pub(super) fn commit_step_state(
 }
 
 fn storage_needs_recovery(context: &SourceSetContext, work_path: &Path) -> bool {
-    HashStorage::new(context.storage_path(work_path)).needs_recovery()
+    context
+        .storage_path(work_path)
+        .is_some_and(|path| HashStorage::new(path).needs_recovery())
 }
 
 pub(super) fn remove_storage_path(path: &Path) -> std::io::Result<()> {
