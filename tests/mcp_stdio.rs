@@ -1031,8 +1031,8 @@ async fn mcp_stdio_tools_answer_in_the_forms_of_their_commands() {
     client.cancel().await.expect("cancel client");
 }
 
-/// Живая проверка EDT собирает `data` своим кодом, мимо сценария CLI, — и отвечает той же
-/// формой `check`, вместе с замечанием вида EDT.
+/// Живая проверка EDT идёт в общую сессию сервера тем же исполнителем, что `check` CLI, — и
+/// отвечает той же формой `check`, вместе с замечанием вида EDT.
 #[tokio::test]
 async fn mcp_stdio_the_live_edt_check_answers_in_the_form_of_check() {
     let validate_handler = "if [ -n \"$out\" ]; then printf 'ERROR\\tCatalogs.Items\\t1\\t2\\tUnusedVariables\\tunused variable\\n' > \"$out\"; fi\nprompt";
@@ -1917,6 +1917,10 @@ fn assert_refused_as_busy(response: &rmcp::model::CallToolResult) {
         .as_ref()
         .expect("structured payload");
     assert_envelope_business_failure(payload, "check");
+    // MCP сводит рода к `validation`, `runtime` и `platform`: `workspace_busy` командной
+    // строки здесь приезжает как `runtime_failure`.
+    assert_eq!(payload["error"]["code"], "runtime_failure", "{payload}");
+    assert_eq!(payload["error"]["kind"], "runtime", "{payload}");
     assert!(
         payload["error"]["message"]
             .as_str()

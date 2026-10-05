@@ -2,43 +2,22 @@ use std::future::Future;
 
 use crate::config::model::AppConfig;
 use crate::use_cases::context::CommandName;
+use crate::use_cases::result::UseCaseError;
 #[cfg(test)]
 use crate::use_cases::result::UseCaseFailure;
-use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::workspace_lock::{acquire_workspace_lock, WorkspaceLockGuard};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspaceBusyPolicy {
-    LegacyRuntime,
-    Typed,
-}
-
-/// Runs an adapter dispatch under the shared workspace-lock policy.
+/// Runs an adapter dispatch under the shared workspace lock.
+///
+/// Занятый каталог отказывает здесь своим родом `WorkspaceBusy` для всякой команды: словарь
+/// провода выбирает транспорт, а не граница замка.
 pub fn dispatch_with_workspace_lock<TResult>(
     config: &AppConfig,
     command: CommandName,
     before_dispatch: impl FnOnce() -> Result<(), UseCaseError>,
     run: impl FnOnce() -> TResult,
 ) -> Result<TResult, UseCaseError> {
-    dispatch_with_workspace_lock_policy(
-        config,
-        command,
-        WorkspaceBusyPolicy::LegacyRuntime,
-        before_dispatch,
-        run,
-    )
-}
-
-/// Runs the single workspace-lock policy while allowing new commands to opt into a typed
-/// contention code without changing the established contract of existing commands.
-pub(crate) fn dispatch_with_workspace_lock_policy<TResult>(
-    config: &AppConfig,
-    command: CommandName,
-    busy_policy: WorkspaceBusyPolicy,
-    before_dispatch: impl FnOnce() -> Result<(), UseCaseError>,
-    run: impl FnOnce() -> TResult,
-) -> Result<TResult, UseCaseError> {
-    let _workspace_lock = acquire(config, command, busy_policy)?;
+    let _workspace_lock = acquire(config, command)?;
     before_dispatch()?;
     Ok(run())
 }
@@ -54,26 +33,12 @@ pub(crate) async fn dispatch_with_workspace_lock_async<TFuture>(
 where
     TFuture: Future,
 {
-    let _workspace_lock = acquire(config, command, WorkspaceBusyPolicy::LegacyRuntime)?;
+    let _workspace_lock = acquire(config, command)?;
     Ok(run().await)
 }
 
-/// Захват и его отказ по политике команды: занятый каталог прежние команды называют
-/// ошибкой исполнения, новые — своим кодом.
-fn acquire(
-    config: &AppConfig,
-    command: CommandName,
-    busy_policy: WorkspaceBusyPolicy,
-) -> Result<WorkspaceLockGuard, UseCaseError> {
-    acquire_workspace_lock(config, command.as_str()).map_err(|error| {
-        let error = UseCaseError::from(error);
-        match (busy_policy, error.kind()) {
-            (WorkspaceBusyPolicy::LegacyRuntime, UseCaseErrorKind::WorkspaceBusy) => {
-                UseCaseError::new(UseCaseErrorKind::Runtime, error.message())
-            }
-            _ => error,
-        }
-    })
+fn acquire(config: &AppConfig, command: CommandName) -> Result<WorkspaceLockGuard, UseCaseError> {
+    acquire_workspace_lock(config, command.as_str()).map_err(UseCaseError::from)
 }
 
 /// Maps a use-case failure payload into a transport-specific response while preserving the
@@ -171,7 +136,7 @@ mod tests {
         )
         .expect_err("busy workspace");
 
-        assert_eq!(error.kind(), UseCaseErrorKind::Runtime);
+        assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
         assert!(!ran.get());
     }
 }
