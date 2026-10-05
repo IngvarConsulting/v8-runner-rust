@@ -3232,12 +3232,8 @@ mod tests {
 
     #[cfg(unix)]
     fn process_exists(pid: i32) -> bool {
-        unsafe {
-            if libc::kill(pid, 0) == 0 {
-                return true;
-            }
-        }
-        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        // An unreaped zombie still exists here: the tests also check that a child is reaped.
+        u32::try_from(pid).is_ok_and(crate::support::machine::is_process_alive)
     }
 
     #[cfg(unix)]
@@ -3266,16 +3262,7 @@ mod tests {
 
     #[cfg(windows)]
     fn process_exists(pid: u32) -> bool {
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
-                ),
-            ])
-            .status()
-            .is_ok_and(|status| status.success())
+        crate::support::machine::is_process_alive(pid)
     }
 
     #[cfg(windows)]

@@ -2,11 +2,14 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::support::machine::{host_name, is_process_running};
+use crate::support::path::{filesystem_object_identity, open_file_identity};
 
 pub const TOOL_NAME: &str = "v8-runner";
 
@@ -18,7 +21,22 @@ pub fn is_known_tool_name(tool: &str) -> bool {
 thread_local! {
     static TEST_LOCK_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
         std::cell::RefCell::new(None);
+    /// Runs between opening the system lock file and locking it.
+    static TEST_SYSTEM_LOCK_OPENED_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        std::cell::RefCell::new(None);
 }
+
+#[cfg(test)]
+fn run_system_lock_opened_hook() {
+    TEST_SYSTEM_LOCK_OPENED_HOOK.with(|cell| {
+        if let Some(hook) = cell.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_system_lock_opened_hook() {}
 
 /// Create a directory and all missing parents.
 pub fn ensure_dir(path: &Path) -> std::io::Result<()> {
@@ -69,12 +87,26 @@ pub struct AdvisoryLockMetadata {
     pub pid: u32,
     pub owner_id: String,
     pub created_at: DateTime<Utc>,
+    /// The record was published while its owner held the system lock, and the owner
+    /// removes it before letting that lock go. Whoever holds the system lock and still
+    /// finds such a record knows its owner died. Records without the mark come from
+    /// writers that did not hold the system lock and stay fail-closed.
+    #[serde(default)]
+    pub system_lock: bool,
+    /// Machine the owner ran on: `pid` means something only there. A marked record
+    /// without it is taken as written on this machine only when this machine has no
+    /// name either; otherwise it stays until removed by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
+/// A held advisory lock: the OS lock on the `.system` file and the owner record next
+/// to it. Dropping the guard removes both files while the lock is still held and only
+/// then releases it, so no lock file outlives its command.
 #[derive(Debug)]
 pub struct AdvisoryLockGuard {
-    #[allow(dead_code)]
     file: Option<File>,
+    system_path: PathBuf,
     path: PathBuf,
     metadata: AdvisoryLockMetadata,
 }
@@ -84,6 +116,12 @@ impl Drop for AdvisoryLockGuard {
         if let Some(file) = self.file.take() {
             if lock_file_owned_by(&self.path, &self.metadata.owner_id) {
                 let _ = std::fs::remove_file(&self.path);
+            }
+            // Only the holder removes the system file, and only while holding it: a
+            // waiter that opened this file before the removal takes a lock on an
+            // unnamed file, sees the name no longer refers to it and retries.
+            if file_still_named_by(&file, &self.system_path).unwrap_or(false) {
+                let _ = std::fs::remove_file(&self.system_path);
             }
             let _ = file.unlock();
         }
@@ -154,11 +192,27 @@ impl ReplaceFileError {
     }
 }
 
+/// How long a blocking acquisition keeps waiting while the system file only stays
+/// pending removal. A removal is pending while some process — a former holder, an
+/// antivirus or an indexer — still has the removed file open, which passes; an access
+/// denial that outlasts this window is taken as a real one and reported.
+const PENDING_REMOVAL_WAIT: Duration = Duration::from_secs(30);
+
+/// Takes the lock, waiting while another holder keeps it.
 pub fn acquire_advisory_lock(path: &Path) -> std::io::Result<AdvisoryLockGuard> {
+    let mut pending_since: Option<Instant> = None;
     loop {
         match try_acquire_advisory_lock(path) {
             Ok(guard) => return Ok(guard),
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if is_system_lock_pending_removal(&error) {
+                    let since = *pending_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= PENDING_REMOVAL_WAIT {
+                        return Err(pending_removal_access_error(error));
+                    }
+                } else {
+                    pending_since = None;
+                }
                 thread::sleep(Duration::from_millis(50));
             }
             Err(error) => return Err(error),
@@ -166,6 +220,12 @@ pub fn acquire_advisory_lock(path: &Path) -> std::io::Result<AdvisoryLockGuard> 
     }
 }
 
+/// Takes the lock or reports `WouldBlock` when another holder keeps it.
+///
+/// Does not wait for another holder, but may pause briefly: when a former holder has
+/// just removed the system file, the name is opened again, and on Windows a removal
+/// still pending is waited out for up to about a second before the lock is reported
+/// busy.
 pub fn try_acquire_advisory_lock(path: &Path) -> std::io::Result<AdvisoryLockGuard> {
     try_acquire_advisory_lock_impl(path)
 }
@@ -182,28 +242,144 @@ fn try_acquire_advisory_lock_impl(path: &Path) -> std::io::Result<AdvisoryLockGu
         pid: std::process::id(),
         owner_id: Uuid::new_v4().to_string(),
         created_at: Utc::now(),
+        system_lock: true,
+        host: host_name(),
     };
     let encoded = serde_json::to_vec_pretty(&metadata)
         .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
-    let system_lock_path = advisory_system_lock_path(path)?;
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(system_lock_path)?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Err(lock_already_held(path)),
-        Err(TryLockError::Error(error)) => return Err(error),
-    }
-
-    publish_advisory_lock_metadata(path, parent, &encoded)?;
-    Ok(AdvisoryLockGuard {
+    let system_path = advisory_system_lock_path(path)?;
+    let file = lock_named_system_file(path, &system_path)?;
+    // From here on the guard owns the system file: a failed publication drops it, and
+    // the drop removes the system file under the lock before releasing it.
+    let guard = AdvisoryLockGuard {
         file: Some(file),
+        system_path,
         path: path.to_path_buf(),
         metadata,
+    };
+    publish_advisory_lock_metadata(path, parent, &encoded)?;
+    Ok(guard)
+}
+
+/// How many times acquisition reopens the system file before it reports the error.
+/// A reopen is needed when a previous holder removed the file between this process
+/// opening it and locking it, or, on Windows, while that removal is still pending.
+/// Together with the pause this bounds one attempt at about a second.
+const SYSTEM_LOCK_REOPEN_ATTEMPTS: u32 = 200;
+const SYSTEM_LOCK_REOPEN_PAUSE: Duration = Duration::from_millis(5);
+
+/// Locks the file currently named `system_path`. The holder removes that file before
+/// releasing it, so a lock taken on a handle opened earlier may belong to a file that
+/// no longer has the name; such a lock is dropped and the name is opened again.
+fn lock_named_system_file(path: &Path, system_path: &Path) -> std::io::Result<File> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let retry_allowed = attempt < SYSTEM_LOCK_REOPEN_ATTEMPTS;
+        let file = match OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(system_path)
+        {
+            Ok(file) => file,
+            Err(error) if is_pending_removal(&error) => {
+                if !retry_allowed {
+                    return Err(system_lock_pending_removal(path, error));
+                }
+                thread::sleep(SYSTEM_LOCK_REOPEN_PAUSE);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        run_system_lock_opened_hook();
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Err(lock_already_held(path)),
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+        if file_still_named_by(&file, system_path)? {
+            return Ok(file);
+        }
+        if !retry_allowed {
+            return Err(lock_already_held(path));
+        }
+    }
+}
+
+/// Whether `path` still names the file `file` was opened from. A missing name, or on
+/// Windows a name whose removal is still pending, does not.
+fn file_still_named_by(file: &File, path: &Path) -> std::io::Result<bool> {
+    let held = open_file_identity(file)?;
+    match filesystem_object_identity(path) {
+        Ok(named) => Ok(named == held),
+        Err(error) if error.kind() == ErrorKind::NotFound || is_pending_removal(&error) => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// On Windows a removed file keeps its name until the last handle closes, and opening
+/// that name fails with access denied or delete pending. Elsewhere a removed name is
+/// simply gone.
+///
+/// An access denial from missing rights carries the same code and cannot be told
+/// apart here; the reopen attempts and [`PENDING_REMOVAL_WAIT`] bound how long it is
+/// taken for a pending removal.
+#[cfg(windows)]
+fn is_pending_removal(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_DELETE_PENDING};
+
+    error.raw_os_error().is_some_and(|code| {
+        [ERROR_ACCESS_DENIED, ERROR_DELETE_PENDING]
+            .into_iter()
+            .any(|pending| i32::try_from(pending) == Ok(code))
     })
+}
+
+#[cfg(not(windows))]
+fn is_pending_removal(_error: &std::io::Error) -> bool {
+    false
+}
+
+/// The system file stayed pending removal through every reopen. To a caller this is a
+/// busy lock; the original denial is kept as the source.
+#[derive(Debug, thiserror::Error)]
+#[error("lock is already held: {} (its file is still pending removal: {source})", path.display())]
+struct SystemLockPendingRemoval {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+fn system_lock_pending_removal(path: &Path, source: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::WouldBlock,
+        SystemLockPendingRemoval {
+            path: path.to_path_buf(),
+            source,
+        },
+    )
+}
+
+fn is_system_lock_pending_removal(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<SystemLockPendingRemoval>())
+}
+
+/// Gives back the access denial behind a pending removal that never ended.
+fn pending_removal_access_error(error: std::io::Error) -> std::io::Error {
+    let kind = error.kind();
+    match error.into_inner() {
+        Some(inner) => match inner.downcast::<SystemLockPendingRemoval>() {
+            Ok(pending) => pending.source,
+            Err(inner) => std::io::Error::new(kind, inner),
+        },
+        None => std::io::Error::from(kind),
+    }
 }
 
 fn advisory_system_lock_path(path: &Path) -> std::io::Result<PathBuf> {
@@ -223,8 +399,12 @@ fn publish_advisory_lock_metadata(
     parent: &Path,
     encoded: &[u8],
 ) -> std::io::Result<()> {
+    // The candidate is named after the lock, so one left by a killed process still
+    // matches the lock's own name pattern (for a dump lock, `.dump-*.lock*`).
+    let mut prefix = path.file_name().unwrap_or_default().to_os_string();
+    prefix.push(".candidate-");
     let mut candidate = tempfile::Builder::new()
-        .prefix(".v8-runner-lock-candidate-")
+        .prefix(&prefix)
         .tempfile_in(parent)?;
     write_advisory_lock_metadata(candidate.as_file_mut(), encoded)?;
     candidate.as_file().sync_all()?;
@@ -235,16 +415,73 @@ fn publish_advisory_lock_metadata(
             Ok(())
         }
         Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
-            Err(legacy_lock_requires_offline_cleanup(path))
+            refuse_unless_left_by_dead_owner(path)?;
+            error.file.persist(path).map_err(|error| error.error)?;
+            let _ = best_effort_fsync_dir(parent);
+            Ok(())
         }
         Err(error) => Err(error.error),
     }
+}
+
+/// The caller holds the system lock and found an owner record in place. Only a record
+/// marked as written under the system lock, whose process is known to be gone, may be
+/// replaced. A marked record whose process still runs here, although the caller holds
+/// the system lock, means either that the pid was reused by an unrelated process or
+/// that the file system ignored the system lock (some network file systems do).
+/// Neither ends by waiting, so the record stays until removed by hand. A record from
+/// another machine cannot be checked from here, and an unmarked one may belong to a
+/// writer that never takes the system lock; both stay until removed by hand too.
+fn refuse_unless_left_by_dead_owner(path: &Path) -> std::io::Result<()> {
+    let Ok(metadata) = read_advisory_lock_metadata(path) else {
+        return Err(legacy_lock_requires_offline_cleanup(path));
+    };
+    if !metadata.system_lock {
+        return Err(legacy_lock_requires_offline_cleanup(path));
+    }
+    // A marked record without a host comes only from a writer that could not learn its
+    // own host name; it is taken as written here only by a reader in the same position.
+    if metadata.host != host_name() {
+        return Err(owner_on_another_host(
+            path,
+            metadata.pid,
+            metadata.host.as_deref(),
+        ));
+    }
+    if is_process_running(metadata.pid) {
+        return Err(owner_process_still_running(path, metadata.pid));
+    }
+    Ok(())
 }
 
 fn lock_already_held(path: &Path) -> std::io::Error {
     std::io::Error::new(
         ErrorKind::WouldBlock,
         format!("lock is already held: {}", path.display()),
+    )
+}
+
+fn owner_process_still_running(path: &Path, pid: u32) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::AlreadyExists,
+        format!(
+            "lock at '{}' is owned by process {pid}, which is still running; if that process is not v8-runner, remove this file manually",
+            path.display()
+        ),
+    )
+}
+
+fn owner_on_another_host(path: &Path, pid: u32, owner_host: Option<&str>) -> std::io::Error {
+    let host = owner_host.map_or_else(
+        || "an unrecorded host".to_owned(),
+        |host| format!("host '{host}'"),
+    );
+    std::io::Error::new(
+        ErrorKind::AlreadyExists,
+        format!(
+            "lock at '{}' is owned by process {pid} on {host}, which this machine cannot check; once that process has stopped, remove this file manually",
+            path.display()
+        ),
     )
 }
 
@@ -819,12 +1056,15 @@ mod tests {
     use super::replace_dir_atomically;
     use super::{
         acquire_advisory_lock, advisory_lock_owner_id, advisory_system_lock_path,
-        decode_platform_log, publish_file_atomically, publish_file_atomically_impl,
-        read_advisory_lock_metadata, remove_path_if_exists, replace_file_atomically,
-        replace_file_rollback_error, try_acquire_advisory_lock,
+        decode_platform_log, is_system_lock_pending_removal, pending_removal_access_error,
+        publish_file_atomically, publish_file_atomically_impl, read_advisory_lock_metadata,
+        remove_path_if_exists, replace_file_atomically, replace_file_rollback_error,
+        system_lock_pending_removal, try_acquire_advisory_lock,
         try_acquire_advisory_lock_with_hook, AdvisoryLockMetadata, ReplaceFileFailureState,
-        ReplaceFileTestPoint, CP1251_HIGH, REPLACE_FILE_TEST_HOOK, TOOL_NAME,
+        ReplaceFileTestPoint, CP1251_HIGH, REPLACE_FILE_TEST_HOOK, TEST_SYSTEM_LOCK_OPENED_HOOK,
+        TOOL_NAME,
     };
+    use crate::support::machine::host_name;
     use std::fs;
     use std::io::ErrorKind;
     use std::path::Path;
@@ -860,19 +1100,309 @@ mod tests {
         assert_eq!(metadata.owner_id, advisory_lock_owner_id(&guard));
     }
 
-    #[test]
-    fn released_advisory_lock_keeps_system_file_and_can_be_reacquired() {
-        let dir = tempdir().expect("tempdir");
-        let lock_path = dir.path().join("persistent.lock");
-        let first = acquire_advisory_lock(&lock_path).expect("first lock");
-        drop(first);
+    fn directory_entries(dir: &Path) -> Vec<String> {
+        let mut entries: Vec<String> = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
 
-        assert!(!lock_path.exists());
+    #[test]
+    fn released_advisory_lock_leaves_no_files_and_can_be_reacquired() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("released.lock");
+        let first = acquire_advisory_lock(&lock_path).expect("first lock");
         assert!(advisory_system_lock_path(&lock_path)
             .expect("system lock path")
             .is_file());
+        drop(first);
+
+        assert!(directory_entries(dir.path()).is_empty());
         let second = try_acquire_advisory_lock(&lock_path).expect("second lock");
         assert!(!advisory_lock_owner_id(&second).is_empty());
+        drop(second);
+        assert!(directory_entries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn files_left_by_a_killed_owner_do_not_block_and_are_removed() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("killed.lock");
+        let system_path = advisory_system_lock_path(&lock_path).expect("system lock path");
+        let dead = AdvisoryLockMetadata {
+            tool: TOOL_NAME.to_owned(),
+            pid: i32::MAX as u32,
+            owner_id: "killed-owner".to_owned(),
+            created_at: chrono::Utc::now(),
+            system_lock: true,
+            host: host_name(),
+        };
+        fs::write(
+            &lock_path,
+            serde_json::to_vec_pretty(&dead).expect("record"),
+        )
+        .expect("record left by the killed owner");
+        fs::write(&system_path, b"").expect("system file left by the killed owner");
+
+        let guard = try_acquire_advisory_lock(&lock_path).expect("lock after a killed owner");
+        assert_eq!(
+            read_advisory_lock_metadata(&lock_path)
+                .expect("own record")
+                .owner_id,
+            advisory_lock_owner_id(&guard)
+        );
+        drop(guard);
+
+        assert!(directory_entries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_failed_acquisition_leaves_no_system_file() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("refused.lock");
+        fs::write(&lock_path, b"legacy owner").expect("legacy lock");
+
+        try_acquire_advisory_lock(&lock_path).expect_err("legacy owner keeps the lock");
+
+        assert_eq!(directory_entries(dir.path()), ["refused.lock"]);
+    }
+
+    /// Holders remove the system file while still holding it, so a contender may open the
+    /// file, lose the name to a newer one and only then lock it. That lock guards
+    /// nothing: the contender must see the name moved on and find the newer file held.
+    #[test]
+    fn a_lock_taken_on_a_removed_system_file_does_not_admit_a_second_holder() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("contended.lock");
+        let first = acquire_advisory_lock(&lock_path).expect("first holder");
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel::<()>();
+        let contender_path = lock_path.clone();
+
+        let contender = thread::spawn(move || {
+            let paused = std::cell::Cell::new(false);
+            TEST_SYSTEM_LOCK_OPENED_HOOK.with(|cell| {
+                *cell.borrow_mut() = Some(Box::new(move || {
+                    if !paused.replace(true) {
+                        opened_tx.send(()).expect("signal opened");
+                        resume_rx.recv().expect("resume");
+                    }
+                }));
+            });
+            let result = try_acquire_advisory_lock(&contender_path).map(drop);
+            TEST_SYSTEM_LOCK_OPENED_HOOK.with(|cell| *cell.borrow_mut() = None);
+            result
+        });
+
+        opened_rx.recv().expect("contender opened the first file");
+        drop(first);
+        let second = try_acquire_advisory_lock(&lock_path).expect("second holder");
+        resume_tx.send(()).expect("resume contender");
+
+        let error = contender
+            .join()
+            .expect("join contender")
+            .expect_err("the second holder still holds the lock");
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        drop(second);
+        assert!(directory_entries(dir.path()).is_empty());
+    }
+
+    fn write_owner_record(lock_path: &Path, pid: u32, host: Option<String>) {
+        let record = AdvisoryLockMetadata {
+            tool: TOOL_NAME.to_owned(),
+            pid,
+            owner_id: "recorded-owner".to_owned(),
+            created_at: chrono::Utc::now(),
+            system_lock: true,
+            host,
+        };
+        fs::write(
+            lock_path,
+            serde_json::to_vec_pretty(&record).expect("record"),
+        )
+        .expect("owner record");
+    }
+
+    fn recorded_owner_id(lock_path: &Path) -> String {
+        read_advisory_lock_metadata(lock_path)
+            .expect("owner record")
+            .owner_id
+    }
+
+    /// Where the OS lock is ignored (some network file systems), the system file no
+    /// longer keeps a second process out, and a marked record of a running owner is the
+    /// only sign that the lock is held. The same record with a reused pid would never
+    /// clear by itself, so acquisition refuses at once instead of waiting.
+    #[test]
+    fn a_marked_record_of_a_running_owner_is_not_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("running.lock");
+        write_owner_record(&lock_path, std::process::id(), host_name());
+
+        let error = try_acquire_advisory_lock(&lock_path).expect_err("the owner still runs");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(error
+            .to_string()
+            .contains(&format!("process {}", std::process::id())));
+        assert!(error.to_string().contains("remove this file manually"));
+        assert_eq!(recorded_owner_id(&lock_path), "recorded-owner");
+        assert_eq!(directory_entries(dir.path()), ["running.lock"]);
+
+        let started = std::time::Instant::now();
+        let error = acquire_advisory_lock(&lock_path).expect_err("blocking acquisition refuses");
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(recorded_owner_id(&lock_path), "recorded-owner");
+    }
+
+    #[test]
+    fn a_marked_record_of_a_stopped_owner_on_this_host_is_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("stopped.lock");
+        write_owner_record(&lock_path, i32::MAX as u32, host_name());
+
+        let guard = try_acquire_advisory_lock(&lock_path).expect("the owner has stopped");
+
+        assert_eq!(
+            recorded_owner_id(&lock_path),
+            advisory_lock_owner_id(&guard)
+        );
+        drop(guard);
+        assert!(directory_entries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_marked_record_from_another_host_is_not_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("remote.lock");
+        let other_host = format!("{}-elsewhere", host_name().unwrap_or_default());
+        write_owner_record(&lock_path, i32::MAX as u32, Some(other_host));
+
+        let error = try_acquire_advisory_lock(&lock_path)
+            .expect_err("a process on another host cannot be checked");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("remove this file manually"));
+        assert_eq!(recorded_owner_id(&lock_path), "recorded-owner");
+        assert_eq!(directory_entries(dir.path()), ["remote.lock"]);
+    }
+
+    /// Only a writer that could not learn its host name leaves a marked record without
+    /// one, so a reader that knows its own name cannot take the record as written here.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_marked_record_without_a_host_is_not_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("hostless.lock");
+        write_owner_record(&lock_path, i32::MAX as u32, None);
+
+        let error =
+            try_acquire_advisory_lock(&lock_path).expect_err("the host of the owner is unknown");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("remove this file manually"));
+        assert_eq!(recorded_owner_id(&lock_path), "recorded-owner");
+        assert_eq!(directory_entries(dir.path()), ["hostless.lock"]);
+    }
+
+    /// A runner killed with `kill -9` stays a zombie until its parent waits for it, and
+    /// its record already counts as left by a stopped owner.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_marked_record_of_a_killed_unreaped_owner_is_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("zombie.lock");
+        let mut owner = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn owner");
+        owner.kill().expect("kill owner");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::support::machine::is_process_running(owner.id())
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            crate::support::machine::is_process_alive(owner.id()),
+            "the killed owner is not reaped yet"
+        );
+        write_owner_record(&lock_path, owner.id(), host_name());
+
+        let acquired = try_acquire_advisory_lock(&lock_path);
+        owner.wait().expect("reap owner");
+
+        let guard = acquired.expect("a killed owner waiting to be reaped has stopped");
+        assert_eq!(
+            recorded_owner_id(&lock_path),
+            advisory_lock_owner_id(&guard)
+        );
+        drop(guard);
+        assert!(directory_entries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_published_record_carries_this_host() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("host.lock");
+        let _guard = try_acquire_advisory_lock(&lock_path).expect("lock");
+
+        let record = read_advisory_lock_metadata(&lock_path).expect("owner record");
+
+        assert_eq!(record.host, host_name());
+    }
+
+    /// A process killed while writing its record leaves the candidate behind; it must
+    /// still carry the lock's name so the lock's own name pattern finds it.
+    #[test]
+    fn a_record_candidate_is_named_after_its_lock() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join(".dump-0123.lock");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_dir = dir.path().to_path_buf();
+        let hook_seen = Arc::clone(&seen);
+
+        let guard = try_acquire_advisory_lock_with_hook(&lock_path, move || {
+            *hook_seen.lock().expect("seen") = directory_entries(&hook_dir);
+        })
+        .expect("lock");
+        drop(guard);
+
+        let seen = seen.lock().expect("seen").clone();
+        let candidates: Vec<&String> = seen
+            .iter()
+            .filter(|name| name.as_str() != ".dump-0123.lock.system")
+            .collect();
+        assert_eq!(candidates.len(), 1, "{seen:?}");
+        assert!(
+            candidates[0].starts_with(".dump-0123.lock.candidate-"),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_pending_removal_reads_as_busy_and_gives_back_its_denial() {
+        let denial = std::io::Error::new(ErrorKind::PermissionDenied, "access denied");
+        let error = system_lock_pending_removal(Path::new("pending.lock"), denial);
+
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert!(is_system_lock_pending_removal(&error));
+        assert!(!is_system_lock_pending_removal(&std::io::Error::from(
+            ErrorKind::WouldBlock
+        )));
+        let denial = pending_removal_access_error(error);
+        assert_eq!(denial.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "access denied");
     }
 
     #[test]
@@ -884,6 +1414,8 @@ mod tests {
             pid: i32::MAX as u32,
             owner_id: "stale-owner".to_owned(),
             created_at: chrono::Utc::now(),
+            system_lock: false,
+            host: None,
         };
         fs::write(
             &lock_path,
@@ -1135,6 +1667,8 @@ mod tests {
             pid: std::process::id(),
             owner_id: "live-owner".to_owned(),
             created_at: chrono::Utc::now(),
+            system_lock: false,
+            host: None,
         };
         fs::write(
             &lock_path,
@@ -1201,6 +1735,8 @@ mod tests {
             pid: std::process::id(),
             owner_id: "legacy-owner".to_owned(),
             created_at: chrono::Utc::now(),
+            system_lock: false,
+            host: None,
         };
         fs::write(
             &lock_path,

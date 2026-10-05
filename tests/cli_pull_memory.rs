@@ -8,7 +8,10 @@ use std::process::Output;
 
 use serde_json::Value;
 use support::fake_agent::{start_fake_agent, FakeAgent, AGENT_PASSWORD};
-use support::{temp_workspace, v8_runner_command, write_shell_script};
+use support::{
+    interruptible_stub, temp_workspace, terminate_and_wait, v8_runner_command, wait_for_file,
+    write_shell_script, write_shell_script_atomically, RunnerGuard,
+};
 
 struct Project {
     _dir: tempfile::TempDir,
@@ -16,7 +19,29 @@ struct Project {
     sources: PathBuf,
     work: PathBuf,
     calls: PathBuf,
+    binary: PathBuf,
     extension: bool,
+}
+
+/// Поддельная платформа, которая выгружает в каталог из командной строки два файла.
+fn dumping_platform(calls: &Path) -> String {
+    format!(
+        r#"printf '%s\n' "$*" >> '{}'
+target=''
+previous=''
+for arg in "$@"; do
+  if [ "$previous" = '/DumpConfigToFiles' ]; then target="$arg"; fi
+  previous="$arg"
+done
+if [ "$1" = 'config' ] && [ "$2" = 'export' ]; then target="$previous"; fi
+if [ -n "$target" ]; then
+  mkdir -p "$target"
+  printf '<Configuration/>\n' > "$target/Configuration.xml"
+  printf 'Procedure Published()\nEndProcedure\n' > "$target/Module.bsl"
+fi
+exit 0"#,
+        calls.display()
+    )
 }
 
 fn project(provider: &str, extension: bool) -> Project {
@@ -37,26 +62,7 @@ fn project(provider: &str, extension: bool) -> Project {
         ""
     };
     let binary = root.join(if provider == "ibcmd" { "ibcmd" } else { "1cv8" });
-    write_shell_script(
-        &binary,
-        &format!(
-            r#"printf '%s\n' "$*" >> '{}'
-target=''
-previous=''
-for arg in "$@"; do
-  if [ "$previous" = '/DumpConfigToFiles' ]; then target="$arg"; fi
-  previous="$arg"
-done
-if [ "$1" = 'config' ] && [ "$2" = 'export' ]; then target="$previous"; fi
-if [ -n "$target" ]; then
-  mkdir -p "$target"
-  printf '<Configuration/>\n' > "$target/Configuration.xml"
-  printf 'Procedure Published()\nEndProcedure\n' > "$target/Module.bsl"
-fi
-exit 0"#,
-            calls.display()
-        ),
-    );
+    write_shell_script(&binary, &dumping_platform(&calls));
     let agent_yaml = if provider == "agent" {
         let base = root.join("agent-base");
         fs::create_dir_all(base.join("0")).expect("agent user dir");
@@ -98,6 +104,7 @@ exit 0"#,
         sources,
         work,
         calls,
+        binary,
         extension,
     }
 }
@@ -363,4 +370,104 @@ fn an_ad_hoc_base_never_uses_the_named_hash_baseline() {
         .collect();
     assert_eq!(bases, [std::ffi::OsString::from("origin")]);
     assert_push_skips(&project);
+}
+
+/// Файлы замка выгрузки, лежащие рядом с набором исходников.
+fn dump_lock_files(project: &Project) -> Vec<String> {
+    let parent = project.sources.parent().expect("source set parent");
+    let mut names: Vec<String> = fs::read_dir(parent)
+        .expect("source set parent")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with(".dump-") && name.contains(".lock"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Запускает полную выгрузку на заглушке, которая ждёт `release`, и возвращает раннер,
+/// когда выгрузка уже идёт и замок выгрузки взят.
+fn start_a_blocked_pull(project: &Project, release: &Path) -> RunnerGuard {
+    let root = project.sources.parent().expect("project root");
+    let started = root.join("dump-started");
+    write_shell_script_atomically(&project.binary, &interruptible_stub(&started, release));
+    let runner = RunnerGuard(
+        v8_runner_command()
+            .arg("--config")
+            .arg(&project.config)
+            .arg("--json-message")
+            .args(["pull", "--mode", "full", "--source-set", "main"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn pull"),
+    );
+    assert!(
+        wait_for_file(&started, std::time::Duration::from_secs(30)),
+        "the dump never started"
+    );
+    assert!(
+        dump_lock_files(project)
+            .iter()
+            .any(|name| name.ends_with(".lock.system")),
+        "the dump runs under its lock: {:?}",
+        dump_lock_files(project)
+    );
+    runner
+}
+
+#[test]
+fn a_finished_pull_leaves_no_dump_lock_beside_the_source_set() {
+    for provider in ["designer", "ibcmd"] {
+        for extension in [false, true] {
+            let project = project(provider, extension);
+            pull(&project);
+            assert_eq!(
+                dump_lock_files(&project),
+                Vec::<String>::new(),
+                "{provider}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_interrupted_pull_leaves_no_dump_lock_beside_the_source_set() {
+    let project = project("designer", false);
+    let release = project.work.with_file_name("dump-release");
+    let mut runner = start_a_blocked_pull(&project, &release);
+
+    let stopped = terminate_and_wait(&mut runner.0, std::time::Duration::from_secs(30));
+    fs::write(&release, "").expect("release a stray dump");
+
+    assert!(stopped, "pull did not stop after SIGTERM");
+    assert_eq!(dump_lock_files(&project), Vec::<String>::new());
+}
+
+/// После `kill -9` ОС снимает замок, но его файлы остаются. Следующая команда их не
+/// пугается: берёт замок как обычно и уносит файлы с собой.
+#[test]
+fn a_pull_after_a_killed_pull_succeeds_and_removes_the_left_lock_files() {
+    let project = project("designer", false);
+    let release = project.work.with_file_name("dump-release");
+    let mut runner = start_a_blocked_pull(&project, &release);
+
+    runner.0.kill().expect("kill -9 the pull");
+    runner.0.wait().expect("killed pull");
+    fs::write(&release, "").expect("release the orphaned dump");
+    assert_ne!(
+        dump_lock_files(&project),
+        Vec::<String>::new(),
+        "a killed pull cannot remove its lock files"
+    );
+
+    write_shell_script_atomically(&project.binary, &dumping_platform(&project.calls));
+    pull(&project);
+
+    assert_eq!(dump_lock_files(&project), Vec::<String>::new());
 }
