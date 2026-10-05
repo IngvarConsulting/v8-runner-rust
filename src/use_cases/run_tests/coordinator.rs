@@ -123,7 +123,7 @@ pub(super) fn run_tests(
                 "build",
                 ExecutionStepKind::PlatformCommand,
                 build_started.elapsed().as_millis() as u64,
-                "build prerequisite explicitly skipped by --no-build",
+                "build prerequisite explicitly skipped by --no-push",
             ));
             if let Err(error) = validate_prepared_infobase(config) {
                 let message = error.to_string();

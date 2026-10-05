@@ -5,7 +5,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use support::{
     hold_workspace_lock, temp_workspace, v8_runner_command, write_shell_script as write_script,
 };
@@ -270,8 +270,7 @@ fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
             "--dry-run",
@@ -292,8 +291,7 @@ fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -323,8 +321,7 @@ fn dry_run_refuses_clean_before_execution_instead_of_skipping_it() {
             "--no-color",
             "--clean-before-execution",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
             "--dry-run",
@@ -354,8 +351,7 @@ fn dump_dry_run_plans_the_target_without_writing_it() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
             "--dry-run",
@@ -396,8 +392,7 @@ fn dump_ibcmd_full_json_success() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -432,8 +427,7 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -486,8 +480,7 @@ fn dump_text_success_is_compact_and_keeps_output_visible() {
             &config_path.display().to_string(),
             "--no-color",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -525,8 +518,6 @@ fn dump_ibcmd_incremental_json_success() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "incremental",
             "--source-set",
             "main",
         ])
@@ -552,8 +543,6 @@ fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "partial",
             "--source-set",
             "main",
             "--object",
@@ -586,8 +575,6 @@ fn dump_text_warning_shows_degraded_fallback_reason() {
             &config_path.display().to_string(),
             "--no-color",
             "dump",
-            "--mode",
-            "partial",
             "--source-set",
             "main",
             "--object",
@@ -613,8 +600,6 @@ fn dump_ibcmd_partial_failure_keeps_partial_mode_and_warning() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "partial",
             "--source-set",
             "main",
             "--object",
@@ -656,8 +641,6 @@ fn dump_designer_partial_json_normalizes_colon_selector_and_reports_both_forms()
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "partial",
             "--object",
             "  Catalog:Items  ",
         ])
@@ -691,8 +674,7 @@ fn dump_text_failure_shows_error_message() {
             &config_path.display().to_string(),
             "--no-color",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -723,8 +705,7 @@ fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -783,27 +764,14 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
     )
     .expect("hand-written");
 
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "dump",
-            "--mode",
-            "full",
-            "--source-set",
-            "main",
-        ])
-        .output()
-        .expect("run dump");
+    // Командная строка просит замену только с согласием (`pull --force`); полная выгрузка,
+    // которая спрашивает сначала, — у MCP: согласия ему взять неоткуда.
+    let answer = support::mcp::call_tool(&config_path, "dump_config", json!({ "mode": "FULL" }));
 
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let rendered = answer.envelope.to_string();
+    assert!(answer.is_error, "the dump must be refused: {rendered}");
     assert_eq!(
-        output.status.code(),
-        Some(2),
+        answer.envelope["error"]["kind"], "validation",
         "a refusal is a validation error, not a runtime one: {rendered}"
     );
     assert!(
@@ -811,7 +779,7 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
         "the refusal must name what would be lost: {rendered}"
     );
     assert!(
-        rendered.contains("--discard-uncommitted"),
+        rendered.contains("--force"),
         "the refusal must say how to proceed anyway: {rendered}"
     );
     assert!(
@@ -821,7 +789,7 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
 }
 
 /// Опись версий штатно лежит в игноре, а полная выгрузка пишет её заново: её
-/// прежнее содержимое не потеря, и выгрузка идёт без `--discard-uncommitted`.
+/// прежнее содержимое не потеря, и выгрузка идёт без `--force`.
 #[test]
 fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
     let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
@@ -841,24 +809,13 @@ fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
     git(&base_path, &["commit", "-qm", "ignore the version file"]);
     fs::write(&version_file, "<info previous=\"yes\"/>\n").expect("version file");
 
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "dump",
-            "--mode",
-            "full",
-            "--source-set",
-            "main",
-        ])
-        .output()
-        .expect("run dump");
+    // Без согласия: полная выгрузка MCP спрашивает систему контроля версий сначала.
+    let answer = support::mcp::call_tool(&config_path, "dump_config", json!({ "mode": "FULL" }));
 
     assert!(
-        output.status.success(),
-        "an ignored version file must not stop a full dump: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        !answer.is_error,
+        "an ignored version file must not stop a full dump: {}",
+        answer.envelope
     );
     // Поддельная платформа описи не пишет: в заменённом каталоге файла с прежним
     // содержимым остаться не должно.
@@ -884,12 +841,9 @@ fn an_explicit_request_replaces_the_directory_and_keeps_nothing() {
         .args([
             "--config",
             &config_path.display().to_string(),
-            "dump",
-            "--mode",
-            "full",
-            "--source-set",
+            "pull",
             "main",
-            "--discard-uncommitted",
+            "--force",
         ])
         .output()
         .expect("run dump");
@@ -932,31 +886,22 @@ fn kept_backups(base_path: &Path) -> Vec<PathBuf> {
 fn without_version_control_the_dump_proceeds_untouched() {
     let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project();
 
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "dump",
-            "--mode",
-            "full",
-            "--source-set",
-            "main",
-        ])
-        .output()
-        .expect("run dump");
+    // Без согласия: полная выгрузка MCP спрашивает систему контроля версий сначала.
+    let answer = support::mcp::call_tool(&config_path, "dump_config", json!({ "mode": "FULL" }));
 
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let rendered = answer.envelope.to_string();
     assert!(
-        output.status.success(),
+        !answer.is_error,
         "a missing answer must not stop the work: {rendered}"
     );
-    assert!(
-        rendered.contains("Dump completed successfully"),
+    assert_eq!(
+        answer.envelope["warnings"],
+        json!([]),
         "and must not turn an ordinary dump into a warning: {rendered}"
+    );
+    assert_eq!(
+        answer.envelope["data"]["message"], "dump completed successfully",
+        "{rendered}"
     );
     assert!(
         kept_backups(&base_path).is_empty(),
@@ -972,8 +917,7 @@ fn pull_main(config_path: &Path, extra: &[&str]) -> (std::process::Output, Strin
         "--config",
         config.as_str(),
         "pull",
-        "--mode",
-        "full",
+        "--force",
         "--source-set",
         "main",
     ];

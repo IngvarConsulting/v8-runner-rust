@@ -78,7 +78,7 @@ fn refusal(target: &Path, paths: &[PathBuf]) -> String {
     // Одной строкой: человеческий вывод — закреплённая форма, и многострочная
     // подробность в нём рассыпается по разным видам строк.
     format!(
-        "refusing to replace '{}': {} file(s) there exist nowhere else ({}{}); commit or stash them, or pass --discard-uncommitted to replace the directory anyway",
+        "refusing to replace '{}': {} file(s) there exist nowhere else ({}{}); commit or stash them, or pass --force to replace the directory anyway",
         target.display(),
         paths.len(),
         named.join(", "),
@@ -115,7 +115,7 @@ mod tests {
             &[PathBuf::from("src/cf/hand-written.xml")],
         );
         assert!(message.contains("src/cf/hand-written.xml"), "{message}");
-        assert!(message.contains("--discard-uncommitted"), "{message}");
+        assert!(message.contains("--force"), "{message}");
     }
 
     /// Попросили явно — уничтожаем, как и обещает имя ключа.

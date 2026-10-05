@@ -230,7 +230,7 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
     let (build, payload) = run(&harness, &["build"]);
     assert_eq!(build, 0, "{payload}");
 
-    let (dump, payload) = run(&harness, &["dump", "--mode", "incremental"]);
+    let (dump, payload) = run(&harness, &["dump"]);
 
     assert_eq!(dump, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], true, "{payload}");

@@ -1,6 +1,13 @@
 mod support;
 
+/// Перечень прежних имён — тот же файл, что держит разбор: в тесте он не повторяется.
+#[path = "../src/cli/synonyms.rs"]
+mod synonyms;
+
+use std::collections::{BTreeMap, BTreeSet};
+
 use support::v8_runner_command;
+use synonyms::{Previous, SYNONYMS};
 
 #[test]
 fn root_help_splits_commands_and_global_options() {
@@ -16,13 +23,155 @@ fn root_help_splits_commands_and_global_options() {
     assert!(stdout.contains("Print application version"));
     assert!(stdout.contains("Send configured source-sets to the infobase"));
     assert!(stdout.contains("--json-message"));
-    // Прежние имена принимаются, но словарь в справке один.
-    for previous in ["bootstrap", "build", "dump", "load", "syntax", "config"] {
-        let listed = stdout
-            .lines()
-            .any(|line| line.trim_start().starts_with(&format!("{previous} ")));
-        assert!(!listed, "{previous} is listed in help:\n{stdout}");
+}
+
+fn help(path: &[String], flag: &str) -> String {
+    let output = v8_runner_command()
+        .args(path)
+        .arg(flag)
+        .output()
+        .expect("run help");
+    assert!(
+        output.status.success(),
+        "{path:?} {flag}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf-8 help")
+}
+
+/// Подкоманды из раздела `Commands:` вместе с видимыми псевдонимами.
+fn listed_subcommands(help: &str) -> BTreeMap<String, Vec<String>> {
+    help.lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+        .map(|line| {
+            let name = line.split_whitespace().next().expect("name").to_owned();
+            let aliases = line
+                .split_once("[aliases: ")
+                .or_else(|| line.split_once("[alias: "))
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(aliases, _)| aliases.split(", ").map(str::to_owned).collect())
+                .unwrap_or_default();
+            (name, aliases)
+        })
+        .collect()
+}
+
+/// Длинные ключи, которые справка перечисляет как ключи этой команды.
+fn listed_keys(help: &str) -> BTreeSet<String> {
+    help.lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with('-'))
+        .flat_map(|line| {
+            line.split_whitespace()
+                .take_while(|token| token.starts_with('-'))
+                .filter_map(|token| token.strip_prefix("--"))
+                .map(|name| name.trim_end_matches(',').to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Упоминает ли текст ключ `--name` целым словом.
+fn mentions_key(help: &str, name: &str) -> bool {
+    let needle = format!("--{name}");
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    help.match_indices(&needle).any(|(start, _)| {
+        let before = help[..start].chars().next_back();
+        let after = help[start + needle.len()..].chars().next();
+        !before.is_some_and(word) && !after.is_some_and(word)
+    })
+}
+
+/// Значения, которые справка перечисляет у ключа `--key`.
+fn listed_values(help: &str, key: &str) -> Option<Vec<String>> {
+    let lines = help.lines().collect::<Vec<_>>();
+    let head = format!("--{key} <");
+    let start = lines.iter().position(|line| line.contains(&head))?;
+    let block = lines[start..]
+        .iter()
+        .enumerate()
+        .take_while(|(index, line)| {
+            *index == 0 || !(line.trim_start().starts_with('-') || line.trim().is_empty())
+        })
+        .map(|(_, line)| *line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let values = block
+        .split_once("[possible values: ")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(values, _)| values.split(", ").map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    Some(values)
+}
+
+/// Справка всех уровней — корня и каждой видимой подкоманды, краткая и полная — печатает
+/// только словарь сайта: ни одно прежнее имя команды, ключа или значения из перечня
+/// `src/cli/synonyms.rs` в ней не появляется (`INV.CLI.A-HIDDEN-SYNONYM-IS-ABSENT-FROM-HELP`).
+#[test]
+fn no_help_at_any_level_prints_a_previous_name() {
+    let mut pending = vec![Vec::<String>::new()];
+    let mut visited = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        for flag in ["-h", "--help"] {
+            let text = help(&path, flag);
+            let keys = listed_keys(&text);
+            let subcommands = listed_subcommands(&text);
+            for synonym in SYNONYMS {
+                let here = synonym.command == path.as_slice();
+                let shown = match synonym.previous {
+                    Previous::Command(previous) => {
+                        here && subcommands.iter().any(|(name, aliases)| {
+                            name == previous || aliases.iter().any(|alias| alias == previous)
+                        })
+                    }
+                    // Ключ, который у этой команды есть под новым смыслом (`upload --mode`),
+                    // справка печатает по праву; иначе прежнее имя не появляется даже в прозе.
+                    Previous::Key(previous) => {
+                        (here && keys.contains(previous))
+                            || (!keys.contains(previous) && mentions_key(&text, previous))
+                    }
+                    Previous::Value { key, value } if here => listed_values(&text, key)
+                        .unwrap_or_else(|| panic!("{path:?} {flag} has no --{key}:\n{text}"))
+                        .iter()
+                        .any(|listed| listed == value),
+                    Previous::Value { .. } => false,
+                };
+                assert!(
+                    !shown,
+                    "`v8-runner {} {flag}` prints the previous name {:?} instead of {}:\n{text}",
+                    path.join(" "),
+                    synonym.previous,
+                    synonym.current
+                );
+            }
+            if flag == "--help" {
+                for name in subcommands.into_keys().filter(|name| name != "help") {
+                    let mut inner = path.clone();
+                    inner.push(name);
+                    pending.push(inner);
+                }
+            }
+        }
+        visited.insert(path);
     }
+
+    // Каждая строка перечня проверена справкой той команды, где живёт.
+    for synonym in SYNONYMS {
+        let path = synonym
+            .command
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            visited.contains(&path),
+            "{:?} lives under {path:?}, which no help lists",
+            synonym.previous
+        );
+    }
+    assert!(visited.len() > SYNONYMS.len(), "{visited:?}");
 }
 
 #[test]

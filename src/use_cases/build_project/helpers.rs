@@ -80,7 +80,7 @@ pub(super) fn plan_edt_export_step(
     if full_rebuild {
         return Ok(StepPlan::Execute {
             mode: BuildMode::EdtExport,
-            message: "forced EDT export (--full-rebuild)".to_owned(),
+            message: "forced EDT export (--full)".to_owned(),
             partial_paths: None,
             commit: StepCommit::RescanFull {
                 recover_storage: true,
@@ -155,7 +155,7 @@ pub(super) fn plan_generated_designer_load_step(
     if full_rebuild {
         return Ok(StepPlan::Execute {
             mode: BuildMode::Full,
-            message: "full load from EDT export (--full-rebuild)".to_owned(),
+            message: "full load from EDT export (--full)".to_owned(),
             partial_paths: None,
             commit: StepCommit::RescanFull {
                 recover_storage: true,

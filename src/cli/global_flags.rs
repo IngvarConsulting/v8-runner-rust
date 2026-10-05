@@ -12,6 +12,7 @@
 
 use clap::ArgMatches;
 
+use crate::cli::synonyms::{Previous, SYNONYMS};
 use crate::config::model::InfobaseSelector;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -24,6 +25,26 @@ pub fn leaf_command_path(matches: &ArgMatches) -> String {
         current = sub;
     }
     parts.join(" ")
+}
+
+/// Имя листа в словаре. Псевдонимы `clap` уже сводит к новому имени; скрытые прежние пути
+/// (`config init`, `infobase configuration export`, `check edt`) отвечают именем команды,
+/// которая их заменила, — его называет перечень прежних имён.
+pub fn dictionary_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split(' ').collect();
+    SYNONYMS
+        .iter()
+        .find_map(|synonym| match synonym.previous {
+            Previous::Command(previous) => {
+                let scope = synonym.command.len();
+                (parts.len() > scope
+                    && parts[..scope] == *synonym.command
+                    && parts[scope] == previous)
+                    .then(|| synonym.current.to_owned())
+            }
+            Previous::Key(_) | Previous::Value { .. } => None,
+        })
+        .unwrap_or_else(|| path.to_owned())
 }
 
 /// Умеет ли лист превью.
@@ -247,15 +268,17 @@ fn leaf(path: &str) -> Option<&'static Leaf> {
 /// ложь, против которой написано правило, поэтому отказ здесь закрыт по умолчанию.
 pub fn refusal(path: &str, dry_run: bool, infobase: Option<&str>) -> Option<UseCaseError> {
     let refuse = |message: String| Some(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    // Строку таблицы ищет путь разбора, а отказ называет лист словаря.
+    let name = dictionary_path(path);
     // Ключ без значения — не отсутствие ключа: вызывающий что-то назвал, и раннер обязан
     // сказать, что названного не понял.
     if infobase.is_some_and(|value| value.trim().is_empty()) {
-        return refuse(format!("--infobase names no infobase for `{path}`"));
+        return refuse(format!("--infobase names no infobase for `{name}`"));
     }
     let Some(leaf) = leaf(path) else {
         if dry_run || infobase.is_some() {
             return refuse(format!(
-                "`{path}` declares nothing about the global keys, so --dry-run and --infobase are not accepted there"
+                "`{name}` declares nothing about the global keys, so --dry-run and --infobase are not accepted there"
             ));
         }
         return None;
@@ -263,16 +286,16 @@ pub fn refusal(path: &str, dry_run: bool, infobase: Option<&str>) -> Option<UseC
     if dry_run {
         if let Preview::Absent(reason) = leaf.preview {
             return refuse(format!(
-                "`{path}` has no preview: {reason}. Remove --dry-run"
+                "`{name}` has no preview: {reason}. Remove --dry-run"
             ));
         }
     }
     match (leaf.base, InfobaseSelector::from_flag(infobase)) {
         (Base::Ignores, InfobaseSelector::Name(_) | InfobaseSelector::Connection(_)) => {
-            refuse(format!("`{path}` selects no infobase. Remove --infobase"))
+            refuse(format!("`{name}` selects no infobase. Remove --infobase"))
         }
-        (Base::Declares, InfobaseSelector::Name(name)) => refuse(format!(
-            "`{path}` declares the infobase, so --infobase takes a connection string here, not the name `{name}`"
+        (Base::Declares, InfobaseSelector::Name(declared)) => refuse(format!(
+            "`{name}` declares the infobase, so --infobase takes a connection string here, not the name `{declared}`"
         )),
         _ => None,
     }

@@ -131,17 +131,14 @@ fn succeeded(output: Output) -> Value {
 
 fn pull(project: &Project) {
     if project.extension {
-        succeeded(run(
-            project,
-            &["pull", "--mode", "full", "--source-set", "base"],
-        ));
+        succeeded(run(project, &["pull", "--force", "--source-set", "base"]));
     }
     let selector = if project.extension {
         "--extension"
     } else {
         "--source-set"
     };
-    succeeded(run(project, &["pull", "--mode", "full", selector, "main"]));
+    succeeded(run(project, &["pull", "--force", selector, "main"]));
 }
 
 fn assert_push_skips(project: &Project) {
@@ -216,7 +213,7 @@ fn relative_file_address_uses_the_project_directory_and_matches_absolute_memory(
             .arg("--config")
             .arg(&project.config)
             .arg("--json-message")
-            .args(["pull", "--mode", "full", "--source-set", "main"])
+            .args(["pull", "--force", "--source-set", "main"])
             .output()
             .expect("pull from another directory"),
     );
@@ -270,13 +267,22 @@ fn git_refusal_preserves_memory_and_a_retry_can_publish() {
     git(repository, &["commit", "-qm", "baseline"]);
     let before = fs::read(snapshot(&project)).expect("snapshot");
     fs::write(project.sources.join("Module.bsl"), "uncommitted local edit").expect("edit");
-    let refused = run(
-        &project,
-        &["pull", "--mode", "full", "--source-set", "main"],
+    // Командная строка просит полную выгрузку только с согласием (`pull --force`); сначала
+    // спрашивает систему контроля версий полная выгрузка MCP.
+    let refused = support::mcp::call_tool(
+        &project.config,
+        "dump_config",
+        serde_json::json!({ "mode": "FULL" }),
+    );
+    assert_eq!(
+        refused.envelope["ok"], false,
+        "publication must refuse local changes: {}",
+        refused.envelope
     );
     assert!(
-        !refused.status.success(),
-        "publication must refuse local changes"
+        refused.envelope.to_string().contains("Module.bsl"),
+        "the refusal names the local edit: {}",
+        refused.envelope
     );
     assert_eq!(
         fs::read(snapshot(&project)).expect("snapshot after refusal"),
@@ -286,10 +292,7 @@ fn git_refusal_preserves_memory_and_a_retry_can_publish() {
         fs::read_to_string(project.sources.join("Module.bsl")).expect("local edit"),
         "uncommitted local edit"
     );
-    succeeded(run(
-        &project,
-        &["pull", "--mode", "full", "--source-set", "main", "--force"],
-    ));
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
     assert_push_skips(&project);
 }
 
@@ -336,7 +339,7 @@ fn foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_crede
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     let message = json.to_string();
     assert!(message.contains("belongs to"), "{message}");
-    assert!(message.contains("pull --mode full"), "{message}");
+    assert!(message.contains("pull --force"), "{message}");
     assert!(message.contains("push --full"), "{message}");
     assert!(message.contains("replacement-ib"), "{message}");
     assert!(!message.contains(AGENT_PASSWORD), "{message}");
@@ -401,7 +404,7 @@ fn start_a_blocked_pull(project: &Project, release: &Path) -> RunnerGuard {
             .arg("--config")
             .arg(&project.config)
             .arg("--json-message")
-            .args(["pull", "--mode", "full", "--source-set", "main"])
+            .args(["pull", "--force", "--source-set", "main"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

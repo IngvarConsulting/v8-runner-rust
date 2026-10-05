@@ -99,7 +99,7 @@ v8-runner infobase create
 - Only one source-set changed: name it positionally (`push <SET>`, `pull <SET>`, `make <SET>`, `download <SET>`, `convert <SET>`) instead of rebuilding or materializing everything. A positional value is always a source set, never a base: name the base with `--infobase`.
 - Package vs whole base: `.cf`/`.cfe` is `download`/`upload <FILE>`, `.dt` is `infobase dump`/`infobase restore`; `infobase dump --output *.cf|*.cfe` is refused before the platform starts and names `download`; `upload *.dt` names `infobase restore`. `download --state db` takes the database configuration.
 - After successful full `pull` in `DESIGNER` format, the next unchanged `push` skips loading for the same named base/source set. If the response says sources were published without updating hash memory, repeat full `pull`; do not repair a failed pull by pushing old sources.
-- Hash memory is separate per named base; ad hoc connection strings do not reuse it. Foreign memory is named in the refusal: full `pull` if the base is right, `push --full` if the sources are right. Memory from older runner versions is not migrated: first `pull --mode full` before an ordinary `push`, or the push loads the whole tree.
+- Hash memory is separate per named base; ad hoc connection strings do not reuse it. Foreign memory is named in the refusal: full `pull` if the base is right, `push --full` if the sources are right. Memory from older runner versions is not migrated: first `pull --force` before an ordinary `push`, or the push loads the whole tree.
 - Full `pull` refuses a target containing `workPath`, including symlink aliases. EDT export cache stays shared; per-base agent generation/version-file memory remains pending in #214.
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner push --full`.
 - Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`. `--dry-run` stops after the utility is located and before the platform runs: no platform log directory is created, and the answer names `status: planned`, `provider_dispatched: false` and `exit_code: -1`.
@@ -151,11 +151,16 @@ v8-runner infobase create
   not match the observed target is refused before the platform starts; neither provider asks, and
   there is no staging step that could undo a load. Append `--dry-run` first to see the selected
   provider and the planned input without touching the infobase.
-- `pull` and `convert` replace the target source directory as a whole, so they first ask git what
+- `pull` modes come from dictionary keys: no key — incremental dump over the directory;
+  `--object <TYPE:NAME>` — partial; `--force` — full dump that replaces the directory. The hidden
+  `--mode incremental|partial` means no key; `--mode full` is refused and names `pull --force`.
+- `convert` (and a full pull requested without consent, as MCP `dump_config` with `FULL` does)
+  replaces the target source directory as a whole, so it first asks git what
   inside it exists nowhere else — untracked files, ignored files, a worktree edit on top of the
   index, unresolved merge markers. Finding any, the command refuses before touching anything with
   exit 2 and names them. Commit or stash them, or pass `--force` to replace the
-  directory anyway; the flag destroys them and keeps no copy. Staged content is not a loss: it is
+  directory anyway; the flag destroys them and keeps no copy, so check `git status` before
+  `pull --force`. Staged content is not a loss: it is
   recoverable from the index. Where git cannot answer — no git, outside a worktree, a git error, a
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.

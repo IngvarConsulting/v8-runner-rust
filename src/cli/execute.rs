@@ -10,8 +10,9 @@ use crate::cli::args::{
     DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
     ExtensionsCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationCommand,
     InfobaseConfigurationExportArgs, InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
-    SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
-    TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
+    PreviousDumpMode, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner,
+    TestScope, TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs,
+    ToolsDownloadCommand,
 };
 use crate::cli::output::{
     failure_envelope, pre_dispatch_error_envelope, print_command_use_case_error, with_cli_error,
@@ -54,9 +55,7 @@ use crate::domain::tools_download::{
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
-use crate::support::adapter_input::{
-    parse_launch_target, parse_required_dump_mode, LaunchModeAliases,
-};
+use crate::support::adapter_input::{parse_launch_target, LaunchModeAliases};
 use crate::support::error::AppError;
 use crate::support::fs::clean_dir;
 use crate::support::path::is_safe_path_segment;
@@ -78,10 +77,10 @@ use crate::use_cases::request::{
     effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
-    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpRequest,
-    ExtensionInventoryRequest, ExtensionInventoryScope, InitRequest, LaunchRequest, LoadRequest,
-    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
-    ToolsDownloadRequest,
+    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
+    DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, InitRequest, LaunchRequest,
+    LoadRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest,
+    TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -2836,10 +2835,35 @@ fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCa
     })
 }
 
+/// Режим выгрузки по ключам словаря: `--object` выгружает названные объекты, `--force`
+/// заменяет каталог состоянием базы, без ключей выгрузка ложится поверх по описи версий.
+///
+/// Прежний `--mode incremental|partial` значит то же, что без ключа. `--mode full` не
+/// отображается в `--force`, а отказывает и называет его: молчаливое отображение дало бы
+/// согласие на уничтожение, о котором не просили.
+fn dump_mode(args: &DumpArgs) -> Result<DumpModeRequest, UseCaseError> {
+    match args.mode {
+        None | Some(PreviousDumpMode::Incremental | PreviousDumpMode::Partial) => {}
+        Some(PreviousDumpMode::Full) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "`--mode full` is no longer accepted: run `pull --force` to replace the directory with the infobase state",
+            ));
+        }
+    }
+    Ok(if !args.objects.is_empty() {
+        DumpModeRequest::Partial
+    } else if args.discard_uncommitted {
+        DumpModeRequest::Full
+    } else {
+        DumpModeRequest::Incremental
+    })
+}
+
 fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCaseError> {
     Ok(DumpRequest {
         dry_run,
-        mode: parse_required_dump_mode(&args.mode)?,
+        mode: dump_mode(args)?,
         source_set: args.source_set.name().map(str::to_owned),
         extension: args.extension.clone(),
         objects: args.objects.clone(),
@@ -4354,9 +4378,9 @@ mod tests {
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
         DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs, InfobaseCommand,
         InfobaseConfigurationArgs, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SourceSetArg, SyntaxArgs,
-        SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
-        TestYaxunitArgs,
+        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, PreviousDumpMode, SourceSetArg,
+        SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope,
+        TestVaArgs, TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
@@ -4637,7 +4661,7 @@ mod tests {
             map_dump_request(
                 &DumpArgs {
                     discard_uncommitted: false,
-                    mode: "incremental".to_owned(),
+                    mode: Some(PreviousDumpMode::Incremental),
                     source_set: SourceSetArg::named("main"),
                     extension: Some("Ext".to_owned()),
                     objects: vec!["Catalog.Item".to_owned()],
@@ -4646,13 +4670,13 @@ mod tests {
             )
             .expect("request")
             .mode,
-            DumpModeRequest::Incremental
+            DumpModeRequest::Partial
         );
         assert_eq!(
             map_dump_request(
                 &DumpArgs {
                     discard_uncommitted: false,
-                    mode: "incremental".to_owned(),
+                    mode: None,
                     source_set: SourceSetArg::named("main"),
                     extension: Some("Ext".to_owned()),
                     objects: vec!["Catalog.Item".to_owned()],
@@ -4827,16 +4851,13 @@ mod tests {
 
     #[test]
     fn rejects_invalid_mode_mapping() {
-        let dump_error = map_dump_request(
-            &DumpArgs {
-                discard_uncommitted: false,
-                mode: "garbage".to_owned(),
-                source_set: SourceSetArg::default(),
-                extension: None,
-                objects: vec![],
-            },
-            false,
-        )
+        // Значения прежнего `pull --mode` типизированы: чужое отвергает разбор.
+        let dump_error = <crate::cli::args::Cli as clap::Parser>::try_parse_from([
+            "v8-runner",
+            "pull",
+            "--mode",
+            "garbage",
+        ])
         .expect_err("dump mode should be rejected");
         let launch_error = map_launch_request(
             &LaunchArgs {
@@ -4853,8 +4874,52 @@ mod tests {
         )
         .expect_err("launch mode should be rejected");
 
-        assert_eq!(dump_error.kind(), UseCaseErrorKind::Validation);
+        assert_eq!(dump_error.kind(), clap::error::ErrorKind::InvalidValue);
         assert_eq!(launch_error.kind(), UseCaseErrorKind::Validation);
+    }
+
+    /// Прежний `--mode incremental|partial` значит то же, что без ключа, при любых других
+    /// ключах; `--mode full` отказывает и называет `pull --force`.
+    #[test]
+    fn a_previous_pull_mode_means_no_key_and_full_names_force() {
+        let args = |mode: Option<PreviousDumpMode>, objects: &[&str], force: bool| DumpArgs {
+            mode,
+            source_set: SourceSetArg::named("main"),
+            extension: None,
+            objects: objects.iter().map(|object| (*object).to_owned()).collect(),
+            discard_uncommitted: force,
+        };
+        let request = |args: &DumpArgs| map_dump_request(args, false).expect("request");
+
+        for objects in [&[][..], &["Catalog:Items"][..]] {
+            for force in [false, true] {
+                let without = request(&args(None, objects, force));
+                for previous in [PreviousDumpMode::Incremental, PreviousDumpMode::Partial] {
+                    assert_eq!(
+                        request(&args(Some(previous), objects, force)),
+                        without,
+                        "--mode {previous:?}, objects {objects:?}, force {force}"
+                    );
+                }
+                let error =
+                    map_dump_request(&args(Some(PreviousDumpMode::Full), objects, force), false)
+                        .expect_err("--mode full is refused");
+                assert_eq!(error.kind(), UseCaseErrorKind::Validation);
+                assert!(error.message().contains("`pull --force`"), "{error}");
+            }
+        }
+
+        assert_eq!(
+            request(&args(None, &[], false)).mode,
+            DumpModeRequest::Incremental
+        );
+        assert_eq!(
+            request(&args(None, &["Catalog:Items"], false)).mode,
+            DumpModeRequest::Partial
+        );
+        let replace = request(&args(None, &[], true));
+        assert_eq!(replace.mode, DumpModeRequest::Full);
+        assert!(replace.discard_uncommitted);
     }
 
     #[test]
