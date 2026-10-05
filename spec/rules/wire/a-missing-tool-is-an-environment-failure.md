@@ -1,7 +1,8 @@
 ---
 id: INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/285
+check:
+  - src/use_cases/result.rs::a_missing_utility_is_an_environment_failure
+  - tests/cli_convert.rs::convert_without_the_edt_cli_answers_an_environment_failure
 ---
 
 # Отказ из-за отсутствующей утилиты несёт род `environment`
@@ -9,8 +10,8 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/285
 Утилиты платформы нет в окружении — отказ несёт род `environment`: поставьте, и заработает.
 Род `platform` оставлен за сбоем самой платформы.
 
-Сегодня так отвечает выбор исполнителя по цепочке: когда не готов ни один кандидат, отказ —
-`environment_unavailable` (`src/use_cases/provider_selection.rs`). Утилиту, которую ищут
-напрямую, в обход цепочки, — например `1cedtcli` у `convert`, — отказ называет родом
-`platform`: `AppError::PlatformLocator` отображается в `UseCaseErrorKind::Platform`
-(`src/use_cases/result.rs`).
+Так отвечает и выбор исполнителя по цепочке, когда не готов ни один кандидат
+(`src/use_cases/provider_selection.rs`), и утилита, которую ищут напрямую, в обход цепочки, —
+например `1cedtcli` у `convert`: `AppError::PlatformLocator` отображается в
+`UseCaseErrorKind::Environment` (`src/use_cases/result.rs`). В конверте CLI это код
+`environment_unavailable` и выход 2, у MCP — `runtime_failure`.

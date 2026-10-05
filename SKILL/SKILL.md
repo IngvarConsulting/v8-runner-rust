@@ -215,7 +215,8 @@ v8-runner infobase create
   the runner does not yet detect two working copies sharing one base; pushes from different
   branches silently mix in it, and a test run in one copy blocks apply in the other.
 - Preserve failed test artifacts under `workPath/temp/<runner-id>/runs/<run-id>/` for diagnosis instead of cleaning them immediately.
-- Report missing local 1C utilities as environment/setup issues, not as project source failures.
+- Report missing local 1C utilities as environment/setup issues, not as project source failures:
+  a missing or wrong-version utility answers `environment_unavailable` (exit 2).
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.
 
 ## Output Discipline

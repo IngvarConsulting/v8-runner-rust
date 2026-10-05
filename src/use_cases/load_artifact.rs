@@ -711,15 +711,16 @@ fn validate_probe_mode_compatibility(
     use LoadMode::{Load, Merge, Update};
     use LoadTargetKind::{Configuration, Extension, Unknown};
 
-    let unproven = || {
-        Some(AppError::Validation(format!(
+    let unproven_message = || {
+        format!(
             "{} state was asked and not established, so nothing is changed{}",
             target_label(resolved),
             evidence
                 .map(|line| format!(". The platform said: {line}"))
                 .unwrap_or_default()
-        )))
+        )
     };
+    let unproven = || Some(AppError::Validation(unproven_message()));
 
     match (resolved.target_kind, resolved.mode, state) {
         (_, Update, _) => Some(AppError::Validation(
@@ -728,7 +729,12 @@ fn validate_probe_mode_compatibility(
         // Asked and not proven permits no change, in either mode and for either target: the
         // fail-closed rule carried from DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED. An unreadable extension list or an
         // infobase that will not open stops a load too.
-        (Configuration | Extension, Load | Merge, NotEstablished) => unproven(),
+        // The request was right and the platform did not answer — the infobase did not open or
+        // the extension list did not read — so the refusal is the platform's, not the request's
+        // (INV.USE-CASES.AN-UNESTABLISHED-COMPATIBILITY-IS-A-PLATFORM-FAILURE).
+        (Configuration | Extension, Load | Merge, NotEstablished) => {
+            Some(AppError::Platform(unproven_message()))
+        }
         // An extension the infobase does not list is a first installation; merging into
         // nothing is the caller's mistake.
         (Extension, Load, Absent) => None,
@@ -1559,20 +1565,17 @@ mod tests {
         assert!(ordered[0] < ordered[1]);
     }
 
-    /// Four tests used to stand here, each proving that a particular mix of stdout, stderr and
-    /// `/Out` lines kept the state `unknown` and blocked the load. They classified the
-    /// platform's prose, which DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids, so the rule they protected is proven with a
-    /// structural input instead: the infobase cannot be asked at all, and nothing is applied.
+    /// Загрузка расширения в базу, которую нельзя спросить: перечень расширений не читается,
+    /// и о расширении ничего не установлено. Возвращает отказ сценария.
     #[cfg(unix)]
-    #[test]
-    fn an_extension_whose_presence_cannot_be_read_blocks_the_load() {
-        let dir = tempdir().expect("tempdir");
-        let root = dir.path();
+    fn load_an_extension_whose_presence_cannot_be_read(
+        root: &Path,
+        calls: &Path,
+    ) -> super::LoadExecutionFailure {
         fs::create_dir_all(root.join("work")).expect("work");
         let binary = root.join("1cv8");
-        let calls = root.join("calls.log");
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
-        write_absent_extension_designer_script(&binary, &calls, None, None, None);
+        write_absent_extension_designer_script(&binary, calls, None, None, None);
         // The infobase cannot be asked, so nothing about the extension is established.
         let ibcmd = root.join("ibcmd");
         fs::write(&ibcmd, "#!/bin/sh\nexit 7\n").expect("write ibcmd");
@@ -1587,8 +1590,20 @@ mod tests {
             extension: Some("ListedExt".to_owned()),
         };
 
-        let failure = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
-            .expect_err("an unproven state must not permit a change");
+        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("an unproven state must not permit a change")
+    }
+
+    /// Four tests used to stand here, each proving that a particular mix of stdout, stderr and
+    /// `/Out` lines kept the state `unknown` and blocked the load. They classified the
+    /// platform's prose, which DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids, so the rule they protected is proven with a
+    /// structural input instead: the infobase cannot be asked at all, and nothing is applied.
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_whose_presence_cannot_be_read_blocks_the_load() {
+        let dir = tempdir().expect("tempdir");
+        let calls = dir.path().join("calls.log");
+        let failure = load_an_extension_whose_presence_cannot_be_read(dir.path(), &calls);
         let payload = failure.payload.expect("payload");
         assert_eq!(
             load_payload(&payload).compatibility_state,
@@ -1597,6 +1612,57 @@ mod tests {
         assert!(
             !calls.exists(),
             "nothing may be applied, or even started, on an unproven state"
+        );
+    }
+
+    /// Совместимость спросили и не установили — отказ рода `platform`, а не `validation`:
+    /// запрос верен, не ответила платформа. Перебор закрывает каждую цель и каждый режим, а
+    /// прогон сценария — то, что этот род доезжает до вызывающего.
+    #[cfg(unix)]
+    #[test]
+    fn an_unestablished_compatibility_answers_a_platform_failure() {
+        for target_kind in [LoadTargetKind::Configuration, LoadTargetKind::Extension] {
+            for mode in [LoadMode::Load, LoadMode::Merge] {
+                let resolved = ResolvedLoadRequest {
+                    mode,
+                    artifact_path: PathBuf::from("dist/main.cf"),
+                    artifact_type: ArtifactBuildMode::ConfigurationCf,
+                    target_kind,
+                    settings_path: None,
+                    extension: None,
+                    vendor_name: None,
+                };
+                let refusal = super::validate_probe_mode_compatibility(
+                    &resolved,
+                    CompatibilityState::NotEstablished,
+                    None,
+                )
+                .expect("an unproven state permits no change");
+                let error = crate::use_cases::result::UseCaseError::from(refusal);
+                assert_eq!(
+                    error.kind(),
+                    UseCaseErrorKind::Platform,
+                    "{target_kind:?}/{mode:?}: {error}"
+                );
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let failure = load_an_extension_whose_presence_cannot_be_read(
+            dir.path(),
+            &dir.path().join("calls.log"),
+        );
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Platform,
+            "{}",
+            failure.error
+        );
+        assert_eq!(failure.error.exit_code(), 4);
+        let payload = failure.payload.expect("payload");
+        assert_eq!(
+            load_payload(&payload).compatibility_state,
+            CompatibilityState::NotEstablished
         );
     }
 

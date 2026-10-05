@@ -164,15 +164,18 @@ impl UseCaseError {
             AppError::PlatformDesignerContext { context, source } => {
                 Self::new(UseCaseErrorKind::Platform, format!("{context}; {source}"))
             }
+            // Утилиты нет или не та версия — дело окружения, а не сбой платформы: поставьте,
+            // и заработает (`INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE`).
             AppError::PlatformLocator(error) => {
-                Self::new(UseCaseErrorKind::Platform, error.to_string())
+                Self::new(UseCaseErrorKind::Environment, error.to_string())
             }
             AppError::PlatformProcess(error) => {
                 Self::new(UseCaseErrorKind::Platform, error.to_string())
             }
-            AppError::PlatformLocatorContext { context, source } => {
-                Self::new(UseCaseErrorKind::Platform, format!("{context}; {source}"))
-            }
+            AppError::PlatformLocatorContext { context, source } => Self::new(
+                UseCaseErrorKind::Environment,
+                format!("{context}; {source}"),
+            ),
             AppError::PlatformProcessContext { context, source } => {
                 Self::new(UseCaseErrorKind::Platform, format!("{context}; {source}"))
             }
@@ -340,6 +343,7 @@ mod tests {
     use crate::platform::designer::DesignerError;
     use crate::platform::edt_session::EdtSessionError;
     use crate::platform::ibcmd::IbcmdError;
+    use crate::platform::locator::{LocatorError, UtilityType};
     use crate::platform::process::{ProcessError, WorkGiven};
     use crate::support::error::{AppError, CancelledAt, CapabilityReason};
 
@@ -545,6 +549,26 @@ mod tests {
         assert_eq!(error.kind(), UseCaseErrorKind::Validation);
         assert!(error.message().contains("failed to build ibcmd connection"));
         assert!(error.message().contains("infobase.dbms.kind"));
+    }
+
+    /// Утилиты нет или не та версия — род `environment` с кодом выхода 2, с уточнением и без:
+    /// поставьте её, и заработает. Род `platform` оставлен за сбоем самой платформы.
+    #[test]
+    fn a_missing_utility_is_an_environment_failure() {
+        let missing = || LocatorError::NotFound {
+            utility: UtilityType::EdtCli,
+            detail: None,
+        };
+        for app_error in [
+            AppError::from(missing()),
+            AppError::from(missing()).with_context("failed to resolve 1cedtcli"),
+        ] {
+            let error = UseCaseError::from(app_error);
+
+            assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+            assert_eq!(error.exit_code(), 2, "{error}");
+            assert!(error.message().contains("was not found"), "{error}");
+        }
     }
 
     #[test]
