@@ -28,8 +28,9 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
 ];
 
 /// Листья, объявившие `Preview::Runs`: ключ превью они исполняют, и поведение каждого
-/// обязано держать проверка в `tests/contract_previews.rs`. Перечень на семь команд,
-/// живший там прежде, расхождения не видел.
+/// обязано держать проверка в `tests/contract_previews.rs`, а форму `data` — сверка в
+/// `tests/contract_command_data.rs`. Вызов каждого листа обе берут из
+/// `tests/support/previews.rs`. Перечни, жившие в них прежде, расхождения не видели.
 #[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
 const LEAVES_WITH_PREVIEW: &[&str] = &[
     "clone",
