@@ -549,6 +549,20 @@ mod tests {
         assert_eq!(error.kind(), UseCaseErrorKind::Platform);
     }
 
+    /// Снятый процесс, конец которого не подтверждён, — сбой платформы, а не отмена.
+    #[test]
+    fn an_interruption_whose_end_is_unconfirmed_is_a_platform_failure() {
+        let error = UseCaseError::from(AppError::PlatformProcess(
+            ProcessError::InterruptedEndUnconfirmed {
+                cmd: "1cv8 DESIGNER".to_owned(),
+                source: std::io::Error::other("wait refused"),
+            },
+        ));
+
+        assert_eq!(error.kind(), UseCaseErrorKind::Platform);
+        assert!(error.message().contains("was not confirmed"));
+    }
+
     #[test]
     fn contextual_config_errors_stay_validation_errors() {
         let app_error = AppError::Config(ConfigLoadError::NotFound("v8project.yaml".to_owned()))

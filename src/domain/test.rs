@@ -15,6 +15,7 @@ pub const TEST_ERROR_CODE_TEST_SETUP_FAILED: &str = "test_setup_failed";
 pub const TEST_ERROR_CODE_ENTERPRISE_SPAWN_FAILED: &str = "enterprise_spawn_failed";
 pub const TEST_ERROR_CODE_ENTERPRISE_STARTUP_CHECK_FAILED: &str = "enterprise_startup_check_failed";
 pub const TEST_ERROR_CODE_ENTERPRISE_EXITED_EARLY: &str = "enterprise_exited_early";
+pub const TEST_ERROR_CODE_ENTERPRISE_END_UNCONFIRMED: &str = "enterprise_end_unconfirmed";
 pub const TEST_ERROR_CODE_ENTERPRISE_STDOUT_LOG_IO: &str = "enterprise_stdout_log_io";
 pub const TEST_ERROR_CODE_ENTERPRISE_STDERR_LOG_IO: &str = "enterprise_stderr_log_io";
 pub const TEST_ERROR_CODE_ENTERPRISE_TIMED_OUT: &str = "enterprise_timed_out";
@@ -48,6 +49,8 @@ pub enum TestErrorKind {
     EnterpriseSpawnFailed,
     EnterpriseStartupCheckFailed,
     EnterpriseExitedEarly,
+    /// Прогон снимали по отмене или пределу, но конец процесса не подтвердился.
+    EnterpriseEndUnconfirmed,
     EnterpriseStdoutLogIo,
     EnterpriseStderrLogIo,
     EnterpriseTimedOut,
@@ -67,6 +70,7 @@ impl TestErrorKind {
             Self::EnterpriseSpawnFailed => TEST_ERROR_CODE_ENTERPRISE_SPAWN_FAILED,
             Self::EnterpriseStartupCheckFailed => TEST_ERROR_CODE_ENTERPRISE_STARTUP_CHECK_FAILED,
             Self::EnterpriseExitedEarly => TEST_ERROR_CODE_ENTERPRISE_EXITED_EARLY,
+            Self::EnterpriseEndUnconfirmed => TEST_ERROR_CODE_ENTERPRISE_END_UNCONFIRMED,
             Self::EnterpriseStdoutLogIo => TEST_ERROR_CODE_ENTERPRISE_STDOUT_LOG_IO,
             Self::EnterpriseStderrLogIo => TEST_ERROR_CODE_ENTERPRISE_STDERR_LOG_IO,
             Self::EnterpriseTimedOut => TEST_ERROR_CODE_ENTERPRISE_TIMED_OUT,
@@ -86,6 +90,7 @@ impl TestErrorKind {
             TEST_ERROR_CODE_ENTERPRISE_SPAWN_FAILED => Self::EnterpriseSpawnFailed,
             TEST_ERROR_CODE_ENTERPRISE_STARTUP_CHECK_FAILED => Self::EnterpriseStartupCheckFailed,
             TEST_ERROR_CODE_ENTERPRISE_EXITED_EARLY => Self::EnterpriseExitedEarly,
+            TEST_ERROR_CODE_ENTERPRISE_END_UNCONFIRMED => Self::EnterpriseEndUnconfirmed,
             TEST_ERROR_CODE_ENTERPRISE_STDOUT_LOG_IO => Self::EnterpriseStdoutLogIo,
             TEST_ERROR_CODE_ENTERPRISE_STDERR_LOG_IO => Self::EnterpriseStderrLogIo,
             TEST_ERROR_CODE_ENTERPRISE_TIMED_OUT => Self::EnterpriseTimedOut,
@@ -294,6 +299,7 @@ pub fn test_execution_status(kind: Option<TestErrorKind>, ok: bool) -> Execution
             | TestErrorKind::EnterpriseSpawnFailed
             | TestErrorKind::EnterpriseStartupCheckFailed
             | TestErrorKind::EnterpriseExitedEarly
+            | TestErrorKind::EnterpriseEndUnconfirmed
             | TestErrorKind::EnterpriseStdoutLogIo
             | TestErrorKind::EnterpriseStderrLogIo
             | TestErrorKind::EnterpriseExitedNonZero
@@ -336,6 +342,7 @@ mod tests {
             TestErrorKind::EnterpriseSpawnFailed,
             TestErrorKind::EnterpriseStartupCheckFailed,
             TestErrorKind::EnterpriseExitedEarly,
+            TestErrorKind::EnterpriseEndUnconfirmed,
             TestErrorKind::EnterpriseStdoutLogIo,
             TestErrorKind::EnterpriseStderrLogIo,
             TestErrorKind::EnterpriseTimedOut,
@@ -355,6 +362,7 @@ mod tests {
             TestErrorKind::EnterpriseSpawnFailed,
             TestErrorKind::EnterpriseStartupCheckFailed,
             TestErrorKind::EnterpriseExitedEarly,
+            TestErrorKind::EnterpriseEndUnconfirmed,
             TestErrorKind::EnterpriseStdoutLogIo,
             TestErrorKind::EnterpriseStderrLogIo,
         ] {

@@ -390,11 +390,18 @@ impl<'a> EdtDsl<'a> {
                 );
                 let deadline = Instant::now() + effective_timeout;
                 // Политика DSL без отметки — шаг самой платформы: его команда служебная.
+                // Класс шага сессия соблюдает: критический она доводит до исхода.
+                let safety = self.execution_policy.safety;
                 let request = match self.execution_policy.work.clone() {
-                    Some(work) => {
-                        EdtSessionRequest::new(interactive_command.to_owned(), deadline, work)
+                    Some(work) => EdtSessionRequest::new(
+                        interactive_command.to_owned(),
+                        deadline,
+                        work,
+                        safety,
+                    ),
+                    None => {
+                        EdtSessionRequest::service(interactive_command.to_owned(), deadline, safety)
                     }
-                    None => EdtSessionRequest::service(interactive_command.to_owned(), deadline),
                 };
                 let output = manager
                     .execute_blocking(
@@ -426,7 +433,7 @@ impl<'a> EdtDsl<'a> {
                     exit_code,
                     stdout: output.stdout,
                     stderr: output.stderr,
-                    interruption: None,
+                    interruption: output.interruption,
                 }
             }
         };
@@ -1354,6 +1361,119 @@ mod tests {
         assert_eq!(commands.matches("START").count(), 1);
         assert!(commands.contains("import --project /tmp/first-project"));
         assert!(commands.contains("import --project /tmp/second-project"));
+    }
+
+    /// Общая сессия соблюдает класс шага, как одноразовый EDT: отмену и истёкший предел
+    /// критического шага она откладывает до его исхода — команда доводится до подсказки, а
+    /// ответ называет отложенное прерывание.
+    #[cfg(unix)]
+    #[test]
+    fn shared_session_defers_the_interruption_of_a_critical_step() {
+        for reason in [
+            ProcessInterruptionReason::Cancelled,
+            ProcessInterruptionReason::TimedOut,
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let script = dir.path().join("1cedtcli");
+            let started = dir.path().join("export-started");
+            let finished = dir.path().join("export-finished");
+            let base = dir.path().join("base");
+            let work = dir.path().join("work");
+            fs::create_dir_all(base.join("main")).expect("source dir");
+            write_script(
+                &script,
+                &format!(
+                    "set -eu\n\
+                     prompt() {{ printf '1C:EDT>'; }}\n\
+                     current_dir=\"\"\n\
+                     prev=\"\"\n\
+                     for arg in \"$@\"; do\n\
+                       if [ \"$prev\" = \"-data\" ]; then current_dir=\"$arg\"; fi\n\
+                       prev=\"$arg\"\n\
+                     done\n\
+                     prompt\n\
+                     while IFS= read -r line; do\n\
+                       eval \"set -- $line\"\n\
+                       cmd=\"${{1:-}}\"\n\
+                       if [ \"$#\" -gt 0 ]; then shift; fi\n\
+                       case \"$cmd\" in\n\
+                         cd)\n\
+                           if [ \"$#\" -eq 0 ]; then\n\
+                             printf '%s\\n' \"$current_dir\"\n\
+                           else\n\
+                             current_dir=\"$1\"\n\
+                           fi\n\
+                           prompt\n\
+                           ;;\n\
+                         export)\n\
+                           : > '{started}'\n\
+                           sleep 2.5\n\
+                           : > '{finished}'\n\
+                           prompt\n\
+                           ;;\n\
+                         *)\n\
+                           prompt\n\
+                           ;;\n\
+                       esac\n\
+                     done\n",
+                    started = started.display(),
+                    finished = finished.display(),
+                ),
+            );
+            let config = sample_shared_config(&base, &work, &script);
+            let manager = Arc::new(
+                EdtSessionManager::for_config(
+                    &config,
+                    EdtSessionHostOptions::for_cli_command(&config),
+                )
+                .expect("manager"),
+            );
+            let cancellation = CancellationToken::new();
+            let by_timeout = reason == ProcessInterruptionReason::TimedOut;
+            let operator = (!by_timeout).then(|| {
+                crate::platform::process::cancel_when_started(&started, cancellation.clone())
+            });
+            let dsl = EdtDsl::new_shared_session(
+                script,
+                work.join("edt-workspace"),
+                manager.clone(),
+                Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
+                Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+                ProcessExecutionPolicy::new(
+                    by_timeout.then_some(Duration::from_millis(1500)),
+                    cancellation,
+                    ProcessInterruptionSafety::CriticalNonAbortable,
+                    WorkGiven::for_command(),
+                ),
+            )
+            .expect("shared dsl");
+
+            let result = dsl
+                .export_project("project", Path::new("/tmp/out"))
+                .unwrap_or_else(|error| panic!("{reason:?}: the step is deferred: {error:?}"));
+            if let Some(operator) = operator {
+                assert!(
+                    operator.join().expect("operator"),
+                    "the export never marked its start"
+                );
+            }
+
+            assert!(
+                finished.exists(),
+                "{reason:?}: the critical command ran to its end"
+            );
+            assert_eq!(result.process.exit_code, 0);
+            assert_eq!(
+                result.process.interruption,
+                Some(crate::platform::process::ProcessInterruption {
+                    reason,
+                    action: ProcessInterruptionAction::Deferred,
+                }),
+                "{reason:?}"
+            );
+            drop(dsl);
+            manager.shutdown().expect("shutdown");
+        }
     }
 
     #[cfg(unix)]

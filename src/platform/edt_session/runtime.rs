@@ -4,12 +4,15 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::config::model::AppConfig;
 use crate::platform::interactive::{
-    InteractiveCommandOutput, InteractiveProcessError, InteractiveProcessExecutor,
-    InteractiveProcessRequest, ShutdownOutcome,
+    InteractiveCommandExecution, InteractiveCommandOutput, InteractiveProcessError,
+    InteractiveProcessExecutor, InteractiveProcessRequest, ShutdownOutcome,
 };
 use crate::platform::locator::UtilityType;
+use crate::platform::process::{ProcessExecutionPolicy, ProcessInterruptionSafety};
 use crate::platform::utilities::PlatformUtilities;
 
 use super::{
@@ -29,6 +32,16 @@ pub(super) trait ManagedSession: Send {
         delivered: &dyn Fn(),
     ) -> Result<InteractiveCommandOutput, InteractiveProcessError>;
 
+    /// Как `execute`, но для критического шага: отмену из `cancellation` и истёкший
+    /// `timeout` команда не снимает, а доводится до исхода и называет их отложенными.
+    fn execute_critical(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+        delivered: &dyn Fn(),
+    ) -> Result<InteractiveCommandExecution, InteractiveProcessError>;
+
     fn shutdown(&mut self, timeout: Duration) -> Result<ShutdownOutcome, InteractiveProcessError>;
 
     fn kill(&mut self) -> Result<(), InteractiveProcessError>;
@@ -46,6 +59,22 @@ impl ManagedSession for InteractiveProcessExecutor {
         delivered: &dyn Fn(),
     ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
         Self::execute_delivering(self, command, timeout, delivered)
+    }
+
+    fn execute_critical(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+        delivered: &dyn Fn(),
+    ) -> Result<InteractiveCommandExecution, InteractiveProcessError> {
+        // Работу отмечает `delivered`, как и у `execute`; политика несёт только класс шага.
+        let policy = ProcessExecutionPolicy::platform_step(
+            Some(timeout),
+            cancellation.clone(),
+            ProcessInterruptionSafety::CriticalNonAbortable,
+        );
+        Self::execute_with_policy_delivering(self, command, timeout, &policy, delivered)
     }
 
     fn shutdown(&mut self, timeout: Duration) -> Result<ShutdownOutcome, InteractiveProcessError> {
@@ -252,19 +281,48 @@ pub(super) fn run_worker(
         // первой, чтобы запрос не назвал доставку, которой отметка ещё не знает.
         let request = &queued.request;
         let state = &queued.state;
-        let execution = active_session.execute(&request.command, remaining, &|| {
+        let delivered = || {
             if let Some(work) = &request.work {
                 work.mark_work_given();
                 state.mark_delivered();
             }
-        });
+        };
+        // Критический шаг исполнитель доводит до исхода и под отменой, и после срока, как
+        // одноразовый EDT; остальные слушают отмену у вызывающего.
+        let execution = if request.is_critical() {
+            active_session.execute_critical(
+                &request.command,
+                remaining,
+                &request.cancellation,
+                &delivered,
+            )
+        } else {
+            active_session
+                .execute(&request.command, remaining, &delivered)
+                .map(|output| InteractiveCommandExecution {
+                    output,
+                    interruption: None,
+                })
+        };
         match execution {
-            Ok(output) => {
+            Ok(InteractiveCommandExecution {
+                output,
+                interruption,
+            }) => {
                 queued.state.finish();
                 queued.reply(Ok(EdtSessionResponse {
                     stdout: output.stdout,
                     stderr: output.stderr,
+                    interruption,
                 }));
+            }
+            // Отмена застала критический запрос до отправки: в процесс он не попал, и
+            // сессия цела.
+            Err(InteractiveProcessError::CommandCancelled {
+                delivered: false, ..
+            }) => {
+                queued.state.finish();
+                queued.reply(Err(EdtSessionError::RunningCancelled { delivered: false }));
             }
             Err(InteractiveProcessError::CommandTimeout { .. }) => {
                 if kill_and_drop_session(&mut session, inner.active_pid.as_ref()) {
