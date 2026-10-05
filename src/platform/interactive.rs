@@ -1135,6 +1135,8 @@ mod tests {
         spawn_with_executable_busy_retry, InteractiveCommandOutput, InteractiveProcessError,
         InteractiveProcessExecutor, InteractiveProcessRequest, ShutdownOutcome,
     };
+    #[cfg(unix)]
+    use crate::support::machine::is_process_alive;
     use std::fs;
     use std::path::Path;
     use std::process::{Command, Stdio};
@@ -1346,18 +1348,6 @@ mod tests {
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(matches!(err, InteractiveProcessError::SpawnFailed { .. }));
-    }
-
-    /// Жив ли процесс — по нулевому сигналу: он отвечает и за зомби, так что «не жив» значит
-    /// «подобран». Отказ в правах — тоже живой процесс.
-    #[cfg(unix)]
-    fn is_process_alive(pid: u32) -> bool {
-        let pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
-        // SAFETY: нулевой сигнал ничего не посылает, `kill` лишь проверяет процесс.
-        if unsafe { libc::kill(pid, 0) } == 0 {
-            return true;
-        }
-        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
     #[cfg(unix)]
