@@ -279,7 +279,7 @@ tests:
 - Обязателен: да
 
 Для обычных project-команд список должен содержать поддерживаемый source-set. Исключение —
-`download` и `infobase dump`: они используют только ИБ и принимают
+`download`, `infobase dump` и `launch`: они используют только ИБ и принимают
 отсутствующий `source-set` как пустой список (явный `source-set: []` равнозначен). Это
 command-specific validation, а не ослабление `push`, source `pull`, `convert`, `make` или
 остальных project workflows.

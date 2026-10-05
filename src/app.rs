@@ -13,8 +13,9 @@ use crate::cli::global_flags;
 use crate::cli::output::{failure_envelope, print_command_error};
 use crate::command_envelope::Envelope;
 use crate::config::loader::{
-    load_config, load_config_for_infobase_export, load_config_for_prepared_test,
-    load_config_for_preview, load_config_for_tools_download, resolve_primary_config_path,
+    load_config, load_config_for_infobase_export, load_config_for_launch,
+    load_config_for_prepared_test, load_config_for_preview, load_config_for_tools_download,
+    resolve_primary_config_path,
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
@@ -315,6 +316,8 @@ fn load_cli_config(
         load_config_for_infobase_export(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Launch(_)) {
+        load_config_for_launch(config_path, workdir, &selector)
     } else if cli.dry_run {
         // Превью не создаёт рабочего каталога: проверки те же, готовит `workPath` только
         // применение. Прежде так загружалось одно лишь `extensions --dry-run`.

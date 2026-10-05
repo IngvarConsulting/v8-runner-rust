@@ -452,6 +452,17 @@ pub fn validate_prepared_test(config: &AppConfig) -> Result<(), ConfigValidation
     Ok(())
 }
 
+/// Launch consumes an existing infobase and client settings, never project sources.
+/// Validate the workspace path without creating it; execution owns its lifecycle.
+pub fn validate_launch(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_connection_contract(config)?;
+    validate_platform_version(config)?;
+    validate_mcp_admission_timeout(config)?;
+    validate_client_mcp_launch_config(config)
+}
+
 /// Validate configuration for operations that read only the configured infobase.
 ///
 /// Source trees, build settings, test runners, EDT and client MCP tooling are not inputs to
@@ -1151,6 +1162,15 @@ fn validate_test_config(config: &AppConfig) -> Result<(), ConfigValidationError>
         return Ok(());
     }
 
+    validate_vanessa_launch_config(config)
+}
+
+/// Inputs consumed by both a Vanessa test and a client MCP Vanessa launch.
+/// Unrelated test engines and their execution timeouts are not launch inputs.
+pub(crate) fn validate_vanessa_launch_config(
+    config: &AppConfig,
+) -> Result<(), ConfigValidationError> {
+    let va = &config.tests.va;
     let epf_path = config
         .tools
         .va
@@ -1276,6 +1296,10 @@ fn validate_mcp_config(config: &AppConfig) -> Result<(), ConfigValidationError> 
         return Err(ConfigValidationError::InvalidMcpShutdownGracePeriodSecs);
     }
 
+    validate_client_mcp_launch_config(config)
+}
+
+fn validate_client_mcp_launch_config(config: &AppConfig) -> Result<(), ConfigValidationError> {
     if config.tools.client_mcp.port == Some(0) {
         return Err(ConfigValidationError::InvalidMcpClientPort);
     }
