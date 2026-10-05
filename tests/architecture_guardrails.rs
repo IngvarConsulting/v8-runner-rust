@@ -4581,6 +4581,8 @@ fn the_dump_format_guard_sees_every_spelling() {
         r#"fn f(a: &mut Vec<String>) { a.push("--format".to_owned()); }"#,
         r#"fn f(d: &str) -> String { format!("config dump-config-to-files --dir={d} --format=plain") }"#,
         r#"fn f(a: &mut Vec<String>) { a.push("-FORMAT".into()); }"#,
+        r##"fn f(d: &str) -> String { format!(r#"config "--format=plain" --dir={d}"#) }"##,
+        r##"fn f() -> String { format!("{}", vec![r#"-Format"#]) }"##,
     ] {
         assert!(caught(bypass), "the guard must catch: {bypass}");
     }
@@ -4621,15 +4623,28 @@ fn dump_format_arguments(file: &syn::File) -> Vec<String> {
             self.0.push(literal.value());
         }
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-            // Аргументы макроса для syn — сырые токены; строки достаются из их текста.
-            static STRING: LazyLock<Regex> =
-                LazyLock::new(|| Regex::new(r#""(?:[^"\\]|\\.)*""#).expect("string literal regex"));
-            let tokens = mac.tokens.to_string();
-            self.0.extend(
-                STRING
-                    .find_iter(&tokens)
-                    .map(|found| found.as_str().to_owned()),
-            );
+            // Аргументы макроса для syn — сырые токены: строковые литералы, сырые тоже,
+            // достаются из них разбором, а не по тексту.
+            let buffer = syn::buffer::TokenBuffer::new2(mac.tokens.clone());
+            collect_macro_strings(buffer.begin(), &mut self.0);
+        }
+    }
+
+    fn collect_macro_strings(mut cursor: syn::buffer::Cursor<'_>, out: &mut Vec<String>) {
+        while !cursor.eof() {
+            if let Some((literal, next)) = cursor.literal() {
+                if let Ok(text) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
+                    out.push(text.value());
+                }
+                cursor = next;
+            } else if let Some((inside, _, _, next)) = cursor.any_group() {
+                collect_macro_strings(inside, out);
+                cursor = next;
+            } else if let Some((_, next)) = cursor.token_tree() {
+                cursor = next;
+            } else {
+                break;
+            }
         }
     }
 
