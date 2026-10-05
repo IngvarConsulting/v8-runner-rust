@@ -1,18 +1,18 @@
 ---
 id: INV.CLI.CONVERT-WORKS-ON-PROJECT-SOURCE-SETS
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/236
+check:
+  - tests/cli_convert.rs::convert_without_source_set_processes_all_source_sets_into_work_path_out
+  - tests/cli_convert.rs::convert_unknown_source_set_json_keeps_convert_command_identity_before_workspace_lock
+  - tests/cli_convert.rs::convert_output_root_rejects_source_overlap_before_workspace_lock
 ---
 
-# `convert` переводит наборы проекта и файлы пакетов между видами исходников
+# `convert` работает над наборами проекта
 
-Позиционный аргумент — набор исходников проекта или файл пакета `.cf`/`.cfe`; без
-аргумента обрабатываются все наборы в порядке настроек. Неизвестное имя набора даёт отказ
-до замка. `--to xml|edt|package` задаёт направление: XML платформы, проект EDT или пакет. Информационная база команде не нужна.
-
-EDT ↔ XML выполняет `1cedtcli`. Для направлений с пакетом есть цепочка исполнителей
-`ibcmd` → `ibcmd-rs`, а квитанция называет выбранного. Если не найден ни один инструмент
-для направления, отказ имеет род `environment`.
+Без указания набора обрабатываются все наборы в порядке настроек, с указанием — один
+названный; неизвестное имя даёт отказ до замка. Информационная база команде не нужна.
 
 `--output` задаёт только корень результата и проверяется на пересечение с исходниками,
 базовым и рабочим каталогами.
+
+Как называется набор и что ещё принимает команда, держит
+`INV.CLI.CONVERT-TAKES-A-SET-OR-A-PACKAGE-AND-A-DIRECTION`.
