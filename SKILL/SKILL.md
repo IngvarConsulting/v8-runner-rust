@@ -139,6 +139,12 @@ v8-runner infobase create
   interruption record's `phase` says where it stopped: `command_boundary` — a safe point, no work
   of the command was cut short; `provider_command`, `run`, `apply`, `update_db_cfg`,
   `publication` — the executor's work was cut short or, with `deferred: true`, waited for.
+- A `providers.*` key naming an executor outside the matrix is refused at config load with
+  `invalid_argument` (exit 2, message lists the implemented executors); fix the key, do not
+  retry. `download`, `infobase configuration export`, `infobase dump` and `infobase restore`
+  each check only the key of their own operation (`download`, `infobase.dump` or
+  `infobase.restore`), so a key of another operation does not block them; `test --no-build` and `launch` check no key; every
+  other command that loads the project checks all keys.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.

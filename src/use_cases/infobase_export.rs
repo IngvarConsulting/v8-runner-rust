@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::model::AppConfig;
-use crate::domain::capability::{Implementation, Provider, ProviderReceipt};
+use crate::domain::capability::{Provider, ProviderReceipt};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, StepResult,
 };
@@ -911,53 +911,40 @@ fn select_provider(
     intent: InfobaseTransferIntent,
 ) -> Result<PreparedTransferProvider, (AppError, ProviderReceipt)> {
     use crate::domain::capability::SkippedProvider;
+    use crate::use_cases::provider_selection::{
+        no_adapter, no_executor, nobody_ready, utilities_of,
+    };
 
     // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
-    // умолчание — цепочка, из которой берётся первый готовый.
-    let plan = config.provider_plan(intent.operation());
+    // умолчание — цепочка, из которой берётся первый готовый. Исполнителя вне матрицы
+    // сюда не пускает проверка настроек, а реализованность каждого держит
+    // `domain::capability`: второго мнения о ней здесь нет.
+    let operation = intent.operation();
+    let plan = config.provider_plan(operation);
     if plan.candidates().is_empty() {
         return Err((
-            AppError::capability(format!(
-                "no executor implements {} on a {} target",
-                intent.operation(),
-                config.target_kind().as_str()
-            )),
+            no_executor(config, operation),
             plan.receipt_for_nobody(Vec::new()),
         ));
     }
     let mut utilities = PlatformUtilities::from_config(config);
     let mut skipped: Vec<SkippedProvider> = Vec::new();
-    let mut has_implemented = false;
 
     for provider in plan.candidates() {
         if let Some(error) = pending_interruption_error(context, "during provider selection") {
             let receipt = plan.receipt_for_nobody(skipped);
             return Err((error, receipt));
         }
-        let (implementation, implementation_reason) = capability(intent, provider);
-        // Экспериментальный адаптер доступен только переопределением: в цепочку умолчаний
-        // он не входит, а названный явно — пробуется, потому что за этим и назвали.
-        let named_explicitly = matches!(
-            plan,
-            crate::domain::capability::ProviderPlan::Override { .. }
-        );
-        // У автономного сервера шлюз — единственный исполнитель: он не эксперимент, а
-        // строка матрицы (`GATE_ONLY`), и в цепочку входит сам.
-        let gate_only = provider == Provider::Agent && config.infobase.standalone.is_some();
-        // Развилка недостижима и оставлена поясом: цепочка умолчаний отфильтрована по
-        // `Implemented`, а названный ключом исполнитель проходит по `named_explicitly`.
-        // Настоящий отказ по неверному ключу даёт проверка настроек — у экспортного
-        // семейства её нет, и это разбирается в #272.
-        if implementation == Implementation::Experimental && !named_explicitly && !gate_only {
-            skipped.push(SkippedProvider {
-                provider,
-                reason: implementation_reason.to_owned(),
-            });
+        let Some(needed) = utilities_of(provider, config) else {
+            skipped.push(no_adapter(provider, operation));
             continue;
-        }
-        has_implemented = true;
-
-        let utility = provider_utility(config, provider);
+        };
+        // Исполнителю переноса нужна не больше чем одна утилита: первая из его списка.
+        debug_assert!(
+            needed.len() <= 1,
+            "a transfer executor needs at most one utility, {provider} needs {needed:?}"
+        );
+        let utility = needed.first().copied();
         match readiness(config, &mut utilities, intent, provider, utility) {
             Ok(executable) => {
                 let receipt = plan.receipt_for(provider, skipped);
@@ -967,96 +954,12 @@ fn select_provider(
                     executable,
                 });
             }
-            Err(reason) => skipped.push(SkippedProvider {
-                provider,
-                reason: format!("{implementation_reason}; {reason}"),
-            }),
+            Err(reason) => skipped.push(SkippedProvider { provider, reason }),
         }
     }
 
-    let reason = skipped
-        .iter()
-        .map(|entry| format!("{}: {}", entry.provider.as_str(), entry.reason))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let receipt = plan.receipt_for_nobody(skipped);
-    let error = if has_implemented {
-        AppError::EnvironmentUnavailable(reason)
-    } else {
-        AppError::capability(reason)
-    };
-    Err((error, receipt))
-}
-
-/// Есть ли у переноса адаптер под этого исполнителя, и словами — почему.
-///
-/// Улику эта таблица не называет: её держит `domain::capability`, и второго мнения о ней
-/// здесь быть не должно. Прежде называла — и расходилась с доменом в пяти строках из
-/// девяти, а читателя у значения не было ни одного. Сама таблица уходит в #272 вместе с
-/// проверкой настроек, которой у экспортного семейства нет.
-fn capability(
-    intent: InfobaseTransferIntent,
-    provider: Provider,
-) -> (Implementation, &'static str) {
-    match (intent, provider) {
-        (InfobaseTransferIntent::Configuration, Provider::Designer) => (
-            Implementation::Implemented,
-            "Designer CF/CFE adapter is implemented from the documented batch contract",
-        ),
-        (InfobaseTransferIntent::Configuration, Provider::Ibcmd) => (
-            Implementation::Implemented,
-            "IBCMD CF/CFE adapter is implemented from the documented config-save contract",
-        ),
-        (InfobaseTransferIntent::Snapshot, Provider::Designer) => (
-            Implementation::Implemented,
-            "Designer DT adapter is implemented from the documented batch contract",
-        ),
-        (InfobaseTransferIntent::Snapshot, Provider::Ibcmd) => (
-            Implementation::Experimental,
-            "IBCMD DT export is disabled until an exclusive-access preflight is implemented",
-        ),
-        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Designer) => (
-            Implementation::Implemented,
-            "Designer DT restore is implemented and was verified against a live 8.3.27 file infobase",
-        ),
-        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Ibcmd) => (
-            Implementation::Experimental,
-            "IBCMD DT restore runs but stays experimental until an exclusive-access preflight is implemented",
-        ),
-        (InfobaseTransferIntent::Configuration, Provider::Agent) => (
-            Implementation::Experimental,
-            "agent CF/CFE export runs `config dump-cfg` in the agent session; named by providers.* only",
-        ),
-        (InfobaseTransferIntent::Snapshot, Provider::Agent) => (
-            Implementation::Experimental,
-            "agent DT export runs `infobase-tools dump-ib`; named by providers.* only",
-        ),
-        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Agent) => (
-            Implementation::Experimental,
-            "agent DT restore runs `infobase-tools restore-ib`; the agent drops the session afterwards",
-        ),
-        // Строка матрицы, опередившая код: исполнитель назван, адаптера у него нет.
-        (_, _) => (
-            Implementation::Experimental,
-            "no export adapter is implemented for this provider in this build of the runner",
-        ),
-    }
-}
-
-/// Утилита исполнителя; `None` — исполнителю на этой машине утилита не нужна.
-fn provider_utility(config: &AppConfig, provider: Provider) -> Option<UtilityType> {
-    match provider {
-        Provider::Designer => Some(UtilityType::V8),
-        // Управляемому агенту нужна платформа, чужому и шлюзу автономного сервера — ничего.
-        Provider::Agent if config.infobase.standalone.is_some() => None,
-        Provider::Agent => match config.tools.designer_agent.mode() {
-            Ok(crate::config::model::DesignerAgentMode::Attached { .. }) => None,
-            _ => Some(UtilityType::V8),
-        },
-        // Только Designer, Agent и ibcmd имеют адаптер. Остальных сюда не пускает
-        // проверка настроек, отвергающая ключ без строки в матрице.
-        _ => Some(UtilityType::Ibcmd),
-    }
+    let error = nobody_ready(config, &plan, &skipped);
+    Err((error, plan.receipt_for_nobody(skipped)))
 }
 
 fn readiness(
@@ -1659,7 +1562,7 @@ mod tests {
     use crate::config::model::{
         AppConfig, BuildConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
-    use crate::domain::capability::{Implementation, Provider};
+    use crate::domain::capability::Provider;
     use crate::domain::execution::{
         ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
     };
@@ -1670,10 +1573,10 @@ mod tests {
     use crate::use_cases::result::UseCaseErrorKind;
 
     use super::{
-        acquire_target_lock, capability, cleanup_export_orphans, observe_locked_output,
+        acquire_target_lock, cleanup_export_orphans, observe_locked_output,
         record_execution_failure, resolve_output, revalidate_before_publish,
         revalidate_output_observation, validate_configuration_output, validate_snapshot_output,
-        InfobaseTransferIntent, InfobaseTransferPhase, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT,
+        InfobaseTransferPhase, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT,
     };
 
     fn config(base: &Path, work: &Path) -> AppConfig {
@@ -1716,14 +1619,9 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_output_is_dt_and_ibcmd_remains_experimental() {
+    fn snapshot_output_is_dt() {
         assert!(validate_snapshot_output(Path::new("dist/base.dt")).is_ok());
         assert!(validate_snapshot_output(Path::new("dist/base.backup")).is_err());
-
-        let (designer, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Designer);
-        assert_eq!(designer, Implementation::Implemented);
-        let (ibcmd, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Ibcmd);
-        assert_eq!(ibcmd, Implementation::Experimental);
     }
 
     #[test]
