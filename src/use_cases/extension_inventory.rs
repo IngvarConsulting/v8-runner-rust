@@ -291,15 +291,12 @@ fn validate_snapshot_step(
     step: &str,
     subject: &str,
 ) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
-        Ok(())
-    } else {
-        // A platform diagnostic may echo connection arguments and passwords.
-        Err(AppError::Platform(format!(
-            "extension inventory {step} failed for {subject} with exit code {}",
-            result.process.exit_code
-        )))
-    }
+    // A platform diagnostic may echo connection arguments and passwords.
+    result.process.outcome().map_err(|code| {
+        AppError::Platform(format!(
+            "extension inventory {step} failed for {subject} with exit code {code}"
+        ))
+    })
 }
 
 fn inventory_identity(
@@ -330,12 +327,11 @@ fn requested(scope: &ExtensionInventoryScope) -> RequestedInventory {
 
 /// Отказ изменения состава через `ibcmd` называет само изменение, код выхода и вывод.
 fn validate_change(verb: &str, result: &PlatformCommandResult) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
+    let Err(code) = result.process.outcome() else {
         return Ok(());
-    }
+    };
     let mut details = vec![format!(
-        "platform extension {verb} failed with exit code {}",
-        result.process.exit_code
+        "platform extension {verb} failed with exit code {code}"
     )];
     for (label, value) in [
         ("stdout", result.process.stdout.as_str()),

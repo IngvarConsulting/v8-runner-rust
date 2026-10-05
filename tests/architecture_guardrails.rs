@@ -530,6 +530,199 @@ fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<Str
         .collect()
 }
 
+/// Корень #285: сценарии сами сравнивали код выхода утилиты с нулём, и знание о том, что
+/// код значит, расползлось по ним. Код читает слой `platform` — `ProcessResult::outcome`
+/// и вердикты адаптеров, — а сценарий получает исход. Проверка узнаёт чтение кода в
+/// сценарии под любым именем носителя: сравнение кода с числом, `match` кода с числовым
+/// образцом, `.success()`, `NonZero*::new` над кодом — в том числе внутри макросов.
+#[test]
+fn scenarios_receive_an_outcome_not_an_exit_code() {
+    assert_eq!(
+        exit_code_readings(&SourceIndex::of_src()),
+        std::collections::BTreeSet::new(),
+        "a scenario reads an exit code itself; let the platform layer turn it into an outcome"
+    );
+}
+
+/// Страж узнаёт каждую форму чтения кода в сценарии — в методе, во вложенном модуле, в
+/// макросе — и не трогает ни слой `platform`, ни тесты, ни код в тексте ответа.
+#[test]
+fn the_exit_code_finder_sees_every_reading_in_a_scenario() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::family",
+            "fn field(result: R) -> bool { result.process.exit_code == 0 }\n\
+             fn reversed(result: R) -> bool { 0 != result.exit_code }\n\
+             fn local(exit_code: i32) -> bool { exit_code > 0 }\n\
+             fn status(status: S) -> bool { status.success() }\n\
+             fn method(status: S) -> bool { status.code() == 101 }\n\
+             fn matched(result: R) -> u8 { match result.process.exit_code { 0 => 1, _ => 2 } }\n\
+             fn wrapped(result: R) -> Option<std::num::NonZeroI32> { std::num::NonZeroI32::new(result.process.exit_code) }\n\
+             fn in_macro(result: R) -> bool { matches!(result.process.exit_code, 0) }\n\
+             fn asserted(result: R) { debug_assert!(result.process.exit_code != 0); }\n\
+             fn message(result: R) -> String { format!(\"exit code {}\", result.process.exit_code) }\n\
+             fn outcome(result: R) -> bool { result.process.outcome().is_ok() }\n\
+             struct Step;\n\
+             impl Step { fn ok(&self, result: R) -> bool { (result.exit_code) == 0 } }\n\
+             mod inner { fn eager(result: R) -> bool { result.exit_code == 0 } }\n\
+             #[cfg(test)]\n\
+             mod tests { fn asserts(result: R) -> bool { result.exit_code == 0 } }",
+        ),
+        (
+            "crate::platform::process",
+            "fn outcome(result: R) -> bool { result.exit_code == 0 }",
+        ),
+    ]);
+
+    assert_eq!(
+        exit_code_readings(&index),
+        [
+            "crate::use_cases::family::Step::ok",
+            "crate::use_cases::family::asserted",
+            "crate::use_cases::family::field",
+            "crate::use_cases::family::in_macro",
+            "crate::use_cases::family::inner::eager",
+            "crate::use_cases::family::local",
+            "crate::use_cases::family::matched",
+            "crate::use_cases::family::method",
+            "crate::use_cases::family::reversed",
+            "crate::use_cases::family::status",
+            "crate::use_cases::family::wrapped",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+    );
+}
+
+/// Места сценариев, где производственный код читает код выхода сам.
+fn exit_code_readings(index: &SourceIndex) -> std::collections::BTreeSet<String> {
+    production_bodies(index)
+        .into_iter()
+        .filter(|body| is_scenario_module(&body.module))
+        .filter(|body| {
+            let mut finder = ExitCodeReading(false);
+            syn::visit::visit_block(&mut finder, body.block);
+            finder.0
+        })
+        .map(|body| format!("{}::{}", body.module.join("::"), body.context))
+        .collect()
+}
+
+/// Нашлось ли в теле чтение кода выхода.
+struct ExitCodeReading(bool);
+
+impl<'ast> syn::visit::Visit<'ast> for ExitCodeReading {
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        let comparison = matches!(
+            node.op,
+            syn::BinOp::Eq(_)
+                | syn::BinOp::Ne(_)
+                | syn::BinOp::Lt(_)
+                | syn::BinOp::Le(_)
+                | syn::BinOp::Gt(_)
+                | syn::BinOp::Ge(_)
+        );
+        self.0 |= comparison
+            && ((names_exit_code(&node.left) && is_int_literal(&node.right))
+                || (names_exit_code(&node.right) && is_int_literal(&node.left)));
+        syn::visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        self.0 |= names_exit_code(&node.expr)
+            && node
+                .arms
+                .iter()
+                .any(|arm| has_int_literal_pattern(&arm.pat));
+        syn::visit::visit_expr_match(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.0 |= node.method == "success" && node.args.is_empty();
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(function) = node.func.as_ref() {
+            let names = function
+                .path
+                .segments
+                .iter()
+                .rev()
+                .take(2)
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let non_zero_new = matches!(
+                names.as_slice(),
+                [new, carrier] if new == "new" && carrier.starts_with("NonZero")
+            );
+            self.0 |= non_zero_new && node.args.iter().any(names_exit_code);
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    /// Макрос читается как список выражений через запятую; `matches!` над кодом — тоже
+    /// сравнение.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        use syn::parse::Parser;
+        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        if let Ok(arguments) = parser.parse2(node.tokens.clone()) {
+            let is_matches = node
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "matches");
+            self.0 |= is_matches && arguments.first().is_some_and(names_exit_code);
+            for argument in &arguments {
+                syn::visit::visit_expr(self, argument);
+            }
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+/// Выражение называет код выхода: поле или имя `exit_code`, метод `exit_code()` или
+/// `code()`.
+fn names_exit_code(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Paren(inner) => names_exit_code(&inner.expr),
+        syn::Expr::Group(inner) => names_exit_code(&inner.expr),
+        syn::Expr::Reference(inner) => names_exit_code(&inner.expr),
+        syn::Expr::Unary(inner) => names_exit_code(&inner.expr),
+        syn::Expr::Field(field) => {
+            matches!(&field.member, syn::Member::Named(name) if name == "exit_code")
+        }
+        syn::Expr::Path(path) => path.path.is_ident("exit_code"),
+        syn::Expr::MethodCall(call) => call.method == "exit_code" || call.method == "code",
+        _ => false,
+    }
+}
+
+fn is_int_literal(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(literal) => matches!(literal.lit, syn::Lit::Int(_)),
+        syn::Expr::Unary(inner) => is_int_literal(&inner.expr),
+        syn::Expr::Paren(inner) => is_int_literal(&inner.expr),
+        syn::Expr::Group(inner) => is_int_literal(&inner.expr),
+        _ => false,
+    }
+}
+
+fn has_int_literal_pattern(pat: &syn::Pat) -> bool {
+    match pat {
+        syn::Pat::Lit(literal) => matches!(literal.lit, syn::Lit::Int(_)),
+        syn::Pat::Or(or) => or.cases.iter().any(has_int_literal_pattern),
+        syn::Pat::Range(_) => true,
+        syn::Pat::Paren(inner) => has_int_literal_pattern(&inner.pat),
+        syn::Pat::Ident(ident) => ident
+            .subpat
+            .as_ref()
+            .is_some_and(|(_, sub)| has_int_literal_pattern(sub)),
+        _ => false,
+    }
+}
+
 fn path_of(path: &str) -> Vec<String> {
     path.split("::").map(str::to_owned).collect()
 }

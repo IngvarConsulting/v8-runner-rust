@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::domain::syntax::SyntaxCheckStatus;
 use crate::platform::connection::V8Connection;
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
@@ -21,6 +22,17 @@ pub enum DesignerError {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// Вердикт проверки Конфигуратора — `/CheckConfig` и `/CheckModules` — по коду выхода: ноль —
+/// чисто, 101 — замечания найдены, любой другой — сбой инструмента. Других входов у вердикта
+/// нет: текст журнала его не меняет.
+pub fn syntax_check_status(exit_code: i32) -> SyntaxCheckStatus {
+    match exit_code {
+        0 => SyntaxCheckStatus::Clean,
+        101 => SyntaxCheckStatus::IssuesFound,
+        _ => SyntaxCheckStatus::ToolFailed,
+    }
 }
 
 /// Low-level DSL for invoking `1cv8` in `DESIGNER` mode.
@@ -399,12 +411,20 @@ impl<'a> DesignerDsl<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::DesignerDsl;
+    use super::{syntax_check_status, DesignerDsl};
+    use crate::domain::syntax::SyntaxCheckStatus;
     use crate::platform::connection::V8Connection;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+
+    #[test]
+    fn status_mapping_matches_designer_exit_codes() {
+        assert_eq!(syntax_check_status(0), SyntaxCheckStatus::Clean);
+        assert_eq!(syntax_check_status(101), SyntaxCheckStatus::IssuesFound);
+        assert_eq!(syntax_check_status(1), SyntaxCheckStatus::ToolFailed);
+    }
 
     #[cfg(unix)]
     fn make_executable(path: &Path) {

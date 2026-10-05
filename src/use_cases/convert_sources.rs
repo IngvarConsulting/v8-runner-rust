@@ -1317,13 +1317,12 @@ fn ensure_platform_success(
     direction_label: &str,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
+    let Err(code) = result.process.outcome() else {
         return Ok(());
-    }
+    };
 
     let mut details = vec![format!(
-        "convert source-set '{source_set_name}' ({direction_label}) failed with exit code {}",
-        result.process.exit_code
+        "convert source-set '{source_set_name}' ({direction_label}) failed with exit code {code}"
     )];
     if !result.process.stdout.trim().is_empty() {
         details.push(format!("stdout: {}", result.process.stdout.trim()));

@@ -653,10 +653,9 @@ fn create_infobase_via_designer(
     )
     .create_infobase()
     .map(|result| IbcmdInfobaseCreateOutcome {
-        status: if result.process.exit_code == 0 {
-            IbcmdInfobaseCreateStatus::Created
-        } else {
-            IbcmdInfobaseCreateStatus::Failed
+        status: match result.process.outcome() {
+            Ok(()) => IbcmdInfobaseCreateStatus::Created,
+            Err(_code) => IbcmdInfobaseCreateStatus::Failed,
         },
         result,
     })
@@ -824,10 +823,10 @@ fn ensure_platform_success(
     target: &str,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
-        return Ok(());
-    }
-    Err(AppError::Platform(failure_details(action, target, result)))
+    result
+        .process
+        .outcome()
+        .map_err(|_code| AppError::Platform(failure_details(action, target, result)))
 }
 
 /// Создание базы не удалось.

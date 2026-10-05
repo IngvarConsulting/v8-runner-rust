@@ -1505,11 +1505,8 @@ fn provider_log_path(config: &AppConfig, stem: &str) -> Result<PathBuf, AppError
 }
 
 fn validate_platform_success(result: &PlatformCommandResult) -> Result<(), AppError> {
-    if result.process.exit_code != 0 {
-        let mut details = vec![format!(
-            "platform export failed with exit code {}",
-            result.process.exit_code
-        )];
+    if let Err(code) = result.process.outcome() {
+        let mut details = vec![format!("platform export failed with exit code {code}")];
         append_platform_diagnostic(&mut details, "stdout", &result.process.stdout);
         append_platform_diagnostic(&mut details, "stderr", &result.process.stderr);
         if let Some(log) = result.platform_log.as_deref() {
