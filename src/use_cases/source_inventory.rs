@@ -5,6 +5,9 @@ use crate::change_detection::analyzer::ContextAnalysis;
 use crate::change_detection::source_sets::SourceSetsService;
 use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
 use crate::domain::source_set::SourceSetContext;
+use crate::support::error::AppError;
+use crate::use_cases::context::CommandName;
+use crate::use_cases::extension_identity::platform_extension_name;
 
 /// Read-only runtime index for source-set orchestration.
 pub(crate) struct SourceSetInventory<'a> {
@@ -65,6 +68,37 @@ impl<'a> SourceSetInventory<'a> {
         self.source_sets_by_name.get(name).copied()
     }
 
+    /// Набор, названный пользователем. Имя, которого нет среди наборов проекта, — отказ
+    /// одной формулировкой для всех команд.
+    pub(crate) fn named(&self, name: &str) -> Result<&'a SourceSetConfig, AppError> {
+        self.source_set(name)
+            .ok_or_else(|| AppError::Validation(format!("unknown source-set '{name}'")))
+    }
+
+    /// Пакет конфигурации, который называет набор: набор конфигурации — основную
+    /// конфигурацию (`None`), набор расширения — расширение с именем набора. У набора
+    /// внешних файлов пакета конфигурации нет: отказ называет команду `command`, которая
+    /// его просила.
+    pub(crate) fn configuration_package(
+        &self,
+        name: &str,
+        command: CommandName,
+    ) -> Result<(&'a SourceSetConfig, Option<&'a str>), AppError> {
+        let source_set = self.named(name)?;
+        match source_set.purpose {
+            SourceSetPurpose::Configuration => Ok((source_set, None)),
+            SourceSetPurpose::Extension => {
+                Ok((source_set, Some(platform_extension_name(source_set))))
+            }
+            SourceSetPurpose::ExternalDataProcessors | SourceSetPurpose::ExternalReports => {
+                Err(AppError::Validation(format!(
+                    "source-set '{name}' holds external files; {} takes the main configuration or an extension",
+                    command.as_str()
+                )))
+            }
+        }
+    }
+
     pub(crate) fn source_sets_with_purpose(
         &self,
         purpose: SourceSetPurpose,
@@ -115,7 +149,7 @@ fn index_contexts(contexts: &[SourceSetContext]) -> HashMap<String, SourceSetCon
 
 #[cfg(test)]
 mod tests {
-    use super::SourceSetInventory;
+    use super::{CommandName, SourceSetInventory};
     use crate::config::model::{
         AppConfig, BuildConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
         TestsConfig, ToolsConfig,
@@ -175,6 +209,31 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["main", "ext", "processors", "reports"]);
+    }
+
+    /// Набор называет пакет конфигурации: основную конфигурацию или расширение с именем
+    /// набора; набор внешних файлов и чужое имя — отказ.
+    #[test]
+    fn a_source_set_names_its_configuration_package() {
+        let config = config(SourceFormat::Designer);
+        let inventory = SourceSetInventory::new(&config);
+
+        let package = |name| {
+            inventory
+                .configuration_package(name, CommandName::InfobaseConfigurationExport)
+                .map(|(source_set, extension)| (source_set.name.as_str(), extension))
+                .map_err(|error| error.to_string())
+        };
+
+        assert_eq!(package("main"), Ok(("main", None)));
+        assert_eq!(package("ext"), Ok(("ext", Some("ext"))));
+        let external = package("reports").expect_err("external files");
+        assert!(external.contains("download takes"), "{external}");
+        let unknown = package("missing").expect_err("unknown");
+        assert!(
+            unknown.contains("unknown source-set 'missing'"),
+            "{unknown}"
+        );
     }
 
     #[test]

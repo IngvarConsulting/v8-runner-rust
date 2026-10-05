@@ -36,10 +36,11 @@ v8-runner init
   ветке `master`;
 - создаёт рядом `v8project.local.yaml` с modeline на
   `https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json`
-  и объявляет в нём базу `origin`: адрес из `--connection`, по умолчанию `File=build/ib`.
+  и объявляет в нём базу `origin`: адрес из `--infobase <строка соединения>` (прежний ключ
+  `--connection` принимается скрыто), по умолчанию `File=build/ib`.
   Существующий местный слой сохраняется: `origin` дописывается, если не объявлен; секция
   без адреса (прежний `infobase:` только с учётными данными) получает адрес и переезжает в
-  `infobases.origin`; объявленный адрес, отличный от `--connection`, — отказ. Файл с картой
+  `infobases.origin`; объявленный адрес, отличный от названного, — отказ. Файл с картой
   `infobases` или потоковой записью при дописывании перезаписывается целиком, комментарии
   в нём теряются;
 - дописывает в `.gitignore` каталога проекта (каталога запуска, а не каталога `--output`)
@@ -659,8 +660,8 @@ Validation rules:
 
 Порог между partial и full load.
 
-CLI selector `v8-runner push --source-set <name>` использует `source-set[].name` как stable
-runtime identity и не добавляет отдельное поле конфигурации. Если selector не задан, `push`
+Позиционный набор `v8-runner push <name>` использует `source-set[].name` как stable
+runtime identity и не добавляет отдельное поле конфигурации. Если набор не назван, `push`
 обрабатывает все `source-set`.
 
 ### `tests`
@@ -786,7 +787,7 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
     `format`);
   - `artifact.path` на существующий `.cfe` файл.
 
-`tools.client_mcp.extension` не добавляется в `source-set` и не выбирается через `--source-set`.
+`tools.client_mcp.extension` не добавляется в `source-set` и не выбирается позиционным `<SET>`.
 `infobase create` импортирует EDT `source` в workspace, `push` подготавливает расширение
 после project source-set, а `launch mcp` и `launch mcp va` расширение не устанавливают и
 не обновляют.

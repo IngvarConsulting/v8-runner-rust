@@ -712,6 +712,15 @@ fn run_external_designer_export(
     ))
 }
 
+fn requested_extension_name(extension: Option<&str>) -> Result<&str, AppError> {
+    extension
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::Validation("artifacts cfe export requires non-empty --extension".to_owned())
+        })
+}
+
 fn resolve_target(
     config: &AppConfig,
     args: &ArtifactsRequest,
@@ -723,9 +732,7 @@ fn resolve_target(
         ArtifactsModeRequest::ConfigurationCf => {
             let source_set = match args.source_set.as_deref() {
                 Some(name) => {
-                    let source_set = inventory.source_set(name).ok_or_else(|| {
-                        AppError::Validation(format!("unknown source-set '{name}'"))
-                    })?;
+                    let source_set = inventory.named(name)?;
                     if source_set.purpose != SourceSetPurpose::Configuration {
                         return Err(AppError::Validation(format!(
                             "source-set '{name}' is not a configuration source-set"
@@ -738,27 +745,20 @@ fn resolve_target(
             (source_set, None)
         }
         ArtifactsModeRequest::ExtensionCfe => {
-            let requested_extension = args
-                .extension
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    AppError::Validation(
-                        "artifacts cfe export requires non-empty --extension".to_owned(),
-                    )
-                })?;
-
             if let Some(source_set_name) = args.source_set.as_deref() {
-                let source_set = inventory.source_set(source_set_name).ok_or_else(|| {
-                    AppError::Validation(format!("unknown source-set '{source_set_name}'"))
-                })?;
+                let source_set = inventory.named(source_set_name)?;
                 if source_set.purpose != SourceSetPurpose::Extension {
                     return Err(AppError::Validation(format!(
                         "source-set '{source_set_name}' is not an extension source-set"
                     )));
                 }
                 let resolved_extension_name = platform_extension_name(source_set);
+                // Набор расширения называет и само расширение: `--extension` лишь сверяется
+                // с ним, когда назван.
+                let requested_extension = match args.extension.as_deref() {
+                    None => resolved_extension_name,
+                    Some(extension) => requested_extension_name(Some(extension))?,
+                };
                 if resolved_extension_name != requested_extension {
                     return Err(AppError::Validation(format!(
                         "source-set '{source_set_name}' resolves to extension '{resolved_extension_name}', expected '{requested_extension}'"
@@ -766,6 +766,7 @@ fn resolve_target(
                 }
                 (source_set, Some(requested_extension.to_owned()))
             } else {
+                let requested_extension = requested_extension_name(args.extension.as_deref())?;
                 let candidates = inventory
                     .source_sets_with_purpose(SourceSetPurpose::Extension)
                     .into_iter()
@@ -809,11 +810,9 @@ fn resolve_target(
                 ));
             }
             let source_set_name = args.source_set.as_deref().ok_or_else(|| {
-                AppError::Validation("external artifacts export requires --source-set".to_owned())
+                AppError::Validation("external artifacts export requires <SET>".to_owned())
             })?;
-            let source_set = inventory.source_set(source_set_name).ok_or_else(|| {
-                AppError::Validation(format!("unknown source-set '{source_set_name}'"))
-            })?;
+            let source_set = inventory.named(source_set_name)?;
             let expected_purpose = match args.mode {
                 ArtifactsModeRequest::ExternalDataProcessorEpf => {
                     SourceSetPurpose::ExternalDataProcessors
@@ -946,7 +945,7 @@ fn resolve_single_configuration_source_set<'a>(
             .map(|source_set| source_set.name.as_str())
             .collect::<Vec<_>>();
         return Err(AppError::Validation(format!(
-            "artifacts cf export requires exactly one configuration source-set when --source-set is omitted; found [{}]",
+            "artifacts cf export requires exactly one configuration source-set when <SET> is omitted; found [{}]",
             candidates.join(", ")
         )));
     }
@@ -1534,6 +1533,39 @@ mod tests {
         let error = resolve_target(&config, &request).expect_err("blank extension should fail");
 
         assert!(error.to_string().contains("non-empty --extension"));
+    }
+
+    /// Отказ называет позиционный `<SET>`: прежний ключ `--source-set` скрыт и в текстах
+    /// отказов не звучит.
+    #[test]
+    fn resolve_target_refusals_name_the_positional_set() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(
+            dir.path(),
+            dir.path(),
+            Path::new("/tmp/1cv8"),
+            SourceFormat::Designer,
+        );
+        let mut external = cf_request("dist/external");
+        external.mode = ArtifactsModeRequest::ExternalDataProcessorEpf;
+        external.execution =
+            ArtifactsRequest::default_execution(ArtifactsModeRequest::ExternalDataProcessorEpf);
+        let without_set = resolve_target(&config, &external)
+            .expect_err("external export without a set")
+            .to_string();
+        assert!(without_set.contains("requires <SET>"), "{without_set}");
+        assert!(!without_set.contains("--source-set"), "{without_set}");
+
+        config.source_sets.push(SourceSetConfig {
+            name: "configuration-2".to_owned(),
+            purpose: SourceSetPurpose::Configuration,
+            path: PathBuf::from("configuration-2"),
+        });
+        let ambiguous = resolve_target(&config, &cf_request("dist/main.cf"))
+            .expect_err("several configuration sets")
+            .to_string();
+        assert!(ambiguous.contains("when <SET> is omitted"), "{ambiguous}");
+        assert!(!ambiguous.contains("--source-set"), "{ambiguous}");
     }
 
     #[cfg(unix)]

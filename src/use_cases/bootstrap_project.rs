@@ -14,6 +14,7 @@ use crate::use_cases::dump_config;
 use crate::use_cases::ignored_files::{ProjectGitignore, LOCAL_CONFIG_FILE_NAME};
 use crate::use_cases::request::{DumpModeRequest, DumpRequest};
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::workspace_lock::is_workspace_lock_file;
 
 const CONFIG_FILE_NAME: &str = "v8project.yaml";
 
@@ -147,16 +148,21 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
     let request = &plan.request;
     let written;
     let LoadedConfig { config, warnings } = if plan.is_preview() {
+        refuse_a_non_empty_project_dir(&plan.paths, &plan.config().work_path, request.force)
+            .map_err(UseCaseFailure::without_payload)?;
         &plan.settings
     } else {
         // Под замком файлы проекта проверяются заново: другой клон мог написать их между
-        // планом и замком. Каталог исходников — нет: его мог завести сам замок, если он
+        // планом и замком. Пустоту каталога спрашивают только здесь: занятый замок — свой
+        // отказ, и он приходит раньше отказа «каталог не пуст». Каталог исходников — нет: его мог завести сам замок, если он
         // совпадает с `workPath`. Отмена, пришедшая до записи, не оставляет полупроекта.
         refuse_existing(
             &[&plan.paths.config_path, &plan.paths.local_config_path],
             request.force,
         )
         .map_err(UseCaseFailure::without_payload)?;
+        refuse_a_non_empty_project_dir(&plan.paths, &plan.config().work_path, request.force)
+            .map_err(UseCaseFailure::without_payload)?;
         if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
             context,
             "before the project was written",
@@ -251,6 +257,8 @@ fn written_settings(paths: &BootstrapPaths) -> Result<LoadedConfig, AppError> {
 
 #[derive(Debug, Clone)]
 struct BootstrapPaths {
+    /// Каталог проекта, разрешённый от написания пользователя.
+    project_dir: PathBuf,
     config_path: PathBuf,
     local_config_path: PathBuf,
     gitignore: ProjectGitignore,
@@ -266,6 +274,7 @@ impl BootstrapPaths {
     fn new(project_dir: &Path, source_dir: &Path) -> Self {
         let resolved = crate::support::path::resolve_from(project_dir, source_dir);
         Self {
+            project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(CONFIG_FILE_NAME),
             local_config_path: project_dir.join(LOCAL_CONFIG_FILE_NAME),
             gitignore: ProjectGitignore::locate(project_dir, project_dir),
@@ -336,8 +345,74 @@ fn refuse_existing(targets: &[&Path], force: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Каталог журналов под `workPath`. Проверка пустоты его не читает: в нём может лежать и
+/// журнал прежних запусков.
+const WORK_PATH_LOGS_DIR: &str = "logs";
+
+/// Клон пишет проект только в пустой каталог: пустым считается каталог, где нет ничего,
+/// кроме `.git`. Проверка идёт после замка, а замок и журнал уже могут лежать в `workPath`
+/// нового проекта. Поэтому `workPath` не в счёт, только пока в нём нет ничего, кроме файлов
+/// замка и каталога журналов `logs/` (его содержимое не проверяется); любой другой файл или
+/// каталог в нём — «не пуст».
+/// `--force` снимает отказ, как и запрет перезаписи. Каталога ещё нет — он пуст.
+fn refuse_a_non_empty_project_dir(
+    paths: &BootstrapPaths,
+    work_path: &Path,
+    force: bool,
+) -> Result<(), AppError> {
+    if force {
+        return Ok(());
+    }
+    let project_dir = &paths.project_dir;
+    let refuse = |path: PathBuf| {
+        AppError::Validation(format!(
+            "clone target is not empty: {} holds {} (clone writes into an empty directory; use --force to clone into this one)",
+            project_dir.display(),
+            path.display()
+        ))
+    };
+    for entry in directory_entries(project_dir)? {
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        if path != work_path {
+            return Err(refuse(path));
+        }
+        if let Some(foreign) = directory_entries(work_path)?
+            .into_iter()
+            .find(|inner| !is_lock_file_or_logs_dir(inner))
+        {
+            return Err(refuse(foreign.path()));
+        }
+    }
+    Ok(())
+}
+
+/// Запись `workPath`, которую проверка пустоты пропускает: файл замка или каталог журналов
+/// `logs/` целиком, с любым содержимым и чьим бы он ни был.
+fn is_lock_file_or_logs_dir(entry: &std::fs::DirEntry) -> bool {
+    let name = entry.file_name();
+    is_workspace_lock_file(&name) || (name == WORK_PATH_LOGS_DIR && entry.path().is_dir())
+}
+
+/// Записи каталога; каталога нет — записей нет.
+fn directory_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, AppError> {
+    let read_error = |error: std::io::Error| {
+        AppError::Runtime(format!(
+            "failed to read directory '{}': {error}",
+            dir.display()
+        ))
+    };
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(read_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(read_error(error)),
+    }
+}
+
 fn write_bootstrap_files(paths: &BootstrapPaths, text: &ProjectText<'_>) -> Result<(), AppError> {
-    let project_dir = paths.config_path.parent().unwrap_or(Path::new("."));
+    let project_dir = &paths.project_dir;
     // Каталог проекта создаётся не при разрешении пути: план ничего не пишет. Боевой
     // прогон заводит его уже замком `workPath` внутри проекта, здесь он лишь гарантирован.
     std::fs::create_dir_all(project_dir).map_err(|error| {

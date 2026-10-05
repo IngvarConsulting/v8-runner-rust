@@ -45,7 +45,7 @@ MCP DTO в одном слое.
 - Generated Designer output для EDT flow живёт под `workPath/designer/<sourceSetName>`.
 
 Change detection выполняется on-demand во время build/export/load decision и не требует
-background watcher. `push --source-set <NAME>` ограничивает анализ, export/load decision и
+background watcher. `push <SET>` ограничивает анализ, export/load decision и
 runtime snapshot commit только указанным source-set.
 
 ## Пайплайн `push`
