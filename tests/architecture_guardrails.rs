@@ -4999,7 +4999,7 @@ fn cancellation_stop_bypasses(index: &SourceIndex) -> Vec<String> {
 /// пишет тот же модуль, истёкший срок — `timed_out_record`.
 ///
 /// Чего страж не видит: код, пришедший в `ExecutionError::new` через переменную или
-/// функцию, — как `execution_step_code` у CLI, — поэтому такой разбор сначала отдаёт
+/// функцию, — как `UseCaseErrorKind::execution_step_code`, — поэтому такой разбор сначала отдаёт
 /// отмену владельцу.
 #[test]
 fn a_cancellation_stop_is_recorded_only_by_its_owner() {
