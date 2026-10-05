@@ -715,3 +715,48 @@ fn init_ibcmd_server_auth_failure_stays_fatal() {
         .expect("message")
         .contains("access denied"));
 }
+
+/// Строка из `infobases.<имя>.connection` местного слоя бывает с `Usr=`/`Pwd=`: ни
+/// превью, ни ответ живого прогона, ни «уже существует» её не печатают — базу называет
+/// `describe_target` (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
+#[test]
+fn server_infobase_create_never_echoes_the_connection_string_credentials() {
+    let already_exists = "if printf '%s' \"$*\" | grep -F -q -- 'generation-id'; then exit 0; fi\nprintf 'already exists\\n' >&2\nexit 17";
+    for (script, dry_run, expected) in [
+        ("exit 0", true, "planned"),
+        ("exit 0", false, "ok"),
+        (already_exists, false, "skipped"),
+    ] {
+        let (_dir, config_path, _work_path, calls_log) = setup_ibcmd_server_init_project(script);
+        fs::write(
+            config_path.with_file_name("v8project.local.yaml"),
+            "infobases:\n  origin:\n    connection: 'Srvr=cluster:1541;Ref=demo;Usr=ConnUser;Pwd=conn-s3cret'\n",
+        )
+        .expect("local overlay");
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(&config_path)
+            .args(["--json-message", "infobase", "create"])
+            .args(dry_run.then_some("--dry-run"))
+            .output()
+            .expect("run command");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        let step = &payload["data"]["steps"][0];
+        assert_eq!(step["status"], expected, "{stdout}");
+        let message = step["message"].as_str().expect("message");
+        assert!(
+            message.contains("server infobase 'demo' on 'cluster:1541' as 'Admin'"),
+            "{message}"
+        );
+        for leaked in ["conn-s3cret", "Pwd=", "Usr=", "ConnUser"] {
+            assert!(!stdout.contains(leaked), "{expected}: {leaked} in {stdout}");
+            assert!(!stderr.contains(leaked), "{expected}: {leaked} in {stderr}");
+        }
+        // The preview dispatches nothing; a live run reaches ibcmd.
+        assert_eq!(calls_log.exists(), !dry_run, "{expected}");
+    }
+}
