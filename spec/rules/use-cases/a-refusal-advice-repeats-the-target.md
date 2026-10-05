@@ -7,6 +7,7 @@ check:
   - tests/cli_dump.rs::an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir
   - tests/mcp_http.rs::mcp_http_refusal_advises_the_command_line_of_the_server_target
   - tests/cli_pull_memory.rs::foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_credentials
+  - tests/cli_pull_memory.rs::foreign_memory_advice_runs_as_written_against_the_same_base
   - tests/architecture_guardrails.rs::no_production_text_advises_a_bare_pull_force_or_push_full
 ---
 

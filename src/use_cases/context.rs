@@ -231,9 +231,19 @@ impl ExecutionContext {
         self
     }
 
-    /// The global keys a command line needs to reach the same target as this run.
-    pub const fn command_line(&self) -> &CommandLineTarget {
-        &self.command_line
+    /// `` `v8-runner <global keys> <tail>` `` and where to run it, for a refusal that
+    /// advises a command: the command reaches the same target as this run, and an MCP
+    /// client learns that it runs from the command line, over HTTP on the server's machine.
+    pub fn advised_command(&self, tail: &str) -> String {
+        let command = self.command_line.command(tail);
+        let place = match self.transport {
+            ExecutionTransport::Cli => "",
+            ExecutionTransport::McpStdio => " from the command line",
+            ExecutionTransport::McpHttp => {
+                " from the command line on the machine where the MCP server runs"
+            }
+        };
+        format!("`{command}`{place}")
     }
 
     /// Returns the EDT subprocess timeout budget for this execution.

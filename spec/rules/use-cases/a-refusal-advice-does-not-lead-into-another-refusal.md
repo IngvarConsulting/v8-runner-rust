@@ -2,6 +2,7 @@
 id: INV.USE-CASES.A-REFUSAL-ADVICE-DOES-NOT-LEAD-INTO-ANOTHER-REFUSAL
 check:
   - tests/cli_dump.rs::an_edt_refusal_advises_a_full_replacement_that_runs_as_written
+  - tests/cli_synonyms.rs::mode_full_with_object_advises_dropping_the_object_too
   - tests/cli_convert.rs::a_convert_refusal_does_not_offer_a_truncated_command
   - tests/cli_help.rs::pull_help_says_every_edt_dump_replaces_the_project
 ---

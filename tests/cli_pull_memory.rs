@@ -341,8 +341,8 @@ fn foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_crede
     assert!(message.contains("belongs to"), "{message}");
     // Совет называет набор: голый `pull --force` выгрузил бы набор по умолчанию, а голый
     // `push --full` загрузил бы все наборы, а не тот, чья память чужая.
-    assert!(message.contains("`pull main --force`"), "{message}");
-    assert!(message.contains("`push main --full`"), "{message}");
+    assert!(message.contains(" pull main --force`"), "{message}");
+    assert!(message.contains(" push main --full`"), "{message}");
     assert!(!message.contains("`pull --force`"), "{message}");
     assert!(!message.contains("`push --full`"), "{message}");
     assert!(message.contains("replacement-ib"), "{message}");
@@ -353,6 +353,83 @@ fn foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_crede
     // Совет, выполненный буквально, записывает память для выбранной базы.
     succeeded(run(&project, &["pull", "main", "--force"]));
     assert_push_skips(&project);
+}
+
+/// Совет чужой памяти несёт глобальные ключи вызова: `pull main --force` без `--infobase`
+/// выгрузил бы базу по умолчанию, а без `--config` из другого каталога — чужой проект.
+/// Совет, выполненный буквально из другого каталога, выгружает ту же базу и записывает её
+/// память; память базы по умолчанию он не трогает.
+#[test]
+fn foreign_memory_advice_runs_as_written_against_the_same_base() {
+    let project = project("designer", false);
+    succeeded(run(
+        &project,
+        &["--infobase", "second", "pull", "main", "--force"],
+    ));
+    let second_memory = project.work.join("infobases/second/hashes/main.redb");
+    let old_memory = fs::read(&second_memory).expect("memory of the second base");
+    assert!(
+        !snapshot(&project).exists(),
+        "the default base was never used"
+    );
+    let local = project.config.with_file_name("v8project.local.yaml");
+    let original = fs::read_to_string(&local).expect("local config");
+    let root = project.config.parent().expect("root");
+    let moved = root.join("moved-second-ib");
+    fs::write(
+        &local,
+        original.replace(
+            &format!("File={}", root.join("second-ib").display()),
+            &format!("File={}", moved.display()),
+        ),
+    )
+    .expect("retarget");
+
+    let output = run(&project, &["--infobase", "second", "push"]);
+    assert!(!output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(message.contains("belongs to"), "{message}");
+    let config = format!("--config {}", project.config.display());
+    for tail in ["pull main --force", "push main --full"] {
+        let advice = format!("`v8-runner {config} --infobase second {tail}`");
+        assert!(message.contains(&advice), "must advise {advice}: {message}");
+    }
+    assert_eq!(fs::read(&second_memory).expect("memory"), old_memory);
+
+    // Совет буквально, оболочкой и из другого каталога.
+    let advice = message
+        .split('`')
+        .find(|part| part.starts_with("v8-runner ") && part.ends_with(" pull main --force"))
+        .expect("pull advice");
+    let binary = support::v8_runner_binary();
+    let literal = advice.replacen("v8-runner", &format!("'{}'", binary.display()), 1);
+    let elsewhere = tempfile::tempdir().expect("another directory");
+    let before = fs::read_to_string(&project.calls).expect("calls");
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&literal)
+        .current_dir(elsewhere.path())
+        .output()
+        .expect("run the advice");
+    assert!(
+        output.status.success(),
+        "{literal}: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(&project.calls).expect("calls");
+    let dispatched = &calls[before.len()..];
+    assert!(
+        dispatched.contains(&moved.display().to_string()),
+        "the advice must dump the selected base: {dispatched}"
+    );
+    assert_ne!(fs::read(&second_memory).expect("memory"), old_memory);
+    assert!(
+        !snapshot(&project).exists(),
+        "the advice must not touch the default base"
+    );
+    succeeded(run(&project, &["--infobase", "second", "push"]));
 }
 
 #[test]

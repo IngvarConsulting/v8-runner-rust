@@ -153,18 +153,10 @@ fn remedy(ways_out: &WaysOut, context: &ExecutionContext) -> String {
             ),
         },
         WaysOut::PullForce { source_set } => {
-            let command = context
-                .command_line()
-                .command(&format!("pull {} --force", shell_word(source_set)));
-            let place = match transport {
-                ExecutionTransport::Cli => "",
-                ExecutionTransport::McpStdio => " from the command line",
-                ExecutionTransport::McpHttp => {
-                    " from the command line on the machine where the MCP server runs"
-                }
-            };
+            let command =
+                context.advised_command(&format!("pull {} --force", shell_word(source_set)));
             format!(
-                "{save}, or run `{command}`{place}: a full dump of source-set '{source_set}' that replaces its whole directory and discards them"
+                "{save}, or run {command}: a full dump of source-set '{source_set}' that replaces its whole directory and discards them"
             )
         }
     }

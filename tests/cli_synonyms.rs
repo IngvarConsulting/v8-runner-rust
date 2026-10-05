@@ -524,6 +524,42 @@ fn mode_full_is_refused_and_names_pull_force() {
     );
 }
 
+/// `--mode full` рядом с `--object`: совет снять один `--mode full` и добавить `--force`
+/// упёрся бы в отказ «`--object` contradicts `--force`». Совет снимает и `--object`, и
+/// вызов по совету проходит разбор ключей.
+#[test]
+fn mode_full_with_object_advises_dropping_the_object_too() {
+    let project = project();
+    let called = [
+        "pull",
+        "main",
+        "--mode",
+        "full",
+        "--object",
+        "Catalog:Items",
+        "--dry-run",
+    ];
+    assert_refused(
+        &project,
+        &called,
+        &[
+            "drop `--mode full` and every `--object` and add `--force` to the same command",
+            FORCE_MEANS,
+        ],
+    );
+    // Совет буквально: без `--mode full`, без `--object` и с `--force`.
+    let advised: Vec<String> = ["pull", "main", "--dry-run", "--force"]
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
+    let output = run(&project, &advised);
+    let answer = envelope(&advised, &output);
+    assert_eq!(
+        answer["ok"], true,
+        "the advice must run as written: {answer}"
+    );
+}
+
 /// Прежний режим, который спорит с `--force`, не превращается молча в замену каталога:
 /// отказ до платформы называет выбор.
 #[test]

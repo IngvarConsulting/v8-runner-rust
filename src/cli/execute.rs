@@ -127,6 +127,7 @@ pub fn execute_command(
         Command::Build(args) => execute_build(
             config,
             args,
+            command_line,
             presenter,
             clean_before_execution,
             dry_run,
@@ -143,6 +144,7 @@ pub fn execute_command(
         Command::Test(args) => execute_test(
             config,
             args,
+            command_line,
             presenter,
             clean_before_execution,
             cancellation,
@@ -886,13 +888,16 @@ fn execute_init(
 fn execute_build(
     config: &AppConfig,
     args: &BuildArgs,
+    command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let request = map_build_request(args, dry_run);
-    let context = cli_context(config, CommandName::Build, cancellation);
+    // Отказ при чужой памяти советует `pull`/`push` с глобальными ключами этого вызова.
+    let context = cli_context(config, CommandName::Build, cancellation)
+        .with_command_line(command_line.clone());
     with_cli_workspace_lock(
         config,
         presenter,
@@ -938,6 +943,7 @@ fn execute_build(
 fn execute_test(
     config: &AppConfig,
     args: &TestArgs,
+    command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     cancellation: CancellationToken,
@@ -946,7 +952,9 @@ fn execute_test(
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Test, error))?;
     let effective_config = effective_test_config(config, args)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Test, error))?;
-    let context = cli_context(&effective_config, CommandName::Test, cancellation);
+    // Прогон собирает проект: совет отказа сборки несёт глобальные ключи этого вызова.
+    let context = cli_context(&effective_config, CommandName::Test, cancellation)
+        .with_command_line(command_line.clone());
     with_cli_workspace_lock(
         &effective_config,
         presenter,
@@ -2826,8 +2834,15 @@ fn dump_mode(args: &DumpArgs) -> Result<DumpModeRequest, UseCaseError> {
     let refuse = |message: String| Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
     match (args.mode, args.discard_uncommitted) {
         (Some(PreviousDumpMode::Full), _) => {
+            // `--object` рядом с `--force` отказывает: совет, выполненный буквально, не
+            // должен упереться во второй отказ.
+            let drop = if args.objects.is_empty() {
+                "`--mode full`"
+            } else {
+                "`--mode full` and every `--object`"
+            };
             return refuse(format!(
-                "`--mode full` is gone: drop `--mode full` and add `--force` to the same command (`pull [SET] --force`, the same source set); {PULL_FORCE_MEANS}"
+                "`--mode full` is gone: drop {drop} and add `--force` to the same command (`pull [SET] --force`, the same source set); {PULL_FORCE_MEANS}"
             ));
         }
         (Some(previous @ (PreviousDumpMode::Incremental | PreviousDumpMode::Partial)), true) => {
@@ -4911,10 +4926,18 @@ mod tests {
                     "{message}"
                 );
             }
+            // Рядом с `--object` совет снимает и его: иначе `--force` упёрся бы в отказ.
+            let drop = if objects.is_empty() {
+                "drop `--mode full` and add"
+            } else {
+                "drop `--mode full` and every `--object` and add"
+            };
             for force in [false, true] {
                 let message = refusal(&args(Some(PreviousDumpMode::Full), objects, force));
                 assert!(
-                    message.contains("`--mode full` is gone: drop `--mode full` and add `--force` to the same command"),
+                    message.contains(&format!(
+                        "`--mode full` is gone: {drop} `--force` to the same command"
+                    )),
                     "{message}"
                 );
                 assert!(
