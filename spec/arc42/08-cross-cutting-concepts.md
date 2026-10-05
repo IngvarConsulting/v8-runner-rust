@@ -85,8 +85,8 @@
 [файлы замка убирает только держатель](../rules/use-cases/a-lock-file-is-removed-only-by-its-holder.md),
 [запись работающего или удалённого владельца остаётся](../rules/use-cases/a-record-of-a-running-or-remote-owner-is-kept.md),
 [сбой метаданных не снимает замок](../rules/cli/sidecar-failure-does-not-release-the-lock.md),
-[вложенные шаги не берут замок повторно](../rules/cli/nested-orchestration-does-not-relock.md);
-пока не выполнено — [занятый каталог отвечает `workspace_busy`](../rules/wire/a-busy-workspace-answers-workspace-busy.md).
+[вложенные шаги не берут замок повторно](../rules/cli/nested-orchestration-does-not-relock.md),
+[занятый каталог отвечает `workspace_busy`](../rules/wire/a-busy-workspace-answers-workspace-busy.md).
 
 ### 8.4 Исполнители
 

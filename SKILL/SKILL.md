@@ -130,6 +130,9 @@ v8-runner infobase create
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
   way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the
   step instead of parsing the message.
+- A busy `workPath` (another run holds its lock) answers at once with `error.kind: workspace`,
+  `error.code: workspace_busy`, step `workspace lock` and exit 3 for every CLI command; MCP
+  answers `runtime_failure`. Wait for the other run and retry.
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
