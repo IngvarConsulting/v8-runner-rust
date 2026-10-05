@@ -294,6 +294,9 @@ v8-runner tools download client-mcp [--sources] [--force]
 - CLI-only; не публикуется как MCP tool.
 - Берёт latest release из GitHub для выбранного инструмента: `bia-technologies/yaxunit`,
   `Pr-Mex/vanessa-automation-single` или `1c-neurofish/onec-client-mcp-devkit`.
+- Для `vanessa` «последний» выпуск — наибольшая версия среди выпусков без пометки
+  pre-release: теги сравниваются покомпонентно как числа (`1.2.043.42` > `1.2.043.9`),
+  флаг latest на GitHub не учитывается. Выбранная версия — поле `tag` в `destinations`.
 - `yaxunit --sources` распаковывает source subtree в `tests` и добавляет в primary
   `v8project.yaml` `source-set` с именем `tests`; без `--sources` скачивает `.cfe` в
   `build/tools`.

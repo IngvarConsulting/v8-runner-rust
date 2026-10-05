@@ -158,12 +158,17 @@ fn serve_fixture_request(stream: &mut TcpStream, root: &Path) -> std::io::Result
             return write_http_response(stream, status, &[("Location", location.as_str())], &[]);
         }
     }
-    let relative = path
-        .split('?')
-        .next()
-        .unwrap_or(path)
-        .trim_start_matches('/');
-    let file_path = root.join(relative);
+    let (relative, query) = path.split_once('?').unwrap_or((path, ""));
+    let mut file_path = root.join(relative.trim_start_matches('/'));
+    // Список выпусков (`.../releases?per_page=..&page=N`) лежит страницами в каталоге
+    // `releases` рядом с `latest`: страница N — файл `page-N.json`.
+    if file_path.is_dir() {
+        let page = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("page="))
+            .unwrap_or("1");
+        file_path = file_path.join(format!("page-{page}.json"));
+    }
     match fs::read(file_path) {
         Ok(body) => write_http_response(stream, "200 OK", &[], &body),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -269,20 +274,32 @@ fn write_http_fixture_with_redirect_prefix(root: &Path, port: u16, prefix: &str)
     );
 }
 
+/// Пишет выпуск как `releases/latest` и как единственный выпуск списка `releases`.
 fn write_release(path: &Path, tag: &str, zipball_url: &str, assets: &[(&str, &str)]) {
     fs::create_dir_all(path).expect("release dir");
+    let release = release_json(tag, false, zipball_url, assets);
+    fs::write(path.join("latest"), &release).expect("release json");
+    write_release_page(path, 1, std::slice::from_ref(&release));
+}
+
+fn release_json(tag: &str, prerelease: bool, zipball_url: &str, assets: &[(&str, &str)]) -> String {
     let assets_json = assets
         .iter()
         .map(|(name, url)| format!(r#"{{"name":"{name}","browser_download_url":"{url}"}}"#))
         .collect::<Vec<_>>()
         .join(",");
-    fs::write(
-        path.join("latest"),
-        format!(
-            r#"{{"tag_name":"{tag}","html_url":"https://example.invalid/{tag}","zipball_url":"{zipball_url}","assets":[{assets_json}]}}"#
-        ),
+    format!(
+        r#"{{"tag_name":"{tag}","html_url":"https://example.invalid/{tag}","zipball_url":"{zipball_url}","prerelease":{prerelease},"draft":false,"assets":[{assets_json}]}}"#
     )
-    .expect("release json");
+}
+
+fn write_release_page(path: &Path, page: usize, releases: &[String]) {
+    fs::create_dir_all(path).expect("release dir");
+    fs::write(
+        path.join(format!("page-{page}.json")),
+        format!("[{}]", releases.join(",")),
+    )
+    .expect("release page json");
 }
 
 fn make_zip(path: &Path, entries: &[(&str, &str)]) {
@@ -539,6 +556,88 @@ fn tools_download_repairs_pending_vanessa_configuration() {
     assert!(local.contains("epf_path:"));
     assert!(local.contains("epf_path: build/tools/vanessa-automation-single.epf"));
     assert!(!local.contains(&dir.path().display().to_string()));
+}
+
+/// «Последняя» Vanessa — наибольшая версия среди обычных выпусков (#160): флаг latest
+/// стоит на 1.2.043.1, есть pre-release с ещё большей версией, а 1.2.043.42 лежит на второй
+/// странице списка. Версии сравниваются числами: 1.2.043.42 больше 1.2.043.9.
+#[test]
+fn tools_download_vanessa_takes_the_highest_stable_release_not_the_latest_flag() {
+    let dir = temp_workspace();
+    let config_path = write_minimal_config(dir.path());
+    let server_root = dir.path().join("server");
+    let (_server, port) = FixtureServer::start(&server_root);
+    write_http_fixture(&server_root, port);
+
+    let releases_dir = server_root
+        .join("repos")
+        .join("Pr-Mex")
+        .join("vanessa-automation-single")
+        .join("releases");
+    let vanessa_release = |tag: &str, prerelease: bool| {
+        let name = format!("vanessa-automation-single.{tag}.zip");
+        let url = format!("http://127.0.0.1:{port}/assets/{name}");
+        make_zip(
+            &server_root.join("assets").join(&name),
+            &[("vanessa-automation-single.epf", &format!("va epf {tag}"))],
+        );
+        release_json(
+            tag,
+            prerelease,
+            &format!("http://127.0.0.1:{port}/archives/vanessa-source.zip"),
+            &[(name.as_str(), url.as_str())],
+        )
+    };
+    // Полная первая страница: флаг latest (файл `latest`) — на 1.2.043.1.
+    let mut first_page = vec![
+        vanessa_release("1.2.043.1", false),
+        vanessa_release("1.2.043.9", false),
+        vanessa_release("1.2.044.1", true),
+    ];
+    first_page.extend((0..97).map(|minor| {
+        release_json(
+            &format!("1.1.{minor}"),
+            false,
+            "http://127.0.0.1:1/unused.zip",
+            &[],
+        )
+    }));
+    write_release_page(&releases_dir, 1, &first_page);
+    write_release_page(&releases_dir, 2, &[vanessa_release("1.2.043.42", false)]);
+
+    let output = v8_runner_command()
+        .env(
+            "V8TR_GITHUB_API_BASE_URL",
+            format!("http://127.0.0.1:{port}"),
+        )
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "tools",
+            "download",
+            "vanessa",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert_eq!(
+        payload["data"]["destinations"][0]["tag"], "1.2.043.42",
+        "{payload}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("build/tools/vanessa-automation-single.epf"))
+            .expect("downloaded epf"),
+        "va epf 1.2.043.42"
+    );
 }
 
 #[test]
