@@ -1144,3 +1144,58 @@ fn clone_resolves_a_symlinked_project_directory_to_its_target() {
         )
     );
 }
+
+/// Проект — подкаталог чужого репозитория (монорепо, `git init` в домашнем каталоге):
+/// `clone` пишет шаблоны в `.gitignore` каталога проекта, а корневой `.gitignore`
+/// репозитория не трогает. Форма называет именно файл проекта.
+#[test]
+fn clone_into_a_subdirectory_of_a_repository_writes_the_project_gitignore() {
+    let dir = temp_workspace();
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["init", "-q", "-b", "main", "."])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git init failed");
+    let root_gitignore = repo.join(".gitignore");
+    fs::write(&root_gitignore, "target/\n").expect("root gitignore");
+    let project_dir = repo.join("apps").join("erp");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    args.insert(0, "--json-message".to_owned());
+
+    let output = v8_runner_command()
+        .args(args)
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let project_gitignore = fs::canonicalize(&project_dir)
+        .expect("canonical project dir")
+        .join(".gitignore");
+    assert_eq!(
+        payload["data"]["gitignore_path"],
+        Value::from(project_gitignore.display().to_string())
+    );
+    assert_eq!(
+        fs::read_to_string(&root_gitignore).expect("root gitignore"),
+        "target/\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&project_gitignore).expect("project gitignore"),
+        "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+    );
+}

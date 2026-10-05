@@ -116,7 +116,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
 
     let local_path = output_dir.join(LOCAL_CONFIG_FILE_NAME);
-    let gitignore = ProjectGitignore::locate(output_dir);
+    let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
 
     std::fs::write(&output_path, yaml).map_err(|error| {
         AppError::Runtime(format!(

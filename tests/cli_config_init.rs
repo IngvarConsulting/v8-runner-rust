@@ -188,8 +188,10 @@ fn config_init_creates_local_overlay_next_to_output_override() {
     let local_config = fs::read_to_string(dir.path().join("config").join("v8project.local.yaml"))
         .expect("local config");
     assert!(local_config.starts_with(LOCAL_CONFIG_SCHEMA_MODEL_LINE));
-    let gitignore =
-        fs::read_to_string(dir.path().join("config").join(".gitignore")).expect("gitignore");
+    // Вне гита шаблоны тоже ложатся в `.gitignore` каталога проекта: шаблон без `/`
+    // оттуда покрывает и вложенный конфиг, и каталоги наборов.
+    assert!(!dir.path().join("config").join(".gitignore").exists());
+    let gitignore = fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
     assert!(gitignore.lines().any(|line| line == "v8project.local.yaml"));
 }
 

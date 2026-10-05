@@ -231,10 +231,11 @@ v8-runner init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format
 - Пишет результат в текущий каталог или в `--output`.
 - Рядом с primary config создает/обновляет пустой `v8project.local.yaml` со schema modeline и
   добавляет в `.gitignore` недостающие шаблоны `v8project.local.yaml`, `ConfigDumpInfo.xml`
-  и `.dump-*.lock*`. В git-репозитории это `.gitignore` корня рабочей копии (так шаблоны
-  описи и замка покрывают каталоги наборов при любом `--output`), вне git — `.gitignore`
-  рядом с конфигом; `gitignore_path` в ответе называет этот файл. Уже покрытый шаблон
-  повторно не пишется; покрытием считается только `.gitignore` внутри рабочей копии, а не
+  и `.dump-*.lock*`. Это `.gitignore` каталога проекта — каталога запуска, где ищутся наборы,
+  в git и вне его; шаблоны без `/` покрывают каталоги наборов и вложенный `--output`.
+  `.gitignore` корня рабочей копии выше проекта (монорепо) не трогается; `gitignore_path` в
+  ответе называет файл проекта. Уже покрытый шаблон повторно не пишется; покрытием считается
+  любой `.gitignore` внутри рабочей копии, в том числе выше проекта, но не
   `.git/info/exclude` или `core.excludesFile` — они с репозиторием не уезжают.
 - Не использует глобальный `--config` как shortcut output path.
 - Ищет supported `DESIGNER` / `EDT` `source-set` по marker files и их содержимому.
@@ -252,8 +253,9 @@ v8-runner clone --connection <CONNECTION> --platform-version <VERSION> [--projec
 
 - Работает до загрузки `v8project.yaml` и предназначен для пустого project directory.
 - Создаёт `v8project.yaml`, schema-modelined `v8project.local.yaml`, `.gitignore` с теми же
-  шаблонами и по тем же правилам выбора файла, что и `init` (`v8project.local.yaml`,
-  `ConfigDumpInfo.xml`, `.dump-*.lock*`), и
+  шаблонами и по тем же правилам, что и `init` (`v8project.local.yaml`,
+  `ConfigDumpInfo.xml`, `.dump-*.lock*`; файл — `<project-dir>/.gitignore`, существующий
+  только дописывается), и
   `source-set main` типа `CONFIGURATION`.
 - Выгружает основную конфигурацию из указанной ИБ в `src/configuration` через Designer full dump.
 - `--connection` не должен содержать embedded credentials; используйте `--user` и `--password`.

@@ -18,6 +18,8 @@ pub mod result;
 /// Маскирование секретов в составленных аргументах.
 pub mod secrets;
 pub mod sftp;
+#[cfg(test)]
+pub(crate) mod test_git;
 pub mod utilities;
 /// `webinst` command composition.
 pub mod webinst;

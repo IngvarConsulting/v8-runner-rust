@@ -262,7 +262,7 @@ impl BootstrapPaths {
         Self {
             config_path: project_dir.join(CONFIG_FILE_NAME),
             local_config_path: project_dir.join(LOCAL_CONFIG_FILE_NAME),
-            gitignore: ProjectGitignore::locate(project_dir),
+            gitignore: ProjectGitignore::locate(project_dir, project_dir),
             source_dir: if source_dir.is_absolute() {
                 source_dir.to_path_buf()
             } else {

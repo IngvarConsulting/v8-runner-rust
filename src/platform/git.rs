@@ -24,9 +24,19 @@ use std::process::{Command, Stdio};
 pub fn ignored_by_worktree_gitignore(dir: &Path, relative: &Path) -> Option<bool> {
     use std::io::Write;
 
+    let unknown = |reason: &dyn std::fmt::Display| -> Option<bool> {
+        tracing::debug!(
+            dir = %dir.display(),
+            path = %relative.display(),
+            %reason,
+            "git ignore coverage is unknown"
+        );
+        None
+    };
+
     // `-z` гит принимает только вместе с `--stdin`: путь уходит на вход, ответ
     // приходит полями через NUL, и никакое имя не ломает разбор.
-    let mut child = Command::new("git")
+    let mut child = match Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(["check-ignore", "-z", "--stdin", "--verbose", "--no-index"])
@@ -34,20 +44,36 @@ pub fn ignored_by_worktree_gitignore(dir: &Path, relative: &Path) -> Option<bool
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+    {
+        Ok(child) => child,
+        Err(error) => return unknown(&format_args!("git check-ignore failed to run: {error}")),
+    };
     let mut request = relative.as_os_str().as_encoded_bytes().to_vec();
     request.push(0);
+    // Вход закрывается до ожидания: иначе гит ждал бы конца ввода вечно.
     let written = child
         .stdin
         .take()
         .map(|mut stdin| stdin.write_all(&request));
-    let output = child.wait_with_output().ok()?;
-    written?.ok()?;
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(error) => return unknown(&format_args!("git check-ignore failed: {error}")),
+    };
+    match written {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            return unknown(&format_args!(
+                "failed to write to git check-ignore: {error}"
+            ))
+        }
+        None => return unknown(&"git check-ignore has no standard input"),
+    }
 
     match output.status.code() {
         Some(0) => Some(match_comes_from_worktree_gitignore(&output.stdout)),
         Some(1) => Some(false),
-        _ => None,
+        Some(code) => unknown(&format_args!("git check-ignore exited with {code}")),
+        None => unknown(&"git check-ignore was terminated by a signal"),
     }
 }
 
@@ -71,39 +97,6 @@ fn match_comes_from_worktree_gitignore(stdout: &[u8]) -> bool {
         && !source
             .components()
             .any(|component| component.as_os_str() == ".git")
-}
-
-/// Корень рабочей копии, в которой лежит `dir`.
-///
-/// Каталога может ещё не быть на диске — гит спрашивают из ближайшего
-/// существующего предка. Корень получается подъёмом от этого предка на столько
-/// уровней, сколько назвал гит, а не из абсолютного пути гита: так путь остаётся в
-/// той форме, в какой его дал вызывающий, и написание в ответе команды не меняется.
-///
-/// `None` — гита нет, каталог вне рабочей копии или гит вернул ошибку.
-pub fn worktree_root(dir: &Path) -> Option<PathBuf> {
-    let anchor = dir.ancestors().find(|candidate| candidate.is_dir())?;
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(anchor)
-        .args(["rev-parse", "--show-cdup"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let cdup = String::from_utf8(output.stdout).ok()?;
-    let mut levels = 0;
-    for component in Path::new(cdup.trim_end()).components() {
-        match component {
-            std::path::Component::ParentDir => levels += 1,
-            std::path::Component::CurDir => {}
-            _ => return None,
-        }
-    }
-    anchor.ancestors().nth(levels).map(Path::to_path_buf)
 }
 
 /// Лежит ли файл в индексе гита.
@@ -324,6 +317,7 @@ fn is_unrecoverable(index: u8, worktree: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::test_git::{init_git_repo, run_git};
     use std::fs;
     use tempfile::{tempdir, TempDir};
 
@@ -331,9 +325,7 @@ mod tests {
     fn repo_with_committed_source() -> TempDir {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        run_git(root, &["init", "-q", "-b", "main", "."]);
-        run_git(root, &["config", "user.email", "test@example.com"]);
-        run_git(root, &["config", "user.name", "Test"]);
+        init_git_repo(root);
         fs::create_dir_all(root.join("src").join("cf")).expect("source dir");
         fs::write(
             root.join("src").join("cf").join("Configuration.xml"),
@@ -343,18 +335,6 @@ mod tests {
         run_git(root, &["add", "-A"]);
         run_git(root, &["commit", "-qm", "init"]);
         dir
-    }
-
-    fn run_git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {args:?} failed");
     }
 
     fn source_dir(repo: &TempDir) -> PathBuf {
@@ -477,9 +457,7 @@ mod tests {
     fn a_rename_does_not_invent_a_loss() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        run_git(root, &["init", "-q", "-b", "main", "."]);
-        run_git(root, &["config", "user.email", "test@example.com"]);
-        run_git(root, &["config", "user.name", "Test"]);
+        init_git_repo(root);
         fs::write(root.join("aM.xml"), "renamed away\n").expect("write");
         run_git(root, &["add", "-A"]);
         run_git(root, &["commit", "-qm", "init"]);
@@ -513,9 +491,7 @@ mod tests {
     fn a_rename_seen_in_the_worktree_column_does_not_invent_a_loss() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        run_git(root, &["init", "-q", "-b", "main", "."]);
-        run_git(root, &["config", "user.email", "test@example.com"]);
-        run_git(root, &["config", "user.name", "Test"]);
+        init_git_repo(root);
         fs::write(root.join("aM.xml"), "moved away\n").expect("write");
         run_git(root, &["add", "-A"]);
         run_git(root, &["commit", "-qm", "init"]);
@@ -656,26 +632,6 @@ mod tests {
             ignored_by_worktree_gitignore(dir.path(), Path::new("ConfigDumpInfo.xml")),
             None
         );
-    }
-
-    #[test]
-    fn the_worktree_root_is_found_from_a_nested_and_an_absent_directory() {
-        let repo = repo_with_committed_source();
-        assert_eq!(
-            worktree_root(&source_dir(&repo)),
-            Some(repo.path().to_path_buf())
-        );
-        assert_eq!(
-            worktree_root(&repo.path().join("never").join("was")),
-            Some(repo.path().to_path_buf())
-        );
-        assert_eq!(worktree_root(repo.path()), Some(repo.path().to_path_buf()));
-    }
-
-    #[test]
-    fn a_directory_outside_a_worktree_has_no_root() {
-        let dir = tempdir().expect("tempdir");
-        assert_eq!(worktree_root(dir.path()), None);
     }
 
     #[test]

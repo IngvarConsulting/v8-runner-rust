@@ -89,6 +89,7 @@ fn refusal(target: &Path, paths: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::test_git::init_git_repo;
     use crate::use_cases::ignored_files::VERSION_FILE_NAME;
     use std::fs;
     use tempfile::tempdir;
@@ -122,21 +123,7 @@ mod tests {
     fn an_explicit_request_discards_instead_of_hoarding() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        for args in [
-            vec!["init", "-q", "-b", "main", "."],
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Test"],
-        ] {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(&args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .expect("git");
-            assert!(status.success());
-        }
+        init_git_repo(root);
         fs::write(root.join("hand-written.xml"), "mine\n").expect("write");
 
         assert!(guard_replacement(root, DestructionConsent::Granted, &[]).is_ok());
@@ -151,21 +138,7 @@ mod tests {
     fn an_ignored_version_file_at_the_root_is_not_a_loss() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        for args in [
-            vec!["init", "-q", "-b", "main", "."],
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Test"],
-        ] {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(&args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .expect("git");
-            assert!(status.success());
-        }
+        init_git_repo(root);
         fs::write(root.join(".gitignore"), format!("{VERSION_FILE_NAME}\n")).expect("ignore");
 
         let asked = root.join("cf");
@@ -182,21 +155,7 @@ mod tests {
     fn a_replacement_that_does_not_regenerate_the_version_file_protects_it() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        for args in [
-            vec!["init", "-q", "-b", "main", "."],
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Test"],
-        ] {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(&args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .expect("git");
-            assert!(status.success());
-        }
+        init_git_repo(root);
         fs::write(root.join(".gitignore"), format!("{VERSION_FILE_NAME}\n")).expect("ignore");
 
         let asked = root.join("cf");
