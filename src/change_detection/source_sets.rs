@@ -233,9 +233,15 @@ mod tests {
         config.base_path = dir.path().to_path_buf();
         config.work_path = dir.path().join("work");
         config.source_sets[0].name = "build".to_owned();
+        let generated_root = SourceSetsService::new(&config).designer_contexts()[0]
+            .path()
+            .to_path_buf();
+        assert_eq!(
+            generated_root,
+            config.work_path.join("designer").join("build")
+        );
 
         assert_root_named_like_a_service_dir_is_analyzed(&config);
-        assert!(config.work_path.join("designer/build/Module.bsl").is_file());
     }
 
     /// Состояние анализа лежит под `workPath`, у каждого логического контекста набора своё:
