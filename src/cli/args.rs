@@ -514,7 +514,7 @@ pub enum TestScope {
 #[derive(Args, Debug)]
 #[command(
     next_help_heading = "Command options",
-    after_help = "Without keys: incremental dump - changed objects are written over the source tree; in a Designer-format project nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded.\nEDT-format project: every dump replaces the whole project directory, with or without keys. Without --force, uncommitted work there makes the dump refuse: commit or stash it and repeat, or repeat the same command with `--force` added (it discards that work)."
+    after_help = "Without keys: incremental dump - changed objects are written over the source tree; in a Designer-format project nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded.\nEDT-format project: every dump replaces the whole project directory, with or without keys. Without --force, uncommitted work there makes the dump refuse: commit or stash it and repeat, or run the full replacement the refusal names: `pull <SET> --force` for the same set with the same global options and without --object (it discards that work)."
 )]
 pub struct DumpArgs {
     /// Previous mode key; hidden from help for one release cycle. `incremental` and

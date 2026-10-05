@@ -1432,4 +1432,27 @@ fn a_convert_refusal_does_not_offer_a_truncated_command() {
         "{message}"
     );
     assert!(target.join("hand-written.xml").is_file());
+
+    // Совет, выполненный буквально: `--force` у `convert` ни с чем не спорит, и тот же вызов
+    // с ключом заменяет тот же каталог, а не упирается во второй отказ.
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "convert",
+            "main",
+            "--output",
+            &output_dir.display().to_string(),
+            "--force",
+        ])
+        .output()
+        .expect("run convert with --force");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!target.join("hand-written.xml").exists());
 }

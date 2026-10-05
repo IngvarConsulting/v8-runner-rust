@@ -27,7 +27,7 @@ use crate::use_cases::external_artifacts::{
 };
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
-use crate::use_cases::request::{ConsentKey, ConvertRequest, ConvertScopeRequest};
+use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
@@ -634,15 +634,13 @@ fn resolve_request(
         source_set,
         workspace_path: convert_workspace_path(config),
         items,
-        // Преобразование есть только в командной строке, и у него ключ `--force`: совет —
-        // тот же вызов с ключом, со всеми его аргументами.
-        consent: DestructionConsent::requested(
-            request.discard_uncommitted,
-            WaysOut {
-                key: ConsentKey::Force,
-                cli_command: None,
-            },
-        ),
+        // Преобразование есть только в командной строке, а `--force` у него ни с чем не
+        // спорит: совет — тот же вызов с ключом, со всеми его аргументами.
+        consent: if request.discard_uncommitted {
+            DestructionConsent::Granted
+        } else {
+            DestructionConsent::AskFirst(WaysOut::SameCallWithForce)
+        },
     })
 }
 

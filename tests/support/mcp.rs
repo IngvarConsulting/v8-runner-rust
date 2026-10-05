@@ -21,6 +21,13 @@ pub struct ToolAnswer {
 
 /// Запускает `mcp serve stdio` с файлом настроек, вызывает инструмент и закрывает сервер.
 pub fn call_tool(config: &Path, tool: &str, arguments: Value) -> ToolAnswer {
+    let config = config.display().to_string();
+    call_tool_started_with(&["--config", config.as_str()], tool, arguments)
+}
+
+/// То же, но сервер запущен с данными глобальными ключами (`--config`, `--infobase`, …).
+#[allow(dead_code)]
+pub fn call_tool_started_with(global_keys: &[&str], tool: &str, arguments: Value) -> ToolAnswer {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -28,10 +35,7 @@ pub fn call_tool(config: &Path, tool: &str, arguments: Value) -> ToolAnswer {
     runtime.block_on(async {
         let transport = TokioChildProcess::new(
             tokio::process::Command::new(v8_runner_binary()).configure(|command| {
-                command
-                    .arg("--config")
-                    .arg(config)
-                    .args(["mcp", "serve", "stdio"]);
+                command.args(global_keys).args(["mcp", "serve", "stdio"]);
             }),
         )
         .expect("spawn stdio transport");

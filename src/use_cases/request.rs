@@ -149,20 +149,21 @@ pub struct DumpRequest {
     /// Replace the target directory although it holds work version control cannot
     /// give back. Only a human can grant this; automated transports never do.
     pub discard_uncommitted: bool,
-    /// The consent key the caller's own command has. A refusal offers only this way out:
-    /// a caller that cannot grant consent must not be told to repeat itself with a key
-    /// that does nothing.
-    pub consent_key: ConsentKey,
+    /// Whether a refusal to replace the directory may name `pull <SET> --force` as a way
+    /// out. No transport passes a consent key here: MCP has none, and the command line's
+    /// `--force` arrives as `discard_uncommitted`. The value says only whether the same
+    /// target has a full replacement on the command line that a caller may be sent to.
+    pub force_way_out: ForceWayOut,
 }
 
-/// The key that grants consent to discard uncommitted work, as the caller has it.
+/// Whether a replacement refusal may send the caller to `pull <SET> --force`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConsentKey {
-    /// The caller has no such key: the only way out of a refusal is to save the work.
-    Absent,
-    /// The same command run again with `--force` replaces the directory and discards the
-    /// work. A transport without the key (MCP) names the command line that has it.
-    Force,
+pub enum ForceWayOut {
+    /// The caller is not to be sent there (`clone`): the only way out is to save the work.
+    Withheld,
+    /// `pull <SET> --force` with the run's global keys reaches the same target: a full dump
+    /// that replaces the directory of the set and discards the work.
+    PullForce,
 }
 
 /// Transport-neutral convert scope.

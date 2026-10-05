@@ -70,7 +70,7 @@ pub enum ChangeDetectionError {
 
     /// The stored snapshot describes another base or source directory. Its hashes say
     /// nothing about the selected pair, so they are neither used nor silently replaced.
-    #[error("hash memory for source-set '{source_set}' at '{storage_path}' belongs to {recorded}; the selected target is {selected}. If the infobase holds the right state, run a full pull (`pull --force`) to record it; if the source directory does, run `push --full` to load it")]
+    #[error("hash memory for source-set '{source_set}' at '{storage_path}' belongs to {recorded}; the selected target is {selected}. If the infobase holds the right state, run a full pull (`pull {source_set} --force`) to record it; if the source directory does, run `push {source_set} --full` to load it")]
     ForeignMemory {
         source_set: String,
         storage_path: PathBuf,

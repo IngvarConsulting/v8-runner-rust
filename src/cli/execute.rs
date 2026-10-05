@@ -64,7 +64,7 @@ use crate::use_cases::artifacts;
 use crate::use_cases::build_project;
 use crate::use_cases::check_syntax;
 use crate::use_cases::configure_extensions;
-use crate::use_cases::context::{CommandName, ExecutionContext};
+use crate::use_cases::context::{CommandLineTarget, CommandName, ExecutionContext};
 use crate::use_cases::convert_sources;
 use crate::use_cases::dump_config;
 use crate::use_cases::extension_inventory;
@@ -77,11 +77,11 @@ use crate::use_cases::load_artifact;
 use crate::use_cases::request::{
     effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
-    ConsentKey, ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
+    ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
-    DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, InitRequest, LaunchRequest,
-    LoadRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest,
-    TestScopeRequest, ToolsDownloadRequest,
+    DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut, InitRequest,
+    LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest,
+    TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -94,7 +94,7 @@ use crate::use_cases::transport::dispatch_with_workspace_lock;
 pub fn execute_command(
     config: &AppConfig,
     command: &Command,
-    primary_config_path: Option<PathBuf>,
+    command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
@@ -111,7 +111,7 @@ pub fn execute_command(
         Command::Tools(args) => execute_tools(
             config,
             args,
-            required_primary_config_path(primary_config_path)?,
+            required_primary_config_path(command_line.config.clone())?,
             presenter,
             clean_before_execution,
             cancellation,
@@ -150,6 +150,7 @@ pub fn execute_command(
         Command::Dump(args) => execute_dump(
             config,
             args,
+            command_line,
             presenter,
             clean_before_execution,
             dry_run,
@@ -1039,6 +1040,7 @@ fn execute_load(
 fn execute_dump(
     config: &AppConfig,
     args: &DumpArgs,
+    command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
@@ -1046,7 +1048,9 @@ fn execute_dump(
 ) -> Result<(), UseCaseError> {
     let request = map_dump_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Dump, error))?;
-    let context = cli_context(config, CommandName::Dump, cancellation);
+    // Совет отказа сторожа называет `pull <SET> --force` с глобальными ключами этого вызова.
+    let context = cli_context(config, CommandName::Dump, cancellation)
+        .with_command_line(command_line.clone());
     with_cli_workspace_lock(
         config,
         presenter,
@@ -2856,7 +2860,7 @@ fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCa
         extension: args.extension.clone(),
         objects: args.objects.clone(),
         discard_uncommitted: args.discard_uncommitted,
-        consent_key: ConsentKey::Force,
+        force_way_out: ForceWayOut::PullForce,
     })
 }
 
@@ -4361,7 +4365,7 @@ mod tests {
         append_interruptions, build_load_envelope, command_name, execute_command,
         map_artifacts_request_with_config, map_build_request, map_designer_config_request,
         map_dump_request, map_extensions_request, map_launch_request, map_load_request,
-        map_syntax_request, map_test_request, workspace_refusal_phase,
+        map_syntax_request, map_test_request, workspace_refusal_phase, CommandLineTarget,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
@@ -5125,7 +5129,7 @@ mod tests {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             false,
             false,
@@ -5159,7 +5163,7 @@ mod tests {
                     scope: TestScope::All,
                 }),
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             false,
             false,
@@ -5221,8 +5225,15 @@ mod tests {
         ];
 
         for command in commands {
-            let error = execute_command(&config, &command, None, &presenter, false, false)
-                .expect_err("busy workspace");
+            let error = execute_command(
+                &config,
+                &command,
+                &CommandLineTarget::default(),
+                &presenter,
+                false,
+                false,
+            )
+            .expect_err("busy workspace");
             assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
             assert!(error.to_string().contains("workspace"));
             assert!(error.to_string().contains("already"));
@@ -5252,7 +5263,7 @@ mod tests {
                 mcp_port: None,
                 wait_ready: false,
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             false,
             false,
@@ -5287,7 +5298,7 @@ mod tests {
                     },
                 }),
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             false,
             false,
@@ -5319,7 +5330,7 @@ mod tests {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             true,
             false,

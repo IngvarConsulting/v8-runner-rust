@@ -339,14 +339,19 @@ fn foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_crede
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     let message = json.to_string();
     assert!(message.contains("belongs to"), "{message}");
-    assert!(message.contains("pull --force"), "{message}");
-    assert!(message.contains("push --full"), "{message}");
+    // Совет называет набор: голый `pull --force` выгрузил бы набор по умолчанию, а голый
+    // `push --full` загрузил бы все наборы, а не тот, чья память чужая.
+    assert!(message.contains("`pull main --force`"), "{message}");
+    assert!(message.contains("`push main --full`"), "{message}");
+    assert!(!message.contains("`pull --force`"), "{message}");
+    assert!(!message.contains("`push --full`"), "{message}");
     assert!(message.contains("replacement-ib"), "{message}");
     assert!(!message.contains(AGENT_PASSWORD), "{message}");
     assert_eq!(json["data"]["provider_dispatched"], false, "{json}");
     assert_eq!(fs::read_to_string(&project.calls).expect("calls"), before);
     assert_eq!(fs::read(snapshot(&project)).expect("memory"), old_memory);
-    pull(&project);
+    // Совет, выполненный буквально, записывает память для выбранной базы.
+    succeeded(run(&project, &["pull", "main", "--force"]));
     assert_push_skips(&project);
 }
 

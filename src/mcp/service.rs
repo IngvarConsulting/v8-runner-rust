@@ -30,9 +30,9 @@ use crate::support::path::is_safe_path_segment;
 use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
 use crate::use_cases::request::{
     effective_test_timeouts, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
-    ClientMcpOptionsRequest, ConsentKey, DesignerClientScope, DesignerClientScopes,
-    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
-    DumpRequest, LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestBuildPolicy, TestRequest,
+    ClientMcpOptionsRequest, DesignerClientScope, DesignerClientScopes, DesignerConfigCheck,
+    DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest, DumpRequest, ForceWayOut,
+    LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestBuildPolicy, TestRequest,
     TestScopeRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
@@ -196,8 +196,9 @@ where
             // У MCP согласия взять неоткуда: инструмент работает без человека
             // у экрана, а уничтожение незафиксированной работы требует его решения.
             discard_uncommitted: false,
-            // Ключ согласия есть у той же цели в командной строке: отказ назовёт её.
-            consent_key: ConsentKey::Force,
+            // У той же цели в командной строке есть `pull <SET> --force`: отказ назовёт его
+            // с глобальными ключами, с которыми запущен сервер.
+            force_way_out: ForceWayOut::PullForce,
         };
 
         match self
@@ -719,6 +720,7 @@ pub(crate) fn execution_context(
     match call_context.transport() {
         transport @ (ExecutionTransport::McpStdio | ExecutionTransport::McpHttp) => {
             Ok(ExecutionContext::new(command, transport)
+                .with_command_line(call_context.command_line().clone())
                 .with_edt_timeout(call_context.edt_timeout())
                 .with_cancellation(call_context.cancellation()))
         }

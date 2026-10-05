@@ -18,8 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::platform::git::{uncommitted_work_in, UncommittedWork};
 use crate::support::error::AppError;
-use crate::use_cases::context::{ExecutionContext, ExecutionTransport};
-use crate::use_cases::request::ConsentKey;
+use crate::use_cases::context::{shell_word, ExecutionContext, ExecutionTransport};
 
 /// Сколько потерь перечислять в отказе, прежде чем считать их числом.
 const NAMED_LOSS_LIMIT: usize = 20;
@@ -37,26 +36,24 @@ pub(super) enum DestructionConsent {
     Granted,
 }
 
-impl DestructionConsent {
-    /// Согласие по просьбе вызывающего: уничтожить, если он попросил, иначе спросить.
-    pub(super) fn requested(discard_uncommitted: bool, ways_out: WaysOut) -> Self {
-        if discard_uncommitted {
-            Self::Granted
-        } else {
-            Self::AskFirst(ways_out)
-        }
-    }
-}
-
-/// Выходы из отказа. Их сообщает вызывающий: только он знает, какой ключ согласия есть у
-/// его команды и какой командой строки та же цель достижима.
+/// Выходы из отказа, кроме общего для всех «сохранить работу и повторить». Их называет
+/// вызывающий: только он знает, есть ли у его цели замена в командной строке и какая.
+///
+/// Совет, выполненный буквально, обязан бить в ту же цель и не упираться во второй отказ.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct WaysOut {
-    /// Ключ согласия команды вызывающего.
-    pub(super) key: ConsentKey,
-    /// Та же цель командой строки без ключа — например, `pull main`. Её называет отказ
-    /// транспорту, у которого ключа нет (MCP). `None` — точно собрать нельзя.
-    pub(super) cli_command: Option<String>,
+pub(super) enum WaysOut {
+    /// Только сохранить работу: заменить каталог вызывающему нечем (`clone`).
+    SaveWork,
+    /// Ещё повторить тот же вызов с добавленным `--force`. Годится, где `--force` ни с чем
+    /// в вызове не спорит (`convert`).
+    SameCallWithForce,
+    /// Ещё полностью заменить каталог набора точной командой `pull <SET> --force` с
+    /// глобальными ключами запуска. Не «тот же вызов с `--force`»: рядом с `--object` и
+    /// прежним `--mode` ключ отказывает, и буквальный повтор упёрся бы во второй отказ.
+    PullForce {
+        /// Набор так, как его принимает позиционный аргумент командной строки.
+        source_set: String,
+    },
 }
 
 /// Отказывает до того, как что-либо стёрто, либо пропускает работу дальше.
@@ -68,8 +65,9 @@ pub(super) struct WaysOut {
 /// каждой выгрузке. Преобразование и замена проекта EDT описи не пишут — у них
 /// исключений нет.
 ///
-/// `context` называет транспорт: повторить вызов человек командной строки и клиент MCP
-/// могут по-разному.
+/// `context` называет транспорт и глобальные ключи запуска: повторить вызов человек
+/// командной строки и клиент MCP могут по-разному, а команда в совете должна попасть в ту
+/// же цель.
 pub(super) fn guard_replacement(
     context: &ExecutionContext,
     target: &Path,
@@ -89,10 +87,7 @@ pub(super) fn guard_replacement(
             // Попросили уничтожить — уничтожаем, как и обещает имя ключа.
             None => Ok(()),
             Some(ways_out) => Err(AppError::Validation(refusal(
-                target,
-                &paths,
-                ways_out,
-                context.transport(),
+                target, &paths, ways_out, context,
             ))),
         },
         // Ответа нет — работа идёт, как шла до сторожа. Это не защита и не
@@ -105,7 +100,7 @@ fn refusal(
     target: &Path,
     paths: &[PathBuf],
     ways_out: &WaysOut,
-    transport: ExecutionTransport,
+    context: &ExecutionContext,
 ) -> String {
     let named: Vec<String> = paths
         .iter()
@@ -126,43 +121,54 @@ fn refusal(
         paths.len(),
         named.join(", "),
         tail,
-        remedy(ways_out, transport)
+        remedy(ways_out, context)
     )
 }
 
 /// Выход из отказа, который у вызывающего есть.
 ///
-/// Готовой команды из имени команды отказ не собирает: урезанная до имени, она теряет
-/// набор, каталог вывода и прочие аргументы, и буквальный повтор бьёт в чужой каталог.
-/// В командной строке совет — тот же вызов с добавленным ключом, и только тому, у кого
-/// ключ есть. У MCP ключа нет: отказ называет команду строки для той же цели, собранную
-/// вызывающим.
-fn remedy(ways_out: &WaysOut, transport: ExecutionTransport) -> String {
+/// Готовой команды, урезанной до имени команды, отказ не собирает: без набора, каталога
+/// вывода и глобальных ключей буквальный повтор бьёт в чужой каталог или чужую базу.
+/// Точная команда `pull` несёт набор и глобальные ключи запуска; у MCP по HTTP она
+/// исполнима только там, где работает сервер.
+fn remedy(ways_out: &WaysOut, context: &ExecutionContext) -> String {
     const DISCARDS: &str = "which replaces the directory and discards them";
-    match (transport, ways_out.key) {
-        (ExecutionTransport::Cli, ConsentKey::Absent) => {
-            "commit or stash them and run the same command again".to_owned()
+    let transport = context.transport();
+    let save = match transport {
+        ExecutionTransport::Cli => "commit or stash them and run the same command again",
+        ExecutionTransport::McpStdio | ExecutionTransport::McpHttp => {
+            "commit or stash them and call the tool again"
         }
-        (ExecutionTransport::Cli, ConsentKey::Force) => format!(
-            "commit or stash them and run the same command again, or repeat the same command with `--force` added, {DISCARDS}"
-        ),
-        (ExecutionTransport::McpStdio | ExecutionTransport::McpHttp, ConsentKey::Absent) => {
-            "commit or stash them and call the tool again".to_owned()
-        }
-        (ExecutionTransport::McpStdio | ExecutionTransport::McpHttp, ConsentKey::Force) => {
-            let command = match &ways_out.cli_command {
-                Some(command) => format!("`v8-runner {command} --force`"),
-                None => {
-                    "the matching `v8-runner` command with `--force` for the same target".to_owned()
+    };
+    match ways_out {
+        WaysOut::SaveWork => save.to_owned(),
+        WaysOut::SameCallWithForce => match transport {
+            ExecutionTransport::Cli => {
+                format!("{save}, or repeat the same command with `--force` added, {DISCARDS}")
+            }
+            // Преобразования у MCP нет; если появится, точной команды здесь собрать не из
+            // чего, и совет не подставляет урезанную.
+            ExecutionTransport::McpStdio | ExecutionTransport::McpHttp => format!(
+                "{save}, or run the matching `v8-runner` command with `--force` for the same target from the command line, {DISCARDS}"
+            ),
+        },
+        WaysOut::PullForce { source_set } => {
+            let command = context
+                .command_line()
+                .command(&format!("pull {} --force", shell_word(source_set)));
+            let place = match transport {
+                ExecutionTransport::Cli => "",
+                ExecutionTransport::McpStdio => " from the command line",
+                ExecutionTransport::McpHttp => {
+                    " from the command line on the machine where the MCP server runs"
                 }
             };
             format!(
-                "commit or stash them and call the tool again, or run {command} from the command line, {DISCARDS}"
+                "{save}, or run `{command}`{place}: a full dump of source-set '{source_set}' that replaces its whole directory and discards them"
             )
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,25 +177,34 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    use crate::use_cases::context::CommandName;
+    use crate::use_cases::context::{CommandLineTarget, CommandName};
 
     fn cli() -> ExecutionContext {
         ExecutionContext::cli(CommandName::Dump)
     }
 
-    fn with_force(cli_command: Option<&str>) -> WaysOut {
-        WaysOut {
-            key: ConsentKey::Force,
-            cli_command: cli_command.map(str::to_owned),
+    fn pull_force(source_set: &str) -> WaysOut {
+        WaysOut::PullForce {
+            source_set: source_set.to_owned(),
         }
     }
 
     fn ask_first() -> DestructionConsent {
-        DestructionConsent::AskFirst(with_force(Some("pull main")))
+        DestructionConsent::AskFirst(pull_force("main"))
     }
 
     fn cli_refusal(target: &Path, paths: &[PathBuf]) -> String {
-        refusal(target, paths, &with_force(None), ExecutionTransport::Cli)
+        refusal(target, paths, &WaysOut::SameCallWithForce, &cli())
+    }
+
+    /// Сервер, запущенный с конфигом в другом каталоге, с невыбранной по умолчанию базой
+    /// и переопределённым рабочим каталогом.
+    fn started_elsewhere() -> CommandLineTarget {
+        CommandLineTarget {
+            config: Some(PathBuf::from("/srv/my project/v8project.yaml")),
+            infobase: Some("staging".to_owned()),
+            workdir: Some(PathBuf::from("/var/tmp/v8w")),
+        }
     }
 
     #[test]
@@ -217,62 +232,85 @@ mod tests {
         assert!(message.contains("src/cf/hand-written.xml"), "{message}");
     }
 
-    /// Отказ называет выходы: сохранить работу и повторить либо заменить каталог с её
-    /// потерей — и только тем путём, который у вызывающего действительно есть. Готовой
-    /// команды из имени команды он не собирает: урезанная, она бьёт в другой каталог.
+    /// Отказ называет выходы, которые у вызывающего есть: сохранить работу и повторить —
+    /// всегда, а заменить каталог — только тому, кому это доступно.
     #[test]
     fn the_refusal_names_the_ways_out_the_caller_has() {
         let lost = [PathBuf::from("src/cf/hand-written.xml")];
         let target = Path::new("/project/src/cf");
-        let without_key = WaysOut {
-            key: ConsentKey::Absent,
-            cli_command: None,
-        };
 
-        let cli = refusal(
-            target,
-            &lost,
-            &with_force(Some("pull ext")),
-            ExecutionTransport::Cli,
+        let same_call = refusal(target, &lost, &WaysOut::SameCallWithForce, &cli());
+        assert!(
+            same_call.contains("commit or stash them and run the same command again"),
+            "{same_call}"
         );
         assert!(
-            cli.contains("commit or stash them and run the same command again"),
-            "{cli}"
+            same_call.contains("repeat the same command with `--force` added"),
+            "{same_call}"
         );
-        assert!(
-            cli.contains("repeat the same command with `--force` added"),
-            "{cli}"
-        );
-        assert!(!cli.contains("`pull --force`"), "{cli}");
-        assert!(!cli.contains("`pull ext"), "{cli}");
 
-        let no_key = refusal(target, &lost, &without_key, ExecutionTransport::Cli);
+        let pull = refusal(target, &lost, &pull_force("ext"), &cli());
         assert!(
-            no_key.contains("commit or stash them and run the same command again"),
-            "{no_key}"
+            pull.contains("commit or stash them and run the same command again"),
+            "{pull}"
         );
-        assert!(!no_key.contains("--force"), "{no_key}");
+        assert!(pull.contains("pull ext --force`"), "{pull}");
 
-        for transport in [ExecutionTransport::McpStdio, ExecutionTransport::McpHttp] {
-            let mcp = refusal(target, &lost, &with_force(Some("pull ext")), transport);
+        for context in [
+            cli(),
+            ExecutionContext::mcp_stdio(CommandName::Dump),
+            ExecutionContext::mcp_http(CommandName::Dump),
+        ] {
+            let save_only = refusal(target, &lost, &WaysOut::SaveWork, &context);
+            assert!(save_only.contains("commit or stash them"), "{save_only}");
+            assert!(!save_only.contains("--force"), "{save_only}");
+        }
+
+        for context in [
+            ExecutionContext::mcp_stdio(CommandName::Dump),
+            ExecutionContext::mcp_http(CommandName::Dump),
+        ] {
+            let mcp = refusal(target, &lost, &pull_force("ext"), &context);
             assert!(
                 mcp.contains("commit or stash them and call the tool again"),
                 "{mcp}"
             );
             assert!(
-                mcp.contains("run `v8-runner pull ext --force` from the command line"),
+                mcp.contains("pull ext --force` from the command line"),
                 "{mcp}"
             );
             assert!(!mcp.contains("pass --force"), "{mcp}");
+        }
+    }
 
-            let unknown = refusal(target, &lost, &with_force(None), transport);
+    /// Совет повторяет исходную цель: набор и глобальные ключи запуска. Буквально
+    /// выполненный из другого каталога, он бьёт в тот же проект, ту же базу и тот же
+    /// рабочий каталог, а не в базу по умолчанию соседнего проекта.
+    #[test]
+    fn the_pull_advice_repeats_the_target_with_the_global_keys_of_the_run() {
+        let lost = [PathBuf::from("src/cf/hand-written.xml")];
+        let target = Path::new("/project/src/cf");
+        let expected = "`v8-runner --config '/srv/my project/v8project.yaml' --infobase staging --workdir /var/tmp/v8w pull ext --force`";
+
+        for context in [
+            ExecutionContext::cli(CommandName::Dump),
+            ExecutionContext::mcp_stdio(CommandName::Dump),
+            ExecutionContext::mcp_http(CommandName::Dump),
+        ] {
+            let transport = context.transport();
+            let context = context.with_command_line(started_elsewhere());
+            let message = refusal(target, &lost, &pull_force("ext"), &context);
+            assert!(message.contains(expected), "{transport:?}: {message}");
             assert!(
-                unknown.contains("the matching `v8-runner` command with `--force`"),
-                "{unknown}"
+                message
+                    .contains("a full dump of source-set 'ext' that replaces its whole directory"),
+                "{transport:?}: {message}"
             );
-
-            let no_key = refusal(target, &lost, &without_key, transport);
-            assert!(!no_key.contains("--force"), "{no_key}");
+            assert_eq!(
+                message.contains("on the machine where the MCP server runs"),
+                transport == ExecutionTransport::McpHttp,
+                "{transport:?}: {message}"
+            );
         }
     }
 

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -60,6 +61,65 @@ pub enum ExecutionTransport {
     McpHttp,
 }
 
+/// Global keys of a command line that reach the same project, infobase and work directory
+/// as this run.
+///
+/// A refusal that names a command to run must name one that hits the same target when it
+/// is executed literally — from another directory, or for an MCP server started with
+/// `--infobase`. The transport knows how it was started; the use case only appends them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandLineTarget {
+    /// Absolute path of the primary `v8project.yaml`. `None` only where nothing was loaded
+    /// from a file (unit tests).
+    pub config: Option<PathBuf>,
+    /// The `--infobase` value when the run did not select the default base.
+    pub infobase: Option<String>,
+    /// The effective work directory when `--workdir` overrode it.
+    pub workdir: Option<PathBuf>,
+}
+
+impl CommandLineTarget {
+    /// `v8-runner <global keys> <tail>`, with every value quoted for a POSIX shell where it
+    /// needs quoting.
+    pub fn command(&self, tail: &str) -> String {
+        let keys = [
+            ("--config", self.config.as_deref().map(path_text)),
+            ("--infobase", self.infobase.clone()),
+            ("--workdir", self.workdir.as_deref().map(path_text)),
+        ];
+        let global_keys = keys
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| format!("{key} {}", shell_word(&value))));
+        std::iter::once("v8-runner".to_owned())
+            .chain(global_keys)
+            .chain(std::iter::once(tail.to_owned()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn path_text(path: &std::path::Path) -> String {
+    path.display().to_string()
+}
+
+/// One shell word: as is when it holds nothing a POSIX shell would split, expand or
+/// unescape, otherwise in single quotes. A backslash is not plain: unquoted, `sh` drops it.
+pub(crate) fn shell_word(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '_' | '-' | '.' | '/' | ':' | '=' | '+' | ',' | '@' | '%'
+                )
+        });
+    if plain {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
+}
+
 /// Command-boundary interruption signal observed at safe points.
 ///
 /// A command carries no deadline (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), so the only
@@ -109,6 +169,8 @@ pub struct ExecutionContext {
     cancellation: CancellationToken,
     /// Получил ли исполнитель работу этой команды; отмечает платформа, читает ответ.
     work: WorkGiven,
+    /// Глобальные ключи командной строки, которые ведут к той же цели.
+    command_line: CommandLineTarget,
 }
 
 impl ExecutionContext {
@@ -120,6 +182,7 @@ impl ExecutionContext {
             edt_timeout: None,
             cancellation: CancellationToken::new(),
             work: WorkGiven::for_command(),
+            command_line: CommandLineTarget::default(),
         }
     }
 
@@ -160,6 +223,17 @@ impl ExecutionContext {
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    /// Attaches the global keys a command line needs to reach the same target.
+    pub fn with_command_line(mut self, command_line: CommandLineTarget) -> Self {
+        self.command_line = command_line;
+        self
+    }
+
+    /// The global keys a command line needs to reach the same target as this run.
+    pub const fn command_line(&self) -> &CommandLineTarget {
+        &self.command_line
     }
 
     /// Returns the EDT subprocess timeout budget for this execution.
@@ -226,10 +300,31 @@ mod tests {
 
     use crate::platform::process::ProcessInterruptionSafety;
 
+    use std::path::PathBuf;
+
     use super::{
-        CommandName, ExecutionContext, ExecutionInterruption, ExecutionTransport,
-        InterruptionSafetyClass,
+        CommandLineTarget, CommandName, ExecutionContext, ExecutionInterruption,
+        ExecutionTransport, InterruptionSafetyClass,
     };
+
+    /// Команда называет только те глобальные ключи, что меняют цель, и каждое значение
+    /// переживает оболочку: пробел, кавычка и обратная косая черта не дробят слово.
+    #[test]
+    fn a_command_line_names_the_global_keys_of_the_target() {
+        assert_eq!(
+            CommandLineTarget::default().command("pull main --force"),
+            "v8-runner pull main --force"
+        );
+        let elsewhere = CommandLineTarget {
+            config: Some(PathBuf::from("/srv/it's mine/v8project.yaml")),
+            infobase: Some("Srvr=host;Ref=demo".to_owned()),
+            workdir: Some(PathBuf::from(r"C:\work")),
+        };
+        assert_eq!(
+            elsewhere.command("pull main --force"),
+            r"v8-runner --config '/srv/it'\''s mine/v8project.yaml' --infobase 'Srvr=host;Ref=demo' --workdir 'C:\work' pull main --force"
+        );
+    }
 
     #[test]
     fn constructs_mcp_contexts() {

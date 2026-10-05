@@ -998,3 +998,207 @@ fn a_pull_proceeds_silently_when_tracking_is_unknown() {
     );
     assert!(calls_log.exists(), "the platform must run: {rendered}");
 }
+
+/// Команда `v8-runner …` из совета отказа, разобранная на слова так, как её разобрала бы
+/// оболочка: совет кавычит значения одинарными кавычками.
+fn advised_command(message: &str) -> Vec<String> {
+    let start = message
+        .find("`v8-runner ")
+        .unwrap_or_else(|| panic!("the advice must name an exact command: {message}"))
+        + 1;
+    let rest = &message[start..];
+    let line = &rest[..rest.find('`').expect("closing backtick")];
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in line.chars() {
+        match ch {
+            '\'' => {
+                quoted = !quoted;
+                started = true;
+            }
+            ' ' if !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            _ => {
+                word.push(ch);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    assert_eq!(
+        words.first().map(String::as_str),
+        Some("v8-runner"),
+        "{line}"
+    );
+    words
+}
+
+/// Выполняет совет буквально — из другого каталога, без `--json-message` и прочего, что
+/// было в исходном вызове.
+fn run_advice_from_elsewhere(
+    advice: &[String],
+    elsewhere: &Path,
+) -> (std::process::Output, String) {
+    fs::create_dir_all(elsewhere).expect("elsewhere");
+    let output = v8_runner_command()
+        .current_dir(elsewhere)
+        .args(&advice[1..])
+        .output()
+        .expect("run advice");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output, rendered)
+}
+
+/// В проекте EDT отказывают и `pull --object`, и прежний `--mode incremental|partial`.
+/// «Тот же вызов с `--force`» упёрся бы во второй отказ (`--object`/`--mode` спорят с
+/// `--force`), поэтому совет — точная `pull <SET> --force` с глобальными ключами вызова и
+/// прямо названная полная замена. Выполненный буквально из другого каталога, он проходит и
+/// заменяет тот же каталог.
+#[test]
+fn an_edt_refusal_advises_a_full_replacement_that_runs_as_written() {
+    for keys in [
+        &["--object", "Catalog:Items"][..],
+        &["--mode", "incremental"],
+        &["--mode", "partial"],
+    ] {
+        let (dir, config_path, _platform, _edt, _work, base_path, _designer, _edt_calls) =
+            setup_edt_project();
+        git(&base_path, &["init", "-q", "-b", "main", "."]);
+        git(&base_path, &["config", "user.email", "test@example.com"]);
+        git(&base_path, &["config", "user.name", "Test"]);
+        git(&base_path, &["add", "-A"]);
+        git(&base_path, &["commit", "-qm", "committed sources"]);
+        let hand_written = base_path.join("main").join("hand-written.xml");
+        fs::write(&hand_written, "written by hand\n").expect("hand-written");
+
+        let config = config_path.display().to_string();
+        let mut args = vec![
+            "--config",
+            config.as_str(),
+            "--json-message",
+            "pull",
+            "main",
+        ];
+        args.extend_from_slice(keys);
+        let output = v8_runner_command().args(&args).output().expect("run pull");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(output.status.code(), Some(2), "{keys:?}: {payload}");
+        let message = payload["error"]["message"].as_str().expect("message");
+        assert!(message.contains("hand-written.xml"), "{keys:?}: {message}");
+        assert!(
+            !message.contains("repeat the same command with `--force` added"),
+            "{keys:?}: {message}"
+        );
+        assert!(
+            message.contains("a full dump of source-set 'main' that replaces its whole directory"),
+            "{keys:?}: {message}"
+        );
+
+        let advice = advised_command(message);
+        let canonical_config = fs::canonicalize(&config_path).expect("canonical config");
+        assert_eq!(
+            advice[1..],
+            [
+                "--config".to_owned(),
+                canonical_config.display().to_string(),
+                "pull".to_owned(),
+                "main".to_owned(),
+                "--force".to_owned(),
+            ],
+            "{keys:?}: {message}"
+        );
+
+        let (output, rendered) = run_advice_from_elsewhere(&advice, &dir.path().join("elsewhere"));
+        assert!(
+            output.status.success(),
+            "{keys:?}: the advice must not run into a second refusal: {rendered}"
+        );
+        assert!(
+            !hand_written.exists(),
+            "{keys:?}: the advice replaced the same directory"
+        );
+    }
+}
+
+/// MCP по stdio, сервер запущен с `--infobase` и `--workdir`: совет называет команду строки
+/// с конфигом абсолютным путём и теми же ключами. Выполненная буквально из другого
+/// каталога, она идёт в ту же базу и тот же рабочий каталог, а не в базу по умолчанию.
+#[test]
+fn an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir() {
+    let (dir, config_path, _binary, _work, base_path, calls_log) = setup_project_in_a_repository();
+    fs::write(
+        config_path.with_file_name("v8project.local.yaml"),
+        "infobases:\n  staging:\n    connection: 'File=/tmp/staging-ib'\n",
+    )
+    .expect("local config");
+    let hand_written = base_path.join("main").join("hand-written.xml");
+    fs::write(&hand_written, "written by hand\n").expect("hand-written");
+    let other_work = dir.path().join("other-work");
+    fs::create_dir_all(&other_work).expect("other work");
+
+    let config = config_path.display().to_string();
+    let workdir = other_work.display().to_string();
+    let answer = support::mcp::call_tool_started_with(
+        &[
+            "--config",
+            config.as_str(),
+            "--infobase",
+            "staging",
+            "--workdir",
+            workdir.as_str(),
+        ],
+        "dump_config",
+        json!({ "mode": "FULL" }),
+    );
+    assert!(answer.is_error, "{}", answer.envelope);
+    let message = answer.envelope["error"]["message"]
+        .as_str()
+        .expect("message")
+        .to_owned();
+    assert!(message.contains("hand-written.xml"), "{message}");
+    assert!(message.contains("from the command line"), "{message}");
+    assert!(
+        !message.contains("on the machine where the MCP server runs"),
+        "stdio runs on the caller's machine: {message}"
+    );
+
+    let advice = advised_command(&message);
+    let canonical_config = fs::canonicalize(&config_path).expect("canonical config");
+    assert_eq!(
+        advice[1..],
+        [
+            "--config".to_owned(),
+            canonical_config.display().to_string(),
+            "--infobase".to_owned(),
+            "staging".to_owned(),
+            "--workdir".to_owned(),
+            other_work.display().to_string(),
+            "pull".to_owned(),
+            "main".to_owned(),
+            "--force".to_owned(),
+        ],
+        "{message}"
+    );
+
+    let (output, rendered) = run_advice_from_elsewhere(&advice, &dir.path().join("elsewhere"));
+    assert!(output.status.success(), "{rendered}");
+    assert!(
+        !hand_written.exists(),
+        "the advice replaced the same directory"
+    );
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    assert!(calls.contains("staging-ib"), "the same base: {calls}");
+    assert_ibcmd_data_path(&calls, &other_work);
+}

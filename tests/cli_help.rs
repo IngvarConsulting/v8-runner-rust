@@ -261,15 +261,22 @@ fn pull_help_says_every_edt_dump_replaces_the_project() {
         for phrase in [
             "EDT-format project: every dump replaces the whole project directory",
             "uncommitted work there makes the dump refuse",
-            "commit or stash it and repeat, or repeat the same command with `--force` added",
+            "commit or stash it and repeat, or run the full replacement the refusal names",
+            "`pull <SET> --force` for the same set with the same global options and without --object",
             "in a Designer-format project nothing else in it is touched",
         ] {
             assert!(help.contains(phrase), "{flag} must say {phrase:?}:\n{help}");
         }
-        // Голый `pull --force` в выходе из отказа теряет набор и бьёт в другой каталог.
+        // Голый `pull --force` теряет набор и бьёт в другой каталог. Тот же страж для
+        // текстов отказов в `src/` — `architecture_guardrails::no_production_text_advises_a_bare_pull_force_or_push_full`.
         assert!(
-            !help.contains("run `pull --force`"),
+            !help.contains("`pull --force`"),
             "{flag} must not offer a bare `pull --force`:\n{help}"
+        );
+        // «Тот же вызов с `--force`» после `--object` упирается во второй отказ.
+        assert!(
+            !help.contains("repeat the same command with `--force` added"),
+            "{flag} must not send `pull --object` into the `--object`/`--force` refusal:\n{help}"
         );
     }
 }
