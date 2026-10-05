@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.A-WRONG-PACKAGE-SUFFIX-NAMES-THE-NEIGHBOUR-COMMAND
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/192
+check:
+  - tests/cli_infobase.rs::infobase_dump_into_a_package_names_download
+  - tests/cli_load.rs::upload_of_a_transfer_file_names_infobase_restore
 ---
 
 # Чужое расширение файла называет соседнюю команду

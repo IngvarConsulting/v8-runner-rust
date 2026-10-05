@@ -29,6 +29,7 @@ use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
+use crate::use_cases::source_inventory::SourceSetInventory;
 
 const CONVERT_BACKUP_PREFIX: &str = ".convert-backup";
 
@@ -647,12 +648,9 @@ fn select_source_sets<'a>(
 ) -> Result<Vec<&'a SourceSetConfig>, AppError> {
     match &request.scope {
         ConvertScopeRequest::All => Ok(config.source_sets.iter().collect()),
-        ConvertScopeRequest::SourceSet { name } => config
-            .source_sets
-            .iter()
-            .find(|source_set| source_set.name == *name)
-            .map(|source_set| vec![source_set])
-            .ok_or_else(|| AppError::Validation(format!("unknown source-set '{name}'"))),
+        ConvertScopeRequest::SourceSet { name } => SourceSetInventory::new(config)
+            .named(name)
+            .map(|source_set| vec![source_set]),
     }
 }
 

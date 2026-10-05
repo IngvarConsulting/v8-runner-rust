@@ -1710,3 +1710,34 @@ fn no_ready_provider_wins_over_workspace_contention_without_side_effects() {
         "selection failure must not create the JSON action log"
     );
 }
+
+/// Пакет конфигурации — не образ базы: `infobase dump --output main.cf` отказывает до
+/// платформы и называет `download`, которая такой файл и пишет.
+#[test]
+fn infobase_dump_into_a_package_names_download() {
+    for name in ["main.cf", "sales.CFE"] {
+        let (_dir, config, base, calls) = setup("DESIGNER");
+        let output = base.join("dist").join(name);
+        let command = v8_runner_command()
+            .args([
+                "--config",
+                &config.display().to_string(),
+                "--json-message",
+                "infobase",
+                "dump",
+                "--output",
+                &output.display().to_string(),
+            ])
+            .output()
+            .expect("run dump");
+
+        assert_eq!(command.status.code(), Some(2), "{name}");
+        let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+        assert_eq!(envelope["command"], "infobase.dump");
+        assert_eq!(envelope["error"]["kind"], "validation");
+        let message = envelope["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("`download`"), "{name}: {envelope}");
+        assert!(!calls.exists(), "{name}: the platform must not be started");
+        assert!(!output.exists());
+    }
+}

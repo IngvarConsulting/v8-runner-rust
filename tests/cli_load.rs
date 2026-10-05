@@ -619,3 +619,39 @@ fn upload_with_ibcmd_push_receives_config_relative_paths_resolved_from_the_confi
     );
     assert!(!calls.contains("/./"), "{calls}");
 }
+
+/// Образ базы — не пакет: `upload ib.dt` отказывает до платформы и называет
+/// `infobase restore`. Отказ не зависит от того, есть ли такой файл.
+#[test]
+fn upload_of_a_transfer_file_names_infobase_restore() {
+    let (_dir, config_path, _binary_path, base_path, calls_log) = setup_project();
+    fs::write(base_path.join("ib.dt"), "dt").expect("transfer file");
+
+    for file in ["ib.dt", "missing.DT"] {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "upload",
+                file,
+            ])
+            .output()
+            .expect("run command");
+
+        assert_eq!(output.status.code(), Some(2), "{file}");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(payload["command"], "upload");
+        assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("`infobase restore`")),
+            "{file}: {payload}"
+        );
+        assert!(
+            !calls_log.exists(),
+            "{file}: the platform must not be started"
+        );
+    }
+}

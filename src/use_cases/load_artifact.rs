@@ -94,6 +94,21 @@ fn run_load(
     let started = Instant::now();
     let request_snapshot = request_snapshot_for_failure_payload(args);
 
+    if let Err(error) = refuse_a_transfer_file(&args.artifact_path) {
+        let message = error.to_string();
+        return Err(LoadExecutionFailure::with_payload(
+            error,
+            empty_result_from_resolved(
+                &request_snapshot,
+                CompatibilityState::NotProbed,
+                started,
+                Some(message),
+                None,
+                false,
+            ),
+        ));
+    }
+
     if let Some(error) = validate_supported_matrix(config) {
         return Err(LoadExecutionFailure::with_payload(
             error,
@@ -911,6 +926,22 @@ fn resolve_existing_file(
                 candidate.display()
             ))
         })
+}
+
+/// Образ базы — не пакет конфигурации: отказ называет команду, которая такой файл
+/// принимает. Спрашивается первым, до матрицы исполнителей: ответ о соседней команде верен
+/// при любом формате проекта.
+fn refuse_a_transfer_file(raw_path: &str) -> Result<(), AppError> {
+    let is_transfer_file = Path::new(raw_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("dt"));
+    if is_transfer_file {
+        return Err(AppError::Validation(format!(
+            "'{raw_path}' is a .dt transfer file of the whole infobase; upload takes a .cf or .cfe package, a .dt file is loaded by `infobase restore`"
+        )));
+    }
+    Ok(())
 }
 
 fn infer_artifact_type(raw_path: &str) -> Option<ArtifactBuildMode> {

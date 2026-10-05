@@ -1615,6 +1615,110 @@ fn the_loopback_question_is_answered_in_one_place() {
     );
 }
 
+/// Значение реализованности или улики, названное в токенах кода: так выглядит строка
+/// матрицы, записанная мимо её владельца, — и сравнение с ней, с которого такая строка
+/// начинается. Glob-импорт вариантов (`Implementation::*`) ловится сам по себе: после него
+/// варианты в `match` называются голыми именами. Известный предел поиска по тексту:
+/// импорт под другим именем (`Implementation as I`) он не видит, а то же имя в
+/// doc-комментарии или строке даёт ложное срабатывание.
+const CAPABILITY_ROW_MARKERS: &[&str] = &[
+    "Implementation::Implemented",
+    "Implementation::Experimental",
+    "Implementation::{",
+    "Implementation::*",
+    "Evidence::Documented",
+    "Evidence::ArgvTested",
+    "Evidence::LiveVerified",
+    "Evidence::{",
+    "Evidence::*",
+];
+
+fn names_a_capability_row(production: &str) -> bool {
+    CAPABILITY_ROW_MARKERS
+        .iter()
+        .any(|marker| production.contains(marker))
+}
+
+#[test]
+fn capability_rows_are_written_in_one_place() {
+    // Корень проблемы: экспортное семейство выросло мимо общей проверки настроек и
+    // завело свою таблицу `match (намерение, исполнитель)`, отдававшую реализованность
+    // и улику, — вторую матрицу, расходившуюся с доменом. Владелец строк один —
+    // `domain::capability`; остальные читают его ответ (`capabilities`, `default_chain`,
+    // `capability_of`) и значений реализованности или улики сами не называют.
+    let owner = repo_path("src/domain/capability.rs");
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        if names_a_capability_row(&production_tokens(&file)) {
+            offenders.push(file.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these modules write capability rows on their own instead of reading \
+         domain::capability, which is the single owner of the matrix:\n{}",
+        offenders.join("\n")
+    );
+
+    // Страж проверяет себя на той форме, которой дефект и был написан.
+    let second_matrix = production_tokens_of(
+        r#"
+        fn capability(intent: Intent, provider: Provider) -> (Implementation, &'static str) {
+            match (intent, provider) {
+                (Intent::Snapshot, Provider::Ibcmd) => (Implementation::Experimental, "why"),
+                (_, _) => (Implementation::Experimental, "no adapter"),
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&second_matrix));
+
+    // Та же таблица на glob-импорте: в `match` варианты уже без имени типа.
+    let glob_matrix = production_tokens_of(
+        r#"
+        use crate::domain::capability::Implementation::*;
+
+        fn capability(intent: Intent) -> Implementation {
+            match intent {
+                Intent::Snapshot => Experimental,
+                _ => Implemented,
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&glob_matrix));
+    let glob_evidence = production_tokens_of(
+        r#"
+        use crate::domain::capability::Evidence::*;
+
+        fn proof(intent: Intent) -> Evidence {
+            match intent {
+                Intent::Snapshot => LiveVerified,
+                _ => Documented,
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&glob_evidence));
+
+    // Чтение ответа владельца — законный путь: страж его не задевает.
+    let reader = production_tokens_of(
+        r#"
+        use crate::domain::capability::{capabilities, capability_of, has_a_choice};
+
+        fn implements(operation: Operation, target: TargetKind, provider: Provider) -> bool {
+            has_a_choice(operation, target)
+                && capability_of(operation, target, provider).is_some()
+                && !capabilities(operation, target).is_empty()
+        }
+        "#,
+    );
+    assert!(!names_a_capability_row(&reader));
+}
+
 #[test]
 fn a_host_port_record_is_read_in_one_place() {
     // Корень проблемы: запись `host:port` резали по последнему двоеточию в двух местах —
