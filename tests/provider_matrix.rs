@@ -305,6 +305,50 @@ fn a_foreign_operation_key_does_not_block_the_transfer_family() {
     );
 }
 
+/// Внутри семейства переноса команда читает ключ только своей операции: неверный
+/// `providers.infobase.dump` не мешает `download`, но останавливает `infobase dump`.
+#[test]
+fn a_transfer_command_checks_only_the_key_of_its_own_operation() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), "providers:\n  infobase.dump: webinst\n");
+    let output = dir.path().join("out").join("main.cf");
+    let output = output.display().to_string();
+    let snapshot = dir.path().join("out").join("base.dt");
+    let snapshot = snapshot.display().to_string();
+
+    let download = [
+        "download",
+        "--state",
+        "working",
+        "--output",
+        &output,
+        "--dry-run",
+    ];
+    let (_, payload) = run(&config_path, &download);
+    // Настройки приняты: команда дошла до выбора исполнителя. Готова ли база — уже
+    // не вопрос настроек.
+    assert_ne!(
+        payload["error"]["code"], "invalid_argument",
+        "the dump key does not block download: {payload}"
+    );
+    assert!(
+        payload["data"]["provider"].is_object(),
+        "download reached provider selection: {payload}"
+    );
+
+    let dump = ["infobase", "dump", "--output", &snapshot, "--dry-run"];
+    let (code, payload) = run(&config_path, &dump);
+    assert_eq!(code, 2, "{payload}");
+    assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("infobase.dump"),
+        "{payload}"
+    );
+}
+
 /// Публикация не входит ни в одну цепочку умолчаний: она меняет веб-сервер вне
 /// рабочего каталога и делается только отдельной командой.
 #[test]

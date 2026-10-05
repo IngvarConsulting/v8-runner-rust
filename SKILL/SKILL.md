@@ -142,8 +142,8 @@ v8-runner infobase create
 - A `providers.*` key naming an executor outside the matrix is refused at config load with
   `invalid_argument` (exit 2, message lists the implemented executors); fix the key, do not
   retry. `download`, `infobase configuration export`, `infobase dump` and `infobase restore`
-  check only their own keys (`download`, `infobase.dump`, `infobase.restore`), so a key of
-  another operation does not block them; `test --no-build` and `launch` check no key; every
+  each check only the key of their own operation (`download`, `infobase.dump` or
+  `infobase.restore`), so a key of another operation does not block them; `test --no-build` and `launch` check no key; every
   other command that loads the project checks all keys.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).

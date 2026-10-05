@@ -360,8 +360,8 @@ providers:
   команда отказывает при загрузке настроек с `invalid_argument` до запуска платформы и
   перечисляет допустимых исполнителей;
 - какие ключи проверяет команда: `download`, `infobase configuration export`,
-  `infobase dump` и `infobase restore` — только свои (`download`, `infobase.dump`,
-  `infobase.restore`), ключ другой операции им не мешает; `test --no-build` и `launch` —
+  `infobase dump` и `infobase restore` — только ключ своей операции (`download`,
+  `infobase.dump` или `infobase.restore`), ключ другой операции им не мешает; `test --no-build` и `launch` —
   ни одного; остальные команды, читающие проект, — все;
 - ключ принимается только для операции, у которой на этой базе есть выбор; для
   операции с одним исполнителем это ошибка конфигурации, а не подтверждение очевидного;

@@ -468,13 +468,17 @@ pub fn validate_launch(config: &AppConfig) -> Result<(), ConfigValidationError> 
 ///
 /// Source trees, build settings, test runners, EDT and client MCP tooling are not inputs to
 /// CF/CFE/DT export and must not block an infobase-only workspace. Of `providers.*` only the
-/// keys of the transfer family are checked: a key of another operation (say, `push`) is not
-/// an input here either, even when the selected infobase leaves that operation no choice.
-pub fn validate_infobase_export(config: &AppConfig) -> Result<(), ConfigValidationError> {
+/// key of `operation`, the one the command performs, is checked: a key of another operation
+/// (say, `push` or `infobase.dump` for `download`) is not an input here either, even when the
+/// selected infobase leaves that operation no choice.
+pub fn validate_infobase_export(
+    config: &AppConfig,
+    operation: Operation,
+) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     // Export provider selection is intentionally side-effect free. workPath is
     // created only when the selected command acquires its workspace lock.
-    validate_providers(config, &TRANSFER_OPERATIONS)?;
+    validate_providers(config, &[operation])?;
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
     validate_mcp_admission_timeout(config)?;
@@ -1083,14 +1087,6 @@ fn validate_web_publication(config: &AppConfig) -> Result<(), ConfigValidationEr
     }
     Ok(())
 }
-
-/// Операции семейства переноса: их ключи `providers.*` — единственные, что читают
-/// `download`, `infobase configuration export`, `infobase dump` и `infobase restore`.
-const TRANSFER_OPERATIONS: [Operation; 3] = [
-    Operation::ConfigurationExport,
-    Operation::InfobaseDump,
-    Operation::InfobaseRestore,
-];
 
 /// Переопределение провайдера принимается только там, где есть развилка, и только
 /// для исполнителя, который операцию реализует. Ключ для операции с одним исполнителем —
