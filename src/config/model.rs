@@ -282,9 +282,9 @@ pub(crate) enum ClusterAdministration {
     /// `cluster.ras` as declared: `rac` goes to this administration server.
     DeclaredRas(String),
     /// No `cluster.ras`: the runner starts its own `ras` against this agent (#213) —
-    /// `cluster.agent.address` as declared, or the first server of `Srvr=` with
-    /// [`DEFAULT_CLUSTER_AGENT_PORT`].
-    ManagedRasForAgent(String),
+    /// `cluster.agent.address`, or the first non-empty server of `Srvr=`; the port is
+    /// [`DEFAULT_CLUSTER_AGENT_PORT`] unless `agent.address` names one.
+    ManagedRasForAgent { host: Host, port: u16 },
 }
 
 /// Why no administration address follows from the declaration.
@@ -299,6 +299,11 @@ pub(crate) enum ClusterAdministrationError {
         "infobase.connection names the cluster server '{server}', which is not `host` or `host:port`: declare infobase.cluster.ras or infobase.cluster.agent.address"
     )]
     ServerUnreadable { server: String },
+
+    #[error(
+        "infobase.cluster.agent.address '{address}' is not `host` or `host:port`, the host a name or IPv4"
+    )]
+    AgentAddressUnreadable { address: String },
 
     #[error(
         "infobase.connection names the cluster by the IPv6 address '{server}', and with infobase.cluster.ras and infobase.cluster.agent.address empty the runner takes the agent address from Srvr=: rac and ras accept only a name or IPv4 — declare infobase.cluster.ras or infobase.cluster.agent.address as a name or IPv4"
@@ -389,7 +394,10 @@ impl InfobaseConfig {
 
     /// The administration address for `rac`, in the order the declaration answers it:
     /// `cluster.ras`; else `cluster.agent.address` for the runner's own `ras`; else the first
-    /// server of `Srvr=` (or `/S`) with [`DEFAULT_CLUSTER_AGENT_PORT`]. The declared keys are
+    /// non-empty server of `Srvr=` (or `/S`) with [`DEFAULT_CLUSTER_AGENT_PORT`]. Ask it only
+    /// of a cluster target: a file base or a standalone server has no cluster to administer,
+    /// and the answer for them is [`ClusterAdministrationError::NoServer`] or meaningless.
+    /// The declared keys are
     /// already a name or IPv4 after validation
     /// (`INV.CONFIG.A-CLUSTER-ADDRESS-IS-A-NAME-OR-IPV4`); an IPv6 host taken from the
     /// connection string is refused here, because `rac` and `ras` do not work over IPv6.
@@ -405,7 +413,17 @@ impl InfobaseConfig {
             .and_then(|cluster| cluster.agent.as_ref())
             .and_then(|agent| agent.address.as_deref())
         {
-            return Ok(ClusterAdministration::ManagedRasForAgent(agent.to_owned()));
+            return match host_and_port_of_authority(agent) {
+                Some((host, port)) if !names_an_ipv6_host(agent) => {
+                    Ok(ClusterAdministration::ManagedRasForAgent {
+                        host,
+                        port: port.unwrap_or(DEFAULT_CLUSTER_AGENT_PORT),
+                    })
+                }
+                _ => Err(ClusterAdministrationError::AgentAddressUnreadable {
+                    address: agent.to_owned(),
+                }),
+            };
         }
         let hosts = V8Connection::from_connection_string(&self.connection).cluster_hosts();
         let server = hosts
@@ -416,9 +434,10 @@ impl InfobaseConfig {
             return Err(ClusterAdministrationError::ServerIsIpv6 { server });
         }
         match host_and_port_of_authority(&server) {
-            Some((host, _)) => Ok(ClusterAdministration::ManagedRasForAgent(format!(
-                "{host}:{DEFAULT_CLUSTER_AGENT_PORT}"
-            ))),
+            Some((host, _)) => Ok(ClusterAdministration::ManagedRasForAgent {
+                host,
+                port: DEFAULT_CLUSTER_AGENT_PORT,
+            }),
             None => Err(ClusterAdministrationError::ServerUnreadable { server }),
         }
     }
@@ -1257,6 +1276,13 @@ mod tests {
         }
     }
 
+    fn agent_at(host: &str, port: u16) -> ClusterAdministration {
+        ClusterAdministration::ManagedRasForAgent {
+            host: crate::support::authority::host_of_authority(host).expect("agent host"),
+            port,
+        }
+    }
+
     fn cluster_base(connection: &str, cluster: &str) -> InfobaseConfig {
         let mut base = InfobaseConfig::file(connection);
         base.cluster = Some(serde_yaml::from_str(cluster).expect("cluster section"));
@@ -1264,7 +1290,7 @@ mod tests {
     }
 
     /// Адрес администрирования выводится по порядку: `cluster.ras`, иначе
-    /// `cluster.agent.address`, иначе первый сервер `Srvr=` с портом агента; IPv6 из строки
+    /// `cluster.agent.address`, иначе первый непустой сервер `Srvr=` с портом агента; IPv6 из строки
     /// подключения — отказ, а объявленный ключ строку не читает вовсе (#213).
     #[test]
     fn the_cluster_administration_address_is_derived_in_the_declared_order() {
@@ -1286,28 +1312,25 @@ mod tests {
                 "{agent: {address: 'agent-host:2540'}}"
             )
             .cluster_administration(),
-            Ok(ClusterAdministration::ManagedRasForAgent(
-                "agent-host:2540".to_owned()
-            )),
+            Ok(agent_at("agent-host", 2540)),
             "agent.address wins over Srvr="
         );
         assert_eq!(
             cluster_base(ipv6_server, "{agent: {address: agent-host}}").cluster_administration(),
-            Ok(ClusterAdministration::ManagedRasForAgent(
-                "agent-host".to_owned()
-            )),
+            Ok(agent_at("agent-host", super::DEFAULT_CLUSTER_AGENT_PORT)),
             "a declared agent name is not refused for an IPv6 Srvr="
         );
 
         for (connection, agent) in [
-            ("Srvr=SRV:1541;Ref=demo", "srv:1540"),
-            ("Srvr=10.0.0.5;Ref=demo", "10.0.0.5:1540"),
-            ("Srvr='tcp://srv1:1541,[::1]:1541';Ref=demo", "srv1:1540"),
-            ("/S srv:1541\\demo", "srv:1540"),
+            ("Srvr=SRV:1541;Ref=demo", "srv"),
+            ("Srvr=10.0.0.5;Ref=demo", "10.0.0.5"),
+            ("Srvr='tcp://srv1:1541,[::1]:1541';Ref=demo", "srv1"),
+            ("Srvr=' ,srv2';Ref=demo", "srv2"),
+            ("/S srv:1541\\demo", "srv"),
         ] {
             assert_eq!(
                 cluster_base(connection, "{}").cluster_administration(),
-                Ok(ClusterAdministration::ManagedRasForAgent(agent.to_owned())),
+                Ok(agent_at(agent, super::DEFAULT_CLUSTER_AGENT_PORT)),
                 "{connection}"
             );
         }
