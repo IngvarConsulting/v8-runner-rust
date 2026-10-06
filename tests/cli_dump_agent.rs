@@ -392,6 +392,40 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
     );
 }
 
+/// Каталог без файла версий: выгрузка по изменившемуся идёт полной поверх каталога —
+/// агенту уходит команда без `--update`, ответ называет `FULL` и причину, а прежнее
+/// поколение не даёт её пропустить.
+#[test]
+fn a_directory_without_a_version_file_is_dumped_full_without_the_generation_skip() {
+    let harness = harness(true, Some(true), false);
+    let (first, payload) = run_dump(&harness, &["--force"]);
+    assert_eq!(first, 0, "{payload}");
+    let _ = fs::remove_file(harness.target.join("ConfigDumpInfo.xml"));
+
+    let (second, payload) = run_dump(&harness, &[]);
+
+    assert_eq!(second, 0, "{payload}");
+    assert_eq!(payload["data"]["mode"], "FULL", "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
+    assert!(
+        payload["data"]["message"].as_str().is_some_and(|message| {
+            message.contains("no version file ConfigDumpInfo.xml")
+                && message.contains("ran full instead of incremental")
+        }),
+        "{payload}"
+    );
+    let dumps: Vec<_> = commands(&harness)
+        .into_iter()
+        .filter(|line| line.starts_with("config dump-config-to-files"))
+        .collect();
+    assert_eq!(dumps.len(), 2, "{dumps:?}");
+    assert!(
+        dumps[1].starts_with("config dump-config-to-files --dir=target/")
+            && !dumps[1].contains("--update"),
+        "{dumps:?}"
+    );
+}
+
 /// Явная полная выгрузка восстанавливает дерево и память даже при прежнем поколении.
 #[test]
 fn a_full_dump_repeats_even_when_the_generation_is_unchanged() {

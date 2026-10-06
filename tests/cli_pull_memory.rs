@@ -899,3 +899,97 @@ fn a_source_edit_keeps_the_pull_incremental() {
     assert!(last.contains("/DumpConfigToFiles"), "{last}");
     assert!(last.contains("-update"), "{last}");
 }
+
+fn output_text(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// Полная выгрузка поверх каталога без файла версий переписывает файлы человека, как и
+/// замена каталога: незакоммиченная правка отслеживаемого файла останавливает её до
+/// платформы, отказ называет файл и выход `pull main --force`, файл цел. Выход работает:
+/// с согласием выгрузка идёт полной.
+#[test]
+fn a_full_dump_over_the_directory_asks_the_replacement_guard() {
+    for provider in ["designer", "ibcmd", "agent"] {
+        let project = project(provider, false);
+        let repository = project.sources.parent().expect("project root");
+        fs::write(repository.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+        git(repository, &["init", "-q", "-b", "main"]);
+        git(repository, &["add", ".gitignore", "sources"]);
+        git(repository, &["commit", "-qm", "baseline"]);
+        let edited = project.sources.join("old.txt");
+        fs::write(&edited, "an edit nobody committed").expect("edit");
+        assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+
+        let output = run(&project, &["pull", "--source-set", "main"]);
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{provider}: {}",
+            output_text(&output)
+        );
+        let text = output_text(&output);
+        assert!(text.contains("refusing to overwrite"), "{provider}: {text}");
+        assert!(text.contains("old.txt"), "{provider}: {text}");
+        assert!(text.contains("pull main --force"), "{provider}: {text}");
+        assert_eq!(read(&edited), "an edit nobody committed", "{provider}");
+        let calls = fs::read_to_string(&project.calls).unwrap_or_default();
+        assert!(
+            !calls.contains("DumpConfigToFiles")
+                && !calls.contains("export")
+                && !calls.contains("dump-config-to-files"),
+            "{provider}: the platform must not start: {calls}"
+        );
+
+        let response = succeeded(run(&project, &["pull", "main", "--force"]));
+        assert_eq!(response["data"]["mode"], "FULL", "{provider}: {response}");
+    }
+}
+
+/// Превью называет тот режим, который выполнит выгрузка: без файла версий — полный и
+/// причину; подменённый файл при своей копии раннера уступит ей, и выгрузка останется по
+/// изменившемуся. Платформа не запускается.
+#[test]
+fn a_preview_names_the_mode_the_pull_would_run() {
+    let project = version_project("designer");
+    let preview = |project: &Project| {
+        let calls_before = fs::read_to_string(&project.calls).unwrap_or_default();
+        let response = succeeded(run(project, &["pull", "--source-set", "main", "--dry-run"]));
+        assert_eq!(
+            fs::read_to_string(&project.calls).unwrap_or_default(),
+            calls_before,
+            "the preview must not start the platform"
+        );
+        response
+    };
+
+    let missing = preview(&project);
+    assert_eq!(missing["data"]["mode"], "FULL", "{missing}");
+    assert!(
+        missing["data"]["message"].as_str().is_some_and(|message| {
+            message.contains("no version file ConfigDumpInfo.xml")
+                && message.contains("would run full instead of incremental")
+        }),
+        "{missing}"
+    );
+
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let version_file = project.sources.join("ConfigDumpInfo.xml");
+    fs::write(&version_file, "<ConfigDumpInfo/>\n").expect("a replaced version file");
+    let restored = preview(&project);
+    assert_eq!(restored["data"]["mode"], "INCREMENTAL", "{restored}");
+    assert_eq!(read(&version_file), "<ConfigDumpInfo/>\n");
+    let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
+    assert_eq!(response["data"]["mode"], "INCREMENTAL", "{response}");
+
+    fs::remove_file(&version_file).expect("a lost version file");
+    let lost = preview(&project);
+    assert_eq!(lost["data"]["mode"], "FULL", "{lost}");
+    let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
+    assert_eq!(response["data"]["mode"], "FULL", "{response}");
+}
