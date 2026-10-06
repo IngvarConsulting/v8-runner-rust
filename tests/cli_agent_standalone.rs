@@ -519,6 +519,28 @@ fn build_through_the_gate_loads_from_the_declared_dir() {
     );
 }
 
+/// Квитанция шлюза автономного сервера называет адрес шлюза. Ни логина шлюза, ни
+/// пароля в адресе нет: он печатается из хоста и порта, а не из записи с учётными данными.
+#[test]
+fn a_gate_session_is_named_in_the_receipt() {
+    let harness = harness();
+
+    let (code, payload) = run(&harness, &["build"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let receipt = &payload["data"]["provider"];
+    assert_eq!(
+        receipt["endpoint"],
+        serde_json::json!({"mode": "gate", "address": format!("127.0.0.1:{}", harness.port)}),
+        "{payload}"
+    );
+    let shown = receipt.to_string();
+    assert!(
+        !shown.contains(AGENT_PASSWORD) && !shown.contains(&format!("{GATE_USER}@")),
+        "the receipt carries no credentials: {receipt}"
+    );
+}
+
 /// `make` и состав расширений идут той же сессией шлюза.
 #[test]
 fn make_and_extensions_go_through_the_gate() {

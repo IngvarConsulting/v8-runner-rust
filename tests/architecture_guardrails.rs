@@ -2227,7 +2227,7 @@ fn a_critical_phase_names_its_deferral_through_the_owner() {
         ),
         (
             "crate::use_cases::infobase_export::run_restore_provider",
-            "crate::use_cases::infobase_export::execute_infobase_restore",
+            "crate::use_cases::infobase_export::run_infobase_restore",
         ),
         (
             "crate::use_cases::init_project::create_infobase_via_designer",
@@ -3015,8 +3015,8 @@ fn every_staged_publication_rechecks_its_target_first() {
         "crate::use_cases::artifacts::run_external_designer_export",
         "crate::use_cases::dump_config::finalize_edt_dump",
         "crate::use_cases::dump_config::publish_full_dump",
-        "crate::use_cases::infobase_export::execute_configuration_export",
-        "crate::use_cases::infobase_export::execute_infobase_snapshot",
+        "crate::use_cases::infobase_export::run_configuration_export",
+        "crate::use_cases::infobase_export::run_infobase_snapshot",
     ];
 
     let index = SourceIndex::of_src();

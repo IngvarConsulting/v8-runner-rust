@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::domain::capability::SessionEndpoint;
 use crate::platform::process::{ProcessExecutionPolicy, ProcessInterruptionSafety, WorkGiven};
 
 /// Identifies the logical command being executed.
@@ -109,6 +110,9 @@ pub struct ExecutionContext {
     cancellation: CancellationToken,
     /// Получил ли исполнитель работу этой команды; отмечает платформа, читает ответ.
     work: WorkGiven,
+    /// Точка входа сессии агента, которую открыла эта команда; отмечает подключение,
+    /// читает квитанция исполнителя.
+    session: std::sync::Arc<std::sync::Mutex<Option<SessionEndpoint>>>,
 }
 
 impl ExecutionContext {
@@ -120,6 +124,7 @@ impl ExecutionContext {
             edt_timeout: None,
             cancellation: CancellationToken::new(),
             work: WorkGiven::for_command(),
+            session: std::sync::Arc::default(),
         }
     }
 
@@ -193,6 +198,24 @@ impl ExecutionContext {
     /// Отметка работы исполнителя для этой команды: `provider_dispatched` ответа.
     pub fn work(&self) -> &WorkGiven {
         &self.work
+    }
+
+    /// Отмечает точку входа открытой сессии агента. Сессий у команды бывает несколько,
+    /// но конфиг у неё один, и точка входа у них общая: первая отметка остаётся.
+    pub(crate) fn note_session(&self, endpoint: SessionEndpoint) {
+        self.session_slot().get_or_insert(endpoint);
+    }
+
+    /// Точка входа сессии агента, если команда её открывала.
+    pub(crate) fn opened_session(&self) -> Option<SessionEndpoint> {
+        self.session_slot().clone()
+    }
+
+    /// Отметка — простое значение: паника другого потока его не портит.
+    fn session_slot(&self) -> std::sync::MutexGuard<'_, Option<SessionEndpoint>> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Returns the pending command-boundary interruption, if any.

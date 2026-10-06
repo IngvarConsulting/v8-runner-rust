@@ -768,6 +768,11 @@ impl AgentSession {
         Ok(reply)
     }
 
+    /// Точка входа, к которой сессия подключена.
+    pub fn endpoint(&self) -> &AgentEndpoint {
+        &self.endpoint
+    }
+
     /// Прерывание, которое отложила последняя команда, — и тогда, когда её ответ не
     /// дочитан или оказался отказом. Читают его сразу после `run`: следующая команда его
     /// сбрасывает.
@@ -1367,6 +1372,14 @@ impl ManagedAgent {
 
     pub fn session(&mut self) -> &mut AgentSession {
         self.session.as_mut().expect("session lives with the agent")
+    }
+
+    /// Точка входа сессии с поднятым агентом.
+    pub fn endpoint(&self) -> &AgentEndpoint {
+        self.session
+            .as_ref()
+            .expect("session lives with the agent")
+            .endpoint()
     }
 
     pub fn base_dir(&self) -> &Path {

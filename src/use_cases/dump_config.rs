@@ -73,7 +73,10 @@ pub fn execute(
         "executing dump use case"
     );
     stamp_dispatch(
-        coordinator::run_dump_with_context(context, config, args),
+        crate::use_cases::provider_selection::stamp_session(
+            coordinator::run_dump_with_context(context, config, args),
+            context,
+        ),
         context.work(),
     )
 }

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.LOAD-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/upload.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -43,9 +43,10 @@ check:
 отказом, но отложенную отмену называют: её запись с `deferred: true` и предупреждение идут
 первыми.
 
-**Что изменила версия 5.** Ошибка отмены в `execution.errors[]` называется `cancelled` —
-тем же кодом, что отмена в конверте и в формах `download`, `infobase dump` и
-`infobase restore`. Прежде `upload` писал `artifact_load_interrupted`.
+**Что изменила версия 6.** Схема квитанции `provider` допускает необязательное поле
+`endpoint` — точку входа сессии агента ([правило](a-session-receipt-names-its-endpoint.md)): тип квитанции
+общий у всех команд. `upload` через сессию агента не идёт, и в её ответе поля нет;
+значения на проводе прежние.
 
 ## Пример
 

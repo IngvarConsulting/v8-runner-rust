@@ -152,6 +152,7 @@ v8-runner infobase create
   each check only the key of their own operation (`download`, `infobase.dump` or
   `infobase.restore`), so a key of another operation does not block them; `test --no-build` and `launch` check no key; every
   other command that loads the project checks all keys.
+- `provider.endpoint` (`mode`: `managed`/`attached`/`gate`, `address`: `host:port`, never credentials) appears only when the command opened an agent session; previews and platform-process runs omit it.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
