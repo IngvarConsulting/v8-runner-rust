@@ -81,7 +81,7 @@ fn an_unsupported_combination_is_refused_before_any_utility_runs() {
         let project = write_project(dir.path(), &yaml);
         for command in [
             vec!["push"],
-            vec!["pull", "--mode", "full"],
+            vec!["pull", "--force"],
             vec!["infobase", "create"],
         ] {
             let output = v8_runner_command()

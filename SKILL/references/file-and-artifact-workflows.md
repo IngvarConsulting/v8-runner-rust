@@ -8,26 +8,26 @@ Use these commands when the task is about files, artifacts, publication, or sour
 
 ```bash
 git status --short
-v8-runner pull --mode incremental
+v8-runner pull
 git diff
 ```
 
 Supported modes:
 
 ```bash
-v8-runner pull --mode full
-v8-runner pull --mode incremental
-v8-runner pull --mode partial --object Catalog:Items
+v8-runner pull --force
+v8-runner pull
+v8-runner pull --object Catalog:Items
 ```
 
 Useful selectors:
 
 ```bash
-v8-runner pull --mode incremental --source-set <NAME>
-v8-runner pull --mode incremental --extension <EXTENSION>
+v8-runner pull <NAME>
+v8-runner pull --extension <EXTENSION>
 ```
 
-`partial` requires at least one `--object`. When `ibcmd` executes the pull, object-scoped partial degrades to incremental with a warning.
+No key is incremental, `--object` is partial, `--force` replaces the directory with a full dump (check `git status` first). When `ibcmd` executes the pull, object-scoped partial degrades to incremental with a warning.
 
 Use `TYPE:NAME` as the canonical partial selector form, for example `Catalog:Items`.
 The dotted `TYPE.NAME` form remains compatible. The Designer list and JSON
@@ -45,9 +45,9 @@ For `format=EDT`, `pull` uses an internal Designer snapshot under `workPath/desi
 Use configuration export when the artifact must reflect state already stored in the infobase:
 
 ```bash
-v8-runner download --state working --output dist/main.cf
-v8-runner download --state database --output dist/main.cf
-v8-runner download --state database --extension Sales --output dist/sales.cfe
+v8-runner download --output dist/main.cf
+v8-runner download --state db --output dist/main.cf
+v8-runner download --state db --extension Sales --output dist/sales.cfe
 ```
 
 Append `--dry-run` when an orchestrator needs the selected provider and compact output plan before
@@ -98,7 +98,7 @@ runner waits for the platform and reports the deferred interruption in
 
 ```bash
 v8-runner convert
-v8-runner convert --source-set <NAME>
+v8-runner convert <NAME>
 v8-runner convert --output <DIR>
 ```
 
@@ -144,7 +144,7 @@ Rules:
 
 ```bash
 v8-runner make --output <TARGET>
-v8-runner make --output <TARGET> --source-set <NAME>
+v8-runner make <NAME> --output <TARGET>
 v8-runner make --output <TARGET> --extension <NAME>
 ```
 

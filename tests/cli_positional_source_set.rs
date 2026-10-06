@@ -90,7 +90,7 @@ fn envelope(output: &Output) -> Value {
 fn commands_with_a_set<'a>(value: &'a str, cf: &'a str) -> Vec<Vec<&'a str>> {
     vec![
         vec!["push", value],
-        vec!["pull", value, "--mode", "full"],
+        vec!["pull", value, "--force"],
         vec!["make", value, "--output", cf],
         vec!["download", value, "--output", cf],
         vec!["convert", value],
@@ -140,10 +140,7 @@ fn a_positional_source_set_selects_that_set() {
         .collect::<Vec<_>>();
     assert_eq!(planned, ["sales"], "{push}");
 
-    let pull = envelope(&run(
-        &project,
-        &["pull", "sales", "--mode", "full", "--dry-run"],
-    ));
+    let pull = envelope(&run(&project, &["pull", "sales", "--force", "--dry-run"]));
     assert_eq!(pull["ok"], true, "{pull}");
     assert_eq!(pull["data"]["source_set"], "sales", "{pull}");
     assert_eq!(pull["data"]["extension"], "sales", "{pull}");

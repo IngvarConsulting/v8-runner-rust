@@ -5,7 +5,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use support::{
     hold_workspace_lock, temp_workspace, v8_runner_command, write_shell_script as write_script,
 };
@@ -270,8 +270,7 @@ fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
             "--dry-run",
@@ -292,8 +291,7 @@ fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -323,8 +321,7 @@ fn dry_run_refuses_clean_before_execution_instead_of_skipping_it() {
             "--no-color",
             "--clean-before-execution",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
             "--dry-run",
@@ -354,8 +351,7 @@ fn dump_dry_run_plans_the_target_without_writing_it() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
             "--dry-run",
@@ -396,8 +392,7 @@ fn dump_ibcmd_full_json_success() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -432,8 +427,7 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -486,8 +480,7 @@ fn dump_text_success_is_compact_and_keeps_output_visible() {
             &config_path.display().to_string(),
             "--no-color",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -525,8 +518,6 @@ fn dump_ibcmd_incremental_json_success() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "incremental",
             "--source-set",
             "main",
         ])
@@ -552,8 +543,6 @@ fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "partial",
             "--source-set",
             "main",
             "--object",
@@ -586,8 +575,6 @@ fn dump_text_warning_shows_degraded_fallback_reason() {
             &config_path.display().to_string(),
             "--no-color",
             "dump",
-            "--mode",
-            "partial",
             "--source-set",
             "main",
             "--object",
@@ -613,8 +600,6 @@ fn dump_ibcmd_partial_failure_keeps_partial_mode_and_warning() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "partial",
             "--source-set",
             "main",
             "--object",
@@ -656,8 +641,6 @@ fn dump_designer_partial_json_normalizes_colon_selector_and_reports_both_forms()
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "partial",
             "--object",
             "  Catalog:Items  ",
         ])
@@ -691,8 +674,7 @@ fn dump_text_failure_shows_error_message() {
             &config_path.display().to_string(),
             "--no-color",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -723,8 +705,7 @@ fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
             &config_path.display().to_string(),
             "--json-message",
             "dump",
-            "--mode",
-            "full",
+            "--force",
             "--source-set",
             "main",
         ])
@@ -783,27 +764,14 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
     )
     .expect("hand-written");
 
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "dump",
-            "--mode",
-            "full",
-            "--source-set",
-            "main",
-        ])
-        .output()
-        .expect("run dump");
+    // Командная строка просит замену только с согласием (`pull --force`); полная выгрузка,
+    // которая спрашивает сначала, — у MCP: согласия ему взять неоткуда.
+    let answer = support::mcp::call_tool(&config_path, "dump_config", json!({ "mode": "FULL" }));
 
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let rendered = answer.envelope.to_string();
+    assert!(answer.is_error, "the dump must be refused: {rendered}");
     assert_eq!(
-        output.status.code(),
-        Some(2),
+        answer.envelope["error"]["kind"], "validation",
         "a refusal is a validation error, not a runtime one: {rendered}"
     );
     assert!(
@@ -811,7 +779,7 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
         "the refusal must name what would be lost: {rendered}"
     );
     assert!(
-        rendered.contains("--discard-uncommitted"),
+        rendered.contains("--force"),
         "the refusal must say how to proceed anyway: {rendered}"
     );
     assert!(
@@ -821,7 +789,7 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
 }
 
 /// Опись версий штатно лежит в игноре, а полная выгрузка пишет её заново: её
-/// прежнее содержимое не потеря, и выгрузка идёт без `--discard-uncommitted`.
+/// прежнее содержимое не потеря, и выгрузка идёт без `--force`.
 #[test]
 fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
     let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
@@ -841,24 +809,13 @@ fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
     git(&base_path, &["commit", "-qm", "ignore the version file"]);
     fs::write(&version_file, "<info previous=\"yes\"/>\n").expect("version file");
 
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "dump",
-            "--mode",
-            "full",
-            "--source-set",
-            "main",
-        ])
-        .output()
-        .expect("run dump");
+    // Без согласия: полная выгрузка MCP спрашивает систему контроля версий сначала.
+    let answer = support::mcp::call_tool(&config_path, "dump_config", json!({ "mode": "FULL" }));
 
     assert!(
-        output.status.success(),
-        "an ignored version file must not stop a full dump: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        !answer.is_error,
+        "an ignored version file must not stop a full dump: {}",
+        answer.envelope
     );
     // Поддельная платформа описи не пишет: в заменённом каталоге файла с прежним
     // содержимым остаться не должно.
@@ -884,12 +841,9 @@ fn an_explicit_request_replaces_the_directory_and_keeps_nothing() {
         .args([
             "--config",
             &config_path.display().to_string(),
-            "dump",
-            "--mode",
-            "full",
-            "--source-set",
+            "pull",
             "main",
-            "--discard-uncommitted",
+            "--force",
         ])
         .output()
         .expect("run dump");
@@ -932,31 +886,22 @@ fn kept_backups(base_path: &Path) -> Vec<PathBuf> {
 fn without_version_control_the_dump_proceeds_untouched() {
     let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project();
 
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "dump",
-            "--mode",
-            "full",
-            "--source-set",
-            "main",
-        ])
-        .output()
-        .expect("run dump");
+    // Без согласия: полная выгрузка MCP спрашивает систему контроля версий сначала.
+    let answer = support::mcp::call_tool(&config_path, "dump_config", json!({ "mode": "FULL" }));
 
-    let rendered = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let rendered = answer.envelope.to_string();
     assert!(
-        output.status.success(),
+        !answer.is_error,
         "a missing answer must not stop the work: {rendered}"
     );
-    assert!(
-        rendered.contains("Dump completed successfully"),
+    assert_eq!(
+        answer.envelope["warnings"],
+        json!([]),
         "and must not turn an ordinary dump into a warning: {rendered}"
+    );
+    assert_eq!(
+        answer.envelope["data"]["message"], "dump completed successfully",
+        "{rendered}"
     );
     assert!(
         kept_backups(&base_path).is_empty(),
@@ -972,8 +917,7 @@ fn pull_main(config_path: &Path, extra: &[&str]) -> (std::process::Output, Strin
         "--config",
         config.as_str(),
         "pull",
-        "--mode",
-        "full",
+        "--force",
         "--source-set",
         "main",
     ];
@@ -1053,4 +997,305 @@ fn a_pull_proceeds_silently_when_tracking_is_unknown() {
         "an unknown answer is silent: {rendered}"
     );
     assert!(calls_log.exists(), "the platform must run: {rendered}");
+}
+
+/// Команда `v8-runner …` из совета отказа, разобранная на слова так, как её разобрала бы
+/// оболочка: совет кавычит значения одинарными кавычками.
+fn advised_command(message: &str) -> Vec<String> {
+    let start = message
+        .find("`v8-runner ")
+        .unwrap_or_else(|| panic!("the advice must name an exact command: {message}"))
+        + 1;
+    let rest = &message[start..];
+    let line = &rest[..rest.find('`').expect("closing backtick")];
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in line.chars() {
+        match ch {
+            '\'' => {
+                quoted = !quoted;
+                started = true;
+            }
+            ' ' if !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            _ => {
+                word.push(ch);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    assert_eq!(
+        words.first().map(String::as_str),
+        Some("v8-runner"),
+        "{line}"
+    );
+    words
+}
+
+/// Слова совета, где значения `--config` и `--workdir` приведены к каноническому пути: на
+/// macOS временный каталог `/var/…` — ссылка на `/private/var/…`, и раннер называет
+/// разрешённый путь. Сравнивают с тоже каноническими ожидаемыми путями.
+fn with_canonical_paths(words: &[String]) -> Vec<String> {
+    let mut canonical = words.to_vec();
+    for index in 1..canonical.len() {
+        if matches!(words[index - 1].as_str(), "--config" | "--workdir") {
+            canonical[index] = fs::canonicalize(&words[index])
+                .unwrap_or_else(|error| panic!("{}: {error}", words[index]))
+                .display()
+                .to_string();
+        }
+    }
+    canonical
+}
+
+/// Выполняет совет буквально — из другого каталога, без `--json-message` и прочего, что
+/// было в исходном вызове.
+fn run_advice_from_elsewhere(
+    advice: &[String],
+    elsewhere: &Path,
+) -> (std::process::Output, String) {
+    fs::create_dir_all(elsewhere).expect("elsewhere");
+    let output = v8_runner_command()
+        .current_dir(elsewhere)
+        .args(&advice[1..])
+        .output()
+        .expect("run advice");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output, rendered)
+}
+
+/// В проекте EDT отказывают и `pull --object`, и прежний `--mode incremental|partial`.
+/// «Тот же вызов с `--force`» упёрся бы во второй отказ (`--object`/`--mode` спорят с
+/// `--force`), поэтому совет — точная `pull <SET> --force` с глобальными ключами вызова и
+/// прямо названная полная замена. Выполненный буквально из другого каталога, он проходит и
+/// заменяет тот же каталог.
+#[test]
+fn an_edt_refusal_advises_a_full_replacement_that_runs_as_written() {
+    for keys in [
+        &["--object", "Catalog:Items"][..],
+        &["--mode", "incremental"],
+        &["--mode", "partial"],
+    ] {
+        let (dir, config_path, _platform, _edt, _work, base_path, _designer, _edt_calls) =
+            setup_edt_project();
+        git(&base_path, &["init", "-q", "-b", "main", "."]);
+        git(&base_path, &["config", "user.email", "test@example.com"]);
+        git(&base_path, &["config", "user.name", "Test"]);
+        git(&base_path, &["add", "-A"]);
+        git(&base_path, &["commit", "-qm", "committed sources"]);
+        let hand_written = base_path.join("main").join("hand-written.xml");
+        fs::write(&hand_written, "written by hand\n").expect("hand-written");
+
+        let config = config_path.display().to_string();
+        let mut args = vec![
+            "--config",
+            config.as_str(),
+            "--json-message",
+            "pull",
+            "main",
+        ];
+        args.extend_from_slice(keys);
+        let output = v8_runner_command().args(&args).output().expect("run pull");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(output.status.code(), Some(2), "{keys:?}: {payload}");
+        let message = payload["error"]["message"].as_str().expect("message");
+        assert!(message.contains("hand-written.xml"), "{keys:?}: {message}");
+        assert!(
+            !message.contains("repeat the same command with `--force` added"),
+            "{keys:?}: {message}"
+        );
+        assert!(
+            message.contains("a full dump of source-set 'main' that replaces its whole directory"),
+            "{keys:?}: {message}"
+        );
+
+        let advice = advised_command(message);
+        let canonical_config = fs::canonicalize(&config_path).expect("canonical config");
+        assert_eq!(
+            with_canonical_paths(&advice)[1..],
+            [
+                "--config".to_owned(),
+                canonical_config.display().to_string(),
+                "pull".to_owned(),
+                "main".to_owned(),
+                "--force".to_owned(),
+            ],
+            "{keys:?}: {message}"
+        );
+
+        let (output, rendered) = run_advice_from_elsewhere(&advice, &dir.path().join("elsewhere"));
+        assert!(
+            output.status.success(),
+            "{keys:?}: the advice must not run into a second refusal: {rendered}"
+        );
+        assert!(
+            !hand_written.exists(),
+            "{keys:?}: the advice replaced the same directory"
+        );
+    }
+}
+
+/// MCP по stdio, сервер запущен с `--infobase` и `--workdir`: совет называет команду строки
+/// с конфигом абсолютным путём и теми же ключами. Выполненная буквально из другого
+/// каталога, она идёт в ту же базу и тот же рабочий каталог, а не в базу по умолчанию.
+#[test]
+fn an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir() {
+    let (dir, config_path, _binary, _work, base_path, calls_log) = setup_project_in_a_repository();
+    fs::write(
+        config_path.with_file_name("v8project.local.yaml"),
+        "infobases:\n  staging:\n    connection: 'File=/tmp/staging-ib'\n",
+    )
+    .expect("local config");
+    let hand_written = base_path.join("main").join("hand-written.xml");
+    fs::write(&hand_written, "written by hand\n").expect("hand-written");
+    let other_work = dir.path().join("other-work");
+    fs::create_dir_all(&other_work).expect("other work");
+
+    let config = config_path.display().to_string();
+    let workdir = other_work.display().to_string();
+    let answer = support::mcp::call_tool_started_with(
+        &[
+            "--config",
+            config.as_str(),
+            "--infobase",
+            "staging",
+            "--workdir",
+            workdir.as_str(),
+        ],
+        "dump_config",
+        json!({ "mode": "FULL" }),
+    );
+    assert!(answer.is_error, "{}", answer.envelope);
+    let message = answer.envelope["error"]["message"]
+        .as_str()
+        .expect("message")
+        .to_owned();
+    assert!(message.contains("hand-written.xml"), "{message}");
+    assert!(message.contains("from the command line"), "{message}");
+    assert!(
+        !message.contains("on the machine where the MCP server runs"),
+        "stdio runs on the caller's machine: {message}"
+    );
+
+    let advice = advised_command(&message);
+    let canonical_config = fs::canonicalize(&config_path).expect("canonical config");
+    let canonical_work = fs::canonicalize(&other_work).expect("canonical work");
+    assert_eq!(
+        with_canonical_paths(&advice)[1..],
+        [
+            "--config".to_owned(),
+            canonical_config.display().to_string(),
+            "--infobase".to_owned(),
+            "staging".to_owned(),
+            "--workdir".to_owned(),
+            canonical_work.display().to_string(),
+            "pull".to_owned(),
+            "main".to_owned(),
+            "--force".to_owned(),
+        ],
+        "{message}"
+    );
+
+    let (output, rendered) = run_advice_from_elsewhere(&advice, &dir.path().join("elsewhere"));
+    assert!(output.status.success(), "{rendered}");
+    assert!(
+        !hand_written.exists(),
+        "the advice replaced the same directory"
+    );
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    assert!(calls.contains("staging-ib"), "the same base: {calls}");
+    assert_ibcmd_data_path(&calls, &other_work);
+}
+
+/// Секрет в строке соединения, которого загрузчик не отвергает: `Wsp=`, а не `Pwd=`.
+const CONNECTION_SECRET: &str = "SECRETPW";
+
+/// Строка соединения из `--infobase` может нести секрет, и совет её не повторяет: просит
+/// то же значение `--infobase` словами. Команда строки, отказавшая сторожем EDT.
+#[test]
+fn a_command_line_advice_never_repeats_the_connection_string() {
+    let (_dir, config_path, _platform, _edt, _work, base_path, _designer, _edt_calls) =
+        setup_edt_project();
+    git(&base_path, &["init", "-q", "-b", "main", "."]);
+    git(&base_path, &["config", "user.email", "test@example.com"]);
+    git(&base_path, &["config", "user.name", "Test"]);
+    git(&base_path, &["add", "-A"]);
+    git(&base_path, &["commit", "-qm", "committed sources"]);
+    fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
+
+    let config = config_path.display().to_string();
+    let connection = format!("File=/tmp/staging-ib;Wsp={CONNECTION_SECRET}");
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            config.as_str(),
+            "--infobase",
+            connection.as_str(),
+            "--json-message",
+            "pull",
+            "main",
+            "--object",
+            "Catalog:Items",
+        ])
+        .output()
+        .expect("run pull");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(2), "{rendered}");
+    assert!(rendered.contains("hand-written.xml"), "{rendered}");
+    assert!(rendered.contains(" pull main --force`"), "{rendered}");
+    assert!(
+        rendered.contains("with the same `--infobase` value as this command"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains(CONNECTION_SECRET), "{rendered}");
+    assert!(!rendered.contains("staging-ib"), "{rendered}");
+}
+
+/// Сервер MCP по stdio, запущенный со строкой соединения в `--infobase`: совет отказа не
+/// повторяет её, а просит то же значение, с которым запущен сервер.
+#[test]
+fn an_mcp_advice_never_repeats_the_connection_string_of_the_server() {
+    let (_dir, config_path, _binary, _work, base_path, _calls_log) =
+        setup_project_in_a_repository();
+    fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
+
+    let config = config_path.display().to_string();
+    let connection = format!("File=/tmp/staging-ib;Wsp={CONNECTION_SECRET}");
+    let answer = support::mcp::call_tool_started_with(
+        &[
+            "--config",
+            config.as_str(),
+            "--infobase",
+            connection.as_str(),
+        ],
+        "dump_config",
+        json!({ "mode": "FULL" }),
+    );
+    assert!(answer.is_error, "{}", answer.envelope);
+    let rendered = answer.envelope.to_string();
+    assert!(rendered.contains("hand-written.xml"), "{rendered}");
+    assert!(rendered.contains(" pull main --force`"), "{rendered}");
+    assert!(
+        rendered.contains("with the same `--infobase` value the MCP server was started with"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains(CONNECTION_SECRET), "{rendered}");
+    assert!(!rendered.contains("staging-ib"), "{rendered}");
 }

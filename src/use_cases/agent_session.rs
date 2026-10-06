@@ -16,6 +16,7 @@ use crate::platform::result::PlatformCommandResult;
 use serde::{Deserialize, Serialize};
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
+use crate::domain::capability::{SessionEndpoint, SessionMode};
 use crate::platform::agent::{
     self, AgentEndpoint, AgentError, AgentLaunch, AgentSession, AgentSessionRequest,
     HostKeyExpectation, ManagedAgent, WaitPolicy,
@@ -61,6 +62,18 @@ impl AgentHandle {
         }
     }
 
+    /// Режим и адрес, к которому открыта сессия: адрес — тот, к которому подключился
+    /// SSH-клиент, напечатанный из хоста и порта; учётных данных в нём нет.
+    pub(crate) fn endpoint(&self) -> SessionEndpoint {
+        match self {
+            Self::Managed(agent) => session_endpoint(SessionMode::Managed, agent.endpoint()),
+            Self::Attached { session, .. } => {
+                session_endpoint(SessionMode::Attached, session.endpoint())
+            }
+            Self::Gate { session, .. } => session_endpoint(SessionMode::Gate, session.endpoint()),
+        }
+    }
+
     /// Канал обмена с точкой входа. У агента Конфигуратора это его каталог
     /// пользователя из карты `AgentBaseDir`, у шлюза автономного сервера — то, что
     /// объявил конфиг.
@@ -87,6 +100,15 @@ impl AgentHandle {
             Self::Managed(agent) => agent.shutdown(wait),
             Self::Attached { session, .. } | Self::Gate { session, .. } => session.release(wait),
         }
+    }
+}
+
+/// Точка входа для квитанции: адрес печатается из разобранных хоста и порта. Запись с
+/// учётными данными до этого места не доходит — разбор адреса отказывает ей раньше.
+fn session_endpoint(mode: SessionMode, endpoint: &AgentEndpoint) -> SessionEndpoint {
+    SessionEndpoint {
+        mode,
+        address: endpoint.to_string(),
     }
 }
 
@@ -145,7 +167,23 @@ pub(crate) fn transcript_log(config: &AppConfig, name: &str) -> Result<PathBuf, 
 
 /// Открывает точку входа по конфигу: управляемую поднимает, к объявленной подключается.
 /// `v8` — путь к `1cv8` из выбора исполнителя у управляемого агента; у чужого его нет.
+///
+/// Открытая точка входа отмечается в контексте команды: квитанция исполнителя называет
+/// её оттуда, и другого источника адреса у квитанции нет.
 pub(crate) fn connect(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    v8: Option<&Path>,
+    transcript_log: PathBuf,
+    wait: &WaitPolicy,
+) -> Result<AgentHandle, AppError> {
+    let handle = open_handle(config, utilities, v8, transcript_log, wait)?;
+    context.note_session(handle.endpoint());
+    Ok(handle)
+}
+
+fn open_handle(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     v8: Option<&Path>,
@@ -399,7 +437,7 @@ pub(crate) fn with_session(
 ) -> Result<PlatformCommandResult, CommandFailure> {
     let wait = wait_policy(context);
     let mut utilities = PlatformUtilities::from_config(config);
-    let mut handle = connect(config, &mut utilities, v8, log.clone(), &wait)
+    let mut handle = connect(context, config, &mut utilities, v8, log.clone(), &wait)
         .map_err(CommandFailure::without_deferral)?;
     let outcome = handle
         .exchange(config)
@@ -879,6 +917,42 @@ impl GenerationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Адрес квитанции — `host:port` без учётных данных. Запись с `user:pass@` не
+    /// разбирается ни у чужого агента, ни у шлюза, поэтому до адреса не доходит; разобранная
+    /// печатается хостом и портом, IPv6 — в скобках.
+    #[test]
+    fn a_receipt_address_never_carries_credentials() {
+        for record in ["user:secret@127.0.0.1:1543", "agent@gate.example:1543"] {
+            let attached = crate::config::model::DesignerAgentConfig {
+                attach: Some(record.to_owned()),
+                ..Default::default()
+            };
+            assert!(attached.mode().is_err(), "{record} was accepted as attach");
+            let standalone: crate::config::model::StandaloneConfig =
+                serde_yaml::from_str(&format!("gate: '{record}'")).expect("standalone yaml");
+            assert!(
+                standalone.gate_endpoint().is_err(),
+                "{record} was accepted as gate"
+            );
+        }
+
+        for (record, address) in [
+            ("127.0.0.1:1543", "127.0.0.1:1543"),
+            ("Gate.Example:22", "gate.example:22"),
+            ("[::1]:1543", "[::1]:1543"),
+        ] {
+            let (host, port) = crate::config::model::StandaloneConfig {
+                gate: record.to_owned(),
+                host_fingerprint: None,
+                exchange: None,
+            }
+            .gate_endpoint()
+            .expect("gate record");
+            let endpoint = session_endpoint(SessionMode::Gate, &AgentEndpoint { host, port });
+            assert_eq!(endpoint.address, address);
+        }
+    }
 
     #[test]
     fn a_symlinked_dir_is_exposed_under_the_user_dir_and_withdrawn_as_a_link() {

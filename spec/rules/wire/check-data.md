@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.SYNTAX-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/check.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -51,6 +51,11 @@ check:
 имени отвечает под новым. Это же значение попадает в имя файла журнала платформы, поэтому у проверки модулей он
 теперь `syntax_designer-config_*.log`; у ветки EDT в имя входит ещё и набор исходников —
 `syntax_edt_<набор>_*.log`.
+
+**Что изменила версия 6.** Схема квитанции `provider` допускает необязательное поле
+`endpoint` — точку входа сессии агента ([правило](a-session-receipt-names-its-endpoint.md)): тип квитанции
+общий у всех команд. `check` через сессию агента не идёт, и в её ответе поля нет;
+значения на проводе прежние.
 
 ## Пример
 

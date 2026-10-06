@@ -64,7 +64,13 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing artifacts use case"
     );
-    stamp_dispatch(run_artifacts(context, config, args), context.work())
+    stamp_dispatch(
+        crate::use_cases::provider_selection::stamp_session(
+            run_artifacts(context, config, args),
+            context,
+        ),
+        context.work(),
+    )
 }
 
 type ArtifactsExecutionFailure = UseCaseFailure<ArtifactsResult>;
@@ -678,7 +684,7 @@ fn run_external_designer_export(
             ARTIFACTS_BACKUP_PREFIX,
             "failed to publish staged external directory",
             // Путь вывода — место для порождённого, а не для чьей-то работы.
-            crate::use_cases::destruction_guard::DestructionConsent::RunnerOwned,
+            &crate::use_cases::destruction_guard::DestructionConsent::RunnerOwned,
             &[],
         )
         .map_err(|error| {

@@ -32,7 +32,13 @@ pub fn execute(
     config: &AppConfig,
     args: &ConfigureExtensionsRequest,
 ) -> UseCaseResult<ExtensionsResult> {
-    stamp_dispatch(run_configure(context, config, args), context.work())
+    stamp_dispatch(
+        crate::use_cases::provider_selection::stamp_session(
+            run_configure(context, config, args),
+            context,
+        ),
+        context.work(),
+    )
 }
 
 fn run_configure(
