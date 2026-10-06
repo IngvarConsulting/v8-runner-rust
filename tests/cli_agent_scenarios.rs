@@ -334,7 +334,7 @@ fn configuration_export_through_the_agent_handles_working_state_only() {
     assert!(
         payload["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("which only designer exports")),
+            .is_some_and(|message| message.contains("which only designer or ibcmd exports")),
         "{payload}"
     );
     assert_eq!(

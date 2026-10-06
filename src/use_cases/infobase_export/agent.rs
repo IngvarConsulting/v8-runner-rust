@@ -32,7 +32,7 @@ pub(super) fn export_configuration(
 ) -> Result<PlatformCommandResult, CommandFailure> {
     if state == ConfigurationState::Database {
         return Err(CommandFailure::without_deferral(AppError::capability(
-            "the agent exports only the working configuration: it has no command for the database configuration, which only designer exports".to_owned(),
+            "the agent exports only the working configuration: it has no command for the database configuration, which only designer or ibcmd exports".to_owned(),
         )));
     }
     let name = match extension {

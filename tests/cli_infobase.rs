@@ -140,9 +140,8 @@ fn configuration_cfe_dry_run_preserves_extension_intent_without_dispatch() {
             "infobase",
             "configuration",
             "export",
-            // `ibcmd` выгружает рабочее состояние: `--state db` исполняет только Конфигуратор.
             "--state",
-            "working",
+            "database",
             "--extension",
             "SalesAddon",
             "--output",
@@ -971,8 +970,8 @@ fn download_database_configuration(config: &Path, output: &Path, extra: &[&str])
     })
 }
 
-/// `download --state db` без ключа выбирает Конфигуратор: `/DumpDBCfg`, пропущенных нет, а
-/// `ibcmd`, готовый на той же машине, не запускается.
+/// `download --state db` без ключа берёт первого из цепочки — Конфигуратор с `/DumpDBCfg`;
+/// пропущенных нет, `ibcmd` не запускается.
 #[test]
 fn download_state_db_selects_designer_by_default() {
     let (_dir, config, base, designer_calls, ibcmd_calls) = setup_designer_and_ibcmd("");
@@ -992,13 +991,16 @@ fn download_state_db_selects_designer_by_default() {
     assert_eq!(fs::read(&output).expect("published cf"), b"payload");
     let argv = fs::read_to_string(designer_calls).expect("designer calls");
     assert!(argv.contains("/DumpDBCfg"), "{argv}");
-    assert!(!ibcmd_calls.exists(), "ibcmd must not run for --state db");
+    assert!(
+        !ibcmd_calls.exists(),
+        "ibcmd runs only when designer is not ready"
+    );
 }
 
-/// Конфигуратора на машине нет, `ibcmd` готов: `download --state db` его не пробует.
-/// Квитанция называет пропущенным один Конфигуратор, а отказ — его неготовность.
+/// Конфигуратора на машине нет: `download --state db` идёт дальше по цепочке к `ibcmd`
+/// (`config save --db`), квитанция называет пропущенным Конфигуратор.
 #[test]
-fn download_state_db_does_not_fall_back_to_another_executor() {
+fn download_state_db_goes_through_ibcmd_without_designer() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -1012,34 +1014,36 @@ fn download_state_db_does_not_fall_back_to_another_executor() {
 
     let envelope = download_database_configuration(&config, &output, &[]);
 
-    assert_eq!(envelope["ok"], false, "{envelope}");
-    assert_eq!(envelope["error"]["code"], "environment_unavailable");
-    assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(envelope["data"]["state"], "database", "{envelope}");
+    assert_eq!(envelope["data"]["provider"]["selected"], "ibcmd");
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
     let skipped = envelope["data"]["provider"]["skipped"]
         .as_array()
         .expect("skipped providers");
     assert_eq!(skipped.len(), 1, "{skipped:?}");
     assert_eq!(skipped[0]["provider"], "designer");
-    assert!(!calls.exists(), "ibcmd must not run for --state db");
-    assert!(!output.exists());
+    assert_eq!(fs::read(&output).expect("published cf"), b"payload");
+    let argv = fs::read_to_string(calls).expect("calls");
+    assert!(argv.contains("config save"), "{argv}");
+    assert!(
+        argv.split_whitespace().any(|argument| argument == "--db"),
+        "{argv}"
+    );
 }
 
-/// Ключ `providers.download`, назначивший `download --state db` не Конфигуратору, отказывает
-/// при выборе исполнителя: и в превью, и в работе, до запуска чего-либо.
+/// `providers.download: agent` при `--state db` отказывает при выборе исполнителя — и в
+/// превью, и в работе, до запуска платформы. Отказ называет причину и что сделать.
 #[test]
-fn download_state_db_refuses_a_providers_key_naming_another_executor() {
-    for (provider, extra) in [
-        ("ibcmd", &[][..]),
-        ("ibcmd", &["--dry-run"][..]),
-        ("agent", &[][..]),
-    ] {
+fn download_state_db_refuses_the_agent_before_the_platform() {
+    for extra in [&[][..], &["--dry-run"][..]] {
         let (_dir, config, base, designer_calls, ibcmd_calls) =
-            setup_designer_and_ibcmd(&format!("providers:\n  download: {provider}\n"));
+            setup_designer_and_ibcmd("providers:\n  download: agent\n");
         let output = base.join("dist/main.cf");
 
         let envelope = download_database_configuration(&config, &output, extra);
 
-        assert_eq!(envelope["ok"], false, "{provider} {extra:?}: {envelope}");
+        assert_eq!(envelope["ok"], false, "{extra:?}: {envelope}");
         assert_eq!(envelope["error"]["kind"], "capability", "{envelope}");
         assert_eq!(
             envelope["error"]["code"], "capability_unavailable",
@@ -1047,19 +1051,13 @@ fn download_state_db_refuses_a_providers_key_naming_another_executor() {
         );
         assert_eq!(
             envelope["error"]["message"],
-            format!(
-                "download --state db takes the database configuration, which only designer exports: providers.download in v8project.yaml assigns {provider}; remove the key or assign designer"
-            ),
+            "download --state db takes the database configuration, which only designer or ibcmd exports: the agent has no command for it; providers.download in v8project.yaml assigns agent: remove the key or assign designer or ibcmd",
             "{envelope}"
         );
         assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
         assert_eq!(
             envelope["data"]["provider"]["origin"],
             serde_json::json!({"kind": "override", "file": "v8project.yaml"})
-        );
-        assert!(
-            envelope["data"]["provider"].get("skipped").is_none(),
-            "{envelope}"
         );
         assert!(!designer_calls.exists() && !ibcmd_calls.exists());
         assert!(!output.exists());
@@ -1284,7 +1282,7 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
             "configuration",
             "export",
             "--state",
-            "working",
+            "database",
             "--output",
             &output.display().to_string(),
         ])
@@ -1299,8 +1297,7 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
     assert!(argv.contains("--database-server db.example.test"));
     assert!(argv.contains("--database-name demo_data"));
     assert!(argv.contains("config save"));
-    // Конфигурацию базы данных выгружает только Конфигуратор: `ibcmd` берёт рабочую.
-    assert!(!argv.split_whitespace().any(|argument| argument == "--db"));
+    assert!(argv.split_whitespace().any(|argument| argument == "--db"));
 }
 
 #[test]

@@ -974,30 +974,46 @@ fn select_provider(
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 
-/// `download --state db` исполняет только Конфигуратор: конфигурацию базы данных раннер
-/// берёт его `/DumpDBCfg`. Прочих исполнителей цепочки умолчаний не пробуют и в
-/// пропущенных не называют, а ключ `providers.download`, назначивший другого, отказывает
-/// до выбора — исполнителю отказ не достаётся.
+/// Кто выгружает конфигурацию базы данных: Конфигуратор (`/DumpDBCfg`) и `ibcmd`
+/// (`config save --db`). У агента такой команды нет.
+const DATABASE_CONFIGURATION_EXPORTERS: [Provider; 2] = [Provider::Designer, Provider::Ibcmd];
+
+/// План `download --state db`: из цепочки умолчаний остаются Конфигуратор и `ibcmd` в её
+/// порядке, агента в ней не пробуют. Ключ `providers.download: agent` и цель, у которой
+/// в цепочке нет ни Конфигуратора, ни `ibcmd`, отказывают до выбора — до запуска
+/// платформы и до сессии агента.
 fn database_configuration_plan(
     config: &AppConfig,
     plan: ProviderPlan,
 ) -> Result<ProviderPlan, (AppError, ProviderReceipt)> {
-    const EXPORTER: Provider = Provider::Designer;
     let operation = Operation::ConfigurationExport;
-    let refusal = match &plan {
-        ProviderPlan::Override { provider, .. } if *provider == EXPORTER => return Ok(plan),
-        ProviderPlan::Override { provider, file } => format!(
-            "{operation} --state db takes the database configuration, which only {EXPORTER} exports: providers.{operation} in {file} assigns {provider}; remove the key or assign {EXPORTER}"
-        ),
-        ProviderPlan::Default { chain } if chain.contains(&EXPORTER) => {
-            return Ok(ProviderPlan::Default {
-                chain: vec![EXPORTER],
-            })
+    let [designer, ibcmd] = DATABASE_CONFIGURATION_EXPORTERS;
+    let reason = format!(
+        "{operation} --state db takes the database configuration, which only {designer} or {ibcmd} exports: the agent has no command for it"
+    );
+    let refusal = match plan {
+        ProviderPlan::Override { provider, .. }
+            if DATABASE_CONFIGURATION_EXPORTERS.contains(&provider) =>
+        {
+            return Ok(plan)
         }
-        ProviderPlan::Default { .. } => format!(
-            "{operation} --state db takes the database configuration, which only {EXPORTER} exports, and {EXPORTER} serves no {operation} on a {} target",
-            config.target_kind().as_str()
+        ProviderPlan::Override { provider, ref file } => format!(
+            "{reason}; providers.{operation} in {file} assigns {provider}: remove the key or assign {designer} or {ibcmd}"
         ),
+        ProviderPlan::Default { ref chain } => {
+            let exporters = chain
+                .iter()
+                .copied()
+                .filter(|provider| DATABASE_CONFIGURATION_EXPORTERS.contains(provider))
+                .collect::<Vec<_>>();
+            if !exporters.is_empty() {
+                return Ok(ProviderPlan::Default { chain: exporters });
+            }
+            format!(
+                "{reason}; a {} target serves {operation} only through the agent: omit --state db to export the working configuration",
+                config.target_kind().as_str()
+            )
+        }
     };
     let receipt = plan.receipt_for_nobody(Vec::new());
     Err((AppError::capability(refusal), receipt))

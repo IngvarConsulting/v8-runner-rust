@@ -30,7 +30,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `test` | Та же матрица, что и у `push` | По умолчанию запускает `push` |
 | `test --no-push` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без `push` |
 | `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; перед заменой каталога цели раннер спрашивает git, что в нём не восстановить, и найдя незафиксированное, файл вне учёта или в игноре (кроме `ConfigDumpInfo.xml` в корне цели полной выгрузки в формате Конфигуратора — она пишет его заново; у reverse sync EDT и у `convert` исключения нет), отказывает с выходом 2 и называет потери, а `--force` уничтожает их без копии; там, где git не отвечает, поведение прежнее и защиты нет |
-| `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent`; `--state db` — только `designer`; у автономного сервера (`infobase.standalone`) — `agent` через SSH-шлюз, только рабочее состояние | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; конфигурацию базы данных (`--state db`) выгружает только `designer` — `ibcmd` для неё не пробуется, а `providers.download`, назначивший другого, отказывает с `capability_unavailable` до запуска; у `agent` только `working` (`config dump-cfg`), файл пишется в каталог агента и переносится в staging |
+| `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent`; `--state db` — `designer` → `ibcmd`, без `agent`; у автономного сервера (`infobase.standalone`) — `agent` через SSH-шлюз, только рабочее состояние | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; конфигурацию базы данных (`--state db`) выгружают `designer` (`/DumpDBCfg`) и `ibcmd` (`config save --db`), а `providers.download: agent` при ней отказывает с `capability_unavailable` до запуска; у `agent` только `working` (`config dump-cfg`), файл пишется в каталог агента и переносится в staging |
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent`; у автономного сервера (`infobase.standalone`) строки нет | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
 | `upload` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
@@ -631,11 +631,12 @@ v8-runner download [--state db] --extension <NAME> --output <FILE.cfe> [--dry-ru
 - Умолчание — цепочка `designer` → `ibcmd`: runner берёт первого готового до spawn и кладёт
   в квитанцию `provider`, кого пропустил и почему. `providers.download`
   назначает одного исполнителя без отката.
-- `--state db` исполняет только `designer` (`/DumpDBCfg`): `ibcmd` из цепочки не пробуется, и
-  не готов Конфигуратор — команда отказывает. `providers.download` с другим исполнителем при
-  `--state db` отказывает с `capability_unavailable` и в превью, и в работе, до запуска
-  платформы и до сессии агента. У автономного сервера Конфигуратора в цепочке нет, поэтому
-  `--state db` там отказывает тем же кодом; через SSH-шлюз `download` отдаёт основную
+- `--state db` исполняют `designer` (`/DumpDBCfg`) и `ibcmd` (`config save --db`) в порядке
+  цепочки; `providers.download` может назначить любого из них. У агента команды для
+  конфигурации базы данных нет: `providers.download: agent` при `--state db` отказывает с
+  `capability_unavailable` и в превью, и в работе, до запуска платформы и до сессии агента.
+  У автономного сервера в цепочке только агент, поэтому `--state db` там отказывает тем же
+  кодом и советует выгрузить рабочую конфигурацию; через SSH-шлюз `download` отдаёт основную
   конфигурацию в рабочем состоянии (`config dump-cfg`).
 - Переключение допустимо только во время pure preflight; после первого spawn provider не меняется.
 - Публикация идёт через sibling staging и target-specific lock; `published=true` означает, что

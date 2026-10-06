@@ -557,9 +557,9 @@ fn a_download_through_the_gate_exports_the_main_configuration() {
     );
 }
 
-/// `download --state db` шлюзу не адресуется: конфигурацию базы данных выгружает только
-/// Конфигуратор, а у автономного сервера его в цепочке `download` нет. Отказ приходит до
-/// сессии.
+/// `download --state db` шлюзу не адресуется: конфигурацию базы данных выгружают
+/// Конфигуратор и `ibcmd`, а в цепочке `download` автономного сервера только агент. Отказ
+/// приходит до сессии и называет это.
 #[test]
 fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
     let harness = harness();
@@ -583,7 +583,7 @@ fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
     );
     assert_eq!(
         error_message(&payload),
-        "download --state db takes the database configuration, which only designer exports, and designer serves no download on a standalone target",
+        "download --state db takes the database configuration, which only designer or ibcmd exports: the agent has no command for it; a standalone target serves download only through the agent: omit --state db to export the working configuration",
         "{payload}"
     );
     assert_eq!(payload["data"]["provider"]["selected"], Value::Null);
