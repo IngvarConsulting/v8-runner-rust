@@ -82,7 +82,9 @@ flowchart TB
 | [`version_file.rs`](../../src/use_cases/version_file.rs) | Копия файла версий набора под базой; сверка файла в каталоге перед `pull` и `push` ([правило](../rules/use-cases/a-replaced-version-file-gives-way-to-the-runner-copy.md)) и запись после удачи ([правило](../rules/use-cases/the-runner-copy-takes-the-platform-file-after-success.md)); уборка брошенных временных файлов ([правило](../rules/use-cases/a-version-file-replacement-leaves-no-trace.md)); сверка версии формата перед загрузкой ([правило](../rules/use-cases/a-load-from-a-newer-format-is-refused-before-the-platform-starts.md)) |
 | [`interruption.rs`](../../src/use_cases/interruption.rs) | Слова о прерывании и учёт отмен, отложенных критической фазой, — [8.7](08-cross-cutting-concepts.md) |
 | [`progress.rs`](../../src/use_cases/progress.rs) | События живой ленты текстового вывода |
-| [`source_inventory.rs`](../../src/use_cases/source_inventory.rs) | Наборы исходников проекта в порядке обработки (`ordered_by_purpose` решает порядок по назначению); пакеты конфигурации в порядке обхода — [правило](../rules/use-cases/configuration-packages-are-walked-in-the-inventory-order.md) |
+| [`source_inventory.rs`](../../src/use_cases/source_inventory.rs) | Наборы исходников проекта в порядке обработки (`ordered_by_purpose` решает порядок по назначению); пакеты конфигурации в порядке обхода — [правило](../rules/use-cases/configuration-packages-are-walked-in-the-inventory-order.md); каталог, имя и проверка целей пакетов у `make` и `download` без набора; сопоставление наборов с составом базы — [правило](../rules/use-cases/installed-extensions-are-matched-in-one-place.md) |
+| [`installed_extensions.rs`](../../src/use_cases/installed_extensions.rs) | Чтение состава расширений базы исполнителем команды для `pull --all` и `download` без набора |
+| [`set_walk.rs`](../../src/use_cases/set_walk.rs) | Общее у обходов наборов: ответ каждого набора в `sets`, остановка на первом отказе, закрытие ответа обхода |
 | [`tool_extension.rs`](../../src/use_cases/tool_extension.rs) | Расширение-инструмент клиентского MCP |
 
 ### 5.5 `platform`

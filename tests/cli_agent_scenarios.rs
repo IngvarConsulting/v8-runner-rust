@@ -167,7 +167,12 @@ fn make_cf_through_the_agent_publishes_the_package() {
 
     let (code, payload) = run(
         &harness,
-        &["artifacts", "--output", &output.display().to_string()],
+        &[
+            "artifacts",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ],
     );
 
     assert_eq!(code, 0, "{payload}");
@@ -205,7 +210,12 @@ fn a_managed_agent_session_is_named_in_the_receipt() {
 
     let (code, payload) = run(
         &harness,
-        &["artifacts", "--output", &output.display().to_string()],
+        &[
+            "artifacts",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ],
     );
 
     assert_eq!(code, 0, "{payload}");
@@ -231,7 +241,10 @@ fn a_receipt_without_a_session_has_no_endpoint() {
     let output = harness.dir.path().join("dist").join("release.cf");
     let output = output.display().to_string();
 
-    let (code, preview) = run(&harness, &["artifacts", "--output", &output, "--dry-run"]);
+    let (code, preview) = run(
+        &harness,
+        &["artifacts", "main", "--output", &output, "--dry-run"],
+    );
     assert_eq!(code, 0, "{preview}");
     let receipt = &preview["data"]["provider"];
     assert_eq!(receipt["selected"], "agent", "{preview}");
@@ -245,7 +258,7 @@ fn a_receipt_without_a_session_has_no_endpoint() {
         commands(&harness)
     );
 
-    let (code, payload) = run(&harness, &["artifacts", "--output", &output]);
+    let (code, payload) = run(&harness, &["artifacts", "main", "--output", &output]);
     assert_eq!(code, 0, "{payload}");
     assert_eq!(
         payload["data"]["provider"]["endpoint"]["mode"], "managed",
@@ -351,6 +364,7 @@ fn configuration_export_through_the_agent_handles_working_state_only() {
             "infobase",
             "configuration",
             "export",
+            "main",
             "--state",
             "working",
             "--output",
@@ -375,6 +389,7 @@ fn configuration_export_through_the_agent_handles_working_state_only() {
             "infobase",
             "configuration",
             "export",
+            "main",
             "--state",
             "database",
             "--output",

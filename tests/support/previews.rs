@@ -4,7 +4,8 @@
 //! (`tests/contract_previews.rs`), и сверка форм `data` (`tests/contract_command_data.rs`).
 //! Каждая из них сверяет состав с `LEAVES_WITH_PREVIEW` из `src/cli/global_flags_expected.in`,
 //! поэтому лист, получивший превью без строки здесь, роняет обе проверки, а не проходит
-//! мимо одной из них молча (#266, #268).
+//! мимо одной из них молча (#266, #268). У листа бывает несколько строк, когда у него
+//! несколько форм ответа: `make` и `download` с набором и без.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -131,6 +132,8 @@ fn row(arguments: &[&str], leaf: &'static str, command: &'static str, trace: Pat
 pub fn with_preview(dir: &Path) -> Vec<Previewed> {
     let work = dir.join("work");
     let artifact = dir.join("main.cf").display().to_string();
+    // Без набора `make` и `download` пишут каждый пакет в каталог: у листа вторая строка.
+    let packages = dir.join("packages").display().to_string();
     let snapshot = dir.join("main.dt").display().to_string();
     let cloned = dir.join("cloned");
     let platform = dir.join("platform").display().to_string();
@@ -209,7 +212,15 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
         ),
         row(&["dump", "--force"], "pull", "pull", work.clone()),
         row(
-            &["download", "--state", "working", "--output", &artifact],
+            &[
+                "download", "main", "--state", "working", "--output", &artifact,
+            ],
+            "download",
+            "download",
+            work.clone(),
+        ),
+        row(
+            &["download", "--state", "working", "--output", &packages],
             "download",
             "download",
             work.clone(),
@@ -225,6 +236,7 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
                 "infobase",
                 "configuration",
                 "export",
+                "main",
                 "--state",
                 "working",
                 "--output",
@@ -248,7 +260,13 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
         ),
         row(&["convert"], "convert", "convert", work.clone()),
         row(
-            &["make", "--output", &artifact],
+            &["make", "main", "--output", &artifact],
+            "make",
+            "make",
+            work.clone(),
+        ),
+        row(
+            &["make", "--output", &packages],
             "make",
             "make",
             work.clone(),

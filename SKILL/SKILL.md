@@ -126,8 +126,12 @@ v8-runner infobase create
   Append `--dry-run` to preview without platform calls. Apply disables safe mode and unsafe action protection.
 - Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner pull ...` command.
 - Need a CF/CFE package of the state currently stored in the infobase: use
-  `v8-runner download [--state db] --output <file.cf>` (without `--state` the working configuration, `db` the database one);
-  add `--extension <name>` and use `.cfe` for an extension. This is not `make`, which builds
+  `v8-runner download <SET> [--state db] --output <file.cf|file.cfe>` (without `--state` the working configuration, `db` the database one),
+  or `--extension <name>` with a `.cfe`. Without a set and `--extension`, `--output` is a directory: every configuration/extension set
+  goes to `<dir>/<SET>.cf|.cfe`, extension sets missing from the infobase are skipped and listed in `data.not_installed`
+  (`make --output <dir>` likewise builds every set, external ones into `<dir>/<SET>/`). A file path without a set is refused
+  (`error.next` names `<command> <main set> --output <file>.cf`) — except `download` in an infobase-only project
+  (`source-set: []`), which still writes the main configuration to the file. Choose a `<dir>` outside the source-set directories and `workPath`: a package landing on, inside or around them is refused before the platform starts. This is not `make`, which builds
   artifacts from project sources.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.
   A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`),
@@ -220,7 +224,7 @@ v8-runner infobase create
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.
 - `--dry-run` is a global key: it means the same before and after the command. Commands with no
-  preview — `version`, `init`, `tools download`, `test`, `mcp serve` — refuse it
+  preview — `version`, `init`, `tools download`, `test`, `status`, `mcp serve` — refuse it
   with a named reason instead of running.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
   what it would do: `clone`, `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`,

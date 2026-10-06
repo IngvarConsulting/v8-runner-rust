@@ -152,6 +152,7 @@ fn rows(dir: &Path) -> Vec<Dispatching> {
     let fresh = format!("--infobase=File={}", path("fresh"));
     let (made, artifact, exported) = (path("made.cf"), path("main.cf"), path("exported.cf"));
     let (snapshot, dumped) = (path("main.dt"), path("dumped.dt"));
+    let (made_dir, exported_dir) = (path("made"), path("exported"));
     vec![
         given(&["check"], "check"),
         // `clone` проектного файла не читает: адрес, версию и платформу он называет ключами.
@@ -211,7 +212,9 @@ fn rows(dir: &Path) -> Vec<Dispatching> {
         // База образца уже заведена, создавать нечего.
         idle(&["infobase", "create"], "infobase-create"),
         given(&["launch", "thin"], "launch"),
-        given(&["make", "--output", &made], "make"),
+        given(&["make", "main", "--output", &made], "make"),
+        // Без набора `--output` — каталог: каждый набор образца собирается в него.
+        given(&["make", "--output", &made_dir], "make-all"),
         given(&["publish"], "publish"),
         given(&["dump", "--force"], "pull"),
         // Заглушка списка не пишет: чтение состава базы отказывает уже после запуска
@@ -223,8 +226,16 @@ fn rows(dir: &Path) -> Vec<Dispatching> {
         // Формы выгрузки несут признак только в превью: боевой ответ его не называет,
         // хотя работу исполнитель получил.
         given(
-            &["download", "--state", "working", "--output", &exported],
+            &[
+                "download", "main", "--state", "working", "--output", &exported,
+            ],
             "download",
+        ),
+        // Как у `pull --all`: заглушка списка не пишет, и чтение состава базы отказывает уже
+        // после запуска Конфигуратора, отвечая формой обхода.
+        given(
+            &["download", "--state", "working", "--output", &exported_dir],
+            "download-all",
         ),
         given(&["infobase", "dump", "--output", &dumped], "infobase-dump"),
         given(

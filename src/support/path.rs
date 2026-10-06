@@ -324,16 +324,49 @@ pub fn absolute_from_current_dir(path: &Path) -> std::io::Result<PathBuf> {
     Ok(resolve_from(&std::env::current_dir()?, path))
 }
 
+/// Абсолютный путь без `.` и `..`, свёрнутый лексически: файловая система не читается, и
+/// путь может ещё не существовать. `..` у корня остаётся корнем. Так `std::path::absolute`
+/// уже отвечает на Windows; на Unix он `..` сохраняет.
+pub fn lexically_normal_absolute(path: &Path) -> PathBuf {
+    let mut normal = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(normal.components().next_back(), Some(Component::Normal(_))) {
+                    normal.pop();
+                }
+            }
+            other => normal.push(other),
+        }
+    }
+    normal
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         filesystem_object_identity, hashed_lock_path, is_filesystem_root, is_safe_path_segment,
-        nearest_existing_canonical_path, normalize_windows_verbatim_path, resolve_from,
-        stable_path_identity, strip_windows_verbatim_prefix,
+        lexically_normal_absolute, nearest_existing_canonical_path,
+        normalize_windows_verbatim_path, resolve_from, stable_path_identity,
+        strip_windows_verbatim_prefix,
     };
     use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn lexically_normal_absolute_folds_dots_without_reading_the_file_system() {
+        assert_eq!(
+            lexically_normal_absolute(std::path::Path::new("/missing/proj/./a/../../main.cf")),
+            PathBuf::from("/missing/main.cf")
+        );
+        assert_eq!(
+            lexically_normal_absolute(std::path::Path::new("/../out")),
+            PathBuf::from("/out")
+        );
+    }
 
     #[test]
     fn safe_path_segment_rejects_control_characters() {

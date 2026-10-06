@@ -45,10 +45,16 @@ For `format=EDT`, `pull` uses an internal Designer snapshot under `workPath/desi
 Use configuration export when the artifact must reflect state already stored in the infobase:
 
 ```bash
-v8-runner download --output dist/main.cf
-v8-runner download --state db --output dist/main.cf
+v8-runner download main --output dist/main.cf
+v8-runner download --state db --output dist
 v8-runner download --state db --extension Sales --output dist/sales.cfe
 ```
+
+Without a set and `--extension`, `--output` is a directory: the infobase is asked which extensions
+it has, and every configuration/extension set is written as `<dir>/<SET>.cf` / `<dir>/<SET>.cfe`;
+an extension set missing from the infobase is skipped and named in `data.not_installed`. A file
+path without a set is refused with `error.next` naming the set. With `source-set: []` there is
+nothing to walk, and `download --output <file.cf>` takes the main configuration as before.
 
 Append `--dry-run` when an orchestrator needs the selected provider and compact output plan before
 apply. Preview does not create `workPath`, locks, staging/output paths, or a provider process.
@@ -143,12 +149,14 @@ Rules:
 `make` and `artifacts` are the same use case. Prefer `make` in examples unless the user uses the alias.
 
 ```bash
-v8-runner make --output <TARGET>
+v8-runner make --output <DIR>
 v8-runner make <NAME> --output <TARGET>
 v8-runner make --output <TARGET> --extension <NAME>
 ```
 
 Behavior:
+
+- without a set and `--extension`, every set is built into `<DIR>`: `<SET>.cf`, `<SET>.cfe`, and `<SET>/` for external files, in the order configuration, extensions, external processors, reports; the first failure stops the walk; a file path is refused with `error.next` naming the main set;
 
 - main configuration exports to `.cf`;
 - extension export uses `.cfe`;

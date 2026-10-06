@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 mod agent;
+mod all;
+
+pub use self::all::execute_all;
 use tracing::debug;
 
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
@@ -927,7 +930,10 @@ fn validate_output_path(args: &ArtifactsRequest) -> Result<PathBuf, AppError> {
         }
         ArtifactsModeRequest::ExternalDataProcessorEpf
         | ArtifactsModeRequest::ExternalReportErf => {
-            if output_path.extension().is_some() && !output_path.is_dir() {
+            if !args.output_is_directory
+                && output_path.extension().is_some()
+                && !output_path.is_dir()
+            {
                 return Err(AppError::Validation(
                     "external artifacts output must be a directory".to_owned(),
                 ));
@@ -1435,6 +1441,7 @@ mod tests {
     fn cf_request(output: &str) -> ArtifactsRequest {
         ArtifactsRequest {
             dry_run: false,
+            output_is_directory: false,
             execution: ArtifactsRequest::default_execution(ArtifactsModeRequest::ConfigurationCf),
             mode: ArtifactsModeRequest::ConfigurationCf,
             output_path: output.to_owned(),
@@ -1450,6 +1457,7 @@ mod tests {
     ) -> ArtifactsRequest {
         ArtifactsRequest {
             dry_run: false,
+            output_is_directory: false,
             execution: ArtifactsRequest::default_execution(mode),
             mode,
             output_path: output.to_owned(),
@@ -1501,6 +1509,7 @@ mod tests {
         config.source_sets[1].name = "SalesAddon".to_owned();
         let request = ArtifactsRequest {
             dry_run: false,
+            output_is_directory: false,
             execution: ArtifactsRequest::default_execution(ArtifactsModeRequest::ExtensionCfe),
             mode: ArtifactsModeRequest::ExtensionCfe,
             output_path: "dist/sales.cfe".to_owned(),
@@ -1526,6 +1535,7 @@ mod tests {
         );
         let request = ArtifactsRequest {
             dry_run: false,
+            output_is_directory: false,
             execution: ArtifactsRequest::default_execution(ArtifactsModeRequest::ExtensionCfe),
             mode: ArtifactsModeRequest::ExtensionCfe,
             output_path: "dist/sales.cfe".to_owned(),

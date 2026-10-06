@@ -156,10 +156,13 @@ v8-runner upload --path <FILE> --extension <NAME>
 Export release artifacts or publish external artifacts:
 
 ```bash
-v8-runner make --output <TARGET>
+v8-runner make --output <DIR>
 v8-runner make <NAME> --output <TARGET>
 v8-runner make --output <TARGET> --extension <NAME>
 ```
+
+Without a set and `--extension`, `make --output <DIR>` builds every set into `<DIR>` (`<SET>.cf`,
+`<SET>.cfe`, `<SET>/` for external files); a file path there is refused.
 
 `artifacts` is a visible alias for `make`.
 

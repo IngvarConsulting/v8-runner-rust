@@ -105,6 +105,8 @@ fn every_leaf_taking_the_lock_is_exercised_here() {
         .map(|(leaf, ..)| leaf)
         .collect();
     covered.sort_unstable();
+    // Лист с несколькими формами ответа стоит в таблице превью несколькими строками.
+    covered.dedup();
     let mut expected: Vec<&str> = LEAVES_WITH_PREVIEW
         .iter()
         .chain(LEAVES_WITHOUT_PREVIEW)

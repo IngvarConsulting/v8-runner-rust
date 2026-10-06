@@ -920,8 +920,9 @@ v8-runner convert [<SET>] [--output <DIR>] [--dry-run] [--force]
 ### `download`
 
 ```bash
-v8-runner download [<SET>] [--state db] --output <FILE.cf|FILE.cfe> [--dry-run]
+v8-runner download <SET> [--state db] --output <FILE.cf|FILE.cfe> [--dry-run]
 v8-runner download [--state db] --extension <NAME> --output <FILE.cfe> [--dry-run]
+v8-runner download [--state db] --output <DIR> [--dry-run]
 ```
 
 - Сохраняет состояние конфигурации из ИБ, а не собирает пакет из project sources.
@@ -932,8 +933,22 @@ v8-runner download [--state db] --extension <NAME> --output <FILE.cfe> [--dry-ru
   требует `.cf`, набор расширения — расширение с именем набора и требует `.cfe`. Набор внешних
   файлов и значение, которое набором не является, — validation error до запуска платформы.
 - `--extension` называет расширение по имени в ИБ, без набора; вместе с позиционным набором не
-  принимается. Без набора и `--extension` экспортирует основную конфигурацию и требует `.cf`;
-  сохранение всех наборов без аргумента пока не сделано — [#364](https://github.com/IngvarConsulting/v8-runner-rust/issues/364).
+  принимается.
+- Без набора и `--extension` `--output` — каталог (от `basePath`): команда спрашивает базу о
+  расширениях тем же вызовом, что `pull --all`, и выгружает пакеты конфигурации в порядке
+  инвентаря — основная конфигурация в `<DIR>/<SET>.cf`, затем каждый набор расширения, чьё
+  расширение есть в базе, в `<DIR>/<SET>.cfe`. Набор расширения, которого в базе нет, не
+  выгружается и назван в `data.not_installed`; наборы внешних файлов не берутся. Набор,
+  исходники которого называют другое установленное расширение, — отказ до выгрузки, как у
+  `pull --all` (#218). Отказ набора останавливает обход. `data.output` — разрешённый каталог. Ответ — форма `CTR.WIRE.DOWNLOAD-ALL-DATA`: `sets[]` формы
+  `download <SET>`, `not_installed`, у превью — `if_installed` (превью базу не читает и
+  выгружает план только набору конфигурации).
+- **Несовместимо с 0.12.0:** путь к файлу без набора (`download --output main.cf`) больше не
+  выгружает основную конфигурацию, а отказывает до платформы родом `validation`; `next`
+  называет `download <основной набор> --output main.cf`.
+- Проект без наборов конфигурации и расширений (`source-set: []`, только база) обходить
+  нечего: там `download --output <FILE.cf>` без набора, как прежде, выгружает основную
+  конфигурацию в файл.
 - Пока набор не разрешён (настройки не загрузились или набора нет), `subject` в ответе об
   отказе следует суффиксу `--output`: `.cfe` — расширение с именем набора, иначе основная
   конфигурация.
@@ -1072,16 +1087,28 @@ v8-runner upload <FILE> [--mode <load|combine>] [--settings <FILE>] [--extension
 ### `make` / `artifacts`
 
 ```bash
-v8-runner make [<SET>] --output <TARGET> [--extension <NAME>] [--dry-run]
+v8-runner make <SET> --output <TARGET> [--extension <NAME>] [--dry-run]
+v8-runner make --extension <NAME> --output <FILE.cfe> [--dry-run]
+v8-runner make --output <DIR> [--dry-run]
 v8-runner artifacts [<SET>] --output <TARGET> [--extension <NAME>] [--dry-run]
 ```
 
 - Это один use case с двумя CLI names.
 - Позиционный аргумент — набор исходников; набор расширения собирает расширение с именем
   набора, `--extension` при наборе только сверяется с ним. Значение, которое набором не
-  является, — validation error. Прежний ключ `--source-set` принимается скрыто. Без набора,
-  как и прежде, собирается основная конфигурация; сборка всех наборов без аргумента пока не
-  сделана — [#364](https://github.com/IngvarConsulting/v8-runner-rust/issues/364).
+  является, — validation error. Прежний ключ `--source-set` принимается скрыто.
+- Без набора и `--extension` `--output` — каталог: собирается каждый набор проекта в порядке
+  основная конфигурация, расширения, внешние обработки, внешние отчёты — в `<DIR>/<SET>.cf`,
+  `<DIR>/<SET>.cfe` и каталог `<DIR>/<SET>` для внешних файлов (точка в имени набора суффиксом
+  не становится). Отказ набора останавливает обход. Ответ — форма `CTR.WIRE.MAKE-ALL-DATA`:
+  `sets[]` формы `make <SET>`, `output_path` — каталог, разрешённый от текущего каталога.
+- У обоих обходов до работы: пакет, который совпал бы с каталогом набора или `workPath`, лёг
+  бы внутрь него или вместил его, — отказ родом `validation` (`make --output src` при наборе
+  `src/tools` заменил бы исходники); так же отказывают наборы, чьи имена совпадают без
+  регистра, и набор с именем устройства Windows.
+- **Несовместимо с 0.12.0:** `make --output main.cf` без набора больше не собирает основную
+  конфигурацию, а отказывает до платформы родом `validation`; `next` называет
+  `make <основной набор> --output main.cf`.
 - `.cf` используется для основной конфигурации.
 - `.cfe` используется для extension export.
 - Каталог output используется для external `.epf` / `.erf` publication.

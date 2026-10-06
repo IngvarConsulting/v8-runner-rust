@@ -173,10 +173,17 @@ v8-runner status --all     # каждая объявленная база
 ### Спланируйте или выгрузите состояние ИБ:
 
 ```bash
-v8-runner download --output dist/main.cf --dry-run
-v8-runner download --state db --output dist/main.cf --dry-run
+v8-runner download main --output dist/main.cf --dry-run
+v8-runner download --state db --output dist --dry-run
 v8-runner infobase dump --output dist/base.dt --dry-run
 ```
+
+Без набора `make` и `download` пишут пакет каждого набора в каталог `--output`:
+`<каталог>/<набор>.cf`, `<набор>.cfe`, у `make` — ещё каталог `<набор>` внешних файлов;
+`download` берёт только расширения, которые есть в базе. **Несовместимо с 0.12.0:** путь к
+файлу без набора (`make --output main.cf`) теперь отказ с советом `make main --output main.cf`;
+исключение — проект только с базой (`source-set: []`), где `download --output main.cf`
+выгружает основную конфигурацию, как прежде.
 
 Позиционный аргумент `push`, `pull`, `make`, `download` и `convert` — набор исходников
 (`v8-runner push my-ext`), никогда не база: базу называет `--infobase`. Пакет `.cf`/`.cfe`

@@ -85,7 +85,10 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
         (vec!["build", "--dry-run"], "designer"),
         (vec!["dump", "--force", "--dry-run"], "designer"),
         (vec!["infobase", "create", "--dry-run"], "designer"),
-        (vec!["make", "--output", &artifact, "--dry-run"], "designer"),
+        (
+            vec!["make", "main", "--output", &artifact, "--dry-run"],
+            "designer",
+        ),
         (vec!["load", "--path", &artifact, "--dry-run"], "designer"),
         (
             vec!["syntax", "designer-config", "--thin-client"],

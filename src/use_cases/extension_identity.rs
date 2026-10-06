@@ -13,6 +13,13 @@ pub fn platform_extension_name(source_set: &SourceSetConfig) -> &str {
     source_set.name.as_str()
 }
 
+/// Ключ, по которому имя расширения сравнивается с другим: 1С регистр в именах не
+/// различает, поэтому `old` в проекте — то же расширение, что `Old` в базе. Одно правило на
+/// все сопоставления набора с составом базы (`pull --all`, `download` без набора).
+pub fn extension_name_key(name: &str) -> String {
+    name.to_lowercase()
+}
+
 /// Имя расширения, которое называют исходники набора: `Name` в `Configuration.xml`
 /// (у EDT — в `src/Configuration/Configuration.mdo`); `None`, пока описания нет.
 ///

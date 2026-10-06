@@ -189,13 +189,24 @@ fn download_state_db_takes_the_database_configuration() {
 
     let preview = envelope(&run(
         &project,
-        &["download", "--state", "db", "--output", &cf, "--dry-run"],
+        &[
+            "download",
+            "main",
+            "--state",
+            "db",
+            "--output",
+            &cf,
+            "--dry-run",
+        ],
     ));
     assert_eq!(preview["ok"], true, "{preview}");
     assert_eq!(preview["data"]["state"], "database", "{preview}");
     assert_eq!(preview["data"]["subject"]["kind"], "main", "{preview}");
 
-    let working = envelope(&run(&project, &["download", "--output", &cf, "--dry-run"]));
+    let working = envelope(&run(
+        &project,
+        &["download", "main", "--output", &cf, "--dry-run"],
+    ));
     assert_eq!(working["ok"], true, "{working}");
     assert_eq!(working["data"]["state"], "working", "{working}");
 }
@@ -248,7 +259,15 @@ fn download_accepts_the_hidden_state_values_and_help_hides_them() {
     for value in ["working", "database"] {
         let preview = envelope(&run(
             &project,
-            &["download", "--state", value, "--output", &cf, "--dry-run"],
+            &[
+                "download",
+                "main",
+                "--state",
+                value,
+                "--output",
+                &cf,
+                "--dry-run",
+            ],
         ));
         assert_eq!(preview["ok"], true, "--state {value}: {preview}");
         assert_eq!(

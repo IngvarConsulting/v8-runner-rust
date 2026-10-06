@@ -170,8 +170,15 @@ pub fn run() -> i32 {
             return error.exit_code();
         }
     };
+    // `download` без набора обходит пакеты проекта и отвечает своей формой: его ведёт общий
+    // путь команд, а не подготовка одной выгрузки.
+    let download_all = match &cli.command {
+        Command::Infobase(args) => execute::downloads_every_package(args, &config),
+        _ => None,
+    };
+    let downloads_all = download_all.is_some();
     let mut prepared_infobase = match &cli.command {
-        Command::Infobase(args) => {
+        Command::Infobase(args) if !downloads_all => {
             match execute::prepare_infobase_cli_command(&config, args, &presenter, cli.dry_run) {
                 Ok(prepared) => Some(prepared),
                 Err(error) => return error.exit_code(),
@@ -179,7 +186,7 @@ pub fn run() -> i32 {
         }
         _ => None,
     };
-    if let Command::Infobase(_) = &cli.command {
+    if let (Command::Infobase(_), false) = (&cli.command, downloads_all) {
         if cli.dry_run {
             return match execute::preview_prepared_infobase_command(
                 &config,
@@ -204,7 +211,7 @@ pub fn run() -> i32 {
     };
 
     let level = cli.log_level.as_deref().unwrap_or("info");
-    let is_infobase_command = matches!(&cli.command, Command::Infobase(_));
+    let is_infobase_command = matches!(&cli.command, Command::Infobase(_)) && !downloads_all;
     let logging_result = if is_infobase_command {
         crate::support::logging::init_action_logging_deferred(
             level,
@@ -271,14 +278,23 @@ pub fn run() -> i32 {
             cli.clean_before_execution,
             cli.dry_run,
         ),
-        Command::Infobase(_) => execute::execute_prepared_infobase_command(
-            &config,
-            prepared_infobase
-                .take()
-                .expect("infobase command was prepared before action logging"),
-            &presenter,
-            cli.clean_before_execution,
-        ),
+        Command::Infobase(_) => match download_all {
+            Some(export) => execute::execute_download_all_command(
+                &config,
+                export,
+                &presenter,
+                cli.clean_before_execution,
+                cli.dry_run,
+            ),
+            None => execute::execute_prepared_infobase_command(
+                &config,
+                prepared_infobase
+                    .take()
+                    .expect("infobase command was prepared before action logging"),
+                &presenter,
+                cli.clean_before_execution,
+            ),
+        },
         Command::Mcp(_) => unreachable!("mcp commands are handled before CLI presenter setup"),
     };
 

@@ -52,6 +52,7 @@ fn artifacts_dry_run_plans_the_package_without_building_it() {
             &config_path.display().to_string(),
             "--json-message",
             "artifacts",
+            "main",
             "--output",
             &output_path.display().to_string(),
             "--dry-run",
@@ -92,6 +93,7 @@ fn artifacts_text_success_keeps_output_artifact_visible() {
             &config_path.display().to_string(),
             "--no-color",
             "artifacts",
+            "main",
             "--output",
             &output_path.display().to_string(),
         ])
@@ -119,6 +121,7 @@ fn artifacts_text_failure_surfaces_error_and_diagnostic_path() {
             &config_path.display().to_string(),
             "--no-color",
             "artifacts",
+            "main",
             "--output",
             &output_path.display().to_string(),
         ])
