@@ -248,7 +248,7 @@ jobs:
             and for each archive also to the path and SHA-256 of the binary inside it.
             All archives and the manifest have GitHub build attestations.
             Starting with v0.7.0, the consolidated manifest replaces per-asset .sha256 and .provenance.json sidecars.
-            Releases of the 0.11 line (up to v0.11.4) also carried uncompressed binaries named v8-runner-darwin-arm64,
+            Up to v0.11.4 the release also carried uncompressed binaries named v8-runner-darwin-arm64,
             v8-runner-linux-x64 and v8-runner-win-x64.exe; they were byte-for-byte the archived binary and are gone.
           files: |
             dist/*
