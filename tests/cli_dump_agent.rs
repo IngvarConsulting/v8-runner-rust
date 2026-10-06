@@ -438,6 +438,27 @@ fn an_attached_agent_is_used_without_launching_or_stopping_anything() {
     );
 }
 
+/// Квитанция чужого агента называет адрес из `attach` — хост и порт, к которым раннер
+/// подключился, без учётных данных.
+#[test]
+fn an_attached_agent_session_is_named_in_the_receipt() {
+    let harness = harness(false, Some(true), true);
+
+    let (code, payload) = run_dump(&harness, &["--force"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let receipt = &payload["data"]["provider"];
+    assert_eq!(
+        receipt["endpoint"],
+        serde_json::json!({"mode": "attached", "address": format!("127.0.0.1:{}", harness.port)}),
+        "{payload}"
+    );
+    assert!(
+        !receipt.to_string().contains(AGENT_PASSWORD),
+        "the receipt carries no credentials: {receipt}"
+    );
+}
+
 /// Чужой агент, которому команда не дала ни одной команды запроса: сессия открыта, соединение
 /// с базой закрыто служебной командой, а работы исполнитель не получил. Закрытие чужого
 /// агента снимает отметку работы само — как и завершение управляемого.

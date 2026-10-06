@@ -59,8 +59,22 @@ impl PreparedTransferProvider {
     }
 }
 
+/// Квитанция ответа называет точку входа сессии агента, если исполнение шло через неё.
 #[allow(clippy::result_large_err)] // Failure payload preserves the typed AI-facing result.
 pub fn execute_configuration_export(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &ExportConfigurationPackageRequest,
+    prepared: &PreparedTransferProvider,
+) -> UseCaseResult<ExportConfigurationPackageResult> {
+    crate::use_cases::provider_selection::stamp_session(
+        run_configuration_export(context, config, request, prepared),
+        context,
+    )
+}
+
+#[allow(clippy::result_large_err)] // Failure payload preserves the typed AI-facing result.
+fn run_configuration_export(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportConfigurationPackageRequest,
@@ -246,8 +260,22 @@ pub fn execute_configuration_export(
     Ok(result)
 }
 
+/// Квитанция ответа называет точку входа сессии агента, если исполнение шло через неё.
 #[allow(clippy::result_large_err)] // Failure payload preserves the typed AI-facing result.
 pub fn execute_infobase_snapshot(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &ExportInfobaseSnapshotRequest,
+    prepared: &PreparedTransferProvider,
+) -> UseCaseResult<ExportInfobaseSnapshotResult> {
+    crate::use_cases::provider_selection::stamp_session(
+        run_infobase_snapshot(context, config, request, prepared),
+        context,
+    )
+}
+
+#[allow(clippy::result_large_err)] // Failure payload preserves the typed AI-facing result.
+fn run_infobase_snapshot(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportInfobaseSnapshotRequest,
@@ -535,7 +563,23 @@ pub fn preview_infobase_restore(
 /// There is no staging step here, unlike an export: the provider writes straight into
 /// the infobase, so the target mode checked during provider selection is the only
 /// protection the caller gets, and it is checked again after the workspace lock.
+///
+/// Квитанция ответа называет точку входа сессии агента, если исполнение шло через неё.
+#[allow(clippy::result_large_err)] // Failure payload preserves the typed AI-facing result.
 pub fn execute_infobase_restore(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &RestoreInfobaseSnapshotRequest,
+    prepared: &PreparedTransferProvider,
+) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
+    crate::use_cases::provider_selection::stamp_session(
+        run_infobase_restore(context, config, request, prepared),
+        context,
+    )
+}
+
+#[allow(clippy::result_large_err)] // Failure payload preserves the typed AI-facing result.
+fn run_infobase_restore(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &RestoreInfobaseSnapshotRequest,

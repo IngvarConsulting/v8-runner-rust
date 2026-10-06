@@ -61,6 +61,7 @@ impl AgentLoader {
                 TimelineStageStatus::Running,
             );
             let handle = connect(
+                context,
                 config,
                 &mut self.utilities,
                 self.location.as_ref().map(|found| found.path.as_path()),

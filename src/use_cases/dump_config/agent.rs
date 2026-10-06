@@ -33,6 +33,7 @@ pub(super) fn run_dump_agent(
 
     log_live_stage("dump: agent", "[агент] opening the Designer agent session");
     let mut handle = connect(
+        context,
         config,
         utilities,
         location.map(|found| found.path.as_path()),
