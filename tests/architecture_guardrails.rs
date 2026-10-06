@@ -266,6 +266,10 @@ fn the_lock_guard_tells_locked_dispatches_from_unlocked_ones() {
 /// больше никто не пользуется, валит проверку.
 const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     (
+        "crate::use_cases::transport::preview_boundary",
+        "превью замков не берёт: метку владельца оно читает без замка и ничего в неё не пишет",
+    ),
+    (
         "crate::use_cases::config_init::execute",
         "`init` пишет описание проекта, в `workPath` ничего",
     ),
@@ -2108,6 +2112,79 @@ fn a_host_port_record_is_read_in_one_place() {
         "stale KEY_VALUE_LINE_READERS entries — the files no longer split a line by a colon, \
          remove them from the allowlist:\n{}",
         stale.join("\n")
+    );
+}
+
+/// Чья файловая база, проверяет одна точка — граница команды, сразу за замком базы.
+///
+/// Корень проблемы, от которого страж бережёт: команда, открывающая файловую базу мимо
+/// границы или с проверкой владельца, написанной заново в сценарии, на базе другой рабочей
+/// копии работала бы без отказа, а второй читатель метки разошёлся бы с её формой. Владелец
+/// метки один — `use_cases::infobase_owner`; зовёт его только `use_cases::transport`, в
+/// функции `acquire` — после замков `workPath` и базы, и в границе превью. Что каждый
+/// сценарий уходит в работу через эту границу, держит
+/// `every_scenario_is_dispatched_under_the_workspace_lock`.
+///
+/// Под другим именем дефект узнаётся по тому, что ему нужно: замок базы, форма метки или
+/// имя её файла вне своих владельцев.
+#[test]
+fn the_owner_of_a_file_base_is_checked_in_one_place() {
+    let boundary = repo_path("src/use_cases/transport.rs");
+    let owner = repo_path("src/use_cases/infobase_owner.rs");
+    let lock = repo_path("src/use_cases/infobase_lock.rs");
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src")) {
+        let relative = file
+            .strip_prefix(repo_path(""))
+            .expect("inside the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = without_doc_comments(&production_source(&file));
+        if file != boundary && file != owner && source.contains("check_infobase_owner") {
+            offenders.push(format!("{relative}: checks the owner outside the boundary"));
+        }
+        if file != boundary && file != lock && source.contains("acquire_infobase_lock") {
+            offenders.push(format!(
+                "{relative}: takes the base lock outside the boundary"
+            ));
+        }
+        if file != owner
+            && ["OwnerMarker", "OwnerRecord", "owners.json"]
+                .iter()
+                .any(|marker| source.contains(marker))
+        {
+            offenders.push(format!("{relative}: reads or writes the owner marker"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the owner of a file infobase is checked only at the command boundary, by \
+         use_cases::infobase_owner:\n{}",
+        offenders.join("\n")
+    );
+
+    let acquire = free_function_tokens(&boundary, "acquire");
+    let order = [
+        "acquire_workspace_lock(",
+        "acquire_infobase_lock(",
+        "check_infobase_owner(",
+    ]
+    .map(|call| {
+        acquire
+            .find(call)
+            .unwrap_or_else(|| panic!("the boundary's acquire calls {call}"))
+    });
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "the owner is checked after the workspace lock and the base lock: {acquire}"
+    );
+    assert!(
+        acquire.contains("OwnerCheck::Run"),
+        "the boundary's run records the copy"
+    );
+    assert!(
+        free_function_tokens(&boundary, "preview_boundary").contains("OwnerCheck::Preview"),
+        "a preview reads the marker without recording"
     );
 }
 

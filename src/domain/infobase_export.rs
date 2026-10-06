@@ -16,6 +16,7 @@ pub enum InfobaseTransferPhase {
     WorkspaceLock,
     WorkspacePreparation,
     InfobaseLock,
+    InfobaseOwner,
     ResolveTarget,
     TargetLock,
     OrphanCleanup,
@@ -36,6 +37,7 @@ impl InfobaseTransferPhase {
             Self::WorkspaceLock => "workspace lock",
             Self::WorkspacePreparation => "workspace preparation",
             Self::InfobaseLock => "infobase lock",
+            Self::InfobaseOwner => "infobase owner",
             Self::ResolveTarget => "resolve target",
             Self::TargetLock => "target lock",
             Self::OrphanCleanup => "orphan cleanup",
@@ -60,6 +62,7 @@ impl InfobaseTransferPhase {
             | Self::WorkspaceLock
             | Self::WorkspacePreparation
             | Self::InfobaseLock
+            | Self::InfobaseOwner
             | Self::ResolveTarget
             | Self::TargetLock
             | Self::OrphanCleanup
@@ -80,6 +83,7 @@ impl InfobaseTransferPhase {
             | Self::OrphanCleanup
             | Self::PrepareStaging => ExecutionStepKind::PrepareWorkspace,
             Self::InfobaseLock
+            | Self::InfobaseOwner
             | Self::ResolveTarget
             | Self::TargetLock
             | Self::PublishTargetRevalidation => ExecutionStepKind::ResolveTarget,

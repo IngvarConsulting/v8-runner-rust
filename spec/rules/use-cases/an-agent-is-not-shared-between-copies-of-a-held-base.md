@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.AN-AGENT-IS-NOT-SHARED-BETWEEN-COPIES-OF-A-HELD-BASE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_build_agent.rs::a_managed_build_loads_and_updates_in_one_session_and_records_the_generation
+  - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner
 ---
 
 # Агент не делится между рабочими копиями базы, у которой есть владелец

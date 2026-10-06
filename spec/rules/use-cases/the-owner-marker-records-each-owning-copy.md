@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.THE-OWNER-MARKER-RECORDS-EACH-OWNING-COPY
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::a_base_without_a_marker_is_taken_and_the_answer_says_so
+  - src/use_cases/infobase_owner.rs::a_written_marker_passes_its_schema
 ---
 
 # Метка называет каждую копию-владельца

@@ -142,6 +142,16 @@ v8-runner infobase create
   If the lock cannot be taken for another reason (the directory next to the base is read-only),
   a writing command refuses with the directory and the reason, and a reading one (`download`,
   `infobase dump`, `make`, `extensions list`) goes on with an `infobase lock …` warning.
+- A development file infobase is held by one working copy, recorded in the owner marker
+  `.<dir>.v8-runner.owners.json` next to the base directory. A writing command on a base held by
+  another live copy answers `error.code: infobase_held` (kind `workspace`, step `infobase owner`,
+  exit 3; MCP: `runtime_failure`) — retrying does not help. Give this copy its own base:
+  `error.next` is `infobase create` after pointing `infobases.origin` in `v8project.local.yaml` at
+  a new path; to free the base, remove it from the other copy's local layer (a copy on another
+  machine: delete its record from the marker by hand). A gone owner
+  (directory deleted or no longer declaring the base) is replaced automatically and named in
+  `warnings`. `--infobase <connection string>` obeys the owner but never becomes one. An
+  unreadable marker or one of an unknown version stops a write with `runtime_failure`.
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps

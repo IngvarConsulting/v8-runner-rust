@@ -15,7 +15,9 @@
 3. Журнал действий открывается при `--json-message` или заданном `V8TR_ACTION_LOG_FILE`;
    Ctrl+C и SIGTERM становятся отменой — [8.7](08-cross-cutting-concepts.md).
 4. Адаптер собирает запрос. Превью идёт без замка, иначе берётся замок `workPath`, а у
-   команды, которая открывает файловую базу, за ним — замок базы — [8.3](08-cross-cutting-concepts.md).
+   команды, которая открывает файловую базу, за ним — замок базы и под ним проверка, чья
+   база, — [8.3](08-cross-cutting-concepts.md). Превью читает метку владельца без замка и
+   называет отказ заранее.
 5. Сценарий получает `ExecutionContext` и возвращает результат или ошибку; адаптер
    печатает текст или конверт — [8.6](08-cross-cutting-concepts.md).
 
@@ -40,6 +42,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 Правила: [замок берёт адаптер](../rules/cli/lock-boundary-is-the-adapter.md),
 [превью без замка](../rules/cli/preview-takes-no-lock.md),
 [замок базы после замка `workPath`](../rules/cli/the-base-lock-follows-the-workpath-lock.md),
+[базу держит одна рабочая копия](../rules/use-cases/a-development-base-is-held-by-one-working-copy.md),
+[сначала владелец, затем память и поколение](../rules/use-cases/ownership-is-checked-before-memory-and-generation.md),
 [допуск общий для обоих транспортов](../rules/mcp/admission-is-shared-by-both-transports.md),
 [недопущенный вызов — ошибка протокола](../rules/mcp/an-unadmitted-call-is-a-protocol-error.md),
 [перегрузка и запрос без сессии](../rules/mcp/overload-answers-503-and-stateless-post-400.md),
