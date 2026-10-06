@@ -5,6 +5,7 @@ check:
   - tests/cli_infobase_owner.rs::an_owner_on_another_machine_is_never_replaced
   - src/use_cases/transport.rs::a_base_of_another_copy_stops_the_dispatch_before_the_scenario
   - tests/architecture_guardrails.rs::the_owner_of_a_file_base_is_checked_in_one_place
+  - tests/cli_infobase_owner.rs::a_held_refusal_on_a_shared_base_leads_to_an_own_base
 ---
 
 # Базу для разработки держит одна рабочая копия
