@@ -14,7 +14,8 @@
    `restore` здесь же выбирают исполнителя, и их превью возвращается до замка.
 3. Журнал действий открывается при `--json-message` или заданном `V8TR_ACTION_LOG_FILE`;
    Ctrl+C и SIGTERM становятся отменой — [8.7](08-cross-cutting-concepts.md).
-4. Адаптер собирает запрос. Превью идёт без замка, иначе берётся замок `workPath` — [8.3](08-cross-cutting-concepts.md).
+4. Адаптер собирает запрос. Превью идёт без замка, иначе берётся замок `workPath`, а у
+   команды, которая открывает файловую базу, за ним — замок базы — [8.3](08-cross-cutting-concepts.md).
 5. Сценарий получает `ExecutionContext` и возвращает результат или ошибку; адаптер
    печатает текст или конверт — [8.6](08-cross-cutting-concepts.md).
 
@@ -32,12 +33,13 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 2. Допуск: один семафор на сервер. Отмена или истечение ожидания в очереди — ошибка
    протокола, инструмент не запускался.
 3. [`service.rs`](../../src/mcp/service.rs) переводит вход в запрос сценария;
-   [`port.rs`](../../src/mcp/port.rs) берёт тот же замок `workPath`; сценарий идёт в
-   отдельном потоке.
+   [`port.rs`](../../src/mcp/port.rs) берёт те же замки `workPath` и базы; сценарий идёт
+   в отдельном потоке.
 4. Ответ — тот же конверт в `structured_content`; отказ сценария помечен `isError`.
 
 Правила: [замок берёт адаптер](../rules/cli/lock-boundary-is-the-adapter.md),
 [превью без замка](../rules/cli/preview-takes-no-lock.md),
+[замок базы после замка `workPath`](../rules/cli/the-base-lock-follows-the-workpath-lock.md),
 [допуск общий для обоих транспортов](../rules/mcp/admission-is-shared-by-both-transports.md),
 [недопущенный вызов — ошибка протокола](../rules/mcp/an-unadmitted-call-is-a-protocol-error.md),
 [перегрузка и запрос без сессии](../rules/mcp/overload-answers-503-and-stateless-post-400.md),

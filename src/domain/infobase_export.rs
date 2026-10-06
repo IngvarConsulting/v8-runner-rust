@@ -15,6 +15,7 @@ pub enum InfobaseTransferPhase {
     ProviderSelection,
     WorkspaceLock,
     WorkspacePreparation,
+    InfobaseLock,
     ResolveTarget,
     TargetLock,
     OrphanCleanup,
@@ -34,6 +35,7 @@ impl InfobaseTransferPhase {
             Self::ProviderSelection => "provider selection",
             Self::WorkspaceLock => "workspace lock",
             Self::WorkspacePreparation => "workspace preparation",
+            Self::InfobaseLock => "infobase lock",
             Self::ResolveTarget => "resolve target",
             Self::TargetLock => "target lock",
             Self::OrphanCleanup => "orphan cleanup",
@@ -57,6 +59,7 @@ impl InfobaseTransferPhase {
             | Self::ProviderSelection
             | Self::WorkspaceLock
             | Self::WorkspacePreparation
+            | Self::InfobaseLock
             | Self::ResolveTarget
             | Self::TargetLock
             | Self::OrphanCleanup
@@ -76,9 +79,10 @@ impl InfobaseTransferPhase {
             | Self::WorkspacePreparation
             | Self::OrphanCleanup
             | Self::PrepareStaging => ExecutionStepKind::PrepareWorkspace,
-            Self::ResolveTarget | Self::TargetLock | Self::PublishTargetRevalidation => {
-                ExecutionStepKind::ResolveTarget
-            }
+            Self::InfobaseLock
+            | Self::ResolveTarget
+            | Self::TargetLock
+            | Self::PublishTargetRevalidation => ExecutionStepKind::ResolveTarget,
             Self::ProviderSelection => ExecutionStepKind::Other,
             Self::ProviderCommand => ExecutionStepKind::PlatformCommand,
             Self::BeforePublication | Self::Publication => ExecutionStepKind::Publish,
@@ -506,6 +510,14 @@ mod tests {
         assert_eq!(
             InfobaseTransferPhase::WorkspacePreparation.kind(),
             ExecutionStepKind::PrepareWorkspace
+        );
+        assert_eq!(
+            InfobaseTransferPhase::InfobaseLock.as_str(),
+            "infobase lock"
+        );
+        assert_eq!(
+            InfobaseTransferPhase::InfobaseLock.kind(),
+            ExecutionStepKind::ResolveTarget
         );
         assert_eq!(
             InfobaseTransferPhase::ProviderCommand.kind(),

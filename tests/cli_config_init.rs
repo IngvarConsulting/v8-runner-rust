@@ -114,6 +114,8 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
 
 #[test]
 fn config_init_uses_json_envelope_and_output_override() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
     let config_path = dir.path().join("custom.yaml");
@@ -127,7 +129,7 @@ fn config_init_uses_json_envelope_and_output_override() {
             "--output",
             &config_path.display().to_string(),
             "--connection",
-            "File=/tmp/test-ib",
+            &format!("File={tmp}/test-ib"),
         ])
         .output()
         .expect("run command");
@@ -164,7 +166,9 @@ fn config_init_uses_json_envelope_and_output_override() {
     )
     .expect("local config");
     assert!(
-        local_config.contains("infobases:\n  origin:\n    connection: 'File=/tmp/test-ib'\n"),
+        local_config.contains(&format!(
+            "infobases:\n  origin:\n    connection: 'File={tmp}/test-ib'\n"
+        )),
         "{local_config}"
     );
 }

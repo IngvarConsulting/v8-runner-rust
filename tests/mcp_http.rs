@@ -145,7 +145,7 @@ fn write_http_designer_config(
     idle_ttl_secs: u64,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\n    allowed_hosts:\n      - runner.test\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\n    allowed_hosts:\n      - runner.test\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         bind_address,
         stateful_sessions,
@@ -251,7 +251,7 @@ fn write_http_edt_config(
         AutoStart::On => "    auto-start: true\n",
     };
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 4\n    idle_ttl_secs: 900\n  execution:\n    max_concurrent_calls: 1\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n{}    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 4\n    idle_ttl_secs: 900\n  execution:\n    max_concurrent_calls: 1\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n{}    command_timeout_ms: {}\n",
         work_path.display(),
         bind_address,
         edt_path.display(),
@@ -313,7 +313,7 @@ fn setup_http_ibcmd_dump_project(
         fail_pattern,
         max_sessions,
         idle_ttl_secs,
-        "  connection: 'File=/tmp/ib'\n",
+        "  connection: 'File=ib'\n",
     )
 }
 
@@ -776,10 +776,12 @@ async fn mcp_http_dump_config_full_ibcmd_server_contract_passes_dbms_and_infobas
 /// работает сервер, — клиент HTTP может сидеть на другой машине.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_http_refusal_advises_the_command_line_of_the_server_target() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (dir, config_path, url, _calls_log) = setup_http_ibcmd_dump_project(None, 4, 900);
     fs::write(
         config_path.with_file_name("v8project.local.yaml"),
-        "infobases:\n  staging:\n    connection: 'File=/tmp/staging-ib'\n",
+        format!("infobases:\n  staging:\n    connection: 'File={tmp}/staging-ib'\n"),
     )
     .expect("local config");
     let project = dir.path().join("project");

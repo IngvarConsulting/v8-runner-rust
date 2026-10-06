@@ -80,7 +80,7 @@ fn write_config(
     format: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: {}\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: {}\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         format,
         platform_path.display(),

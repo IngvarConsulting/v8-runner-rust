@@ -46,6 +46,8 @@ pub enum ErrorCode {
     Soon,
     EnvironmentUnavailable,
     WorkspaceBusy,
+    /// Файловую базу держит другая команда; как `workspace_busy`, можно повторить.
+    InfobaseBusy,
     InvalidOutput,
     Cancelled,
     TimedOut,
@@ -113,6 +115,7 @@ impl ErrorCode {
             Self::Soon => "soon",
             Self::EnvironmentUnavailable => "environment_unavailable",
             Self::WorkspaceBusy => "workspace_busy",
+            Self::InfobaseBusy => "infobase_busy",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
@@ -134,6 +137,7 @@ impl ErrorCode {
         Self::Soon,
         Self::EnvironmentUnavailable,
         Self::WorkspaceBusy,
+        Self::InfobaseBusy,
         Self::InvalidOutput,
         Self::Cancelled,
         Self::TimedOut,
@@ -396,6 +400,7 @@ mod schema_tests {
                 "workspace_busy",
                 "workspace",
             ),
+            (UseCaseErrorKind::InfobaseBusy, "infobase_busy", "workspace"),
             (
                 UseCaseErrorKind::InvalidOutput,
                 "invalid_output",

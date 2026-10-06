@@ -461,6 +461,7 @@ impl McpToolServer {
         )
         .map_err(|error| ErrorData::internal_error(error.message, None))?;
         let use_case_request = normalize_check_syntax_edt_request(&request);
+        let base = use_case_request.base_access();
         let config = self.config.clone();
         let session = self.edt_session.clone();
         // Замок `workPath` берётся после допуска, как у порта: ожидая слота, вызов его не
@@ -471,6 +472,7 @@ impl McpToolServer {
         let result = match dispatch_with_workspace_lock_async(
             self.config.as_ref(),
             CommandName::Syntax,
+            base,
             || {
                 tokio::task::spawn_blocking(move || {
                     check_syntax::execute_in_server_session(
