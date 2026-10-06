@@ -173,7 +173,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [цель перепроверяется перед публикацией](../rules/use-cases/a-target-is-rechecked-before-publication.md),
 [неудачный откат называет себя](../rules/use-cases/a-failed-rollback-is-named.md),
 [замена каталога человека спрашивает заранее](../rules/use-cases/replacing-a-user-directory-asks-first.md),
-[файл версий принадлежит раннеру](../rules/use-cases/the-runner-owns-the-version-file.md);
+[подменённый файл версий уступает копии](../rules/use-cases/a-replaced-version-file-gives-way-to-the-runner-copy.md),
+[копия перенимает файл платформы после удачи](../rules/use-cases/the-runner-copy-takes-the-platform-file-after-success.md);
 пока не выполнены — [`--force` называет уничтоженное](../rules/use-cases/force-names-what-it-destroyed.md),
 [выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md).
 

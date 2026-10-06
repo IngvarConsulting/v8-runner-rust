@@ -751,3 +751,81 @@ fn a_push_that_writes_no_version_file_keeps_the_runner_copy() {
     succeeded(run(&project, &["pull", "--source-set", "main"]));
     assert_eq!(format!("{}\n", last_seen(&project)), ours);
 }
+
+#[test]
+fn a_failed_copy_write_is_a_warning_not_a_refusal() {
+    let project = version_project("designer");
+    let memory = project.work.join("infobases/origin");
+    fs::create_dir_all(&memory).expect("memory dir");
+    fs::write(memory.join("dump-info"), "not a directory").expect("block the copy dir");
+
+    let response = succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+
+    let message = response["data"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("ConfigDumpInfo.xml for source-set 'main' was not updated"),
+        "{response}"
+    );
+    assert!(project.sources.join("ConfigDumpInfo.xml").is_file());
+}
+
+#[test]
+fn a_designer_partial_pull_leaves_the_runner_copy_alone() {
+    let project = version_project("designer");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let ours = read(&runner_copy(&project));
+
+    succeeded(run(
+        &project,
+        &["pull", "--source-set", "main", "--object", "Catalog:Items"],
+    ));
+
+    assert_ne!(read(&project.sources.join("ConfigDumpInfo.xml")), ours);
+    assert_eq!(read(&runner_copy(&project)), ours);
+}
+
+#[test]
+fn an_ibcmd_partial_pull_dumps_from_the_runner_copy() {
+    let project = version_project("ibcmd");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let ours = read(&runner_copy(&project));
+    let version_file = project.sources.join("ConfigDumpInfo.xml");
+    fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
+
+    succeeded(run(
+        &project,
+        &["pull", "--source-set", "main", "--object", "Catalog:Items"],
+    ));
+
+    assert_eq!(format!("{}\n", last_seen(&project)), ours);
+    assert_eq!(read(&runner_copy(&project)), read(&version_file));
+}
+
+/// Агент загружает через ссылку на каталог набора: перед загрузкой там лежит файл раннера,
+/// а записанный агентом становится копией.
+#[test]
+fn an_agent_push_loads_over_the_runner_copy_and_records_the_new_one() {
+    let project = project("agent", false);
+    let version_file = project.sources.join("ConfigDumpInfo.xml");
+    succeeded(run(&project, &["push"]));
+    let ours = read(&version_file);
+    assert!(ours.contains("agent-load="), "{ours}");
+    assert_eq!(read(&runner_copy(&project)), ours);
+
+    fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
+    fs::write(
+        project.sources.join("Module.bsl"),
+        "Procedure Edited()\nEndProcedure\n",
+    )
+    .expect("edit");
+    succeeded(run(&project, &["push"]));
+
+    let seen = read(&project.calls.with_extension("version-files"));
+    let seen = seen
+        .lines()
+        .next_back()
+        .expect("the agent loaded with --update-config-dump-info");
+    assert_eq!(format!("{seen}\n"), ours);
+    assert_eq!(read(&runner_copy(&project)), read(&version_file));
+    assert_ne!(read(&version_file), ours);
+}

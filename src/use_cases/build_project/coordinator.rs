@@ -292,7 +292,7 @@ fn run_build_with(
                 ) {
                     Ok(mut warnings) => {
                         warnings.extend(version_file.as_ref().and_then(|version_file| {
-                            version_file.record_if_rewritten(before.as_deref())
+                            version_file.record_if_rewritten(before.as_ref())
                         }));
                         push_build_step(
                             &mut steps,

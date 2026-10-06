@@ -647,6 +647,51 @@ pub fn best_effort_fsync_dir(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Suffix of the temporary file [`write_file_atomically`] creates next to its target:
+/// `<имя цели>.candidate-<случайное>`. A file left by a killed process keeps this name.
+pub const ATOMIC_WRITE_CANDIDATE_SUFFIX: &str = ".candidate-";
+
+/// Contents of a file, or `None` when there is no such file.
+pub fn read_optional(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Replace `path` with what `fill` writes, so a reader sees the previous file or the new
+/// one whole. The temporary file is named after the target
+/// ([`ATOMIC_WRITE_CANDIDATE_SUFFIX`]) and takes the permissions of the file it replaces.
+pub fn write_file_atomically(
+    path: &Path,
+    fill: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("path has no parent: {}", path.display()),
+        )
+    })?;
+    let mut prefix = path.file_name().unwrap_or_default().to_os_string();
+    prefix.push(ATOMIC_WRITE_CANDIDATE_SUFFIX);
+    let mut candidate = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)?;
+    fill(candidate.as_file_mut())?;
+    candidate.as_file().sync_all()?;
+    match std::fs::metadata(path) {
+        Ok(previous) => candidate
+            .as_file()
+            .set_permissions(previous.permissions())?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    candidate.persist(path).map_err(|error| error.error)?;
+    let _ = best_effort_fsync_dir(parent);
+    Ok(())
+}
+
 pub fn publish_file_atomically(temp_path: &Path, destination_path: &Path) -> std::io::Result<()> {
     publish_file_atomically_impl(
         temp_path,
@@ -1064,6 +1109,43 @@ mod tests {
         ReplaceFileTestPoint, CP1251_HIGH, REPLACE_FILE_TEST_HOOK, TEST_SYSTEM_LOCK_OPENED_HOOK,
         TOOL_NAME,
     };
+    /// The temporary file keeps the target's name and the replaced file keeps its mode.
+    #[cfg(unix)]
+    #[test]
+    fn an_atomic_write_keeps_the_mode_and_leaves_no_candidate() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("dir");
+        let target = dir.path().join("ConfigDumpInfo.xml");
+        std::fs::write(&target, "old").expect("old");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).expect("mode");
+        let mut seen = None;
+        super::write_file_atomically(&target, |file| {
+            seen = Some(
+                std::fs::read_dir(dir.path())
+                    .expect("list")
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .find(|name| name != "ConfigDumpInfo.xml"),
+            );
+            file.write_all(b"new")
+        })
+        .expect("write");
+        let candidate = seen.flatten().expect("a candidate exists while writing");
+        assert!(
+            candidate.starts_with("ConfigDumpInfo.xml.candidate-"),
+            "{candidate}"
+        );
+        assert_eq!(std::fs::read(&target).expect("target"), b"new");
+        let mode = std::fs::metadata(&target)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o644);
+        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
+    }
+
     use crate::support::machine::host_name;
     use std::fs;
     use std::io::ErrorKind;
