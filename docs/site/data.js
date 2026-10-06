@@ -248,7 +248,7 @@ window.RUNNER_DATA = (function () {
       today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['connection'], note: 'только Конфигуратор; состояния совместимости supported / absent / not_established / not_probed' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer], config: ['connection'], note: 'по прямому шлюзу; через SSH-шлюз нет: в его наборе нет сравнения, а проба совместимости перед загрузкой обязательна' };
-        return { chain: [P.agent, P.designer], config: ['connection'], note: '' };
+        return { chain: [P.designer], config: ['connection'], note: 'только Конфигуратор: в наборе агента нет сравнения конфигураций, а проба совместимости перед загрузкой обязательна' };
       }
     },
     {
