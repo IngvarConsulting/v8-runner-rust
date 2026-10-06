@@ -510,17 +510,45 @@ const FORCE_MEANS: &str =
 #[test]
 fn mode_full_is_refused_and_names_pull_force() {
     let project = project();
-    let gone = "`--mode full` is gone: drop `--mode full` and add `--force` to the same command";
+    let gone = "`--mode full` is gone: drop `--mode full` and add `--force` in the same command, which then reads `pull [SET] --force`";
     assert_refused(&project, &["pull", "--mode", "full"], &[gone, FORCE_MEANS]);
     assert_refused(
         &project,
         &["dump", "--mode", "full", "--dry-run"],
         &[gone, FORCE_MEANS],
     );
+}
+
+/// `--mode full` рядом с `--force`: совет «добавить `--force`» дал бы `--force --force`, и
+/// разбор ключей отказал бы. Совет оставляет `--force`, называет готовую форму для того же
+/// набора, и вызов по совету проходит.
+#[test]
+fn mode_full_next_to_force_advises_keeping_force() {
+    let project = project();
+    let called = ["pull", "main", "--mode", "full", "--force", "--dry-run"];
+    let args = called
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect::<Vec<_>>();
+    let answer = envelope(&args, &run(&project, &args));
+    let message = answer["error"]["message"].as_str().unwrap_or_default();
     assert_refused(
         &project,
-        &["pull", "main", "--mode", "full", "--force"],
-        &[gone, FORCE_MEANS],
+        &called,
+        &[
+            "drop `--mode full` and keep `--force` in the same command, which then reads `pull main --force`",
+            FORCE_MEANS,
+        ],
+    );
+    assert!(!message.contains("add `--force`"), "{message}");
+    let advised: Vec<String> = ["pull", "main", "--force", "--dry-run"]
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
+    let answer = envelope(&advised, &run(&project, &advised));
+    assert_eq!(
+        answer["ok"], true,
+        "the advice must run as written: {answer}"
     );
 }
 
@@ -543,7 +571,7 @@ fn mode_full_with_object_advises_dropping_the_object_too() {
         &project,
         &called,
         &[
-            "drop `--mode full` and every `--object` and add `--force` to the same command",
+            "drop `--mode full` and every `--object` and add `--force` in the same command, which then reads `pull main --force`",
             FORCE_MEANS,
         ],
     );
@@ -554,6 +582,42 @@ fn mode_full_with_object_advises_dropping_the_object_too() {
         .collect();
     let output = run(&project, &advised);
     let answer = envelope(&advised, &output);
+    assert_eq!(
+        answer["ok"], true,
+        "the advice must run as written: {answer}"
+    );
+}
+
+/// `--mode partial` с `--object` рядом с `--force`: совет снять один `--mode` упёрся бы в
+/// отказ «`--object` contradicts `--force`». Совет снимает и каждый `--object`, и вызов по
+/// совету проходит разбор ключей.
+#[test]
+fn a_mode_with_object_next_to_force_advises_dropping_the_object_too() {
+    let project = project();
+    let called = [
+        "pull",
+        "main",
+        "--mode",
+        "partial",
+        "--object",
+        "Catalog:Items",
+        "--force",
+        "--dry-run",
+    ];
+    assert_refused(
+        &project,
+        &called,
+        &[
+            "drop `--mode` and every `--object` for a full replacement, `pull main --force`",
+            FORCE_MEANS,
+        ],
+    );
+    // Совет буквально: без `--mode`, без `--object`, с `--force`.
+    let advised: Vec<String> = ["pull", "main", "--force", "--dry-run"]
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
+    let answer = envelope(&advised, &run(&project, &advised));
     assert_eq!(
         answer["ok"], true,
         "the advice must run as written: {answer}"

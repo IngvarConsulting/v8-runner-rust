@@ -390,11 +390,25 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     let message = json["error"]["message"].as_str().expect("message");
     assert!(message.contains("belongs to"), "{message}");
-    let config = format!("--config {}", project.config.display());
+    // Раннер называет конфиг каноническим путём: на macOS временный `/var/…` — ссылка на
+    // `/private/var/…`.
+    let config = format!(
+        "--config {}",
+        fs::canonicalize(&project.config)
+            .expect("canonical config")
+            .display()
+    );
     for tail in ["pull main --force", "push main --full"] {
         let advice = format!("`v8-runner {config} --infobase second {tail}`");
         assert!(message.contains(&advice), "must advise {advice}: {message}");
     }
+    // Замена каталога названа вместе с потерей: совет не уводит молча в уничтожение.
+    assert!(
+        message.contains(
+            "which replaces the directory of source-set 'main' and discards its uncommitted changes"
+        ),
+        "{message}"
+    );
     assert_eq!(fs::read(&second_memory).expect("memory"), old_memory);
 
     // Совет буквально, оболочкой и из другого каталога.

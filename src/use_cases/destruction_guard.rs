@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::platform::git::{uncommitted_work_in, UncommittedWork};
 use crate::support::error::AppError;
-use crate::use_cases::context::{shell_word, ExecutionContext, ExecutionTransport};
+use crate::use_cases::context::{ExecutionContext, ExecutionTransport};
 
 /// Сколько потерь перечислять в отказе, прежде чем считать их числом.
 const NAMED_LOSS_LIMIT: usize = 20;
@@ -38,6 +38,12 @@ pub(super) enum DestructionConsent {
 
 /// Выходы из отказа, кроме общего для всех «сохранить работу и повторить». Их называет
 /// вызывающий: только он знает, есть ли у его цели замена в командной строке и какая.
+///
+/// Это не повтор [`ForceWayOut`](crate::use_cases::request::ForceWayOut). Тот — поле
+/// запроса `pull`, которое транспорт заполняет, не зная, какой набор разрешится: он
+/// говорит только, можно ли слать вызывающего к замене. Здесь выход уже собран сценарием
+/// для своей цели: с разрешённым набором для `pull` и с вариантом `convert`, у которого
+/// запроса `pull` нет вовсе.
 ///
 /// Совет, выполненный буквально, обязан бить в ту же цель и не упираться во второй отказ.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,8 +159,7 @@ fn remedy(ways_out: &WaysOut, context: &ExecutionContext) -> String {
             ),
         },
         WaysOut::PullForce { source_set } => {
-            let command =
-                context.advised_command(&format!("pull {} --force", shell_word(source_set)));
+            let command = context.advised_pull_force(source_set);
             format!(
                 "{save}, or run {command}: a full dump of source-set '{source_set}' that replaces its whole directory and discards them"
             )
@@ -169,7 +174,7 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    use crate::use_cases::context::{CommandLineTarget, CommandName};
+    use crate::use_cases::context::{AdvisedInfobase, CommandLineTarget, CommandName};
 
     fn cli() -> ExecutionContext {
         ExecutionContext::cli(CommandName::Dump)
@@ -194,7 +199,7 @@ mod tests {
     fn started_elsewhere() -> CommandLineTarget {
         CommandLineTarget {
             config: Some(PathBuf::from("/srv/my project/v8project.yaml")),
-            infobase: Some("staging".to_owned()),
+            infobase: Some(AdvisedInfobase::Name("staging".to_owned())),
             workdir: Some(PathBuf::from("/var/tmp/v8w")),
         }
     }
@@ -295,7 +300,7 @@ mod tests {
             assert!(message.contains(expected), "{transport:?}: {message}");
             assert!(
                 message
-                    .contains("a full dump of source-set 'ext' that replaces its whole directory"),
+                    .contains("a full dump of source-set 'ext' that replaces its whole directory and discards them"),
                 "{transport:?}: {message}"
             );
             assert_eq!(

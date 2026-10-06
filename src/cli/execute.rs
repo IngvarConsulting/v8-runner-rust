@@ -64,7 +64,7 @@ use crate::use_cases::artifacts;
 use crate::use_cases::build_project;
 use crate::use_cases::check_syntax;
 use crate::use_cases::configure_extensions;
-use crate::use_cases::context::{CommandLineTarget, CommandName, ExecutionContext};
+use crate::use_cases::context::{shell_word, CommandLineTarget, CommandName, ExecutionContext};
 use crate::use_cases::convert_sources;
 use crate::use_cases::dump_config;
 use crate::use_cases::extension_inventory;
@@ -2832,22 +2832,35 @@ const PULL_FORCE_MEANS: &str =
 /// (решение владельца 05.10.2026, #191).
 fn dump_mode(args: &DumpArgs) -> Result<DumpModeRequest, UseCaseError> {
     let refuse = |message: String| Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    // Совет, выполненный буквально, не должен упереться во второй отказ: `--object` рядом с
+    // `--force` отказывает, а второй `--force` не примет разбор ключей.
+    let drop_objects = if args.objects.is_empty() {
+        ""
+    } else {
+        " and every `--object`"
+    };
+    // Готовая форма для того же набора; без набора — заполнитель, а не голый `pull --force`,
+    // который выгрузил бы набор по умолчанию.
+    let replacing_form = format!(
+        "`pull {} --force`",
+        args.source_set
+            .name()
+            .map_or_else(|| "[SET]".to_owned(), shell_word)
+    );
     match (args.mode, args.discard_uncommitted) {
-        (Some(PreviousDumpMode::Full), _) => {
-            // `--object` рядом с `--force` отказывает: совет, выполненный буквально, не
-            // должен упереться во второй отказ.
-            let drop = if args.objects.is_empty() {
-                "`--mode full`"
+        (Some(PreviousDumpMode::Full), discard) => {
+            let force = if discard {
+                "keep `--force`"
             } else {
-                "`--mode full` and every `--object`"
+                "add `--force`"
             };
             return refuse(format!(
-                "`--mode full` is gone: drop {drop} and add `--force` to the same command (`pull [SET] --force`, the same source set); {PULL_FORCE_MEANS}"
+                "`--mode full` is gone: drop `--mode full`{drop_objects} and {force} in the same command, which then reads {replacing_form} with the same global keys; {PULL_FORCE_MEANS}"
             ));
         }
         (Some(previous @ (PreviousDumpMode::Incremental | PreviousDumpMode::Partial)), true) => {
             return refuse(format!(
-                "`--mode {}` contradicts `--force`: drop `--mode` for a full replacement ({PULL_FORCE_MEANS}), or drop `--force` for a dump over the source tree",
+                "`--mode {}` contradicts `--force`: drop `--mode`{drop_objects} for a full replacement, {replacing_form} with the same global keys ({PULL_FORCE_MEANS}), or drop `--force` for a dump over the source tree",
                 previous.as_str()
             ));
         }
@@ -4925,18 +4938,27 @@ mod tests {
                     message.contains("discards uncommitted changes"),
                     "{message}"
                 );
+                // Рядом с `--object` совет снимает и его: иначе `--force` упёрся бы в отказ.
+                let drop = if objects.is_empty() {
+                    "drop `--mode` for a full replacement, `pull main --force`"
+                } else {
+                    "drop `--mode` and every `--object` for a full replacement, `pull main --force`"
+                };
+                assert!(message.contains(drop), "{message}");
             }
             // Рядом с `--object` совет снимает и его: иначе `--force` упёрся бы в отказ.
             let drop = if objects.is_empty() {
-                "drop `--mode full` and add"
+                "drop `--mode full`"
             } else {
-                "drop `--mode full` and every `--object` and add"
+                "drop `--mode full` and every `--object`"
             };
             for force in [false, true] {
                 let message = refusal(&args(Some(PreviousDumpMode::Full), objects, force));
+                // Второй `--force` разбор ключей не примет: стоящий ключ остаётся.
+                let force_key = if force { "keep" } else { "add" };
                 assert!(
                     message.contains(&format!(
-                        "`--mode full` is gone: {drop} `--force` to the same command"
+                        "`--mode full` is gone: {drop} and {force_key} `--force` in the same command, which then reads `pull main --force`"
                     )),
                     "{message}"
                 );

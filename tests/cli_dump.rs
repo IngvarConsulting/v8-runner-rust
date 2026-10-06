@@ -1041,6 +1041,22 @@ fn advised_command(message: &str) -> Vec<String> {
     words
 }
 
+/// Слова совета, где значения `--config` и `--workdir` приведены к каноническому пути: на
+/// macOS временный каталог `/var/…` — ссылка на `/private/var/…`, и раннер называет
+/// разрешённый путь. Сравнивают с тоже каноническими ожидаемыми путями.
+fn with_canonical_paths(words: &[String]) -> Vec<String> {
+    let mut canonical = words.to_vec();
+    for index in 1..canonical.len() {
+        if matches!(words[index - 1].as_str(), "--config" | "--workdir") {
+            canonical[index] = fs::canonicalize(&words[index])
+                .unwrap_or_else(|error| panic!("{}: {error}", words[index]))
+                .display()
+                .to_string();
+        }
+    }
+    canonical
+}
+
 /// Выполняет совет буквально — из другого каталога, без `--json-message` и прочего, что
 /// было в исходном вызове.
 fn run_advice_from_elsewhere(
@@ -1109,7 +1125,7 @@ fn an_edt_refusal_advises_a_full_replacement_that_runs_as_written() {
         let advice = advised_command(message);
         let canonical_config = fs::canonicalize(&config_path).expect("canonical config");
         assert_eq!(
-            advice[1..],
+            with_canonical_paths(&advice)[1..],
             [
                 "--config".to_owned(),
                 canonical_config.display().to_string(),
@@ -1176,15 +1192,16 @@ fn an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir() {
 
     let advice = advised_command(&message);
     let canonical_config = fs::canonicalize(&config_path).expect("canonical config");
+    let canonical_work = fs::canonicalize(&other_work).expect("canonical work");
     assert_eq!(
-        advice[1..],
+        with_canonical_paths(&advice)[1..],
         [
             "--config".to_owned(),
             canonical_config.display().to_string(),
             "--infobase".to_owned(),
             "staging".to_owned(),
             "--workdir".to_owned(),
-            other_work.display().to_string(),
+            canonical_work.display().to_string(),
             "pull".to_owned(),
             "main".to_owned(),
             "--force".to_owned(),
@@ -1201,4 +1218,84 @@ fn an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir() {
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("staging-ib"), "the same base: {calls}");
     assert_ibcmd_data_path(&calls, &other_work);
+}
+
+/// Секрет в строке соединения, которого загрузчик не отвергает: `Wsp=`, а не `Pwd=`.
+const CONNECTION_SECRET: &str = "SECRETPW";
+
+/// Строка соединения из `--infobase` может нести секрет, и совет её не повторяет: просит
+/// то же значение `--infobase` словами. Команда строки, отказавшая сторожем EDT.
+#[test]
+fn a_command_line_advice_never_repeats_the_connection_string() {
+    let (_dir, config_path, _platform, _edt, _work, base_path, _designer, _edt_calls) =
+        setup_edt_project();
+    git(&base_path, &["init", "-q", "-b", "main", "."]);
+    git(&base_path, &["config", "user.email", "test@example.com"]);
+    git(&base_path, &["config", "user.name", "Test"]);
+    git(&base_path, &["add", "-A"]);
+    git(&base_path, &["commit", "-qm", "committed sources"]);
+    fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
+
+    let config = config_path.display().to_string();
+    let connection = format!("File=/tmp/staging-ib;Wsp={CONNECTION_SECRET}");
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            config.as_str(),
+            "--infobase",
+            connection.as_str(),
+            "--json-message",
+            "pull",
+            "main",
+            "--object",
+            "Catalog:Items",
+        ])
+        .output()
+        .expect("run pull");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(2), "{rendered}");
+    assert!(rendered.contains("hand-written.xml"), "{rendered}");
+    assert!(rendered.contains(" pull main --force`"), "{rendered}");
+    assert!(
+        rendered.contains("with the same `--infobase` value as this command"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains(CONNECTION_SECRET), "{rendered}");
+    assert!(!rendered.contains("staging-ib"), "{rendered}");
+}
+
+/// Сервер MCP по stdio, запущенный со строкой соединения в `--infobase`: совет отказа не
+/// повторяет её, а просит то же значение, с которым запущен сервер.
+#[test]
+fn an_mcp_advice_never_repeats_the_connection_string_of_the_server() {
+    let (_dir, config_path, _binary, _work, base_path, _calls_log) =
+        setup_project_in_a_repository();
+    fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
+
+    let config = config_path.display().to_string();
+    let connection = format!("File=/tmp/staging-ib;Wsp={CONNECTION_SECRET}");
+    let answer = support::mcp::call_tool_started_with(
+        &[
+            "--config",
+            config.as_str(),
+            "--infobase",
+            connection.as_str(),
+        ],
+        "dump_config",
+        json!({ "mode": "FULL" }),
+    );
+    assert!(answer.is_error, "{}", answer.envelope);
+    let rendered = answer.envelope.to_string();
+    assert!(rendered.contains("hand-written.xml"), "{rendered}");
+    assert!(rendered.contains(" pull main --force`"), "{rendered}");
+    assert!(
+        rendered.contains("with the same `--infobase` value the MCP server was started with"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains(CONNECTION_SECRET), "{rendered}");
+    assert!(!rendered.contains("staging-ib"), "{rendered}");
 }

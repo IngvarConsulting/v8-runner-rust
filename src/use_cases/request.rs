@@ -157,6 +157,12 @@ pub struct DumpRequest {
 }
 
 /// Whether a replacement refusal may send the caller to `pull <SET> --force`.
+///
+/// Not a copy of `destruction_guard::WaysOut`: this is what a transport knows before the
+/// use case runs — whether its caller may be sent to a replacement at all — while the
+/// source set is not resolved yet. `WaysOut` is the way out the use case assembles for its
+/// own target: the resolved set for `pull`, and the `convert` variant, which has no `pull`
+/// request to carry this field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForceWayOut {
     /// The caller is not to be sent there (`clone`): the only way out is to save the work.

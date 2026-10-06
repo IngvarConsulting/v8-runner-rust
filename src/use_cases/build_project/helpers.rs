@@ -53,11 +53,10 @@ pub(super) fn change_detection_failure(
 ) -> String {
     match error {
         analyzer::ChangeDetectionError::ForeignMemory { source_set, .. } => {
-            let set = shell_word(source_set);
             format!(
-                "{error}. If the infobase holds the right state, run a full pull {} to record it; if the source directory does, run {} to load it",
-                context.advised_command(&format!("pull {set} --force")),
-                context.advised_command(&format!("push {set} --full")),
+                "{error}. If the infobase holds the right state, run a full pull {}, which replaces the directory of source-set '{source_set}' and discards its uncommitted changes, to record it; if the source directory does, run {} to load it",
+                context.advised_pull_force(source_set),
+                context.advised_command(&format!("push {} --full", shell_word(source_set))),
             )
         }
         analyzer::ChangeDetectionError::StorageHard { .. }

@@ -179,7 +179,8 @@ v8-runner infobase create
   index, unresolved merge markers. Finding any, the command refuses before touching anything with
   exit 2 and names them. Commit or stash them and repeat, or run the command the refusal names
   as written: for `pull`/MCP `dump_config` an exact `v8-runner --config <abs> [--infobase …]
-  [--workdir …] pull <SET> --force` (MCP over HTTP: on the server's machine); for `convert` the
+  [--workdir …] pull <SET> --force` (MCP over HTTP: on the server's machine; a connection-string
+  `--infobase` is not repeated — add the same `--infobase` value yourself); for `convert` the
   same command with `--force` added — never drop the set or `--output`. The flag destroys them and keeps no
   copy, so check `git status` first. `clone` has no such consent: commit or stash.
   Staged content is not a loss: it is

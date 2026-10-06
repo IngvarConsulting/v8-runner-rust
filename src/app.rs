@@ -23,7 +23,7 @@ use crate::support::error::AppError;
 use crate::use_cases::config_init::{
     ConfigFormatRequest, ConfigInitRequest, DeclaredOrigin, OriginKey,
 };
-use crate::use_cases::context::{CommandLineTarget, CommandName};
+use crate::use_cases::context::{AdvisedInfobase, CommandLineTarget, CommandName};
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
 /// Новые имена команд словаря, у которых внутри остался прежний путь разбора: `init` —
@@ -727,11 +727,13 @@ fn command_line_target(
     config: &crate::config::model::AppConfig,
 ) -> CommandLineTarget {
     use crate::config::model::{InfobaseSelector, DEFAULT_INFOBASE_NAME};
+    // Строку соединения совет не повторяет: в ней может лежать секрет, которого
+    // загрузчик не отвергает (`Wsp=`), а совет показывают, пишут в журнал и копируют.
     let infobase = match InfobaseSelector::from_flag(cli.infobase.as_deref()) {
         InfobaseSelector::Default => None,
         InfobaseSelector::Name(name) if name == DEFAULT_INFOBASE_NAME => None,
-        InfobaseSelector::Name(name) => Some(name),
-        InfobaseSelector::Connection(connection) => Some(connection),
+        InfobaseSelector::Name(name) => Some(AdvisedInfobase::Name(name)),
+        InfobaseSelector::Connection(_connection) => Some(AdvisedInfobase::SameConnection),
     };
     CommandLineTarget {
         config: config_path,
@@ -830,8 +832,9 @@ fn prepare_mcp_runtime(
         "starting mcp server"
     );
 
-    // Конфиг уже прочитан, поэтому путь к нему разрешится; не разрешился — совет просто
-    // останется без `--config`, сервер от этого не падает.
+    // Конфиг уже прочитан, поэтому путь к нему разрешится; не разрешился — совет не
+    // выдаёт готовую команду без `--config`, а велит выполнить её из каталога проекта.
+    // Сервер от этого не падает.
     let config_path = resolve_primary_config_path(cli.config.as_deref()).ok();
     let command_line = command_line_target(cli, config_path, &config);
     Ok((config, command_line))
