@@ -410,6 +410,7 @@ fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
     let harness = harness(true, Some(true), false);
     let (first, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(first, 0, "{payload}");
+    commit_project(&harness);
     let ledger_file = fs::read_dir(harness.dir.path().join("work/infobases"))
         .expect("base memory")
         .map(|entry| entry.expect("entry").path().join("generation.json"))
@@ -438,6 +439,8 @@ fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
             serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
         rewrite(&mut ledger["main"]);
         fs::write(&ledger_file, ledger.to_string()).expect("rewrite ledger");
+        // Прошлая выгрузка оставила файлы вне учёта; без фиксации сторож откажет.
+        commit_project(&harness);
 
         let (code, payload) = run_dump(&harness, &[]);
 
