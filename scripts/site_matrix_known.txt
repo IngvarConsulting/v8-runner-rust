@@ -1,0 +1,37 @@
+# Известные расхождения «сайт = матрица» для scripts/site_matrix.py.
+#
+# Сайт описывает целевое состояние, матрица src/domain/capability.rs — текущее. Строка —
+# одна пара операции и цели: исполнители по target() из docs/site/data.js, исполнители
+# строки матрицы в её порядке («~» — только по ключу providers.*, «-» — строки нет) и
+# задача, которая снимает расхождение. Задача удаляет свои строки; сверка падает и на
+# новом расхождении, и на строке, которая больше не расходится или расходится иначе.
+# Список пуст — задача #225 закрыта.
+#
+# <операция> <цель> | сайт: <исполнители> | матрица: <исполнители> | #<задача>
+
+download file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
+download cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
+download standalone | сайт: designer agent | матрица: agent | #205
+extensions cluster | сайт: agent designer | матрица: ibcmd agent~ | #206
+extensions standalone | сайт: agent designer | матрица: agent | #205
+infobase.create file | сайт: ibcmd designer | матрица: designer ibcmd | #204
+infobase.create cluster | сайт: designer | матрица: designer ibcmd | #204
+infobase.dump file | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
+infobase.dump cluster | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
+infobase.dump standalone | сайт: designer | матрица: - | #205
+infobase.restore file | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
+infobase.restore cluster | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
+infobase.restore standalone | сайт: designer | матрица: - | #205
+make file | сайт: ibcmd ibcmd-rs designer | матрица: designer agent~ | #207
+make cluster | сайт: ibcmd ibcmd-rs designer | матрица: designer agent~ | #207
+make standalone | сайт: ibcmd ibcmd-rs designer | матрица: agent | #207
+pull file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
+pull cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
+pull standalone | сайт: designer agent | матрица: agent | #205
+push file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
+push cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
+push standalone | сайт: designer agent | матрица: agent | #205
+syntax standalone | сайт: designer | матрица: - | #205
+upload file | сайт: agent designer | матрица: designer | #206
+upload cluster | сайт: agent designer | матрица: designer | #206
+upload standalone | сайт: designer | матрица: - | #205

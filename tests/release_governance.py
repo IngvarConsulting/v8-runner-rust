@@ -328,6 +328,17 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("python3 tests/release_governance.py", ci)
         self.assertIn("python3 tests/release_assets.py", ci)
 
+    def test_ci_checks_that_the_site_matches_the_provider_matrix(self) -> None:
+        """Сверка «сайт = матрица» (#225) — блокирующий шаг обязательной джобы Happy Path."""
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        job = self._workflow_job(ci, "happy-path")
+        step = job.split("- name: Verify site matches provider matrix")
+        self.assertEqual(2, len(step), "the site/matrix check must be one step of Happy Path")
+        body = step[1].split("      - name: ")[0]
+        self.assertIn("python3 scripts/site_matrix.py", body)
+        self.assertNotIn("continue-on-error", body)
+        self.assertTrue((ROOT / "scripts/site_matrix_known.txt").is_file())
+
     def test_all_actions_are_pinned_to_full_commit_sha(self) -> None:
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
             workflow = path.read_text(encoding="utf-8")
