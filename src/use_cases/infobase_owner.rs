@@ -10,7 +10,7 @@
 //! команда записи на базе из местного слоя записывает свою копию в метку. Команда чтения
 //! метку только читает; превью читает её без замка и ничего не пишет.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -20,7 +20,7 @@ use crate::config::loader::load_declared_infobases;
 use crate::config::model::AppConfig;
 use crate::domain::next_step::NextStep;
 use crate::platform::connection::V8Connection;
-use crate::support::fs::publish_file_atomically;
+use crate::support::fs::{read_optional, write_file_atomically};
 use crate::support::machine::{host_name, machine_id};
 use crate::support::path::{nearest_existing_canonical_path, stable_path_identity};
 use crate::use_cases::infobase_lock::BaseAccess;
@@ -388,10 +388,8 @@ impl MarkerReadError {
 /// Метка рядом с базой: `None`, если её ещё нет. Версия сверяется раньше формы: незнакомая
 /// версия называется как версия, а не как непонятная форма.
 fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
-    let raw = match std::fs::read(path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(MarkerReadError::Io(error)),
+    let Some(raw) = read_optional(path).map_err(MarkerReadError::Io)? else {
+        return Ok(None);
     };
     let value: serde_json::Value = serde_json::from_slice(&raw)
         .map_err(|error| MarkerReadError::Malformed(error.to_string()))?;
@@ -413,13 +411,7 @@ fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
 fn write_marker(path: &Path, marker: &OwnerMarker) -> std::io::Result<()> {
     let mut encoded = serde_json::to_vec_pretty(marker).map_err(std::io::Error::other)?;
     encoded.push(b'\n');
-    let mut temp_name = path.file_name().unwrap_or_default().to_os_string();
-    temp_name.push(format!(".tmp.{}", std::process::id()));
-    let temp_path = path.with_file_name(temp_name);
-    std::fs::write(&temp_path, encoded)?;
-    publish_file_atomically(&temp_path, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp_path);
-    })
+    write_file_atomically(path, |file| file.write_all(&encoded))
 }
 
 /// Файл метки рядом с каталогом базы.
@@ -673,16 +665,24 @@ mod tests {
     }
 
     /// Метку, которую не записать, команда записи не обходит: отказ называет каталог и
-    /// причину, а прежнего состояния метки не меняет.
+    /// причину, а метки не появляется. Каталог рядом с базой закрыт на запись; под root права
+    /// не действуют, и тогда проверке не на чем стоять.
+    #[cfg(unix)]
     #[test]
     fn a_marker_that_cannot_be_written_stops_a_write() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().expect("tempdir");
         let base = base(dir.path());
         let config = project(&dir.path().join("copy"), &base);
         let marker_path = owner_marker_path(&base).expect("marker path");
-        let mut temp_name = marker_path.file_name().expect("name").to_os_string();
-        temp_name.push(format!(".tmp.{}", std::process::id()));
-        fs::create_dir(marker_path.with_file_name(temp_name)).expect("blocker");
+        let beside = base.parent().expect("parent").to_path_buf();
+        fs::set_permissions(&beside, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let probe = beside.join("probe");
+        if fs::write(&probe, "").is_ok() {
+            fs::remove_file(&probe).expect("remove probe");
+            eprintln!("skipped: permissions do not apply to this user");
+            return;
+        }
 
         let refused = check_as(
             &on("machine-a", "host", &config),
@@ -690,12 +690,15 @@ mod tests {
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
-        )
-        .expect_err("the marker cannot be written");
+        );
+        fs::set_permissions(&beside, fs::Permissions::from_mode(0o755)).expect("chmod back");
 
+        let refused = refused.expect_err("the marker cannot be written");
         assert_eq!(refused.kind(), UseCaseErrorKind::Runtime);
-        let beside = base.parent().expect("parent").display().to_string();
-        assert!(refused.message().contains(&beside), "{refused}");
+        assert!(
+            refused.message().contains(&beside.display().to_string()),
+            "{refused}"
+        );
         assert!(refused.message().contains("cannot be written"), "{refused}");
         assert!(!marker_path.exists());
     }
