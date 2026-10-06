@@ -1609,10 +1609,19 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
     let marker = temp_workspace();
     let started = marker.path().join("started");
     let terminated = marker.path().join("terminated");
+    // Признак `terminated` пишет ловушка, а мягкого выхода раннер ждёт недолго (250 мс в
+    // `ManagedSpawnResult::terminate`), затем снимает группу SIGKILL. Ловушку нельзя
+    // держать за `sleep` переднего плана: оболочка откладывает её до конца команды, а
+    // `sleep`, уже разветвлённый, но не дошедший до `exec`, принимает групповой SIGTERM
+    // унаследованным обработчиком оболочки и теряет его на `exec` (dash и bash до 5.2 —
+    // в том числе /bin/sh macOS). Ловушка тогда ждёт целую секунду сна, SIGKILL приходит
+    // раньше, и признака нет. Встроенный `wait` перехваченный сигнал по POSIX прерывает
+    // сразу. Ловушка ставится до признака старта: появившийся `started` значит, что она
+    // уже ждёт.
     let script = format!(
-        "printf started > '{}'\ntrap 'printf terminated > \"{}\"; exit 0' TERM INT\nwhile true; do sleep 1; done",
-        started.display(),
-        terminated.display()
+        "trap 'printf terminated > \"{}\"; exit 0' TERM INT\nprintf started > '{}'\nwhile true; do sleep 1 & wait $!; done",
+        terminated.display(),
+        started.display()
     );
     let (_dir, config_path, _install_dir, _work_path) = setup_project_with_thin_script(&script);
     insert_client_mcp_config(
