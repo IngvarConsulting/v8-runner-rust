@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.A-WITHDRAWN-CONSENT-STOPS-EVERY-COPY
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/328
+check:
+  - tests/cli_infobase_owner.rs::a_consent_withdrawn_on_this_machine_stops_every_copy_at_once
+  - src/use_cases/infobase_owner.rs::a_remote_copy_that_withdrew_consent_stops_this_machine_after_its_next_write
 ---
 
 # Отозванное согласие останавливает все копии
