@@ -565,30 +565,38 @@ fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
     let harness = harness();
     let output = harness.dir.path().join("dist").join("main.cf");
 
-    let (code, payload) = run(
-        &harness,
-        &[
-            "download",
-            "--state",
-            "db",
-            "--output",
-            &output.display().to_string(),
-        ],
-    );
+    for extra in [&[][..], &["--dry-run"][..]] {
+        let mut arguments = vec![
+            "download".to_owned(),
+            "--state".to_owned(),
+            "db".to_owned(),
+            "--output".to_owned(),
+            output.display().to_string(),
+        ];
+        arguments.extend(extra.iter().map(|argument| (*argument).to_owned()));
+        let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
 
-    assert_ne!(code, 0, "{payload}");
-    assert_eq!(
-        payload["error"]["code"], "capability_unavailable",
-        "{payload}"
-    );
-    assert_eq!(
-        error_message(&payload),
-        "download --state db takes the database configuration, which only designer or ibcmd exports: the agent has no command for it; a standalone target serves download only through the agent: omit --state db to export the working configuration",
-        "{payload}"
-    );
-    assert_eq!(payload["data"]["provider"]["selected"], Value::Null);
-    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
-    assert!(!output.exists());
+        let (code, payload) = run(&harness, &arguments);
+
+        assert_ne!(code, 0, "{extra:?}: {payload}");
+        assert_eq!(
+            payload["error"]["code"], "capability_unavailable",
+            "{payload}"
+        );
+        assert_eq!(
+            error_message(&payload),
+            "download --state db takes the database configuration, which only designer or ibcmd exports: agent has no command for it; a standalone target serves download only through the agent: omit --state db to export the working configuration",
+            "{payload}"
+        );
+        assert_eq!(payload["data"]["provider"]["selected"], Value::Null);
+        assert_eq!(
+            payload["data"]["provider"]["skipped"],
+            serde_json::json!([{"provider": "agent", "reason": "agent has no command for the database configuration that download --state db takes"}]),
+            "{payload}"
+        );
+        assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+        assert!(!output.exists());
+    }
 }
 
 /// Квитанция шлюза автономного сервера называет адрес шлюза. Ни логина шлюза, ни

@@ -1051,7 +1051,7 @@ fn download_state_db_refuses_the_agent_before_the_platform() {
         );
         assert_eq!(
             envelope["error"]["message"],
-            "download --state db takes the database configuration, which only designer or ibcmd exports: the agent has no command for it; providers.download in v8project.yaml assigns agent: remove the key or assign designer or ibcmd",
+            "download --state db takes the database configuration, which only designer or ibcmd exports: agent has no command for it; providers.download in v8project.yaml assigns agent: remove the key or assign designer or ibcmd",
             "{envelope}"
         );
         assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
@@ -1059,8 +1059,52 @@ fn download_state_db_refuses_the_agent_before_the_platform() {
             envelope["data"]["provider"]["origin"],
             serde_json::json!({"kind": "override", "file": "v8project.yaml"})
         );
+        assert_eq!(
+            envelope["data"]["provider"]["skipped"],
+            serde_json::json!([{
+                "provider": "agent",
+                "reason": "agent has no command for the database configuration that download --state db takes"
+            }]),
+            "{envelope}"
+        );
         assert!(!designer_calls.exists() && !ibcmd_calls.exists());
         assert!(!output.exists());
+    }
+}
+
+/// Ключ `providers.download` с Конфигуратором или `ibcmd` при `--state db` исполняется
+/// назначенным без отката: другой, готовый на той же машине, не запускается.
+#[test]
+fn download_state_db_follows_a_providers_key_naming_designer_or_ibcmd() {
+    for (provider, marker) in [("designer", "/DumpDBCfg"), ("ibcmd", "--db")] {
+        let (_dir, config, base, designer_calls, ibcmd_calls) =
+            setup_designer_and_ibcmd(&format!("providers:\n  download: {provider}\n"));
+        let output = base.join("dist/main.cf");
+
+        let envelope = download_database_configuration(&config, &output, &[]);
+
+        assert_eq!(envelope["ok"], true, "{provider}: {envelope}");
+        assert_eq!(envelope["data"]["state"], "database", "{envelope}");
+        assert_eq!(envelope["data"]["provider"]["selected"], provider);
+        assert_eq!(
+            envelope["data"]["provider"]["origin"],
+            serde_json::json!({"kind": "override", "file": "v8project.yaml"})
+        );
+        assert_eq!(fs::read(&output).expect("published cf"), b"payload");
+        let (used, unused) = if provider == "designer" {
+            (designer_calls, ibcmd_calls)
+        } else {
+            (ibcmd_calls, designer_calls)
+        };
+        let argv = fs::read_to_string(used).expect("calls");
+        assert!(
+            argv.split_whitespace().any(|argument| argument == marker),
+            "{argv}"
+        );
+        assert!(
+            !unused.exists(),
+            "{provider}: the other executor must not run"
+        );
     }
 }
 

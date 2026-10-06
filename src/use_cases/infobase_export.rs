@@ -6,7 +6,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::model::AppConfig;
-use crate::domain::capability::{Operation, Provider, ProviderPlan, ProviderReceipt};
+use crate::domain::capability::{
+    database_configuration_exporters, exports_database_configuration, Operation, Provider,
+    ProviderPlan, ProviderReceipt, SkippedProvider,
+};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, StepResult,
 };
@@ -51,6 +54,10 @@ pub struct PreparedTransferProvider {
     provider: Provider,
     /// `None` у исполнителя без утилиты на этой машине — чужого агента.
     executable: Option<PathBuf>,
+    /// Состояние конфигурации, под которое выбран исполнитель выгрузки пакета; `None` у
+    /// снимка и подъёма базы. Исполнение пакета сверяет с ним свой запрос: исполнителя,
+    /// выбранного для рабочего состояния, конфигурацией базы данных не нагружают.
+    configuration_state: Option<ConfigurationState>,
 }
 
 impl PreparedTransferProvider {
@@ -83,6 +90,18 @@ fn run_configuration_export(
     let mut result =
         ExportConfigurationPackageResult::new(request.clone(), Some(prepared.receipt.clone()));
     if let Err(error) = validate_configuration_request(request) {
+        return Err(configuration_failure(
+            context,
+            error,
+            result,
+            InfobaseTransferPhase::Validation,
+        ));
+    }
+    if prepared.configuration_state != Some(request.state) {
+        let error = AppError::Runtime(format!(
+            "the executor was selected for another configuration state than the requested {}",
+            request.state.as_str()
+        ));
         return Err(configuration_failure(
             context,
             error,
@@ -949,6 +968,13 @@ impl InfobaseTransferIntent {
             Self::SnapshotRestore { .. } => Operation::InfobaseRestore,
         }
     }
+
+    const fn configuration_state(self) -> Option<ConfigurationState> {
+        match self {
+            Self::Configuration { state } => Some(state),
+            Self::Snapshot | Self::SnapshotRestore { .. } => None,
+        }
+    }
 }
 
 fn select_provider(
@@ -956,7 +982,6 @@ fn select_provider(
     config: &AppConfig,
     intent: InfobaseTransferIntent,
 ) -> Result<PreparedTransferProvider, (AppError, ProviderReceipt)> {
-    use crate::domain::capability::SkippedProvider;
     use crate::use_cases::provider_selection::{
         no_adapter, no_executor, nobody_ready, utilities_of,
     };
@@ -967,7 +992,7 @@ fn select_provider(
     // `domain::capability`: второго мнения о ней здесь нет.
     let operation = intent.operation();
     let plan = config.provider_plan(operation);
-    let plan = match intent {
+    let (plan, mut skipped) = match intent {
         InfobaseTransferIntent::Configuration {
             state: ConfigurationState::Database,
         } => database_configuration_plan(config, plan)?,
@@ -975,16 +1000,15 @@ fn select_provider(
             state: ConfigurationState::Working,
         }
         | InfobaseTransferIntent::Snapshot
-        | InfobaseTransferIntent::SnapshotRestore { .. } => plan,
+        | InfobaseTransferIntent::SnapshotRestore { .. } => (plan, Vec::new()),
     };
     if plan.candidates().is_empty() {
         return Err((
             no_executor(config, operation),
-            plan.receipt_for_nobody(Vec::new()),
+            plan.receipt_for_nobody(skipped),
         ));
     }
     let mut utilities = PlatformUtilities::from_config(config);
-    let mut skipped: Vec<SkippedProvider> = Vec::new();
 
     for provider in plan.candidates() {
         if let Some(error) = pending_interruption_error(context, "during provider selection") {
@@ -1008,6 +1032,7 @@ fn select_provider(
                     receipt,
                     provider,
                     executable,
+                    configuration_state: intent.configuration_state(),
                 });
             }
             Err(reason) => skipped.push(SkippedProvider { provider, reason }),
@@ -1018,48 +1043,58 @@ fn select_provider(
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 
-/// Кто выгружает конфигурацию базы данных: Конфигуратор (`/DumpDBCfg`) и `ibcmd`
-/// (`config save --db`). У агента такой команды нет.
-const DATABASE_CONFIGURATION_EXPORTERS: [Provider; 2] = [Provider::Designer, Provider::Ibcmd];
-
-/// План `download --state db`: из цепочки умолчаний остаются Конфигуратор и `ibcmd` в её
-/// порядке, агента в ней не пробуют. Ключ `providers.download: agent` и цель, у которой
-/// в цепочке нет ни Конфигуратора, ни `ibcmd`, отказывают до выбора — до запуска
-/// платформы и до сессии агента.
+/// План `download --state db`: из цепочки умолчаний остаются те, кто выгружает
+/// конфигурацию базы данных (`domain::capability::exports_database_configuration`), в её
+/// порядке; прочие сразу попадают в пропущенные с причиной. Ключ `providers.download`,
+/// назначивший того, кто её не выгружает, и цель, у которой в цепочке таких нет,
+/// отказывают до выбора — до запуска платформы и до сессии агента.
 fn database_configuration_plan(
     config: &AppConfig,
     plan: ProviderPlan,
-) -> Result<ProviderPlan, (AppError, ProviderReceipt)> {
+) -> Result<(ProviderPlan, Vec<SkippedProvider>), (AppError, ProviderReceipt)> {
     let operation = Operation::ConfigurationExport;
-    let [designer, ibcmd] = DATABASE_CONFIGURATION_EXPORTERS;
+    let (exporters, unable): (Vec<Provider>, Vec<Provider>) = plan
+        .candidates()
+        .into_iter()
+        .partition(|provider| exports_database_configuration(*provider));
+    let skipped = unable
+        .into_iter()
+        .map(|provider| SkippedProvider {
+            provider,
+            reason: format!(
+                "{provider} has no command for the database configuration that {operation} --state db takes"
+            ),
+        })
+        .collect::<Vec<_>>();
+    if !exporters.is_empty() {
+        let plan = match plan {
+            ProviderPlan::Override { .. } => plan,
+            ProviderPlan::Default { .. } => ProviderPlan::Default { chain: exporters },
+        };
+        return Ok((plan, skipped));
+    }
+    let unable = skipped
+        .iter()
+        .map(|entry| entry.provider.as_str())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let named = database_configuration_exporters()
+        .map(Provider::as_str)
+        .collect::<Vec<_>>()
+        .join(" or ");
     let reason = format!(
-        "{operation} --state db takes the database configuration, which only {designer} or {ibcmd} exports: the agent has no command for it"
+        "{operation} --state db takes the database configuration, which only {named} exports: {unable} has no command for it"
     );
-    let refusal = match plan {
-        ProviderPlan::Override { provider, .. }
-            if DATABASE_CONFIGURATION_EXPORTERS.contains(&provider) =>
-        {
-            return Ok(plan)
-        }
-        ProviderPlan::Override { provider, ref file } => format!(
-            "{reason}; providers.{operation} in {file} assigns {provider}: remove the key or assign {designer} or {ibcmd}"
+    let refusal = match &plan {
+        ProviderPlan::Override { provider, file } => format!(
+            "{reason}; providers.{operation} in {file} assigns {provider}: remove the key or assign {named}"
         ),
-        ProviderPlan::Default { ref chain } => {
-            let exporters = chain
-                .iter()
-                .copied()
-                .filter(|provider| DATABASE_CONFIGURATION_EXPORTERS.contains(provider))
-                .collect::<Vec<_>>();
-            if !exporters.is_empty() {
-                return Ok(ProviderPlan::Default { chain: exporters });
-            }
-            format!(
-                "{reason}; a {} target serves {operation} only through the agent: omit --state db to export the working configuration",
-                config.target_kind().as_str()
-            )
-        }
+        ProviderPlan::Default { .. } => format!(
+            "{reason}; a {} target serves {operation} only through the agent: omit --state db to export the working configuration",
+            config.target_kind().as_str()
+        ),
     };
-    let receipt = plan.receipt_for_nobody(Vec::new());
+    let receipt = plan.receipt_for_nobody(skipped);
     Err((AppError::capability(refusal), receipt))
 }
 
@@ -1468,7 +1503,6 @@ fn run_configuration_provider(
                 context,
                 config,
                 executable,
-                state,
                 extension,
                 staging_path,
             )
@@ -1888,6 +1922,48 @@ mod tests {
         crate::use_cases::interruption::assert_stopped_at_a_safe_point(&result.execution);
     }
 
+    /// Исполнитель, выбранный под рабочее состояние, конфигурацию базы данных не исполняет:
+    /// несовпадение запросов отвергается до цели и до исполнителя, а отказ «у агента нет
+    /// такой команды» остаётся только у выбора.
+    #[test]
+    fn a_provider_prepared_for_another_state_is_not_dispatched() {
+        use crate::domain::capability::{ProviderOrigin, ProviderReceipt};
+        use crate::domain::infobase_export::ConfigurationState;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&base).expect("base");
+        let config = config(&base, &work);
+        let prepared = super::PreparedTransferProvider {
+            receipt: ProviderReceipt::new(Provider::Agent, ProviderOrigin::Default),
+            provider: Provider::Agent,
+            executable: None,
+            configuration_state: Some(ConfigurationState::Working),
+        };
+        let request = crate::domain::infobase_export::ExportConfigurationPackageRequest {
+            state: ConfigurationState::Database,
+            subject: ConfigurationSubject::Main,
+            output: base.join("main.cf"),
+        };
+        let context = ExecutionContext::cli(
+            crate::use_cases::context::CommandName::InfobaseConfigurationExport,
+        );
+
+        let failure = super::execute_configuration_export(&context, &config, &request, &prepared)
+            .expect_err("a mismatched state must not reach the executor");
+
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("another configuration state"),
+            "{}",
+            failure.error
+        );
+        assert!(!base.join("main.cf").exists());
+    }
+
     #[test]
     fn orphan_cleanup_removes_only_owned_stale_export_files() {
         use crate::support::fs::{
@@ -2220,6 +2296,7 @@ mod tests {
             receipt: ProviderReceipt::new(Provider::Designer, ProviderOrigin::Default),
             provider: Provider::Designer,
             executable: Some(designer),
+            configuration_state: None,
         };
         let cancellation = tokio_util::sync::CancellationToken::new();
         let context = ExecutionContext::cli(CommandName::InfobaseRestore)
@@ -2348,6 +2425,7 @@ mod tests {
             receipt: ProviderReceipt::new(provider, ProviderOrigin::Default),
             provider,
             executable: Some(designer),
+            configuration_state: None,
         };
         let cancellation = tokio_util::sync::CancellationToken::new();
         if cancelled {

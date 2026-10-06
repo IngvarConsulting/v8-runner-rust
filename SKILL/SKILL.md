@@ -120,7 +120,7 @@ v8-runner infobase create
   Append `--dry-run` to preview without platform calls. Apply disables safe mode and unsafe action protection.
 - Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner pull ...` command.
 - Need a CF/CFE package of the state currently stored in the infobase: use
-  `v8-runner download --state <working|database> --output <file.cf>`;
+  `v8-runner download [--state db] --output <file.cf>` (without `--state` the working configuration, `db` the database one);
   add `--extension <name>` and use `.cfe` for an extension. This is not `make`, which builds
   artifacts from project sources.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.

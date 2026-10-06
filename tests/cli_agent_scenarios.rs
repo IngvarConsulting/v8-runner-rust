@@ -396,6 +396,16 @@ fn configuration_export_through_the_agent_handles_working_state_only() {
             .is_some_and(|message| message.contains("which only designer or ibcmd exports")),
         "{payload}"
     );
+    // Отказ пришёл при выборе: исполнитель не выбран, агент назван пропущенным.
+    assert_eq!(
+        payload["data"]["provider"]["selected"],
+        Value::Null,
+        "{payload}"
+    );
+    assert_eq!(
+        payload["data"]["provider"]["skipped"][0]["provider"], "agent",
+        "{payload}"
+    );
     assert_eq!(
         commands(&harness).len(),
         sessions,
