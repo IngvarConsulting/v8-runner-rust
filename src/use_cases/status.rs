@@ -30,8 +30,8 @@ use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    connect, generation_id, transcript_log, wait_policy, AgentHandle, GenerationAfter,
-    GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
+    connect, generation_id, transcript_log, wait_policy, AgentHandle, GenerationComparison,
+    GenerationLedger, GenerationRecord, Recorded,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::exchange_guard::{memory_of, new_owner_mark};
@@ -109,7 +109,11 @@ fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
                 recorded: own_record(context, &config.work_path).map(|record| RecordedGeneration {
                     token: record.token,
                     tool: record.tool,
-                    after: after_label(record.after).to_owned(),
+                    // Имя операции — то же, что в журнале: его даёт сам тип записи.
+                    after: serde_json::to_value(record.after)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_default(),
                     recorded_at: record.recorded_at,
                 }),
                 changed_files: (memory == MemoryState::Remembered)
@@ -140,14 +144,6 @@ fn own_record(context: &SourceSetContext, work_path: &Path) -> Option<Generation
     match GenerationLedger::of(context, work_path)?.read() {
         Recorded::Ours(record) => Some(record),
         Recorded::Nothing | Recorded::Foreign { .. } => None,
-    }
-}
-
-fn after_label(after: GenerationAfter) -> &'static str {
-    match after {
-        GenerationAfter::Build => "build",
-        GenerationAfter::Dump => "dump",
-        GenerationAfter::FailedBuild => "failed_build",
     }
 }
 
@@ -183,7 +179,14 @@ fn deepen(
         else {
             continue;
         };
-        let extension = (set.purpose == "extension").then_some(set.name.as_str());
+        let extension = config
+            .source_sets
+            .iter()
+            .any(|declared| {
+                declared.name == set.name
+                    && declared.purpose == crate::config::model::SourceSetPurpose::Extension
+            })
+            .then_some(set.name.as_str());
         let (tool, answer) = reader.read(context, config, extension);
         let record = own_record(source, &config.work_path);
         set.base = Some(verdict(tool, answer, record.as_ref()));
@@ -196,6 +199,11 @@ fn deepen(
         return Err(error);
     }
     status.extensions = Some(extensions(context, config));
+    if let Some(error) =
+        crate::use_cases::interruption::pending_interruption_error(context, "the owner marker")
+    {
+        return Err(error);
+    }
     status.holders = crate::use_cases::infobase_owner::holders(config);
     Ok(())
 }
@@ -440,5 +448,76 @@ impl GenerationReader {
                 handle.finish(wait);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(tool: Provider, token: &str) -> GenerationRecord {
+        GenerationRecord {
+            token: token.to_owned(),
+            tool,
+            after: crate::use_cases::agent_session::GenerationAfter::Build,
+            recorded_at: "2026-10-06T00:00:00Z".to_owned(),
+            identity: "pair".to_owned(),
+        }
+    }
+
+    /// Сверка ответа с записью идёт только внутри одного инструмента, как у `push`; ответа
+    /// нет — нет и сверки, записи нет — сравнивать не с чем.
+    #[test]
+    fn the_verdict_compares_within_the_tool_of_the_record() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let designer = record(Provider::Designer, &a);
+        let cases = [
+            (
+                Some(Provider::Designer),
+                Ok(Some(a.clone())),
+                Some(&designer),
+                GenerationVerdict::Unchanged,
+            ),
+            (
+                Some(Provider::Designer),
+                Ok(Some(b.clone())),
+                Some(&designer),
+                GenerationVerdict::MovedAhead,
+            ),
+            (
+                Some(Provider::Ibcmd),
+                Ok(Some(b.clone())),
+                Some(&designer),
+                GenerationVerdict::OtherTool,
+            ),
+            (
+                Some(Provider::Designer),
+                Ok(None),
+                Some(&designer),
+                GenerationVerdict::NoAnswer,
+            ),
+            (
+                None,
+                Err("no executor".to_owned()),
+                Some(&designer),
+                GenerationVerdict::NoAnswer,
+            ),
+            (
+                Some(Provider::Designer),
+                Ok(Some(a.clone())),
+                None,
+                GenerationVerdict::NoRecord,
+            ),
+        ];
+        for (tool, answer, record, expected) in cases {
+            assert_eq!(verdict(tool, answer, record).comparison, expected);
+        }
+        assert_eq!(
+            verdict(Some(Provider::Designer), Ok(None), Some(&designer))
+                .reason
+                .as_deref(),
+            Some("the tool gave no configuration generation")
+        );
     }
 }

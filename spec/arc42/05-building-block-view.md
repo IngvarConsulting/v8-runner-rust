@@ -63,7 +63,7 @@ flowchart TB
 `init_project` (в `CommandName` — `Init`), `download`, `infobase dump` и `restore` —
 `infobase_export`, `extensions` — `configure_extensions` и `extension_inventory`, `test` —
 `run_tests`; остальные названы по команде: `convert_sources`, `launch_app`, `publish_infobase`,
-`tools_download`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит
+`tools_download`, `status`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит
 [правило](../rules/mcp/published-tool-surface.md).
 
 ### 5.4 Общее в `use_cases`
@@ -73,6 +73,7 @@ flowchart TB
 | [`transport.rs`](../../src/use_cases/transport.rs), [`command_lock.rs`](../../src/use_cases/command_lock.rs), [`workspace_lock.rs`](../../src/use_cases/workspace_lock.rs), [`infobase_lock.rs`](../../src/use_cases/infobase_lock.rs) | Вызов сценария под замком `workPath` и затем под замком файловой базы — общий для CLI и MCP; что команда делает с базой, называет адаптер |
 | [`infobase_owner.rs`](../../src/use_cases/infobase_owner.rs) | Метка владельца файловой базы: чья база, запись копии, форма метки; зовёт её только граница в `transport.rs` — [8.3](08-cross-cutting-concepts.md) |
 | [`exchange_guard.rs`](../../src/use_cases/exchange_guard.rs) | Проверки перед обменом после владельца: память о базе у набора (`no_memory`) и поколение до и после загрузки и выгрузки (`non_fast_forward`), сверка всех наборов до первой загрузки, пропуск выгрузки при неизменном поколении, признак нового владельца, память созданной базы, восстановление файла версий; единственный, кто строит эти отказы и их `next` (сквозь исполнителей они идут как `AppError::Refused`); журнал поколений — в [`agent_session.rs`](../../src/use_cases/agent_session.rs) — [6.3](06-runtime-view.md) |
+| [`status.rs`](../../src/use_cases/status.rs) | `status`: память о базе по наборам — определение памяти берётся у `exchange_guard.rs` — и с `--deep` поколение исполнителем `push`, состав расширений исполнителем `extensions` (`extension_inventory.rs`), копии из метки (`infobase_owner.rs`); ничего не пишет |
 | [`provider_selection.rs`](../../src/use_cases/provider_selection.rs) | Выбор исполнителя и квитанция — [6.2](06-runtime-view.md) |
 | [`agent_session.rs`](../../src/use_cases/agent_session.rs) | Сессия агента на команду, обмен файлами, поколение — [6.4](06-runtime-view.md) |
 | [`staged_publication.rs`](../../src/use_cases/staged_publication.rs), [`destruction_guard.rs`](../../src/use_cases/destruction_guard.rs) | Публикация с заменой и вопрос к git — [8.8](08-cross-cutting-concepts.md) |
