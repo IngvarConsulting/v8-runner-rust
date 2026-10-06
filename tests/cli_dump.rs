@@ -471,7 +471,8 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
 
 #[test]
 fn dump_text_success_is_compact_and_keeps_output_visible() {
-    let (_dir, config_path, _binary_path, _work_path, base_path, _calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, _work_path, base_path, _calls_log) =
+        setup_project_in_a_repository();
 
     let output = v8_runner_command()
         .args([
@@ -540,7 +541,8 @@ fn dump_ibcmd_incremental_json_success() {
 
 #[test]
 fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
-    let (_dir, config_path, _binary_path, work_path, _base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, _base_path, calls_log) =
+        setup_project_in_a_repository();
 
     let output = v8_runner_command()
         .args([
@@ -572,7 +574,8 @@ fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
 
 #[test]
 fn dump_text_warning_shows_degraded_fallback_reason() {
-    let (_dir, config_path, _binary_path, _work_path, _base_path, _calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, _work_path, _base_path, _calls_log) =
+        setup_project_in_a_repository();
 
     let output = v8_runner_command()
         .args([
@@ -596,7 +599,8 @@ fn dump_text_warning_shows_degraded_fallback_reason() {
 
 #[test]
 fn dump_ibcmd_partial_failure_keeps_partial_mode_and_warning() {
-    let (_dir, config_path, binary_path, _work_path, _base_path, calls_log) = setup_project();
+    let (_dir, config_path, binary_path, _work_path, _base_path, calls_log) =
+        setup_project_in_a_repository();
     write_ibcmd_script(&binary_path, &calls_log, Some("--sync"));
 
     let output = v8_runner_command()
@@ -631,7 +635,8 @@ fn dump_ibcmd_partial_failure_keeps_partial_mode_and_warning() {
 
 #[test]
 fn dump_designer_partial_json_normalizes_colon_selector_and_reports_both_forms() {
-    let (_dir, config_path, binary_path, work_path, _base_path, _calls_log) = setup_project();
+    let (_dir, config_path, binary_path, work_path, _base_path, _calls_log) =
+        setup_project_in_a_repository();
     let designer_binary = binary_path.with_file_name("1cv8");
     let captured_list = config_path
         .parent()
@@ -749,6 +754,31 @@ fn setup_project_in_a_repository() -> (
 ) {
     let parts = setup_project();
     let base_path = parts.4.clone();
+    git(&base_path, &["init", "-q", "-b", "main", "."]);
+    git(&base_path, &["config", "user.email", "test@example.com"]);
+    git(&base_path, &["config", "user.name", "Test"]);
+    git(&base_path, &["add", "-A"]);
+    git(&base_path, &["commit", "-qm", "committed sources"]);
+    parts
+}
+
+/// Проект в репозитории с годным файлом версий в игноре: `pull` идёт по изменившемуся.
+fn setup_project_with_a_version_file_in_a_repository() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+) {
+    let parts = setup_project();
+    let base_path = parts.4.clone();
+    fs::write(base_path.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    fs::write(
+        base_path.join("main").join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.17\"/>",
+    )
+    .expect("version file");
     git(&base_path, &["init", "-q", "-b", "main", "."]);
     git(&base_path, &["config", "user.email", "test@example.com"]);
     git(&base_path, &["config", "user.name", "Test"]);
@@ -885,33 +915,282 @@ fn kept_backups(base_path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Каталог вне системы контроля версий: ответа нет. Сторож не отказывает и не
-/// притворяется, что защитил, — работа идёт ровно как до него.
+/// `pull main` с добавленными ключами в форме JSON: выход, конверт и весь вывод.
+fn pull_json(config_path: &Path, extra: &[&str]) -> (std::process::Output, Value, String) {
+    let config = config_path.display().to_string();
+    let mut args = vec![
+        "--config",
+        config.as_str(),
+        "--json-message",
+        "pull",
+        "main",
+    ];
+    args.extend_from_slice(extra);
+    let output = v8_runner_command().args(&args).output().expect("run pull");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("json envelope ({error}): {rendered}"));
+    (output, envelope, rendered)
+}
+
+/// Потери, которые ответ называет полем `losses`, строками.
+fn losses_of(envelope: &Value) -> Vec<String> {
+    envelope["data"]["losses"]
+        .as_array()
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|path| path.as_str().expect("loss is a path").to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Каталог вне системы контроля версий: ответа нет, и потерять можно всё. Отказ идёт на
+/// тех же правах, что найденное безвозвратное, называет каждый файл и случается до запуска
+/// платформы — и у выгрузки поверх каталога, и у замены каталога без согласия.
 #[test]
-fn without_version_control_the_dump_proceeds_untouched() {
-    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project();
+fn a_directory_outside_version_control_is_refused_and_every_file_is_named() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) = setup_project();
+    let nested = base_path.join("main").join("Catalogs").join("Hand.xml");
+    fs::create_dir_all(nested.parent().expect("parent")).expect("nested dir");
+    fs::write(&nested, "written by hand\n").expect("nested file");
 
-    // Без согласия: полная выгрузка MCP спрашивает систему контроля версий сначала.
+    let (output, envelope, rendered) = pull_json(&config_path, &[]);
+    assert_eq!(output.status.code(), Some(2), "{rendered}");
+    assert_eq!(envelope["error"]["kind"], "validation", "{rendered}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("refusing to overwrite"), "{message}");
+    assert!(message.contains("version control"), "{message}");
+    assert!(message.contains("old.txt"), "{message}");
+    assert!(message.contains("Hand.xml"), "{message}");
+    assert!(message.contains("pull main --force"), "{message}");
+
     let answer = support::mcp::call_tool(&config_path, "dump_config", json!({ "mode": "FULL" }));
-
     let rendered = answer.envelope.to_string();
     assert!(
-        !answer.is_error,
-        "a missing answer must not stop the work: {rendered}"
+        answer.is_error,
+        "the replacement must be refused: {rendered}"
     );
-    assert_eq!(
-        answer.envelope["warnings"],
-        json!([]),
-        "and must not turn an ordinary dump into a warning: {rendered}"
+    assert_eq!(answer.envelope["error"]["kind"], "validation", "{rendered}");
+    assert!(rendered.contains("refusing to replace"), "{rendered}");
+    assert!(rendered.contains("old.txt"), "{rendered}");
+
+    assert!(
+        !calls_log.exists(),
+        "the refusal comes before the platform starts: {:?}",
+        fs::read_to_string(&calls_log).ok()
     );
-    assert_eq!(
-        answer.envelope["data"]["message"], "dump completed successfully",
+    assert!(base_path.join("main").join("old.txt").is_file());
+    assert!(nested.is_file());
+    assert!(kept_backups(&base_path).is_empty());
+}
+
+/// Пустой каталог вне системы контроля версий терять нечего: выгрузка идёт без согласия.
+#[test]
+fn an_empty_directory_outside_version_control_has_nothing_to_lose() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) = setup_project();
+    fs::remove_file(base_path.join("main").join("old.txt")).expect("empty the directory");
+
+    let (output, envelope, rendered) = pull_json(&config_path, &[]);
+
+    assert!(output.status.success(), "{rendered}");
+    assert!(losses_of(&envelope).is_empty(), "{rendered}");
+    assert!(calls_log.exists(), "the platform must run: {rendered}");
+}
+
+/// `pull` кладёт выгрузку поверх каталога: чего в базе нет, остаётся. `pull --force`
+/// приводит каталог ровно к базе; зафиксированное потерей не считается, и ответ ничего
+/// уничтоженным не называет.
+#[test]
+fn a_pull_lays_the_dump_over_the_directory_and_force_brings_it_to_the_base() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) =
+        setup_project_with_a_version_file_in_a_repository();
+
+    let (output, envelope, rendered) = pull_json(&config_path, &[]);
+    assert!(output.status.success(), "{rendered}");
+    assert_eq!(envelope["data"]["mode"], "INCREMENTAL", "{rendered}");
+    assert!(
+        fs::read_to_string(&calls_log)
+            .expect("calls")
+            .contains("--sync"),
         "{rendered}"
     );
     assert!(
-        kept_backups(&base_path).is_empty(),
-        "nothing is kept behind: {:?}",
-        kept_backups(&base_path)
+        base_path.join("main").join("old.txt").is_file(),
+        "what the base does not have stays in place: {rendered}"
+    );
+    assert!(losses_of(&envelope).is_empty(), "{rendered}");
+
+    let (output, envelope, rendered) = pull_json(&config_path, &["--force"]);
+    assert!(output.status.success(), "{rendered}");
+    assert_eq!(envelope["data"]["mode"], "FULL", "{rendered}");
+    assert!(
+        !base_path.join("main").join("old.txt").exists(),
+        "the directory is brought exactly to the base: {rendered}"
+    );
+    assert!(
+        losses_of(&envelope).is_empty(),
+        "a committed file is not destroyed: {rendered}"
+    );
+}
+
+/// Пообъектная перезапись спрашивает сторожа так же, как замена: незафиксированное в
+/// каталоге останавливает `pull` до платформы и называется поимённо.
+#[test]
+fn an_incremental_pull_refuses_over_work_version_control_cannot_give_back() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) =
+        setup_project_with_a_version_file_in_a_repository();
+    fs::write(
+        base_path.join("main").join("hand-written.xml"),
+        "written by hand\n",
+    )
+    .expect("hand-written");
+
+    let (output, envelope, rendered) = pull_json(&config_path, &[]);
+
+    assert_eq!(output.status.code(), Some(2), "{rendered}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("refusing to overwrite"), "{message}");
+    assert!(message.contains("main/hand-written.xml"), "{message}");
+    assert!(
+        !message.contains("ran full"),
+        "the version file is usable, so the dump is incremental: {message}"
+    );
+    assert!(
+        !calls_log.exists(),
+        "the platform must not start: {rendered}"
+    );
+    assert!(base_path.join("main").join("hand-written.xml").is_file());
+}
+
+/// Выборка объектов тоже перезаписывает каталог на месте: незафиксированная правка
+/// отслеживаемого файла останавливает `pull --object` до платформы, файл цел.
+#[test]
+fn a_partial_pull_refuses_over_an_uncommitted_edit() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) =
+        setup_project_with_a_version_file_in_a_repository();
+    let edited = base_path.join("main").join("old.txt");
+    fs::write(&edited, "edited by hand\n").expect("edit a committed file");
+
+    let (output, envelope, rendered) = pull_json(&config_path, &["--object", "Catalog:Items"]);
+
+    assert_eq!(output.status.code(), Some(2), "{rendered}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("refusing to overwrite"), "{message}");
+    assert!(message.contains("main/old.txt"), "{message}");
+    assert!(
+        !calls_log.exists(),
+        "the platform must not start: {rendered}"
+    );
+    assert_eq!(
+        fs::read_to_string(&edited).expect("the edit survives"),
+        "edited by hand\n"
+    );
+}
+
+/// `--force` называет уничтоженное поимённо: и найденное системой контроля версий, и весь
+/// каталог, когда ответа у неё нет.
+#[test]
+fn force_names_what_it_destroyed() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
+    fs::write(
+        base_path.join("main").join("hand-written.xml"),
+        "written by hand\n",
+    )
+    .expect("hand-written");
+
+    let (output, envelope, rendered) = pull_json(&config_path, &["--force"]);
+    assert!(output.status.success(), "{rendered}");
+    assert_eq!(
+        losses_of(&envelope),
+        vec!["main/hand-written.xml".to_owned()],
+        "{rendered}"
+    );
+    let message = envelope["data"]["message"].as_str().expect("message");
+    assert!(message.contains("main/hand-written.xml"), "{message}");
+    assert!(!base_path.join("main").join("hand-written.xml").exists());
+
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project();
+    let (output, envelope, rendered) = pull_json(&config_path, &["--force"]);
+    assert!(output.status.success(), "{rendered}");
+    let losses = losses_of(&envelope);
+    assert_eq!(losses.len(), 1, "{rendered}");
+    assert!(
+        Path::new(&losses[0]).ends_with("main/old.txt"),
+        "{rendered}"
+    );
+    let message = envelope["data"]["message"].as_str().expect("message");
+    assert!(message.contains("old.txt"), "{message}");
+    assert!(message.contains("version control"), "{message}");
+    assert!(!base_path.join("main").join("old.txt").exists());
+}
+
+/// Превью перечисляет потери поимённо и ничего не трогает: без согласия — то, на чём
+/// выгрузка остановится, с согласием — то, что она уничтожит.
+#[test]
+fn a_pull_preview_names_the_losses_and_touches_nothing() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) = setup_project();
+
+    for (extra, says) in [
+        (&["--dry-run"][..], "would stop"),
+        (&["--force", "--dry-run"][..], "would discard"),
+    ] {
+        let (output, envelope, rendered) = pull_json(&config_path, extra);
+        assert!(output.status.success(), "{extra:?}: {rendered}");
+        let losses = losses_of(&envelope);
+        assert_eq!(losses.len(), 1, "{extra:?}: {rendered}");
+        assert!(
+            Path::new(&losses[0]).ends_with("main/old.txt"),
+            "{extra:?}: {rendered}"
+        );
+        let message = envelope["data"]["message"].as_str().expect("message");
+        assert!(message.contains(says), "{extra:?}: {message}");
+        assert!(message.contains("old.txt"), "{extra:?}: {message}");
+    }
+    assert!(base_path.join("main").join("old.txt").is_file());
+    assert!(!calls_log.exists(), "a preview must not start the platform");
+}
+
+/// У проекта EDT слияния нет: выгрузка заменяет проект по тем же правилам подтверждения.
+/// Вне системы контроля версий без согласия — отказ до платформы, с согласием — замена,
+/// которая называет уничтоженное.
+#[test]
+fn an_edt_project_is_replaced_only_by_the_same_confirmation_rules() {
+    let (
+        _dir,
+        config_path,
+        _platform_path,
+        _edt_path,
+        _work_path,
+        base_path,
+        designer_calls,
+        _edt_calls,
+    ) = setup_edt_project();
+
+    let (output, envelope, rendered) = pull_json(&config_path, &[]);
+    assert_eq!(output.status.code(), Some(2), "{rendered}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("refusing to replace"), "{message}");
+    assert!(message.contains("old.txt"), "{message}");
+    assert!(
+        !designer_calls.exists(),
+        "the refusal comes before the platform starts: {rendered}"
+    );
+    assert!(base_path.join("main").join("old.txt").is_file());
+
+    let (output, envelope, rendered) = pull_json(&config_path, &["--force"]);
+    assert!(output.status.success(), "{rendered}");
+    assert!(!base_path.join("main").join("old.txt").exists());
+    assert!(
+        losses_of(&envelope)
+            .iter()
+            .any(|loss| Path::new(loss).ends_with("main/old.txt")),
+        "{rendered}"
     );
 }
 

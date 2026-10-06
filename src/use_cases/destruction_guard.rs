@@ -1,26 +1,27 @@
-//! Сторож: не дать замене каталога уничтожить работу, которую не вернуть.
+//! Сторож: не дать замене или перезаписи каталога уничтожить работу, которую не вернуть.
 //!
-//! Платформа не знает о том, что человек держит в каталоге исходников, а замена
-//! каталога стирает оттуда всё лишнее безвозвратно: резервную копию прежнего
-//! содержимого раннер до сих пор удалял последним шагом.
+//! Платформа не знает о том, что человек держит в каталоге исходников: замена каталога
+//! стирает оттуда всё лишнее, а выгрузка поверх него переписывает файлы на месте.
 //!
-//! Спрашивают об этом систему контроля версий, и ответов у неё три, а не два.
-//! Незнание — законный ответ: раннер работает и там, где гита нет вовсе.
+//! Спрашивают об этом систему контроля версий, и ответов у неё три: терять нечего, есть
+//! безвозвратное, ответа нет. Третий ответ — гита нет, каталог вне рабочей копии, вызов не
+//! удался — приравнен ко второму: потерять можно всё, что в каталоге лежит, и отказ идёт
+//! на тех же правах, с перечнем каждого файла. Пустой каталог терять нечего ни в каком
+//! случае.
 //!
-//! Что делать с незнанием — решено намеренно: работа идёт, как шла до сторожа.
-//! Защитить того, за кого нельзя ответить, здесь нечем, а изображать защиту
-//! дороже, чем её не обещать: сохранять копию дерева на **каждой** выгрузке вне
-//! репозитория значит платить за редкий случай на общем пути. Настоящий ответ для
-//! таких каталогов — не гит, а собственная память раннера о том, что он сам
-//! породил (#163, #165).
+//! Согласие (`--force`) пропускает работу и называет уничтоженное: то, что нашла система
+//! контроля версий, или весь каталог, когда ответа нет.
 
 use std::path::{Path, PathBuf};
 
-use crate::platform::git::{uncommitted_work_in, UncommittedWork};
+use walkdir::WalkDir;
+
+use crate::platform::git::{uncommitted_work_in, NoAnswer, UncommittedWork};
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, ExecutionTransport};
 
-/// Сколько потерь перечислять в отказе, прежде чем считать их числом.
+/// Сколько потерь перечислять в тексте, прежде чем считать их числом. Полный перечень
+/// несёт поле ответа.
 const NAMED_LOSS_LIMIT: usize = 20;
 
 /// Чьё содержимое лежит в каталоге и разрешено ли его уничтожить.
@@ -29,7 +30,7 @@ pub(super) enum DestructionConsent {
     /// Каталог раннер завёл для себя: кеш инструментов и тому подобное. Спрашивать
     /// систему контроля версий не о чем.
     RunnerOwned,
-    /// Каталог назвал человек. Незафиксированное останавливает работу, и отказ называет
+    /// Каталог назвал человек. Безвозвратное останавливает работу, и отказ называет
     /// выходы, которые у вызывающего есть.
     AskFirst(WaysOut),
     /// Человек попросил уничтожить явно.
@@ -80,14 +81,131 @@ impl Destruction {
     }
 }
 
-/// Отказывает до того, как что-либо стёрто, либо пропускает работу дальше.
+/// Что в каталоге пропадёт безвозвратно.
 ///
-/// `regenerated` — имена файлов в корне `target`, которые эта замена пишет заново;
-/// их называет вызывающий, потому что только он знает, что пишет. Выгрузка в
-/// формате Конфигуратора передаёт опись версий: платформа пишет её в каждую полную
-/// выгрузку, а штатно опись лежит в игноре, и без исключения отказ стоял бы на
-/// каждой выгрузке. Преобразование и замена проекта EDT описи не пишут — у них
-/// исключений нет.
+/// Пути — такими, какими их называет ответ: от корня рабочей копии, когда гит ответил
+/// (так их не спутать между наборами), и полными, когда ответа нет и корня тоже.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Losses {
+    paths: Vec<PathBuf>,
+    /// Почему система контроля версий не ответила. Тогда потеря — каждый файл каталога.
+    unanswered: Option<NoAnswer>,
+}
+
+impl Losses {
+    pub(super) fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    pub(super) fn into_paths(self) -> Vec<PathBuf> {
+        self.paths
+    }
+
+    /// Перечень для текста: первые имена и счёт остальных.
+    fn named(&self) -> String {
+        let named: Vec<String> = self
+            .paths
+            .iter()
+            .take(NAMED_LOSS_LIMIT)
+            .map(|path| path.display().to_string())
+            .collect();
+        let rest = self.paths.len().saturating_sub(named.len());
+        let tail = if rest > 0 {
+            format!(", and {rest} more")
+        } else {
+            String::new()
+        };
+        format!("{}{tail}", named.join(", "))
+    }
+
+    /// Что потеряется в каталоге, названном рядом, — одной фразой.
+    fn describe(&self, tense: Tense) -> String {
+        let count = self.paths.len();
+        let (exist, gives) = match tense {
+            Tense::Present => ("exist", "gives"),
+            Tense::Past => ("existed", "gave"),
+        };
+        match &self.unanswered {
+            None => format!(
+                "{count} file(s) there {exist} nowhere else ({})",
+                self.named()
+            ),
+            Some(no_answer) => {
+                // Один файл — без множественного числа: «all 1 file(s)» читается сбоем.
+                let every_file = match (count, tense) {
+                    (1, Tense::Present) => "the only file in it exists".to_owned(),
+                    (1, Tense::Past) => "the only file in it existed".to_owned(),
+                    (_, _) => format!("all {count} files in it {exist}"),
+                };
+                format!(
+                    "version control {gives} no answer there ({}), so {every_file} nowhere else ({})",
+                    no_answer.reason(),
+                    self.named()
+                )
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Tense {
+    Present,
+    Past,
+}
+
+/// Спрашивает, что в `target` не восстановить. Ничего не пишет и согласия не учитывает.
+///
+/// `regenerated` — имена файлов в корне `target`, которые работа пишет заново; их
+/// называет вызывающий, потому что только он знает, что пишет. Выгрузка в формате
+/// Конфигуратора передаёт опись версий: платформа пишет её в каждую выгрузку, а штатно
+/// опись лежит в игноре, и без исключения отказ стоял бы на каждой выгрузке.
+/// Преобразование и замена проекта EDT описи не пишут — у них исключений нет.
+pub(super) fn losses_in(target: &Path, regenerated: &[&str]) -> Losses {
+    match uncommitted_work_in(target, regenerated) {
+        // Терять нечего: прежнее содержимое система контроля версий вернёт сама.
+        UncommittedWork::Nothing => Losses::default(),
+        UncommittedWork::AtRisk(paths) => Losses {
+            paths,
+            unanswered: None,
+        },
+        // Ответа нет — потерять можно всё, что лежит в каталоге.
+        UncommittedWork::Unknown(no_answer) => {
+            let paths = every_file_in(target, regenerated);
+            Losses {
+                unanswered: (!paths.is_empty()).then_some(no_answer),
+                paths,
+            }
+        }
+    }
+}
+
+/// Каждый файл под `target`, кроме названных в `regenerated` в его корне. Каталоги сами по
+/// себе потерей не считаются; по ссылкам обход не идёт. То, что прочесть не удалось,
+/// называется своим путём: о его содержимом ответа нет, а терять его так же можно.
+fn every_file_in(target: &Path, regenerated: &[&str]) -> Vec<PathBuf> {
+    WalkDir::new(target)
+        .min_depth(1)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Ok(entry) if entry.file_type().is_dir() => None,
+            Ok(entry)
+                if entry.depth() == 1
+                    && regenerated
+                        .iter()
+                        .any(|name| entry.file_name() == std::ffi::OsStr::new(name)) =>
+            {
+                None
+            }
+            Ok(entry) => Some(entry.into_path()),
+            Err(error) => Some(error.path().unwrap_or(target).to_path_buf()),
+        })
+        .collect()
+}
+
+/// Отказывает до того, как что-либо стёрто, либо пропускает работу дальше и отдаёт, что
+/// она уничтожит по согласию; без согласия отдаёт пустое.
 ///
 /// `context` называет транспорт и глобальные ключи запуска: повторить вызов человек
 /// командной строки и клиент MCP могут по-разному, а команда в совете должна попасть в ту
@@ -98,57 +216,74 @@ pub(super) fn guard_replacement(
     consent: &DestructionConsent,
     regenerated: &[&str],
     how: Destruction,
-) -> Result<(), AppError> {
+) -> Result<Losses, AppError> {
     let ways_out = match consent {
-        DestructionConsent::RunnerOwned => return Ok(()),
+        DestructionConsent::RunnerOwned => return Ok(Losses::default()),
+        // Попросили уничтожить — уничтожаем, как и обещает имя ключа, и называем что.
         DestructionConsent::Granted => None,
         DestructionConsent::AskFirst(ways_out) => Some(ways_out),
     };
+    let losses = losses_in(target, regenerated);
+    match ways_out {
+        Some(ways_out) if !losses.is_empty() => Err(AppError::Validation(refusal(
+            target, &losses, ways_out, context, how,
+        ))),
+        Some(_) | None => Ok(losses),
+    }
+}
 
-    match uncommitted_work_in(target, regenerated) {
-        // Терять нечего: прежнее содержимое система контроля версий вернёт сама.
-        UncommittedWork::Nothing => Ok(()),
-        UncommittedWork::AtRisk(paths) => match ways_out {
-            // Попросили уничтожить — уничтожаем, как и обещает имя ключа.
-            None => Ok(()),
-            Some(ways_out) => Err(AppError::Validation(refusal(
-                target, &paths, ways_out, context, how,
-            ))),
-        },
-        // Ответа нет — работа идёт, как шла до сторожа. Это не защита и не
-        // выдаётся за неё.
-        UncommittedWork::Unknown(_) => Ok(()),
+/// Строка ответа о том, что работа уничтожила по согласию; `None`, если ничего.
+pub(super) fn discard_note(target: &Path, losses: &Losses) -> Option<String> {
+    (!losses.is_empty()).then(|| {
+        format!(
+            "discarded on request in '{}': {}",
+            target.display(),
+            losses.describe(Tense::Past)
+        )
+    })
+}
+
+/// Строка превью о потерях: на чём работа остановится без согласия или что она уничтожит
+/// с ним; `None`, если терять нечего.
+pub(super) fn preview_note(
+    context: &ExecutionContext,
+    target: &Path,
+    consent: &DestructionConsent,
+    losses: &Losses,
+    how: Destruction,
+) -> Option<String> {
+    if losses.is_empty() {
+        return None;
+    }
+    match consent {
+        DestructionConsent::AskFirst(ways_out) => Some(format!(
+            "it would stop before the platform starts: {}",
+            refusal(target, losses, ways_out, context, how)
+        )),
+        DestructionConsent::Granted => Some(format!(
+            "it would discard in '{}': {}",
+            target.display(),
+            losses.describe(Tense::Present)
+        )),
+        DestructionConsent::RunnerOwned => None,
     }
 }
 
 fn refusal(
     target: &Path,
-    paths: &[PathBuf],
+    losses: &Losses,
     ways_out: &WaysOut,
     context: &ExecutionContext,
     how: Destruction,
 ) -> String {
-    let named: Vec<String> = paths
-        .iter()
-        .take(NAMED_LOSS_LIMIT)
-        .map(|path| path.display().to_string())
-        .collect();
-    let rest = paths.len().saturating_sub(named.len());
-    let tail = if rest > 0 {
-        format!(", and {rest} more")
-    } else {
-        String::new()
-    };
     // Одной строкой: человеческий вывод — закреплённая форма, и многострочная
     // подробность в нём рассыпается по разным видам строк.
     format!(
-        "refusing to {} '{}': {} file(s) there exist nowhere else ({}{}); {}",
+        "refusing to {} '{}': {}; {}",
         how.verb(),
         target.display(),
-        paths.len(),
-        named.join(", "),
-        tail,
-        remedy(ways_out, context)
+        losses.describe(Tense::Present),
+        remedy(ways_out, context, losses)
     )
 }
 
@@ -158,17 +293,30 @@ fn refusal(
 /// вывода и глобальных ключей буквальный повтор бьёт в чужой каталог или чужую базу.
 /// Точная команда `pull` несёт набор и глобальные ключи запуска; у MCP по HTTP она
 /// исполнима только там, где работает сервер.
-fn remedy(ways_out: &WaysOut, context: &ExecutionContext) -> String {
+///
+/// Без ответа системы контроля версий «закоммитить» нечем: работу сохраняют, взяв каталог
+/// под контроль версий или унеся файлы.
+fn remedy(ways_out: &WaysOut, context: &ExecutionContext, losses: &Losses) -> String {
     const DISCARDS: &str = "which replaces the directory and discards them";
     let transport = context.transport();
-    let save = match transport {
-        ExecutionTransport::Cli => "commit or stash them and run the same command again",
-        ExecutionTransport::McpStdio | ExecutionTransport::McpHttp => {
-            "commit or stash them and call the tool again"
+    let keep = match losses.unanswered {
+        Some(NoAnswer::OutsideRepository(_)) => {
+            "put them under version control and commit them, or move them away,"
         }
+        // Каталог, может быть, и в рабочей копии, но гит не ответил: брать его под
+        // контроль версий нечего, а чинить надо то, что гит назвал.
+        Some(NoAnswer::Failed(_)) => {
+            "fix what keeps `git status` from answering there and commit them, or move them away,"
+        }
+        None => "commit or stash them",
     };
+    let again = match transport {
+        ExecutionTransport::Cli => "run the same command again",
+        ExecutionTransport::McpStdio | ExecutionTransport::McpHttp => "call the tool again",
+    };
+    let save = format!("{keep} and {again}");
     match ways_out {
-        WaysOut::SaveWork => save.to_owned(),
+        WaysOut::SaveWork => save,
         WaysOut::SameCallWithForce => match transport {
             ExecutionTransport::Cli => {
                 format!("{save}, or repeat the same command with `--force` added, {DISCARDS}")
@@ -211,10 +359,18 @@ mod tests {
         DestructionConsent::AskFirst(pull_force("main"))
     }
 
+    /// Потери, которые нашёл гит.
+    fn answered(paths: &[PathBuf]) -> Losses {
+        Losses {
+            paths: paths.to_vec(),
+            unanswered: None,
+        }
+    }
+
     fn cli_refusal(target: &Path, paths: &[PathBuf]) -> String {
         refusal(
             target,
-            paths,
+            &answered(paths),
             &WaysOut::SameCallWithForce,
             &cli(),
             Destruction::Replace,
@@ -244,13 +400,164 @@ mod tests {
         .is_ok());
     }
 
-    /// Вне репозитория ответа нет — и сторож не притворяется, что защитил.
+    /// Вне репозитория ответа нет: потерять можно всё. Отказ идёт на тех же правах, что
+    /// найденное безвозвратное, и называет каждый файл, кроме того, что работа пишет заново.
     #[test]
-    fn without_an_answer_the_work_goes_on_as_before() {
+    fn without_an_answer_every_file_is_a_loss_and_the_work_is_refused() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("hand-written.xml"), "mine\n").expect("write");
+        fs::create_dir_all(dir.path().join("Catalogs").join("Empty")).expect("dirs");
+        fs::write(dir.path().join("Catalogs").join("Item.xml"), "mine\n").expect("write");
+        fs::write(dir.path().join(VERSION_FILE_NAME), "<info/>\n").expect("version file");
+
+        let Err(AppError::Validation(message)) = guard_replacement(
+            &cli(),
+            dir.path(),
+            &ask_first(),
+            &[VERSION_FILE_NAME],
+            Destruction::Overwrite,
+        ) else {
+            panic!("a directory without an answer must be refused");
+        };
+        assert!(message.contains("refusing to overwrite"), "{message}");
         assert!(
-            guard_replacement(&cli(), dir.path(), &ask_first(), &[], Destruction::Replace).is_ok()
+            message.contains("version control gives no answer"),
+            "{message}"
+        );
+        assert!(message.contains("all 2 files"), "{message}");
+        assert!(message.contains("hand-written.xml"), "{message}");
+        assert!(message.contains("Item.xml"), "{message}");
+        assert!(!message.contains(VERSION_FILE_NAME), "{message}");
+        assert!(
+            message.contains("put them under version control and commit them"),
+            "{message}"
+        );
+    }
+
+    /// Гит упал внутри рабочей копии: отказ тот же, но взять каталог под контроль версий
+    /// не советует — он уже там; совет — устранить то, что гит назвал.
+    #[test]
+    fn a_failing_git_inside_a_worktree_is_not_advised_to_be_put_under_version_control() {
+        let repo = tempdir().expect("tempdir");
+        init_git_repo(repo.path());
+        let source = repo.path().join("src");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("hand-written.xml"), "mine\n").expect("write");
+        fs::write(repo.path().join(".git").join("index"), "x").expect("break the index");
+
+        let Err(AppError::Validation(message)) =
+            guard_replacement(&cli(), &source, &ask_first(), &[], Destruction::Replace)
+        else {
+            panic!("a failing git must be refused");
+        };
+        assert!(
+            message.contains("version control gives no answer"),
+            "{message}"
+        );
+        assert!(message.contains("exited with"), "{message}");
+        assert!(message.contains("the only file in it exists"), "{message}");
+        assert!(
+            !message.contains("put them under version control"),
+            "{message}"
+        );
+        assert!(message.contains("fix what keeps `git status`"), "{message}");
+    }
+
+    /// Пустой каталог терять нечего, есть у него ответ или нет.
+    #[test]
+    fn an_empty_directory_without_an_answer_has_nothing_to_lose() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("nested")).expect("nested");
+        fs::write(dir.path().join(VERSION_FILE_NAME), "<info/>\n").expect("version file");
+        let losses = guard_replacement(
+            &cli(),
+            dir.path(),
+            &ask_first(),
+            &[VERSION_FILE_NAME],
+            Destruction::Replace,
+        )
+        .expect("nothing to lose");
+        assert!(losses.is_empty(), "{losses:?}");
+    }
+
+    /// Согласие называет уничтоженное: найденное гитом и весь каталог без ответа.
+    #[test]
+    fn consent_names_what_it_destroys() {
+        let outside = tempdir().expect("tempdir");
+        fs::write(outside.path().join("hand-written.xml"), "mine\n").expect("write");
+        let losses = guard_replacement(
+            &cli(),
+            outside.path(),
+            &DestructionConsent::Granted,
+            &[],
+            Destruction::Replace,
+        )
+        .expect("consent proceeds");
+        assert_eq!(
+            losses.clone().into_paths(),
+            vec![outside.path().join("hand-written.xml")]
+        );
+        let note = discard_note(outside.path(), &losses).expect("a note");
+        assert!(note.contains("version control gave no answer"), "{note}");
+        assert!(note.contains("hand-written.xml"), "{note}");
+
+        let repo = tempdir().expect("tempdir");
+        init_git_repo(repo.path());
+        fs::write(repo.path().join("hand-written.xml"), "mine\n").expect("write");
+        let losses = guard_replacement(
+            &cli(),
+            repo.path(),
+            &DestructionConsent::Granted,
+            &[],
+            Destruction::Replace,
+        )
+        .expect("consent proceeds");
+        assert_eq!(
+            losses.clone().into_paths(),
+            vec![PathBuf::from("hand-written.xml")]
+        );
+        let note = discard_note(repo.path(), &losses).expect("a note");
+        assert!(!note.contains("no answer"), "{note}");
+    }
+
+    /// Превью называет потери, ничего не трогая: без согласия — отказ, который случится, с
+    /// согласием — уничтожение.
+    #[test]
+    fn a_preview_names_the_losses_for_either_consent() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("hand-written.xml"), "mine\n").expect("write");
+        let losses = losses_in(dir.path(), &[]);
+
+        let refused = preview_note(
+            &cli(),
+            dir.path(),
+            &ask_first(),
+            &losses,
+            Destruction::Overwrite,
+        )
+        .expect("a note");
+        assert!(refused.contains("would stop"), "{refused}");
+        assert!(refused.contains("refusing to overwrite"), "{refused}");
+        let granted = preview_note(
+            &cli(),
+            dir.path(),
+            &DestructionConsent::Granted,
+            &losses,
+            Destruction::Replace,
+        )
+        .expect("a note");
+        assert!(granted.contains("would discard"), "{granted}");
+        assert!(granted.contains("hand-written.xml"), "{granted}");
+        assert!(dir.path().join("hand-written.xml").is_file());
+        assert_eq!(
+            preview_note(
+                &cli(),
+                dir.path(),
+                &ask_first(),
+                &Losses::default(),
+                Destruction::Replace
+            ),
+            None
         );
     }
 
@@ -272,7 +579,7 @@ mod tests {
 
         let same_call = refusal(
             target,
-            &lost,
+            &answered(&lost),
             &WaysOut::SameCallWithForce,
             &cli(),
             Destruction::Replace,
@@ -288,7 +595,7 @@ mod tests {
 
         let pull = refusal(
             target,
-            &lost,
+            &answered(&lost),
             &pull_force("ext"),
             &cli(),
             Destruction::Replace,
@@ -306,7 +613,7 @@ mod tests {
         ] {
             let save_only = refusal(
                 target,
-                &lost,
+                &answered(&lost),
                 &WaysOut::SaveWork,
                 &context,
                 Destruction::Replace,
@@ -321,7 +628,7 @@ mod tests {
         ] {
             let mcp = refusal(
                 target,
-                &lost,
+                &answered(&lost),
                 &pull_force("ext"),
                 &context,
                 Destruction::Replace,
@@ -356,7 +663,7 @@ mod tests {
             let context = context.with_command_line(started_elsewhere());
             let message = refusal(
                 target,
-                &lost,
+                &answered(&lost),
                 &pull_force("ext"),
                 &context,
                 Destruction::Replace,

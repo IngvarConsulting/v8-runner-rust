@@ -365,6 +365,10 @@ fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
     )
     .expect("dump info");
     fs::write(target.join("Untouched.xml"), "<Keep/>").expect("untouched");
+    // Выгрузка поверх каталога вне системы контроля версий отказывает: каталог зафиксирован.
+    let project = harness.dir.path().join("project");
+    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    support::commit_sources(&project);
 
     let (code, payload) = run(&harness, &["dump"]);
 

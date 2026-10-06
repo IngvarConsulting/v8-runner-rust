@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.PULL-LAYS-THE-DUMP-OVER-THE-DIRECTORY
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/217
+check:
+  - tests/cli_dump.rs::a_pull_lays_the_dump_over_the_directory_and_force_brings_it_to_the_base
+  - tests/cli_dump.rs::an_edt_project_is_replaced_only_by_the_same_confirmation_rules
 ---
 
 # Выгрузка ложится поверх каталога пообъектно
@@ -12,6 +13,8 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/217
 
 `pull --force` приводит каталог ровно к базе, и лишнее исчезает. Для формата EDT слияния
 нет ни в одном режиме: выгрузка либо заменяет проект по тем же правилам подтверждения,
-либо отказывает. Ответ называет запрошенный режим и случившийся по прогнозу
-(`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`), а сторож безвозвратного
-срабатывает и на пообъектную перезапись.
+либо отказывает.
+
+Когда выгрузка останавливается над незафиксированным, держит
+`INV.USE-CASES.REPLACING-A-USER-DIRECTORY-ASKS-FIRST`; какой режим случился на самом деле,
+ответ называет по `INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`.

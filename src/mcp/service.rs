@@ -1626,6 +1626,7 @@ mod tests {
             platform_log_path: None,
             duration_ms: 33,
             message: None,
+            losses: Vec::new(),
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -1670,6 +1671,7 @@ mod tests {
                     platform_log_path: None,
                     duration_ms: 3,
                     message: Some("dump failed".to_owned()),
+                    losses: Vec::new(),
                 },
             ))),
         );
@@ -1750,6 +1752,7 @@ mod tests {
                 platform_log_path: None,
                 duration_ms: 1,
                 message: None,
+                losses: Vec::new(),
             })),
         );
 
@@ -1804,6 +1807,7 @@ mod tests {
                 "IBCMD does not support object-scoped partial dump; ran incremental export for source-set 'main' instead"
                     .to_owned(),
             ),
+            losses: Vec::new(),
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -1856,6 +1860,7 @@ mod tests {
                         "IBCMD does not support object-scoped partial dump; export failed"
                             .to_owned(),
                     ),
+                    losses: Vec::new(),
                 },
             ))),
         );
