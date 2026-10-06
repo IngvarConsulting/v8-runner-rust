@@ -1,16 +1,31 @@
 ---
 id: INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/285
+check:
+  - src/use_cases/result.rs::a_missing_utility_is_an_environment_failure
+  - src/use_cases/result.rs::an_unsuitable_utility_version_is_an_environment_failure
+  - src/mcp/error.rs::a_missing_utility_answers_a_runtime_failure_over_mcp
+  - src/use_cases/load_artifact.rs::an_extension_load_without_ibcmd_answers_an_environment_failure
+  - tests/cli_convert.rs::convert_without_the_edt_cli_answers_an_environment_failure
+  - src/use_cases/infobase_export.rs::a_dump_without_its_utility_records_an_environment_step_code
+  - src/use_cases/infobase_export.rs::the_step_code_follows_the_envelope_kind_for_every_error
+  - tests/cli_infobase.rs::infobase_dump_without_its_utility_records_an_environment_step_code
 ---
 
 # Отказ из-за отсутствующей утилиты несёт род `environment`
 
-Утилиты платформы нет в окружении — отказ несёт род `environment`: поставьте, и заработает.
+Подходящей утилиты платформы нет в окружении — её не нашли, или нашли не той версии, или её
+версию не прочитать, — отказ несёт род `environment`: поставьте подходящую, и заработает.
 Род `platform` оставлен за сбоем самой платформы.
 
-Сегодня так отвечает выбор исполнителя по цепочке: когда не готов ни один кандидат, отказ —
-`environment_unavailable` (`src/use_cases/provider_selection.rs`). Утилиту, которую ищут
-напрямую, в обход цепочки, — например `1cedtcli` у `convert`, — отказ называет родом
-`platform`: `AppError::PlatformLocator` отображается в `UseCaseErrorKind::Platform`
-(`src/use_cases/result.rs`).
+Так отвечает и выбор исполнителя по цепочке, когда не готов ни один кандидат
+(`src/use_cases/provider_selection.rs`), и утилита, которую ищут напрямую, в обход цепочки, —
+например `1cedtcli` у `convert` или `ibcmd`, которым `load` спрашивает перечень расширений:
+`AppError::PlatformLocator` отображается в `UseCaseErrorKind::Environment`
+(`src/use_cases/result.rs`). В конверте CLI это код `environment_unavailable` и выход 2,
+у MCP — `runtime_failure`.
+
+Код шага в `data.execution.errors[]` у `download`, `infobase dump` и `infobase restore`
+выводится из того же рода, поэтому недостающая утилита пишет там `environment_unavailable`, а
+не `platform_failure`. Своего отображения ошибок в код у шага нет: род отказа
+(`UseCaseErrorKind::of`) — единственный владелец, а код шага — `execution_step_code` этого
+рода.

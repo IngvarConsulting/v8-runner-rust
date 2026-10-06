@@ -125,6 +125,12 @@ runtime snapshot commit только указанным source-set.
 Shared EDT нужен не ради отдельного public режима, а ради повторного использования одного
 execution model для CLI и MCP.
 
+Проверку проекта EDT — `check` для формата EDT и `check_syntax_edt` — выполняет один
+исполнитель для CLI и MCP. В shared-режиме у команды сессии нет кода выхода, и исход
+читается по её выводу и журналу `--file`: stderr даёт `tool_failed`, замечания журнала —
+`issues_found`, stdout без замечаний — `tool_failed`, а `exit_code` в ответе — `101` или `-1`. Предел
+`command_timeout_ms` действует на каждый проект отдельно.
+
 ## `workPath`, lock и interruption policy
 
 `workPath` является корнем runtime state.
@@ -142,6 +148,9 @@ Interruption policy:
 - terminal cancellation и deferred interruption должны различаться;
 - отмена — род `interruption` у любой команды, и решает это сама ошибка, а не сигнал: отказ,
   пришедший при ожидающей отмене, остаётся отказом;
+- в формах с итогом исполнения `test`, `upload`, `make`, `download`, `infobase dump` и
+  `infobase restore` остановку отменой пишет один владелец (`record_cancellation`): статус
+  `cancelled`, ошибка `cancelled` и запись о прерывании с одним текстом;
 - critical publish/apply phases не hard-kill by default; запись в базу, и `/RestoreIB` тоже,
   дорабатывает до конца.
 

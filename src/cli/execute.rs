@@ -29,13 +29,13 @@ use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,
-    ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, ExecutionStepStatus, StepResult,
+    ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStepStatus, StepResult,
 };
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    InfobaseExportArtifactKind, InfobaseTransferPhase, RestoreInfobaseSnapshotRequest,
-    RestoreInfobaseSnapshotResult, RestoreTargetMode,
+    InfobaseTransferPhase, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
+    RestoreTargetMode, TransferArtifactKind,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -72,6 +72,7 @@ use crate::use_cases::extension_inventory;
 use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
 use crate::use_cases::init_project;
+use crate::use_cases::interruption::record_cancellation;
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
 use crate::use_cases::request::{
@@ -87,7 +88,7 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
-use crate::use_cases::transport::{dispatch_with_workspace_lock_policy, WorkspaceBusyPolicy};
+use crate::use_cases::transport::dispatch_with_workspace_lock;
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
 /// rendering the resulting command output.
@@ -1379,7 +1380,7 @@ fn map_infobase_configuration_export_request(
         .extension()
         .and_then(|suffix| suffix.to_str())
         .is_some_and(|suffix| {
-            suffix.eq_ignore_ascii_case(InfobaseExportArtifactKind::Cfe.file_extension())
+            suffix.eq_ignore_ascii_case(TransferArtifactKind::Cfe.file_extension())
         });
     let extension = match args.set.as_deref() {
         Some(set) if names_an_extension_package => Some(set),
@@ -1574,16 +1575,8 @@ fn execute_infobase_restore(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseRestore;
     let started = Instant::now();
-    let mut workspace_lock_acquired = false;
-    let mut dispatched = false;
-    let outcome = with_cli_workspace_lock_observed(
-        config,
-        presenter,
-        command,
-        clean_before_execution,
-        || workspace_lock_acquired = true,
-        || {
-            dispatched = true;
+    let outcome =
+        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1631,20 +1624,17 @@ fn execute_infobase_restore(
                     Err(error)
                 }
             }
-        },
-    );
-    if !dispatched {
-        if let Err(error) = &outcome {
-            let result = restore_pre_dispatch_failure(
-                &request,
-                Some(prepared.receipt().clone()),
-                error,
-                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
-            );
-            render_restore_failure(command, result, error, presenter);
-        }
-    }
-    outcome
+        });
+    outcome.unwrap_or_else(|refusal| {
+        let result = restore_pre_dispatch_failure(
+            &request,
+            Some(prepared.receipt().clone()),
+            &refusal.error,
+            refusal.phase,
+        );
+        render_restore_failure(command, result, &refusal.error, presenter);
+        Err(refusal.error)
+    })
 }
 
 fn execute_infobase_configuration_export(
@@ -1657,16 +1647,8 @@ fn execute_infobase_configuration_export(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseConfigurationExport;
     let started = Instant::now();
-    let mut workspace_lock_acquired = false;
-    let mut dispatched = false;
-    let outcome = with_cli_workspace_lock_observed(
-        config,
-        presenter,
-        command,
-        clean_before_execution,
-        || workspace_lock_acquired = true,
-        || {
-            dispatched = true;
+    let outcome =
+        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1716,20 +1698,17 @@ fn execute_infobase_configuration_export(
                     Err(error)
                 }
             }
-        },
-    );
-    if !dispatched {
-        if let Err(error) = &outcome {
-            let result = configuration_pre_dispatch_failure(
-                &request,
-                Some(prepared.receipt().clone()),
-                error,
-                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
-            );
-            render_configuration_failure(command, result, error, presenter);
-        }
-    }
-    outcome
+        });
+    outcome.unwrap_or_else(|refusal| {
+        let result = configuration_pre_dispatch_failure(
+            &request,
+            Some(prepared.receipt().clone()),
+            &refusal.error,
+            refusal.phase,
+        );
+        render_configuration_failure(command, result, &refusal.error, presenter);
+        Err(refusal.error)
+    })
 }
 
 fn execute_infobase_dump(
@@ -1742,16 +1721,8 @@ fn execute_infobase_dump(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseDump;
     let started = Instant::now();
-    let mut workspace_lock_acquired = false;
-    let mut dispatched = false;
-    let outcome = with_cli_workspace_lock_observed(
-        config,
-        presenter,
-        command,
-        clean_before_execution,
-        || workspace_lock_acquired = true,
-        || {
-            dispatched = true;
+    let outcome =
+        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1799,23 +1770,20 @@ fn execute_infobase_dump(
                     Err(error)
                 }
             }
-        },
-    );
-    if !dispatched {
-        if let Err(error) = &outcome {
-            let result = snapshot_pre_dispatch_failure(
-                &request,
-                Some(prepared.receipt().clone()),
-                error,
-                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
-            );
-            render_snapshot_failure(command, result, error, presenter);
-        }
-    }
-    outcome
+        });
+    outcome.unwrap_or_else(|refusal| {
+        let result = snapshot_pre_dispatch_failure(
+            &request,
+            Some(prepared.receipt().clone()),
+            &refusal.error,
+            refusal.phase,
+        );
+        render_snapshot_failure(command, result, &refusal.error, presenter);
+        Err(refusal.error)
+    })
 }
 
-fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
+fn workspace_refusal_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
     if workspace_lock_acquired {
         InfobaseTransferPhase::WorkspacePreparation
     } else {
@@ -1823,36 +1791,31 @@ fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> Infob
     }
 }
 
-fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &UseCaseError) {
-    execution.status = match error.kind() {
-        UseCaseErrorKind::InvalidOutput => ExecutionStatus::InvalidOutput,
-        UseCaseErrorKind::Cancelled(_) => ExecutionStatus::Cancelled,
-        UseCaseErrorKind::TimedOut => ExecutionStatus::TimedOut,
-        _ => ExecutionStatus::Failed,
-    };
-    execution.errors.push(ExecutionError::new(
-        execution_step_code(error.kind()),
-        error.message(),
-    ));
+/// Шаг, на котором команда отказала до работы исполнителя.
+fn failed_phase_step(phase: InfobaseTransferPhase, error: &UseCaseError) -> StepResult {
+    StepResult::failed(phase.as_str(), phase.kind(), 0).with_message(error.message().to_owned())
 }
 
-/// Код шага исполнителя: свой словарь, едущий внутри `data.execution.errors[]`.
+/// Итог исполнения у отказа до работы исполнителя в фазе `phase`.
 ///
-/// Имена совпадают с кодами конверта, но поля разные, и различать их должен код, а не
-/// читатель: конверт стал точнее — у рода `capability` там четыре кода, — а шаг остаётся
-/// при прежнем словаре, потому что его читает другой потребитель.
-const fn execution_step_code(kind: UseCaseErrorKind) -> &'static str {
-    match kind {
-        UseCaseErrorKind::Capability(_) => "capability_unavailable",
-        UseCaseErrorKind::Environment => "environment_unavailable",
-        UseCaseErrorKind::WorkspaceBusy => "workspace_busy",
-        UseCaseErrorKind::InvalidOutput => "invalid_output",
-        UseCaseErrorKind::Cancelled(_) => "cancelled",
-        UseCaseErrorKind::TimedOut => "timed_out",
-        UseCaseErrorKind::Validation => "invalid_argument",
-        UseCaseErrorKind::Runtime => "runtime_failure",
-        UseCaseErrorKind::Platform => "platform_failure",
+/// Отмены здесь сегодня не бывает: сюда приходят только отказы разбора запроса, загрузки
+/// настроек, набора исходников и границы `workPath` (замок и очистка журналов) — ни один
+/// из этих шагов не смотрит на сигнал отмены и не зовёт платформу. Если отмена всё же
+/// придёт, её статус, ошибку и запись ставит владелец, а не этот разбор.
+fn annotate_pre_dispatch_failure(
+    execution: &mut ExecutionOutcome<()>,
+    error: &UseCaseError,
+    phase: InfobaseTransferPhase,
+) {
+    if let Some(at) = error.cancellation() {
+        record_cancellation(execution, at, phase.interruption_phase(), error.message());
+        return;
     }
+    execution.status = error.kind().execution_status();
+    execution.errors.push(ExecutionError::new(
+        error.kind().execution_step_code(),
+        error.message(),
+    ));
 }
 
 fn configuration_pre_dispatch_failure(
@@ -1862,11 +1825,8 @@ fn configuration_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> ExportConfigurationPackageResult {
     let mut result = ExportConfigurationPackageResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
-    result.steps.push(
-        StepResult::failed(phase.as_str(), phase.kind(), 0)
-            .with_message(error.message().to_owned()),
-    );
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
+    result.steps.push(failed_phase_step(phase, error));
     result
 }
 
@@ -1877,11 +1837,8 @@ fn snapshot_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> ExportInfobaseSnapshotResult {
     let mut result = ExportInfobaseSnapshotResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
-    result.steps.push(
-        StepResult::failed(phase.as_str(), phase.kind(), 0)
-            .with_message(error.message().to_owned()),
-    );
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
+    result.steps.push(failed_phase_step(phase, error));
     result
 }
 
@@ -1892,11 +1849,8 @@ fn restore_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> RestoreInfobaseSnapshotResult {
     let mut result = RestoreInfobaseSnapshotResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
-    result.steps.push(
-        StepResult::failed(phase.as_str(), phase.kind(), 0)
-            .with_message(error.message().to_owned()),
-    );
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
+    result.steps.push(failed_phase_step(phase, error));
     result
 }
 
@@ -1973,7 +1927,7 @@ struct InfobaseExportText<'a> {
     applied: bool,
     target_state: &'a str,
     warnings: &'a [String],
-    mode: crate::domain::infobase_export::InfobaseExportMode,
+    mode: crate::domain::infobase_export::InfobaseTransferMode,
     provider_dispatched: Option<bool>,
 }
 
@@ -1995,7 +1949,7 @@ fn render_configuration_export_text(
             provider: result.provider.as_ref(),
             applied_label: "published",
             applied: result.published,
-            target_state: export_target_state_label(result.target_state),
+            target_state: target_state_label(result.target_state),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -2022,7 +1976,7 @@ fn render_snapshot_export_text(
             provider: result.provider.as_ref(),
             applied_label: "published",
             applied: result.published,
-            target_state: export_target_state_label(result.target_state),
+            target_state: target_state_label(result.target_state),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -2049,7 +2003,7 @@ fn render_restore_text(
             provider: result.provider.as_ref(),
             applied_label: "restored",
             applied: result.restored,
-            target_state: export_target_state_label(result.target_state),
+            target_state: target_state_label(result.target_state),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -2077,7 +2031,7 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         provider_dispatched,
     } = view;
     let status = if applied
-        || (mode == crate::domain::infobase_export::InfobaseExportMode::Preview
+        || (mode == crate::domain::infobase_export::InfobaseTransferMode::Preview
             && execution_status == "succeeded")
     {
         TimelineStatus::Succeeded
@@ -2099,8 +2053,8 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         format!(
             "mode: {}",
             match mode {
-                crate::domain::infobase_export::InfobaseExportMode::Preview => "preview",
-                crate::domain::infobase_export::InfobaseExportMode::Apply => "apply",
+                crate::domain::infobase_export::InfobaseTransferMode::Preview => "preview",
+                crate::domain::infobase_export::InfobaseTransferMode::Apply => "apply",
             }
         ),
         format!("subject: {subject}"),
@@ -2162,16 +2116,14 @@ fn provider_origin_label(origin: &crate::domain::capability::ProviderOrigin) -> 
     }
 }
 
-fn export_target_state_label(
-    state: crate::domain::infobase_export::ExportTargetState,
-) -> &'static str {
-    use crate::domain::infobase_export::ExportTargetState;
+fn target_state_label(state: crate::domain::infobase_export::InfobaseTargetState) -> &'static str {
+    use crate::domain::infobase_export::InfobaseTargetState;
     match state {
-        ExportTargetState::Unchanged => "unchanged",
-        ExportTargetState::Created => "created",
-        ExportTargetState::Replaced => "replaced",
-        ExportTargetState::Restored => "restored",
-        ExportTargetState::Uncertain => "uncertain",
+        InfobaseTargetState::Unchanged => "unchanged",
+        InfobaseTargetState::Created => "created",
+        InfobaseTargetState::Replaced => "replaced",
+        InfobaseTargetState::Restored => "restored",
+        InfobaseTargetState::Uncertain => "uncertain",
     }
 }
 
@@ -2450,40 +2402,38 @@ pub(crate) fn with_cli_workspace_lock<T>(
         );
         return run();
     }
-    with_cli_workspace_lock_observed(
-        config,
-        presenter,
-        command,
-        clean_before_execution,
-        || {},
-        run,
-    )
+    match dispatch_under_cli_workspace_lock(config, command, clean_before_execution, run) {
+        Ok(outcome) => outcome,
+        Err(refusal) => {
+            print_workspace_refusal(presenter, command, &refusal);
+            Err(refusal.error)
+        }
+    }
 }
 
-fn with_cli_workspace_lock_observed<T>(
+/// Отказ границы `workPath` до сценария: замок не взят или каталог не подготовлен.
+///
+/// Фаза называет шаг отказа — `workspace lock` или `workspace preparation`; отказ печатает
+/// вызывающий, своей формой `data`, но с тем же шагом.
+struct WorkspaceRefusal {
+    phase: InfobaseTransferPhase,
+    error: UseCaseError,
+}
+
+/// Граница `workPath` без печати: внешняя ошибка — отказ границы, внутренний итог —
+/// сценария. Занятый каталог у всякой команды — `WorkspaceBusy` на шаге `workspace lock`.
+fn dispatch_under_cli_workspace_lock<T>(
     config: &AppConfig,
-    presenter: &Presenter,
     command: CommandName,
     clean_before_execution: bool,
-    workspace_lock_acquired: impl FnOnce(),
-    run: impl FnOnce() -> Result<T, UseCaseError>,
-) -> Result<T, UseCaseError> {
-    let busy_policy = if matches!(
-        command,
-        CommandName::InfobaseConfigurationExport
-            | CommandName::InfobaseDump
-            | CommandName::Bootstrap
-    ) {
-        WorkspaceBusyPolicy::Typed
-    } else {
-        WorkspaceBusyPolicy::LegacyRuntime
-    };
-    let result = dispatch_with_workspace_lock_policy(
+    run: impl FnOnce() -> T,
+) -> Result<T, WorkspaceRefusal> {
+    let mut workspace_lock_acquired = false;
+    dispatch_with_workspace_lock(
         config,
         command,
-        busy_policy,
         || {
-            workspace_lock_acquired();
+            workspace_lock_acquired = true;
             if clean_before_execution {
                 clean_platform_logs_under_lock(config)
             } else {
@@ -2491,14 +2441,26 @@ fn with_cli_workspace_lock_observed<T>(
             }
         },
         run,
-    );
-    result.map_err(|error| {
-        if matches!(busy_policy, WorkspaceBusyPolicy::Typed) {
-            error
-        } else {
-            render_pre_dispatch_error(presenter, command, error)
-        }
-    })?
+    )
+    .map_err(|error| WorkspaceRefusal {
+        phase: workspace_refusal_phase(workspace_lock_acquired),
+        error,
+    })
+}
+
+/// Отказ границы у команды без своей формы отказа: `data` — текст отказа, шаг — фаза.
+fn print_workspace_refusal(
+    presenter: &Presenter,
+    command: CommandName,
+    refusal: &WorkspaceRefusal,
+) {
+    if presenter.is_json() {
+        let mut envelope = pre_dispatch_error_envelope(command.as_str(), &refusal.error);
+        envelope.steps = vec![failed_phase_step(refusal.phase, &refusal.error)];
+        presenter.print_envelope(&envelope);
+    } else {
+        presenter.print_error(&refusal.error.to_string());
+    }
 }
 
 fn clean_platform_logs_under_lock(config: &AppConfig) -> Result<(), UseCaseError> {
@@ -4354,9 +4316,9 @@ fn status_label(status: &TestStatus) -> &'static str {
 mod tests {
     use super::{
         append_interruptions, build_load_envelope, command_name, execute_command,
-        infobase_pre_dispatch_execution_phase, map_artifacts_request_with_config,
-        map_build_request, map_designer_config_request, map_dump_request, map_extensions_request,
-        map_launch_request, map_load_request, map_syntax_request, map_test_request,
+        map_artifacts_request_with_config, map_build_request, map_designer_config_request,
+        map_dump_request, map_extensions_request, map_launch_request, map_load_request,
+        map_syntax_request, map_test_request, workspace_refusal_phase,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
@@ -5057,7 +5019,7 @@ mod tests {
         )
         .expect_err("busy workspace");
 
-        assert_eq!(error.kind(), UseCaseErrorKind::Runtime);
+        assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
         assert!(error.to_string().contains("workspace"));
         assert!(error.to_string().contains("already"));
     }
@@ -5091,7 +5053,7 @@ mod tests {
         )
         .expect_err("busy workspace");
 
-        assert_eq!(error.kind(), UseCaseErrorKind::Runtime);
+        assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
         assert!(error.to_string().contains("workspace"));
         assert!(error.to_string().contains("already"));
     }
@@ -5275,13 +5237,13 @@ mod tests {
     }
 
     #[test]
-    fn infobase_pre_dispatch_phase_distinguishes_lock_from_workspace_preparation() {
+    fn workspace_refusal_phase_distinguishes_lock_from_workspace_preparation() {
         assert_eq!(
-            infobase_pre_dispatch_execution_phase(false),
+            workspace_refusal_phase(false),
             InfobaseTransferPhase::WorkspaceLock
         );
         assert_eq!(
-            infobase_pre_dispatch_execution_phase(true),
+            workspace_refusal_phase(true),
             InfobaseTransferPhase::WorkspacePreparation
         );
     }
@@ -5329,5 +5291,48 @@ mod tests {
         assert!(message.contains("load main.cf applied successfully after NotEstablished"));
         assert!(message.contains("deferred cancellation during apply"));
         assert!(message.contains("deferred timeout during update_db_cfg"));
+    }
+
+    /// Отказ до исполнителя, если в нём всё же окажется отмена, итог исполнения получает
+    /// через владельца: статус, ошибку `cancelled` и запись с тем же текстом.
+    #[test]
+    fn a_pre_dispatch_cancellation_is_recorded_by_the_owner() {
+        use crate::domain::execution::{
+            ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionOutcome,
+            ExecutionStatus,
+        };
+        use crate::domain::infobase_export::InfobaseTransferPhase;
+        use crate::support::error::{AppError, CancelledAt};
+        use crate::use_cases::result::UseCaseError;
+
+        let error = UseCaseError::from(AppError::Cancelled {
+            message: "cancelled before the provider".to_owned(),
+            at: CancelledAt::Boundary,
+        });
+        let mut execution = ExecutionOutcome::<()>::new(ExecutionStatus::Failed);
+        super::annotate_pre_dispatch_failure(
+            &mut execution,
+            &error,
+            InfobaseTransferPhase::WorkspaceLock,
+        );
+
+        assert_eq!(execution.status, ExecutionStatus::Cancelled);
+        let [recorded] = execution.errors.as_slice() else {
+            panic!("one error expected: {:?}", execution.errors);
+        };
+        assert_eq!(recorded.code, "cancelled");
+        let [interruption] = execution.interruptions.as_slice() else {
+            panic!("one interruption expected: {:?}", execution.interruptions);
+        };
+        assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert_eq!(
+            interruption.message.as_deref(),
+            Some(recorded.message.as_str())
+        );
     }
 }

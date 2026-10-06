@@ -1,8 +1,10 @@
 use std::fmt;
 
+use crate::domain::execution::ExecutionStatus;
 use crate::domain::next_step::NextStep;
 use crate::platform::process::WorkGiven;
 use crate::support::error::{AppError, CancelledAt, CapabilityReason};
+use crate::use_cases::interruption::CANCELLED_ERROR_CODE;
 
 const VALIDATION_EXIT_CODE: i32 = 2;
 const RUNTIME_EXIT_CODE: i32 = 3;
@@ -35,6 +37,72 @@ impl UseCaseErrorKind {
             Self::Validation => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
             Self::Platform => PLATFORM_EXIT_CODE,
+        }
+    }
+
+    /// Род отказа по виду ошибки — единственное отображение [`AppError`] в род. Из рода
+    /// выводятся и пара «код, род» конверта, и код шага в `data.execution.errors[]`.
+    pub(crate) const fn of(error: &AppError) -> Self {
+        match error {
+            AppError::CapabilityUnavailable(refusal) => Self::Capability(refusal.reason),
+            // Утилиты нет или не та версия — дело окружения, а не сбой платформы: поставьте,
+            // и заработает (`INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE`).
+            AppError::EnvironmentUnavailable(_)
+            | AppError::PlatformLocator(_)
+            | AppError::PlatformLocatorContext { .. } => Self::Environment,
+            AppError::WorkspaceBusy(_) => Self::WorkspaceBusy,
+            AppError::Cancelled { at, .. } => Self::Cancelled(*at),
+            AppError::TimedOut(_) => Self::TimedOut,
+            AppError::InvalidOutput(_) => Self::InvalidOutput,
+            AppError::Validation(_)
+            | AppError::ValidationIbcmd(_)
+            | AppError::ValidationIbcmdContext { .. }
+            | AppError::Config(_)
+            | AppError::ConfigContext { .. } => Self::Validation,
+            AppError::Runtime(_) => Self::Runtime,
+            AppError::Platform(_)
+            | AppError::PlatformDesigner(_)
+            | AppError::PlatformDesignerContext { .. }
+            | AppError::PlatformProcess(_)
+            | AppError::PlatformProcessContext { .. }
+            | AppError::PlatformEdt(_)
+            | AppError::PlatformEdtContext { .. }
+            | AppError::PlatformEdtSession(_)
+            | AppError::PlatformEdtSessionContext { .. } => Self::Platform,
+        }
+    }
+
+    /// Код шага исполнителя: свой словарь, едущий внутри `data.execution.errors[]`.
+    ///
+    /// Имена совпадают с кодами конверта, но поля разные, и различать их должен код, а не
+    /// читатель: конверт стал точнее — у рода `capability` там свой код на каждую причину, —
+    /// а шаг остаётся при прежнем словаре, потому что его читает другой потребитель.
+    pub(crate) const fn execution_step_code(self) -> &'static str {
+        match self {
+            Self::Capability(_) => "capability_unavailable",
+            Self::Environment => "environment_unavailable",
+            Self::WorkspaceBusy => "workspace_busy",
+            Self::InvalidOutput => "invalid_output",
+            Self::Cancelled(_) => CANCELLED_ERROR_CODE,
+            Self::TimedOut => "timed_out",
+            Self::Validation => "invalid_argument",
+            Self::Runtime => "runtime_failure",
+            Self::Platform => "platform_failure",
+        }
+    }
+
+    /// Статус итога исполнения, который ставит отказ этого рода.
+    pub(crate) const fn execution_status(self) -> ExecutionStatus {
+        match self {
+            Self::InvalidOutput => ExecutionStatus::InvalidOutput,
+            Self::TimedOut => ExecutionStatus::TimedOut,
+            Self::Cancelled(_) => ExecutionStatus::Cancelled,
+            Self::Capability(_)
+            | Self::Environment
+            | Self::WorkspaceBusy
+            | Self::Validation
+            | Self::Runtime
+            | Self::Platform => ExecutionStatus::Failed,
         }
     }
 
@@ -133,66 +201,38 @@ impl From<AppError> for UseCaseError {
 }
 
 impl UseCaseError {
-    /// Род отказа по виду ошибки; отмену поверх него узнаёт `From`.
+    /// Отказ по ошибке: род — от [`UseCaseErrorKind::of`], текст — без метки рода; отмену
+    /// поверх него узнаёт `From`.
     fn classified(value: AppError) -> Self {
-        match value {
-            AppError::CapabilityUnavailable(refusal) => Self::new(
-                UseCaseErrorKind::Capability(refusal.reason),
-                refusal.message,
-            ),
-            AppError::EnvironmentUnavailable(message) => {
-                Self::new(UseCaseErrorKind::Environment, message)
-            }
-            AppError::WorkspaceBusy(message) => Self::new(UseCaseErrorKind::WorkspaceBusy, message),
-            AppError::Cancelled { message, at } => {
-                Self::new(UseCaseErrorKind::Cancelled(at), message)
-            }
-            AppError::TimedOut(message) => Self::new(UseCaseErrorKind::TimedOut, message),
-            AppError::InvalidOutput(message) => Self::new(UseCaseErrorKind::InvalidOutput, message),
-            AppError::Validation(message) => Self::new(UseCaseErrorKind::Validation, message),
-            AppError::ValidationIbcmd(error) => {
-                Self::new(UseCaseErrorKind::Validation, error.to_string())
-            }
-            AppError::ValidationIbcmdContext { context, source } => {
-                Self::new(UseCaseErrorKind::Validation, format!("{context}; {source}"))
-            }
-            AppError::Runtime(message) => Self::new(UseCaseErrorKind::Runtime, message),
-            AppError::Platform(message) => Self::new(UseCaseErrorKind::Platform, message),
-            AppError::PlatformDesigner(error) => {
-                Self::new(UseCaseErrorKind::Platform, error.to_string())
-            }
-            AppError::PlatformDesignerContext { context, source } => {
-                Self::new(UseCaseErrorKind::Platform, format!("{context}; {source}"))
-            }
-            AppError::PlatformLocator(error) => {
-                Self::new(UseCaseErrorKind::Platform, error.to_string())
-            }
-            AppError::PlatformProcess(error) => {
-                Self::new(UseCaseErrorKind::Platform, error.to_string())
-            }
-            AppError::PlatformLocatorContext { context, source } => {
-                Self::new(UseCaseErrorKind::Platform, format!("{context}; {source}"))
-            }
-            AppError::PlatformProcessContext { context, source } => {
-                Self::new(UseCaseErrorKind::Platform, format!("{context}; {source}"))
-            }
-            AppError::PlatformEdt(error) => {
-                Self::new(UseCaseErrorKind::Platform, error.to_string())
-            }
-            AppError::PlatformEdtContext { context, source } => {
-                Self::new(UseCaseErrorKind::Platform, format!("{context}; {source}"))
-            }
-            AppError::PlatformEdtSession(error) => {
-                Self::new(UseCaseErrorKind::Platform, error.to_string())
-            }
+        let kind = UseCaseErrorKind::of(&value);
+        let message = match value {
+            AppError::CapabilityUnavailable(refusal) => refusal.message,
+            AppError::EnvironmentUnavailable(message)
+            | AppError::WorkspaceBusy(message)
+            | AppError::Cancelled { message, .. }
+            | AppError::TimedOut(message)
+            | AppError::InvalidOutput(message)
+            | AppError::Validation(message)
+            | AppError::Runtime(message)
+            | AppError::Platform(message) => message,
+            AppError::ValidationIbcmd(error) => error.to_string(),
+            AppError::PlatformDesigner(error) => error.to_string(),
+            AppError::PlatformLocator(error) => error.to_string(),
+            AppError::PlatformProcess(error) => error.to_string(),
+            AppError::PlatformEdt(error) => error.to_string(),
+            AppError::PlatformEdtSession(error) => error.to_string(),
+            AppError::Config(error) => error.to_string(),
+            AppError::ValidationIbcmdContext { context, source } => format!("{context}; {source}"),
+            AppError::PlatformDesignerContext { context, source } => format!("{context}; {source}"),
+            AppError::PlatformLocatorContext { context, source } => format!("{context}; {source}"),
+            AppError::PlatformProcessContext { context, source } => format!("{context}; {source}"),
+            AppError::PlatformEdtContext { context, source } => format!("{context}; {source}"),
             AppError::PlatformEdtSessionContext { context, source } => {
-                Self::new(UseCaseErrorKind::Platform, format!("{context}; {source}"))
+                format!("{context}; {source}")
             }
-            AppError::Config(error) => Self::new(UseCaseErrorKind::Validation, error.to_string()),
-            AppError::ConfigContext { context, source } => {
-                Self::new(UseCaseErrorKind::Validation, format!("{context}; {source}"))
-            }
-        }
+            AppError::ConfigContext { context, source } => format!("{context}; {source}"),
+        };
+        Self::new(kind, message)
     }
 }
 
@@ -340,8 +380,12 @@ mod tests {
     use crate::platform::designer::DesignerError;
     use crate::platform::edt_session::EdtSessionError;
     use crate::platform::ibcmd::IbcmdError;
+    use crate::platform::locator::{
+        LocatorError, PlatformVersion, PlatformVersionRequirement, UtilityType,
+    };
     use crate::platform::process::{ProcessError, WorkGiven};
     use crate::support::error::{AppError, CancelledAt, CapabilityReason};
+    use std::path::PathBuf;
 
     /// Форма с признаком в миниатюре.
     #[derive(Debug)]
@@ -505,6 +549,20 @@ mod tests {
         assert_eq!(error.kind(), UseCaseErrorKind::Platform);
     }
 
+    /// Снятый процесс, конец которого не подтверждён, — сбой платформы, а не отмена.
+    #[test]
+    fn an_interruption_whose_end_is_unconfirmed_is_a_platform_failure() {
+        let error = UseCaseError::from(AppError::PlatformProcess(
+            ProcessError::InterruptedEndUnconfirmed {
+                cmd: "1cv8 DESIGNER".to_owned(),
+                source: std::io::Error::other("wait refused"),
+            },
+        ));
+
+        assert_eq!(error.kind(), UseCaseErrorKind::Platform);
+        assert!(error.message().contains("was not confirmed"));
+    }
+
     #[test]
     fn contextual_config_errors_stay_validation_errors() {
         let app_error = AppError::Config(ConfigLoadError::NotFound("v8project.yaml".to_owned()))
@@ -545,6 +603,52 @@ mod tests {
         assert_eq!(error.kind(), UseCaseErrorKind::Validation);
         assert!(error.message().contains("failed to build ibcmd connection"));
         assert!(error.message().contains("infobase.dbms.kind"));
+    }
+
+    /// Утилиты нет или не та версия — род `environment` с кодом выхода 2, с уточнением и без:
+    /// поставьте её, и заработает. Род `platform` оставлен за сбоем самой платформы.
+    #[test]
+    fn a_missing_utility_is_an_environment_failure() {
+        let missing = || LocatorError::NotFound {
+            utility: UtilityType::EdtCli,
+            detail: None,
+        };
+        for app_error in [
+            AppError::from(missing()),
+            AppError::from(missing()).with_context("failed to resolve 1cedtcli"),
+        ] {
+            let error = UseCaseError::from(app_error);
+
+            assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+            assert_eq!(error.exit_code(), 2, "{error}");
+            assert!(error.message().contains("was not found"), "{error}");
+        }
+    }
+
+    /// Утилита нашлась, но не той версии, или версию прочитать нельзя — тоже дело окружения:
+    /// поставьте подходящую, и заработает.
+    #[test]
+    fn an_unsuitable_utility_version_is_an_environment_failure() {
+        let required = || PlatformVersionRequirement::parse("8.3.25").expect("requirement");
+        for locator_error in [
+            LocatorError::VersionMismatch {
+                utility: UtilityType::Ibcmd,
+                path: PathBuf::from("/opt/1cv8/8.3.24.1000/ibcmd"),
+                required: required(),
+                found: PlatformVersion::parse_strict("8.3.24.1000").expect("version"),
+            },
+            LocatorError::UnknownVersion {
+                utility: UtilityType::Ibcmd,
+                path: PathBuf::from("/opt/custom/ibcmd"),
+                required: required(),
+            },
+        ] {
+            let error = UseCaseError::from(AppError::from(locator_error));
+
+            assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+            assert_eq!(error.exit_code(), 2, "{error}");
+            assert!(error.message().contains("required"), "{error}");
+        }
     }
 
     #[test]

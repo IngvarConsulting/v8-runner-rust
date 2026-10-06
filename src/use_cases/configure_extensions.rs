@@ -146,24 +146,23 @@ impl SafetySetter<'_> {
                     Ok(result)
                 })
                 .map_err(StepFailure::Error)?;
-                if result.process.exit_code == 0 {
-                    Ok(append_warnings(SAFETY_DISABLED.to_owned(), &warnings))
-                } else {
+                match result.process.outcome() {
+                    Ok(()) => Ok(append_warnings(SAFETY_DISABLED.to_owned(), &warnings)),
                     // Отказ несёт текст шага, а не ошибку: отмену, отложенную до конца
                     // записи, он называет первой.
-                    Err(StepFailure::Platform(prefix_warnings(
+                    Err(code) => Err(StepFailure::Platform(prefix_warnings(
                         &warnings,
                         format_ibcmd_failure_details(
                             "extension update",
                             "extension",
                             target,
-                            result.process.exit_code,
+                            code.get(),
                             &result.process.stdout,
                             &result.process.stderr,
                             None,
                             None,
                         ),
-                    )))
+                    ))),
                 }
             }
             Self::Agent(agent) => collecting_deferrals(|deferrals| {

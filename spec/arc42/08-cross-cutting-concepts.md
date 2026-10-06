@@ -85,8 +85,8 @@
 [файлы замка убирает только держатель](../rules/use-cases/a-lock-file-is-removed-only-by-its-holder.md),
 [запись работающего или удалённого владельца остаётся](../rules/use-cases/a-record-of-a-running-or-remote-owner-is-kept.md),
 [сбой метаданных не снимает замок](../rules/cli/sidecar-failure-does-not-release-the-lock.md),
-[вложенные шаги не берут замок повторно](../rules/cli/nested-orchestration-does-not-relock.md);
-пока не выполнено — [занятый каталог отвечает `workspace_busy`](../rules/wire/a-busy-workspace-answers-workspace-busy.md).
+[вложенные шаги не берут замок повторно](../rules/cli/nested-orchestration-does-not-relock.md),
+[занятый каталог отвечает `workspace_busy`](../rules/wire/a-busy-workspace-answers-workspace-busy.md).
 
 ### 8.4 Исполнители
 
@@ -203,7 +203,9 @@ EDT работает одноразовым `1cedtcli` или одной инт�
 [`edt_session.rs`](../../src/platform/edt_session.rs) над долгим процессом
 [`interactive.rs`](../../src/platform/interactive.rs): очередь, проверка рабочей области
 перед каждой командой, перезапуск после сбоя. MCP-сервер держит одну сессию всё время
-работы; командная строка и сценарии заводят свою на команду.
+работы; командная строка и сценарии заводят свою на команду. Класс прерывания шага сессия
+соблюдает, как одноразовый EDT: отмену и истёкший срок критического запроса, который уже
+работает, она откладывает до его исхода и называет в ответе.
 
 Правила: [у EDT два режима](../rules/platform/edt-has-two-execution-modes.md),
 [прогревает только долгоживущий хост](../rules/platform/only-a-long-lived-host-prewarms-edt.md).

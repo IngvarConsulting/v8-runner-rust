@@ -1338,6 +1338,52 @@ fn ready_provider_reports_workspace_busy_without_dispatch() {
     assert!(!dir.path().join("work/logs/mcp/actions.log").exists());
 }
 
+/// Занятый каталог у восстановления — один конверт: прежде отказ замка печатался общей
+/// формой, а следом — формой восстановления, и stdout нёс два документа JSON.
+#[test]
+fn restore_on_a_busy_workspace_prints_one_envelope() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    hold_workspace_lock(&base.join("../work"));
+    let input = write_dt(&dir.path().join("transfer/base.dt"));
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--replace",
+        ])
+        .output()
+        .expect("run busy restore");
+
+    assert_eq!(command.status.code(), Some(3));
+    let envelopes = serde_json::Deserializer::from_slice(&command.stdout)
+        .into_iter::<Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("json envelopes");
+    assert_eq!(
+        envelopes.len(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&command.stdout)
+    );
+    let envelope = &envelopes[0];
+    assert_eq!(envelope["command"], "infobase.restore");
+    assert_eq!(envelope["error"]["code"], "workspace_busy");
+    assert_eq!(envelope["error"]["kind"], "workspace");
+    assert_eq!(envelope["steps"][0]["name"], "workspace lock");
+    assert_eq!(envelope["data"]["target_state"], "unchanged");
+    assert_eq!(
+        envelope["data"]["execution"]["errors"][0]["code"],
+        "workspace_busy"
+    );
+    assert!(!calls.exists());
+}
+
 #[test]
 fn text_output_uses_the_same_canonical_provider_name_as_json() {
     let (_dir, config, base, _calls) = setup("DESIGNER");
@@ -1709,6 +1755,43 @@ fn no_ready_provider_wins_over_workspace_contention_without_side_effects() {
         !work.join("logs/mcp/actions.log").exists(),
         "selection failure must not create the JSON action log"
     );
+}
+
+/// `infobase dump` без утилиты: род конверта `environment`, и код шага в
+/// `data.execution.errors[]` тот же — `environment_unavailable`, а не `platform_failure`.
+#[test]
+fn infobase_dump_without_its_utility_records_an_environment_step_code() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    fs::remove_file(dir.path().join("1cv8")).expect("remove designer");
+    let output = base.join("dist/main.dt");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "dump",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .output()
+        .expect("run dump");
+
+    assert_eq!(command.status.code(), Some(2));
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["error"]["code"], "environment_unavailable");
+    assert_eq!(envelope["error"]["kind"], "environment");
+    assert_eq!(
+        envelope["data"]["execution"]["status"], "failed",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["data"]["execution"]["errors"][0]["code"], "environment_unavailable",
+        "{envelope}"
+    );
+    assert!(!calls.exists());
+    assert!(!output.exists());
 }
 
 /// Пакет конфигурации — не образ базы: `infobase dump --output main.cf` отказывает до

@@ -185,6 +185,7 @@ mod tests {
         AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
         ToolsConfig,
     };
+    use crate::mcp::error::{McpBusinessError, McpBusinessErrorKind, McpErrorCode};
     use crate::support::fs::acquire_advisory_lock;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::BuildRequest;
@@ -238,7 +239,12 @@ mod tests {
             )
             .expect_err("busy workspace");
 
-        assert_eq!(failure.error.kind(), UseCaseErrorKind::Runtime);
+        // Граница замка отказывает своим родом; словарь MCP узок и отвечает
+        // `runtime_failure` — решение владельца в #291.
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::WorkspaceBusy);
+        let mcp_error = McpBusinessError::from_use_case(&failure.error);
+        assert_eq!(mcp_error.code, McpErrorCode::RuntimeFailure);
+        assert_eq!(mcp_error.kind, McpBusinessErrorKind::Runtime);
         assert!(failure.error.to_string().contains("workspace"));
         assert!(failure.error.to_string().contains("already"));
     }

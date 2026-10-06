@@ -139,8 +139,7 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
 /// перечень адаптеров, записанный руками.
 ///
 /// Как читается код:
-/// - сценарий — свободная функция модуля `use_cases` или `mcp::edt_syntax` (единственного
-///   сценария, который живёт в адаптере, — arc42 §5.1, §6.7); ссылка на него — любой путь
+/// - сценарий — свободная функция модуля `use_cases`; ссылка на него — любой путь
 ///   в выражении: вызов или указатель на функцию, после разрешения через `use` модуля и
 ///   функции, `crate`, `self` и `super`. Типы и их методы (`ExecutionContext::cli`) —
 ///   не сценарии;
@@ -322,6 +321,10 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
         "crate::use_cases::request::effective_test_timeouts",
         "чистая функция над запросом",
     ),
+    (
+        "crate::use_cases::interruption::record_cancellation",
+        "чистая запись отмены в итог отказа до исполнителя; в `workPath` ничего",
+    ),
 ];
 
 /// Подключение `ibcmd` — а с ним требование секции `infobase.dbms` — строится только
@@ -414,6 +417,104 @@ fn the_ibcmd_site_finder_names_the_type_and_reads_nested_modules() {
     );
 }
 
+/// Корень #249: проверку проекта EDT выполняли два исполнителя — сценарий командной строки
+/// и свой путь MCP над общей сессией, — и копии их помощников расходились молча. Владелец
+/// теперь один, `use_cases::check_syntax`; транспорт выбирает только сессию и способ её
+/// ждать. Второй исполнитель под любым именем узнаётся по тому, без чего проверки нет: он
+/// запускает `validate` EDT — через DSL или командой общей сессии — либо читает её журнал.
+#[test]
+fn the_edt_project_check_has_one_executor() {
+    assert_eq!(
+        edt_check_modules(&SourceIndex::of_src()),
+        ["crate::use_cases::check_syntax"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "the EDT project check runs in one executor; a transport picks only its session"
+    );
+}
+
+/// Исполнитель узнаётся по любому признаку — вызову `validate_project`, команде `validate`
+/// общей сессии, чтению журнала проверки — в любом модуле, в том числе вложенном, и через
+/// `use` с переименованием. Соседние команды EDT исполнителем не считаются.
+#[test]
+fn the_edt_check_finder_sees_a_second_executor_under_another_name() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::check_syntax",
+            "use crate::parsers::edt_validation;\n\
+             fn run() { let _ = Some(\"\").map(edt_validation::parse); }",
+        ),
+        (
+            "crate::mcp::live_check",
+            "use crate::platform::edt::render_interactive_validate_command as command;\n\
+             fn submit() { command(); }",
+        ),
+        (
+            "crate::mcp::other",
+            "mod inner { fn read() { crate::parsers::edt_validation::parse(\"\"); } }",
+        ),
+        (
+            "crate::use_cases::export",
+            "struct Step;\n\
+             impl Step { fn run(dsl: Dsl) { dsl.validate_project(); } }",
+        ),
+        (
+            "crate::use_cases::unrelated",
+            "fn run(dsl: Dsl) { dsl.export_project(); validate(); }",
+        ),
+    ]);
+
+    assert_eq!(
+        edt_check_modules(&index),
+        [
+            "crate::mcp::live_check",
+            "crate::mcp::other::inner",
+            "crate::use_cases::check_syntax",
+            "crate::use_cases::export",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+    );
+}
+
+/// Модули, чей производственный код выполняет проверку проекта EDT.
+fn edt_check_modules(index: &SourceIndex) -> std::collections::BTreeSet<String> {
+    struct ValidateCall(bool);
+    impl<'ast> syn::visit::Visit<'ast> for ValidateCall {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.0 |= node.method == "validate_project";
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    let markers = [
+        path_of("crate::parsers::edt_validation::parse"),
+        path_of("crate::platform::edt::render_interactive_validate_command"),
+    ];
+    production_bodies(index)
+        .into_iter()
+        .filter(|body| {
+            let mut call = ValidateCall(false);
+            syn::visit::visit_block(&mut call, body.block);
+            call.0
+                || markers.iter().any(|marker| {
+                    let mut finder = PathFinder {
+                        index,
+                        module: &body.module,
+                        local_uses: body.local_uses(index),
+                        target: marker,
+                        found: false,
+                    };
+                    syn::visit::visit_block(&mut finder, body.block);
+                    finder.found
+                })
+        })
+        .map(|body| body.module.join("::"))
+        .collect()
+}
+
 fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<String> {
     let constructor = path_of("crate::platform::ibcmd::IbcmdConnection::from_infobase");
     production_bodies(index)
@@ -431,6 +532,199 @@ fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<Str
         })
         .map(|body| format!("{}::{}", body.module.join("::"), body.context))
         .collect()
+}
+
+/// Корень #285: сценарии сами сравнивали код выхода утилиты с нулём, и знание о том, что
+/// код значит, расползлось по ним. Код читает слой `platform` — `ProcessResult::outcome`
+/// и вердикты адаптеров, — а сценарий получает исход. Проверка узнаёт чтение кода в
+/// сценарии под любым именем носителя: сравнение кода с числом, `match` кода с числовым
+/// образцом, `.success()`, `NonZero*::new` над кодом — в том числе внутри макросов.
+#[test]
+fn scenarios_receive_an_outcome_not_an_exit_code() {
+    assert_eq!(
+        exit_code_readings(&SourceIndex::of_src()),
+        std::collections::BTreeSet::new(),
+        "a scenario reads an exit code itself; let the platform layer turn it into an outcome"
+    );
+}
+
+/// Страж узнаёт каждую форму чтения кода в сценарии — в методе, во вложенном модуле, в
+/// макросе — и не трогает ни слой `platform`, ни тесты, ни код в тексте ответа.
+#[test]
+fn the_exit_code_finder_sees_every_reading_in_a_scenario() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::family",
+            "fn field(result: R) -> bool { result.process.exit_code == 0 }\n\
+             fn reversed(result: R) -> bool { 0 != result.exit_code }\n\
+             fn local(exit_code: i32) -> bool { exit_code > 0 }\n\
+             fn status(status: S) -> bool { status.success() }\n\
+             fn method(status: S) -> bool { status.code() == 101 }\n\
+             fn matched(result: R) -> u8 { match result.process.exit_code { 0 => 1, _ => 2 } }\n\
+             fn wrapped(result: R) -> Option<std::num::NonZeroI32> { std::num::NonZeroI32::new(result.process.exit_code) }\n\
+             fn in_macro(result: R) -> bool { matches!(result.process.exit_code, 0) }\n\
+             fn asserted(result: R) { debug_assert!(result.process.exit_code != 0); }\n\
+             fn message(result: R) -> String { format!(\"exit code {}\", result.process.exit_code) }\n\
+             fn outcome(result: R) -> bool { result.process.outcome().is_ok() }\n\
+             struct Step;\n\
+             impl Step { fn ok(&self, result: R) -> bool { (result.exit_code) == 0 } }\n\
+             mod inner { fn eager(result: R) -> bool { result.exit_code == 0 } }\n\
+             #[cfg(test)]\n\
+             mod tests { fn asserts(result: R) -> bool { result.exit_code == 0 } }",
+        ),
+        (
+            "crate::platform::process",
+            "fn outcome(result: R) -> bool { result.exit_code == 0 }",
+        ),
+    ]);
+
+    assert_eq!(
+        exit_code_readings(&index),
+        [
+            "crate::use_cases::family::Step::ok",
+            "crate::use_cases::family::asserted",
+            "crate::use_cases::family::field",
+            "crate::use_cases::family::in_macro",
+            "crate::use_cases::family::inner::eager",
+            "crate::use_cases::family::local",
+            "crate::use_cases::family::matched",
+            "crate::use_cases::family::method",
+            "crate::use_cases::family::reversed",
+            "crate::use_cases::family::status",
+            "crate::use_cases::family::wrapped",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+    );
+}
+
+/// Места сценариев, где производственный код читает код выхода сам.
+fn exit_code_readings(index: &SourceIndex) -> std::collections::BTreeSet<String> {
+    production_bodies(index)
+        .into_iter()
+        .filter(|body| is_scenario_module(&body.module))
+        .filter(|body| {
+            let mut finder = ExitCodeReading(false);
+            syn::visit::visit_block(&mut finder, body.block);
+            finder.0
+        })
+        .map(|body| format!("{}::{}", body.module.join("::"), body.context))
+        .collect()
+}
+
+/// Нашлось ли в теле чтение кода выхода.
+struct ExitCodeReading(bool);
+
+impl<'ast> syn::visit::Visit<'ast> for ExitCodeReading {
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        let comparison = matches!(
+            node.op,
+            syn::BinOp::Eq(_)
+                | syn::BinOp::Ne(_)
+                | syn::BinOp::Lt(_)
+                | syn::BinOp::Le(_)
+                | syn::BinOp::Gt(_)
+                | syn::BinOp::Ge(_)
+        );
+        self.0 |= comparison
+            && ((names_exit_code(&node.left) && is_int_literal(&node.right))
+                || (names_exit_code(&node.right) && is_int_literal(&node.left)));
+        syn::visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        self.0 |= names_exit_code(&node.expr)
+            && node
+                .arms
+                .iter()
+                .any(|arm| has_int_literal_pattern(&arm.pat));
+        syn::visit::visit_expr_match(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.0 |= node.method == "success" && node.args.is_empty();
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(function) = node.func.as_ref() {
+            let names = function
+                .path
+                .segments
+                .iter()
+                .rev()
+                .take(2)
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let non_zero_new = matches!(
+                names.as_slice(),
+                [new, carrier] if new == "new" && carrier.starts_with("NonZero")
+            );
+            self.0 |= non_zero_new && node.args.iter().any(names_exit_code);
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    /// Макрос читается как список выражений через запятую; `matches!` над кодом — тоже
+    /// сравнение.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        use syn::parse::Parser;
+        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        if let Ok(arguments) = parser.parse2(node.tokens.clone()) {
+            let is_matches = node
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "matches");
+            self.0 |= is_matches && arguments.first().is_some_and(names_exit_code);
+            for argument in &arguments {
+                syn::visit::visit_expr(self, argument);
+            }
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+/// Выражение называет код выхода: поле или имя `exit_code`, метод `exit_code()` или
+/// `code()`.
+fn names_exit_code(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Paren(inner) => names_exit_code(&inner.expr),
+        syn::Expr::Group(inner) => names_exit_code(&inner.expr),
+        syn::Expr::Reference(inner) => names_exit_code(&inner.expr),
+        syn::Expr::Unary(inner) => names_exit_code(&inner.expr),
+        syn::Expr::Field(field) => {
+            matches!(&field.member, syn::Member::Named(name) if name == "exit_code")
+        }
+        syn::Expr::Path(path) => path.path.is_ident("exit_code"),
+        syn::Expr::MethodCall(call) => call.method == "exit_code" || call.method == "code",
+        _ => false,
+    }
+}
+
+fn is_int_literal(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(literal) => matches!(literal.lit, syn::Lit::Int(_)),
+        syn::Expr::Unary(inner) => is_int_literal(&inner.expr),
+        syn::Expr::Paren(inner) => is_int_literal(&inner.expr),
+        syn::Expr::Group(inner) => is_int_literal(&inner.expr),
+        _ => false,
+    }
+}
+
+fn has_int_literal_pattern(pat: &syn::Pat) -> bool {
+    match pat {
+        syn::Pat::Lit(literal) => matches!(literal.lit, syn::Lit::Int(_)),
+        syn::Pat::Or(or) => or.cases.iter().any(has_int_literal_pattern),
+        syn::Pat::Range(_) => true,
+        syn::Pat::Paren(inner) => has_int_literal_pattern(&inner.pat),
+        syn::Pat::Ident(ident) => ident
+            .subpat
+            .as_ref()
+            .is_some_and(|(_, sub)| has_int_literal_pattern(sub)),
+        _ => false,
+    }
 }
 
 fn path_of(path: &str) -> Vec<String> {
@@ -1205,7 +1499,6 @@ struct DispatchScan {
 
 fn is_scenario_module(path: &[String]) -> bool {
     path.starts_with(&path_of("crate::use_cases"))
-        || path.starts_with(&path_of("crate::mcp::edt_syntax"))
 }
 
 /// Свободная функция сценария: модульный путь и имя в `snake_case`, без типов.
@@ -3840,7 +4133,7 @@ fn provider_dispatched_takes_its_value_only_from_the_work_mark() {
     let platform = path_of("crate::platform");
     let result = path_of("crate::use_cases::result");
     let context = path_of("crate::use_cases::context");
-    let owners_of_command_work = [context.clone(), path_of("crate::mcp::edt_syntax")];
+    let owners_of_command_work = [context.clone()];
 
     let mut violations = Vec::new();
     let mut stamping = Vec::new();
@@ -4519,6 +4812,321 @@ fn the_cancellation_guard_sees_every_bypass() {
             || line.contains("AppError::cancellation")),
         "the guard flags a legitimate place: {found:?}"
     );
+}
+
+/// Хвосты путей, по которым страж узнаёт остановку отменой: запись `cancelled` и ошибку.
+const CANCELLED_RECORD: &[&str] = &["ExecutionInterruptionKind", "Cancelled"];
+const EXECUTION_ERROR_NEW: &[&str] = &["ExecutionError", "new"];
+const CANCELLED_ERROR_CODE: &str = "CANCELLED_ERROR_CODE";
+
+fn path_ends_with(path: &[String], tail: &[&str]) -> bool {
+    path.len() >= tail.len()
+        && path[path.len() - tail.len()..]
+            .iter()
+            .zip(tail)
+            .all(|(segment, expected)| segment == expected)
+}
+
+/// Код ошибки — `"cancelled"` или константа владельца, как бы его ни превращали в строку:
+/// `.to_owned()`, `.into()`, `String::from(..)`, ссылка, скобки.
+fn is_cancelled_code(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(literal),
+            ..
+        }) => literal.value() == "cancelled",
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == CANCELLED_ERROR_CODE),
+        syn::Expr::MethodCall(call) => is_cancelled_code(&call.receiver),
+        syn::Expr::Call(call) => call.args.first().is_some_and(is_cancelled_code),
+        syn::Expr::Reference(reference) => is_cancelled_code(&reference.expr),
+        syn::Expr::Paren(paren) => is_cancelled_code(&paren.expr),
+        syn::Expr::Group(group) => is_cancelled_code(&group.expr),
+        _ => false,
+    }
+}
+
+/// Места производственного кода вне `use_cases::interruption`, где остановку отменой
+/// записывают в итог исполнения в обход владельца: строят запись
+/// `ExecutionInterruptionKind::Cancelled` или ошибку с кодом `cancelled`. Образец — чтение
+/// записи в `match` или `matches!` — не построение и не считается.
+fn cancellation_stop_bypasses(index: &SourceIndex) -> Vec<String> {
+    struct Scan<'a, 'b> {
+        index: &'a SourceIndex,
+        body: &'a Body<'b>,
+        local_uses: std::collections::HashMap<String, Vec<String>>,
+        found: Vec<String>,
+    }
+
+    impl Scan<'_, '_> {
+        fn note(&mut self, what: impl std::fmt::Display) {
+            self.found.push(format!(
+                "{} ({}): {what}",
+                self.body.unit.file.display(),
+                self.body.context
+            ));
+        }
+
+        /// Полные пути выражения: через `use`, `Self` и звёздочки модуля; неразрешённый —
+        /// как написан.
+        fn paths(&self, path: &syn::Path) -> Vec<Vec<String>> {
+            let written = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let mut paths = vec![self
+                .index
+                .resolve(&self.body.module, &self.local_uses, path)
+                .unwrap_or_else(|| written.clone())];
+            if let [name] = written.as_slice() {
+                paths.extend(
+                    self.body
+                        .globs
+                        .iter()
+                        .map(|glob| [glob.as_slice(), std::slice::from_ref(name)].concat()),
+                );
+            }
+            paths
+        }
+
+        fn names(&self, path: &syn::Path, tail: &[&str]) -> bool {
+            self.paths(path)
+                .iter()
+                .any(|full| path_ends_with(full, tail))
+        }
+
+        /// Тело макроса, которое не разбирается как выражения, проверяется по словам.
+        fn scan_tokens(&mut self, tokens: &impl std::fmt::Display) {
+            let text = tokens.to_string().replace(' ', "");
+            if text.contains("ExecutionInterruptionKind::Cancelled") {
+                self.note("builds ExecutionInterruptionKind::Cancelled in a macro");
+            }
+            if text.contains(CANCELLED_ERROR_CODE) {
+                self.note("names CANCELLED_ERROR_CODE in a macro");
+            }
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Scan<'_, '_> {
+        /// Образец читает запись, а не строит её.
+        fn visit_pat(&mut self, _node: &'ast syn::Pat) {}
+
+        fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+            if self.names(&node.path, CANCELLED_RECORD) {
+                self.note("builds ExecutionInterruptionKind::Cancelled");
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(function) = node.func.as_ref() {
+                if self.names(&function.path, EXECUTION_ERROR_NEW)
+                    && node.args.first().is_some_and(is_cancelled_code)
+                {
+                    self.note("builds an ExecutionError with the cancelled code");
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            let builds_the_error = self.names(&node.path, &EXECUTION_ERROR_NEW[..1])
+                && node.fields.iter().any(|field| {
+                    matches!(&field.member, syn::Member::Named(name) if name == "code")
+                        && is_cancelled_code(&field.expr)
+                });
+            if builds_the_error {
+                self.note("builds an ExecutionError with the cancelled code");
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+
+        /// `matches!` — образец; тело прочих макросов — выражения через запятую, а что так
+        /// не разбирается, проверяется по словам.
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if node
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "matches")
+            {
+                return;
+            }
+            let parsed = node.parse_body_with(
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+            );
+            match parsed {
+                Ok(exprs) => {
+                    for expr in &exprs {
+                        syn::visit::Visit::visit_expr(self, expr);
+                    }
+                }
+                Err(_) => self.scan_tokens(&node.tokens),
+            }
+        }
+    }
+
+    let owner = path_of("crate::use_cases::interruption");
+    let mut found = Vec::new();
+    for body in production_bodies(index) {
+        if body.module == owner {
+            continue;
+        }
+        let mut scan = Scan {
+            index,
+            body: &body,
+            local_uses: body.local_uses(index),
+            found: Vec::new(),
+        };
+        syn::visit::Visit::visit_block(&mut scan, body.block);
+        found.extend(scan.found);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Остановку отменой в итоге исполнения ставит один владелец —
+/// `use_cases::interruption::record_cancellation` (#319). Корень прежней ошибки: формы
+/// собирали статус `cancelled` и запись о прерывании каждая сама, и одни забывали ошибку
+/// `cancelled`, а другие писали свой код. Страж ловит возвращение под любым именем: вне
+/// владельца производственный код не строит запись `ExecutionInterruptionKind::Cancelled` и
+/// ошибку с кодом `cancelled` — ни литералом, ни константой, ни в макросе. Отложенную отмену
+/// пишет тот же модуль, истёкший срок — `timed_out_record`.
+///
+/// Чего страж не видит: код, пришедший в `ExecutionError::new` через переменную или
+/// функцию, — как `UseCaseErrorKind::execution_step_code`, — поэтому такой разбор сначала отдаёт
+/// отмену владельцу.
+#[test]
+fn a_cancellation_stop_is_recorded_only_by_its_owner() {
+    let bypasses = cancellation_stop_bypasses(&SourceIndex::of_src());
+    assert!(
+        bypasses.is_empty(),
+        "a cancellation stop is recorded around its owner; call \
+         `crate::use_cases::interruption::record_cancellation` (or `cancelled_outcome`, \
+         `SafePointCancel::record_into`):\n{}",
+        bypasses.join("\n")
+    );
+}
+
+/// Страж видит построение в каждом виде и не видит чтения, чужого кода, владельца и тестов.
+#[test]
+fn the_cancellation_stop_guard_sees_every_bypass() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::sample",
+            "use crate::domain::execution::{\n\
+                 ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,\n\
+             };\n\
+             use crate::use_cases::interruption::CANCELLED_ERROR_CODE;\n\
+             fn by_record() -> ExecutionInterruptionDetails {\n\
+                 ExecutionInterruptionDetails::new(ExecutionInterruptionKind::Cancelled, false)\n\
+             }\n\
+             fn by_qualified() -> ExecutionInterruptionKind {\n\
+                 crate::domain::execution::ExecutionInterruptionKind::Cancelled\n\
+             }\n\
+             fn by_literal(message: String) -> ExecutionError {\n\
+                 ExecutionError::new(\"cancelled\", message)\n\
+             }\n\
+             fn by_constant(message: String) -> ExecutionError {\n\
+                 ExecutionError::new(CANCELLED_ERROR_CODE, message)\n\
+             }\n\
+             fn by_owned(message: String) -> ExecutionError {\n\
+                 ExecutionError::new(\"cancelled\".to_owned(), message)\n\
+             }\n\
+             fn by_struct(message: String) -> ExecutionError {\n\
+                 ExecutionError { code: \"cancelled\".into(), message, details: Vec::new(), \
+                     artifact: None, retryable: false }\n\
+             }\n\
+             fn in_macro() -> Vec<ExecutionInterruptionDetails> {\n\
+                 vec![ExecutionInterruptionDetails::new(ExecutionInterruptionKind::Cancelled, false)]\n\
+             }\n\
+             fn in_macro_error(message: String) -> Vec<ExecutionError> {\n\
+                 vec![ExecutionError::new(CANCELLED_ERROR_CODE, message)]\n\
+             }\n\
+             fn by_reading(kind: ExecutionInterruptionKind) -> &'static str {\n\
+                 match kind { ExecutionInterruptionKind::Cancelled => \"cancelled\", _ => \"other\" }\n\
+             }\n\
+             fn by_matching(kind: ExecutionInterruptionKind) -> bool {\n\
+                 matches!(kind, ExecutionInterruptionKind::Cancelled)\n\
+             }\n\
+             fn by_other_code(message: String) -> ExecutionError {\n\
+                 ExecutionError::new(\"timed_out\", message)\n\
+             }\n\
+             fn by_timeout() -> ExecutionInterruptionKind {\n\
+                 ExecutionInterruptionKind::TimedOut\n\
+             }\n\
+             fn by_code_name() -> &'static str {\n\
+                 CANCELLED_ERROR_CODE\n\
+             }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 fn in_a_test(message: String) -> ExecutionError {\n\
+                     ExecutionError::new(\"cancelled\", message)\n\
+                 }\n\
+             }",
+        ),
+        (
+            "crate::use_cases::globbed",
+            "use crate::domain::execution::ExecutionInterruptionKind::*;\n\
+             fn by_glob() -> crate::domain::execution::ExecutionInterruptionKind {\n\
+                 Cancelled\n\
+             }",
+        ),
+        (
+            "crate::use_cases::interruption",
+            "use crate::domain::execution::{ExecutionError, ExecutionInterruptionKind};\n\
+             pub(crate) const CANCELLED_ERROR_CODE: &str = \"cancelled\";\n\
+             fn the_owner(message: String) -> (ExecutionError, ExecutionInterruptionKind) {\n\
+                 (ExecutionError::new(CANCELLED_ERROR_CODE, message), \
+                  ExecutionInterruptionKind::Cancelled)\n\
+             }",
+        ),
+    ]);
+
+    let found = cancellation_stop_bypasses(&index);
+
+    for (context, what) in [
+        ("by_record", "builds ExecutionInterruptionKind::Cancelled"),
+        (
+            "by_qualified",
+            "builds ExecutionInterruptionKind::Cancelled",
+        ),
+        ("by_literal", "the cancelled code"),
+        ("by_constant", "the cancelled code"),
+        ("by_owned", "the cancelled code"),
+        ("by_struct", "the cancelled code"),
+        ("in_macro", "builds ExecutionInterruptionKind::Cancelled"),
+        ("in_macro_error", "the cancelled code"),
+        ("by_glob", "builds ExecutionInterruptionKind::Cancelled"),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains(&format!("({context})")) && line.contains(what)),
+            "the guard misses {context}: {found:?}"
+        );
+    }
+    for legitimate in [
+        "by_reading",
+        "by_matching",
+        "by_other_code",
+        "by_timeout",
+        "by_code_name",
+        "in_a_test",
+        "the_owner",
+    ] {
+        assert!(
+            !found
+                .iter()
+                .any(|line| line.contains(&format!("({legitimate})"))),
+            "the guard flags a legitimate place {legitimate}: {found:?}"
+        );
+    }
 }
 
 /// Функции production-кода, где путь разрешён вручную: проверка `is_absolute()` или

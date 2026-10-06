@@ -35,7 +35,6 @@ use url::Url;
 
 use crate::config::model::AppConfig;
 use crate::mcp::context::McpCallContext;
-use crate::mcp::edt_syntax;
 use crate::mcp::error::{McpInternalError, McpServiceResult};
 use crate::mcp::port::{DefaultMcpUseCasePort, McpUseCasePort};
 use crate::mcp::request::{
@@ -44,11 +43,14 @@ use crate::mcp::request::{
     McpLaunchAppRequest, McpRunAllTestsRequest, McpRunModuleTestsRequest,
 };
 use crate::mcp::service::McpService;
-use crate::mcp::service::{map_syntax_use_case_result, normalize_check_syntax_edt_request};
+use crate::mcp::service::{
+    execution_context, map_syntax_use_case_result, normalize_check_syntax_edt_request,
+};
 use crate::mcp::telemetry::{
     McpEdtSessionObserver, McpTelemetry, SemaphoreWaitErrorKind, SemaphoreWaitOutcome,
 };
 use crate::support::authority::{host_of_authority, host_of_url, Host};
+use crate::use_cases::check_syntax::{self, EdtSessionMiss};
 use crate::use_cases::context::CommandName;
 use crate::use_cases::result::UseCaseFailure;
 use crate::use_cases::transport::dispatch_with_workspace_lock_async;
@@ -437,26 +439,41 @@ impl McpToolServer {
         // Допускной срок кончается вместе с допуском, иначе это тот же срок команды под
         // другим именем — см. DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
         let edt_timeout = Duration::from_millis(self.config.tools.edt_cli.command_timeout_ms);
+        let context = execution_context(
+            self.call_context
+                .clone()
+                .with_cancellation(cancellation)
+                .with_edt_timeout(Some(edt_timeout)),
+            CommandName::Syntax,
+        )
+        .map_err(|error| ErrorData::internal_error(error.message, None))?;
         let use_case_request = normalize_check_syntax_edt_request(&request);
+        let config = self.config.clone();
+        let session = self.edt_session.clone();
         // Замок `workPath` берётся после допуска, как у порта: ожидая слота, вызов его не
         // держит. Снимается он с конечным состоянием проверки — раньше слота, иначе
-        // следующий допущенный вызов застал бы каталог занятым.
+        // следующий допущенный вызов застал бы каталог занятым. Исполнитель тот же, что у
+        // командной строки; сервер выбирает только свою сессию и ждёт её в потоке
+        // блокирующих задач.
         let result = match dispatch_with_workspace_lock_async(
             self.config.as_ref(),
             CommandName::Syntax,
             || {
-                edt_syntax::execute(
-                    self.edt_session.as_ref(),
-                    self.config.as_ref(),
-                    &use_case_request,
-                    edt_timeout,
-                    cancellation,
-                )
+                tokio::task::spawn_blocking(move || {
+                    check_syntax::execute_in_server_session(
+                        &context,
+                        config.as_ref(),
+                        &use_case_request,
+                        session.as_ref(),
+                    )
+                })
             },
         )
         .await
         {
-            Ok(result) => result,
+            Ok(joined) => joined.map_err(|_| {
+                execution_error(ErrorReason::JoinFailure, ExecutionStage::Running, None)
+            }),
             Err(error) => {
                 permit.take();
                 return map_tool_result(map_syntax_use_case_result(Err(
@@ -464,28 +481,18 @@ impl McpToolServer {
                 )));
             }
         };
+        permit.take();
 
-        match result {
-            Ok(use_case_result) => {
-                permit.take();
-                map_tool_result(map_syntax_use_case_result(use_case_result))
-            }
-            Err(edt_syntax::EdtSyntaxTransportError::QueuedCancelled) => {
-                permit.take();
-                Err(execution_error(
-                    ErrorReason::Cancelled,
-                    ExecutionStage::Queued,
-                    Some(edt_timeout),
-                ))
-            }
-            Err(edt_syntax::EdtSyntaxTransportError::QueuedTimeout) => {
-                permit.take();
-                Err(execution_error(
-                    ErrorReason::Timeout,
-                    ExecutionStage::Queued,
-                    Some(edt_timeout),
-                ))
-            }
+        match result? {
+            Ok(use_case_result) => map_tool_result(map_syntax_use_case_result(use_case_result)),
+            Err(missed) => Err(execution_error(
+                match missed.reason() {
+                    EdtSessionMiss::Cancelled => ErrorReason::Cancelled,
+                    EdtSessionMiss::TimedOut => ErrorReason::Timeout,
+                },
+                ExecutionStage::Queued,
+                Some(edt_timeout),
+            )),
         }
     }
 }

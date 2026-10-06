@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.AN-UNESTABLISHED-COMPATIBILITY-IS-A-PLATFORM-FAILURE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/285
+check:
+  - src/use_cases/load_artifact.rs::an_unestablished_compatibility_answers_a_platform_failure
+  - src/use_cases/load_artifact.rs::an_unreadable_extension_list_answers_a_platform_failure
 ---
 
 # Неустановленная совместимость — сбой платформы
@@ -10,5 +11,7 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/285
 не прочитался перечень расширений, а запрос верен. Род `validation` говорит о запросе и
 здесь не годится. Изменений такой отказ не разрешает.
 
-Сегодня отказ по `NotEstablished` строится как `AppError::Validation`
-(`src/use_cases/load_artifact.rs`).
+Отказ по `NotEstablished` строится как `AppError::Platform`
+(`src/use_cases/load_artifact.rs`). `NotEstablished` значит только «спросили»: то, что
+останавливает вопрос до него, — не найденный `ibcmd`, неполная конфигурация подключения —
+отвечает своим родом.

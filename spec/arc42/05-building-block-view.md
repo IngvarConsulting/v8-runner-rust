@@ -43,8 +43,8 @@ flowchart TB
 `support → platform` и `support → config` — `AppError` оборачивает их ошибки;
 `support → use_cases` — нормализация ввода возвращает типы запросов; `support → output` —
 журнал берёт знак статуса из словаря ленты; одно из пары `config ↔ platform` — модель
-строит подключение платформы, а платформа читает модель. Мимо сценариев идут
-`mcp → platform` и `mcp → parsers` — живая EDT-проверка ([6.7](06-runtime-view.md)). Ради порождаемых
+строит подключение платформы, а платформа читает модель. Мимо сценариев идёт
+`mcp → platform` — сервер держит общую сессию EDT, которую отдаёт сценарию живой EDT-проверки ([6.7](06-runtime-view.md)). Ради порождаемых
 схем `command_data` смотрит в `app`, `cli` и `mcp`, а `command_envelope` — в `command_data`.
 
 Границы, которые держат правила: сценарии не знают транспорта и вывода
@@ -85,7 +85,7 @@ flowchart TB
 | Файл | Что в нём |
 | --- | --- |
 | [`utilities.rs`](../../src/platform/utilities.rs), [`locator.rs`](../../src/platform/locator.rs) | Вход для сценариев; поиск утилит по маске версии — [правило](../rules/platform/platform-tools-are-found-by-version-mask.md) |
-| [`process.rs`](../../src/platform/process.rs) | Процесс в своей группе, класс прерывания, снятие группы; клиент `launch` без ожидания — отсоединённым; отметка работы команды (`WorkGiven`), которую ставит запуск процесса |
+| [`process.rs`](../../src/platform/process.rs) | Процесс в своей группе, класс прерывания, снятие группы; клиент `launch` без ожидания — отсоединённым; отметка работы команды (`WorkGiven`), которую ставит запуск процесса; исход утилиты по коду выхода (`ProcessResult::outcome`) — [правило](../rules/platform/exit-codes-are-read-in-the-platform-layer.md) |
 | [`connection.rs`](../../src/platform/connection.rs) | Строка подключения выбранной базы и аргументы подключения утилит |
 | [`designer.rs`](../../src/platform/designer.rs), [`ibcmd.rs`](../../src/platform/ibcmd.rs), [`edt.rs`](../../src/platform/edt.rs), [`enterprise.rs`](../../src/platform/enterprise.rs), [`webinst.rs`](../../src/platform/webinst.rs) | Команды утилит; итог — [`PlatformCommandResult`](../../src/platform/result.rs) |
 | [`agent.rs`](../../src/platform/agent.rs), [`sftp.rs`](../../src/platform/sftp.rs) | Агент Конфигуратора и шлюз по встроенному SSH; SFTP поверх того же соединения |

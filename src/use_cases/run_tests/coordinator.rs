@@ -1,4 +1,4 @@
-use super::helpers::build_prerequisite_failure;
+use super::helpers::{build_prerequisite_failure, EnterpriseFailure};
 use super::*;
 use crate::support::error::CapabilityReason;
 use crate::use_cases::progress::log_live_stage;
@@ -321,7 +321,7 @@ pub(super) fn run_tests(
     let platform_result = match enterprise.run_launch(&platform_launch) {
         Ok(result) => {
             steps.push(
-                if result.process.exit_code == 0 {
+                if result.process.outcome().is_ok() {
                     succeeded_step(
                         "run",
                         ExecutionStepKind::PlatformCommand,
@@ -341,28 +341,23 @@ pub(super) fn run_tests(
             result
         }
         Err(error) => {
-            let (kind, app_error, interruption, status) = enterprise_error_kind(error);
-            let mut step = failed_step(
-                "run",
-                ExecutionStepKind::PlatformCommand,
-                run_started.elapsed().as_millis() as u64,
-                app_error.to_string(),
-            )
-            .with_target(artifacts.platform_log.display().to_string());
-            if let Some(kind) = kind.clone() {
-                step = step.with_errors(vec![test_execution_error(kind, app_error.to_string())]);
-            }
-            steps.push(step);
+            let failure = enterprise_failure(error);
+            let step_errors = failure.step_errors();
+            let EnterpriseFailure {
+                error: app_error,
+                outcome,
+            } = failure;
+            steps.push(
+                failed_step(
+                    "run",
+                    ExecutionStepKind::PlatformCommand,
+                    run_started.elapsed().as_millis() as u64,
+                    app_error.to_string(),
+                )
+                .with_target(artifacts.platform_log.display().to_string())
+                .with_errors(step_errors),
+            );
             let retained_paths = retain_run_artifacts(config, &artifacts).ok();
-            let mut outcome =
-                ExecutionOutcome::new(status).with_diagnostics(vec![app_error.to_string()]);
-            if let Some(kind) = kind {
-                outcome =
-                    outcome.with_errors(vec![test_execution_error(kind, app_error.to_string())]);
-            }
-            if let Some(interruption) = interruption {
-                outcome = outcome.with_interruptions(vec![interruption]);
-            }
             let outcome = with_retained_artifacts(outcome, retained_paths);
             let result = make_test_result(
                 target,
@@ -457,7 +452,7 @@ pub(super) fn run_tests(
     };
 
     let has_test_failures = report.summary.failed > 0 || report.summary.errors > 0;
-    let process_failed = platform_result.process.exit_code != 0;
+    let process_failed = platform_result.process.outcome().is_err();
     let diagnostics = collect_diagnostics(&platform_result, Vec::new(), config);
 
     if process_failed || has_test_failures {

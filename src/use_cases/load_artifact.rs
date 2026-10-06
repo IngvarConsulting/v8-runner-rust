@@ -21,13 +21,13 @@ use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, CancelledAt};
 use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
-    cancellation_record, deferred_process_interruption, SafePoint, SafePointCancel,
+    cancelled_outcome, deferred_process_interruption, SafePoint, SafePointCancel,
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::LoadRequest;
@@ -37,6 +37,7 @@ const SUPPORTED_LOAD_ERROR: &str =
     "load currently supports only the Designer provider and format=DESIGNER";
 const UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR: &str =
     "load currently supports only .cf and .cfe artifacts";
+const CFE_REQUIRES_EXTENSION_ERROR: &str = ".cfe artifacts require --extension <name>";
 const UNSUPPORTED_UPDATE_MODE_ERROR: &str =
     "load --mode update is not supported; use --mode load or --mode merge";
 
@@ -153,8 +154,10 @@ fn run_load(
             &resolved,
             CompatibilityState::NotProbed,
             started,
+            // Безопасная точка: фаза записи — `command_boundary`, работа не оборвана.
+            CancelledAt::Boundary,
+            ExecutionInterruptionPhase::CommandBoundary,
             cancel.message().to_owned(),
-            cancel.record(),
             None,
         );
         return Err(LoadExecutionFailure::with_payload(
@@ -397,8 +400,10 @@ fn run_load_selected(
             &resolved,
             compatibility_state,
             started,
+            // Безопасная точка: фаза записи — `command_boundary`, работа не оборвана.
+            CancelledAt::Boundary,
+            ExecutionInterruptionPhase::CommandBoundary,
             cancel.message().to_owned(),
-            cancel.record(),
             apply_result.platform_log_path.or(probe_log_path),
         ));
         // Если отмена пришла во время загрузки, загрузка её отложила и довела дело до конца;
@@ -546,7 +551,7 @@ fn probe_compatibility(
     // and told it in prose.
     if resolved.target_kind == LoadTargetKind::Extension {
         let presence = installed_extension_state(context, config, utilities, resolved)
-            .map_err(|cancelled| (cancelled, None))?;
+            .map_err(|error| (error, None))?;
         let (state, diagnostic) = match presence {
             ExtensionPresence::Absent => (CompatibilityState::Absent, None),
             ExtensionPresence::Present => (CompatibilityState::Supported, None),
@@ -613,10 +618,9 @@ fn probe_compatibility(
     // The whole classification: the comparison either ran or it did not. Exit zero is the
     // platform's own guarantee, and exactly then it writes the comparison report; every other
     // outcome leaves the state unestablished, whatever sentence the log carries.
-    let state = if result.process.exit_code == 0 {
-        CompatibilityState::Supported
-    } else {
-        CompatibilityState::NotEstablished
+    let state = match result.process.outcome() {
+        Ok(()) => CompatibilityState::Supported,
+        Err(_code) => CompatibilityState::NotEstablished,
     };
     let diagnostic = probe_evidence(&result);
     Ok(ProbeResult {
@@ -634,27 +638,28 @@ enum ExtensionPresence {
     NotEstablished(String),
 }
 
-/// Asks the infobase whether the extension is installed, by its own keyed list. `Err` is only a
-/// cancellation of the list read: it answers nothing about the extension, it ends the command.
+/// Asks the infobase whether the extension is installed, by its own keyed list.
+///
+/// `NotEstablished` is kept for one case only: the platform was asked and did not answer.
+/// Everything that stops the question before it is asked keeps its own kind as `Err` — a
+/// missing or unsuitable `ibcmd` is the environment's
+/// (INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE), an incomplete connection config and an
+/// unnamed extension are the request's — and so does a cancellation of the list read.
 fn installed_extension_state(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     resolved: &ResolvedLoadRequest,
 ) -> Result<ExtensionPresence, AppError> {
+    // `resolve_request` already refuses a `.cfe` without `--extension`; this keeps the same
+    // answer should that ever change.
     let Some(name) = resolved.extension.as_deref() else {
-        return Ok(ExtensionPresence::NotEstablished(
-            "the extension is not named".to_owned(),
+        return Err(AppError::Validation(
+            CFE_REQUIRES_EXTENSION_ERROR.to_owned(),
         ));
     };
-    let connection = match IbcmdConnection::from_infobase(&config.infobase) {
-        Ok(connection) => connection,
-        Err(error) => return Ok(ExtensionPresence::NotEstablished(error.to_string())),
-    };
-    let binary = match utilities.locate(UtilityType::Ibcmd) {
-        Ok(location) => location.path,
-        Err(error) => return Ok(ExtensionPresence::NotEstablished(error.to_string())),
-    };
+    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
+    let binary = utilities.locate(UtilityType::Ibcmd)?.path;
     let dsl = IbcmdDsl::new(
         binary,
         connection,
@@ -673,10 +678,9 @@ fn installed_extension_state(
             return Ok(ExtensionPresence::NotEstablished(error.to_string()));
         }
     };
-    if result.process.exit_code != 0 {
+    if let Err(code) = result.process.outcome() {
         return Ok(ExtensionPresence::NotEstablished(format!(
-            "reading the extension list exited with {}",
-            result.process.exit_code
+            "reading the extension list exited with {code}"
         )));
     }
     Ok(match parse_extension_inventory(&result.process.stdout) {
@@ -696,9 +700,7 @@ fn installed_extension_state(
 /// Evidence is not a decision: nothing reads this back. It exists so the caller can see which
 /// sentence the runner deliberately refused to interpret.
 fn probe_evidence(result: &PlatformCommandResult) -> Option<String> {
-    if result.process.exit_code == 0 {
-        return None;
-    }
+    result.process.outcome().err()?;
     let log = result.platform_log.as_deref()?;
     let text = log
         .strip_prefix('\u{feff}')
@@ -726,24 +728,29 @@ fn validate_probe_mode_compatibility(
     use LoadMode::{Load, Merge, Update};
     use LoadTargetKind::{Configuration, Extension, Unknown};
 
-    let unproven = || {
-        Some(AppError::Validation(format!(
+    let unproven_message = || {
+        format!(
             "{} state was asked and not established, so nothing is changed{}",
             target_label(resolved),
             evidence
                 .map(|line| format!(". The platform said: {line}"))
                 .unwrap_or_default()
-        )))
+        )
     };
+    let unproven = || Some(AppError::Validation(unproven_message()));
 
     match (resolved.target_kind, resolved.mode, state) {
         (_, Update, _) => Some(AppError::Validation(
             UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
         )),
-        // Asked and not proven permits no change, in either mode and for either target: the
-        // fail-closed rule carried from DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED. An unreadable extension list or an
-        // infobase that will not open stops a load too.
-        (Configuration | Extension, Load | Merge, NotEstablished) => unproven(),
+        // Asked and not proven permits no change, in either mode and for either target
+        // (DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED). The request was
+        // right and the platform did not answer — the infobase did not open or the extension
+        // list did not read — so the refusal is the platform's, not the request's
+        // (INV.USE-CASES.AN-UNESTABLISHED-COMPATIBILITY-IS-A-PLATFORM-FAILURE).
+        (Configuration | Extension, Load | Merge, NotEstablished) => {
+            Some(AppError::Platform(unproven_message()))
+        }
         // An extension the infobase does not list is a first installation; merging into
         // nothing is the caller's mistake.
         (Extension, Load, Absent) => None,
@@ -866,9 +873,8 @@ fn resolve_request(
             (LoadTargetKind::Configuration, None)
         }
         ArtifactBuildMode::ExtensionCfe => {
-            let extension = extension.ok_or_else(|| {
-                AppError::Validation(".cfe artifacts require --extension <name>".to_owned())
-            })?;
+            let extension = extension
+                .ok_or_else(|| AppError::Validation(CFE_REQUIRES_EXTENSION_ERROR.to_owned()))?;
             (LoadTargetKind::Extension, Some(extension))
         }
         ArtifactBuildMode::ExternalDataProcessorEpf | ArtifactBuildMode::ExternalReportErf => {
@@ -988,9 +994,9 @@ fn ensure_platform_success(
     resolved: &ResolvedLoadRequest,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
+    let Err(code) = result.process.outcome() else {
         return Ok(());
-    }
+    };
     Err(AppError::Platform(format_ibcmd_failure_details(
         action,
         match resolved.target_kind {
@@ -999,7 +1005,7 @@ fn ensure_platform_success(
             LoadTargetKind::Unknown => "unknown",
         },
         resolved.extension.as_deref().unwrap_or("main"),
-        result.process.exit_code,
+        code.get(),
         &result.process.stdout,
         &result.process.stderr,
         result.platform_log.as_deref(),
@@ -1018,15 +1024,18 @@ fn target_label(resolved: &ResolvedLoadRequest) -> String {
     }
 }
 
-/// Итог загрузки, остановленной отменой: `message` — её текст, `record` — запись о
-/// прерывании. Получил ли исполнитель работу, ставит отметка команды на выходе `execute`;
-/// что пакет уже загружен, отмечает `with_loaded_artifact` у места вызова.
+/// Итог загрузки, остановленной отменой в `at`, с её текстом `message` в диагностике.
+/// Статус, ошибку `cancelled` и запись о прерывании — с фазой `work_phase` у оборванной
+/// работы — ставит владелец, `cancelled_outcome`. Получил ли исполнитель работу, ставит
+/// отметка команды на выходе `execute`; что пакет уже загружен, отмечает
+/// `with_loaded_artifact` у места вызова.
 fn interrupted_result_from_resolved(
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
+    at: CancelledAt,
+    work_phase: ExecutionInterruptionPhase,
     message: String,
-    record: ExecutionInterruptionDetails,
     platform_log_path: Option<PathBuf>,
 ) -> LoadResult {
     LoadResult {
@@ -1038,13 +1047,8 @@ fn interrupted_result_from_resolved(
         extension: resolved.extension.clone(),
         duration_ms: started.elapsed().as_millis() as u64,
         execution: with_platform_log_artifact(
-            ExecutionOutcome::new(ExecutionStatus::Cancelled)
-                .with_diagnostics(vec![message.clone()])
-                .with_errors(vec![ExecutionError::new(
-                    "artifact_load_interrupted",
-                    message,
-                )])
-                .with_interruptions(vec![record])
+            cancelled_outcome(at, work_phase, message.clone())
+                .with_diagnostics(vec![message])
                 .with_payload(LoadExecutionMetadata {
                     applied: false,
                     target_kind: resolved.target_kind,
@@ -1069,13 +1073,14 @@ fn failed_result_from_resolved(
     update_db_cfg_ran: bool,
 ) -> LoadResult {
     let message = error.to_string();
-    match cancellation_record(error, work_phase, message.clone()) {
-        Some(record) => interrupted_result_from_resolved(
+    match error.cancellation() {
+        Some(at) => interrupted_result_from_resolved(
             resolved,
             compatibility_state,
             started,
+            at,
+            work_phase,
             message,
-            record,
             platform_log_path,
         ),
         None => empty_result_from_resolved(
@@ -1590,20 +1595,17 @@ mod tests {
         assert!(ordered[0] < ordered[1]);
     }
 
-    /// Four tests used to stand here, each proving that a particular mix of stdout, stderr and
-    /// `/Out` lines kept the state `unknown` and blocked the load. They classified the
-    /// platform's prose, which DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids, so the rule they protected is proven with a
-    /// structural input instead: the infobase cannot be asked at all, and nothing is applied.
+    /// Загрузка расширения в базу, которую нельзя спросить: перечень расширений не читается,
+    /// и о расширении ничего не установлено. Возвращает отказ сценария.
     #[cfg(unix)]
-    #[test]
-    fn an_extension_whose_presence_cannot_be_read_blocks_the_load() {
-        let dir = tempdir().expect("tempdir");
-        let root = dir.path();
+    fn load_an_extension_whose_presence_cannot_be_read(
+        root: &Path,
+        calls: &Path,
+    ) -> super::LoadExecutionFailure {
         fs::create_dir_all(root.join("work")).expect("work");
         let binary = root.join("1cv8");
-        let calls = root.join("calls.log");
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
-        write_absent_extension_designer_script(&binary, &calls, None, None, None);
+        write_absent_extension_designer_script(&binary, calls, None, None, None);
         // The infobase cannot be asked, so nothing about the extension is established.
         let ibcmd = root.join("ibcmd");
         fs::write(&ibcmd, "#!/bin/sh\nexit 7\n").expect("write ibcmd");
@@ -1618,8 +1620,20 @@ mod tests {
             extension: Some("ListedExt".to_owned()),
         };
 
-        let failure = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
-            .expect_err("an unproven state must not permit a change");
+        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("an unproven state must not permit a change")
+    }
+
+    /// Four tests used to stand here, each proving that a particular mix of stdout, stderr and
+    /// `/Out` lines kept the state `unknown` and blocked the load. They classified the
+    /// platform's prose, which DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids, so the rule they protected is proven with a
+    /// structural input instead: the infobase cannot be asked at all, and nothing is applied.
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_whose_presence_cannot_be_read_blocks_the_load() {
+        let dir = tempdir().expect("tempdir");
+        let calls = dir.path().join("calls.log");
+        let failure = load_an_extension_whose_presence_cannot_be_read(dir.path(), &calls);
         let payload = failure.payload.expect("payload");
         assert_eq!(
             load_payload(&payload).compatibility_state,
@@ -1629,6 +1643,150 @@ mod tests {
             !calls.exists(),
             "nothing may be applied, or even started, on an unproven state"
         );
+    }
+
+    /// Совместимость спросили и не установили — отказ рода `platform`, а не `validation`:
+    /// запрос верен, не ответила платформа. Перебор закрывает каждую цель и каждый режим.
+    #[test]
+    fn an_unestablished_compatibility_answers_a_platform_failure() {
+        for target_kind in [LoadTargetKind::Configuration, LoadTargetKind::Extension] {
+            for mode in [LoadMode::Load, LoadMode::Merge] {
+                let resolved = ResolvedLoadRequest {
+                    mode,
+                    artifact_path: PathBuf::from("dist/main.cf"),
+                    artifact_type: ArtifactBuildMode::ConfigurationCf,
+                    target_kind,
+                    settings_path: None,
+                    extension: None,
+                    vendor_name: None,
+                };
+                let refusal = super::validate_probe_mode_compatibility(
+                    &resolved,
+                    CompatibilityState::NotEstablished,
+                    None,
+                )
+                .expect("an unproven state permits no change");
+                let error = crate::use_cases::result::UseCaseError::from(refusal);
+                assert_eq!(
+                    error.kind(),
+                    UseCaseErrorKind::Platform,
+                    "{target_kind:?}/{mode:?}: {error}"
+                );
+            }
+        }
+    }
+
+    /// Прогон сценария: род `platform` неустановленной совместимости доезжает до вызывающего.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_extension_list_answers_a_platform_failure() {
+        let dir = tempdir().expect("tempdir");
+        let failure = load_an_extension_whose_presence_cannot_be_read(
+            dir.path(),
+            &dir.path().join("calls.log"),
+        );
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Platform,
+            "{}",
+            failure.error
+        );
+        assert_eq!(failure.error.exit_code(), 4);
+        let payload = failure.payload.expect("payload");
+        assert_eq!(
+            load_payload(&payload).compatibility_state,
+            CompatibilityState::NotEstablished
+        );
+    }
+
+    /// Загрузка расширения, у которой вопрос о его наличии не задан: `ibcmd` не нашёлся
+    /// или конфигурация подключения к базе неполна. Конфигуратор подставной и записывает вызовы.
+    #[cfg(unix)]
+    fn load_an_extension_without_asking(
+        root: &Path,
+        calls: &Path,
+        infobase: crate::config::model::InfobaseConfig,
+    ) -> super::LoadExecutionFailure {
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        write_absent_extension_designer_script(&binary, calls, None, None, None);
+        let mut config = sample_config(root, &binary);
+        config.infobase = infobase;
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("ListedExt".to_owned()),
+        };
+
+        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("a question that was never asked permits no change")
+    }
+
+    /// Неполная установка без server tools — норма: `ibcmd` нет рядом с Конфигуратором, и
+    /// отказ несёт род `environment`, а не `platform` — платформу ни о чём не спрашивали
+    /// (INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE).
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_load_without_ibcmd_answers_an_environment_failure() {
+        let dir = tempdir().expect("tempdir");
+        let calls = dir.path().join("calls.log");
+        let failure = load_an_extension_without_asking(
+            dir.path(),
+            &calls,
+            crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+        );
+
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Environment,
+            "{}",
+            failure.error
+        );
+        assert_eq!(failure.error.exit_code(), 2);
+        assert!(
+            failure.error.message().contains("ibcmd"),
+            "{}",
+            failure.error
+        );
+        let payload = failure.payload.expect("payload");
+        assert_eq!(
+            load_payload(&payload).compatibility_state,
+            CompatibilityState::NotProbed,
+            "nobody asked the infobase"
+        );
+        assert!(!calls.exists(), "nothing may be applied: {calls:?}");
+    }
+
+    /// Серверная база без `infobase.dbms` — ошибка конфигурации, как и везде, где строится
+    /// подключение `ibcmd`: род `validation`, а не `platform`.
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_ibcmd_connection_answers_a_validation_failure() {
+        let dir = tempdir().expect("tempdir");
+        let calls = dir.path().join("calls.log");
+        let mut infobase = crate::config::model::InfobaseConfig::server(
+            "Srvr=demo;Ref=test",
+            crate::config::model::InfobaseDbmsConfig::new("PostgreSQL", "localhost", "demo"),
+        );
+        infobase.dbms = None;
+        let failure = load_an_extension_without_asking(dir.path(), &calls, infobase);
+
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Validation,
+            "{}",
+            failure.error
+        );
+        assert!(
+            failure.error.message().contains("infobase.dbms"),
+            "{}",
+            failure.error
+        );
+        assert!(!calls.exists(), "nothing may be applied: {calls:?}");
     }
 
     #[cfg(unix)]
@@ -1856,6 +2014,7 @@ mod tests {
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&payload.execution);
         assert!(payload.execution.errors[0]
             .message
             .contains("before entering load probe"));
@@ -1918,6 +2077,7 @@ mod tests {
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&payload.execution);
         assert!(payload.execution.errors[0]
             .message
             .contains("before entering update_db_cfg safe point"));
@@ -2151,6 +2311,17 @@ mod tests {
         assert_eq!(
             interruption.phase,
             Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
+        let [error] = payload.execution.errors.as_slice() else {
+            panic!(
+                "a cut probe is one cancelled error: {:?}",
+                payload.execution.errors
+            );
+        };
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(
+            interruption.message.as_deref(),
+            Some(error.message.as_str())
         );
         assert_eq!(
             load_payload(&payload).compatibility_state,

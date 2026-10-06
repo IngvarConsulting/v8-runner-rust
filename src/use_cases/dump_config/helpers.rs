@@ -355,15 +355,15 @@ pub(super) fn ensure_platform_success(
     resolved: &ResolvedDumpTarget,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
+    let Err(code) = result.process.outcome() else {
         return Ok(());
-    }
+    };
 
     Err(AppError::Platform(format_ibcmd_failure_details(
         action,
         "source-set",
         &resolved.source_set_name,
-        result.process.exit_code,
+        code.get(),
         &result.process.stdout,
         &result.process.stderr,
         result.platform_log.as_deref(),
