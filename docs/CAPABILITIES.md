@@ -278,9 +278,9 @@ v8-runner init [--force] [--output <FILE>] [--infobase <CONNECTION>] [--format <
   который уже стоит в `origin`, ничего не меняет; если `upstream` уже есть — отказ, который
   называет `infobases.origin` и `infobases.upstream`. Ответ — вариант `data.kind: "local"`
   с `local_path`, `gitignore_path` и `origin` (`change`: `declared` | `unchanged` |
-  `redirected`, `connection`, `replaced` — заменённый адрес); пароль в адресах замаскирован,
-  учётные данные не печатаются. `--force` переписывает проектный файл (`data.kind:
-  "project"`), с местным слоем поступает так же. В каталоге без `v8project.yaml` другой
+  `redirected`, `connection`, `replaced` — заменённый адрес); пароль и имя пользователя
+  в адресах замаскированы, учётные данные секций не печатаются. `--force` переписывает
+  проектный файл (`data.kind: "project"`), с местным слоем поступает так же. В каталоге без `v8project.yaml` другой
   адрес для уже объявленного `origin` — по-прежнему отказ.
 
 ### `clone`

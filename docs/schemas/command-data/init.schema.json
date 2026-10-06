@@ -41,7 +41,7 @@
     },
     "OriginDeclaration": {
       "additionalProperties": false,
-      "description": "Что `init` сделал с `infobases.origin` местного слоя. Пароль в адресах замаскирован;\nучётные данные секций в ответ не попадают.",
+      "description": "Что `init` сделал с `infobases.origin` местного слоя. Пароль и имя пользователя\nв адресах замаскированы; учётные данные секций в ответ не попадают.",
       "properties": {
         "change": {
           "$ref": "#/$defs/OriginChange"

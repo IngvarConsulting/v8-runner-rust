@@ -118,13 +118,17 @@ fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
             masked.push(arg.clone());
             continue;
         }
+        // Сегменты строки соединения маскируются по всему аргументу до деления на слова:
+        // значение сегмента кончается на `;`, а не на пробеле, и `Pwd="a b"` или
+        // `Pwd=a b;Ref=x` иначе оставили бы половину пароля вторым словом.
+        let arg = mask_segments(arg, hidden);
         let mut rewritten = String::with_capacity(arg.len());
         // Ключи считаются по словам: в argv платформы значение отделено пробелом, а
         // через `--raw-key` в один аргумент кладут и целую связку вроде
         // `/Proxy -PUser bob -PPwd sec`. Разбор по словам разбирает обе формы одним
         // правилом; `mask_detached_value` переносится и на следующее слово, и на
         // следующий аргумент, потому что значение бывает и там, и там.
-        for (word, spacing) in words(arg) {
+        for (word, spacing) in words(&arg) {
             if mask_detached_value {
                 mask_detached_value = false;
                 rewritten.push_str(MASKED_VALUE);
@@ -295,6 +299,18 @@ fn split(value: &str, honour_quotes: bool) -> Vec<&str> {
     found
 }
 
+/// Показывает строку соединения одним значением, а не аргументом командной строки:
+/// слов и ключей в ней нет, поэтому пробел значения не делит. Прячет и пароль, и имя
+/// пользователя — отчёт об адресе базы человеку нужен для узнавания базы, а не учётной
+/// записи. Пароль в адресе со схемой (`ws=http://alice:pass@host`) тоже скрыт.
+pub fn mask_connection_string(value: &str) -> String {
+    let hidden = Hidden::SecretsAndIdentities;
+    mask_userinfo(
+        &mask_hidden_key_runs(&mask_segments(value, hidden), hidden),
+        true,
+    )
+}
+
 /// Прячет пароль в объявленном клиентском адресе, оставляя сам адрес узнаваемым.
 ///
 /// Адрес приходит из `infobase.web.url`, которое не валидируется, поэтому схемы в нём
@@ -406,7 +422,9 @@ fn mask_literals(arg: String, secrets: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_preview_args, mask_url_userinfo, render_masked_command};
+    use super::{
+        mask_connection_string, mask_preview_args, mask_url_userinfo, render_masked_command,
+    };
     use std::path::Path;
 
     fn preview(args: &[&str], secrets: &[&str]) -> Vec<String> {
@@ -666,5 +684,46 @@ mod tests {
     fn a_multibyte_value_does_not_split_a_character() {
         let args = preview(&["/P=пароль", "Srvr=сервер;Pwd=пароль"], &[]);
         assert_eq!(args, vec!["/P=***", "Srvr=сервер;Pwd=***"]);
+    }
+
+    /// Значение сегмента кончается на `;`, а не на пробеле: пароль с пробелом внутри
+    /// одного аргумента не оставляет хвоста ни в превью, ни в показе отказа.
+    #[test]
+    fn masks_a_connection_string_password_that_holds_a_space() {
+        let quoted = "Srvr=h;Pwd=\"a b\";Ref=x";
+        let bare = "Srvr=h;Pwd=a b;Ref=x";
+        assert_eq!(preview(&[quoted], &[]), vec!["Srvr=h;Pwd=***;Ref=x"]);
+        assert_eq!(preview(&[bare], &[]), vec!["Srvr=h;Pwd=***;Ref=x"]);
+        assert_eq!(
+            preview(&["/IBConnectionString", quoted], &[]),
+            vec!["/IBConnectionString", "Srvr=h;Pwd=***;Ref=x"]
+        );
+        let shown = rendered(&[bare, "/N", "Admin"]);
+        assert!(!shown.contains(" b"), "{shown}");
+        assert!(!shown.contains("Admin"), "{shown}");
+    }
+
+    #[test]
+    fn a_connection_string_shown_as_a_value_hides_the_password_and_the_user() {
+        assert_eq!(
+            mask_connection_string("Srvr=h;Ref=erp;Usr=Admin;Pwd=\"a b\""),
+            "Srvr=h;Ref=erp;Usr=***;Pwd=***"
+        );
+        assert_eq!(
+            mask_connection_string("Srvr=h;Pwd=a b;Ref=x"),
+            "Srvr=h;Pwd=***;Ref=x"
+        );
+        assert_eq!(
+            mask_connection_string("Srvr=h;Pwd=\"se;cr et\";Ref=x"),
+            "Srvr=h;Pwd=***;Ref=x"
+        );
+        assert_eq!(
+            mask_connection_string("ws=http://alice:pass word@host/erp"),
+            "ws=http://alice:***@host/erp"
+        );
+        assert_eq!(
+            mask_connection_string("File=C:\\My Bases\\erp"),
+            "File=C:\\My Bases\\erp"
+        );
     }
 }

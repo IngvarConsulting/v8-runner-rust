@@ -54,8 +54,8 @@ pub struct LocalLayerInitResult {
     pub duration_ms: u64,
 }
 
-/// Что `init` сделал с `infobases.origin` местного слоя. Пароль в адресах замаскирован;
-/// учётные данные секций в ответ не попадают.
+/// Что `init` сделал с `infobases.origin` местного слоя. Пароль и имя пользователя
+/// в адресах замаскированы; учётные данные секций в ответ не попадают.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct OriginDeclaration {
     pub change: OriginChange,

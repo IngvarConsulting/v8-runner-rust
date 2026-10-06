@@ -8,7 +8,7 @@ use crate::domain::config_init::{
     ConfigInitResult, ConfigInitSourceSet, LocalLayerInitResult, OriginChange, OriginDeclaration,
     ProjectInitResult,
 };
-use crate::platform::secrets::mask_preview_args;
+use crate::platform::secrets::mask_connection_string;
 use crate::support::edt_project::{self, EdtProjectKind};
 use crate::support::error::AppError;
 use crate::support::path::{is_safe_path_segment, nearest_existing_canonical_path};
@@ -96,6 +96,12 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
             )));
         }
     }
+    // Объявленный адрес читается обрезанным, и названный сравнивается с ним так же:
+    // `--infobase " File=x"` — тот же адрес, что `File=x`.
+    let requested = request.connection.as_ref().map(|origin| DeclaredOrigin {
+        key: origin.key,
+        connection: origin.connection.trim().to_owned(),
+    });
     let conflict = if project_declared {
         OriginConflict::Redirect
     } else {
@@ -107,8 +113,8 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
 
     if project_declared && !request.force {
-        let local = plan_local_config(&local_path, request.connection.as_ref(), conflict)?;
-        write_local_config(&local_path, &local.content)?;
+        let local = plan_local_config(&local_path, requested.as_ref(), conflict)?;
+        write_local_config(&local_path, &local)?;
         gitignore.ensure()?;
         return Ok(ConfigInitResult::Local(LocalLayerInitResult {
             ok: true,
@@ -137,7 +143,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
     // Отказ местного слоя случается до записи проектного файла: иначе `--force` успел
     // бы переписать проект, а команда ответила бы отказом.
-    let local = plan_local_config(&local_path, request.connection.as_ref(), conflict)?;
+    let local = plan_local_config(&local_path, requested.as_ref(), conflict)?;
 
     std::fs::write(&output_path, yaml).map_err(|error| {
         AppError::Runtime(format!(
@@ -145,7 +151,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
             output_path.display()
         ))
     })?;
-    write_local_config(&local_path, &local.content)?;
+    write_local_config(&local_path, &local)?;
     gitignore.ensure()?;
 
     Ok(ConfigInitResult::Project(ProjectInitResult {
@@ -199,7 +205,8 @@ enum OriginConflict {
 
 /// Местный слой, каким его запишет `init`, и что стало с `origin`.
 struct LocalLayerPlan {
-    content: String,
+    /// Новое содержимое слоя; `None` — на диске уже лежит ровно это.
+    content: Option<String>,
     origin: OriginDeclaration,
 }
 
@@ -215,7 +222,7 @@ fn plan_local_config(
     if !path.exists() {
         let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
         return Ok(LocalLayerPlan {
-            content: render_local_config_with_origin(connection),
+            content: Some(render_local_config_with_origin(connection)),
             origin: OriginDeclaration {
                 change: OriginChange::Declared,
                 connection: Some(shown_address(connection)),
@@ -229,10 +236,17 @@ fn plan_local_config(
             path.display()
         ))
     })?;
-    local_config_with_origin(&existing, origin, conflict, path)
+    let mut plan = local_config_with_origin(&existing, origin, conflict, path)?;
+    if plan.content.as_deref() == Some(existing.as_str()) {
+        plan.content = None;
+    }
+    Ok(plan)
 }
 
-fn write_local_config(path: &Path, content: &str) -> Result<(), AppError> {
+fn write_local_config(path: &Path, plan: &LocalLayerPlan) -> Result<(), AppError> {
+    let Some(content) = plan.content.as_deref() else {
+        return Ok(());
+    };
     std::fs::write(path, content).map_err(|error| {
         AppError::Runtime(format!(
             "failed to write local config file '{}': {error}",
@@ -241,12 +255,10 @@ fn write_local_config(path: &Path, content: &str) -> Result<(), AppError> {
     })
 }
 
-/// Адрес так, как его показывают ответ и отказ: пароль внутри строки соединения
-/// замаскирован тем же владельцем, что и в показе команд.
+/// Адрес так, как его показывают ответ и отказ: пароль и имя пользователя внутри строки
+/// соединения замаскированы тем же владельцем, что и в показе команд.
 fn shown_address(connection: &str) -> String {
-    mask_preview_args(std::slice::from_ref(&connection.to_owned()), &[])
-        .pop()
-        .unwrap_or_default()
+    mask_connection_string(connection)
 }
 
 fn with_local_schema_modeline(existing: &str) -> String {
@@ -315,7 +327,7 @@ fn local_config_with_origin(
     })?;
     let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
     let declared = |content: String| LocalLayerPlan {
-        content,
+        content: Some(content),
         origin: OriginDeclaration {
             change: OriginChange::Declared,
             connection: Some(shown_address(connection)),
@@ -323,7 +335,7 @@ fn local_config_with_origin(
         },
     };
     let unchanged = |content: String, connection: Option<&str>| LocalLayerPlan {
-        content,
+        content: Some(content),
         origin: OriginDeclaration {
             change: OriginChange::Unchanged,
             connection: connection.map(shown_address),
@@ -417,7 +429,7 @@ fn redirect_origin(
         path,
     )?;
     Ok(LocalLayerPlan {
-        content,
+        content: Some(content),
         origin: OriginDeclaration {
             change: OriginChange::Redirected,
             connection: Some(shown_address(&requested.connection)),
@@ -1564,7 +1576,7 @@ mod tests {
         assert_eq!(result.origin.change, OriginChange::Redirected);
         assert_eq!(result.origin.connection.as_deref(), Some("File=build/ib"));
         let replaced = result.origin.replaced.as_deref().expect("replaced address");
-        assert!(replaced.starts_with("Srvr=srv;Ref=erp;"), "{replaced}");
+        assert_eq!(replaced, "Srvr=srv;Ref=erp;Pwd=***");
         assert!(!replaced.contains("conn-secret"), "{replaced}");
         let local_config = read(&dir.path().join("v8project.local.yaml"));
         assert!(local_config.starts_with(super::LOCAL_CONFIG_SCHEMA_MODEL_LINE));
