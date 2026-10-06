@@ -2583,7 +2583,8 @@ fn execute_artifacts(
         config,
         presenter,
         CommandName::Artifacts,
-        BaseAccess::Reads,
+        // `make` собирает во временной базе раннера: базу проекта он не открывает (#364).
+        BaseAccess::Untouched,
         clean_before_execution,
         dry_run,
         || match artifacts::execute(&context, config, &request) {
@@ -2638,7 +2639,8 @@ fn execute_make_all(
         config,
         presenter,
         command,
-        BaseAccess::Reads,
+        // `make` собирает во временной базе раннера: базу проекта он не открывает (#364).
+        BaseAccess::Untouched,
         clean_before_execution,
         dry_run,
         || {
