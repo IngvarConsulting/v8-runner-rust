@@ -1,7 +1,10 @@
 ---
 id: INV.USE-CASES.A-DEVELOPMENT-BASE-IS-HELD-BY-ONE-WORKING-COPY
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner
+  - tests/cli_infobase_owner.rs::an_owner_on_another_machine_is_never_replaced
+  - src/use_cases/transport.rs::a_base_of_another_copy_stops_the_dispatch_before_the_scenario
+  - tests/architecture_guardrails.rs::the_owner_of_a_file_base_is_checked_in_one_place
 ---
 
 # Базу для разработки держит одна рабочая копия
@@ -17,6 +20,12 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
 записи отказывает, если делить базу не согласны эта копия или кто-то из владельцев
 (`INV.USE-CASES.A-BASE-IS-SHARED-BY-CONSENT-OF-EVERY-COPY`), и называет копию-владельца,
 как освободить базу и где лежит метка.
+
+Отказ на базе другой рабочей копии отвечает кодом `infobase_held` (`CTR.WIRE.COMMAND-ENVELOPE`):
+повтор его не снимает. Следующий шаг отказа — первый и безопасный выход, своя чистая база
+(`infobase create`); копию базы (`infobase create --from`) и общую базу (`shared: true`) отказ
+называет текстом. Проверка владельца идёт на границе команды, за замком базы, — одна для
+командной строки и MCP.
 
 В словаре сайта команды записи — `push`, `pull`, `apply`, `reset`, `upload`,
 `infobase restore`, `infobase create`, `extensions set`, `test`, `check` для исходников XML,

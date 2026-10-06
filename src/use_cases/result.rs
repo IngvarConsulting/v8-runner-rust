@@ -19,6 +19,8 @@ pub enum UseCaseErrorKind {
     WorkspaceBusy,
     /// Файловую базу держит другая команда: занято, как `WorkspaceBusy`, можно повторить.
     InfobaseBusy,
+    /// Файловую базу держит другая рабочая копия: повтор не поможет.
+    InfobaseHeld,
     InvalidOutput,
     /// Отмена оператором; место остановки говорит, оборвана ли работа исполнителя.
     Cancelled(CancelledAt),
@@ -34,7 +36,7 @@ impl UseCaseErrorKind {
         match self {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment => VALIDATION_EXIT_CODE,
-            Self::WorkspaceBusy | Self::InfobaseBusy => RUNTIME_EXIT_CODE,
+            Self::WorkspaceBusy | Self::InfobaseBusy | Self::InfobaseHeld => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
@@ -86,6 +88,7 @@ impl UseCaseErrorKind {
             Self::Environment => "environment_unavailable",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
+            Self::InfobaseHeld => "infobase_held",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled(_) => CANCELLED_ERROR_CODE,
             Self::TimedOut => "timed_out",
@@ -105,6 +108,7 @@ impl UseCaseErrorKind {
             | Self::Environment
             | Self::WorkspaceBusy
             | Self::InfobaseBusy
+            | Self::InfobaseHeld
             | Self::Validation
             | Self::Runtime
             | Self::Platform => ExecutionStatus::Failed,
@@ -117,6 +121,7 @@ impl UseCaseErrorKind {
             Self::Environment => "environment unavailable",
             Self::WorkspaceBusy => "workspace busy",
             Self::InfobaseBusy => "infobase busy",
+            Self::InfobaseHeld => "infobase held",
             Self::InvalidOutput => "invalid output",
             Self::Cancelled(_) => "cancelled",
             Self::TimedOut => "timed out",
@@ -524,6 +529,7 @@ mod tests {
         assert_eq!(UseCaseErrorKind::Environment.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InfobaseBusy.exit_code(), 3);
+        assert_eq!(UseCaseErrorKind::InfobaseHeld.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InvalidOutput.exit_code(), 4);
         for at in [CancelledAt::Boundary, CancelledAt::Work] {
             assert_eq!(UseCaseErrorKind::Cancelled(at).exit_code(), 4, "{at:?}");

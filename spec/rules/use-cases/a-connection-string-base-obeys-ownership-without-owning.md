@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.A-CONNECTION-STRING-BASE-OBEYS-OWNERSHIP-WITHOUT-OWNING
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::a_connection_string_obeys_the_owner_and_never_owns
+  - src/use_cases/infobase_owner.rs::only_a_run_of_a_write_on_a_declared_base_records_a_copy
 ---
 
 # Строка соединения подчиняется владельцу, но им не становится

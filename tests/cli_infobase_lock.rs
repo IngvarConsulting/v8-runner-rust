@@ -3,6 +3,11 @@
 //! Каждая копия — свой проект со своим `workPath`, а база у них одна. Первая копия держит
 //! базу командой, которую заглушка платформы не отпускает, пока тест не создаст файл
 //! `release`; вторая в это время приходит к той же базе.
+//!
+//! Командная строка называет базу строкой соединения в `--infobase`: такая команда
+//! подчиняется владельцу базы, но им не становится, поэтому обе копии работают с одной базой
+//! и после того, как первая команда кончилась. Владельца базы проверяет
+//! `tests/cli_infobase_owner.rs`; здесь — только замок.
 #![cfg(unix)]
 
 mod support;
@@ -43,6 +48,8 @@ struct Copy {
     config: PathBuf,
     work: PathBuf,
     platform: PathBuf,
+    /// Строка соединения общей базы для `--infobase`.
+    connection: String,
 }
 
 impl Stand {
@@ -79,6 +86,7 @@ impl Stand {
             config,
             work,
             platform,
+            connection: format!("File={}", self.base.display()),
         }
     }
 
@@ -119,6 +127,8 @@ impl Copy {
         v8_runner_command()
             .arg("--config")
             .arg(&self.config)
+            .arg("--infobase")
+            .arg(&self.connection)
             .arg("--json-message")
             .args(args)
             .output()
@@ -135,6 +145,8 @@ impl Copy {
             v8_runner_command()
                 .arg("--config")
                 .arg(&self.config)
+                .arg("--infobase")
+                .arg(&self.connection)
                 .arg("--json-message")
                 .arg("push")
                 .stdout(Stdio::null())

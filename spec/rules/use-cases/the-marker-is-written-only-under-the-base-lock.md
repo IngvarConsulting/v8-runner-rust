@@ -1,7 +1,9 @@
 ---
 id: INV.USE-CASES.THE-MARKER-IS-WRITTEN-ONLY-UNDER-THE-BASE-LOCK
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::processes_racing_for_a_base_without_a_marker_leave_one_owner
+  - src/use_cases/infobase_owner.rs::a_base_whose_lock_is_busy_keeps_its_marker
+  - tests/architecture_guardrails.rs::the_owner_of_a_file_base_is_checked_in_one_place
 ---
 
 # Метку пишут только под замком базы

@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.AN-UNREADABLE-MARKER-STOPS-A-WRITE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::an_unreadable_marker_stops_a_write_and_a_read_goes_on
+  - src/use_cases/infobase_owner.rs::a_marker_that_cannot_be_written_stops_a_write
 ---
 
 # Нечитаемая метка останавливает команду записи
