@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.MAKE-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/make.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -25,9 +25,12 @@ check:
 `execution.errors[]` с тем же текстом. Отказ, пришедший, когда прерывание уже запрошено,
 остаётся отказом: `status: failed` и ошибка `designer_export_failed`, без записи о прерывании.
 
-**Что изменила версия 5.** Отмена пишет в `execution.errors[]` ошибку с кодом `cancelled` —
-тем же, что отмена в конверте. Прежде `make` ограничивался диагностикой и записью о
-прерывании.
+**Что изменила версия 6.** Квитанция `provider` получила необязательное поле
+`endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
+(`managed`, `attached` или `gate`) и `address` — `host:port` подключения без учётных
+данных. Поле есть, только когда команда открыла сессию агента; у процесса платформы,
+у превью и у отказа до подключения его нет ([правило](a-session-receipt-names-its-endpoint.md)). Прежде квитанция
+точку входа не называла.
 
 ## Пример
 
