@@ -103,6 +103,17 @@
       "additionalProperties": false,
       "description": "Квитанция о выборе исполнителя — одна форма у всех операций.\n\nОбъясняет принятое решение и не предлагает другого: неиспользованные альтернативы\nне перечисляются, потому что выбор вызывающему не принадлежит. `selected: null`\nзначит, что выбор состоялся и никто не подошёл: каждый пропущенный назван с причиной.",
       "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Точка входа сессии агента, через которую шло исполнение. Нет — сессия не\nоткрывалась: исполнял процесс платформы, это превью или отказ до подключения."
+        },
         "origin": {
           "$ref": "#/$defs/ProviderOrigin"
         },
@@ -127,6 +138,43 @@
         "origin"
       ],
       "type": "object"
+    },
+    "SessionEndpoint": {
+      "additionalProperties": false,
+      "description": "Точка входа открытой сессии: режим и `host:port`, к которому раннер подключился.\n\nАдрес строится из разобранных хоста и порта, а не из записи конфига, поэтому\nучётных данных в нём нет: ни `user:pass@`, ни пароля строки соединения.",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/SessionMode"
+        }
+      },
+      "required": [
+        "mode",
+        "address"
+      ],
+      "type": "object"
+    },
+    "SessionMode": {
+      "description": "Как раннер добрался до точки входа агента.",
+      "oneOf": [
+        {
+          "const": "managed",
+          "description": "Агента Конфигуратора поднял сам раннер.",
+          "type": "string"
+        },
+        {
+          "const": "attached",
+          "description": "Агент Конфигуратора поднят не раннером, раннер к нему подключился.",
+          "type": "string"
+        },
+        {
+          "const": "gate",
+          "description": "SSH-шлюз автономного сервера.",
+          "type": "string"
+        }
+      ]
     },
     "SkippedProvider": {
       "additionalProperties": false,

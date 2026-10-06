@@ -142,6 +142,7 @@ pub(crate) fn nobody_ready(
 /// Форма ответа, которая несёт квитанцию о выборе исполнителя.
 pub trait CarriesReceipt {
     fn attach_receipt(&mut self, receipt: ProviderReceipt);
+    fn receipt_mut(&mut self) -> Option<&mut ProviderReceipt>;
 }
 
 macro_rules! carries_receipt {
@@ -149,6 +150,10 @@ macro_rules! carries_receipt {
         $(impl CarriesReceipt for $ty {
             fn attach_receipt(&mut self, receipt: ProviderReceipt) {
                 self.provider = Some(receipt);
+            }
+
+            fn receipt_mut(&mut self) -> Option<&mut ProviderReceipt> {
+                self.provider.as_mut()
             }
         })*
     };
@@ -164,6 +169,9 @@ carries_receipt!(
     crate::domain::load::LoadResult,
     crate::domain::artifacts::ArtifactsResult,
     crate::domain::publish::PublishResult,
+    crate::domain::infobase_export::ExportConfigurationPackageResult,
+    crate::domain::infobase_export::ExportInfobaseSnapshotResult,
+    crate::domain::infobase_export::RestoreInfobaseSnapshotResult,
 );
 
 /// Кладёт квитанцию и в успешный ответ, и в типизированный отказ с полезной нагрузкой:
@@ -174,6 +182,25 @@ pub fn attach<T: CarriesReceipt>(
 ) -> crate::use_cases::result::UseCaseResult<T> {
     if let Some(payload) = crate::use_cases::result::payload_mut(&mut outcome) {
         payload.attach_receipt(receipt.clone());
+    }
+    outcome
+}
+
+/// Называет в квитанции точку входа сессии агента, если команда её открывала, — и в
+/// успешном ответе, и в отказе с полезной нагрузкой. Адрес берётся только из отметки,
+/// которую оставило подключение (`agent_session::connect`): превью, процесс платформы
+/// и отказ до подключения сессии не открывали, и поля у них нет.
+pub(crate) fn stamp_session<T: CarriesReceipt>(
+    mut outcome: crate::use_cases::result::UseCaseResult<T>,
+    context: &crate::use_cases::context::ExecutionContext,
+) -> crate::use_cases::result::UseCaseResult<T> {
+    let Some(endpoint) = context.opened_session() else {
+        return outcome;
+    };
+    if let Some(receipt) =
+        crate::use_cases::result::payload_mut(&mut outcome).and_then(CarriesReceipt::receipt_mut)
+    {
+        receipt.endpoint = Some(endpoint);
     }
     outcome
 }

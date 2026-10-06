@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.AN-EXISTING-UPSTREAM-IS-NOT-OVERWRITTEN
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/329
+check:
+  - tests/cli_config_init.rs::init_refuses_to_redirect_origin_over_an_existing_upstream
+  - src/use_cases/config_init.rs::an_existing_upstream_refuses_the_redirect_and_names_origin_and_upstream
 ---
 
 # Существующий `upstream` не перезаписывается

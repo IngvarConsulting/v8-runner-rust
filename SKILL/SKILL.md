@@ -58,9 +58,10 @@ Useful global flags:
    exit code 2 before anything is written, unless `--force`.
    Add `--dry-run` first: it names the four paths it would write and the dump utility it found,
    and creates nothing — not even the project directory.
-5. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
-6. Run `v8-runner infobase create` only when the file infobase or EDT workspace needs to be created.
-7. Run the narrowest validation command that answers the user's goal.
+5. If it exists but the worktree has its own infobase to point at (a new worktree, a copied `v8project.local.yaml`), run `v8-runner init --infobase "File=build/ib"`: it leaves `v8project.yaml` untouched, writes only the local layer, and keeps the previous `origin` with its credentials as `upstream` (refused if `upstream` exists).
+6. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
+7. Run `v8-runner infobase create` only when the file infobase or EDT workspace needs to be created.
+8. Run the narrowest validation command that answers the user's goal.
 
 Minimal infobase-only shape (two files):
 
@@ -99,7 +100,7 @@ v8-runner infobase create
 - Only one source-set changed: name it positionally (`push <SET>`, `pull <SET>`, `make <SET>`, `download <SET>`, `convert <SET>`) instead of rebuilding or materializing everything. A positional value is always a source set, never a base: name the base with `--infobase`.
 - Package vs whole base: `.cf`/`.cfe` is `download`/`upload <FILE>`, `.dt` is `infobase dump`/`infobase restore`; `infobase dump --output *.cf|*.cfe` is refused before the platform starts and names `download`; `upload *.dt` names `infobase restore`. `download --state db` takes the database configuration.
 - After successful full `pull` in `DESIGNER` format, the next unchanged `push` skips loading for the same named base/source set. If the response says sources were published without updating hash memory, repeat full `pull`; do not repair a failed pull by pushing old sources.
-- Hash memory is separate per named base; ad hoc connection strings do not reuse it. Foreign memory is named in the refusal: full `pull` if the base is right, `push --full` if the sources are right. Memory from older runner versions is not migrated: first `pull --mode full` before an ordinary `push`, or the push loads the whole tree.
+- Hash memory is separate per named base; ad hoc connection strings do not reuse it. Foreign memory is named in the refusal: full `pull` if the base is right, `push --full` if the sources are right. Memory from older runner versions is not migrated: first `pull --force` before an ordinary `push`, or the push loads the whole tree.
 - Full `pull` refuses a target containing `workPath`, including symlink aliases. EDT export cache stays shared; per-base agent generation/version-file memory remains pending in #214.
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner push --full`.
 - Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`. `--dry-run` stops after the utility is located and before the platform runs: no platform log directory is created, and the answer names `status: planned`, `provider_dispatched: false` and `exit_code: -1`.
@@ -150,8 +151,9 @@ v8-runner infobase create
   `invalid_argument` (exit 2, message lists the implemented executors); fix the key, do not
   retry. `download`, `infobase configuration export`, `infobase dump` and `infobase restore`
   each check only the key of their own operation (`download`, `infobase.dump` or
-  `infobase.restore`), so a key of another operation does not block them; `test --no-build` and `launch` check no key; every
+  `infobase.restore`), so a key of another operation does not block them; `test --no-push` and `launch` check no key; every
   other command that loads the project checks all keys.
+- `provider.endpoint` (`mode`: `managed`/`attached`/`gate`, `address`: `host:port`, never credentials) appears only when the command opened an agent session; previews and platform-process runs omit it.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
@@ -164,11 +166,26 @@ v8-runner infobase create
   not match the observed target is refused before the platform starts; neither provider asks, and
   there is no staging step that could undo a load. Append `--dry-run` first to see the selected
   provider and the planned input without touching the infobase.
-- `pull` and `convert` replace the target source directory as a whole, so they first ask git what
+- `pull` modes come from dictionary keys: no key — incremental dump over the directory;
+  `--object <TYPE:NAME>` — partial; `--force` — full dump that replaces the directory. The hidden
+  `--mode incremental|partial` means no key; `--mode full` is refused and names `pull [SET] --force` for the same set.
+  `--force` next to `--object` or `--mode` is refused before the platform; pick one form.
+- In an EDT-format project every `pull` (no key, `--object`) replaces the whole project directory.
+  Without `--force`, uncommitted work there makes it refuse: commit or stash it and repeat, or
+  run the exact `v8-runner --config … pull <SET> --force` the refusal names (full dump, uncommitted
+  work is lost; never add `--force` to a call with `--object` or `--mode` — that is refused).
+  There is no partial EDT pull with consent.
+- `convert`, any EDT-format `pull` without `--force` and MCP `dump_config` with `FULL` (any mode
+  in an EDT project) replace the target source directory as a whole, so they first ask git what
   inside it exists nowhere else — untracked files, ignored files, a worktree edit on top of the
   index, unresolved merge markers. Finding any, the command refuses before touching anything with
-  exit 2 and names them. Commit or stash them, or pass `--force` to replace the
-  directory anyway; the flag destroys them and keeps no copy. Staged content is not a loss: it is
+  exit 2 and names them. Commit or stash them and repeat, or run the command the refusal names
+  as written: for `pull`/MCP `dump_config` an exact `v8-runner --config <abs> [--infobase …]
+  [--workdir …] pull <SET> --force` (MCP over HTTP: on the server's machine; a connection-string
+  `--infobase` is not repeated — add the same `--infobase` value yourself); for `convert` the
+  same command with `--force` added — never drop the set or `--output`. The flag destroys them and keeps no
+  copy, so check `git status` first. `clone` has no such consent: commit or stash.
+  Staged content is not a loss: it is
   recoverable from the index. Where git cannot answer — no git, outside a worktree, a git error, a
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.

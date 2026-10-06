@@ -36,7 +36,13 @@ pub fn execute(
     config: &AppConfig,
     request: &ExtensionInventoryRequest,
 ) -> UseCaseResult<ExtensionInventoryResult> {
-    stamp_dispatch(run_read(context, config, request), context.work())
+    stamp_dispatch(
+        crate::use_cases::provider_selection::stamp_session(
+            run_read(context, config, request),
+            context,
+        ),
+        context.work(),
+    )
 }
 
 fn run_read(
@@ -504,7 +510,10 @@ pub fn change(
     dry_run: bool,
 ) -> UseCaseResult<ExtensionsResult> {
     stamp_dispatch(
-        run_change(context, config, request, dry_run),
+        crate::use_cases::provider_selection::stamp_session(
+            run_change(context, config, request, dry_run),
+            context,
+        ),
         context.work(),
     )
 }

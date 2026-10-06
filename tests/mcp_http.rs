@@ -402,6 +402,11 @@ struct HttpServerProcess {
 
 impl HttpServerProcess {
     async fn spawn(config_path: &Path, url: &str) -> Self {
+        Self::spawn_with(config_path, url, &[]).await
+    }
+
+    /// Сервер с дополнительными глобальными ключами (`--infobase`, `--workdir`).
+    async fn spawn_with(config_path: &Path, url: &str, global_keys: &[&str]) -> Self {
         let authority = url
             .strip_prefix("http://")
             .expect("http url")
@@ -418,6 +423,7 @@ impl HttpServerProcess {
         let mut child = tokio::process::Command::new(v8_runner_binary())
             .arg("--config")
             .arg(config_path)
+            .args(global_keys)
             .arg("mcp")
             .arg("serve")
             .arg("http")
@@ -761,6 +767,71 @@ async fn mcp_http_dump_config_full_ibcmd_server_contract_passes_dbms_and_infobas
     assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
     assert!(calls.contains("--user Admin --password secret"));
     assert!(calls.contains("--database-user postgres --database-password pg-secret"));
+
+    server.shutdown().await;
+}
+
+/// Сервер по HTTP запущен с `--infobase`: совет отказа сторожа называет команду строки с
+/// конфигом абсолютным путём и той же базой и оговаривает, что выполнять её там, где
+/// работает сервер, — клиент HTTP может сидеть на другой машине.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_http_refusal_advises_the_command_line_of_the_server_target() {
+    let (dir, config_path, url, _calls_log) = setup_http_ibcmd_dump_project(None, 4, 900);
+    fs::write(
+        config_path.with_file_name("v8project.local.yaml"),
+        "infobases:\n  staging:\n    connection: 'File=/tmp/staging-ib'\n",
+    )
+    .expect("local config");
+    let project = dir.path().join("project");
+    for args in [
+        &["init", "-q", "-b", "main", "."][..],
+        &["config", "user.email", "test@example.com"],
+        &["config", "user.name", "Test"],
+        &["add", "-A"],
+        &["commit", "-qm", "committed sources"],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&project)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+    fs::write(project.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
+
+    let mut server =
+        HttpServerProcess::spawn_with(&config_path, &url, &["--infobase", "staging"]).await;
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_CLIENT_TIMEOUT)
+        .build()
+        .expect("http client");
+    let (session_id, _) = initialize_session(&client, &url).await;
+    send_initialized(&client, &url, &session_id).await;
+
+    let response = call_tool(
+        &client,
+        &url,
+        &session_id,
+        "dump_config",
+        json!({ "mode": "FULL" }),
+        31,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let payload = extract_sse_json(&response.text().await.expect("dump body"));
+    let structured = &payload["result"]["structuredContent"];
+    assert_envelope_business_failure(structured, "pull");
+    let message = structured["error"]["message"].as_str().expect("message");
+    let config = fs::canonicalize(&config_path).expect("canonical config");
+    let expected = format!(
+        "`v8-runner --config {} --infobase staging pull main --force` from the command line on the machine where the MCP server runs",
+        config.display()
+    );
+    assert!(message.contains(&expected), "{expected}\n{message}");
+    assert!(project.join("main").join("hand-written.xml").is_file());
 
     server.shutdown().await;
 }

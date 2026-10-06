@@ -377,6 +377,32 @@ pub struct ProviderReceipt {
     pub origin: ProviderOrigin,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<SkippedProvider>,
+    /// Точка входа сессии агента, через которую шло исполнение. Нет — сессия не
+    /// открывалась: исполнял процесс платформы, это превью или отказ до подключения.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<SessionEndpoint>,
+}
+
+/// Как раннер добрался до точки входа агента.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// Агента Конфигуратора поднял сам раннер.
+    Managed,
+    /// Агент Конфигуратора поднят не раннером, раннер к нему подключился.
+    Attached,
+    /// SSH-шлюз автономного сервера.
+    Gate,
+}
+
+/// Точка входа открытой сессии: режим и `host:port`, к которому раннер подключился.
+///
+/// Адрес строится из разобранных хоста и порта, а не из записи конфига, поэтому
+/// учётных данных в нём нет: ни `user:pass@`, ни пароля строки соединения.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionEndpoint {
+    pub mode: SessionMode,
+    pub address: String,
 }
 
 impl ProviderReceipt {
@@ -385,6 +411,7 @@ impl ProviderReceipt {
             selected: Some(selected),
             origin,
             skipped: Vec::new(),
+            endpoint: None,
         }
     }
 
@@ -394,6 +421,7 @@ impl ProviderReceipt {
             selected: None,
             origin,
             skipped,
+            endpoint: None,
         }
     }
 

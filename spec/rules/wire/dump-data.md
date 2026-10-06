@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DUMP-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/pull.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -16,6 +16,13 @@ check:
 нормализует и вызывающий обязан видеть результат нормализации.
 
 Инструмент MCP `dump_config` отвечает этой же формой.
+
+**Что изменила версия 4.** Квитанция `provider` получила необязательное поле
+`endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
+(`managed`, `attached` или `gate`) и `address` — `host:port` подключения без учётных
+данных. Поле есть, только когда команда открыла сессию агента; у процесса платформы,
+у превью и у отказа до подключения его нет ([правило](a-session-receipt-names-its-endpoint.md)). Прежде квитанция
+точку входа не называла.
 
 ## Пример
 

@@ -23,7 +23,7 @@ use crate::support::error::AppError;
 use crate::use_cases::config_init::{
     ConfigFormatRequest, ConfigInitRequest, DeclaredOrigin, OriginKey,
 };
-use crate::use_cases::context::CommandName;
+use crate::use_cases::context::{AdvisedInfobase, CommandLineTarget, CommandName};
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
 /// Новые имена команд словаря, у которых внутри остался прежний путь разбора: `init` —
@@ -262,7 +262,7 @@ pub fn run() -> i32 {
         | Command::Publish(_) => execute::execute_command(
             &config,
             &cli.command,
-            Some(primary_config_path),
+            &command_line_target(&cli, Some(primary_config_path), &config),
             &presenter,
             cli.clean_before_execution,
             cli.dry_run,
@@ -590,8 +590,8 @@ fn run_config_init(args: &ConfigInitArgs, cli: &Cli, presenter: &Presenter) -> i
                 presenter.print_envelope(&Envelope {
                     ok: true,
                     command: CONFIG_INIT_COMMAND.to_owned(),
-                    duration_ms: result.duration_ms,
-                    warnings: result.warnings.clone(),
+                    duration_ms: result.duration_ms(),
+                    warnings: result.warnings().to_vec(),
                     steps: Vec::new(),
                     error: None,
                     data: result,
@@ -614,32 +614,65 @@ fn render_config_init_text(
     result: &crate::domain::config_init::ConfigInitResult,
     presenter: &Presenter,
 ) {
-    let mut details = vec![
-        format!("path: {}", result.path),
-        format!("local path: {}", result.local_path),
-        format!("gitignore: {}", result.gitignore_path),
-        format!("format: {}", result.format),
-    ];
-    if result.overwritten {
-        details.push("overwritten: yes".to_owned());
-    }
-    if let Some(platform_version) = result.platform_version.as_deref() {
-        details.push(format!("platform version: {platform_version}"));
-    }
-    for source_set in &result.source_sets {
-        details.push(format!(
-            "source-set {}: {} ({})",
-            source_set.name, source_set.path, source_set.source_type
-        ));
-    }
-    for warning in &result.warnings {
-        details.push(format!("[warning] {warning}"));
-    }
+    use crate::domain::config_init::{ConfigInitResult, OriginDeclaration};
 
-    let completion = if result.warnings.is_empty() {
-        "Config written successfully"
-    } else {
-        "Config written with warnings"
+    let origin_details = |origin: &OriginDeclaration| {
+        let mut lines = vec![format!(
+            "origin: {}{}",
+            origin.change.as_str(),
+            origin
+                .connection
+                .as_deref()
+                .map(|connection| format!(" ({connection})"))
+                .unwrap_or_default()
+        )];
+        if let Some(replaced) = origin.replaced.as_deref() {
+            lines.push(format!("upstream: {replaced} (replaced in origin)"));
+        }
+        lines
+    };
+    let (details, completion) = match result {
+        ConfigInitResult::Project(result) => {
+            let mut details = vec![
+                format!("path: {}", result.path),
+                format!("local path: {}", result.local_path),
+                format!("gitignore: {}", result.gitignore_path),
+                format!("format: {}", result.format),
+            ];
+            if result.overwritten {
+                details.push("overwritten: yes".to_owned());
+            }
+            if let Some(platform_version) = result.platform_version.as_deref() {
+                details.push(format!("platform version: {platform_version}"));
+            }
+            for source_set in &result.source_sets {
+                details.push(format!(
+                    "source-set {}: {} ({})",
+                    source_set.name, source_set.path, source_set.source_type
+                ));
+            }
+            details.extend(origin_details(&result.origin));
+            for warning in &result.warnings {
+                details.push(format!("[warning] {warning}"));
+            }
+            let completion = if result.warnings.is_empty() {
+                "Config written successfully"
+            } else {
+                "Config written with warnings"
+            };
+            (details, completion)
+        }
+        ConfigInitResult::Local(result) => {
+            let mut details = vec![
+                format!("local path: {}", result.local_path),
+                format!("gitignore: {}", result.gitignore_path),
+            ];
+            details.extend(origin_details(&result.origin));
+            (
+                details,
+                "Local layer written; the project file is left as it is",
+            )
+        }
     };
     let timeline = vec![
         TimelineItem::new(TimelineStatus::Succeeded, "config:").with_detail(details.join("\n")),
@@ -718,6 +751,32 @@ fn map_config_format(value: &str) -> ConfigFormatRequest {
     }
 }
 
+/// Глобальные ключи, которыми командная строка попадёт в ту же цель, что этот запуск:
+/// конфиг абсолютным путём, база не по умолчанию и переопределённый рабочий каталог.
+/// Совет отказа, выполненный буквально из другого каталога, бьёт туда же.
+fn command_line_target(
+    cli: &Cli,
+    config_path: Option<std::path::PathBuf>,
+    config: &crate::config::model::AppConfig,
+) -> CommandLineTarget {
+    use crate::config::model::{InfobaseSelector, DEFAULT_INFOBASE_NAME};
+    // Строку соединения совет не повторяет: в ней может лежать секрет, которого
+    // загрузчик не отвергает (`Wsp=`), а совет показывают, пишут в журнал и копируют.
+    let infobase = match InfobaseSelector::from_flag(cli.infobase.as_deref()) {
+        InfobaseSelector::Default => None,
+        InfobaseSelector::Name(name) if name == DEFAULT_INFOBASE_NAME => None,
+        InfobaseSelector::Name(name) => Some(AdvisedInfobase::Name(name)),
+        InfobaseSelector::Connection(_connection) => Some(AdvisedInfobase::SameConnection),
+    };
+    CommandLineTarget {
+        config: config_path,
+        infobase,
+        // Загрузчик уже разрешил ключ от каталога конфига: абсолютный путь не зависит от
+        // того, откуда совет выполнят.
+        workdir: cli.workdir.as_ref().map(|_| config.work_path.clone()),
+    }
+}
+
 fn run_mcp_command(cli: &Cli, args: &crate::cli::args::McpArgs) -> i32 {
     match &args.command {
         McpCommand::Serve(serve) => match serve.transport {
@@ -730,12 +789,12 @@ fn run_mcp_command(cli: &Cli, args: &crate::cli::args::McpArgs) -> i32 {
 fn run_mcp_stdio(cli: &Cli) -> i32 {
     install_mcp_panic_hook();
 
-    let config = match prepare_mcp_runtime(cli, "stdio") {
-        Ok(config) => config,
+    let (config, command_line) = match prepare_mcp_runtime(cli, "stdio") {
+        Ok(prepared) => prepared,
         Err(exit_code) => return exit_code,
     };
 
-    match crate::mcp::server::serve_stdio(config) {
+    match crate::mcp::server::serve_stdio(config, command_line) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("{error}");
@@ -747,12 +806,12 @@ fn run_mcp_stdio(cli: &Cli) -> i32 {
 fn run_mcp_http(cli: &Cli) -> i32 {
     install_mcp_panic_hook();
 
-    let config = match prepare_mcp_runtime(cli, "http") {
-        Ok(config) => config,
+    let (config, command_line) = match prepare_mcp_runtime(cli, "http") {
+        Ok(prepared) => prepared,
         Err(exit_code) => return exit_code,
     };
 
-    match crate::mcp::server::serve_http(config) {
+    match crate::mcp::server::serve_http(config, command_line) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("{error}");
@@ -764,7 +823,7 @@ fn run_mcp_http(cli: &Cli) -> i32 {
 fn prepare_mcp_runtime(
     cli: &Cli,
     transport: &'static str,
-) -> Result<crate::config::model::AppConfig, i32> {
+) -> Result<(crate::config::model::AppConfig, CommandLineTarget), i32> {
     let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
     let loaded = match load_config(cli.config.as_deref(), cli.workdir.as_deref(), &selector) {
         Ok(loaded) => loaded,
@@ -806,7 +865,12 @@ fn prepare_mcp_runtime(
         "starting mcp server"
     );
 
-    Ok(config)
+    // Конфиг уже прочитан, поэтому путь к нему разрешится; не разрешился — совет не
+    // выдаёт готовую команду без `--config`, а велит выполнить её из каталога проекта.
+    // Сервер от этого не падает.
+    let config_path = resolve_primary_config_path(cli.config.as_deref()).ok();
+    let command_line = command_line_target(cli, config_path, &config);
+    Ok((config, command_line))
 }
 
 fn install_mcp_panic_hook() {

@@ -8,3 +8,5 @@ pub mod global_flags;
 pub mod output;
 /// CLI signal routing helpers.
 pub mod signal;
+/// Previous command-line names accepted for one release cycle; checked against the parser.
+pub mod synonyms;

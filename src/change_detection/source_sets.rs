@@ -292,7 +292,9 @@ mod tests {
             matches!(error, ChangeDetectionError::ForeignMemory { .. }),
             "{error}"
         );
-        assert!(error.to_string().contains("full pull"));
+        // Выходы с глобальными ключами вызова дописывает сценарий: здесь их не из чего собрать.
+        assert!(error.to_string().contains("belongs to"));
+        assert!(!error.to_string().contains("--force"));
         assert!(error.to_string().contains("/tmp/ib"));
         rescan_and_commit_full(&foreign, &config.work_path).expect("explicit rebuild");
         assert!(matches!(
