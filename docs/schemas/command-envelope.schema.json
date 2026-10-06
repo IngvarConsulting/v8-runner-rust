@@ -168,12 +168,12 @@
         },
         {
           "const": "non_fast_forward",
-          "description": "Пара к роду `non_fast_forward`; производителя пока нет.",
+          "description": "Пара к роду `non_fast_forward`: база ушла вперёд записанного поколения.",
           "type": "string"
         },
         {
           "const": "no_memory",
-          "description": "Пара к роду `no_memory`; производителя пока нет.",
+          "description": "Пара к роду `no_memory`: памяти о базе нет.",
           "type": "string"
         }
       ]
@@ -196,12 +196,12 @@
         },
         {
           "const": "non_fast_forward",
-          "description": "Отправка в базу, ушедшую вперёд. Производителя пока нет: его приносит сравнение\nпоколений.",
+          "description": "Отправка в базу, ушедшую вперёд записанного поколения.",
           "type": "string"
         },
         {
           "const": "no_memory",
-          "description": "Памяти о прошлом разе нет. Производителя пока нет: его приносит память по базе.",
+          "description": "Отправка в базу, о которой у рабочей копии нет памяти.",
           "type": "string"
         }
       ]

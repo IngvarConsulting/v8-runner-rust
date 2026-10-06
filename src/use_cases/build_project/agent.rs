@@ -90,7 +90,7 @@ impl SourceSetLoader for AgentLoader {
     }
 
     /// Поколение спрашивается в той же сессии, что и загрузка: она открывается здесь, если
-    /// её ещё нет. После отмены сессию не открывают и поколение не спрашивают.
+    /// её ещё нет. После отмены сессия команд запроса не отдаёт и отвечает отменой.
     fn read_generation(
         &mut self,
         context: &ExecutionContext,
@@ -98,9 +98,6 @@ impl SourceSetLoader for AgentLoader {
         source_set: &SourceSetConfig,
         _step_index: usize,
     ) -> Result<Option<String>, AppError> {
-        if context.interruption().is_some() {
-            return Ok(None);
-        }
         let (handle, wait) = self.handle(context, config)?;
         generation_id(handle.session(), extension_name(source_set), &wait).map(Some)
     }

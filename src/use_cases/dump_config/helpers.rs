@@ -438,7 +438,12 @@ pub(super) fn read_dump_generation(
     runner: &dyn ProcessRunner,
     resolved: &ResolvedDumpTarget,
 ) -> Option<String> {
-    if context.interruption().is_some() {
+    if crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the configuration generation",
+    )
+    .is_some()
+    {
         return None;
     }
     let extension = resolved.extension.as_deref();

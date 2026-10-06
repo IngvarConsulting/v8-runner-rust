@@ -95,6 +95,23 @@ impl Copy {
             format!("infobases:\n  origin:\n    connection: '{connection}'\n"),
         )
         .expect("local layer");
+        if let Some(base) = connection.strip_prefix("File=") {
+            self.remember(&self.root.join(base));
+        }
+    }
+
+    /// Память копии о базе, как после её создания раннером: тесты владельца начинают не с
+    /// первого знакомства.
+    fn remember(&self, base: &Path) {
+        support::memory::remember_base(
+            &self.root.join("work"),
+            "origin",
+            support::memory::Base::File(base),
+            &[support::memory::Set::configuration(
+                "main",
+                &self.root.join("sources"),
+            )],
+        );
     }
 
     /// Объявляет `origin` местного слоя общей базой стенда: `shared` — согласие этой копии
@@ -108,6 +125,7 @@ impl Copy {
             ),
         )
         .expect("local layer");
+        self.remember(&stand.base);
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -567,16 +585,16 @@ fn a_connection_string_obeys_the_owner_and_never_owns() {
     let second = stand.copy("second");
     let connection = format!("File={}", stand.base.display());
 
-    succeeded(&second.run(&["--infobase", &connection, "push"]));
+    succeeded(&second.run(&["--infobase", &connection, "push", "--force"]));
     assert_eq!(stand.marker_text(), None, "an ad hoc base is not recorded");
 
     succeeded(&first.run(&["push"]));
-    let refused = second.run(&["--infobase", &connection, "push"]);
+    let refused = second.run(&["--infobase", &connection, "push", "--force"]);
     assert_infobase_held(&refused, "push", &first, &stand);
 
     let marker = stand.marker_text();
     fs::remove_dir_all(&first.root).expect("remove the first copy");
-    succeeded(&second.run(&["--infobase", &connection, "push"]));
+    succeeded(&second.run(&["--infobase", &connection, "push", "--force"]));
     assert_eq!(
         stand.marker_text(),
         marker,
@@ -1004,7 +1022,7 @@ fn a_connection_string_on_a_shared_base_is_refused() {
     let marker = stand.marker_text();
 
     let connection = format!("File={}", stand.base.display());
-    let refused = second.run(&["--infobase", &connection, "push"]);
+    let refused = second.run(&["--infobase", &connection, "push", "--force"]);
 
     let message = assert_infobase_held(&refused, "push", &first, &stand);
     assert!(

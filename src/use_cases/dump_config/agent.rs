@@ -271,7 +271,11 @@ fn dump_through(
     // сводит и поколения не пишет; после отмены поколение не спрашивается.
     let changed_note = match (set, plan) {
         (Some(set), DumpPlan::Full | DumpPlan::OverDirectory(_))
-            if context.interruption().is_none() =>
+            if !crate::use_cases::interruption::pending_interruption_error(
+                context,
+                "the configuration generation",
+            )
+            .is_some() =>
         {
             let after = generation_id(handle.session(), extension, wait).ok();
             crate::use_cases::exchange_guard::record_after_dump(

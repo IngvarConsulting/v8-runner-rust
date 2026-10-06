@@ -181,6 +181,17 @@ fn write_live_workspace_lock(work_path: &Path, command: &str) {
     .expect("workspace lock sidecar");
 }
 
+/// Память о базе `File=ib` проекта в `dir`, как после её создания раннером: тесты ниже
+/// начинают не с первого знакомства.
+fn remember(dir: &Path, sets: &[support::memory::Set<'_>]) {
+    support::memory::remember_base(
+        &dir.join("work"),
+        "origin",
+        support::memory::Base::File(&dir.join("ib")),
+        sets,
+    );
+}
+
 fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
@@ -218,6 +229,13 @@ fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
 
     write_build_script(&binary_path, None);
     write_config(&config_path, &base_path, &work_path, &binary_path);
+    remember(
+        dir.path(),
+        &[
+            support::memory::Set::configuration("main", &base_path.join("main")),
+            support::memory::Set::extension("ext", &base_path.join("ext")),
+        ],
+    );
 
     (dir, config_path, binary_path, work_path)
 }
@@ -274,6 +292,13 @@ fn setup_ibcmd_project() -> (
         "IBCMD",
         "File=ib",
     );
+    remember(
+        dir.path(),
+        &[
+            support::memory::Set::configuration("main", &base_path.join("main")),
+            support::memory::Set::extension("ext", &base_path.join("ext")),
+        ],
+    );
 
     (
         dir,
@@ -322,6 +347,13 @@ fn setup_edt_ibcmd_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         edt_cli_path.display(),
     );
     fs::write(&config_path, config).expect("config");
+    remember(
+        dir.path(),
+        &[support::memory::Set::configuration(
+            "configuration",
+            &base_path.join("configuration"),
+        )],
+    );
 
     (dir, config_path, ibcmd_calls_log, edt_calls_log)
 }
@@ -382,6 +414,13 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
         edt_cli_path.display(),
     );
     fs::write(&config_path, config).expect("config");
+    remember(
+        dir.path(),
+        &[
+            support::memory::Set::configuration("configuration", &base_path.join("configuration")),
+            support::memory::Set::extension("client_mcp", &base_path.join("exts/client-mcp")),
+        ],
+    );
 
     (dir, config_path, work_path)
 }
@@ -570,7 +609,12 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
     .expect("config");
 
     let seed = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "--force",
+        ])
         .output()
         .expect("seed build");
     assert!(
@@ -1180,7 +1224,7 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full",
+            "--force",
         ])
         .output()
         .expect("run command");
@@ -1510,7 +1554,7 @@ fn build_ibcmd_passes_credentials_to_import_and_apply() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full",
+            "--force",
         ])
         .current_dir(dir.path())
         .output()
@@ -1575,7 +1619,12 @@ fn build_ibcmd_server_connection_fails_at_config_load() {
     );
 
     let output = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "--force",
+        ])
         .output()
         .expect("run command");
 
@@ -1600,7 +1649,7 @@ fn build_ibcmd_server_connection_passes_dbms_and_infobase_credentials() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full",
+            "--force",
         ])
         .output()
         .expect("run command");
@@ -1633,7 +1682,7 @@ fn build_ibcmd_accepts_raw_f_connection() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full",
+            "--force",
         ])
         .output()
         .expect("run command");
@@ -1687,7 +1736,7 @@ fn ibcmd_push_receives_config_relative_paths_resolved_from_the_config_directory(
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    push(&["--full"]);
+    push(&["--force"]);
     fs::write(&module, "procedure Test() // changed endprocedure").expect("change");
     push(&[]);
 

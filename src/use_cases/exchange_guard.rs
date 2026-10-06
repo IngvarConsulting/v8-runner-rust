@@ -39,7 +39,7 @@ const NEW_OWNER_FILE_NAME: &str = "new-owner.json";
 
 /// Признак нового владельца: когда копия взяла базу.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct NewOwnerRecord {
+struct NewOwnerMark {
     since: String,
 }
 
@@ -55,7 +55,7 @@ pub(crate) fn remember_new_owner(config: &AppConfig) -> Result<(), String> {
     let Some(file) = new_owner_file(config) else {
         return Ok(());
     };
-    let text = serde_json::to_vec(&NewOwnerRecord {
+    let text = serde_json::to_vec(&NewOwnerMark {
         since: chrono::Utc::now().to_rfc3339(),
     })
     .map_err(|error| error.to_string())?;
@@ -86,7 +86,7 @@ fn new_owner_since(config: &AppConfig) -> Option<String> {
     let text = std::fs::read(&file).ok()?;
     // Признак, который не разобрать, всё равно признак: выгрузку не предлагаем.
     Some(
-        serde_json::from_slice::<NewOwnerRecord>(&text)
+        serde_json::from_slice::<NewOwnerMark>(&text)
             .map(|record| record.since)
             .unwrap_or_else(|_| "at an unknown time".to_owned()),
     )
@@ -260,7 +260,14 @@ impl<'a> GenerationGate<'a> {
         tool: Provider,
         read: impl FnOnce() -> Result<Option<String>, AppError>,
     ) -> Result<BeforeLoad, AppError> {
-        if self.force {
+        // После отмены поколение не спрашивают: загрузку остановит её безопасная точка.
+        if self.force
+            || crate::use_cases::interruption::pending_interruption_error(
+                self.context,
+                "the configuration generation",
+            )
+            .is_some()
+        {
             return Ok(BeforeLoad::Unchecked);
         }
         let Some(record) = GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| {
@@ -367,7 +374,14 @@ impl<'a> GenerationGate<'a> {
         let file = set.path().join(VERSION_FILE_NAME);
         let proven = full || *before == BeforeLoad::Matched;
         let token = token?;
-        if file.exists() || !proven || self.context.interruption().is_some() {
+        if file.exists()
+            || !proven
+            || crate::use_cases::interruption::pending_interruption_error(
+                self.context,
+                "the configuration generation",
+            )
+            .is_some()
+        {
             return None;
         }
         match dump_and_reread()? {
@@ -434,4 +448,20 @@ pub(crate) fn remember_created_base(config: &AppConfig) -> Option<String> {
             failures.join("; ")
         )
     })
+}
+
+/// Для тестов сценариев: память о базе у каждого набора, о котором её ещё нет, — запись
+/// журнала поколений, которую поддельный исполнитель не подтвердит и не опровергнет. Хеш-память
+/// теста она не трогает.
+#[cfg(test)]
+pub(crate) fn remember_unknown_sets(config: &AppConfig) {
+    for set in SourceSetsService::new(config).designer_contexts() {
+        if let Some(ledger) = GenerationLedger::of(&set, &config.work_path) {
+            if !remembers(&set, &config.work_path) {
+                ledger
+                    .record(Provider::Designer, &"0".repeat(40), GenerationAfter::Build)
+                    .expect("generation record");
+            }
+        }
+    }
 }

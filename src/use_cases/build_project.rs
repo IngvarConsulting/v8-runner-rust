@@ -79,6 +79,9 @@ pub(crate) type BuildExecutionFailure = UseCaseFailure<BuildResult>;
 
 #[cfg(test)]
 pub(crate) fn run_build(config: &AppConfig, args: &BuildArgs) -> UseCaseResult<BuildResult> {
+    // Тесты сценария начинают с базы, которую раннер помнит пустой: отказ первого
+    // знакомства проверяют свои тесты.
+    crate::use_cases::exchange_guard::remember_unknown_sets(config);
     execute(
         &ExecutionContext::cli(crate::use_cases::context::CommandName::Build),
         config,
@@ -133,14 +136,15 @@ fn run_build_branch(
 }
 
 /// Память о базе у каждого набора, который пойдёт в неё, — до анализа изменений и до
-/// платформы; у `--force` проверки нет. Неверно названный набор здесь пропускается: отказ о
+/// платформы; у `--force` и у превью проверки нет. Неверно названный набор здесь пропускается: отказ о
 /// нём — дело плана сборки.
 fn require_memory(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
 ) -> Result<(), crate::use_cases::result::UseCaseError> {
-    if args.force {
+    // Превью ничего не грузит и памяти не требует: отказ называет прогон.
+    if args.force || args.dry_run {
         return Ok(());
     }
     let inventory = SourceSetInventory::new(config);
@@ -1192,6 +1196,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
+        crate::use_cases::exchange_guard::remember_unknown_sets(&config);
         let failure = super::execute(
             &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),
             &config,
@@ -1599,6 +1604,7 @@ mod tests {
         args: &BuildArgs,
     ) -> crate::use_cases::result::UseCaseResult<crate::domain::build::BuildResult> {
         let cancellation = CancellationToken::new();
+        crate::use_cases::exchange_guard::remember_unknown_sets(config);
         held.interrupt_during(cancellation.clone(), || {
             super::execute(
                 &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),

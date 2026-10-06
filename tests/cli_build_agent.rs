@@ -77,6 +77,12 @@ fn harness_holding(hold: Option<Hold>) -> Harness {
         ),
     )
     .expect("write config");
+    support::memory::remember_base(
+        &work_path,
+        "origin",
+        support::memory::Base::File(&root.join("ib")),
+        &[support::memory::Set::configuration("main", &sources)],
+    );
     Harness {
         config_path,
         commands_log,

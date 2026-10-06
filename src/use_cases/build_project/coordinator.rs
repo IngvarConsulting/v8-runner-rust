@@ -377,15 +377,29 @@ fn run_build_with(
                                 &commit,
                             )
                             .map(|warnings| (before, warnings))
+                    })
+                    .and_then(|(before, warnings)| {
+                        // Поколение после загрузки. Отмена, отложенная загрузкой, останавливает
+                        // шаг здесь и называется вместе с тем, что загрузка отложила; запись
+                        // о поколении тогда стирается — прежний токен описывает не ту базу.
+                        match loader.read_generation(context, config, source_set, index) {
+                            Ok(token) => Ok((before, warnings, token)),
+                            Err(error) if error.cancellation().is_some() => {
+                                let _ = gate.after_load(&source_context, loader.tool(), None);
+                                Err(if warnings.is_empty() {
+                                    error
+                                } else {
+                                    error.with_context(warnings.join("; "))
+                                })
+                            }
+                            Err(error) => {
+                                debug!(%error, "the generation after the load is not known");
+                                Ok((before, warnings, None))
+                            }
+                        }
                     });
                 match loaded {
-                    Ok((before, mut warnings)) => {
-                        let token = loader
-                            .read_generation(context, config, source_set, index)
-                            .unwrap_or_else(|error| {
-                                debug!(%error, "the generation after the load is not known");
-                                None
-                            });
+                    Ok((before, mut warnings, token)) => {
                         warnings.extend(gate.after_load(
                             &source_context,
                             loader.tool(),

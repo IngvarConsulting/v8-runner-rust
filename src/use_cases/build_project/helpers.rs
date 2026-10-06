@@ -642,7 +642,12 @@ pub(super) fn read_designer_generation(
     source_set: &SourceSetConfig,
     step_index: usize,
 ) -> Result<Option<String>, AppError> {
-    if context.interruption().is_some() {
+    if crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the configuration generation",
+    )
+    .is_some()
+    {
         return Ok(None);
     }
     build_designer_dsl(
@@ -667,7 +672,12 @@ pub(super) fn read_ibcmd_generation(
     runner: &dyn ProcessRunner,
     source_set: &SourceSetConfig,
 ) -> Result<Option<String>, AppError> {
-    if context.interruption().is_some() {
+    if crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the configuration generation",
+    )
+    .is_some()
+    {
         return Ok(None);
     }
     build_ibcmd_dsl(
