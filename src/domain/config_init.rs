@@ -54,7 +54,6 @@ pub struct LocalLayerInitResult {
     /// Предупреждения идут только в `warnings` конверта: форма варианта `local` их не
     /// несёт.
     #[serde(skip)]
-    #[schemars(skip)]
     pub warnings: Vec<String>,
     pub duration_ms: u64,
 }

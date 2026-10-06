@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
-use crate::config::loader::layered_origin;
+use crate::config::loader::{layered_origin, INFOBASE_SECTION_SYNONYM};
 use crate::config::schema::main_config_schema_url;
 use crate::domain::config_init::{
     ConfigInitResult, ConfigInitSourceSet, LocalLayerInitResult, OriginChange, OriginDeclaration,
@@ -86,8 +86,13 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     // Проект объявлен, если проектный файл уже есть: тогда местный слой перенаправляет
     // `origin`, а не отказывает, и без `--force` проектный файл остаётся как был.
     let project_declared = output_path.is_file();
+    let fate = if request.force {
+        ProjectFileFate::Rewritten
+    } else {
+        ProjectFileFate::Kept
+    };
     let project = project_declared
-        .then(|| project_layer(&output_path, request.force))
+        .then(|| project_layer(&output_path, fate))
         .flatten();
     // Объявленный адрес читается обрезанным, и названный сравнивается с ним так же:
     // `--infobase " File=x"` — тот же адрес, что `File=x`.
@@ -139,13 +144,24 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     // бы переписать проект, а команда ответила бы отказом.
     let local = plan_local_config(&local_path, requested.as_ref(), conflict, project.as_ref())?;
 
-    std::fs::write(&output_path, yaml).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to write config file '{}': {error}",
-            output_path.display()
-        ))
-    })?;
-    write_local_config(&local_path, &local)?;
+    let write_project_file = || {
+        std::fs::write(&output_path, &yaml).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to write config file '{}': {error}",
+                output_path.display()
+            ))
+        })
+    };
+    if project.is_some() {
+        // Секция `infobase:` переезжает из проектного файла в местный слой: слой пишется
+        // первым, чтобы сбой записи не потерял единственную копию адреса и учётных данных.
+        write_local_config(&local_path, &local)?;
+        write_project_file()?;
+    } else {
+        // Без переезда первым пишется проектный файл: его сбой не оставляет следов.
+        write_project_file()?;
+        write_local_config(&local_path, &local)?;
+    }
     gitignore.ensure()?;
 
     Ok(ConfigInitResult::Project(ProjectInitResult {
@@ -173,24 +189,33 @@ const DEFAULT_ORIGIN_CONNECTION: &str = "File=build/ib";
 struct ProjectLayer {
     path: PathBuf,
     document: serde_yaml::Value,
+    fate: ProjectFileFate,
+}
+
+/// Что `init` сделает с проектным файлом объявленного проекта.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectFileFate {
+    /// Файл остаётся как был: его секция `infobase:` продолжает действовать.
+    Kept,
     /// `--force` перепишет файл, и секция `infobase:` пропала бы вместе с адресом базы:
     /// она переезжает в местный слой, и `origin` остаётся тем же.
-    rewritten: bool,
+    Rewritten,
 }
 
 /// Проектный файл читается снисходительно: файл, который не разбирается как карта YAML,
 /// о базах ничего не говорит, и `init` в нём ведёт себя как в любом объявленном проекте.
-fn project_layer(path: &Path, rewritten: bool) -> Option<ProjectLayer> {
+fn project_layer(path: &Path, fate: ProjectFileFate) -> Option<ProjectLayer> {
     let text = std::fs::read_to_string(path).ok()?;
     let document: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
     let mapping = document.as_mapping()?;
-    let speaks_of_infobases = ["infobase", "infobases"]
+    let (synonym, map) = INFOBASE_SECTION_SYNONYM;
+    let speaks_of_infobases = [synonym, map]
         .into_iter()
         .any(|key| mapping.contains_key(key));
     speaks_of_infobases.then(|| ProjectLayer {
         path: path.to_path_buf(),
         document,
-        rewritten,
+        fate,
     })
 }
 
@@ -347,17 +372,16 @@ fn local_config_with_origin(
         let merged = layered_origin(&project.path, &project.document, &document)
             .map_err(|error| AppError::Validation(error.to_string()))?;
         let view = with_origin_section(document.clone(), merged.section, path)?;
-        if project.rewritten {
-            content = render_local_document(&view, path)?;
-            document = view;
-        } else {
-            warnings.extend(merged.project_synonym_warning);
-            inherited_fields = merged
-                .project_fields
-                .into_iter()
-                .filter(|field| field != "connection")
-                .collect();
-            layered = Some(view);
+        match project.fate {
+            ProjectFileFate::Rewritten => {
+                content = render_local_document(&view, path)?;
+                document = view;
+            }
+            ProjectFileFate::Kept => {
+                warnings.extend(merged.project_synonym_warning);
+                inherited_fields = merged.project_fields_besides_address;
+                layered = Some(view);
+            }
         }
     }
     let effective = layered.as_ref().unwrap_or(&document);

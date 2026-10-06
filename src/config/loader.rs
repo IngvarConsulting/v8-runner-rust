@@ -357,7 +357,7 @@ impl ConfigFile<'_> {
 /// Прежнее имя секции `push:`, которое загрузчик сворачивает: `(прежнее, нынешнее)`.
 const PUSH_SECTION_SYNONYM: (&str, &str) = ("build", "push");
 /// Прежнее имя карты баз, которое загрузчик сворачивает: `(прежнее, нынешнее)`.
-const INFOBASE_SECTION_SYNONYM: (&str, &str) = ("infobase", "infobases");
+pub(crate) const INFOBASE_SECTION_SYNONYM: (&str, &str) = ("infobase", "infobases");
 /// Корневые синонимы, которые сворачивает загрузчик, а не `serde`: модель их не видит,
 /// поэтому схема сверяется с этим списком
 /// (`INV.CONFIG.A-KEY-SYNONYM-IS-MARKED-DEPRECATED-IN-THE-SCHEMA`).
@@ -372,9 +372,9 @@ pub(crate) struct LayeredOrigin {
     /// Слитая секция; `None`, если `origin` не объявлен ни в одном слое.
     pub section: Option<serde_yaml::Mapping>,
     pub project_synonym_warning: Option<String>,
-    /// Имена полей, которые задаёт секция `infobase:` проектного файла: загрузчик
-    /// подмешивает их в `origin`, какой бы адрес ни объявил местный слой.
-    pub project_fields: Vec<String>,
+    /// Имена полей, кроме адреса, которые задаёт секция `infobase:` проектного файла:
+    /// загрузчик подмешивает их в `origin`, какой бы адрес ни объявил местный слой.
+    pub project_fields_besides_address: Vec<String>,
 }
 
 /// `origin` двух слоёв тем же путём, что в [`build_config`]: карта `infobases` в проектном
@@ -390,11 +390,12 @@ pub(crate) fn layered_origin(
     let mut merged = project.clone();
     let project_synonym_warning =
         fold_infobase_synonym(&mut merged, ConfigFile::Project(project_path))?;
-    let project_fields = origin_section(&merged)
+    let project_fields_besides_address = origin_section(&merged)
         .map(|section| {
             section
                 .keys()
                 .filter_map(serde_yaml::Value::as_str)
+                .filter(|field| *field != "connection")
                 .map(str::to_owned)
                 .collect()
         })
@@ -405,7 +406,7 @@ pub(crate) fn layered_origin(
     Ok(LayeredOrigin {
         section: origin_section(&merged).cloned(),
         project_synonym_warning,
-        project_fields,
+        project_fields_besides_address,
     })
 }
 
