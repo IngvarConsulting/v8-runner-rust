@@ -7,6 +7,7 @@ use crate::config::model::{
 };
 use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
+    LOCAL_ONLY_INFOBASE_KEYS,
 };
 use crate::config::validate::{
     validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
@@ -224,7 +225,7 @@ fn build_config(
 ) -> Result<LoadedConfig, ConfigLoadError> {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
     reject_legacy_config_keys(&root)?;
-    reject_infobases_in_project_file(&root)?;
+    reject_local_keys_in_project_file(&root)?;
     let mut warnings = Vec::new();
     reject_mixed_provider_keys(&root, ConfigFile::Project(path))?;
     warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(path))?);
@@ -319,10 +320,14 @@ fn root_mapping_mut(
     })
 }
 
-/// Карта баз живёт только в местном слое: к какой базе подключён каталог, знает эта
-/// машина, а не проект. Отказ называет слой до границы схемы, где ключ был бы просто
+/// Ключи местного слоя в проектном файле. Карта баз живёт только в местном слое: к какой
+/// базе подключён каталог, знает эта машина, а не проект. Согласие делить базу (`shared`)
+/// даёт каждая рабочая копия за себя, и прежняя секция `infobase:` его не несёт: согласие
+/// одной копии не коммитят. Отказ называет слой до границы схемы, где ключ был бы просто
 /// неизвестным.
-fn reject_infobases_in_project_file(root: &serde_yaml::Value) -> Result<(), ConfigValidationError> {
+fn reject_local_keys_in_project_file(
+    root: &serde_yaml::Value,
+) -> Result<(), ConfigValidationError> {
     let Some(mapping) = root.as_mapping() else {
         return Err(ConfigValidationError::InvalidYamlRoot(
             "expected a YAML mapping at the document root".to_owned(),
@@ -330,6 +335,18 @@ fn reject_infobases_in_project_file(root: &serde_yaml::Value) -> Result<(), Conf
     };
     if mapping_contains_key(mapping, "infobases") {
         return Err(ConfigValidationError::InfobasesBelongToTheLocalLayer);
+    }
+    let (synonym, _) = INFOBASE_SECTION_SYNONYM;
+    if let Some(section) = mapping
+        .get(yaml_key(synonym))
+        .and_then(serde_yaml::Value::as_mapping)
+    {
+        if let Some(key) = LOCAL_ONLY_INFOBASE_KEYS
+            .into_iter()
+            .find(|key| mapping_contains_key(section, key))
+        {
+            return Err(ConfigValidationError::InfobaseKeyBelongsToTheLocalLayer { key });
+        }
     }
     Ok(())
 }
@@ -386,7 +403,7 @@ pub(crate) fn layered_origin(
     project: &serde_yaml::Value,
     local: &serde_yaml::Value,
 ) -> Result<LayeredOrigin, ConfigValidationError> {
-    reject_infobases_in_project_file(project)?;
+    reject_local_keys_in_project_file(project)?;
     let mut merged = project.clone();
     let project_synonym_warning =
         fold_infobase_synonym(&mut merged, ConfigFile::Project(project_path))?;
@@ -600,6 +617,8 @@ pub fn load_declared_infobases(
     let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
     if regular_file_exists(&project_path)? {
         let mut project = read_yaml_file(&project_path)?;
+        // Согласие из проектного файла не считается: такой проект не загрузился бы и сам.
+        reject_local_keys_in_project_file(&project)?;
         fold_infobase_synonym(&mut project, ConfigFile::Project(&project_path))?;
         if let Some(infobases) = root_mapping_mut(&mut project)?.remove(yaml_key("infobases")) {
             root_mapping_mut(&mut declared)?.insert(yaml_key("infobases"), infobases);

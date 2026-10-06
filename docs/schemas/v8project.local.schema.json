@@ -275,6 +275,10 @@
             "null"
           ]
         },
+        "shared": {
+          "description": "Consent of this working copy to share the file infobase with the other working copies\nthat hold it. A write command on an infobase held by another copy runs only when every\nholder and this copy consent; the refusal names those who do not. Declared only here:\nthe project file refuses the key, since the consent of one copy is not committed.",
+          "type": "boolean"
+        },
         "standalone": {
           "anyOf": [
             {

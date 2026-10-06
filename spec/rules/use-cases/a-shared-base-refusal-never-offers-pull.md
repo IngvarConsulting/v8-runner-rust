@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-SHARED-BASE-REFUSAL-NEVER-OFFERS-PULL
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/328
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/215
 ---
 
 # Отказ на общей базе выгрузку не предлагает

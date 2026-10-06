@@ -1,7 +1,10 @@
 ---
 id: INV.USE-CASES.A-REMOTE-COPY-REPORTS-CONSENT-THROUGH-THE-MARKER
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/328
+check:
+  - tests/cli_infobase_owner.rs::a_remote_copy_consents_through_the_marker
+  - src/use_cases/infobase_owner.rs::a_remote_copy_that_withdrew_consent_stops_this_machine_after_its_next_write
+  - src/use_cases/infobase_owner.rs::only_a_run_of_a_write_reports_consent
+  - src/use_cases/infobase_owner.rs::a_sole_owner_records_its_changed_consent
 ---
 
 # Копия с другой машины сообщает согласие меткой
