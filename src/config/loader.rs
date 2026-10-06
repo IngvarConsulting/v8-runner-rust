@@ -354,6 +354,42 @@ impl ConfigFile<'_> {
     }
 }
 
+/// Секция `infobases.origin`, какой её соберёт загрузчик из двух слоёв, и предупреждение о
+/// синониме `infobase:` проектного файла.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LayeredOrigin {
+    /// Слитая секция; `None`, если `origin` не объявлен ни в одном слое.
+    pub section: Option<serde_yaml::Mapping>,
+    pub project_synonym_warning: Option<String>,
+}
+
+/// `origin` двух слоёв тем же путём, что в [`build_config`]: карта `infobases` в проектном
+/// файле — отказ, прежний ключ `infobase:` свёрнут в каждом файле отдельно, местный слой
+/// наложен на проектный по полям. Схема и пути не проверяются: читателю — `init` — нужна
+/// только секция, а проектный файл он не трогает.
+pub(crate) fn layered_origin(
+    project_path: &Path,
+    project: &serde_yaml::Value,
+    local: &serde_yaml::Value,
+) -> Result<LayeredOrigin, ConfigValidationError> {
+    reject_infobases_in_project_file(project)?;
+    let mut merged = project.clone();
+    let project_synonym_warning =
+        fold_infobase_synonym(&mut merged, ConfigFile::Project(project_path))?;
+    let mut local = local.clone();
+    fold_infobase_synonym(&mut local, ConfigFile::Local)?;
+    merge_yaml_values(&mut merged, local);
+    let section = merged
+        .get("infobases")
+        .and_then(|infobases| infobases.get(DEFAULT_INFOBASE_NAME))
+        .and_then(serde_yaml::Value::as_mapping)
+        .cloned();
+    Ok(LayeredOrigin {
+        section,
+        project_synonym_warning,
+    })
+}
+
 /// Прежний ключ `infobase:` один цикл выпуска читается как `infobases.origin` — в
 /// каждом файле отдельно, чтобы проектный файл с прежним ключом и местный слой с
 /// новым сливались по полям, как сливались до переименования. Оба ключа в одном

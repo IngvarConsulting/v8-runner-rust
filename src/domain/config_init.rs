@@ -23,7 +23,7 @@ impl ConfigInitResult {
     pub fn warnings(&self) -> &[String] {
         match self {
             Self::Project(result) => &result.warnings,
-            Self::Local(_) => &[],
+            Self::Local(result) => &result.warnings,
         }
     }
 }
@@ -51,6 +51,11 @@ pub struct LocalLayerInitResult {
     pub local_path: String,
     pub gitignore_path: String,
     pub origin: OriginDeclaration,
+    /// Предупреждения идут только в `warnings` конверта: форма варианта `local` их не
+    /// несёт.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub warnings: Vec<String>,
     pub duration_ms: u64,
 }
 
