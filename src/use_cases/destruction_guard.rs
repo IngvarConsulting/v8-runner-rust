@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use crate::platform::git::{uncommitted_work_in, UncommittedWork};
+use crate::platform::git::{uncommitted_work_in, NoAnswer, UncommittedWork};
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, ExecutionTransport};
 
@@ -89,7 +89,7 @@ impl Destruction {
 pub(super) struct Losses {
     paths: Vec<PathBuf>,
     /// Почему система контроля версий не ответила. Тогда потеря — каждый файл каталога.
-    unanswered: Option<String>,
+    unanswered: Option<NoAnswer>,
 }
 
 impl Losses {
@@ -126,11 +126,23 @@ impl Losses {
             Tense::Past => ("existed", "gave"),
         };
         match &self.unanswered {
-            None => format!("{count} file(s) there {exist} nowhere else ({})", self.named()),
-            Some(reason) => format!(
-                "version control {gives} no answer there ({reason}), so all {count} file(s) in it {exist} nowhere else ({})",
+            None => format!(
+                "{count} file(s) there {exist} nowhere else ({})",
                 self.named()
             ),
+            Some(no_answer) => {
+                // Один файл — без множественного числа: «all 1 file(s)» читается сбоем.
+                let every_file = match (count, tense) {
+                    (1, Tense::Present) => "the only file in it exists".to_owned(),
+                    (1, Tense::Past) => "the only file in it existed".to_owned(),
+                    (_, _) => format!("all {count} files in it {exist}"),
+                };
+                format!(
+                    "version control {gives} no answer there ({}), so {every_file} nowhere else ({})",
+                    no_answer.reason(),
+                    self.named()
+                )
+            }
         }
     }
 }
@@ -157,10 +169,10 @@ pub(super) fn losses_in(target: &Path, regenerated: &[&str]) -> Losses {
             unanswered: None,
         },
         // Ответа нет — потерять можно всё, что лежит в каталоге.
-        UncommittedWork::Unknown(reason) => {
+        UncommittedWork::Unknown(no_answer) => {
             let paths = every_file_in(target, regenerated);
             Losses {
-                unanswered: (!paths.is_empty()).then_some(reason),
+                unanswered: (!paths.is_empty()).then_some(no_answer),
                 paths,
             }
         }
@@ -288,7 +300,14 @@ fn remedy(ways_out: &WaysOut, context: &ExecutionContext, losses: &Losses) -> St
     const DISCARDS: &str = "which replaces the directory and discards them";
     let transport = context.transport();
     let keep = match losses.unanswered {
-        Some(_) => "put them under version control and commit them, or move them away,",
+        Some(NoAnswer::OutsideRepository(_)) => {
+            "put them under version control and commit them, or move them away,"
+        }
+        // Каталог, может быть, и в рабочей копии, но гит не ответил: брать его под
+        // контроль версий нечего, а чинить надо то, что гит назвал.
+        Some(NoAnswer::Failed(_)) => {
+            "fix what keeps `git status` from answering there and commit them, or move them away,"
+        }
         None => "commit or stash them",
     };
     let again = match transport {
@@ -405,7 +424,7 @@ mod tests {
             message.contains("version control gives no answer"),
             "{message}"
         );
-        assert!(message.contains("all 2 file(s)"), "{message}");
+        assert!(message.contains("all 2 files"), "{message}");
         assert!(message.contains("hand-written.xml"), "{message}");
         assert!(message.contains("Item.xml"), "{message}");
         assert!(!message.contains(VERSION_FILE_NAME), "{message}");
@@ -413,6 +432,35 @@ mod tests {
             message.contains("put them under version control and commit them"),
             "{message}"
         );
+    }
+
+    /// Гит упал внутри рабочей копии: отказ тот же, но взять каталог под контроль версий
+    /// не советует — он уже там; совет — устранить то, что гит назвал.
+    #[test]
+    fn a_failing_git_inside_a_worktree_is_not_advised_to_be_put_under_version_control() {
+        let repo = tempdir().expect("tempdir");
+        init_git_repo(repo.path());
+        let source = repo.path().join("src");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("hand-written.xml"), "mine\n").expect("write");
+        fs::write(repo.path().join(".git").join("index"), "x").expect("break the index");
+
+        let Err(AppError::Validation(message)) =
+            guard_replacement(&cli(), &source, &ask_first(), &[], Destruction::Replace)
+        else {
+            panic!("a failing git must be refused");
+        };
+        assert!(
+            message.contains("version control gives no answer"),
+            "{message}"
+        );
+        assert!(message.contains("exited with"), "{message}");
+        assert!(message.contains("the only file in it exists"), "{message}");
+        assert!(
+            !message.contains("put them under version control"),
+            "{message}"
+        );
+        assert!(message.contains("fix what keeps `git status`"), "{message}");
     }
 
     /// Пустой каталог терять нечего, есть у него ответ или нет.

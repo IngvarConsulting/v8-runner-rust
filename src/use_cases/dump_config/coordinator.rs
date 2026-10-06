@@ -227,11 +227,15 @@ fn run_dump_selected(
         // Превью спрашивает сторожа о том же каталоге и так же, как выгрузка, но ничего не
         // трогает: называет, на чём она остановится без согласия или что уничтожит с ним.
         let (how, regenerated) = destruction_of(config, &plan);
-        let losses = match resolved.consent {
-            DestructionConsent::RunnerOwned => Losses::default(),
-            DestructionConsent::AskFirst(_) | DestructionConsent::Granted => {
+        let losses = match (how, &resolved.consent) {
+            (_, DestructionConsent::AskFirst(_))
+            | (Destruction::Replace, DestructionConsent::Granted) => {
                 losses_in(&resolved.target_path, regenerated)
             }
+            // Перезапись с согласием уничтоженным ничего не называет — как и сама
+            // выгрузка ниже; каталог раннера спрашивать не о чем.
+            (Destruction::Overwrite, DestructionConsent::Granted)
+            | (_, DestructionConsent::RunnerOwned) => Losses::default(),
         };
         if let Some(note) = preview_note(
             context,
@@ -411,31 +415,32 @@ fn run_dump_selected(
     .and_then(|plan| {
         // Каталог человека сторож спрашивает до платформы при любом плане: выгрузка поверх
         // каталога переписывает его файлы на месте, замена — стирает лишнее. Без согласия
-        // безвозвратное останавливает работу здесь, пока ничего не тронуто. Замену с
-        // согласием сторож спрашивает при публикации: там он и называет уничтоженное.
+        // безвозвратное останавливает работу здесь, пока ничего не тронуто.
         let (how, regenerated) = destruction_of(config, &plan);
-        let discarded = match (how, &resolved.consent) {
-            (Destruction::Replace, DestructionConsent::Granted) => Losses::default(),
-            (
-                Destruction::Replace,
-                DestructionConsent::AskFirst(_) | DestructionConsent::RunnerOwned,
-            )
-            | (
-                Destruction::Overwrite,
-                DestructionConsent::AskFirst(_)
-                | DestructionConsent::Granted
-                | DestructionConsent::RunnerOwned,
-            ) => guard_replacement(
-                context,
-                &resolved.target_path,
-                &resolved.consent,
-                regenerated,
-                how,
-            )?,
-        };
-        Ok((plan, discarded))
+        match (how, &resolved.consent) {
+            (_, DestructionConsent::AskFirst(_)) => {
+                guard_replacement(
+                    context,
+                    &resolved.target_path,
+                    &resolved.consent,
+                    regenerated,
+                    how,
+                )?;
+            }
+            // Замену с согласием сторож спрашивает при публикации: там он и называет
+            // уничтоженное.
+            (Destruction::Replace, DestructionConsent::Granted) => {}
+            // Перезапись с согласием уничтоженным ничего не называет: лишнего она не
+            // удаляет, неотслеживаемое, которого платформа не касается, остаётся на месте,
+            // а какие файлы она перепишет, заранее неизвестно. Из командной строки сюда не
+            // попасть — `--force` делает выгрузку полной, то есть заменой.
+            (Destruction::Overwrite, DestructionConsent::Granted) => {}
+            // Каталог раннера спрашивать не о чем.
+            (_, DestructionConsent::RunnerOwned) => {}
+        }
+        Ok(plan)
     });
-    let (plan, overwritten) = match plan {
+    let plan = match plan {
         Ok(plan) => plan,
         Err(error) => {
             let message = error.to_string();
@@ -656,13 +661,8 @@ fn run_dump_selected(
     // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
     let result = result.map(|(platform_result, notes)| {
         let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
-        // Уничтоженное называет тот вопрос к сторожу, который пропустил работу: перезапись —
-        // до платформы, замена — при публикации.
-        let discarded = if notes.discarded.is_empty() {
-            overwritten
-        } else {
-            notes.discarded
-        };
+        // Уничтоженное называет вопрос к сторожу при публикации замены.
+        let discarded = notes.discarded;
         let message = merge_optional_messages(
             whole_note,
             merge_optional_messages(

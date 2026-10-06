@@ -184,17 +184,20 @@ fn run_convert_with_context(
             "previewed conversion via {}; EDT CLI not dispatched",
             location.path.display()
         );
-        for item in &resolved.items {
-            let losses = losses_in(&item.target_path, &[]);
-            if let Some(note) = preview_note(
-                context,
-                &item.target_path,
-                &resolved.consent,
-                &losses,
-                Destruction::Replace,
-            ) {
-                message.push_str("; ");
-                message.push_str(&note);
+        // Каталог раннера спрашивать не о чем — и превью гита не зовёт.
+        if !matches!(resolved.consent, DestructionConsent::RunnerOwned) {
+            for item in &resolved.items {
+                let losses = losses_in(&item.target_path, &[]);
+                if let Some(note) = preview_note(
+                    context,
+                    &item.target_path,
+                    &resolved.consent,
+                    &losses,
+                    Destruction::Replace,
+                ) {
+                    message.push_str("; ");
+                    message.push_str(&note);
+                }
             }
         }
         let preview = result_snapshot(

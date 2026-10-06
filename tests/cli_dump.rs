@@ -1068,6 +1068,31 @@ fn an_incremental_pull_refuses_over_work_version_control_cannot_give_back() {
     assert!(base_path.join("main").join("hand-written.xml").is_file());
 }
 
+/// Выборка объектов тоже перезаписывает каталог на месте: незафиксированная правка
+/// отслеживаемого файла останавливает `pull --object` до платформы, файл цел.
+#[test]
+fn a_partial_pull_refuses_over_an_uncommitted_edit() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) =
+        setup_project_with_a_version_file_in_a_repository();
+    let edited = base_path.join("main").join("old.txt");
+    fs::write(&edited, "edited by hand\n").expect("edit a committed file");
+
+    let (output, envelope, rendered) = pull_json(&config_path, &["--object", "Catalog:Items"]);
+
+    assert_eq!(output.status.code(), Some(2), "{rendered}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("refusing to overwrite"), "{message}");
+    assert!(message.contains("main/old.txt"), "{message}");
+    assert!(
+        !calls_log.exists(),
+        "the platform must not start: {rendered}"
+    );
+    assert_eq!(
+        fs::read_to_string(&edited).expect("the edit survives"),
+        "edited by hand\n"
+    );
+}
+
 /// `--force` называет уничтоженное поимённо: и найденное системой контроля версий, и весь
 /// каталог, когда ответа у неё нет.
 #[test]
