@@ -39,6 +39,7 @@ mod coordinator;
 mod helpers;
 
 pub use self::all::execute_all;
+pub(crate) use self::all::read_installed_extensions;
 
 #[cfg(test)]
 use self::helpers::create_dump_object_list_file_with;

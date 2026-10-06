@@ -281,6 +281,39 @@ impl ExportConfigurationPackageResult {
     }
 }
 
+/// Ответ `download` без набора: пакет каждого набора конфигурации по составу базы.
+///
+/// Каждая выгрузка отчитывается формой `download <SET>` в порядке обхода пакетов
+/// конфигурации: основная конфигурация, затем расширения проекта, которые есть в базе.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct DownloadAllResult {
+    /// Квитанция о выборе исполнителя, который читал состав базы и выгружал пакеты; `None`,
+    /// пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderReceipt>,
+    pub ok: bool,
+    /// Получил ли исполнитель работу этой команды: чтение состава базы — уже работа.
+    pub provider_dispatched: bool,
+    /// Каталог, в который ложатся пакеты: `<SET>.cf` и `<SET>.cfe`.
+    pub output: PathBuf,
+    /// Наборы расширений проекта, которых в базе нет: их не выгружали. Поля нет, когда таких
+    /// нет или состав не читали.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_installed: Vec<String>,
+    /// Только у превью: наборы расширений проекта, которые превью не выгружало, потому что
+    /// состава базы не знает. Прогон выгрузит те из них, чьё расширение в базе есть, а прочие
+    /// назовёт в `not_installed`. Поля нет, когда таких наборов нет.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub if_installed: Vec<String>,
+    /// Выгрузка каждого набора формой `download <SET>` в порядке обхода. После первого
+    /// отказа обход останавливается. У превью — только наборы конфигурации: их прогон
+    /// выгрузит при любом составе базы.
+    pub sets: Vec<ExportConfigurationPackageResult>,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 /// Request to persist the complete information base into a DT snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportInfobaseSnapshotRequest {

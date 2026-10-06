@@ -22,7 +22,7 @@ use crate::platform::extension_inventory::{
 };
 use crate::use_cases::config_init::{declare_source_sets, with_declared_source_sets};
 use crate::use_cases::extension_agent::ExtensionAgent;
-use crate::use_cases::extension_identity::source_extension_name;
+use crate::use_cases::extension_identity::{extension_name_key, source_extension_name};
 use crate::use_cases::provider_selection::SelectedProvider;
 use crate::use_cases::request::PullAllRequest;
 use crate::use_cases::result::UseCaseError;
@@ -96,7 +96,15 @@ fn run_all(
         return walker.preview(&selected, result, started);
     }
 
-    let installed = match read_installed_extensions(context, config, &selected, &utilities) {
+    let binary = selected.location.as_ref().map(|found| found.path.as_path());
+    let installed = match read_installed_extensions(
+        context,
+        config,
+        Operation::Dump,
+        selected.provider,
+        binary,
+        &utilities,
+    ) {
         Ok(installed) => installed,
         Err(error) => {
             return Err(UseCaseFailure::after_possible_work(
@@ -311,7 +319,7 @@ impl Walk<'_> {
 /// расширения значило бы раздвоить его. Расширение-инструмент клиентского MCP
 /// (`tools.client_mcp.extension`) раннер ставит сам, и набором оно не объявляется.
 fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>, AppError> {
-    let key = |name: &str| name.to_lowercase();
+    let key = extension_name_key;
     let installed_keys = installed
         .iter()
         .map(|name| key(name))
@@ -436,22 +444,25 @@ fn provider_label(selected: &SelectedProvider) -> String {
     }
 }
 
-/// Имена расширений, установленных в базе, — вызовом выбранного исполнителя (замер #187).
+/// Имена расширений, установленных в базе, — вызовом исполнителя команды (замер #187).
+/// Читатель один: им спрашивают базу `pull --all` и `download` без набора.
 ///
 /// Имя, которое не является идентификатором 1С, — неверный вывод: оно станет каталогом и
 /// доводом платформы, и угадывать его нельзя.
-fn read_installed_extensions(
+pub(crate) fn read_installed_extensions(
     context: &ExecutionContext,
     config: &AppConfig,
-    selected: &SelectedProvider,
+    operation: Operation,
+    provider: Provider,
+    binary: Option<&std::path::Path>,
     utilities: &PlatformUtilities,
 ) -> Result<Vec<String>, AppError> {
+    let command = context.command().as_str();
     log_live_stage(
-        "pull: extensions",
-        "[Pull] reading the extensions installed in the infobase",
+        &format!("{command}: extensions"),
+        &format!("[{command}] reading the extensions installed in the infobase"),
     );
-    let binary = selected.location.as_ref().map(|found| found.path.as_path());
-    let names = match (selected.provider, binary) {
+    let names = match (provider, binary) {
         (Provider::Designer, Some(binary)) => {
             let dsl = build_designer_dsl(
                 context,
@@ -515,8 +526,7 @@ fn read_installed_extensions(
         (provider @ (Provider::Designer | Provider::Ibcmd), None)
         | (provider @ (Provider::IbcmdRs | Provider::Webinst), _) => {
             return Err(crate::use_cases::unimplemented_provider(
-                Operation::Dump,
-                provider,
+                operation, provider,
             ))
         }
     };

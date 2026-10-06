@@ -19,11 +19,13 @@ use crate::cli::output::{
 };
 use crate::cli::signal::CliSignalGuard;
 use crate::command_envelope::{test_envelope, Envelope};
-use crate::config::model::{AppConfig, SourceFormat, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceFormat};
 use crate::domain::artifact::{
     ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PACKAGE_FILE, ARTIFACT_ROLE_PLATFORM_LOG,
 };
-use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
+use crate::domain::artifacts::{
+    ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult, MakeAllResult,
+};
 use crate::domain::build::{BuildMode, BuildResult};
 use crate::domain::capability::ProviderReceipt;
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
@@ -33,7 +35,7 @@ use crate::domain::execution::{
     ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStepStatus, StepResult,
 };
 use crate::domain::infobase_export::{
-    ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
+    ConfigurationState, ConfigurationSubject, DownloadAllResult, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
     InfobaseTransferPhase, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
     RestoreTargetMode, TransferArtifactKind,
@@ -79,10 +81,11 @@ use crate::use_cases::request::{
     effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
-    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
-    DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut, InitRequest,
-    LaunchRequest, LoadRequest, PullAllRequest, PushMode, SyntaxExtensionScope, SyntaxRequest,
-    SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
+    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DownloadAllRequest,
+    DumpModeRequest, DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut,
+    InitRequest, LaunchRequest, LoadRequest, MakeAllRequest, PullAllRequest, PushMode,
+    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
+    ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -168,14 +171,26 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
-        Command::Infobase(args) => execute_infobase(
-            config,
-            args,
-            presenter,
-            clean_before_execution,
-            dry_run,
-            cancellation,
-        ),
+        Command::Infobase(args) => match &args.command {
+            InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
+                command: InfobaseConfigurationCommand::Export(export),
+            }) if downloads_every_package(args) => execute_download_all(
+                config,
+                export,
+                presenter,
+                clean_before_execution,
+                dry_run,
+                cancellation,
+            ),
+            _ => execute_infobase(
+                config,
+                args,
+                presenter,
+                clean_before_execution,
+                dry_run,
+                cancellation,
+            ),
+        },
         Command::Convert(args) => execute_convert(
             config,
             args,
@@ -1085,8 +1100,9 @@ fn execute_dump(
             clean_before_execution,
             dry_run,
             || {
-                present_pull_outcome(
+                present_outcome(
                     presenter,
+                    CommandName::Dump,
                     dump_config::execute_all(&context, config, &request),
                     |result| result.duration_ms,
                     render_pull_all_text,
@@ -1102,8 +1118,9 @@ fn execute_dump(
         clean_before_execution,
         dry_run,
         || {
-            present_pull_outcome(
+            present_outcome(
                 presenter,
+                CommandName::Dump,
                 dump_config::execute(&context, config, &request),
                 |result| result.duration_ms,
                 render_dump_text,
@@ -1112,11 +1129,12 @@ fn execute_dump(
     )
 }
 
-/// Исход `pull` и `pull --all`: конверт с формой ответа в JSON, лента `render` в тексте.
-/// Отказ несёт то, что сценарий успел, — в JSON конвертом отказа с формой, в тексте лентой
-/// перед строкой ошибки.
-fn present_pull_outcome<T: Serialize>(
+/// Исход `pull`, `pull --all` и `download` без набора: конверт с формой ответа в JSON,
+/// лента `render` в тексте. Отказ несёт то, что сценарий успел, — в JSON конвертом отказа с
+/// формой, в тексте лентой перед строкой ошибки.
+fn present_outcome<T: Serialize>(
     presenter: &Presenter,
+    command: CommandName,
     outcome: Result<T, crate::use_cases::result::UseCaseFailure<T>>,
     duration_ms: impl Fn(&T) -> u64,
     render: impl Fn(&T, &Presenter, bool),
@@ -1125,7 +1143,7 @@ fn present_pull_outcome<T: Serialize>(
         Ok(result) => {
             if presenter.is_json() {
                 presenter.print_envelope(&Envelope::ok(
-                    CommandName::Dump.as_str(),
+                    command.as_str(),
                     duration_ms(&result),
                     result,
                 ));
@@ -1139,7 +1157,7 @@ fn present_pull_outcome<T: Serialize>(
             if presenter.is_json() {
                 if let Some(result) = failure.payload {
                     presenter.print_envelope(&failure_envelope(
-                        CommandName::Dump.as_str(),
+                        command.as_str(),
                         duration_ms(&result),
                         result,
                         &error,
@@ -1184,8 +1202,14 @@ pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             // Предмет набора известен только по настройкам проекта: такой запрос проверяет
-            // `prepare_infobase_command`, когда настройки загружены.
-            InfobaseConfigurationCommand::Export(args) if args.set.is_some() => Ok(()),
+            // `prepare_infobase_command`, когда настройки загружены. Без набора и
+            // `--extension` `--output` — каталог, и его проверяет `execute_download_all`:
+            // совет отказа называет набор основной конфигурации из настроек.
+            InfobaseConfigurationCommand::Export(args)
+                if args.set.is_some() || args.extension.is_none() =>
+            {
+                Ok(())
+            }
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
                 infobase_export::validate_configuration_request(&request)
@@ -2302,6 +2326,16 @@ fn execute_artifacts(
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
+    if args.source_set.name().is_none() && args.extension.is_none() {
+        return execute_make_all(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        );
+    }
     let request = map_artifacts_request_with_config(config, args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Artifacts, error))?;
     let context = cli_context(config, CommandName::Artifacts, cancellation);
@@ -2338,6 +2372,119 @@ fn execute_artifacts(
                 Err(error)
             }
         },
+    )
+}
+
+/// `make` без набора: пакет каждого набора в каталог `--output`. Путь к файлу без набора —
+/// отказ до сборки с шагом `make <основной набор> --output <файл>.cf`.
+fn execute_make_all(
+    config: &AppConfig,
+    args: &ArtifactsArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    let command = CommandName::Artifacts;
+    let output_directory = SourceSetInventory::new(config)
+        .packages_directory(command, &args.output, None)
+        .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
+    let request = MakeAllRequest {
+        output_directory,
+        dry_run,
+    };
+    let context = cli_context(config, command, cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        command,
+        BaseAccess::Reads,
+        clean_before_execution,
+        dry_run,
+        || match artifacts::execute_all(&context, config, &request) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        command.as_str(),
+                        result.duration_ms,
+                        MakeAllJsonData::from_result(&result),
+                    ));
+                } else {
+                    render_make_all_text(&result, presenter, true);
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    if let Some(result) = failure.payload {
+                        presenter.print_envelope(&failure_envelope(
+                            command.as_str(),
+                            result.duration_ms,
+                            MakeAllJsonData::from_result(&result),
+                            &error,
+                        ));
+                    }
+                } else {
+                    if let Some(result) = failure.payload.as_ref() {
+                        render_make_all_text(result, presenter, false);
+                    }
+                    presenter.print_error(&error.to_string());
+                }
+                Err(error)
+            }
+        },
+    )
+}
+
+/// `download` без набора: пакет каждого набора конфигурации по составу базы в каталог
+/// `--output` (от `basePath`). Путь к файлу без набора — отказ до выбора исполнителя с шагом
+/// `download <основной набор> --output <файл>.cf`.
+pub fn execute_download_all(
+    config: &AppConfig,
+    args: &InfobaseConfigurationExportArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    let command = CommandName::InfobaseConfigurationExport;
+    let output_directory = SourceSetInventory::new(config)
+        .packages_directory(command, &args.output, Some(&config.base_path))
+        .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
+    let request = DownloadAllRequest {
+        state: map_infobase_configuration_export_request(args).state,
+        output_directory,
+        dry_run,
+    };
+    let context = cli_context(config, command, cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        command,
+        BaseAccess::Reads,
+        clean_before_execution,
+        dry_run,
+        || {
+            present_outcome(
+                presenter,
+                command,
+                infobase_export::execute_configuration_export_all(&context, config, &request),
+                |result| result.duration_ms,
+                render_download_all_text,
+            )
+        },
+    )
+}
+
+/// Ответ `download` без набора — тот, что выгружает каждый набор: ни набора, ни
+/// `--extension` в нём нет.
+pub fn downloads_every_package(args: &InfobaseArgs) -> bool {
+    matches!(
+        &args.command,
+        InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
+            command: InfobaseConfigurationCommand::Export(export),
+        }) if export.set.is_none() && export.extension.is_none()
     )
 }
 
@@ -3029,14 +3176,7 @@ fn map_artifacts_request_with_config(
             let source_set = SourceSetInventory::new(config)
                 .named(source_set_name)
                 .map_err(UseCaseError::from)?;
-            match source_set.purpose {
-                SourceSetPurpose::Configuration => ArtifactsModeRequest::ConfigurationCf,
-                SourceSetPurpose::Extension => ArtifactsModeRequest::ExtensionCfe,
-                SourceSetPurpose::ExternalDataProcessors => {
-                    ArtifactsModeRequest::ExternalDataProcessorEpf
-                }
-                SourceSetPurpose::ExternalReports => ArtifactsModeRequest::ExternalReportErf,
-            }
+            ArtifactsModeRequest::for_purpose(source_set.purpose)
         }
         (None, false) => ArtifactsModeRequest::ConfigurationCf,
     };
@@ -3556,6 +3696,41 @@ impl<'a> ArtifactsJsonData<'a> {
             duration_ms: result.duration_ms,
             message: execution_message(&result.execution),
             execution: &result.execution,
+        }
+    }
+}
+
+/// `data` команды `make` без набора: сборка каждого набора формой `make <SET>`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct MakeAllJsonData<'a> {
+    pub ok: bool,
+    /// Получил ли исполнитель работу этой команды хотя бы у одного набора.
+    pub provider_dispatched: bool,
+    /// Каталог, в который легли пакеты: `<SET>.cf`, `<SET>.cfe` и каталоги `<SET>` внешних
+    /// наборов.
+    pub output_path: PathBuf,
+    /// Сборка каждого набора формой `make <SET>` в порядке обхода: основная конфигурация,
+    /// расширения, внешние обработки, внешние отчёты. После первого отказа обход
+    /// останавливается, и последняя запись — отказавший набор.
+    pub sets: Vec<ArtifactsJsonData<'a>>,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl<'a> MakeAllJsonData<'a> {
+    fn from_result(result: &'a MakeAllResult) -> Self {
+        Self {
+            ok: result.ok,
+            provider_dispatched: result.provider_dispatched,
+            output_path: result.output_path.clone(),
+            sets: result
+                .sets
+                .iter()
+                .map(ArtifactsJsonData::from_result)
+                .collect(),
+            duration_ms: result.duration_ms,
+            message: result.message.clone(),
         }
     }
 }
@@ -4175,6 +4350,58 @@ fn render_convert_text(result: &ConvertResult, presenter: &Presenter, succeeded:
         );
     }
     single_timeline_outcome(presenter, timeline_status(succeeded), "Convert", details);
+}
+
+/// `make` без набора: лента каждого набора, как у `make <SET>`.
+fn render_make_all_text(result: &MakeAllResult, presenter: &Presenter, succeeded: bool) {
+    let last = result.sets.len().saturating_sub(1);
+    for (index, set) in result.sets.iter().enumerate() {
+        // Отказ обхода — последний набор неудачной команды; остальные собраны.
+        render_artifacts_text(
+            set,
+            presenter,
+            succeeded || index != last || set.execution.is_ok(),
+        );
+    }
+    if result.sets.is_empty() {
+        let mut details = vec![format!("output: {}", result.output_path.display())];
+        append_if_present(&mut details, result.message.clone());
+        single_timeline_outcome(presenter, timeline_status(succeeded), "Make all", details);
+    }
+}
+
+/// `download` без набора: лента каждого набора, как у `download <SET>`, и наборы, которых в
+/// базе нет.
+fn render_download_all_text(result: &DownloadAllResult, presenter: &Presenter, succeeded: bool) {
+    for set in &result.sets {
+        render_configuration_export_text(CommandName::InfobaseConfigurationExport, set, presenter);
+    }
+    let mut details = Vec::new();
+    if !result.not_installed.is_empty() {
+        details.push(format!(
+            "not in the infobase, not downloaded: {}",
+            result.not_installed.join(", ")
+        ));
+    }
+    if !result.if_installed.is_empty() {
+        details.push(format!(
+            "downloaded only if the infobase has them: {}",
+            result.if_installed.join(", ")
+        ));
+    }
+    if result.sets.is_empty() || !result.if_installed.is_empty() {
+        append_if_present(&mut details, result.message.clone());
+    }
+    if !details.is_empty() || result.sets.is_empty() {
+        details.push(format!("output: {}", result.output.display()));
+        details.extend(provider_receipt_details(result.provider.as_ref()));
+        single_timeline_outcome(
+            presenter,
+            timeline_status(succeeded),
+            "Download all",
+            details,
+        );
+    }
 }
 
 fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succeeded: bool) {

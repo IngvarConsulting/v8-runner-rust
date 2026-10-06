@@ -88,12 +88,14 @@ command_data_forms! {
     "pull", "pull-all" => crate::domain::dump::PullAllResult;
     "download", "download"
         => crate::domain::infobase_export::ExportConfigurationPackageResult;
+    "download", "download-all" => crate::domain::infobase_export::DownloadAllResult;
     "infobase.dump", "infobase-dump"
         => crate::domain::infobase_export::ExportInfobaseSnapshotResult;
     "infobase.restore", "infobase-restore"
         => crate::domain::infobase_export::RestoreInfobaseSnapshotResult;
     "convert", "convert" => crate::domain::convert::ConvertResult;
     "make", "make" => crate::cli::execute::ArtifactsJsonData<'static>;
+    "make", "make-all" => crate::cli::execute::MakeAllJsonData<'static>;
     "check", "check" => crate::domain::syntax::SyntaxCheckResult;
     "launch", "launch" => crate::domain::launch::LaunchResult;
     "publish", "publish" => crate::domain::publish::PublishResult;

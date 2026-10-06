@@ -237,6 +237,39 @@ pub enum ArtifactsModeRequest {
     ExternalReportErf,
 }
 
+impl ArtifactsModeRequest {
+    /// Вид пакета, который собирается из набора этого назначения.
+    pub const fn for_purpose(purpose: crate::config::model::SourceSetPurpose) -> Self {
+        use crate::config::model::SourceSetPurpose;
+        match purpose {
+            SourceSetPurpose::Configuration => Self::ConfigurationCf,
+            SourceSetPurpose::Extension => Self::ExtensionCfe,
+            SourceSetPurpose::ExternalDataProcessors => Self::ExternalDataProcessorEpf,
+            SourceSetPurpose::ExternalReports => Self::ExternalReportErf,
+        }
+    }
+}
+
+/// `make` без набора: пакет каждого набора проекта в каталог.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MakeAllRequest {
+    /// Каталог `--output`, уже проверенный: файл им быть не может.
+    pub output_directory: std::path::PathBuf,
+    /// Спланировать каждую сборку, ничего не собирая и не выкладывая.
+    pub dry_run: bool,
+}
+
+/// `download` без набора: пакет каждого набора конфигурации по составу базы.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadAllRequest {
+    /// Состояние конфигурации, которое выгружается у каждого набора.
+    pub state: crate::domain::infobase_export::ConfigurationState,
+    /// Каталог `--output` (от `basePath`), уже проверенный: файл им быть не может.
+    pub output_directory: std::path::PathBuf,
+    /// Спланировать, не читая базу и ничего не записывая.
+    pub dry_run: bool,
+}
+
 /// Transport-neutral request for the `artifacts` use case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactsRequest {

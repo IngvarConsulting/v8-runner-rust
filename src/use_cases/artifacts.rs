@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 mod agent;
+mod all;
+
+pub use self::all::execute_all;
 use tracing::debug;
 
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};

@@ -11,7 +11,8 @@
       "convert"
     ],
     "download": [
-      "download"
+      "download",
+      "download-all"
     ],
     "extensions": [
       "extensions",
@@ -33,7 +34,8 @@
       "launch"
     ],
     "make": [
-      "make"
+      "make",
+      "make-all"
     ],
     "publish": [
       "publish"

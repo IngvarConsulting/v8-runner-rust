@@ -62,6 +62,25 @@ pub struct ArtifactsResult {
     pub execution: ExecutionOutcome<ArtifactBuildMetadata>,
 }
 
+/// Ответ `make` без набора: пакет каждого набора проекта в каталог `--output`.
+///
+/// Каждая сборка отчитывается формой `make <SET>` в порядке обхода наборов: основная
+/// конфигурация, расширения, внешние обработки, внешние отчёты. После первого отказа обход
+/// останавливается, и последняя запись — отказавший набор.
+#[derive(Debug, Clone)]
+pub struct MakeAllResult {
+    pub ok: bool,
+    /// Получил ли исполнитель работу этой команды хотя бы у одного набора.
+    pub provider_dispatched: bool,
+    /// Каталог, в который легли пакеты: `<SET>.cf`, `<SET>.cfe` и каталоги `<SET>` внешних
+    /// наборов.
+    pub output_path: PathBuf,
+    /// Сборка каждого набора формой `make <SET>` в порядке обхода.
+    pub sets: Vec<ArtifactsResult>,
+    pub duration_ms: u64,
+    pub message: Option<String>,
+}
+
 impl ArtifactSet {
     pub fn is_empty(&self) -> bool {
         self.root_dir.is_none() && self.items.is_empty()

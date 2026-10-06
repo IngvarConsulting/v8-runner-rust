@@ -123,6 +123,12 @@ pub fn run() -> i32 {
         return run_bootstrap(args, &cli, &presenter);
     }
 
+    // `download` без набора обходит наборы и отвечает своей формой: его ведёт общий путь
+    // команд, а не подготовка одной выгрузки.
+    let downloads_all = matches!(
+        &cli.command,
+        Command::Infobase(args) if execute::downloads_every_package(args)
+    );
     if let Command::Infobase(args) = &cli.command {
         if let Err(error) = execute::validate_infobase_request(args) {
             let error =
@@ -155,7 +161,7 @@ pub fn run() -> i32 {
         Err(e) => {
             let message = e.to_string();
             let error = UseCaseError::from(AppError::from(e));
-            if let Command::Infobase(args) = &cli.command {
+            if let (Command::Infobase(args), false) = (&cli.command, downloads_all) {
                 let error = execute::render_infobase_pre_dispatch_failure(
                     args,
                     &presenter,
@@ -171,7 +177,7 @@ pub fn run() -> i32 {
         }
     };
     let mut prepared_infobase = match &cli.command {
-        Command::Infobase(args) => {
+        Command::Infobase(args) if !downloads_all => {
             match execute::prepare_infobase_cli_command(&config, args, &presenter, cli.dry_run) {
                 Ok(prepared) => Some(prepared),
                 Err(error) => return error.exit_code(),
@@ -179,7 +185,7 @@ pub fn run() -> i32 {
         }
         _ => None,
     };
-    if let Command::Infobase(_) = &cli.command {
+    if let (Command::Infobase(_), false) = (&cli.command, downloads_all) {
         if cli.dry_run {
             return match execute::preview_prepared_infobase_command(
                 &config,
@@ -204,7 +210,7 @@ pub fn run() -> i32 {
     };
 
     let level = cli.log_level.as_deref().unwrap_or("info");
-    let is_infobase_command = matches!(&cli.command, Command::Infobase(_));
+    let is_infobase_command = matches!(&cli.command, Command::Infobase(_)) && !downloads_all;
     let logging_result = if is_infobase_command {
         crate::support::logging::init_action_logging_deferred(
             level,
@@ -263,6 +269,14 @@ pub fn run() -> i32 {
         | Command::Syntax(_)
         | Command::Launch(_)
         | Command::Publish(_) => execute::execute_command(
+            &config,
+            &cli.command,
+            &command_line_target(&cli, Some(primary_config_path), &config),
+            &presenter,
+            cli.clean_before_execution,
+            cli.dry_run,
+        ),
+        Command::Infobase(_) if downloads_all => execute::execute_command(
             &config,
             &cli.command,
             &command_line_target(&cli, Some(primary_config_path), &config),

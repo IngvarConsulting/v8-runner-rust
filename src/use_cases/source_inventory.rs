@@ -1,13 +1,16 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::change_detection::analyzer::ContextAnalysis;
 use crate::change_detection::source_sets::SourceSetsService;
 use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
+use crate::domain::infobase_export::TransferArtifactKind;
+use crate::domain::next_step::NextStep;
 use crate::domain::source_set::SourceSetContext;
 use crate::support::error::AppError;
 use crate::use_cases::context::CommandName;
 use crate::use_cases::extension_identity::platform_extension_name;
+use crate::use_cases::result::UseCaseError;
 
 /// Наборы в порядке обработки: основная конфигурация, расширения, внешние обработки,
 /// внешние отчёты, а внутри назначения — в порядке объявления.
@@ -86,6 +89,59 @@ impl<'a> SourceSetInventory<'a> {
             .collect()
     }
 
+    /// Каталог, в который `make` и `download` без набора кладут пакет каждого набора
+    /// ([`package_in_directory`]). Путь, который называет файл — с суффиксом и не
+    /// существующий каталог, или существующий файл, — отказ: без набора команда пишет не один
+    /// файл, а `next` называет ту же команду с набором основной конфигурации и файлом `.cf`.
+    ///
+    /// `relative_to` — откуда команда считает относительный путь: `download` — от
+    /// `basePath`, `make` (`None`) — от текущего каталога.
+    pub(crate) fn packages_directory(
+        &self,
+        command: CommandName,
+        output: &str,
+        relative_to: Option<&Path>,
+    ) -> Result<PathBuf, UseCaseError> {
+        let trimmed = output.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::Validation(format!(
+                "{} without <SET> requires --output naming a directory",
+                command.as_str()
+            ))
+            .into());
+        }
+        let directory = PathBuf::from(trimmed);
+        let resolved = match relative_to {
+            Some(base) => crate::support::path::resolve_from(base, &directory),
+            None => directory.clone(),
+        };
+        let names_a_file = if resolved.exists() {
+            !resolved.is_dir()
+        } else {
+            directory.extension().is_some()
+        };
+        if !names_a_file {
+            return Ok(directory);
+        }
+        let mut error = UseCaseError::from(AppError::Validation(format!(
+            "{command} without <SET> writes a package for each source-set into the directory --output names, and '{trimmed}' names a file: name a directory, or name the source-set to write one package",
+            command = command.as_str()
+        )));
+        let main = self
+            .configuration_packages()
+            .into_iter()
+            .find_map(|(source_set, extension)| extension.is_none().then_some(source_set));
+        if let Some(main) = main {
+            let file = directory.with_extension(TransferArtifactKind::Cf.file_extension());
+            error = error.with_next(
+                NextStep::command(command.as_str())
+                    .for_source_set(main.name.clone())
+                    .with_key("--output", file.display().to_string()),
+            );
+        }
+        Err(error)
+    }
+
     pub(crate) fn source_set(&self, name: &str) -> Option<&'a SourceSetConfig> {
         self.source_sets_by_name.get(name).copied()
     }
@@ -159,6 +215,24 @@ impl<'a> SourceSetInventory<'a> {
     pub(crate) fn analyze_contexts(&self, contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
         SourceSetsService::new(self.config).analyze_contexts(contexts)
     }
+}
+
+/// Куда `make` и `download` без набора кладут пакет набора: `<каталог>/<SET>.cf` у набора
+/// конфигурации, `<каталог>/<SET>.cfe` у набора расширения и каталог `<каталог>/<SET>` у
+/// набора внешних файлов. Имя файла — имя набора: оно в проекте единственно.
+pub(crate) fn package_in_directory(directory: &Path, source_set: &SourceSetConfig) -> PathBuf {
+    let path = directory.join(&source_set.name);
+    let suffix = match source_set.purpose {
+        SourceSetPurpose::Configuration => TransferArtifactKind::Cf.file_extension(),
+        SourceSetPurpose::Extension => TransferArtifactKind::Cfe.file_extension(),
+        SourceSetPurpose::ExternalDataProcessors | SourceSetPurpose::ExternalReports => {
+            return path
+        }
+    };
+    let mut file = path.into_os_string();
+    file.push(".");
+    file.push(suffix);
+    PathBuf::from(file)
 }
 
 fn index_contexts(contexts: &[SourceSetContext]) -> HashMap<String, SourceSetContext> {

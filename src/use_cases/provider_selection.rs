@@ -171,6 +171,7 @@ carries_receipt!(
     crate::domain::artifacts::ArtifactsResult,
     crate::domain::publish::PublishResult,
     crate::domain::infobase_export::ExportConfigurationPackageResult,
+    crate::domain::infobase_export::DownloadAllResult,
     crate::domain::infobase_export::ExportInfobaseSnapshotResult,
     crate::domain::infobase_export::RestoreInfobaseSnapshotResult,
 );
