@@ -21,8 +21,10 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
-use crate::config::model::{AppConfig, SourceFormat};
+use crate::config::model::AppConfig;
 use crate::domain::source_set::SourceSetContext;
+use crate::platform::dump_format::{read_recorded, written_by, RecordedFormat};
+use crate::platform::locator::PlatformVersion;
 use crate::support::error::AppError;
 use crate::support::fs::{
     best_effort_fsync_dir, read_optional, write_file_atomically, ATOMIC_WRITE_CANDIDATE_SUFFIX,
@@ -46,13 +48,9 @@ pub(crate) struct RunnerVersionFile {
 }
 
 impl RunnerVersionFile {
-    /// Копия есть у набора формата Конфигуратора с памятью именованной базы. Снимок
-    /// формата EDT в `workPath/designer/<набор>` общий для всех баз, и его файл версий
-    /// по базам раскладывает #214.
+    /// Копия есть у набора с памятью базы. У формата EDT файл версий лежит в снимке
+    /// Конфигуратора, который тоже лежит под памятью базы.
     pub(crate) fn of(config: &AppConfig, context: &SourceSetContext) -> Option<Self> {
-        if config.format != SourceFormat::Designer {
-            return None;
-        }
         Self::for_context(context, &config.work_path)
     }
 
@@ -154,6 +152,56 @@ impl RunnerVersionFile {
         }
         Ok(())
     }
+}
+
+/// Перед загрузкой: версия формата файла версий не новее той, что пишет платформа.
+///
+/// Версия читается из файла в каталоге набора, а если его там нет — из копии раннера
+/// той же пары. Новее — отказ до запуска платформы, называющий обе версии. Файла нет ни
+/// там, ни там — сверки нет, и возвращается примечание о пропуске для ответа. Версию,
+/// которую пишет платформа, раннер знает не для всех платформ; где не знает, не сверяет.
+pub(crate) fn check_load_format(
+    work_path: &Path,
+    context: &SourceSetContext,
+    platform: Option<&PlatformVersion>,
+) -> Result<Option<String>, AppError> {
+    let in_directory = context.path().join(VERSION_FILE_NAME);
+    let mut source = in_directory.clone();
+    let mut recorded = read_format(&in_directory)?;
+    if recorded == RecordedFormat::Missing {
+        if let Some(copy) = RunnerVersionFile::for_context(context, work_path) {
+            if copy.copy_is_ours()? {
+                recorded = read_format(&copy.copy)?;
+                source = copy.copy;
+            }
+        }
+    }
+    let found = match recorded {
+        RecordedFormat::Missing => {
+            return Ok(Some(format!(
+                "the format version was not checked before the load: no {VERSION_FILE_NAME} in '{}' or in the runner's memory",
+                context.path().display()
+            )));
+        }
+        RecordedFormat::Unrecognized => return Ok(None),
+        RecordedFormat::Version(found) => found,
+    };
+    let Some((platform, written)) =
+        platform.and_then(|platform| written_by(platform).map(|written| (platform, written)))
+    else {
+        return Ok(None);
+    };
+    if found > written {
+        return Err(AppError::Validation(format!(
+            "'{}' is in format {found}, newer than {written} that platform {platform} writes: the platform cannot load it, so the load is refused before it starts; load with a platform that writes {found} or newer",
+            source.display()
+        )));
+    }
+    Ok(None)
+}
+
+fn read_format(path: &Path) -> Result<RecordedFormat, AppError> {
+    read_recorded(path).map_err(|error| io_error("read", path, &error))
 }
 
 /// Временные файлы замен файла версий и его копии (`<имя>.candidate-…`), оставленные
@@ -331,6 +379,52 @@ mod tests {
         first.restore().expect("restore");
         assert_eq!(fs::read(&first.in_directory).expect("file"), b"foreign");
         assert!(!second.copy_is_ours().expect("identity"));
+    }
+
+    fn platform_8_3_27() -> crate::platform::locator::PlatformVersion {
+        crate::platform::locator::PlatformVersion {
+            major: 8,
+            minor: 3,
+            patch: 27,
+            build: 2074,
+        }
+    }
+
+    fn with_format(version: &str) -> String {
+        format!("<ConfigDumpInfo format=\"Hierarchical\" version=\"{version}\"/>")
+    }
+
+    /// Нет файла в каталоге — версия формата берётся из копии раннера той же пары; формат
+    /// новее платформы — отказ с обеими версиями, не новее — загрузка идёт.
+    #[test]
+    fn the_load_format_is_read_from_the_runner_copy_when_the_directory_has_none() {
+        let root = tempfile::tempdir().expect("root");
+        let file = version_file(root.path(), "base-a");
+        let context = SourceSetContext::new("main", root.path().join("sources"), "designer-main")
+            .with_infobase_memory("origin", "base-a".to_owned());
+        let work = root.path().join("work");
+        let platform = platform_8_3_27();
+        let check = || super::check_load_format(&work, &context, Some(&platform));
+
+        let skipped = check().expect("no file").expect("the skip is named");
+        assert!(skipped.contains("not checked"), "{skipped}");
+
+        fs::write(&file.in_directory, with_format("2.21")).expect("platform wrote");
+        assert_eq!(file.record(), None);
+        fs::remove_file(&file.in_directory).expect("lost");
+        let refusal = check().expect_err("a newer format").to_string();
+        assert!(refusal.contains("format 2.21"), "{refusal}");
+        assert!(
+            refusal.contains("2.20 that platform 8.3.27.2074 writes"),
+            "{refusal}"
+        );
+
+        fs::write(&file.in_directory, with_format("2.17")).expect("older");
+        assert_eq!(check().expect("an older format loads"), None);
+        assert_eq!(
+            super::check_load_format(&work, &context, None).expect("unknown platform"),
+            None
+        );
     }
 
     #[test]

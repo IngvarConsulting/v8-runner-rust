@@ -295,11 +295,14 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
         .path()
         .join("work/logs/platform/dump-main-agent.log")
         .is_file());
-    assert!(harness
-        .dir
-        .path()
-        .join("work/agent/generation/main.json")
-        .is_file());
+    let ledgers: Vec<_> = fs::read_dir(harness.dir.path().join("work/infobases"))
+        .expect("base memory")
+        .map(|entry| entry.expect("entry").path().join("generation.json"))
+        .collect();
+    assert!(
+        ledgers.len() == 1 && ledgers[0].is_file(),
+        "the generation is recorded under the base: {ledgers:?}"
+    );
 
     // Поднятый процесс не переживает команду.
     let pid: u32 = read_or_empty(&harness.designer_pid_file)
@@ -318,6 +321,11 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
 #[test]
 fn incremental_mode_updates_the_target_in_place_through_a_link() {
     let harness = harness(true, Some(true), false);
+    fs::write(
+        harness.target.join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    )
+    .expect("version file");
 
     let (code, payload) = run_dump(&harness, &[]);
 

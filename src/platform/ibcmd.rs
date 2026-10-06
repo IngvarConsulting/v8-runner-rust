@@ -449,6 +449,21 @@ impl<'a> IbcmdDsl<'a> {
     }
 
     /// Exports changes in sync mode relative to an existing target directory.
+    /// `config export [--extension=<name>] <dir>`: full export over the directory, without
+    /// `--sync` (no version file to synchronize by) and without `--force`.
+    pub fn config_export_over(
+        &self,
+        target_dir: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "export"]);
+        if let Some(extension) = extension {
+            push_option_value(&mut args, "--extension", extension);
+        }
+        args.push(target_dir.display().to_string());
+        self.run(&args)
+    }
+
     pub fn config_export_incremental(
         &self,
         target_dir: &Path,

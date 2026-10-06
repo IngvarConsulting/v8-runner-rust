@@ -246,10 +246,10 @@ mod tests {
             inventory.source_path(main),
             config.base_path.join("configuration")
         );
-        assert_eq!(
-            inventory.designer_context("main").expect("designer").path(),
-            config.work_path.join("designer/main").as_path()
-        );
+        // Снимок Конфигуратора лежит под памятью базы, названной строкой соединения.
+        let snapshot = inventory.designer_context("main").expect("designer").path();
+        assert!(snapshot.starts_with(config.work_path.join("infobases")));
+        assert!(snapshot.ends_with("designer/main"));
         assert_eq!(
             inventory.edt_context("main").expect("edt").path(),
             config.base_path.join("configuration").as_path()

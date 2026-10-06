@@ -1338,6 +1338,15 @@ fn executable_component_matches(actual: &std::ffi::OsStr, expected: &str) -> boo
     }
 }
 
+/// Версия платформы, которой принадлежит исполняемый файл, — по каталогу установки;
+/// `None`, если путь её не называет.
+pub fn platform_version_of(utility: UtilityType, executable: &Path) -> Option<PlatformVersion> {
+    match infer_version(utility, executable)? {
+        UtilityVersion::Platform(version) => Some(version),
+        UtilityVersion::Edt(_) => None,
+    }
+}
+
 fn infer_version(utility: UtilityType, path: &Path) -> Option<UtilityVersion> {
     let installation_root = installation_root_for_executable(path);
     let version_text = installation_root.file_name().and_then(|name| name.to_str());

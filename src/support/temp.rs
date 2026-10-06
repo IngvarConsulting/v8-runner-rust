@@ -182,14 +182,9 @@ pub fn partial_lists_dir(work_path: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Return the reserved future EDT work directory for a source set.
-pub fn reserved_source_set_dir(work_path: &Path, source_set_name: &str) -> PathBuf {
-    work_path.join("designer").join(source_set_name)
-}
-
 /// Return the EDT export directory of a tool extension inside `work_path`.
 ///
-/// It lives outside `work_path/designer`, where source sets are exported, so a source
+/// It lives outside the Designer copies of source sets, so a source
 /// set may carry any name without sharing a directory with a tool extension.
 pub fn tool_extension_export_dir(work_path: &Path, extension_name: &str) -> PathBuf {
     work_path.join("tool-extensions").join(extension_name)
@@ -216,7 +211,7 @@ pub fn dump_object_list_file(work_path: &Path) -> std::io::Result<NamedTempFile>
 mod tests {
     use super::{
         dump_object_list_file, partial_list_file, partial_lists_dir, platform_logs_dir,
-        private_temp_dir, reserved_source_set_dir,
+        private_temp_dir,
     };
     use tempfile::tempdir;
 
@@ -245,15 +240,6 @@ mod tests {
             .path()
             .to_string_lossy()
             .contains("temp/partial-lists"));
-    }
-
-    #[test]
-    fn reserved_source_set_path_is_not_created() {
-        let dir = tempdir().expect("tempdir");
-        let reserved = reserved_source_set_dir(dir.path(), "main");
-
-        assert!(!reserved.exists());
-        assert!(reserved.ends_with("designer/main"));
     }
 
     #[test]

@@ -99,6 +99,16 @@ impl SourceSetLoader for AgentLoader {
         // Всё, что идёт после отложенной отмены, — провал следующей команды, безопасная
         // точка, фиксация состояния, срезанный `generation-id`, — выходит через учёт,
         // который её называет.
+        // Версия формата сверяется до сессии: формат новее платформы — отказ. Версию
+        // платформы раннер знает только у своего агента.
+        let platform = self.location.as_ref().and_then(|location| {
+            crate::platform::locator::platform_version_of(location.utility, &location.path)
+        });
+        let format_notice = crate::use_cases::version_file::check_load_format(
+            &config.work_path,
+            source_context,
+            platform.as_ref(),
+        )?;
         collecting_deferrals(|deferrals| {
             if let Some(error) = interruption_before_safe_point(
                 context,
@@ -147,10 +157,15 @@ impl SourceSetLoader for AgentLoader {
             // Поколение записывается после удачной загрузки: следующая выгрузка сравнит его
             // и не станет выгружать то, что не менялось.
             let token = generation_id(handle.session(), extension, &wait)?;
-            GenerationLedger::new(config).record(&source_set.name, &token, "build")?;
+            if let Some(ledger) = GenerationLedger::of(source_context, &config.work_path) {
+                ledger.record(&token, "build")?;
+            }
             Ok(())
         })
-        .map(|((), warnings)| warnings)
+        .map(|((), mut warnings)| {
+            warnings.extend(format_notice);
+            warnings
+        })
     }
 
     fn finish(&mut self) {

@@ -346,7 +346,11 @@ fn a_partial_build_through_sftp_ships_only_the_changed_files() {
 fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
     let harness = harness_with_channel(Channel::Sftp);
     let target = harness.dir.path().join("project").join("configuration");
-    fs::write(target.join("ConfigDumpInfo.xml"), "<ConfigDumpInfo/>").expect("dump info");
+    fs::write(
+        target.join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    )
+    .expect("dump info");
     fs::write(target.join("Untouched.xml"), "<Keep/>").expect("untouched");
 
     let (code, payload) = run(&harness, &["dump"]);

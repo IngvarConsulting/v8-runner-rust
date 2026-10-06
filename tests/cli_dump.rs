@@ -452,22 +452,21 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
     );
     assert_native_edt_project(&base_path.join("main"));
     assert!(!base_path.join("main").join("old.txt").exists());
-    assert!(work_path
-        .join("designer")
-        .join("main")
-        .join("Configuration.xml")
-        .exists());
+    // Снимок Конфигуратора лежит под памятью выбранной базы.
+    let bases: Vec<_> = fs::read_dir(work_path.join("infobases"))
+        .expect("base memory")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    let [base] = bases.as_slice() else {
+        panic!("one remembered base: {bases:?}");
+    };
+    let snapshot = base.join("designer/main");
+    assert!(snapshot.join("Configuration.xml").exists());
 
     let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
     let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
-    assert!(designer_calls.contains(work_path.join("designer").display().to_string().as_str()));
-    assert!(edt_calls.contains(
-        work_path
-            .join("designer/main")
-            .display()
-            .to_string()
-            .as_str()
-    ));
+    assert!(designer_calls.contains(base.join("designer").display().to_string().as_str()));
+    assert!(edt_calls.contains(snapshot.display().to_string().as_str()));
 }
 
 #[test]
@@ -511,6 +510,12 @@ fn dump_text_success_is_compact_and_keeps_output_visible() {
 fn dump_ibcmd_incremental_json_success() {
     let (_dir, config_path, _binary_path, work_path, base_path, calls_log) = setup_project();
     fs::remove_dir_all(base_path.join("main")).expect("remove target");
+    fs::create_dir_all(base_path.join("main")).expect("target");
+    fs::write(
+        base_path.join("main/ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    )
+    .expect("version file");
 
     let output = v8_runner_command()
         .args([

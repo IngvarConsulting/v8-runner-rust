@@ -348,6 +348,41 @@ fn run_dump_selected(
         }
     }
 
+    // Выгрузка по изменившемуся держится на файле версий в каталоге. Нет его или формат в
+    // нём чужой — она становится полной до запуска платформы: `-update` у платформы без
+    // файла отказывает, а при чужом формате считает разницу не от того.
+    let full_instead = match mode {
+        DumpMode::Incremental => {
+            match version_file_verdict(&resolved.platform_target_path, location.as_ref()) {
+                Ok(verdict) => verdict,
+                Err(error) => {
+                    let message = error.to_string();
+                    return Err(DumpExecutionFailure::with_payload(
+                        error,
+                        empty_result(
+                            mode,
+                            started,
+                            Some(resolved.source_set_name.clone()),
+                            resolved.extension.clone(),
+                            selectors.clone(),
+                            Some(resolved.target_path.clone()),
+                            Some(message),
+                        ),
+                    ));
+                }
+            }
+        }
+        DumpMode::Full | DumpMode::Partial => None,
+    };
+    let over_directory = match full_instead {
+        None => OverDirectory::ByVersionFile,
+        Some(_) => OverDirectory::Whole,
+    };
+    let mode = match over_directory {
+        OverDirectory::ByVersionFile => mode,
+        OverDirectory::Whole => DumpMode::Full,
+    };
+
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
     // Агент отвечает ещё и «выгружать нечего» — это состояние ответа, а не проза, и
@@ -359,7 +394,11 @@ fn run_dump_selected(
             context,
             config,
             &resolved,
-            &mode,
+            match over_directory {
+                OverDirectory::ByVersionFile => &mode,
+                OverDirectory::Whole => &DumpMode::Incremental,
+            },
+            over_directory,
             partial_objects,
             location.as_ref(),
             &mut utilities,
@@ -374,6 +413,8 @@ fn run_dump_selected(
             (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
                 crate::use_cases::unimplemented_provider(Operation::Dump, other),
             ),
+            // Выгрузка по изменившемуся без файла версий — полная поверх каталога: каталог
+            // человека она не заменяет, лишнего в нём не удаляет.
             (SourceFormat::Designer, DumpMode::Incremental, Provider::Designer, _, _) => {
                 run_incremental_dump_designer(
                     context,
@@ -383,6 +424,18 @@ fn run_dump_selected(
                     utilities.runner_for(UtilityType::V8),
                 )
             }
+            (SourceFormat::Designer, DumpMode::Full, Provider::Designer, _, _)
+                if over_directory == OverDirectory::Whole =>
+            {
+                run_dump_over_directory_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::V8),
+                    OverDirectory::Whole,
+                )
+            }
             (SourceFormat::Designer, DumpMode::Incremental, Provider::Ibcmd, _, _) => {
                 run_incremental_dump_ibcmd(
                     context,
@@ -390,6 +443,18 @@ fn run_dump_selected(
                     &resolved,
                     binary.as_path(),
                     utilities.runner_for(UtilityType::Ibcmd),
+                )
+            }
+            (SourceFormat::Designer, DumpMode::Full, Provider::Ibcmd, _, _)
+                if over_directory == OverDirectory::Whole =>
+            {
+                run_dump_over_directory_ibcmd(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::Ibcmd),
+                    OverDirectory::Whole,
                 )
             }
             (SourceFormat::Designer, DumpMode::Full, Provider::Designer, _, _) => {
@@ -524,7 +589,10 @@ fn run_dump_selected(
         let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
         (
             platform_result,
-            merge_optional_messages(message, copy_warning),
+            merge_optional_messages(
+                full_instead.clone(),
+                merge_optional_messages(message, copy_warning),
+            ),
         )
     });
     drop(lock_guard);
@@ -566,6 +634,45 @@ fn run_dump_selected(
             ))
         }
     }
+}
+
+/// Почему выгрузка по изменившемуся не может опереться на файл версий в каталоге `dir`:
+/// файла нет, версия его формата не распознана или не та, что пишет выбранная платформа.
+/// `None` — файл годится. Версию, которую пишет платформа, раннер знает не для всех
+/// платформ; где не знает, о чужой версии не судит.
+pub(super) fn version_file_verdict(
+    dir: &Path,
+    location: Option<&crate::platform::locator::UtilityLocation>,
+) -> Result<Option<String>, AppError> {
+    use crate::platform::dump_format::{read_recorded, written_by, RecordedFormat};
+    use crate::platform::locator::UtilityVersion;
+    let path = dir.join(crate::use_cases::ignored_files::VERSION_FILE_NAME);
+    let recorded = read_recorded(&path).map_err(|error| {
+        AppError::Runtime(format!("failed to read '{}': {error}", path.display()))
+    })?;
+    let platform = location.and_then(|found| match &found.version {
+        Some(UtilityVersion::Platform(version)) => Some(version),
+        Some(UtilityVersion::Edt(_)) | None => None,
+    });
+    Ok(match recorded {
+        RecordedFormat::Missing => Some(format!(
+            "no version file ConfigDumpInfo.xml in '{}': the dump ran full instead of incremental and wrote it",
+            dir.display()
+        )),
+        RecordedFormat::Unrecognized => Some(format!(
+            "the format version of '{}' is not recognized: the dump ran full instead of incremental",
+            path.display()
+        )),
+        RecordedFormat::Version(found) => platform
+            .and_then(|platform| written_by(platform).map(|written| (platform, written)))
+            .filter(|(_, written)| *written != found)
+            .map(|(platform, written)| {
+                format!(
+                    "'{}' is in format {found}, and platform {platform} writes {written}: the dump ran full instead of incremental",
+                    path.display()
+                )
+            }),
+    })
 }
 
 /// Что выгрузка делает с файлом версий набора и копией раннера.

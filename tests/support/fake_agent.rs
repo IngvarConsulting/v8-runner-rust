@@ -283,6 +283,14 @@ impl FakeAgent {
             let target = self.user_dir().join(&dir);
             fs::create_dir_all(&target).expect("agent output dir");
             fs::write(target.join("Configuration.xml"), "<Configuration/>\n").expect("dump file");
+            // Как платформа: выгрузка целиком и по изменившемуся пишет файл версий.
+            if option("list-file").is_none() {
+                fs::write(
+                    target.join("ConfigDumpInfo.xml"),
+                    "<ConfigDumpInfo format=\"Hierarchical\" version=\"2.20\"/>\n",
+                )
+                .expect("dump info");
+            }
             if has("update") {
                 fs::write(target.join("updated.txt"), "updated").expect("update marker");
             }
@@ -334,7 +342,10 @@ impl FakeAgent {
                 }
                 fs::write(
                     &version_file,
-                    format!("<ConfigDumpInfo agent-load=\"{}\"/>\n", self.token()),
+                    format!(
+                        "<ConfigDumpInfo version=\"2.20\" agent-load=\"{}\"/>\n",
+                        self.token()
+                    ),
                 )
                 .expect("agent version file");
             }

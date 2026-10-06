@@ -18,7 +18,7 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::edt_project;
 use crate::support::error::AppError;
-use crate::support::temp::{partial_list_file, platform_logs_dir, reserved_source_set_dir};
+use crate::support::temp::{partial_list_file, platform_logs_dir};
 use crate::use_cases::build_progress::{
     build_mode_label, log_build_step_timeline, log_timeline_stage, TimelineStageStatus,
 };
@@ -353,9 +353,10 @@ fn execute_edt_export_step(
         ) {
             return Err(error);
         }
-        let export_target = reserved_source_set_dir(&config.work_path, &source_set.name);
+        // Снимок лежит под памятью выбранной базы: его путь называет контекст `designer-`.
+        let export_target = designer_context.path();
         let project_name = resolve_edt_project_name(source_set, edt_context)?;
-        recreate_directory(&export_target).map_err(|error| {
+        recreate_directory(export_target).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to prepare EDT export directory '{}': {error}",
                 export_target.display()
@@ -517,6 +518,12 @@ fn execute_source_set_step(
     // Отмену, которую отложила критическая команда, шаг отмечает сразу по её исходу, до
     // проверки итога: так её называет и отказ этой команды, и всё, что идёт после, —
     // безопасная точка, следующая команда, фиксация состояния.
+    // Версия формата сверяется до запуска платформы: формат новее неё — отказ.
+    let format_notice = crate::use_cases::version_file::check_load_format(
+        &config.work_path,
+        load_context,
+        crate::platform::locator::platform_version_of(UtilityType::V8, binary).as_ref(),
+    )?;
     collecting_deferrals(|deferrals| {
         if let Some(error) = interruption_before_safe_point(
             context,
@@ -626,7 +633,10 @@ fn execute_source_set_step(
 
         commit_step_state(source_set, commit_context, &config.work_path, commit)
     })
-    .map(|((), warnings)| warnings)
+    .map(|((), mut warnings)| {
+        warnings.extend(format_notice);
+        warnings
+    })
 }
 
 fn write_partial_load_list_or_preserve(
@@ -688,6 +698,12 @@ fn execute_source_set_step_ibcmd(
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
 ) -> Result<Vec<String>, AppError> {
+    // Версия формата сверяется до запуска платформы: формат новее неё — отказ.
+    let format_notice = crate::use_cases::version_file::check_load_format(
+        &config.work_path,
+        load_context,
+        crate::platform::locator::platform_version_of(UtilityType::Ibcmd, binary).as_ref(),
+    )?;
     collecting_deferrals(|deferrals| {
         if let Some(error) = interruption_before_safe_point(
             context,
@@ -775,7 +791,10 @@ fn execute_source_set_step_ibcmd(
 
         commit_step_state(source_set, commit_context, &config.work_path, commit)
     })
-    .map(|((), warnings)| warnings)
+    .map(|((), mut warnings)| {
+        warnings.extend(format_notice);
+        warnings
+    })
 }
 
 #[cfg(test)]
@@ -789,7 +808,6 @@ mod tests {
         ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
     };
     use crate::domain::build::BuildMode;
-    use crate::domain::source_set::SourceSetContext;
     #[cfg(unix)]
     use crate::platform::process::HeldCommand;
     #[cfg(unix)]
@@ -1778,14 +1796,21 @@ mod tests {
         source_path: &Path,
         extension_name: &str,
     ) -> PathBuf {
-        let context = SourceSetContext::new(
-            format!("tool:{extension_name}"),
-            source_path.to_path_buf(),
-            format!("tool-{extension_name}-source"),
-        );
-        context
+        SourceSetsService::new(config)
+            .tool_extension_context(extension_name, source_path.to_path_buf())
             .storage_path(&config.work_path)
             .expect("memory path")
+    }
+
+    /// Снимок Конфигуратора набора EDT: под памятью выбранной базы.
+    fn designer_snapshot(config: &AppConfig, name: &str) -> PathBuf {
+        SourceSetsService::new(config)
+            .designer_contexts()
+            .into_iter()
+            .find(|context| context.name() == name)
+            .expect("designer context")
+            .path()
+            .to_path_buf()
     }
 
     fn write_recoverable_tool_extension_storage(path: &Path) {
@@ -2000,7 +2025,7 @@ mod tests {
         let result = run_build(&config, &build_args(true)).expect("build");
 
         assert!(result.ok);
-        let source_set_export = work.join("designer").join("tool-extensions");
+        let source_set_export = designer_snapshot(&config, "tool-extensions");
         let tool_export = work.join("tool-extensions").join("client_mcp");
         assert_eq!(
             fs::read_to_string(source_set_export.join("exported.txt")).expect("set export"),
@@ -2506,8 +2531,7 @@ mod tests {
         assert!(designer_calls_text.contains("/LoadConfigFromFiles"));
         assert!(!designer_calls_text.contains("-partial"));
         assert!(designer_calls_text.contains(
-            work.join("designer")
-                .join("main")
+            designer_snapshot(&config, "main")
                 .display()
                 .to_string()
                 .as_str()
@@ -2574,8 +2598,7 @@ mod tests {
         assert!(!ibcmd_calls_text.contains("--partial"));
         assert!(ibcmd_calls_text.contains("infobase --db-path /tmp/ib config apply"));
         assert!(ibcmd_calls_text.contains(
-            work.join("designer")
-                .join("main")
+            designer_snapshot(&config, "main")
                 .display()
                 .to_string()
                 .as_str()
@@ -2940,7 +2963,7 @@ mod tests {
         run_build(&config, &build_args(false)).expect("initial build");
 
         fs::write(
-            work.join("designer").join("main").join("exported.txt"),
+            designer_snapshot(&config, "main").join("exported.txt"),
             "generated designer drift\n",
         )
         .expect("modify generated designer source");
