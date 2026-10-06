@@ -29,7 +29,7 @@ generated_owner_marker_schema_is_current`. Метку другой версии 
   "version": 1,
   "owners": [
     {
-      "machine": "4c2f8e0a9b7d41d6a1f3c5e7d9b2a4c6",
+      "machine": "9f1c0d4be2a37f6815c9e0b4a7d2f3e61b8c5a9047de2f6c3b1a8e5d7c4f0a92",
       "host": "dev-laptop",
       "project": "/work/erp",
       "shared": false,

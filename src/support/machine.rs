@@ -144,18 +144,24 @@ pub fn host_name() -> Option<String> {
 
 /// Identifier of this machine that the system keeps across a host rename: `machine-id` on
 /// Linux, the hardware UUID on macOS, `MachineGuid` on Windows. `None` when the system
-/// gives none.
+/// gives none. Callers keep it hashed: `machine-id(5)` asks not to show the raw value.
 pub fn machine_id() -> Option<String> {
     system_machine_id()
-        .map(|id| id.trim().to_ascii_lowercase())
-        .filter(|id| !id.is_empty())
+}
+
+/// A `machine-id` file's value, if it holds one: 32 hexadecimal digits. An empty file and
+/// `uninitialized` — a system still in its first boot — hold none.
+#[cfg(any(target_os = "linux", test))]
+fn linux_machine_id(text: &str) -> Option<String> {
+    let id = text.trim();
+    (id.len() == 32 && id.chars().all(|ch| ch.is_ascii_hexdigit())).then(|| id.to_ascii_lowercase())
 }
 
 #[cfg(target_os = "linux")]
 fn system_machine_id() -> Option<String> {
     ["/etc/machine-id", "/var/lib/dbus/machine-id"]
         .into_iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
+        .find_map(|path| linux_machine_id(&std::fs::read_to_string(path).ok()?))
 }
 
 #[cfg(target_vendor = "apple")]
@@ -170,7 +176,8 @@ fn system_machine_id() -> Option<String> {
     if unsafe { libc::gethostuuid(uuid.as_mut_ptr(), &timeout) } != 0 {
         return None;
     }
-    Some(uuid.iter().map(|byte| format!("{byte:02x}")).collect())
+    // A zeroed UUID is the answer of a machine that has none.
+    (uuid != [0u8; 16]).then(|| uuid.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[cfg(windows)]
@@ -206,7 +213,10 @@ fn system_machine_id() -> Option<String> {
         .iter()
         .position(|unit| *unit == 0)
         .unwrap_or(text.len());
-    Some(String::from_utf16_lossy(&text[..end]))
+    let guid = String::from_utf16_lossy(&text[..end])
+        .trim()
+        .to_ascii_lowercase();
+    (!guid.is_empty()).then_some(guid)
 }
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
@@ -216,7 +226,10 @@ fn system_machine_id() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_name, is_process_alive, is_process_running, machine_id, process_state};
+    use super::{
+        host_name, is_process_alive, is_process_running, linux_machine_id, machine_id,
+        process_state,
+    };
 
     #[test]
     fn this_process_is_alive() {
@@ -279,11 +292,22 @@ mod tests {
     #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
     #[test]
     fn this_machine_keeps_one_identifier() {
-        if std::path::Path::new("/etc/machine-id").exists() || !cfg!(target_os = "linux") {
-            let id = machine_id().expect("machine id");
-            assert_eq!(machine_id().as_deref(), Some(id.as_str()));
-            assert_eq!(id, id.trim().to_ascii_lowercase());
-        }
+        // A host without a valid `machine-id` (an empty file in a container) has none, and
+        // that is an answer too; whatever the answer, it does not change between calls.
+        assert_eq!(machine_id(), machine_id());
+    }
+
+    #[test]
+    fn a_machine_id_file_holds_32_hex_digits_or_nothing() {
+        assert_eq!(
+            linux_machine_id("4C2F8E0A9B7D41D6A1F3C5E7D9B2A4C6\n").as_deref(),
+            Some("4c2f8e0a9b7d41d6a1f3c5e7d9b2a4c6")
+        );
+        assert_eq!(linux_machine_id(""), None);
+        assert_eq!(linux_machine_id("\n"), None);
+        assert_eq!(linux_machine_id("uninitialized\n"), None);
+        assert_eq!(linux_machine_id("4c2f8e0a9b7d41d6a1f3c5e7d9b2a4"), None);
+        assert_eq!(linux_machine_id("zz2f8e0a9b7d41d6a1f3c5e7d9b2a4c6"), None);
     }
 
     #[cfg(any(unix, windows))]

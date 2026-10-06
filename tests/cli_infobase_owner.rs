@@ -624,7 +624,7 @@ fn an_owner_on_another_machine_is_never_replaced() {
     let foreign = json!({
         "version": 1,
         "owners": [{
-            "machine": "another-machine-id",
+            "machine": "a".repeat(64),
             "host": "build-agent",
             "project": "/srv/elsewhere",
             "shared": false,
@@ -680,4 +680,79 @@ fn ownership_is_refused_before_foreign_memory() {
     let refused = copied.run(&["push"]);
 
     assert_infobase_held(&refused, "push", &holder, &stand);
+}
+
+/// Местный слой владельца, который не разобрать, называется без своего текста: в нём бывают
+/// пароли, и ни командная строка, ни MCP их не повторяют.
+#[test]
+fn a_secret_in_the_unparsable_layer_of_the_owner_never_reaches_the_answer() {
+    const SECRET: &str = "TOPSECRET1";
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    succeeded(&first.run(&["push"]));
+    fs::write(
+        first.root.join("v8project.local.yaml"),
+        format!(
+            "infobases:\n  origin:\n    connection: 'File={};Pwd={SECRET}'\n    password: {SECRET}\n  [broken\n",
+            stand.base.display()
+        ),
+    )
+    .expect("break layer");
+
+    let refused = second.run(&["push"]);
+
+    let message = assert_infobase_held(&refused, "push", &first, &stand);
+    assert!(message.contains("cannot be parsed"), "{message}");
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!stdout.contains(SECRET), "{stdout}");
+    assert!(!stderr.contains(SECRET), "{stderr}");
+    let answer = support::mcp::call_tool(&second.config, "build_project", json!({}));
+    assert!(answer.is_error, "{}", answer.envelope);
+    assert!(
+        !answer.envelope.to_string().contains(SECRET),
+        "{}",
+        answer.envelope
+    );
+}
+
+/// Проектный файл владельца, который не обычный файл (FIFO), раннер не открывает: команда не
+/// повисает, а владелец считается живым.
+#[test]
+fn a_fifo_in_place_of_the_owner_project_file_does_not_hang_the_command() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    succeeded(&first.run(&["push"]));
+    let project_file = first.root.join("v8project.yaml");
+    fs::remove_file(&project_file).expect("remove project file");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&project_file)
+        .status()
+        .expect("mkfifo");
+    assert!(status.success());
+
+    let mut runner = v8_runner_command()
+        .arg("--config")
+        .arg(&second.config)
+        .arg("--json-message")
+        .arg("push")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn push");
+    let finished = support::wait_until(
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(50),
+        || runner.try_wait().ok().flatten().is_some(),
+    );
+    if !finished {
+        let _ = runner.kill();
+    }
+    let output = runner.wait_with_output().expect("push");
+
+    assert!(finished, "the command hung on the owner's FIFO");
+    let message = assert_infobase_held(&output, "push", &first, &stand);
+    assert!(message.contains("cannot be read"), "{message}");
 }

@@ -1560,6 +1560,8 @@ pub fn preview_prepared_infobase_command(
         PreparedInfobaseCommand::Restore { request, provider } => {
             // Восстановление — команда записи: его превью называет отказ по владельцу так
             // же, как прогон.
+            // Превью команды записи предупреждений не несёт: метку, которую не прочитать, оно
+            // называет отказом, как прогон.
             if let Err(refusal) =
                 preview_boundary(config, CommandName::InfobaseRestore, BaseAccess::Writes)
             {
@@ -2448,9 +2450,19 @@ pub(crate) fn with_cli_workspace_lock<T>(
         );
         // Превью замков не берёт, но отказ по владельцу называет заранее: метку оно читает
         // без замка и ничего в неё не пишет.
-        if let Err(refusal) = preview_boundary(config, command, base) {
-            print_workspace_refusal(presenter, command, &refusal);
-            return Err(refusal.error);
+        match preview_boundary(config, command, base) {
+            Ok(notes) => {
+                for note in &notes {
+                    presenter.note_leading_warnings(
+                        note.phase.as_str(),
+                        std::slice::from_ref(&note.message),
+                    );
+                }
+            }
+            Err(refusal) => {
+                print_workspace_refusal(presenter, command, &refusal);
+                return Err(refusal.error);
+            }
         }
         return run();
     }

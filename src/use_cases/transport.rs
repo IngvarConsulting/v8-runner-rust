@@ -77,14 +77,23 @@ where
 }
 
 /// Граница превью: замков нет, метку владельца читают без замка и ничего не пишут. Превью
-/// команды записи на базе другой рабочей копии отказывает так же, как отказал бы прогон.
+/// команды записи на базе другой рабочей копии отказывает так же, как отказал бы прогон;
+/// превью команды чтения говорит, если метку не прочитать.
 pub fn preview_boundary(
     config: &AppConfig,
     command: CommandName,
     base: BaseAccess,
-) -> Result<(), BoundaryRefusal> {
+) -> Result<Vec<BoundaryNote>, BoundaryRefusal> {
     check_infobase_owner(config, command.as_str(), base, OwnerCheck::Preview)
-        .map(drop)
+        .map(|messages| {
+            messages
+                .into_iter()
+                .map(|message| BoundaryNote {
+                    phase: InfobaseTransferPhase::InfobaseOwner,
+                    message,
+                })
+                .collect()
+        })
         .map_err(|error| BoundaryRefusal {
             phase: InfobaseTransferPhase::InfobaseOwner,
             error,

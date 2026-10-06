@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::loader::load_declared_infobases;
+use crate::config::loader::{load_declared_infobases, ConfigLoadError};
 use crate::config::model::AppConfig;
 use crate::domain::next_step::NextStep;
 use crate::platform::connection::V8Connection;
@@ -55,13 +55,16 @@ pub struct OwnerMarker {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerRecord {
-    /// Идентификатор машины, который переживает смену имени хоста: `machine-id` у Linux,
-    /// аппаратный UUID у macOS, `MachineGuid` у Windows; без него — `host:<имя хоста>`.
+    /// Машина копии: SHA-256 от `v8-runner/owner/` и идентификатора машины, который
+    /// переживает смену имени хоста (`machine-id` у Linux, аппаратный UUID у macOS,
+    /// `MachineGuid` у Windows; без него — `host:<имя хоста>`), шестнадцатеричной строкой.
+    /// Сам идентификатор в метку не попадает: `machine-id(5)` просит его не показывать.
+    #[schemars(regex(pattern = r"^[0-9a-f]{64}$"))]
     pub machine: String,
     /// Имя хоста на момент записи — для людей; машину называет `machine`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// Канонический каталог проекта копии: там лежит её местный слой.
+    /// Канонический абсолютный каталог проекта копии: там лежит её местный слой.
     pub project: PathBuf,
     /// Согласие копии делить базу.
     pub shared: bool,
@@ -73,7 +76,9 @@ pub struct OwnerRecord {
 /// Эта рабочая копия: машина и каталог проекта.
 #[derive(Debug, Clone)]
 pub(crate) struct ThisCopy {
-    machine: String,
+    /// Хеш идентификатора машины, как его пишет метка; `None`, если машина не называет ни
+    /// идентификатора, ни имени хоста.
+    machine: Option<String>,
     host: Option<String>,
     project: PathBuf,
 }
@@ -82,23 +87,33 @@ impl ThisCopy {
     /// Копия, которой принадлежит проект `config`, на этой машине.
     fn of(config: &AppConfig) -> Self {
         let host = host_name();
-        let machine = machine_id()
-            .or_else(|| host.as_ref().map(|host| format!("host:{host}")))
-            .unwrap_or_else(|| "unknown".to_owned());
-        Self::on(machine, host, &config.base_path)
+        let identity = machine_id().or_else(|| host.as_ref().map(|host| format!("host:{host}")));
+        Self::on(identity.as_deref(), host, &config.base_path)
     }
 
-    fn on(machine: String, host: Option<String>, project: &Path) -> Self {
+    /// Копия с идентификатором машины `identity` в открытом виде; в метку идёт его хеш.
+    fn on(identity: Option<&str>, host: Option<String>, project: &Path) -> Self {
         Self {
-            machine,
+            machine: identity.map(machine_hash),
             host,
             project: canonical(project),
         }
     }
 
     fn is(&self, record: &OwnerRecord) -> bool {
-        record.machine == self.machine && same_path(&record.project, &self.project)
+        self.is_on_the_machine_of(record) && same_path(&record.project, &self.project)
     }
+
+    fn is_on_the_machine_of(&self, record: &OwnerRecord) -> bool {
+        self.machine.as_deref() == Some(record.machine.as_str())
+    }
+}
+
+/// Хеш идентификатора машины для метки: идентификатор в открытом виде не хранится.
+fn machine_hash(identity: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("v8-runner/owner/{identity}").as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Чего команда ждёт от проверки: прогон записывает свою копию, превью только называет отказ.
@@ -191,6 +206,13 @@ fn check_as(
     if !kept.is_empty() && gone.is_empty() {
         return Ok(Vec::new());
     }
+    let Some(machine) = this.machine.clone() else {
+        return Ok(vec![format!(
+            "this machine gives neither an identifier nor a host name, so the working copy '{}' is not recorded as the owner of the infobase '{}'",
+            this.project.display(),
+            base_dir.display()
+        )]);
+    };
 
     let mut notes = Vec::new();
     for (owner, why) in &gone {
@@ -205,7 +227,7 @@ fn check_as(
     }
     if nobody_held_it && base_dir.is_dir() {
         notes.push(format!(
-            "the infobase '{}' had no owner marker and is now held by this working copy '{}' (owner marker '{}')",
+            "the infobase '{}' had no owner and is now held by this working copy '{}' (owner marker '{}')",
             base_dir.display(),
             this.project.display(),
             marker_path.display()
@@ -213,7 +235,7 @@ fn check_as(
     }
     if kept.is_empty() {
         kept.push(OwnerRecord {
-            machine: this.machine.clone(),
+            machine,
             host: this.host.clone(),
             project: this.project.clone(),
             shared: false,
@@ -250,10 +272,13 @@ enum Standing {
 enum Alive {
     /// Каталог копии на этой машине есть и объявляет базу.
     Declares,
-    /// Местный слой копии не прочитать: она считается живой и несогласной.
+    /// Местный слой копии не прочитать: она считается живой и несогласной. Причина — без
+    /// текста чужих файлов: в нём бывают пароли.
     Unreadable(String),
-    /// Копия с другой машины: проверить её отсюда нельзя.
-    Remote,
+    /// Копия с другой машины: проверить её отсюда нельзя. `maybe_this_machine` — тот же
+    /// каталог проекта и то же имя хоста, что у этой копии: возможно, это эта машина, у
+    /// которой сменился идентификатор.
+    Remote { maybe_this_machine: bool },
 }
 
 enum Gone {
@@ -274,8 +299,11 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
     if this.is(owner) {
         return Standing::This;
     }
-    if owner.machine != this.machine {
-        return Standing::Alive(Alive::Remote);
+    if !this.is_on_the_machine_of(owner) {
+        let maybe_this_machine = owner.host.is_some()
+            && owner.host == this.host
+            && same_path(&owner.project, &this.project);
+        return Standing::Alive(Alive::Remote { maybe_this_machine });
     }
     // Ушедшим владельца делает только ответ «нет такого каталога»: каталог, который не
     // прочитать, ещё может объявлять базу.
@@ -285,12 +313,25 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Standing::Gone(Gone::DirectoryIsGone)
         }
-        Err(error) => return Standing::Alive(Alive::Unreadable(error.to_string())),
+        Err(error) => {
+            return Standing::Alive(Alive::Unreadable(format!(
+                "its directory cannot be read: {}",
+                error.kind()
+            )))
+        }
     }
     // Объявленный путь разрешается от каталога владельца: у проекта, скопированного
     // целиком, `File=build/ib` указывает на его собственную базу, а не на копию.
     match load_declared_infobases(&owner.project) {
-        Err(error) => Standing::Alive(Alive::Unreadable(error.to_string())),
+        // Текст ошибки разбора цитирует файл, а в местном слое лежат пароли: причина
+        // называется без него.
+        Err(ConfigLoadError::ReadError(error)) => Standing::Alive(Alive::Unreadable(format!(
+            "its v8project.yaml or v8project.local.yaml cannot be read: {}",
+            error.kind()
+        ))),
+        Err(_) => Standing::Alive(Alive::Unreadable(
+            "its v8project.yaml or v8project.local.yaml cannot be parsed".to_owned(),
+        )),
         Ok(declared) => {
             let declares = declared.values().any(|infobase| {
                 V8Connection::from_connection_string(&infobase.connection)
@@ -321,14 +362,14 @@ fn held_refusal(
                 "the working copy '{}' on this machine",
                 owner.project.display()
             ),
-            Alive::Unreadable(error) => format!(
-                "the working copy '{}' on this machine, whose local layer cannot be read ({error}) and which therefore counts as holding it",
+            Alive::Unreadable(reason) => format!(
+                "the working copy '{}' on this machine, whose local layer cannot be read ({reason}) and which therefore counts as holding it",
                 owner.project.display()
             ),
-            Alive::Remote => format!(
+            Alive::Remote { .. } => format!(
                 "the working copy '{}' on machine '{}'",
                 owner.project.display(),
-                owner.host.as_deref().unwrap_or(&owner.machine)
+                owner.host.as_deref().unwrap_or("with an unknown host name")
             ),
         })
         .collect::<Vec<_>>()
@@ -340,8 +381,16 @@ fn held_refusal(
                 "remove the infobase from v8project.local.yaml of '{}' or remove that working copy",
                 owner.project.display()
             ),
-            Alive::Remote => format!(
+            Alive::Remote {
+                maybe_this_machine: false,
+            } => format!(
                 "on another machine only by hand: delete its record of '{}' from the owner marker",
+                owner.project.display()
+            ),
+            Alive::Remote {
+                maybe_this_machine: true,
+            } => format!(
+                "the record of '{}' names this project and this host name with another machine identifier — perhaps it is this machine whose identifier changed: then delete that record from the owner marker",
                 owner.project.display()
             ),
         })
@@ -402,9 +451,21 @@ fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
             ))
         }
     }
-    serde_json::from_value(value)
-        .map(Some)
-        .map_err(|error| MarkerReadError::Malformed(error.to_string()))
+    let marker: OwnerMarker = serde_json::from_value(value)
+        .map_err(|error| MarkerReadError::Malformed(error.to_string()))?;
+    // Неабсолютный каталог владельца раннер разрешил бы от своего каталога и спросил бы не
+    // того владельца: такую метку он не понимает.
+    if let Some(owner) = marker
+        .owners
+        .iter()
+        .find(|owner| !owner.project.is_absolute())
+    {
+        return Err(MarkerReadError::Malformed(format!(
+            "the owner record names the project '{}', which is not an absolute path",
+            owner.project.display()
+        )));
+    }
+    Ok(Some(marker))
 }
 
 /// Пишет метку заменой файла целиком: читатель без замка видит прежнюю метку или новую.
@@ -503,7 +564,7 @@ mod tests {
     }
 
     fn on(machine: &str, host: &str, config: &AppConfig) -> ThisCopy {
-        ThisCopy::on(machine.to_owned(), Some(host.to_owned()), &config.base_path)
+        ThisCopy::on(Some(machine), Some(host.to_owned()), &config.base_path)
     }
 
     /// Машину называет её идентификатор, а не имя хоста: после смены имени копия узнаёт
@@ -701,5 +762,124 @@ mod tests {
         );
         assert!(refused.message().contains("cannot be written"), "{refused}");
         assert!(!marker_path.exists());
+    }
+
+    /// Метка хранит хеш идентификатора машины, а не сам идентификатор.
+    #[test]
+    fn the_marker_keeps_the_machine_hashed() {
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let config = project(&dir.path().join("copy"), &base);
+        check_as(
+            &on("4c2f8e0a9b7d41d6a1f3c5e7d9b2a4c6", "host", &config),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("run");
+
+        let text =
+            fs::read_to_string(owner_marker_path(&base).expect("marker path")).expect("marker");
+        assert!(!text.contains("4c2f8e0a9b7d41d6a1f3c5e7d9b2a4c6"), "{text}");
+        let machine = &marker(&base).owners[0].machine;
+        assert_eq!(
+            machine,
+            &super::machine_hash("4c2f8e0a9b7d41d6a1f3c5e7d9b2a4c6")
+        );
+        assert_eq!(machine.len(), 64);
+        assert!(machine
+            .chars()
+            .all(|ch| matches!(ch, '0'..='9' | 'a'..='f')));
+    }
+
+    /// Запись этого проекта с этим именем хоста, но с другой машиной раннер не сменяет —
+    /// это может быть и другая машина с тем же путём, — но отказ подсказывает, что это,
+    /// возможно, эта машина со сменившимся идентификатором.
+    #[test]
+    fn a_record_of_this_project_and_host_on_another_machine_is_named_as_maybe_this_one() {
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let config = project(&dir.path().join("copy"), &base);
+        check_as(
+            &on("old-machine", "host", &config),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("run");
+
+        let refused = check_as(
+            &on("new-machine", "host", &config),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect_err("another machine holds the base");
+
+        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseHeld);
+        assert!(
+            refused
+                .message()
+                .contains("perhaps it is this machine whose identifier changed"),
+            "{refused}"
+        );
+    }
+
+    /// Машина без идентификатора и без имени хоста подчиняется владельцу, но в метку себя не
+    /// записывает и говорит об этом.
+    #[test]
+    fn a_machine_without_an_identity_is_not_recorded() {
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let config = project(&dir.path().join("copy"), &base);
+
+        let notes = check_as(
+            &ThisCopy::on(None, None, &config.base_path),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("run");
+
+        assert!(
+            notes.iter().any(|note| note.contains("not recorded")),
+            "{notes:?}"
+        );
+        assert!(!owner_marker_path(&base).expect("marker path").exists());
+    }
+
+    /// Метку, которая называет каталог владельца не абсолютным путём, раннер не понимает:
+    /// команда записи отказывает, а метку не трогает.
+    #[test]
+    fn a_marker_with_a_relative_project_is_not_understood() {
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let config = project(&dir.path().join("copy"), &base);
+        let marker_path = owner_marker_path(&base).expect("marker path");
+        let text = format!(
+            "{{\"version\":1,\"owners\":[{{\"machine\":\"{}\",\"project\":\"copy\",\"shared\":false,\"since\":\"2026-10-01T00:00:00Z\"}}]}}",
+            super::machine_hash("machine-a")
+        );
+        fs::write(&marker_path, &text).expect("marker");
+
+        let refused = check_as(
+            &on("machine-a", "host", &config),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect_err("a relative project is not understood");
+
+        assert_eq!(refused.kind(), UseCaseErrorKind::Runtime);
+        assert!(
+            refused.message().contains("not an absolute path"),
+            "{refused}"
+        );
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), text);
     }
 }

@@ -597,10 +597,8 @@ pub fn load_declared_infobases(
     project_dir: &Path,
 ) -> Result<std::collections::BTreeMap<String, InfobaseConfig>, ConfigLoadError> {
     let mut declared = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    // `try_exists`, а не `exists`: файл, о котором нельзя узнать, есть ли он, — ошибка, а
-    // не «базу не объявляет».
     let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
-    if project_path.try_exists()? {
+    if regular_file_exists(&project_path)? {
         let mut project = read_yaml_file(&project_path)?;
         fold_infobase_synonym(&mut project, ConfigFile::Project(&project_path))?;
         if let Some(infobases) = root_mapping_mut(&mut project)?.remove(yaml_key("infobases")) {
@@ -608,7 +606,7 @@ pub fn load_declared_infobases(
         }
     }
     let local_path = project_dir.join(LOCAL_CONFIG_FILE_NAME);
-    if local_path.try_exists()? {
+    if regular_file_exists(&local_path)? {
         let mut overlay = read_yaml_file(&local_path)?;
         reject_local_overlay_keys(&overlay)?;
         validate_local_overlay_schema_boundary(overlay.clone())
@@ -629,6 +627,20 @@ pub fn load_declared_infobases(
         normalize_infobase_paths(infobase, project_dir);
     }
     Ok(infobases)
+}
+
+/// Есть ли обычный файл по пути. Нет ничего — `false`; узнать нельзя или там не обычный
+/// файл (каталог, FIFO, на котором чтение повисло бы) — ошибка, а не «базу не объявляет».
+fn regular_file_exists(path: &Path) -> Result<bool, ConfigLoadError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(ConfigLoadError::ReadError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{}' is not a regular file", path.display()),
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn resolve_primary_config_path(config_path: Option<&str>) -> Result<PathBuf, ConfigLoadError> {
