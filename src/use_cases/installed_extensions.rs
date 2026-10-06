@@ -7,16 +7,17 @@ use std::path::Path;
 
 use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider};
-use crate::platform::designer::DesignerDsl;
 use crate::platform::extension_inventory::{
     is_extension_identifier, parse_extension_inventory, parse_extension_name_list,
 };
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::dump_config::helpers::{
+    build_designer_dsl, build_ibcmd_dsl, ensure_success_of, map_ibcmd_error,
+};
 use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::progress::log_live_stage;
 
@@ -33,27 +34,27 @@ pub(crate) fn read_installed_extensions(
     binary: Option<&Path>,
     utilities: &PlatformUtilities,
 ) -> Result<Vec<String>, AppError> {
+    // Подпись и журнал `pull --all` — прежние (`[Pull]`, `dump-extensions-list.log`); у
+    // `download` — те же по своему имени.
     let command = context.command().as_str();
+    let mut label = command.to_owned();
+    if let Some(first) = label.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
     log_live_stage(
         &format!("{command}: extensions"),
-        &format!("[{command}] reading the extensions installed in the infobase"),
+        &format!("[{label}] reading the extensions installed in the infobase"),
     );
     let names = match (provider, binary) {
         (Provider::Designer, Some(binary)) => {
-            let log_dir =
-                crate::support::temp::platform_logs_dir(&config.work_path).map_err(|error| {
-                    AppError::Runtime(format!("failed to create platform logs dir: {error}"))
-                })?;
-            let dsl = DesignerDsl::new(
-                binary.to_path_buf(),
-                config.v8_connection(),
+            let dsl = build_designer_dsl(
+                context,
+                config,
+                binary,
                 utilities.runner_for(UtilityType::V8),
-                Some(log_dir.join(format!(
-                    "{}-extensions-list.log",
-                    context.command().as_str()
-                ))),
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-            );
+                "extensions",
+                "list",
+            )?;
             let listed = dsl
                 .dump_db_cfg_list_all_extensions()
                 .map_err(AppError::from)?;
@@ -70,23 +71,13 @@ pub(crate) fn read_installed_extensions(
             parse_extension_name_list(out).map_err(AppError::InvalidOutput)?
         }
         (Provider::Ibcmd, Some(binary)) => {
-            let connection =
-                IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-            let data_path = config.work_path.join("ibcmd-data");
-            std::fs::create_dir_all(&data_path).map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to create IBCMD standalone-server data directory '{}': {error}",
-                    data_path.display()
-                ))
-            })?;
-            let dsl = IbcmdDsl::new(
-                binary.to_path_buf(),
-                connection,
+            let dsl = build_ibcmd_dsl(
+                context,
+                config,
+                binary,
                 utilities.runner_for(UtilityType::Ibcmd),
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-            )
-            .with_data_path(data_path);
-            let listed = dsl.infobase_extension_list().map_err(AppError::from)?;
+            )?;
+            let listed = dsl.infobase_extension_list().map_err(map_ibcmd_error)?;
             ensure_listed(&listed)?;
             parse_extension_inventory(&listed.process.stdout)
                 .map_err(AppError::InvalidOutput)?
@@ -122,19 +113,10 @@ pub(crate) fn read_installed_extensions(
 
 /// Список прочитан, только когда процесс завершился удачно.
 fn ensure_listed(result: &PlatformCommandResult) -> Result<(), AppError> {
-    let Err(code) = result.process.outcome() else {
-        return Ok(());
-    };
-    Err(AppError::Platform(
-        crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details(
-            "list extensions of",
-            "infobase",
-            "the configured infobase",
-            code.get(),
-            &result.process.stdout,
-            &result.process.stderr,
-            result.platform_log.as_deref(),
-            result.platform_log_path.as_deref(),
-        ),
-    ))
+    ensure_success_of(
+        "list extensions of",
+        "infobase",
+        "the configured infobase",
+        result,
+    )
 }

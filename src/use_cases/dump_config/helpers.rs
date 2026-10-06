@@ -196,7 +196,7 @@ fn read_edt_project_name(path: &Path, label: &str) -> Result<String, AppError> {
     })
 }
 
-pub(super) fn build_designer_dsl<'a>(
+pub(crate) fn build_designer_dsl<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
     binary: &Path,
@@ -218,7 +218,7 @@ pub(super) fn build_designer_dsl<'a>(
     ))
 }
 
-pub(super) fn build_ibcmd_dsl<'a>(
+pub(crate) fn build_ibcmd_dsl<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
     binary: &Path,
@@ -243,7 +243,7 @@ pub(super) fn build_ibcmd_dsl<'a>(
     .with_data_path(data_path))
 }
 
-pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {
+pub(crate) fn map_ibcmd_error(error: IbcmdError) -> AppError {
     AppError::from(error)
 }
 
@@ -360,7 +360,7 @@ pub(super) fn ensure_platform_success(
 
 /// Исход вызова платформы по коду выхода; отказ называет действие, предмет и что платформа
 /// написала. Текст ответа решения не принимает.
-pub(super) fn ensure_success_of(
+pub(crate) fn ensure_success_of(
     action: &str,
     target_kind: &str,
     target: &str,

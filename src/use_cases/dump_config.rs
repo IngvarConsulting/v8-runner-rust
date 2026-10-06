@@ -36,7 +36,7 @@ use tracing::debug;
 mod agent;
 mod all;
 mod coordinator;
-mod helpers;
+pub(crate) mod helpers;
 
 pub use self::all::execute_all;
 

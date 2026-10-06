@@ -364,15 +364,11 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
         ),
         (
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
-            "шаг `ibcmd` выгрузки",
+            "шаг `ibcmd` выгрузки и состав базы, когда `pull --all` или `download` без набора выбрали `ibcmd`",
         ),
         (
             "crate::use_cases::tool_extension::build_ibcmd_dsl",
             "расширение-инструмент, когда сборку ведёт `ibcmd`",
-        ),
-        (
-            "crate::use_cases::installed_extensions::read_installed_extensions",
-            "состав базы, когда `pull --all` или `download` без набора выбрали `ibcmd`",
         ),
     ];
     let expected = BUILT_FOR_IBCMD

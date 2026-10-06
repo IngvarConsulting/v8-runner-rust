@@ -172,10 +172,11 @@ pub fn run() -> i32 {
     };
     // `download` без набора обходит пакеты проекта и отвечает своей формой: его ведёт общий
     // путь команд, а не подготовка одной выгрузки.
-    let downloads_all = matches!(
-        &cli.command,
-        Command::Infobase(args) if execute::downloads_every_package(args, &config)
-    );
+    let download_all = match &cli.command {
+        Command::Infobase(args) => execute::downloads_every_package(args, &config),
+        _ => None,
+    };
+    let downloads_all = download_all.is_some();
     let mut prepared_infobase = match &cli.command {
         Command::Infobase(args) if !downloads_all => {
             match execute::prepare_infobase_cli_command(&config, args, &presenter, cli.dry_run) {
@@ -276,21 +277,23 @@ pub fn run() -> i32 {
             cli.clean_before_execution,
             cli.dry_run,
         ),
-        Command::Infobase(args) if downloads_all => execute::execute_download_all_command(
-            &config,
-            args,
-            &presenter,
-            cli.clean_before_execution,
-            cli.dry_run,
-        ),
-        Command::Infobase(_) => execute::execute_prepared_infobase_command(
-            &config,
-            prepared_infobase
-                .take()
-                .expect("infobase command was prepared before action logging"),
-            &presenter,
-            cli.clean_before_execution,
-        ),
+        Command::Infobase(_) => match download_all {
+            Some(export) => execute::execute_download_all_command(
+                &config,
+                export,
+                &presenter,
+                cli.clean_before_execution,
+                cli.dry_run,
+            ),
+            None => execute::execute_prepared_infobase_command(
+                &config,
+                prepared_infobase
+                    .take()
+                    .expect("infobase command was prepared before action logging"),
+                &presenter,
+                cli.clean_before_execution,
+            ),
+        },
         Command::Mcp(_) => unreachable!("mcp commands are handled before CLI presenter setup"),
     };
 

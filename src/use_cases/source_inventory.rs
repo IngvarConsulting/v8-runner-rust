@@ -117,11 +117,13 @@ impl<'a> SourceSetInventory<'a> {
         let directory = PathBuf::from(trimmed);
         let resolved = match relative_to {
             Some(base) => crate::support::path::resolve_from(base, &directory),
-            None => std::path::absolute(&directory).map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to resolve --output '{trimmed}' against the current directory: {error}"
-                ))
-            })?,
+            None => std::path::absolute(&directory)
+                .map(|path| crate::support::path::lexically_normal_absolute(&path))
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "failed to resolve --output '{trimmed}' against the current directory: {error}"
+                    ))
+                })?,
         };
         let names_a_file = if resolved.exists() {
             !resolved.is_dir()
@@ -228,15 +230,19 @@ impl<'a> SourceSetInventory<'a> {
                     source_set.name
                 )));
             }
-            if let Some(other) =
-                names.insert(extension_name_key(&source_set.name), &source_set.name)
-            {
+            let target = package_in_directory(directory, source_set);
+            // Ключ — имя файла или каталога пакета, а не имя набора: расширение `Sales` и
+            // внешний набор `Sales.cfe` оба легли бы в `Sales.cfe`.
+            let file_name = target
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default();
+            if let Some(other) = names.insert(extension_name_key(&file_name), &source_set.name) {
                 return Err(AppError::Validation(format!(
-                    "{command} without <SET> would give source-sets '{other}' and '{}' the same package name on a case-insensitive file system: name each set to write its package",
+                    "{command} without <SET> would give source-sets '{other}' and '{}' the same package file name '{file_name}' on a case-insensitive file system: name each set to write its package",
                     source_set.name
                 )));
             }
-            let target = package_in_directory(directory, source_set);
             let comparable = comparable_path(&target);
             if let Some((what, _)) = guarded
                 .iter()

@@ -423,17 +423,35 @@ fn an_external_set_with_a_dot_in_its_name_is_built_into_its_directory() {
     );
 }
 
-/// Два набора, чьи пакеты на файловой системе без регистра назвались бы одним файлом, и
-/// набор с именем устройства Windows — отказ до работы.
+/// Два набора, чьи пакеты (файл или каталог) на файловой системе без регистра назвались бы
+/// одним именем, и набор с именем устройства Windows — отказ до работы.
 #[test]
 fn package_names_that_collide_or_name_a_device_are_refused_before_work() {
-    for (from, to, expected) in [
-        ("- name: Gone\n", "- name: sales\n", "case-insensitive"),
-        ("- name: Gone\n", "- name: CON\n", "device name"),
+    for (from, to, expected, commands) in [
+        (
+            "- name: Gone\n",
+            "- name: sales\n",
+            "case-insensitive",
+            &["make", "download"][..],
+        ),
+        (
+            "- name: Gone\n",
+            "- name: CON\n",
+            "device name",
+            &["make", "download"][..],
+        ),
+        // Внешний набор `Sales.cfe` — каталог `out/Sales.cfe`, тот же путь, что пакет
+        // расширения `Sales`; `download` внешние наборы не обходит.
+        (
+            "- name: tools\n",
+            "- name: Sales.cfe\n",
+            "case-insensitive",
+            &["make"][..],
+        ),
     ] {
         let project = Project::new(&["Sales"]);
         project.rewrite(from, to);
-        for command in ["make", "download"] {
+        for command in commands {
             let answer = project.run(&[command, "--output", "out"]);
             let envelope = refused(&answer);
             let message = envelope["error"]["message"].as_str().unwrap_or_default();
@@ -461,6 +479,17 @@ fn a_relative_directory_resolves_like_the_command_with_a_set() {
             .unwrap_or_default()
             .ends_with("project/sub/out/main.cf"),
         "{made}"
+    );
+
+    // `..` свёрнут лексически: ответ называет каталог без `..`, ещё не созданный.
+    let folded = envelope(&project.run_in(&sub, &["make", "--output", "../out", "--dry-run"]));
+    assert_eq!(folded["ok"], true, "{folded}");
+    let folded_set = folded["data"]["sets"][0]["output_path"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        folded_set.ends_with("project/out/main.cf") && !folded_set.contains(".."),
+        "{folded}"
     );
 
     let downloaded = envelope(&project.run_in(&sub, &["download", "--output", "out", "--dry-run"]));

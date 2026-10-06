@@ -2473,17 +2473,11 @@ fn execute_download_all(
 /// [`downloads_every_package`]: обработчик прерывания и обход.
 pub fn execute_download_all_command(
     config: &AppConfig,
-    args: &InfobaseArgs,
+    export: &InfobaseConfigurationExportArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
 ) -> Result<(), UseCaseError> {
-    let InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
-        command: InfobaseConfigurationCommand::Export(export),
-    }) = &args.command
-    else {
-        unreachable!("only a configuration export downloads every package");
-    };
     let cancellation = CancellationToken::new();
     let _signal_guard = CliSignalGuard::install(cancellation.clone());
     execute_download_all(
@@ -2496,18 +2490,26 @@ pub fn execute_download_all_command(
     )
 }
 
-/// `download` без набора и без `--extension` выгружает каждый пакет конфигурации проекта.
-/// У проекта без набора конфигурации и расширения (только база, `source-set: []`) обходить
-/// нечего: такой вызов, как прежде, выгружает основную конфигурацию в файл `--output`.
-pub fn downloads_every_package(args: &InfobaseArgs, config: &AppConfig) -> bool {
-    matches!(
-        &args.command,
-        InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
-            command: InfobaseConfigurationCommand::Export(export),
-        }) if export.set.is_none() && export.extension.is_none()
-    ) && !SourceSetInventory::new(config)
-        .configuration_packages()
-        .is_empty()
+/// `download` без набора и без `--extension` выгружает каждый пакет конфигурации проекта:
+/// доводы такой выгрузки или `None`. У проекта без набора конфигурации и расширения (только
+/// база, `source-set: []`) обходить нечего: такой вызов, как прежде, выгружает основную
+/// конфигурацию в файл `--output`.
+pub fn downloads_every_package<'a>(
+    args: &'a InfobaseArgs,
+    config: &AppConfig,
+) -> Option<&'a InfobaseConfigurationExportArgs> {
+    let InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
+        command: InfobaseConfigurationCommand::Export(export),
+    }) = &args.command
+    else {
+        return None;
+    };
+    (export.set.is_none()
+        && export.extension.is_none()
+        && !SourceSetInventory::new(config)
+            .configuration_packages()
+            .is_empty())
+    .then_some(export)
 }
 
 fn execute_syntax(
