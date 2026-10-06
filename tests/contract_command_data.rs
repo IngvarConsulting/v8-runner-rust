@@ -233,6 +233,8 @@ fn every_leaf_with_a_preview_is_checked_against_its_form() {
         .map(|row| row.leaf)
         .collect();
     checked.sort_unstable();
+    // Лист с несколькими формами ответа стоит в таблице несколькими строками.
+    checked.dedup();
     let mut named: Vec<&str> = LEAVES_WITH_PREVIEW.to_vec();
     named.sort_unstable();
 

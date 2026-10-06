@@ -249,6 +249,7 @@ fn make_without_a_set_stops_at_the_first_failed_set() {
 #[test]
 fn download_without_a_set_downloads_the_installed_packages() {
     let project = Project::new(&["sales", "Foreign"]);
+    let project_file = fs::read_to_string(project.root.join("v8project.yaml")).expect("file");
     let output = project.run(&["download", "--output", "out"]);
     let envelope = envelope(&output);
     assert!(output.status.success(), "{envelope}");
@@ -285,6 +286,11 @@ fn download_without_a_set_downloads_the_installed_packages() {
     );
     assert!(!calls.contains("-Extension Gone"), "{calls}");
     assert!(!calls.contains("Foreign"), "{calls}");
+    // Расширение базы без набора не объявляется: проектный файл не меняется.
+    assert_eq!(
+        fs::read_to_string(project.root.join("v8project.yaml")).expect("file"),
+        project_file
+    );
 }
 
 /// Превью `download` без набора платформу не запускает: выгрузку планирует набору основной
@@ -337,4 +343,184 @@ fn download_without_a_set_stops_at_the_first_failed_set() {
         "{}",
         project.calls()
     );
+}
+
+impl Project {
+    fn rewrite(&self, from: &str, to: &str) {
+        let path = self.root.join("v8project.yaml");
+        let text = fs::read_to_string(&path).expect("project file");
+        assert!(text.contains(from), "{from} in {text}");
+        fs::write(&path, text.replacen(from, to, 1)).expect("project file");
+    }
+
+    fn run_in(&self, dir: &std::path::Path, args: &[&str]) -> Output {
+        v8_runner_command()
+            .current_dir(dir)
+            .arg("--config")
+            .arg(self.root.join("v8project.yaml"))
+            .arg("--json-message")
+            .args(args)
+            .output()
+            .expect("run command")
+    }
+}
+
+fn refused(output: &Output) -> Value {
+    assert_eq!(output.status.code(), Some(2));
+    let envelope = envelope(output);
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+    envelope
+}
+
+/// Пакет не ложится на каталог набора и `workPath`, внутрь них и вокруг них: публикация
+/// каталога внешнего набора поверх `src/tools` заменила бы его исходники. Отказ — до
+/// работы, исходники на месте.
+#[test]
+fn a_package_directory_overlapping_the_sources_is_refused_before_work() {
+    let project = Project::new(&["Sales"]);
+    for (command, output) in [
+        // `src/tools` — каталог набора `tools`: тот же путь.
+        ("make", "src"),
+        // `src/cf/main.cf` — внутри каталога набора `main`.
+        ("make", "src/cf"),
+        ("make", "work"),
+        ("download", "src/cf"),
+        ("download", "work"),
+    ] {
+        let answer = project.run(&[command, "--output", output]);
+        let envelope = refused(&answer);
+        let message = envelope["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("overlaps"),
+            "{command} {output}: {envelope}"
+        );
+    }
+    assert!(project.root.join("src/tools/Tool.xml").is_file());
+    assert!(
+        project.calls().is_empty(),
+        "the platform must not be started: {}",
+        project.calls()
+    );
+}
+
+/// Каталог внешнего набора называется именем набора и с точкой в имени: `tools.v2` —
+/// каталог, а не файл с суффиксом.
+#[test]
+fn an_external_set_with_a_dot_in_its_name_is_built_into_its_directory() {
+    let project = Project::new(&[]);
+    project.rewrite("- name: tools\n", "- name: tools.v2\n");
+    let output = project.run(&["make", "--output", "out"]);
+    let envelope = envelope(&output);
+    assert!(output.status.success(), "{envelope}");
+    assert!(project.out().join("tools.v2").is_dir(), "{envelope}");
+    assert!(
+        fs::read_dir(project.out().join("tools.v2"))
+            .expect("set dir")
+            .next()
+            .is_some(),
+        "{envelope}"
+    );
+}
+
+/// Два набора, чьи пакеты на файловой системе без регистра назвались бы одним файлом, и
+/// набор с именем устройства Windows — отказ до работы.
+#[test]
+fn package_names_that_collide_or_name_a_device_are_refused_before_work() {
+    for (from, to, expected) in [
+        ("- name: Gone\n", "- name: sales\n", "case-insensitive"),
+        ("- name: Gone\n", "- name: CON\n", "device name"),
+    ] {
+        let project = Project::new(&["Sales"]);
+        project.rewrite(from, to);
+        for command in ["make", "download"] {
+            let answer = project.run(&[command, "--output", "out"]);
+            let envelope = refused(&answer);
+            let message = envelope["error"]["message"].as_str().unwrap_or_default();
+            assert!(message.contains(expected), "{command} {to}: {envelope}");
+        }
+        assert!(project.calls().is_empty(), "{}", project.calls());
+    }
+}
+
+/// Относительный каталог `make` считает от текущего каталога, `download` — от `basePath`,
+/// и ответ называет разрешённый каталог.
+#[test]
+fn a_relative_directory_resolves_like_the_command_with_a_set() {
+    let project = Project::new(&["Sales"]);
+    let sub = project.root.join("sub");
+    fs::create_dir_all(&sub).expect("sub dir");
+
+    let made = envelope(&project.run_in(&sub, &["make", "--output", "out", "--dry-run"]));
+    assert_eq!(made["ok"], true, "{made}");
+    let made_dir = made["data"]["output_path"].as_str().unwrap_or_default();
+    assert!(made_dir.ends_with("project/sub/out"), "{made}");
+    assert!(
+        made["data"]["sets"][0]["output_path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("project/sub/out/main.cf"),
+        "{made}"
+    );
+
+    let downloaded = envelope(&project.run_in(&sub, &["download", "--output", "out", "--dry-run"]));
+    assert_eq!(downloaded["ok"], true, "{downloaded}");
+    let output = downloaded["data"]["output"].as_str().unwrap_or_default();
+    assert!(
+        output.ends_with("project/out") && std::path::Path::new(output).is_absolute(),
+        "{downloaded}"
+    );
+}
+
+/// Без набора конфигурации шага к набору нет: отказ на файл без набора не называет `next`.
+#[test]
+fn without_a_configuration_set_a_file_output_names_no_step() {
+    let project = Project::new(&["Sales"]);
+    project.rewrite(
+        "  - name: main\n    type: CONFIGURATION\n    path: src/cf\n",
+        "",
+    );
+    for command in ["make", "download"] {
+        let envelope = refused(&project.run(&[command, "--output", "out/release.cf"]));
+        assert!(
+            envelope["error"].get("next").is_none(),
+            "{command}: {envelope}"
+        );
+    }
+    assert!(project.calls().is_empty(), "{}", project.calls());
+}
+
+/// Обход `download` идёт так же в проекте формата EDT: по составу базы и в каталог.
+#[test]
+fn download_without_a_set_walks_an_edt_project() {
+    let project = Project::new(&["Sales"]);
+    project.rewrite("format: DESIGNER\n", "format: EDT\n");
+    let output = project.run(&["download", "--output", "out"]);
+    let envelope = envelope(&output);
+    assert!(output.status.success(), "{envelope}");
+    assert_eq!(
+        envelope["data"]["not_installed"],
+        serde_json::json!(["Gone"]),
+        "{envelope}"
+    );
+    assert!(project.out().join("main.cf").is_file());
+    assert!(project.out().join("Sales.cfe").is_file());
+}
+
+/// Набор расширения, исходники которого называют другое установленное расширение, —
+/// отказ `download` до первой выгрузки, как у `pull --all` (#218): по имени набора он взял бы
+/// не то расширение.
+#[test]
+fn download_refuses_a_set_whose_sources_name_another_installed_extension() {
+    let project = Project::new(&["Sales", "Other"]);
+    fs::write(
+        project.root.join("src/sales/Configuration.xml"),
+        "<MetaDataObject><Configuration><Properties><Name>Other</Name><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose></Properties></Configuration></MetaDataObject>\n",
+    )
+    .expect("descriptor");
+    let envelope = refused(&project.run(&["download", "--output", "out"]));
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("#218"), "{envelope}");
+    assert!(!project.out().exists());
+    assert!(!project.calls().contains("/DumpCfg"), "{}", project.calls());
 }

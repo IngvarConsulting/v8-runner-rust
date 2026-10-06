@@ -3,6 +3,7 @@ id: INV.CLI.A-FILE-OUTPUT-WITHOUT-A-SET-NAMES-THE-SET-STEP
 check:
   - tests/cli_make_download_all.rs::a_file_output_without_a_set_is_refused_with_the_set_step
   - src/use_cases/source_inventory.rs::a_file_output_without_a_set_names_the_main_set
+  - tests/cli_make_download_all.rs::without_a_configuration_set_a_file_output_names_no_step
 ---
 
 # Файл в `--output` без набора — отказ с шагом к набору

@@ -13,7 +13,7 @@ check:
 `make` без набора отвечает своей формой рядом с формой `make <SET>` (`CTR.WIRE.MAKE-DATA`):
 команда в конверте та же, `make`, а форму выбирает отсутствие набора и `--extension`.
 
-`output_path` — каталог `--output`. `sets` — сборка каждого набора формой `make <SET>` в
+`output_path` — каталог `--output`, разрешённый от текущего каталога. `sets` — сборка каждого набора формой `make <SET>` в
 порядке обхода; после первого отказа обход останавливается, и последняя запись — отказавший
 набор. `provider_dispatched` — получил ли исполнитель работу хотя бы у одного набора; у превью
 `false`.
@@ -24,7 +24,7 @@ check:
 {
   "ok": true,
   "provider_dispatched": true,
-  "output_path": "dist",
+  "output_path": "/home/dev/project/dist",
   "sets": [
     {
       "provider": {"selected": "designer", "origin": {"kind": "default"}},
@@ -32,13 +32,13 @@ check:
       "provider_dispatched": true,
       "mode": "configuration_cf",
       "source_set": "main",
-      "output_path": "dist/main.cf",
+      "output_path": "/home/dev/project/dist/main.cf",
       "duration_ms": 4100,
       "execution": {
         "status": "succeeded",
         "payload": {
           "artifact_type": "configuration_cf",
-          "output_path": "dist/main.cf",
+          "output_path": "/home/dev/project/dist/main.cf",
           "file_names": ["main.cf"],
           "published": true
         }
@@ -51,13 +51,13 @@ check:
       "mode": "extension_cfe",
       "source_set": "Sales",
       "extension": "Sales",
-      "output_path": "dist/Sales.cfe",
+      "output_path": "/home/dev/project/dist/Sales.cfe",
       "duration_ms": 2300,
       "execution": {
         "status": "succeeded",
         "payload": {
           "artifact_type": "extension_cfe",
-          "output_path": "dist/Sales.cfe",
+          "output_path": "/home/dev/project/dist/Sales.cfe",
           "file_names": ["Sales.cfe"],
           "published": true
         }

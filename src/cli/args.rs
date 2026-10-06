@@ -607,7 +607,7 @@ pub enum InfobaseConfigurationCommand {
 #[derive(Args, Debug)]
 #[command(
     next_help_heading = "Command options",
-    after_help = "Without <SET> and --extension: every configuration and extension set in turn, into the directory --output names (relative to basePath) as <SET>.cf and <SET>.cfe; the infobase is asked which extensions it has, and an extension set it lacks is skipped and named in data.not_installed. A file path without <SET> is refused: name the set, `download <SET> --output <FILE>`. The walk stops at the first failed set. --dry-run reads nothing from the infobase. A project without configuration or extension sets takes the main configuration into the --output file."
+    after_help = "Without <SET> and --extension: every configuration and extension set in turn, into the directory --output names (relative to basePath) as <SET>.cf and <SET>.cfe; the infobase is asked which extensions it has, and an extension set it lacks is skipped and named in data.not_installed. A file path without <SET> is refused: name the set, `download <SET> --output <FILE>`. A directory whose packages would land on a source-set directory or workPath, set names that differ only in case and a Windows device name are refused before the platform starts. The walk stops at the first failed set. --dry-run reads nothing from the infobase. A project without configuration or extension sets takes the main configuration into the --output file."
 )]
 pub struct InfobaseConfigurationExportArgs {
     /// Source set whose configuration is taken: the main configuration or an extension
@@ -678,7 +678,7 @@ pub struct ConvertArgs {
 #[derive(Args, Debug)]
 #[command(
     next_help_heading = "Command options",
-    after_help = "Without <SET> and --extension: every source-set in turn — configuration, extensions, external data processors, external reports — into the directory --output names, as <SET>.cf, <SET>.cfe and the directory <SET> for external files. A file path without <SET> is refused: name the set, `make <SET> --output <FILE>`. The walk stops at the first failed set."
+    after_help = "Without <SET> and --extension: every source-set in turn — configuration, extensions, external data processors, external reports — into the directory --output names, as <SET>.cf, <SET>.cfe and the directory <SET> for external files. A file path without <SET> is refused: name the set, `make <SET> --output <FILE>`. A directory whose packages would land on a source-set directory or workPath (equal, inside or around it), set names that differ only in case and a Windows device name are refused before the platform starts. The walk stops at the first failed set."
 )]
 pub struct ArtifactsArgs {
     /// Final output path (.cf/.cfe file or publish directory for external artifacts); without

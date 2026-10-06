@@ -79,8 +79,8 @@ fn run_all(
 mod tests {
     use super::execute_all;
     use crate::config::model::{
-        AppConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, InfobaseConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::MakeAllRequest;
@@ -95,6 +95,15 @@ mod tests {
         let base = dir.path().join("base");
         for set in ["cf", "ext"] {
             std::fs::create_dir_all(base.join(set)).expect("set dir");
+        }
+        // Конфигуратор не запускается: отмена приходит раньше.
+        let platform = dir.path().join("1cv8");
+        std::fs::write(&platform, "#!/bin/sh\nexit 1\n").expect("platform");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&platform, std::fs::Permissions::from_mode(0o755))
+                .expect("permissions");
         }
         let config = AppConfig {
             base_path: base.clone(),
@@ -117,7 +126,14 @@ mod tests {
                     path: "ext".into(),
                 },
             ],
-            tools: ToolsConfig::default(),
+            tools: ToolsConfig {
+                platform: PlatformToolConfig {
+                    path: Some(platform),
+                    strict: false,
+                    version: None,
+                },
+                ..ToolsConfig::default()
+            },
             mcp: Default::default(),
             tests: TestsConfig::default(),
         };
@@ -130,14 +146,16 @@ mod tests {
         };
 
         let failure = execute_all(&context, &config, &request).expect_err("cancelled");
-        assert!(matches!(
-            failure.error.kind(),
-            UseCaseErrorKind::Cancelled(_)
-        ));
+        assert!(
+            matches!(failure.error.kind(), UseCaseErrorKind::Cancelled(_)),
+            "{}",
+            failure.error
+        );
         let payload = failure.payload.expect("walk payload");
         assert!(!payload.ok);
         assert_eq!(payload.sets.len(), 1, "{payload:?}");
         assert_eq!(payload.sets[0].source_set.as_deref(), Some("main"));
-        assert!(!dir.path().join("out").exists());
+        assert!(!dir.path().join("out/main.cf").exists());
+        assert!(!dir.path().join("out/ext.cfe").exists());
     }
 }

@@ -152,13 +152,17 @@ runtime snapshot commit только указанным source-set.
   выгрузкой и объявлением оставляет каталог без записи — его сторож охраняет советом
   `ForceWayOut::Undeclared` (без `pull <SET> --force`).
 - `download` без набора (`infobase_export::execute_configuration_export_all`) выбирает
-  исполнителя выгрузки один раз, читает им состав базы тем же
-  `dump_config::read_installed_extensions` и обходит
-  `SourceSetInventory::configuration_packages`; каждый пакет идёт сценарием `download <SET>`
-  в `source_inventory::package_in_directory`. `make` без набора
+  исполнителя выгрузки один раз, читает им состав базы тем же читателем, что `pull --all`
+  (`installed_extensions::read_installed_extensions`), сопоставляет наборы
+  `SourceSetInventory::installed_packages` (со сторожем #218) и выгружает найденные пакеты
+  сценарием `download <SET>` в `source_inventory::package_in_directory`. `make` без набора
   (`artifacts::execute_all`) обходит `SourceSetInventory::ordered_source_sets` сценарием
-  `make <SET>`. Каталог вместо файла проверяет `SourceSetInventory::packages_directory`;
-  проект без пакетов (`source-set: []`) у `download` идёт прежним путём одной выгрузки.
+  `make <SET>`. Каталог вместо файла проверяет `SourceSetInventory::packages_directory` и
+  отдаёт разрешённый путь; до работы `SourceSetInventory::check_package_targets` отказывает,
+  если пакет ложится на каталог набора или `workPath` (совпадает, внутри, вокруг), если имена
+  пакетов совпадают без регистра или называют устройство Windows. Накопление ответов,
+  остановку и закрытие ответа у всех трёх обходов ведёт `set_walk`. Проект без пакетов
+  (`source-set: []`) у `download` идёт прежним путём одной выгрузки.
 
 ### `convert`
 

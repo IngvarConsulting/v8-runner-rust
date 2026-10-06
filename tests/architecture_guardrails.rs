@@ -370,6 +370,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "crate::use_cases::tool_extension::build_ibcmd_dsl",
             "расширение-инструмент, когда сборку ведёт `ibcmd`",
         ),
+        (
+            "crate::use_cases::installed_extensions::read_installed_extensions",
+            "состав базы, когда `pull --all` или `download` без набора выбрали `ibcmd`",
+        ),
     ];
     let expected = BUILT_FOR_IBCMD
         .iter()
@@ -5593,6 +5597,52 @@ fn the_order_of_source_sets_is_decided_in_one_place() {
         "these modules order source-sets by purpose on their own instead of calling \
          source_inventory::ordered_by_purpose:\n{}",
         offenders.join("\n")
+    );
+}
+
+/// Наборы с составом базы сопоставляет одно место —
+/// `SourceSetInventory::installed_packages`, со сторожем #218 (`source_extension_name`), и
+/// состав базы читает один читатель — `installed_extensions::read_installed_extensions`.
+/// Корень прежней проблемы — второй сопоставитель в `download` без набора, который потерял
+/// сторож и разошёлся с `pull --all`; страж ловит сверку имён из исходников и чтение состава
+/// в обходе под любым именем функции.
+#[test]
+fn installed_extensions_are_matched_in_one_place() {
+    let owner = repo_path("src/use_cases/source_inventory.rs");
+    let reader = repo_path("src/use_cases/installed_extensions.rs");
+    let definition = repo_path("src/use_cases/extension_identity.rs");
+    for walk in [
+        "src/use_cases/dump_config/all.rs",
+        "src/use_cases/infobase_export/all.rs",
+    ] {
+        let tokens = production_tokens(&repo_path(walk));
+        assert!(
+            tokens.contains(".installed_packages(")
+                && tokens.contains("installed_extensions::read_installed_extensions("),
+            "{walk} must match through installed_packages and read through the shared reader"
+        );
+    }
+    let offenders = collect_rust_files(&repo_path("src"))
+        .into_iter()
+        .filter(|file| *file != owner && *file != definition)
+        .filter(|file| production_tokens(file).contains("source_extension_name("))
+        .map(|file| file.display().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "these modules match source-sets with the installed extensions on their own:\n{}",
+        offenders.join("\n")
+    );
+    let readers = collect_rust_files(&repo_path("src/use_cases"))
+        .into_iter()
+        .filter(|file| *file != reader)
+        .filter(|file| production_tokens(file).contains("dump_db_cfg_list_all_extensions("))
+        .map(|file| file.display().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        readers.is_empty(),
+        "these modules read the installed extensions on their own:\n{}",
+        readers.join("\n")
     );
 }
 

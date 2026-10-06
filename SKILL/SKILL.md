@@ -130,7 +130,7 @@ v8-runner infobase create
   goes to `<dir>/<SET>.cf|.cfe`, extension sets missing from the infobase are skipped and listed in `data.not_installed`
   (`make --output <dir>` likewise builds every set, external ones into `<dir>/<SET>/`). A file path without a set is refused
   (`error.next` names `<command> <main set> --output <file>.cf`) — except `download` in an infobase-only project
-  (`source-set: []`), which still writes the main configuration to the file. This is not `make`, which builds
+  (`source-set: []`), which still writes the main configuration to the file. Choose a `<dir>` outside the source-set directories and `workPath`: a package landing on, inside or around them is refused before the platform starts. This is not `make`, which builds
   artifacts from project sources.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.
   A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`),

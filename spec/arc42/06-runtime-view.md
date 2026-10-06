@@ -231,11 +231,14 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 
 `make` и `download` без набора — обходы поверх своих сценариев одного набора, с каталогом
 вместо файла (`SourceSetInventory::packages_directory`, путь пакета —
-`source_inventory::package_in_directory`). `make` ([`artifacts/all.rs`](../../src/use_cases/artifacts/all.rs))
+`source_inventory::package_in_directory`). До работы цели пакетов сверяются с каталогами
+наборов, `workPath` и друг с другом (`SourceSetInventory::check_package_targets`); накопление
+ответов и остановку ведёт [`set_walk.rs`](../../src/use_cases/set_walk.rs), как у `pull --all`. `make` ([`artifacts/all.rs`](../../src/use_cases/artifacts/all.rs))
 идёт по `SourceSetInventory::ordered_source_sets` сценарием `make <SET>`. `download`
 ([`infobase_export/all.rs`](../../src/use_cases/infobase_export/all.rs)) выбирает исполнителя
-один раз, спрашивает им состав базы читателем `pull --all` и выгружает пакеты
-`SourceSetInventory::configuration_packages`, которые в базе есть, сценарием `download <SET>`;
+один раз, спрашивает им состав базы читателем `pull --all`
+([`installed_extensions.rs`](../../src/use_cases/installed_extensions.rs)) и выгружает пакеты,
+которые `SourceSetInventory::installed_packages` нашёл в базе, сценарием `download <SET>`;
 превью базу не спрашивает и наборы расширений называет условными. Отказ набора останавливает
 оба обхода.
 
