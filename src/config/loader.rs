@@ -509,8 +509,13 @@ fn select_infobase(
                 }
             },
             InfobaseSelector::Connection(connection) => {
-                if connection_string_carries_credentials(connection) {
-                    return Err(ConfigValidationError::AdHocConnectionCarriesCredentials);
+                // Что строка не несёт, решает `secrets.rs` — тот же перечень, по которому
+                // вывод маскирует: второй список здесь разошёлся бы с маскированием, и
+                // строка с ключом, которого он не знает, прошла бы в базу (#380).
+                if let Some(found) = crate::platform::secrets::connection_masked_key(connection) {
+                    return Err(ConfigValidationError::AdHocConnectionCarriesCredentials {
+                        found: found.to_string(),
+                    });
                 }
                 let mut section = serde_yaml::Mapping::new();
                 section.insert(
@@ -527,25 +532,6 @@ fn select_infobase(
         name.map_or(serde_yaml::Value::Null, serde_yaml::Value::String),
     );
     Ok(())
-}
-
-/// Реквизиты в строке соединения: `Usr=`/`Pwd=` в объявленной форме, `/N`/`/P` в сырой —
-/// и слитно с значением (`/NAdmin /Psecret`), как платформа их принимает. База, названная
-/// строкой, учётных данных не несёт — они принадлежат объявленной секции.
-fn connection_string_carries_credentials(connection: &str) -> bool {
-    let trimmed = connection.trim();
-    if trimmed.starts_with('/') || trimmed.starts_with('-') {
-        return trimmed.split_whitespace().any(|token| {
-            token
-                .get(..2)
-                .is_some_and(|key| key.eq_ignore_ascii_case("/n") || key.eq_ignore_ascii_case("/p"))
-        });
-    }
-    crate::platform::connection::declared_parameters(trimmed).is_some_and(|parameters| {
-        parameters
-            .iter()
-            .any(|(key, _)| key == "usr" || key == "pwd")
-    })
 }
 
 pub fn resolve_primary_config_path(config_path: Option<&str>) -> Result<PathBuf, ConfigLoadError> {
@@ -828,7 +814,7 @@ fn normalize_connection_string(connection: &str, config_dir: &Path) -> String {
 }
 
 fn normalize_raw_connection_args(connection: &str, config_dir: &Path) -> String {
-    let mut args = split_arg_string(connection);
+    let mut args = crate::platform::connection::split_arg_string(connection);
     let mut changed = false;
     let mut index = 0;
     while index + 1 < args.len() {
@@ -869,30 +855,6 @@ fn strip_matching_quotes(value: &str) -> Option<&str> {
     } else {
         None
     }
-}
-
-fn split_arg_string(raw: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-
-    for ch in raw.chars() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            ch if ch.is_whitespace() && !in_quotes => {
-                if !current.is_empty() {
-                    args.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if !current.is_empty() {
-        args.push(current);
-    }
-
-    args
 }
 
 fn join_arg_string(args: &[String]) -> String {

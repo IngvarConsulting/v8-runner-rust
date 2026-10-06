@@ -306,7 +306,11 @@ fn file_path_from_args(args: &[String]) -> Option<&str> {
     None
 }
 
-fn split_arg_string(raw: &str) -> Vec<String> {
+/// Токены сырой формы строки соединения (`/F "C:\my base" /N …`) — ровно те, что
+/// уходят платформе: делит по пробелу вне кавычек и снимает кавычки. Один токенизатор на
+/// все вопросы к сырой форме: и argv, и нормализация пути, и проверка учётных данных
+/// смотрят на одни и те же токены.
+pub(crate) fn split_arg_string(raw: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
