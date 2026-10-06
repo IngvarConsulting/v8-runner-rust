@@ -1,7 +1,8 @@
 ---
 id: INV.MCP.A-HELD-BASE-IS-REFUSED-THROUGH-THE-SAME-TOOLS
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::an_mcp_tool_on_a_base_of_another_copy_is_refused_like_the_cli
+  - tests/architecture_guardrails.rs::mcp_surface_snapshot_stays_explicit_and_documented
 ---
 
 # Инструмент MCP на чужой базе отказывает, как командная строка

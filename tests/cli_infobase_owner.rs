@@ -162,7 +162,10 @@ fn assert_infobase_held(output: &Output, command: &str, owner: &Copy, stand: &St
     assert_eq!(payload["command"], command, "{payload}");
     assert_eq!(payload["error"]["code"], "infobase_held", "{payload}");
     assert_eq!(payload["error"]["kind"], "workspace", "{payload}");
-    assert_eq!(payload["error"]["next"]["command"], "infobase create", "{payload}");
+    assert_eq!(
+        payload["error"]["next"]["command"], "infobase create",
+        "{payload}"
+    );
     assert_eq!(payload["steps"][0]["name"], "infobase owner", "{payload}");
     assert_eq!(payload["steps"][0]["status"], "failed", "{payload}");
     let message = payload["error"]["message"]
@@ -210,7 +213,11 @@ fn a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner() {
     assert_infobase_held(&refused, "push", &first, &stand);
     assert_eq!(stand.marker_text(), marker, "a refusal leaves the marker");
     succeeded(&first.run(&["push"]));
-    assert_eq!(stand.marker_text(), marker, "the owner is not written again");
+    assert_eq!(
+        stand.marker_text(),
+        marker,
+        "the owner is not written again"
+    );
 }
 
 /// Команда чтения на базе другой копии проходит и метку не трогает.
@@ -376,7 +383,10 @@ fn a_marker_of_an_unknown_version_stops_a_write() {
     assert_eq!(payload["error"]["code"], "runtime_failure", "{payload}");
     assert_eq!(payload["steps"][0]["name"], "infobase owner", "{payload}");
     let message = payload["error"]["message"].as_str().expect("message");
-    assert!(message.contains("99"), "names the marker version: {message}");
+    assert!(
+        message.contains("99"),
+        "names the marker version: {message}"
+    );
     assert!(
         message.contains("version 1"),
         "names the version this runner knows: {message}"
@@ -485,6 +495,30 @@ fn a_base_without_a_marker_is_taken_and_the_answer_says_so() {
             .any(|warning| warning.contains("now held by this working copy")),
         "{pushed}"
     );
+    // Метка лежит рядом с каталогом базы, а не в нём, и называет машину, каталог проекта и
+    // согласие делить базу.
+    let mut inside: Vec<String> = fs::read_dir(&stand.base)
+        .expect("base dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    inside.sort();
+    assert_eq!(inside, ["1Cv8.1CD"], "the base directory carries no marker");
+    let marker: Value = serde_json::from_str(&stand.marker_text().expect("marker")).expect("json");
+    assert_eq!(marker["version"], 1, "{marker}");
+    let owner = &marker["owners"][0];
+    assert!(
+        owner["machine"]
+            .as_str()
+            .is_some_and(|machine| !machine.is_empty()),
+        "{marker}"
+    );
+    assert_eq!(owner["shared"], false, "{marker}");
     let again = succeeded(&copy.run(&["push"]));
     assert!(
         !warnings(&again)
@@ -537,6 +571,20 @@ fn a_preview_names_the_ownership_refusal_and_writes_nothing() {
 
     assert_infobase_held(&refused, "push", &first, &stand);
     assert_eq!(stand.marker_text(), marker);
+
+    // Превью восстановления возвращается раньше замков, но отказ по владельцу называет и оно.
+    let input = second.root.join("base.dt");
+    fs::write(&input, "dt").expect("dt");
+    let refused = second.run(&[
+        "infobase",
+        "restore",
+        "--input",
+        input.to_str().expect("input path"),
+        "--replace",
+        "--dry-run",
+    ]);
+    assert_infobase_held(&refused, "infobase.restore", &first, &stand);
+    assert_eq!(stand.marker_text(), marker);
 }
 
 /// Инструмент MCP на базе другой копии отказывает так же, как командная строка: кодом
@@ -556,7 +604,10 @@ fn an_mcp_tool_on_a_base_of_another_copy_is_refused_like_the_cli() {
     let payload = &answer.envelope;
     assert_eq!(payload["error"]["code"], "runtime_failure", "{payload}");
     assert_eq!(payload["error"]["kind"], "runtime", "{payload}");
-    assert_eq!(payload["error"]["next"]["command"], "infobase create", "{payload}");
+    assert_eq!(
+        payload["error"]["next"]["command"], "infobase create",
+        "{payload}"
+    );
     assert_eq!(
         payload["error"]["message"], cli["error"]["message"],
         "the same refusal as the command line"
@@ -595,4 +646,38 @@ fn an_owner_on_another_machine_is_never_replaced() {
         "says how to free a remote base: {message}"
     );
     assert_eq!(stand.marker_text().as_deref(), Some(foreign.as_str()));
+}
+
+/// Сначала чья база, затем память: копия с памятью о другой базе на базе другой рабочей
+/// копии получает отказ по владельцу, а не отказ чужой памяти.
+#[test]
+fn ownership_is_refused_before_foreign_memory() {
+    let stand = Stand::new();
+    let holder = stand.copy("holder");
+    succeeded(&holder.run(&["push"]));
+
+    let original = Copy::at(stand.dir.path().join("original"));
+    original.declare("File=build/ib");
+    let own_base = original.root.join("build").join("ib");
+    fs::create_dir_all(&own_base).expect("own base");
+    fs::write(own_base.join("1Cv8.1CD"), "database").expect("infobase file");
+    succeeded(&original.run(&["push"]));
+    let copied_root = stand.dir.path().join("copied");
+    let status = std::process::Command::new("cp")
+        .arg("-r")
+        .arg(&original.root)
+        .arg(&copied_root)
+        .status()
+        .expect("cp -r");
+    assert!(status.success());
+    let copied = Copy {
+        config: copied_root.join("v8project.yaml"),
+        root: copied_root,
+    };
+    // Память копии описывает базу `original/build/ib`, а слой направлен на базу держателя.
+    copied.declare(&format!("File={}", stand.base.display()));
+
+    let refused = copied.run(&["push"]);
+
+    assert_infobase_held(&refused, "push", &holder, &stand);
 }

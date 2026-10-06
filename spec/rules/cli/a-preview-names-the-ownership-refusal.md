@@ -1,7 +1,7 @@
 ---
 id: INV.CLI.A-PREVIEW-NAMES-THE-OWNERSHIP-REFUSAL
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::a_preview_names_the_ownership_refusal_and_writes_nothing
 ---
 
 # Превью называет отказ по владельцу

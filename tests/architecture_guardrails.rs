@@ -2144,7 +2144,9 @@ fn the_owner_of_a_file_base_is_checked_in_one_place() {
             offenders.push(format!("{relative}: checks the owner outside the boundary"));
         }
         if file != boundary && file != lock && source.contains("acquire_infobase_lock") {
-            offenders.push(format!("{relative}: takes the base lock outside the boundary"));
+            offenders.push(format!(
+                "{relative}: takes the base lock outside the boundary"
+            ));
         }
         if file != owner
             && ["OwnerMarker", "OwnerRecord", "owners.json"]

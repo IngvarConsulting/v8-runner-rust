@@ -181,12 +181,7 @@ fn check_as(
         }
     }
     if !alive.is_empty() {
-        return Err(held_refusal(
-            command_name,
-            &base_dir,
-            &marker_path,
-            &alive,
-        ));
+        return Err(held_refusal(command_name, &base_dir, &marker_path, &alive));
     }
     // Превью ничего не берёт, а строка соединения подчиняется владельцу, но им не
     // становится — даже на базе без метки или с ушедшим владельцем.
@@ -282,8 +277,15 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
     if owner.machine != this.machine {
         return Standing::Alive(Alive::Remote);
     }
-    if !owner.project.is_dir() {
-        return Standing::Gone(Gone::DirectoryIsGone);
+    // Ушедшим владельца делает только ответ «нет такого каталога»: каталог, который не
+    // прочитать, ещё может объявлять базу.
+    match std::fs::metadata(&owner.project) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Standing::Gone(Gone::DirectoryIsGone),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Standing::Gone(Gone::DirectoryIsGone)
+        }
+        Err(error) => return Standing::Alive(Alive::Unreadable(error.to_string())),
     }
     // Объявленный путь разрешается от каталога владельца: у проекта, скопированного
     // целиком, `File=build/ib` указывает на его собственную базу, а не на копию.
@@ -474,7 +476,10 @@ mod tests {
         fs::create_dir_all(root).expect("project");
         fs::write(
             root.join("v8project.local.yaml"),
-            format!("infobases:\n  origin:\n    connection: 'File={}'\n", base.display()),
+            format!(
+                "infobases:\n  origin:\n    connection: 'File={}'\n",
+                base.display()
+            ),
         )
         .expect("local layer");
         AppConfig {
@@ -603,10 +608,22 @@ mod tests {
         let this = on("machine-a", "host", &config);
         let marker_path = owner_marker_path(&base).expect("marker path");
 
-        check_as(&this, &config, "push", BaseAccess::Writes, OwnerCheck::Preview)
-            .expect("preview");
-        check_as(&this, &config, "infobase.dump", BaseAccess::Reads, OwnerCheck::Run)
-            .expect("read");
+        check_as(
+            &this,
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Preview,
+        )
+        .expect("preview");
+        check_as(
+            &this,
+            &config,
+            "infobase.dump",
+            BaseAccess::Reads,
+            OwnerCheck::Run,
+        )
+        .expect("read");
         let mut ad_hoc = config.clone();
         ad_hoc.infobase_name = None;
         check_as(&this, &ad_hoc, "push", BaseAccess::Writes, OwnerCheck::Run).expect("ad hoc");
@@ -653,5 +670,33 @@ mod tests {
         let schema = generated_owner_marker_schema();
         let validator = jsonschema::validator_for(&schema).expect("schema");
         assert!(validator.is_valid(&written), "{written}");
+    }
+
+    /// Метку, которую не записать, команда записи не обходит: отказ называет каталог и
+    /// причину, а прежнего состояния метки не меняет.
+    #[test]
+    fn a_marker_that_cannot_be_written_stops_a_write() {
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let config = project(&dir.path().join("copy"), &base);
+        let marker_path = owner_marker_path(&base).expect("marker path");
+        let mut temp_name = marker_path.file_name().expect("name").to_os_string();
+        temp_name.push(format!(".tmp.{}", std::process::id()));
+        fs::create_dir(marker_path.with_file_name(temp_name)).expect("blocker");
+
+        let refused = check_as(
+            &on("machine-a", "host", &config),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect_err("the marker cannot be written");
+
+        assert_eq!(refused.kind(), UseCaseErrorKind::Runtime);
+        let beside = base.parent().expect("parent").display().to_string();
+        assert!(refused.message().contains(&beside), "{refused}");
+        assert!(refused.message().contains("cannot be written"), "{refused}");
+        assert!(!marker_path.exists());
     }
 }

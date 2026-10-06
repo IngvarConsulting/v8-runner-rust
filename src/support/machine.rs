@@ -202,7 +202,10 @@ fn system_machine_id() -> Option<String> {
     }
     let written = usize::try_from(size).ok()? / std::mem::size_of::<u16>();
     let text = &buffer[..written.min(buffer.len())];
-    let end = text.iter().position(|unit| *unit == 0).unwrap_or(text.len());
+    let end = text
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(text.len());
     Some(String::from_utf16_lossy(&text[..end]))
 }
 
@@ -213,7 +216,7 @@ fn system_machine_id() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_name, machine_id, is_process_alive, is_process_running, process_state};
+    use super::{host_name, is_process_alive, is_process_running, machine_id, process_state};
 
     #[test]
     fn this_process_is_alive() {

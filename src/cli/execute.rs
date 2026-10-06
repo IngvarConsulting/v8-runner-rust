@@ -88,7 +88,9 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
-use crate::use_cases::transport::{dispatch_with_workspace_lock, preview_boundary, BoundaryRefusal};
+use crate::use_cases::transport::{
+    dispatch_with_workspace_lock, preview_boundary, BoundaryRefusal,
+};
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
 /// rendering the resulting command output.
@@ -2486,7 +2488,10 @@ fn dispatch_under_cli_workspace_lock<T>(
         base,
         |notes| {
             for note in notes {
-                presenter.note_leading_warnings(note.phase.as_str(), &[note.message.clone()]);
+                presenter.note_leading_warnings(
+                    note.phase.as_str(),
+                    std::slice::from_ref(&note.message),
+                );
             }
             if clean_before_execution {
                 clean_platform_logs_under_lock(config)

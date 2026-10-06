@@ -290,7 +290,10 @@ mod tests {
             fs::create_dir_all(&root).expect("root");
             fs::write(
                 root.join("v8project.local.yaml"),
-                format!("infobases:\n  origin:\n    connection: 'File={}'\n", base.display()),
+                format!(
+                    "infobases:\n  origin:\n    connection: 'File={}'\n",
+                    base.display()
+                ),
             )
             .expect("local layer");
             let mut config = sample_config(&root.join("work"));
@@ -302,8 +305,14 @@ mod tests {
         };
         let first = copy("first");
         let second = copy("second");
-        dispatch_with_workspace_lock(&first, CommandName::Build, BaseAccess::Writes, |_| Ok(()), || ())
-            .expect("the first copy takes the base");
+        dispatch_with_workspace_lock(
+            &first,
+            CommandName::Build,
+            BaseAccess::Writes,
+            |_| Ok(()),
+            || (),
+        )
+        .expect("the first copy takes the base");
         let ran = Cell::new(false);
 
         let refusal = dispatch_with_workspace_lock(

@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-TAKEOVER-IS-NAMED-IN-THE-ANSWER
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::a_base_without_a_marker_is_taken_and_the_answer_says_so
 ---
 
 # Взятие базы без метки названо в ответе
