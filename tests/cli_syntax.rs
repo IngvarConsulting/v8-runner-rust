@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use support::{temp_workspace, v8_runner_command, write_shell_script as write_script};
+use support::{
+    temp_workspace, v8_runner_binary, v8_runner_command, write_shell_script as write_script,
+};
 
 const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
@@ -355,6 +357,54 @@ fn syntax_designer_modules_json_returns_structured_validation_failure() {
         payload["data"]["issues"][0]["path"],
         "CommonModules.TestModule"
     );
+}
+
+/// Раннер, которого запустил родитель с игнорируемым `SIGCHLD` (так бывает у демонов и хостов:
+/// игнорирование переживает exec), начинает с `SIGCHLD` по умолчанию. Иначе ядро само
+/// подбирало бы Конфигуратор, и вышедший сам процесс отвечал бы отказом наблюдения вместо
+/// своего кода выхода.
+#[test]
+fn a_designer_exit_code_survives_a_parent_that_ignores_sigchld() {
+    use std::os::unix::process::CommandExt;
+
+    let (_dir, config_path) = setup_project(
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif printf '%s' \"$args\" | grep -F -q -- '/CheckConfig'; then\n  cat <<'LOG' > \"$out\"\n{CommonModules.TestModule(4,2)}: Ошибка компиляции\n{1}: context\nLOG\n  exit 101\nfi\nexit 0",
+    );
+
+    let mut runner = std::process::Command::new(v8_runner_binary());
+    runner.args([
+        "--config",
+        &config_path.display().to_string(),
+        "--json-message",
+        "syntax",
+        "designer-modules",
+        "--server",
+    ]);
+    // SAFETY: `signal` is async-signal-safe; the ignored disposition survives exec exactly
+    // as it does from a parent that ignores `SIGCHLD`.
+    unsafe {
+        runner.pre_exec(|| {
+            if libc::signal(libc::SIGCHLD, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = runner
+        .output()
+        .expect("run the runner with SIGCHLD ignored");
+
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "json: {error}\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(output.status.code(), Some(3), "{payload}");
+    assert_eq!(payload["error"]["code"], "runtime_failure", "{payload}");
+    assert_eq!(payload["data"]["status"], "issues_found", "{payload}");
+    assert_eq!(payload["data"]["exit_code"], 101, "{payload}");
 }
 
 /// Прежнее имя без режимов больше не отвергается: требование «хотя бы один режим»
