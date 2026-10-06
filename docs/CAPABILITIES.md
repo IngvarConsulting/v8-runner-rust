@@ -463,6 +463,10 @@ v8-runner push [<SET>] [--full] [--dry-run]
   является (в том числе имя объявленной базы или строка соединения), отклоняется как
   validation error до запуска платформы.
 - Для `DESIGNER` выбирает incremental, partial или full path по изменённым файлам выбранного scope.
+  Сегодня удаление, правка `Configuration.xml`, изменённый каталог и превышение
+  `push.partialLoadThreshold` переводят загрузку в полную. Порог и эти переходы снимаются:
+  загрузка будет частичной всегда, когда у набора есть память, а полной — без памяти,
+  по `--full` и в оговорённых случаях — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379).
 - Опись `ConfigDumpInfo.xml` в каталоге `DESIGNER`-набора принадлежит одной базе и в git не хранится: если `ConfigDumpInfo.xml` в каталоге набора лежит в индексе git, команда отказывает до запуска платформы с кодом выхода 2 (`validation`), называет путь и рецепт `git rm --cached <путь> && git commit …`; превью (`--dry-run`) отказывает так же. Там, где git не отвечает, работа идёт молча.
 - Для `EDT` сначала анализирует и экспортирует выбранные EDT `source-set`, затем грузит generated
   Designer files выбранным backend.
@@ -967,9 +971,10 @@ v8-runner mcp serve http
 - При `--infobase <строка соединения>` хеши наборов исходников не читаются и не сохраняются.
   Хеши расширений из `tools.extensions` пока общие и для такой базы тоже используются —
   [#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214).
-  Полная изоляция журнала поколений агента и файла версий, а также отказ отправки в
-  непустую базу без памяти ещё относятся к [#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214)
-  и [#217](https://github.com/IngvarConsulting/v8-runner-rust/issues/217).
+  Полная изоляция журнала поколений агента и файла версий ещё относится к [#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214) и
+  [#217](https://github.com/IngvarConsulting/v8-runner-rust/issues/217); с [#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214) такая база будет помниться по нормализованной строке соединения
+  без учётных данных. Отказа `push` в базу без памяти пока нет: он будет и для пустой
+  базы, потому что пустую базу по поколению раннер не различает, — [#215](https://github.com/IngvarConsulting/v8-runner-rust/issues/215).
 - `workPath/edt-workspace/`: общий EDT workspace всех EDT-сценариев, кроме `convert`.
 - `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert`.
 - `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD dump; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
@@ -987,9 +992,13 @@ v8-runner mcp serve http
 - Object-scoped partial dump через `ibcmd`.
 - `upload` через `ibcmd`.
 - `check` через `ibcmd`.
-- `make` через `ibcmd`.
+- `make` через `ibcmd`: пакет будет собираться во временной базе раннера, всегда с `--out` ([#207](https://github.com/IngvarConsulting/v8-runner-rust/issues/207)).
 - `extensions` через `designer`.
 - `convert` с пакетом: файл `.cf`/`.cfe` на входе, `--to package` и цепочка `ibcmd` → `ibcmd-rs` ([#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
 - `apply` отдельной командой и `push --no-apply` ([#210](https://github.com/IngvarConsulting/v8-runner-rust/issues/210)); `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).
 - Проверка версии формата файла версий до загрузки и восстановление одного файла версий без полной выгрузки ([#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214)).
+- Прогноз режима выгрузки перед `pull` (`-getChanges`, `config export status`) и
+  случившийся режим с причиной в ответе ([#166](https://github.com/IngvarConsulting/v8-runner-rust/issues/166)).
+- Переименование расширения на месте по совпавшему внутреннему идентификатору и
+  `push --delete` с отключением перед удалением ([#218](https://github.com/IngvarConsulting/v8-runner-rust/issues/218)).
 - Отдельная пользовательская настройка EDT `working-directory`.

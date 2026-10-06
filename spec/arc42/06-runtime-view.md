@@ -95,7 +95,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 
 Правила: [изменения ищет та команда, которой нужен ответ](../rules/use-cases/changes-are-detected-on-demand.md),
 [у EDT две ступени состояния](../rules/use-cases/edt-keeps-two-change-contexts.md),
-[сомнение делает загрузку полной](../rules/use-cases/doubt-turns-a-partial-load-into-a-full-one.md),
+[изменение вне корня набора делает загрузку полной](../rules/use-cases/a-change-outside-the-source-root-turns-the-load-full.md),
+[загрузка частичная, если есть с чем сравнить](../rules/use-cases/a-load-is-partial-unless-nothing-to-compare.md),
 [переход к полному режиму назван](../rules/use-cases/degradation-is-visible.md).
 
 ### 6.4 Сессия агента Конфигуратора

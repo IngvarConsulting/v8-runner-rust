@@ -34,6 +34,4 @@ push file | сайт: agent designer ibcmd | матрица: designer ibcmd agen
 push cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
 push standalone | сайт: designer agent | матрица: agent | #205
 syntax standalone | сайт: designer | матрица: - | #205
-upload file | сайт: agent designer | матрица: designer | #206
-upload cluster | сайт: agent designer | матрица: designer | #206
 upload standalone | сайт: designer | матрица: - | #205
