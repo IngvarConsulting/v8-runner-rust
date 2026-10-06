@@ -519,6 +519,78 @@ fn build_through_the_gate_loads_from_the_declared_dir() {
     );
 }
 
+/// `download` через шлюз автономного сервера отдаёт основную конфигурацию: шлюзу уходит
+/// одна команда `config dump-cfg` с путём на стороне цели и без `--extension`, ответ
+/// называет предметом основную конфигурацию, а пакет — то, что выгрузил шлюз.
+#[test]
+fn a_download_through_the_gate_exports_the_main_configuration() {
+    let harness = harness();
+    let output = harness.dir.path().join("dist").join("main.cf");
+
+    let (code, payload) = run(
+        &harness,
+        &["download", "--output", &output.display().to_string()],
+    );
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    assert_eq!(payload["data"]["subject"]["kind"], "main", "{payload}");
+    assert_eq!(payload["data"]["state"], "working", "{payload}");
+    assert_eq!(payload["data"]["artifact_kind"], "cf", "{payload}");
+    assert_eq!(payload["data"]["published"], true, "{payload}");
+    assert_eq!(fs::read_to_string(&output).expect("package"), "CF:main");
+    let lines = commands(&harness);
+    let exports = lines
+        .iter()
+        .filter(|line| line.starts_with("config dump-cfg"))
+        .collect::<Vec<_>>();
+    assert_eq!(exports.len(), 1, "{lines:?}");
+    let file = exports[0]
+        .strip_prefix("config dump-cfg --file=")
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(
+        file.starts_with("export/") && file.ends_with("/main.cf") && !file.contains(' '),
+        "a target-side path of the main configuration package: {lines:?}"
+    );
+}
+
+/// `download --state db` шлюзу не адресуется: конфигурацию базы данных выгружает только
+/// Конфигуратор, а у автономного сервера его в цепочке `download` нет. Отказ приходит до
+/// сессии.
+#[test]
+fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
+    let harness = harness();
+    let output = harness.dir.path().join("dist").join("main.cf");
+
+    let (code, payload) = run(
+        &harness,
+        &[
+            "download",
+            "--state",
+            "db",
+            "--output",
+            &output.display().to_string(),
+        ],
+    );
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(
+        payload["error"]["code"], "capability_unavailable",
+        "{payload}"
+    );
+    assert_eq!(
+        error_message(&payload),
+        "download --state db takes the database configuration, which only designer exports, and designer serves no download on a standalone target",
+        "{payload}"
+    );
+    assert_eq!(payload["data"]["provider"]["selected"], Value::Null);
+    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+    assert!(!output.exists());
+}
+
 /// `make` и состав расширений идут той же сессией шлюза.
 #[test]
 fn make_and_extensions_go_through_the_gate() {

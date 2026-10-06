@@ -140,8 +140,9 @@ fn configuration_cfe_dry_run_preserves_extension_intent_without_dispatch() {
             "infobase",
             "configuration",
             "export",
+            // `ibcmd` выгружает рабочее состояние: `--state db` исполняет только Конфигуратор.
             "--state",
-            "database",
+            "working",
             "--extension",
             "SalesAddon",
             "--output",
@@ -923,6 +924,148 @@ fn a_default_chain_skips_the_missing_designer_and_selects_ibcmd() {
         .contains("config save"));
 }
 
+/// Файловая база, у которой на машине раннера есть Конфигуратор и `ibcmd`: каждый пишет
+/// свой журнал вызовов. `providers` — блок ключей `providers:` или пустая строка.
+fn setup_designer_and_ibcmd(
+    providers: &str,
+) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let dir = temp_workspace();
+    let base = dir.path().join("project");
+    let work = dir.path().join("work");
+    let config = dir.path().join("v8project.yaml");
+    let platform = dir.path().join("platform");
+    fs::create_dir_all(&platform).expect("platform");
+    let designer_calls = dir.path().join("designer-calls.log");
+    let ibcmd_calls = dir.path().join("ibcmd-calls.log");
+    write_designer(&platform.join("1cv8"), &designer_calls);
+    write_ibcmd(&platform.join("ibcmd"), &ibcmd_calls);
+    write_config(&config, &base, &work, "DESIGNER", &platform);
+    if !providers.is_empty() {
+        let text = fs::read_to_string(&config).expect("config");
+        fs::write(&config, format!("{providers}{text}")).expect("providers");
+    }
+    (dir, config, base, designer_calls, ibcmd_calls)
+}
+
+fn download_database_configuration(config: &Path, output: &Path, extra: &[&str]) -> Value {
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "download",
+            "--state",
+            "db",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .args(extra)
+        .output()
+        .expect("run download");
+    serde_json::from_slice(&command.stdout).unwrap_or_else(|error| {
+        panic!(
+            "no json envelope: {error}\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&command.stdout),
+            String::from_utf8_lossy(&command.stderr)
+        )
+    })
+}
+
+/// `download --state db` без ключа выбирает Конфигуратор: `/DumpDBCfg`, пропущенных нет, а
+/// `ibcmd`, готовый на той же машине, не запускается.
+#[test]
+fn download_state_db_selects_designer_by_default() {
+    let (_dir, config, base, designer_calls, ibcmd_calls) = setup_designer_and_ibcmd("");
+    let output = base.join("dist/main.cf");
+
+    let envelope = download_database_configuration(&config, &output, &[]);
+
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(envelope["data"]["state"], "database", "{envelope}");
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
+    // Пустой перечень пропущенных форма не печатает.
+    assert!(
+        envelope["data"]["provider"].get("skipped").is_none(),
+        "{envelope}"
+    );
+    assert_eq!(fs::read(&output).expect("published cf"), b"payload");
+    let argv = fs::read_to_string(designer_calls).expect("designer calls");
+    assert!(argv.contains("/DumpDBCfg"), "{argv}");
+    assert!(!ibcmd_calls.exists(), "ibcmd must not run for --state db");
+}
+
+/// Конфигуратора на машине нет, `ibcmd` готов: `download --state db` его не пробует.
+/// Квитанция называет пропущенным один Конфигуратор, а отказ — его неготовность.
+#[test]
+fn download_state_db_does_not_fall_back_to_another_executor() {
+    let dir = temp_workspace();
+    let base = dir.path().join("project");
+    let work = dir.path().join("work");
+    let config = dir.path().join("v8project.yaml");
+    let platform = dir.path().join("platform");
+    fs::create_dir_all(&platform).expect("platform");
+    let calls = dir.path().join("calls.log");
+    write_ibcmd(&platform.join("ibcmd"), &calls);
+    write_config(&config, &base, &work, "DESIGNER", &platform);
+    let output = base.join("dist/main.cf");
+
+    let envelope = download_database_configuration(&config, &output, &[]);
+
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "environment_unavailable");
+    assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
+    let skipped = envelope["data"]["provider"]["skipped"]
+        .as_array()
+        .expect("skipped providers");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0]["provider"], "designer");
+    assert!(!calls.exists(), "ibcmd must not run for --state db");
+    assert!(!output.exists());
+}
+
+/// Ключ `providers.download`, назначивший `download --state db` не Конфигуратору, отказывает
+/// при выборе исполнителя: и в превью, и в работе, до запуска чего-либо.
+#[test]
+fn download_state_db_refuses_a_providers_key_naming_another_executor() {
+    for (provider, extra) in [
+        ("ibcmd", &[][..]),
+        ("ibcmd", &["--dry-run"][..]),
+        ("agent", &[][..]),
+    ] {
+        let (_dir, config, base, designer_calls, ibcmd_calls) =
+            setup_designer_and_ibcmd(&format!("providers:\n  download: {provider}\n"));
+        let output = base.join("dist/main.cf");
+
+        let envelope = download_database_configuration(&config, &output, extra);
+
+        assert_eq!(envelope["ok"], false, "{provider} {extra:?}: {envelope}");
+        assert_eq!(envelope["error"]["kind"], "capability", "{envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "capability_unavailable",
+            "{envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["message"],
+            format!(
+                "download --state db takes the database configuration, which only designer exports: providers.download in v8project.yaml assigns {provider}; remove the key or assign designer"
+            ),
+            "{envelope}"
+        );
+        assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
+        assert_eq!(
+            envelope["data"]["provider"]["origin"],
+            serde_json::json!({"kind": "override", "file": "v8project.yaml"})
+        );
+        assert!(
+            envelope["data"]["provider"].get("skipped").is_none(),
+            "{envelope}"
+        );
+        assert!(!designer_calls.exists() && !ibcmd_calls.exists());
+        assert!(!output.exists());
+    }
+}
+
 #[test]
 fn ibcmd_only_environment_cannot_dump_dt_until_capability_is_implemented() {
     let (_dir, config, base, calls) = setup("IBCMD");
@@ -1141,7 +1284,7 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
             "configuration",
             "export",
             "--state",
-            "database",
+            "working",
             "--output",
             &output.display().to_string(),
         ])
@@ -1156,7 +1299,8 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
     assert!(argv.contains("--database-server db.example.test"));
     assert!(argv.contains("--database-name demo_data"));
     assert!(argv.contains("config save"));
-    assert!(argv.split_whitespace().any(|argument| argument == "--db"));
+    // Конфигурацию базы данных выгружает только Конфигуратор: `ibcmd` берёт рабочую.
+    assert!(!argv.split_whitespace().any(|argument| argument == "--db"));
 }
 
 #[test]

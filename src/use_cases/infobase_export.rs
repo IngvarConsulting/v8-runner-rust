@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::model::AppConfig;
-use crate::domain::capability::{Provider, ProviderReceipt};
+use crate::domain::capability::{Operation, Provider, ProviderPlan, ProviderReceipt};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, StepResult,
 };
@@ -800,7 +800,10 @@ pub fn prepare_configuration_export(
         ));
     }
 
-    match select_provider(context, config, InfobaseTransferIntent::Configuration) {
+    let intent = InfobaseTransferIntent::Configuration {
+        state: request.state,
+    };
+    match select_provider(context, config, intent) {
         Ok(prepared) => Ok(prepared),
         Err((error, receipt)) => {
             let result = ExportConfigurationPackageResult::new(request.clone(), Some(receipt));
@@ -889,16 +892,15 @@ pub fn preview_infobase_snapshot(
 
 #[derive(Debug, Clone, Copy)]
 enum InfobaseTransferIntent {
-    Configuration,
+    Configuration { state: ConfigurationState },
     Snapshot,
     SnapshotRestore { expects_absent_target: bool },
 }
 
 impl InfobaseTransferIntent {
-    const fn operation(self) -> crate::domain::capability::Operation {
-        use crate::domain::capability::Operation;
+    const fn operation(self) -> Operation {
         match self {
-            Self::Configuration => Operation::ConfigurationExport,
+            Self::Configuration { .. } => Operation::ConfigurationExport,
             Self::Snapshot => Operation::InfobaseDump,
             Self::SnapshotRestore { .. } => Operation::InfobaseRestore,
         }
@@ -921,6 +923,16 @@ fn select_provider(
     // `domain::capability`: второго мнения о ней здесь нет.
     let operation = intent.operation();
     let plan = config.provider_plan(operation);
+    let plan = match intent {
+        InfobaseTransferIntent::Configuration {
+            state: ConfigurationState::Database,
+        } => database_configuration_plan(config, plan)?,
+        InfobaseTransferIntent::Configuration {
+            state: ConfigurationState::Working,
+        }
+        | InfobaseTransferIntent::Snapshot
+        | InfobaseTransferIntent::SnapshotRestore { .. } => plan,
+    };
     if plan.candidates().is_empty() {
         return Err((
             no_executor(config, operation),
@@ -960,6 +972,35 @@ fn select_provider(
 
     let error = nobody_ready(config, &plan, &skipped);
     Err((error, plan.receipt_for_nobody(skipped)))
+}
+
+/// `download --state db` исполняет только Конфигуратор: конфигурацию базы данных раннер
+/// берёт его `/DumpDBCfg`. Прочих исполнителей цепочки умолчаний не пробуют и в
+/// пропущенных не называют, а ключ `providers.download`, назначивший другого, отказывает
+/// до выбора — исполнителю отказ не достаётся.
+fn database_configuration_plan(
+    config: &AppConfig,
+    plan: ProviderPlan,
+) -> Result<ProviderPlan, (AppError, ProviderReceipt)> {
+    const EXPORTER: Provider = Provider::Designer;
+    let operation = Operation::ConfigurationExport;
+    let refusal = match &plan {
+        ProviderPlan::Override { provider, .. } if *provider == EXPORTER => return Ok(plan),
+        ProviderPlan::Override { provider, file } => format!(
+            "{operation} --state db takes the database configuration, which only {EXPORTER} exports: providers.{operation} in {file} assigns {provider}; remove the key or assign {EXPORTER}"
+        ),
+        ProviderPlan::Default { chain } if chain.contains(&EXPORTER) => {
+            return Ok(ProviderPlan::Default {
+                chain: vec![EXPORTER],
+            })
+        }
+        ProviderPlan::Default { .. } => format!(
+            "{operation} --state db takes the database configuration, which only {EXPORTER} exports, and {EXPORTER} serves no {operation} on a {} target",
+            config.target_kind().as_str()
+        ),
+    };
+    let receipt = plan.receipt_for_nobody(Vec::new());
+    Err((AppError::capability(refusal), receipt))
 }
 
 fn readiness(

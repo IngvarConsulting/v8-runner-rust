@@ -20,7 +20,8 @@ use crate::use_cases::interruption::CommandFailure;
 use crate::use_cases::progress::log_live_stage;
 
 /// `config dump-cfg --file=… [--extension=…]` — только рабочая конфигурация: у агента
-/// нет команды для конфигурации базы данных.
+/// нет команды для конфигурации базы данных. `--state db` до агента не доходит — его
+/// отвергает выбор исполнителя; проверка здесь страхует адаптер от чужого вызова.
 pub(super) fn export_configuration(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -31,7 +32,7 @@ pub(super) fn export_configuration(
 ) -> Result<PlatformCommandResult, CommandFailure> {
     if state == ConfigurationState::Database {
         return Err(CommandFailure::without_deferral(AppError::capability(
-            "the agent exports only the working configuration: it has no command for the database configuration; use providers.infobase.configuration.export: designer or ibcmd".to_owned(),
+            "the agent exports only the working configuration: it has no command for the database configuration, which only designer exports".to_owned(),
         )));
     }
     let name = match extension {

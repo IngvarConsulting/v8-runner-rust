@@ -280,7 +280,7 @@ fn make_epf_through_the_agent_builds_and_verifies_each_external_file() {
 }
 
 /// Экспорт рабочей конфигурации — `dump-cfg`; конфигурацию базы данных агент
-/// экспортировать не умеет, и раннер отказывает до сессии.
+/// экспортировать не умеет, и раннер отказывает при выборе исполнителя, до сессии.
 #[test]
 fn configuration_export_through_the_agent_handles_working_state_only() {
     let harness = harness();
@@ -330,10 +330,11 @@ fn configuration_export_through_the_agent_handles_working_state_only() {
     );
 
     assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["kind"], "capability", "{payload}");
     assert!(
         payload["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("working configuration")),
+            .is_some_and(|message| message.contains("which only designer exports")),
         "{payload}"
     );
     assert_eq!(
