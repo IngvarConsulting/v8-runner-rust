@@ -79,7 +79,7 @@ infobases:
     connection: "File=/absolute/path/to/ib"
 ```
 
-`infobase:` in either file is a one-cycle synonym for `infobases.origin` and warns.
+`infobase:` in either file is a one-cycle synonym for `infobases.origin` and warns. `init` in a project whose `v8project.yaml` still has `infobase:` treats it as the declared `origin` (merged field by field with the local one) and never edits the project file; `--infobase` moves that effective section to `upstream` in the local layer and warns (key names only) when the project section has fields besides `connection`, since the loader still merges them into the new `origin`: move `infobase:` to `v8project.local.yaml`.
 
 Useful setup commands:
 

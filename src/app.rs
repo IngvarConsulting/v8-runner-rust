@@ -673,6 +673,12 @@ fn render_config_init_text(
                 format!("gitignore: {}", result.gitignore_path),
             ];
             details.extend(origin_details(&result.origin));
+            details.extend(
+                result
+                    .warnings
+                    .iter()
+                    .map(|warning| format!("[warning] {warning}")),
+            );
             (
                 details,
                 "Local layer written; the project file is left as it is",

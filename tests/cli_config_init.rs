@@ -752,18 +752,235 @@ fn config_init_ignores_non_edt_root_project_marker_when_nested_project_exists() 
     assert!(config.contains("type: CONFIGURATION"));
 }
 
-/// `init` сменил предмет: раньше под этим именем создавали базу. Набравший его по старой
-/// памяти в проекте с объявленной базой получает отказ с именем нужной команды, а не
-/// совет перезаписать свой конфиг ключом `--force`.
-#[test]
-fn init_over_a_config_that_declares_an_infobase_names_infobase_create() {
+/// Проектный файл со старым ключом `infobase:` и местный слой с полями той же секции:
+/// `infobase:` — синоним `infobases.origin`, слои сливаются по полям, как у загрузчика.
+const SYNONYM_PROJECT_FILE: &str = "workPath: build\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=srv;Ref=erp;Pwd=conn-secret'\n  user: proj-user\n  password: proj-secret\nsource-set: []\n";
+const SYNONYM_LOCAL_LAYER: &str = "infobases:\n  origin:\n    password: layer-secret\n";
+const SYNONYM_SECRETS: [&str; 4] = ["conn-secret", "proj-user", "proj-secret", "layer-secret"];
+
+fn synonym_project() -> tempfile::TempDir {
     let dir = temp_workspace();
-    let config_path = dir.path().join("v8project.yaml");
-    fs::write(
-        &config_path,
-        "workPath: build\nformat: DESIGNER\ninfobases:\n  origin:\n    connection: 'File=build/ib'\nsource-set: []\n",
+    fs::write(dir.path().join("v8project.yaml"), SYNONYM_PROJECT_FILE).expect("project file");
+    fs::write(dir.path().join("v8project.local.yaml"), SYNONYM_LOCAL_LAYER).expect("layer");
+    dir
+}
+
+fn printed(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     )
-    .expect("config");
+}
+
+/// Старый ключ `infobase:` в проектном файле объявляет `origin`: `init` без адреса ничего
+/// не меняет ни в проекте, ни в местном слое, отвечает `unchanged` с действующим адресом и
+/// предупреждает о синониме.
+#[test]
+fn init_over_the_infobase_synonym_in_the_project_file_keeps_the_declared_origin() {
+    let dir = synonym_project();
+
+    for json in [true, false] {
+        let mut command = v8_runner_command();
+        command.current_dir(dir.path());
+        if json {
+            command.arg("--json-message");
+        }
+        let output = command.arg("init").output().expect("run init");
+
+        let printed = printed(&output);
+        assert!(output.status.success(), "{printed}");
+        for secret in SYNONYM_SECRETS {
+            assert!(!printed.contains(secret), "{secret} is printed: {printed}");
+        }
+        if json {
+            let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+            assert_data_matches_its_command_form(&payload, "`init` over the `infobase:` synonym");
+            assert_eq!(payload["data"]["kind"], "local", "{payload}");
+            assert_eq!(
+                payload["data"]["origin"]["change"], "unchanged",
+                "{payload}"
+            );
+            assert_eq!(
+                payload["data"]["origin"]["connection"], "Srvr=srv;Ref=erp;Pwd=***",
+                "{payload}"
+            );
+            assert!(
+                payload["warnings"]
+                    .as_array()
+                    .expect("warnings")
+                    .iter()
+                    .any(|warning| warning.as_str().is_some_and(|w| w.contains("`infobase:`"))),
+                "the synonym warning stays: {payload}"
+            );
+        } else {
+            assert!(
+                printed.contains("origin: unchanged (Srvr=srv;Ref=erp;Pwd=***)"),
+                "{printed}"
+            );
+            assert!(printed.contains("[warning] `infobase:`"), "{printed}");
+        }
+        assert_eq!(
+            fs::read_to_string(dir.path().join("v8project.yaml")).expect("project file"),
+            SYNONYM_PROJECT_FILE
+        );
+        let layer = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("layer");
+        assert_eq!(
+            layer
+                .strip_prefix(LOCAL_CONFIG_SCHEMA_MODEL_LINE)
+                .and_then(|layer| layer.strip_prefix('\n')),
+            Some(SYNONYM_LOCAL_LAYER),
+            "the layer only gains its schema line: {layer}"
+        );
+    }
+}
+
+/// `init --infobase` в проекте со старым ключом: `origin` местного слоя получает новый
+/// адрес, а действующая прежняя секция — слитая из обоих слоёв, с учётными данными —
+/// уходит в `upstream`. Проектный файл не меняется, учётные данные не печатаются.
+#[test]
+fn init_with_an_infobase_redirects_the_origin_declared_by_the_infobase_synonym() {
+    let dir = synonym_project();
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["--json-message", "init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+
+    let printed = printed(&output);
+    assert!(output.status.success(), "{printed}");
+    for secret in SYNONYM_SECRETS {
+        assert!(!printed.contains(secret), "{secret} is printed: {printed}");
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert_data_matches_its_command_form(&payload, "`init --infobase` over the synonym");
+    let origin = &payload["data"]["origin"];
+    assert_eq!(origin["change"], "redirected", "{payload}");
+    assert_eq!(origin["connection"], "File=build/ib", "{payload}");
+    assert_eq!(origin["replaced"], "Srvr=srv;Ref=erp;Pwd=***", "{payload}");
+    assert!(
+        payload["warnings"][0]
+            .as_str()
+            .is_some_and(|warning| warning.contains("`infobase:`")),
+        "{payload}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.yaml")).expect("project file"),
+        SYNONYM_PROJECT_FILE
+    );
+    let layer = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("layer");
+    let document: serde_yaml::Value = serde_yaml::from_str(&layer).expect("layer is YAML");
+    assert_eq!(
+        document["infobases"]["origin"]["connection"].as_str(),
+        Some("File=build/ib"),
+        "{layer}"
+    );
+    let upstream = &document["infobases"]["upstream"];
+    assert_eq!(
+        upstream["connection"].as_str(),
+        Some("Srvr=srv;Ref=erp;Pwd=conn-secret"),
+        "{layer}"
+    );
+    assert_eq!(upstream["user"].as_str(), Some("proj-user"), "{layer}");
+    assert_eq!(
+        upstream["password"].as_str(),
+        Some("layer-secret"),
+        "the local field wins, as in the loader: {layer}"
+    );
+}
+
+/// После `init --infobase` загрузчик по-прежнему подмешивает в новый `origin` поля
+/// проектной секции `infobase:`, кроме адреса. Ответ предупреждает об этом и называет
+/// только имена полей; секция из одного адреса предупреждения не даёт.
+#[test]
+fn init_with_an_infobase_warns_which_project_fields_still_apply_to_the_new_origin() {
+    let dir = synonym_project();
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+    let text = printed(&output);
+    assert!(output.status.success(), "{text}");
+    let warning = text
+        .lines()
+        .find(|line| line.contains("[warning]") && line.contains("redirected infobases.origin"))
+        .unwrap_or_else(|| panic!("the inherited fields are named: {text}"));
+    assert!(warning.contains("`user`"), "{warning}");
+    assert!(warning.contains("`password`"), "{warning}");
+    assert!(!warning.contains("`connection`"), "{warning}");
+    assert!(warning.contains("v8project.local.yaml"), "{warning}");
+    for secret in SYNONYM_SECRETS {
+        assert!(!text.contains(secret), "{secret} is printed: {text}");
+    }
+
+    let dir = temp_workspace();
+    fs::write(
+        dir.path().join("v8project.yaml"),
+        "workPath: build\ninfobase:\n  connection: 'File=/srv/ib'\n",
+    )
+    .expect("project file");
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["--json-message", "init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+    assert!(output.status.success(), "{}", printed(&output));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert_eq!(
+        payload["data"]["origin"]["change"], "redirected",
+        "{payload}"
+    );
+    let warnings = payload["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().all(|warning| !warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("redirected infobases.origin"))),
+        "an address alone leaves nothing to inherit: {payload}"
+    );
+}
+
+/// Занятый `upstream` не перезаписывается и тогда, когда `origin` объявлен старым ключом
+/// проектного файла: отказ, оба файла как были.
+#[test]
+fn init_refuses_to_redirect_the_infobase_synonym_over_an_existing_upstream() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("v8project.yaml"), SYNONYM_PROJECT_FILE).expect("project file");
+    let layer = "infobases:\n  upstream:\n    connection: 'File=/srv/older-ib'\n    password: layer-secret\n";
+    fs::write(dir.path().join("v8project.local.yaml"), layer).expect("layer");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["--json-message", "init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2), "{}", printed(&output));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("infobases.origin"), "{message}");
+    assert!(message.contains("infobases.upstream"), "{message}");
+    for secret in SYNONYM_SECRETS {
+        assert!(!message.contains(secret), "{message}");
+    }
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("layer"),
+        layer
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.yaml")).expect("project file"),
+        SYNONYM_PROJECT_FILE
+    );
+}
+
+/// Карта `infobases` в проектном файле — отказ загрузчика, и `init` отказывает тем же
+/// отказом, ничего не записав.
+#[test]
+fn init_refuses_the_infobases_map_in_the_project_file_as_the_loader_does() {
+    let dir = temp_workspace();
+    let project = "workPath: build\ninfobases:\n  origin:\n    connection: 'File=build/ib'\n";
+    fs::write(dir.path().join("v8project.yaml"), project).expect("project file");
 
     let output = v8_runner_command()
         .current_dir(dir.path())
@@ -771,13 +988,16 @@ fn init_over_a_config_that_declares_an_infobase_names_infobase_create() {
         .output()
         .expect("run init");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(2), "{}", printed(&output));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
     let message = payload["error"]["message"].as_str().expect("message");
-    assert!(message.contains("infobase create"), "{message}");
-    assert!(message.contains("origin"), "{message}");
-    assert!(!message.contains("--force"), "{message}");
+    assert!(message.contains("v8project.local.yaml"), "{message}");
     assert_eq!(payload["command"], "init", "{payload}");
+    assert!(!dir.path().join("v8project.local.yaml").exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.yaml")).expect("project file"),
+        project
+    );
 }
 
 /// Порождённый конфиг не пишет ни прежнего имени секции — иначе первая же следующая
