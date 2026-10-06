@@ -110,7 +110,7 @@ fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
         }
         if mask_address_value {
             mask_address_value = false;
-            masked.push(mask_literals(mask_url_userinfo(arg), secrets));
+            masked.push(mask_literals(mask_userinfo(arg, false, hidden), secrets));
             continue;
         }
         if is_client_address_key(arg) {
@@ -118,13 +118,20 @@ fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
             masked.push(arg.clone());
             continue;
         }
+        // Строка соединения маскируется по всему аргументу до деления на слова: значение
+        // сегмента кончается на `;` или на закрывающей кавычке, а не на пробеле, и
+        // `Pwd="a b"`, `Pwd=a b;Ref=x` или `"Srvr=h;Pwd=""a b"""` иначе оставили бы
+        // половину пароля вторым словом. Цена — хвост аргумента после незакавыченного
+        // пароля: в `Srvr=h;Pwd=sec /N Admin` где кончается пароль, не знает никто, и
+        // `/N Admin` скрыт вместе с ним. Показ теряет читаемость, а не пароль.
+        let arg = mask_connection_value(arg, hidden);
         let mut rewritten = String::with_capacity(arg.len());
         // Ключи считаются по словам: в argv платформы значение отделено пробелом, а
         // через `--raw-key` в один аргумент кладут и целую связку вроде
         // `/Proxy -PUser bob -PPwd sec`. Разбор по словам разбирает обе формы одним
         // правилом; `mask_detached_value` переносится и на следующее слово, и на
         // следующий аргумент, потому что значение бывает и там, и там.
-        for (word, spacing) in words(arg) {
+        for (word, spacing) in words(&arg) {
             if mask_detached_value {
                 mask_detached_value = false;
                 rewritten.push_str(MASKED_VALUE);
@@ -140,10 +147,12 @@ fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
                         rewritten.push_str(&word[..start]);
                         rewritten.push_str(MASKED_VALUE);
                     }
-                    None => rewritten.push_str(&mask_userinfo(
-                        &mask_hidden_key_runs(&mask_segments(word, hidden), hidden),
-                        true,
-                    )),
+                    // Сегменты и ключи строки соединения уже скрыты проходом по всему
+                    // аргументу; по словам остаётся адрес: проход по аргументу видит
+                    // только первый, а слов с адресом бывает несколько.
+                    None => {
+                        rewritten.push_str(&mask_userinfo(word, true, hidden));
+                    }
                 }
             }
             rewritten.push_str(spacing);
@@ -295,12 +304,31 @@ fn split(value: &str, honour_quotes: bool) -> Vec<&str> {
     found
 }
 
+/// Показывает строку соединения одним значением, а не аргументом командной строки:
+/// слов и ключей в ней нет, поэтому пробел значения не делит. Прячет и пароль, и имя
+/// пользователя — отчёт об адресе базы человеку нужен для узнавания базы, а не учётной
+/// записи. Пароль в адресе со схемой (`ws=http://alice:pass@host`) тоже скрыт.
+pub fn mask_connection_string(value: &str) -> String {
+    mask_connection_value(value, Hidden::SecretsAndIdentities)
+}
+
+/// Единственная цепочка маскирования строки соединения: сегменты по `;`, затем ключи,
+/// которые разбор по сегментам не увидел (строка, целиком взятая в кавычки), затем
+/// userinfo адреса со схемой.
+fn mask_connection_value(value: &str, hidden: Hidden) -> String {
+    mask_userinfo(
+        &mask_hidden_key_runs(&mask_segments(value, hidden), hidden),
+        true,
+        hidden,
+    )
+}
+
 /// Прячет пароль в объявленном клиентском адресе, оставляя сам адрес узнаваемым.
 ///
 /// Адрес приходит из `infobase.web.url`, которое не валидируется, поэтому схемы в нём
 /// может не быть: раз это заведомо адрес, схема и не требуется.
 pub fn mask_url_userinfo(value: &str) -> String {
-    mask_userinfo(value, false)
+    mask_userinfo(value, false, Hidden::Secrets)
 }
 
 /// Ключ, за которым идёт клиентский адрес: его значение маскируется как адрес,
@@ -320,7 +348,10 @@ fn is_client_address_key(arg: &str) -> bool {
 /// поле `infobase.web.url` не валидируется, — поэтому там адресом считается и голый
 /// authority. В любом другом аргументе без схемы на адрес похож и путь вида
 /// `C:\dir@host`, и маскировать его значило бы портить читаемое.
-fn mask_userinfo(value: &str, require_scheme: bool) -> String {
+///
+/// Имя остаётся при `Hidden::Secrets`; `Hidden::SecretsAndIdentities` прячет и его, как
+/// прячет `Usr=` и `/N`: `***:***@` или `***@`.
+fn mask_userinfo(value: &str, require_scheme: bool, hidden: Hidden) -> String {
     let authority_start = match value.find("://") {
         Some(scheme_end) => scheme_end + "://".len(),
         None if require_scheme => return value.to_owned(),
@@ -334,7 +365,19 @@ fn mask_userinfo(value: &str, require_scheme: bool) -> String {
     let Some(at) = authority.rfind('@') else {
         return value.to_owned();
     };
-    let Some(colon) = authority[..at].find(':') else {
+    let colon = authority[..at].find(':');
+    if matches!(hidden, Hidden::SecretsAndIdentities) {
+        let hidden_userinfo = match colon {
+            Some(_) => format!("{MASKED_VALUE}:{MASKED_VALUE}"),
+            None => MASKED_VALUE.to_owned(),
+        };
+        return format!(
+            "{}{hidden_userinfo}{}",
+            &value[..authority_start],
+            &value[authority_start + at..]
+        );
+    }
+    let Some(colon) = colon else {
         return value.to_owned();
     };
     format!(
@@ -359,15 +402,43 @@ fn mask_hidden_key_runs(word: &str, hidden: Hidden) -> String {
     let mut masked = String::with_capacity(word.len());
     let mut cursor = 0;
     while let Some(value_start) = next_hidden_key_value(&lowered, cursor, hidden) {
-        let value_end = word[value_start..]
-            .find(';')
-            .map_or(word.len(), |at| value_start + at);
+        let value_end = value_start + hidden_value_len(&word[value_start..]);
         masked.push_str(&word[cursor..value_start]);
         masked.push_str(MASKED_VALUE);
         cursor = value_end;
     }
     masked.push_str(&word[cursor..]);
     masked
+}
+
+/// Длина значения ключа в начале `rest`. Значение в удвоенных кавычках (строка целиком
+/// в кавычках) кончается на закрывающих `""`, в одинарных — на закрывающей `"`, иначе
+/// на ближайшей `;`. Кавычка внутри значения удваивается: `""""` в удвоенных и `""` в
+/// одинарных — это кавычка, а не конец. Незакрытая кавычка тянет значение до конца:
+/// где кончается пароль, неизвестно, и хвост — всё ещё его часть.
+fn hidden_value_len(rest: &str) -> usize {
+    if rest.starts_with("\"\"") {
+        quoted_value_len(rest, "\"\"")
+    } else if rest.starts_with('"') {
+        quoted_value_len(rest, "\"")
+    } else {
+        rest.find(';').unwrap_or(rest.len())
+    }
+}
+
+/// Длина значения, открытого кавычкой `quote`, вместе с закрывающей: `quote`, за которой
+/// идёт ещё одна `quote`, — экранированная кавычка внутри значения.
+fn quoted_value_len(rest: &str, quote: &str) -> usize {
+    let mut cursor = quote.len();
+    while let Some(found) = rest[cursor..].find(quote) {
+        let after = cursor + found + quote.len();
+        if rest[after..].starts_with(quote) {
+            cursor = after + quote.len();
+        } else {
+            return after;
+        }
+    }
+    rest.len()
 }
 
 /// Смещение значения ближайшего скрываемого ключа строки соединения после `from`.
@@ -406,7 +477,9 @@ fn mask_literals(arg: String, secrets: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_preview_args, mask_url_userinfo, render_masked_command};
+    use super::{
+        mask_connection_string, mask_preview_args, mask_url_userinfo, render_masked_command,
+    };
     use std::path::Path;
 
     fn preview(args: &[&str], secrets: &[&str]) -> Vec<String> {
@@ -498,6 +571,73 @@ mod tests {
             let args = preview(&[arg], &[]);
             assert!(!args[0].contains("s3cret"), "{arg} -> {}", args[0]);
         }
+        // Пароль в удвоенных кавычках с пробелом или `;` внутри кончается на `""`.
+        for arg in [
+            "\"Srvr=h;Pwd=\"\"a b\"\";Ref=x\"",
+            "\"Srvr=h;Pwd=\"\"a;b c\"\";Ref=x\"",
+            "\"Srvr=h;Pwd=\"\"a\"\"\"\"b c\"\";Ref=x\"",
+        ] {
+            assert_eq!(
+                preview(&[arg], &[]),
+                vec!["\"Srvr=h;Pwd=***;Ref=x\""],
+                "{arg}"
+            );
+            assert_eq!(rendered(&[arg]), "1cv8c \"Srvr=h;Pwd=***;Ref=x\"", "{arg}");
+        }
+    }
+
+    /// Хвост аргумента после незакавыченного пароля скрыт: где кончается пароль в
+    /// `Pwd=sec /N Admin`, неизвестно, и показ жертвует читаемостью, а не паролем.
+    #[test]
+    fn the_tail_after_an_unquoted_password_in_one_argument_is_hidden() {
+        assert_eq!(
+            preview(
+                &["/IBConnectionString Srvr=h;Pwd=sec /N Admin /Out log.txt"],
+                &[]
+            ),
+            vec!["/IBConnectionString Srvr=h;Pwd=***"]
+        );
+        assert_eq!(
+            preview(
+                &["/IBConnectionString Srvr=h;Pwd=sec;Ref=x /Out log.txt"],
+                &[]
+            ),
+            vec!["/IBConnectionString Srvr=h;Pwd=***;Ref=x /Out log.txt"]
+        );
+    }
+
+    /// Показ отказа прячет имя пользователя и в адресе, как прячет `Usr=` и `/N`; превью
+    /// оставляет его читаемым.
+    #[test]
+    fn a_refusal_hides_the_user_of_an_address_and_a_preview_keeps_it() {
+        for args in [
+            vec!["ws=http://alice:s3cret@h/erp"],
+            vec!["/WS", "http://alice:s3cret@h/erp"],
+        ] {
+            let shown = rendered(&args);
+            assert!(shown.contains("http://***:***@h/erp"), "{shown}");
+            assert!(!shown.contains("alice"), "{shown}");
+            let previewed = preview(&args, &[]).join(" ");
+            assert!(previewed.contains("http://alice:***@h/erp"), "{previewed}");
+            assert!(!previewed.contains("s3cret"), "{previewed}");
+        }
+    }
+
+    /// Пароль с пробелом в адресе и в закавыченной связке ключей не делится словами,
+    /// а кавычка в пути не сбивает показ остальных сегментов.
+    #[test]
+    fn a_space_inside_a_value_does_not_split_its_masking() {
+        assert_eq!(
+            preview(&["ws=http://alice:pa ss@host"], &[]),
+            vec!["ws=http://alice:***@host"]
+        );
+        let bundle = preview(&["/C\"mode=x; Password=abc def\""], &[]);
+        assert!(!bundle[0].contains("abc"), "{}", bundle[0]);
+        assert!(!bundle[0].contains("def"), "{}", bundle[0]);
+        assert_eq!(
+            rendered(&["File=\"C:\\My Bases\\erp\";Usr=Admin;Pwd=x"]),
+            "1cv8c File=\"C:\\My Bases\\erp\";Usr=***;Pwd=***"
+        );
     }
 
     /// В один аргумент через `--raw-key` кладут и целую связку ключей: значение
@@ -666,5 +806,71 @@ mod tests {
     fn a_multibyte_value_does_not_split_a_character() {
         let args = preview(&["/P=пароль", "Srvr=сервер;Pwd=пароль"], &[]);
         assert_eq!(args, vec!["/P=***", "Srvr=сервер;Pwd=***"]);
+    }
+
+    /// Значение сегмента кончается на `;`, а не на пробеле: пароль с пробелом внутри
+    /// одного аргумента не оставляет хвоста ни в превью, ни в показе отказа.
+    #[test]
+    fn masks_a_connection_string_password_that_holds_a_space() {
+        let quoted = "Srvr=h;Pwd=\"a b\";Ref=x";
+        let bare = "Srvr=h;Pwd=a b;Ref=x";
+        assert_eq!(preview(&[quoted], &[]), vec!["Srvr=h;Pwd=***;Ref=x"]);
+        assert_eq!(preview(&[bare], &[]), vec!["Srvr=h;Pwd=***;Ref=x"]);
+        assert_eq!(
+            preview(&["/IBConnectionString", quoted], &[]),
+            vec!["/IBConnectionString", "Srvr=h;Pwd=***;Ref=x"]
+        );
+        let shown = rendered(&[bare, "/N", "Admin"]);
+        assert!(!shown.contains(" b"), "{shown}");
+        assert!(!shown.contains("Admin"), "{shown}");
+    }
+
+    #[test]
+    fn a_connection_string_shown_as_a_value_hides_the_password_and_the_user() {
+        // Удвоенная кавычка внутри закавыченного пароля — часть пароля, а не его конец.
+        assert_eq!(
+            mask_connection_string("Pwd=\"a\"\"b c\";Ref=x"),
+            "Pwd=***;Ref=x"
+        );
+        assert_eq!(
+            preview(&["Pwd=\"a\"\"b c\";Ref=x"], &[]),
+            vec!["Pwd=***;Ref=x"]
+        );
+        assert_eq!(rendered(&["Pwd=\"a\"\"b c\";Ref=x"]), "1cv8c Pwd=***;Ref=x");
+        assert_eq!(
+            mask_connection_string("Srvr=h;Ref=erp;Usr=Admin;Pwd=\"a b\""),
+            "Srvr=h;Ref=erp;Usr=***;Pwd=***"
+        );
+        assert_eq!(
+            mask_connection_string("Srvr=h;Pwd=a b;Ref=x"),
+            "Srvr=h;Pwd=***;Ref=x"
+        );
+        assert_eq!(
+            mask_connection_string("Srvr=h;Pwd=\"se;cr et\";Ref=x"),
+            "Srvr=h;Pwd=***;Ref=x"
+        );
+        assert_eq!(
+            mask_connection_string("ws=http://alice:pass word@host/erp"),
+            "ws=http://***:***@host/erp"
+        );
+        assert_eq!(
+            mask_connection_string("ws=http://alice@host/erp"),
+            "ws=http://***@host/erp"
+        );
+        for value in [
+            "\"Srvr=h;Pwd=\"\"a b\"\";Ref=x\"",
+            "\"Srvr=h;Pwd=\"\"a;b c\"\";Ref=x\"",
+            "\"Srvr=h;Pwd=\"\"a\"\"\"\"b c\"\";Ref=x\"",
+        ] {
+            assert_eq!(
+                mask_connection_string(value),
+                "\"Srvr=h;Pwd=***;Ref=x\"",
+                "{value}"
+            );
+        }
+        assert_eq!(
+            mask_connection_string("File=C:\\My Bases\\erp"),
+            "File=C:\\My Bases\\erp"
+        );
     }
 }

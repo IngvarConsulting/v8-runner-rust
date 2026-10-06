@@ -58,9 +58,10 @@ Useful global flags:
    exit code 2 before anything is written, unless `--force`.
    Add `--dry-run` first: it names the four paths it would write and the dump utility it found,
    and creates nothing — not even the project directory.
-5. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
-6. Run `v8-runner infobase create` only when the file infobase or EDT workspace needs to be created.
-7. Run the narrowest validation command that answers the user's goal.
+5. If it exists but the worktree has its own infobase to point at (a new worktree, a copied `v8project.local.yaml`), run `v8-runner init --infobase "File=build/ib"`: it leaves `v8project.yaml` untouched, writes only the local layer, and keeps the previous `origin` with its credentials as `upstream` (refused if `upstream` exists).
+6. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
+7. Run `v8-runner infobase create` only when the file infobase or EDT workspace needs to be created.
+8. Run the narrowest validation command that answers the user's goal.
 
 Minimal infobase-only shape (two files):
 
