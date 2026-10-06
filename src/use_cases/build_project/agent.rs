@@ -158,7 +158,7 @@ impl SourceSetLoader for AgentLoader {
             // и не станет выгружать то, что не менялось.
             let token = generation_id(handle.session(), extension, &wait)?;
             if let Some(ledger) = GenerationLedger::of(source_context, &config.work_path) {
-                ledger.record(&token, "build")?;
+                ledger.record(Provider::Agent, &token, "build")?;
             }
             Ok(())
         })

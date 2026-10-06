@@ -8,6 +8,7 @@
 //! не изменилось с последней удачной загрузки или выгрузки, выгружать нечего.
 
 use super::*;
+use crate::domain::capability::Provider;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::platform::process::ProcessResult;
@@ -15,7 +16,7 @@ use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
     argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
     run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir, write_text, AgentHandle,
-    Exchange, GenerationLedger, Recorded,
+    Exchange, GenerationComparison, GenerationLedger, Recorded,
 };
 
 /// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
@@ -93,7 +94,7 @@ fn dump_through(
     // полная поверх каталога его пишет, и каталог без него не годится как «уже выгружено».
     if matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile)) && objects.is_none() {
         if let Recorded::Ours(record) = &recorded {
-            if record.token == generation {
+            if record.compare(Provider::Agent, &generation) == GenerationComparison::Unchanged {
                 return Ok((
                     String::new(),
                     Some(format!(
@@ -266,7 +267,7 @@ fn dump_through(
         }
     };
     if let Some(ledger) = &ledger {
-        ledger.record(&generation, "dump")?;
+        ledger.record(Provider::Agent, &generation, "dump")?;
     }
     Ok((
         transcript,
