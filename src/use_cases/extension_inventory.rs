@@ -758,7 +758,7 @@ mod tests {
         ibcmd: &std::path::Path,
     ) -> crate::config::model::AppConfig {
         use crate::config::model::{
-            AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
+            AppConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
         };
         AppConfig {
             base_path: root.to_path_buf(),
@@ -770,7 +770,6 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             source_sets: vec![],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(ibcmd.to_path_buf()),

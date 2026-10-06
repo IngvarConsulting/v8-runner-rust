@@ -90,8 +90,8 @@ impl PlatformUtilities {
 mod tests {
     use super::PlatformUtilities;
     use crate::config::model::{
-        AppConfig, BuildConfig, InfobaseConfig, McpConfig, PlatformToolConfig, SourceFormat,
-        TestsConfig, ToolsConfig,
+        AppConfig, InfobaseConfig, McpConfig, PlatformToolConfig, SourceFormat, TestsConfig,
+        ToolsConfig,
     };
     use crate::platform::locator::{
         EdtVersion, Locator, LocatorError, PlatformVersion, PlatformVersionRequirement, UtilityType,
@@ -130,7 +130,6 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             source_sets: Vec::new(),
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: platform_path,

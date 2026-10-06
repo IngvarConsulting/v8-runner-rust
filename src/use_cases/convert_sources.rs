@@ -1613,7 +1613,6 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             source_sets: vec![],
-            build: Default::default(),
             tools: ToolsConfig::default(),
             mcp: McpConfig::default(),
             tests: TestsConfig::default(),
