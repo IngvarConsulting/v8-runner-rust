@@ -334,6 +334,8 @@ fn setup_http_ibcmd_dump_project_with_infobase(
     fs::create_dir_all(base_path.join("main")).expect("main");
     fs::create_dir_all(&work_path).expect("work");
     fs::write(base_path.join("main").join("old.txt"), "old").expect("old");
+    // Каталог вне системы контроля версий с файлами выгрузка не трогает без согласия.
+    support::commit_sources(&base_path);
     write_ibcmd_script(&ibcmd_path, &calls_log, fail_pattern);
     write_http_ibcmd_config_with_infobase(
         &config_path,
@@ -790,7 +792,8 @@ async fn mcp_http_refusal_advises_the_command_line_of_the_server_target() {
         &["config", "user.email", "test@example.com"],
         &["config", "user.name", "Test"],
         &["add", "-A"],
-        &["commit", "-qm", "committed sources"],
+        // Каталог набора уже зафиксирован заготовкой проекта.
+        &["commit", "-q", "--allow-empty", "-m", "committed sources"],
     ] {
         let status = std::process::Command::new("git")
             .arg("-C")

@@ -37,6 +37,30 @@ pub fn hold_workspace_lock(work: &Path) {
     .expect("workspace lock");
 }
 
+/// Фиксирует всё, что лежит под `dir`, в репозитории гита (заводит его, если нет). Каталог
+/// исходников без незафиксированного сторож замены и перезаписи пропускает без согласия;
+/// каталог вне системы контроля версий с файлами — отказывает.
+pub fn commit_sources(dir: &Path) {
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=test@example.com", "-c", "user.name=Test"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    };
+    if !dir.join(".git").exists() {
+        git(&["init", "-q", "-b", "main", "."]);
+    }
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "sources"]);
+}
+
 pub fn v8_runner_command() -> Command {
     Command::cargo_bin("v8-runner").expect("binary")
 }

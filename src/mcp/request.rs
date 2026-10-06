@@ -59,7 +59,7 @@ pub struct McpRunModuleTestsRequest {
 pub struct McpDumpConfigRequest {
     /// Optional raw dump mode. Null/blank defaults to `INCREMENTAL` in service mappers.
     #[schemars(
-        description = "Dump mode. INCREMENTAL (default) dumps changed objects over the source directory; PARTIAL dumps only the listed objects; FULL dumps the whole configuration and replaces the source directory. A replacement refuses while uncommitted work there would be lost: commit or stash it and call again, or run the CLI `pull <SET> --force` for the same source set, which discards it; the refusal names the exact command. In an EDT-format project every mode replaces the project directory."
+        description = "Dump mode. INCREMENTAL (default) dumps changed objects over the source directory; PARTIAL dumps only the listed objects; FULL dumps the whole configuration and replaces the source directory. Every mode refuses before the platform starts while uncommitted work in the source directory would be lost, and when the directory is outside git and holds files: commit or stash it and call again, or run the CLI `pull <SET> --force` for the same source set, which discards it; the refusal names the exact command and every file at risk. In an EDT-format project every mode replaces the project directory."
     )]
     pub mode: Option<String>,
     /// Optional extension name.

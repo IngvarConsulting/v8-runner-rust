@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PULL-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/pull.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -17,12 +17,13 @@ check:
 
 Инструмент MCP `dump_config` отвечает этой же формой.
 
-**Что изменила версия 4.** Квитанция `provider` получила необязательное поле
-`endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
-(`managed`, `attached` или `gate`) и `address` — `host:port` подключения без учётных
-данных. Поле есть, только когда команда открыла сессию агента; у процесса платформы,
-у превью и у отказа до подключения его нет ([правило](a-session-receipt-names-its-endpoint.md)). Прежде квитанция
-точку входа не называла.
+**Что изменила версия 5.** Появилось необязательное поле `losses` — перечень того, что в
+каталоге набора пропадает безвозвратно, каждым путём: после выгрузки с согласием
+(`--force`) — уничтоженное, у превью — что выгрузка уничтожила бы или на чём остановилась бы
+без согласия. Пути гит называет от корня рабочей копии; где он не ответил, путь полный и
+потерей считается каждый файл каталога. Когда терять нечего, поля нет
+([правило](../use-cases/force-names-what-it-destroyed.md)). Прежде ответ уничтоженного не
+называл.
 
 ## Пример
 
@@ -35,6 +36,7 @@ check:
   "mode": "FULL",
   "target_path": "src/cf",
   "duration_ms": 0,
-  "message": "would dump Full into 'src/cf' via /opt/1cv8/bin/1cv8; nothing written"
+  "message": "would dump Full into 'src/cf' via /opt/1cv8/bin/1cv8; nothing written; it would discard in 'src/cf': 1 file(s) there exist nowhere else (src/cf/hand-written.xml)",
+  "losses": ["src/cf/hand-written.xml"]
 }
 ```

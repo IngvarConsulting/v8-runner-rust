@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use walkdir::WalkDir;
+
 /// Покрывает ли имя `relative` в каталоге `dir` шаблон из `.gitignore` рабочей
 /// копии.
 ///
@@ -165,9 +167,9 @@ pub fn tracking_of(path: &Path) -> Tracking {
 
 /// Что в каталоге пропадёт безвозвратно, если его содержимое заменить.
 ///
-/// Состояний три, а не два: незнание — самостоятельный ответ, и приравнивать его
-/// к худшему нельзя. Каталог вне рабочей копии — законное `Unknown`, а не отказ:
-/// раннер работает и без гита вовсе.
+/// Состояний три, а не два: незнание — самостоятельный ответ, и смешивать его с
+/// «терять нечего» нельзя. Что с ним делать, решает вызывающий: сторож замены
+/// приравнивает его к безвозвратному и считает потерей каждый файл каталога.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UncommittedWork {
     /// Гит отвечает: всё, что здесь лежит, он вернёт.
@@ -178,7 +180,57 @@ pub enum UncommittedWork {
     /// нельзя спутать между наборами исходников.
     AtRisk(Vec<PathBuf>),
     /// Ответа нет, причина названа.
-    Unknown(String),
+    Unknown(NoAnswer),
+}
+
+/// Почему гит не ответил. Различается затем, чтобы совет был верным: каталог вне
+/// рабочей копии берут под контроль версий, а упавший гит в рабочей копии чинят.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoAnswer {
+    /// Каталог не лежит ни в какой рабочей копии.
+    OutsideRepository(String),
+    /// Гита нет, он не запустился или упал внутри рабочей копии (`safe.directory`,
+    /// сломанный индекс), или перечень вышел неполным. Причина несёт первую строку
+    /// stderr гита, если он её написал.
+    Failed(String),
+}
+
+impl NoAnswer {
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::OutsideRepository(reason) | Self::Failed(reason) => reason,
+        }
+    }
+}
+
+/// Лежит ли `dir` в рабочей копии: есть ли `.git` в нём или выше. Решает файловая
+/// система, а не текст отказа гита: прозе инструмента решения не доверяются.
+fn inside_a_worktree(dir: &Path) -> bool {
+    let absolute = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    absolute
+        .ancestors()
+        .any(|ancestor| ancestor.join(".git").exists())
+}
+
+/// Первый подкаталог `dir`, который не удалось прочесть, — если такой есть.
+///
+/// Замерено: нечитаемый подкаталог даёт у `git status` нулевой выход и пустой список
+/// вместо своего содержимого. Предупреждение об этом приходит прозой в stderr, а прозе
+/// решения не доверяются, поэтому полноту ответа проверяет обход самого каталога.
+fn unreadable_directory_in(dir: &Path) -> Option<PathBuf> {
+    WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .find_map(|entry| match entry {
+            Ok(_) => None,
+            Err(error) => Some(error.path().unwrap_or(dir).to_path_buf()),
+        })
+}
+
+/// Первая непустая строка stderr — то, что гит сказал о причине.
+fn first_line(stderr: &str) -> Option<&str> {
+    stderr.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
 /// Спрашивает гит, что в `dir` не восстановить после замены каталога.
@@ -214,29 +266,52 @@ pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork 
                 .iter()
                 .map(|name| format!(":(exclude,literal){name}")),
         )
+        // Вопрос ничего не пишет: без этого `status` обновляет индекс рабочей копии, а
+        // превью следа не оставляет.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .output()
     {
         Ok(output) => output,
         Err(error) => {
-            return UncommittedWork::Unknown(format!("git status failed to run: {error}"))
+            return UncommittedWork::Unknown(NoAnswer::Failed(format!(
+                "git status failed to run: {error}"
+            )))
         }
     };
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
     if !output.status.success() {
-        return UncommittedWork::Unknown(match output.status.code() {
+        let exit = match output.status.code() {
             Some(code) => format!("git status exited with {code}"),
             None => "git status was terminated by a signal".to_owned(),
+        };
+        // Первая строка stderr только называет причину человеку; выбор совета решает
+        // файловая система.
+        let reason = match first_line(&stderr) {
+            Some(line) => format!("{exit}: {line}"),
+            None => exit,
+        };
+        return UncommittedWork::Unknown(if inside_a_worktree(dir) {
+            NoAnswer::Failed(reason)
+        } else {
+            NoAnswer::OutsideRepository(reason)
         });
     }
 
-    // Предупреждение приходит в stderr при нулевом выходе, а список при этом
-    // молча неполон: нечитаемый подкаталог даёт пустой ответ вместо своего
-    // содержимого. Полнота списка — условие, без которого он ничего не значит.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let warning = stderr.lines().find(|line| !line.trim().is_empty());
-    if let Some(warning) = warning {
-        return UncommittedWork::Unknown(format!("git status reported: {warning}"));
+    // При нулевом выходе ответ получен; предупреждения в stderr (например, о замене концов
+    // строк) его не отменяют и уходят только в журнал. Полнота перечня — условие, без
+    // которого он ничего не значит: замер #176 — нечитаемый подкаталог даёт нулевой выход
+    // и предупреждение в stderr. Непустой stderr только повод проверить полноту; текст не
+    // разбирается, решает обход каталога. Без stderr обход не нужен.
+    if let Some(warning) = first_line(&stderr) {
+        tracing::debug!(dir = %dir.display(), warning, "git status warning ignored");
+        if let Some(unreadable) = unreadable_directory_in(dir) {
+            return UncommittedWork::Unknown(NoAnswer::Failed(format!(
+                "'{}' could not be read, so git status could not list it",
+                unreadable.display()
+            )));
+        }
     }
 
     UncommittedWork::AtRisk(parse_at_risk(&output.stdout)).normalized()
@@ -639,9 +714,66 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let answer = uncommitted_work_in(dir.path(), &[]);
         assert!(
-            matches!(answer, UncommittedWork::Unknown(_)),
-            "expected Unknown, got {answer:?}"
+            matches!(
+                answer,
+                UncommittedWork::Unknown(NoAnswer::OutsideRepository(_))
+            ),
+            "expected Unknown outside a repository, got {answer:?}"
         );
+    }
+
+    /// Гит упал внутри рабочей копии: это не «вне репозитория», и причина несёт то,
+    /// что гит сказал.
+    #[test]
+    fn a_failing_git_inside_a_worktree_names_its_reason() {
+        let repo = repo_with_committed_source();
+        fs::write(repo.path().join(".git").join("index"), "x").expect("break the index");
+
+        let answer = uncommitted_work_in(&source_dir(&repo), &[]);
+
+        let UncommittedWork::Unknown(NoAnswer::Failed(reason)) = answer else {
+            panic!("expected a failed git, got {answer:?}");
+        };
+        assert!(reason.contains("exited with"), "{reason}");
+        assert!(reason.contains("index"), "{reason}");
+    }
+
+    /// Предупреждение в stderr при нулевом выходе (у гита на Windows — о замене концов
+    /// строк) ответа не отменяет: найденное безвозвратное остаётся найденным.
+    #[cfg(unix)]
+    #[test]
+    fn a_warning_on_a_successful_status_keeps_the_answer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = repo_with_committed_source();
+        let hook = repo.path().join("warn.sh");
+        let fired = repo.path().join("hook-fired");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ntouch '{}'\necho 'warning: in the working copy of x, LF will be replaced by CRLF' >&2\nexit 1\n",
+                fired.display()
+            ),
+        )
+        .expect("hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod");
+        run_git(
+            repo.path(),
+            &[
+                "config",
+                "core.fsmonitor",
+                hook.to_str().expect("utf-8 path"),
+            ],
+        );
+        fs::write(source_dir(&repo).join("hand-written.xml"), "mine\n").expect("write");
+
+        assert_eq!(
+            uncommitted_work_in(&source_dir(&repo), &[]),
+            UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/hand-written.xml")])
+        );
+        // Без метки хук не сработал (старый git без `core.fsmonitor`-хука), и предупреждения
+        // не было — тест прошёл бы впустую.
+        assert!(fired.is_file(), "the fsmonitor hook must have run");
     }
 
     /// Замерено: нечитаемый подкаталог даёт нулевой выход, пустой список и

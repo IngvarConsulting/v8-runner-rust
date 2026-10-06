@@ -242,6 +242,18 @@ fn git(path: &Path, args: &[&str]) {
     );
 }
 
+/// Фиксирует проект в гите с файлом версий в игноре: выгрузка поверх каталога без
+/// незафиксированного идёт без согласия, а каталог вне системы контроля версий она
+/// переписать не вправе.
+fn commit_project(project: &Project) {
+    let root = project.config.parent().expect("project root");
+    let ignore = root.join(".gitignore");
+    if !ignore.exists() {
+        fs::write(&ignore, "ConfigDumpInfo.xml\n").expect("gitignore");
+    }
+    support::commit_sources(root);
+}
+
 fn snapshot(project: &Project) -> PathBuf {
     project.work.join("infobases/origin/hashes/main.redb")
 }
@@ -677,6 +689,7 @@ fn a_foreign_version_file_between_commands_does_not_reach_the_dump() {
             "{provider}"
         );
         let ours = read(&version_file);
+        commit_project(&project);
 
         fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
         succeeded(run(&project, &["pull", "--source-set", "main"]));
@@ -697,6 +710,7 @@ fn a_failed_pull_does_not_change_the_runner_copy() {
     let project = version_project("designer");
     succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
     let ours = read(&runner_copy(&project));
+    commit_project(&project);
 
     fail_platform(&project, true);
     for args in [
@@ -737,6 +751,7 @@ fn a_push_refreshes_the_runner_copy() {
     assert_eq!(read(&runner_copy(&project)), loaded);
 
     fs::write(&version_file, "<ConfigDumpInfo foreign=\"2\"/>\n").expect("foreign write");
+    commit_project(&project);
     succeeded(run(&project, &["pull", "--source-set", "main"]));
     assert_eq!(format!("{}\n", last_seen(&project)), loaded);
 }
@@ -757,6 +772,7 @@ fn a_push_that_writes_no_version_file_keeps_the_runner_copy() {
     succeeded(run(&project, &["push"]));
 
     assert_eq!(read(&runner_copy(&project)), ours);
+    commit_project(&project);
     succeeded(run(&project, &["pull", "--source-set", "main"]));
     assert_eq!(format!("{}\n", last_seen(&project)), ours);
 }
@@ -783,6 +799,7 @@ fn a_designer_partial_pull_leaves_the_runner_copy_alone() {
     let project = version_project("designer");
     succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
     let ours = read(&runner_copy(&project));
+    commit_project(&project);
 
     succeeded(run(
         &project,
@@ -798,6 +815,7 @@ fn an_ibcmd_partial_pull_dumps_from_the_runner_copy() {
     let project = version_project("ibcmd");
     succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
     let ours = read(&runner_copy(&project));
+    commit_project(&project);
     let version_file = project.sources.join("ConfigDumpInfo.xml");
     fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
 
@@ -891,6 +909,8 @@ fn a_source_edit_keeps_the_pull_incremental() {
         "Procedure Edited()\nEndProcedure\n",
     )
     .expect("edit");
+    // Правка зафиксирована: незафиксированную выгрузка поверх каталога не переписывает.
+    commit_project(&project);
 
     succeeded(run(&project, &["pull", "--source-set", "main"]));
 
@@ -979,6 +999,7 @@ fn a_preview_names_the_mode_the_pull_would_run() {
     );
 
     succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    commit_project(&project);
     let version_file = project.sources.join("ConfigDumpInfo.xml");
     fs::write(&version_file, "<ConfigDumpInfo/>\n").expect("a replaced version file");
     let restored = preview(&project);
@@ -1000,6 +1021,7 @@ fn a_preview_names_the_mode_the_pull_would_run() {
 #[test]
 fn a_full_dump_over_the_directory_names_the_memory_it_does_not_write() {
     let project = project("designer", false);
+    commit_project(&project);
     assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
 
     let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
