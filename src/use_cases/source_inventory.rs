@@ -378,4 +378,61 @@ mod tests {
             config.base_path.join("configuration").as_path()
         );
     }
+
+    /// Пакет набора называется именем набора: `.cf` у конфигурации, `.cfe` у расширения,
+    /// каталог у внешних файлов.
+    #[test]
+    fn a_package_is_named_after_its_set() {
+        let config = config(SourceFormat::Designer);
+        let inventory = SourceSetInventory::new(&config);
+        let dir = std::path::Path::new("dist");
+        let named =
+            |name: &str| super::package_in_directory(dir, inventory.source_set(name).expect("set"));
+        assert_eq!(named("main"), dir.join("main.cf"));
+        assert_eq!(named("ext"), dir.join("ext.cfe"));
+        assert_eq!(named("processors"), dir.join("processors"));
+        assert_eq!(named("reports"), dir.join("reports"));
+    }
+
+    /// Файл без набора — отказ с шагом к набору основной конфигурации и файлу `.cf`; каталог
+    /// принимается.
+    #[test]
+    fn a_file_output_without_a_set_names_the_main_set() {
+        let config = config(SourceFormat::Designer);
+        let inventory = SourceSetInventory::new(&config);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing_file = dir.path().join("present");
+        std::fs::write(&existing_file, "x").expect("file");
+
+        assert_eq!(
+            inventory.packages_directory(CommandName::Artifacts, "dist", None),
+            Ok(std::path::PathBuf::from("dist"))
+        );
+        let existing_dir = dir.path().join("dist.v2");
+        std::fs::create_dir_all(&existing_dir).expect("dir");
+        let existing_dir = existing_dir.display().to_string();
+        assert!(inventory
+            .packages_directory(CommandName::Artifacts, &existing_dir, None)
+            .is_ok());
+
+        for (output, file) in [
+            ("dist/release.cfe".to_owned(), "dist/release.cf".to_owned()),
+            (
+                existing_file.display().to_string(),
+                format!("{}.cf", existing_file.display()),
+            ),
+        ] {
+            let error = inventory
+                .packages_directory(CommandName::InfobaseConfigurationExport, &output, None)
+                .expect_err("a file is refused");
+            assert_eq!(
+                error.kind(),
+                crate::use_cases::result::UseCaseErrorKind::Validation
+            );
+            let next = error.next().expect("next step");
+            assert_eq!(next.command, "download");
+            assert_eq!(next.source_set.as_deref(), Some("main"));
+            assert_eq!(next.keys.get("--output"), Some(&file), "{output}");
+        }
+    }
 }

@@ -237,11 +237,12 @@ fn cases(project: &Project) -> Vec<(Vec<String>, Vec<String>)> {
                 "infobase",
                 "configuration",
                 "export",
+                "main",
                 "--output",
                 &cf,
                 "--dry-run",
             ],
-            vec!["download", "--output", &cf, "--dry-run"],
+            vec!["download", "main", "--output", &cf, "--dry-run"],
         ),
         // Ключи.
         (
@@ -356,24 +357,34 @@ fn cases(project: &Project) -> Vec<(Vec<String>, Vec<String>)> {
         (
             vec![
                 "download",
+                "main",
                 "--state",
                 "working",
                 "--output",
                 &cf,
                 "--dry-run",
             ],
-            vec!["download", "--output", &cf, "--dry-run"],
+            vec!["download", "main", "--output", &cf, "--dry-run"],
         ),
         (
             vec![
                 "download",
+                "main",
                 "--state",
                 "database",
                 "--output",
                 &cf,
                 "--dry-run",
             ],
-            vec!["download", "--state", "db", "--output", &cf, "--dry-run"],
+            vec![
+                "download",
+                "main",
+                "--state",
+                "db",
+                "--output",
+                &cf,
+                "--dry-run",
+            ],
         ),
     ];
     pairs

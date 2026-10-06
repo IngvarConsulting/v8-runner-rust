@@ -174,7 +174,7 @@ pub fn execute_command(
         Command::Infobase(args) => match &args.command {
             InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
                 command: InfobaseConfigurationCommand::Export(export),
-            }) if downloads_every_package(args) => execute_download_all(
+            }) if downloads_every_package(args, config) => execute_download_all(
                 config,
                 export,
                 presenter,
@@ -1203,8 +1203,8 @@ pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             // Предмет набора известен только по настройкам проекта: такой запрос проверяет
             // `prepare_infobase_command`, когда настройки загружены. Без набора и
-            // `--extension` `--output` — каталог, и его проверяет `execute_download_all`:
-            // совет отказа называет набор основной конфигурации из настроек.
+            // `--extension` вид `--output` тоже решают настройки: у проекта с пакетами это
+            // каталог (`execute_download_all`), у проекта только с базой — файл.
             InfobaseConfigurationCommand::Export(args)
                 if args.set.is_some() || args.extension.is_none() =>
             {
@@ -2477,15 +2477,18 @@ pub fn execute_download_all(
     )
 }
 
-/// Ответ `download` без набора — тот, что выгружает каждый набор: ни набора, ни
-/// `--extension` в нём нет.
-pub fn downloads_every_package(args: &InfobaseArgs) -> bool {
+/// `download` без набора и без `--extension` выгружает каждый пакет конфигурации проекта.
+/// У проекта без набора конфигурации и расширения (только база, `source-set: []`) обходить
+/// нечего: такой вызов, как прежде, выгружает основную конфигурацию в файл `--output`.
+pub fn downloads_every_package(args: &InfobaseArgs, config: &AppConfig) -> bool {
     matches!(
         &args.command,
         InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
             command: InfobaseConfigurationCommand::Export(export),
         }) if export.set.is_none() && export.extension.is_none()
-    )
+    ) && !SourceSetInventory::new(config)
+        .configuration_packages()
+        .is_empty()
 }
 
 fn execute_syntax(
@@ -5637,7 +5640,7 @@ mod tests {
                 command: InfobaseCommand::Configuration(InfobaseConfigurationArgs {
                     command: InfobaseConfigurationCommand::Export(
                         InfobaseConfigurationExportArgs {
-                            set: None,
+                            set: Some("main".to_owned()),
                             state: None,
                             extension: None,
                             output: dir.path().join("main.cf").display().to_string(),

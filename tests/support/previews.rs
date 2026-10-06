@@ -209,7 +209,9 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
         ),
         row(&["dump", "--force"], "pull", "pull", work.clone()),
         row(
-            &["download", "--state", "working", "--output", &artifact],
+            &[
+                "download", "main", "--state", "working", "--output", &artifact,
+            ],
             "download",
             "download",
             work.clone(),
@@ -225,6 +227,7 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
                 "infobase",
                 "configuration",
                 "export",
+                "main",
                 "--state",
                 "working",
                 "--output",
@@ -248,7 +251,7 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
         ),
         row(&["convert"], "convert", "convert", work.clone()),
         row(
-            &["make", "--output", &artifact],
+            &["make", "main", "--output", &artifact],
             "make",
             "make",
             work.clone(),

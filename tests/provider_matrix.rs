@@ -198,11 +198,14 @@ fn a_foreign_download_provider_is_refused_like_push_before_the_platform_starts()
     let output = output.display().to_string();
     let commands: [&[&str]; 3] = [
         &["push", "--dry-run"],
-        &["download", "--state", "working", "--output", &output],
+        &[
+            "download", "main", "--state", "working", "--output", &output,
+        ],
         &[
             "infobase",
             "configuration",
             "export",
+            "main",
             "--state",
             "working",
             "--output",
@@ -277,6 +280,7 @@ fn a_foreign_operation_key_does_not_block_the_transfer_family() {
 
     let download = [
         "download",
+        "main",
         "--state",
         "working",
         "--output",
@@ -320,6 +324,7 @@ fn a_transfer_command_checks_only_the_key_of_its_own_operation() {
 
     let download = [
         "download",
+        "main",
         "--state",
         "working",
         "--output",

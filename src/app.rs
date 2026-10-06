@@ -123,12 +123,6 @@ pub fn run() -> i32 {
         return run_bootstrap(args, &cli, &presenter);
     }
 
-    // `download` без набора обходит наборы и отвечает своей формой: его ведёт общий путь
-    // команд, а не подготовка одной выгрузки.
-    let downloads_all = matches!(
-        &cli.command,
-        Command::Infobase(args) if execute::downloads_every_package(args)
-    );
     if let Command::Infobase(args) = &cli.command {
         if let Err(error) = execute::validate_infobase_request(args) {
             let error =
@@ -161,7 +155,7 @@ pub fn run() -> i32 {
         Err(e) => {
             let message = e.to_string();
             let error = UseCaseError::from(AppError::from(e));
-            if let (Command::Infobase(args), false) = (&cli.command, downloads_all) {
+            if let Command::Infobase(args) = &cli.command {
                 let error = execute::render_infobase_pre_dispatch_failure(
                     args,
                     &presenter,
@@ -176,6 +170,12 @@ pub fn run() -> i32 {
             return error.exit_code();
         }
     };
+    // `download` без набора обходит пакеты проекта и отвечает своей формой: его ведёт общий
+    // путь команд, а не подготовка одной выгрузки.
+    let downloads_all = matches!(
+        &cli.command,
+        Command::Infobase(args) if execute::downloads_every_package(args, &config)
+    );
     let mut prepared_infobase = match &cli.command {
         Command::Infobase(args) if !downloads_all => {
             match execute::prepare_infobase_cli_command(&config, args, &presenter, cli.dry_run) {

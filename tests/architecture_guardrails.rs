@@ -174,7 +174,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 25,
+        report.accepted, 27,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -5549,8 +5549,9 @@ fn sorts_source_sets_into_purpose_buckets(production: &str) -> bool {
 }
 
 /// Порядок наборов по назначению — основная конфигурация, расширения, внешние файлы —
-/// решает `source_inventory::ordered_by_purpose`, и обход пакетов конфигурации
-/// (`SourceSetInventory::configuration_packages`) идёт им. Корень прежней проблемы — второй
+/// решает `source_inventory::ordered_by_purpose`, и обходы без набора идут им: `pull --all`
+/// и `download` — через `SourceSetInventory::configuration_packages`, `make` — через
+/// `SourceSetInventory::ordered_source_sets`. Корень прежней проблемы — второй
 /// порядок, собранный корзинами в другом сценарии; страж ловит такие корзины под любым
 /// именем функции.
 #[test]
@@ -5562,10 +5563,23 @@ fn the_order_of_source_sets_is_decided_in_one_place() {
             && owner_tokens.contains("ordered_by_purpose(&self.config.source_sets)"),
         "the walk of configuration packages must go through ordered_by_purpose"
     );
-    let all = production_tokens(&repo_path("src/use_cases/dump_config/all.rs"));
+    // Обходы без набора идут порядком инвентаря: `pull --all` и `download` — по пакетам
+    // конфигурации, `make` — по всем наборам тем же порядком.
+    for walk in [
+        "src/use_cases/dump_config/all.rs",
+        "src/use_cases/infobase_export/all.rs",
+    ] {
+        let tokens = production_tokens(&repo_path(walk));
+        assert!(
+            tokens.contains(".configuration_packages()")
+                && !tokens.contains("ordered_source_sets("),
+            "{walk} must walk the packages through SourceSetInventory::configuration_packages"
+        );
+    }
+    let make = production_tokens(&repo_path("src/use_cases/artifacts/all.rs"));
     assert!(
-        all.contains(".configuration_packages()") && !all.contains("ordered_source_sets("),
-        "pull --all must walk the packages through SourceSetInventory::configuration_packages"
+        make.contains(".ordered_source_sets()") && !make.contains("source_sets_with_purpose("),
+        "make without a set must walk the sets through SourceSetInventory::ordered_source_sets"
     );
 
     let offenders = collect_rust_files(&repo_path("src"))

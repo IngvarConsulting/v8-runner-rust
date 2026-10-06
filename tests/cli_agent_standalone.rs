@@ -407,7 +407,12 @@ fn a_read_only_sftp_gate_serves_downloads_and_refuses_uploads() {
 
     let (code, payload) = run(
         &harness,
-        &["artifacts", "--output", &output.display().to_string()],
+        &[
+            "artifacts",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ],
     );
     assert_eq!(code, 0, "{payload}");
     assert_eq!(fs::read_to_string(&output).expect("package"), "CF:main");
@@ -550,7 +555,12 @@ fn a_download_through_the_gate_exports_the_main_configuration() {
 
     let (code, payload) = run(
         &harness,
-        &["download", "--output", &output.display().to_string()],
+        &[
+            "download",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ],
     );
 
     assert_eq!(code, 0, "{payload}");
@@ -589,6 +599,7 @@ fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
     for extra in [&[][..], &["--dry-run"][..]] {
         let mut arguments = vec![
             "download".to_owned(),
+            "main".to_owned(),
             "--state".to_owned(),
             "db".to_owned(),
             "--output".to_owned(),
@@ -650,7 +661,12 @@ fn make_and_extensions_go_through_the_gate() {
 
     let (code, payload) = run(
         &harness,
-        &["artifacts", "--output", &output.display().to_string()],
+        &[
+            "artifacts",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ],
     );
     assert_eq!(code, 0, "{payload}");
     assert_eq!(fs::read_to_string(&output).expect("package"), "CF:main");
