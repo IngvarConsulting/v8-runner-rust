@@ -521,6 +521,8 @@ fn a_declaration_that_breaks_the_project_is_refused_before_any_dump() {
 
     let message = assert_refused_before_any_dump(&project, &output, &envelope, &text);
     assert!(message.contains("would declare"), "{message}");
+    // Состав базы прочитан, объявлено ничего: пустой список, а не `null`.
+    assert_eq!(envelope["data"]["declared"], json!([]), "{envelope}");
     assert!(message.contains("src/ext/Fresh"), "{message}");
     assert_data_matches_one_of(&envelope["data"], "pull --all refusal", &["pull-all"]);
 }

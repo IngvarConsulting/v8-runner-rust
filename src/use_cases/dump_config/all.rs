@@ -86,7 +86,12 @@ fn run_all(
     result.provider = Some(selected.receipt.clone());
 
     if request.dry_run {
-        return preview(context, config, request, &selected, result, started);
+        let walker = Walker {
+            context,
+            config,
+            request,
+        };
+        return walker.preview(&selected, result, started);
     }
 
     let installed = match read_installed_extensions(context, config, &selected, &utilities) {
@@ -103,6 +108,8 @@ fn run_all(
             ))
         }
     };
+    // Состав базы прочитан: дальше `declared` называет объявленное, пусть и ничего.
+    result.declared = Some(Vec::new());
     let walk = match plan_walk(config, &installed).and_then(|walk| {
         // Проект с новыми наборами проверяется до первой выгрузки и тем же валидатором, что
         // проект при загрузке: выгруженное не должно остаться без объявления, а объявление —
@@ -166,41 +173,6 @@ fn run_all(
     Ok(result)
 }
 
-/// Превью платформу не запускает, поэтому состава базы не знает: какие наборы объявит
-/// настоящий прогон и каких расширений проекта в базе нет, выясняется только им. Превью
-/// выгрузки называет наборы, которые прогон выгрузит при любом составе, — основную
-/// конфигурацию; наборы расширений проекта названы в `if_installed`, а объявляемые —
-/// шаблоном `src/ext/<Name>`.
-fn preview(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    request: &PullAllRequest,
-    selected: &SelectedProvider,
-    mut result: PullAllResult,
-    started: Instant,
-) -> UseCaseResult<PullAllResult> {
-    let walker = Walker {
-        context,
-        config,
-        request,
-    };
-    for (source_set, extension) in SourceSetInventory::new(config).configuration_packages() {
-        if extension.is_some() {
-            result.if_installed.push(source_set.name.clone());
-        } else if let Err(error) = walker.pull(&source_set.name, SetKind::Project, &mut result) {
-            return Err(fail(error, result, started));
-        }
-    }
-    result.message = Some(format!(
-        "would read the extensions installed in the infobase via {}, pull each extension set of the project the infobase has and name the others as not installed, and, for each extension without a set, pull it into `{DECLARED_EXTENSION_ROOT}/<Name>` and then declare that set in '{}'; which sets would be declared is known only once the infobase is read; nothing read, nothing written",
-        provider_label(selected),
-        request.project_file.display()
-    ));
-    result.ok = true;
-    result.duration_ms = started.elapsed().as_millis() as u64;
-    Ok(result)
-}
-
 /// Отказ: ответ несёт выгруженное до него и называет причину.
 fn fail(
     error: impl Into<UseCaseError>,
@@ -232,6 +204,35 @@ struct Walker<'a> {
 }
 
 impl Walker<'_> {
+    /// Превью платформу не запускает, поэтому состава базы не знает: какие наборы объявит
+    /// настоящий прогон и каких расширений проекта в базе нет, выясняется только им. Превью
+    /// выгрузки называет наборы, которые прогон выгрузит при любом составе, — основную
+    /// конфигурацию; наборы расширений проекта названы в `if_installed`, а объявляемые —
+    /// шаблоном `src/ext/<Name>`.
+    fn preview(
+        &self,
+        selected: &SelectedProvider,
+        mut result: PullAllResult,
+        started: Instant,
+    ) -> UseCaseResult<PullAllResult> {
+        for (source_set, extension) in SourceSetInventory::new(self.config).configuration_packages()
+        {
+            if extension.is_some() {
+                result.if_installed.push(source_set.name.clone());
+            } else if let Err(error) = self.pull(&source_set.name, SetKind::Project, &mut result) {
+                return Err(fail(error, result, started));
+            }
+        }
+        result.message = Some(format!(
+            "would read the extensions installed in the infobase via {}, pull each extension set of the project the infobase has and name the others as not installed, and, for each extension without a set, pull it into `{DECLARED_EXTENSION_ROOT}/<Name>` and then declare that set in '{}'; which sets would be declared is known only once the infobase is read; nothing read, nothing written",
+            provider_label(selected),
+            self.request.project_file.display()
+        ));
+        result.ok = true;
+        result.duration_ms = started.elapsed().as_millis() as u64;
+        Ok(result)
+    }
+
     /// Выгружает один набор сценарием `pull <SET>` и кладёт его ответ в обход; отказ набора
     /// останавливает обход.
     fn pull(
