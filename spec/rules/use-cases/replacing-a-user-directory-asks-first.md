@@ -10,6 +10,8 @@ check:
   - tests/cli_dump.rs::a_full_dump_replaces_an_ignored_version_file_without_asking
   - tests/cli_pull_memory.rs::a_full_dump_over_the_directory_asks_the_replacement_guard
   - tests/cli_dump.rs::an_incremental_pull_refuses_over_work_version_control_cannot_give_back
+  - tests/cli_dump.rs::a_partial_pull_refuses_over_an_uncommitted_edit
+  - src/platform/git.rs::a_warning_on_a_successful_status_keeps_the_answer
   - tests/cli_convert.rs::convert_without_source_set_processes_all_source_sets_into_work_path_out
 ---
 
@@ -21,7 +23,9 @@ check:
 объектов, полной поверх каталога без годного файла версий, заменой каталога или проекта EDT;
 замена спрашивает ещё раз перед самой публикацией. Отказ называет действие: `refusing to
 replace` или `refusing to overwrite`. Ответов три: терять нечего, есть безвозвратное,
-ответа нет; что значит третий, держит `INV.USE-CASES.AN-UNTRACKED-DIRECTORY-IS-REFUSED-NOT-REPLACED`.
+ответа нет; что значит третий, держит `INV.USE-CASES.AN-UNTRACKED-DIRECTORY-IS-REFUSED-NOT-REPLACED`. Удачный
+ответ гита остаётся ответом и с предупреждением в stderr. Неполный перечень — это «ответа
+нет»: подкаталог, который не прочесть, раннер находит обходом каталога, а не по тексту гита.
 
 Безвозвратно — то, что живёт только на диске: файл вне учёта, файл в игноре, правка
 поверх индекса, разметка незавершённого слияния. Проиндексированное сюда не входит. Не входит и
