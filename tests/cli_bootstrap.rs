@@ -26,7 +26,8 @@ for arg in "$@"; do
   prev="$arg"
 done
 if [ -n "$out" ]; then printf 'designer log: %s\n' "$args" > "$out"; fi
-if [ "{exit_code}" = "0" ]; then
+# Чтение поколения ничего не выгружает: без каталога выгрузки файл лёг бы в корень.
+if [ "{exit_code}" = "0" ] && [ -n "$target" ]; then
   mkdir -p "$target"
   printf '<Configuration />\n' > "$target/Configuration.xml"
 fi
