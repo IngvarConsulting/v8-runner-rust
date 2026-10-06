@@ -570,3 +570,184 @@ fn a_pull_after_a_killed_pull_succeeds_and_removes_the_left_lock_files() {
 
     assert_eq!(dump_lock_files(&project), Vec::<String>::new());
 }
+
+/// Поддельная платформа, которая, как настоящая, пишет файл версий: выгрузка — в каталог
+/// выгрузки, загрузка Конфигуратора с `-updateConfigDumpInfo` — в каталог загрузки;
+/// `ibcmd config import` его не пишет. Выгрузка по изменившемуся и загрузка, пишущая файл
+/// версий, записывают в `seen`, какой файл версий застали в каталоге. С файлом `fail` рядом вызов, успев записать
+/// файл версий, кончается сбоем.
+fn version_writing_platform(root: &Path) -> String {
+    let calls = root.join("calls.log");
+    let counter = root.join("counter");
+    let seen = root.join("seen.log");
+    let fail = root.join("fail");
+    format!(
+        r#"printf '%s\n' "$*" >> '{calls}'
+target=''
+load=''
+update=''
+writes=''
+exports=''
+previous=''
+for arg in "$@"; do
+  if [ "$previous" = '/DumpConfigToFiles' ]; then target="$arg"; fi
+  if [ "$previous" = '/LoadConfigFromFiles' ]; then load="$arg"; fi
+  if [ "$arg" = '-update' ] || [ "$arg" = '--sync' ]; then update=1; fi
+  if [ "$arg" = '-updateConfigDumpInfo' ]; then writes=1; fi
+  if [ "$previous" = 'config' ] && [ "$arg" = 'export' ]; then exports=1; fi
+  previous="$arg"
+done
+if [ -n "$exports" ]; then target="$previous"; fi
+n=$(( $(cat '{counter}' 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > '{counter}'
+if [ -n "$target" ]; then
+  mkdir -p "$target"
+  if [ -n "$update" ]; then cat "$target/ConfigDumpInfo.xml" >> '{seen}'; fi
+  printf '<Configuration/>\n' > "$target/Configuration.xml"
+  printf '<ConfigDumpInfo dump="%s"/>\n' "$n" > "$target/ConfigDumpInfo.xml"
+fi
+if [ -n "$load" ] && [ -n "$writes" ]; then
+  cat "$load/ConfigDumpInfo.xml" >> '{seen}'
+  printf '<ConfigDumpInfo load="%s"/>\n' "$n" > "$load/ConfigDumpInfo.xml"
+fi
+if [ -f '{fail}' ]; then exit 1; fi
+exit 0"#,
+        calls = calls.display(),
+        counter = counter.display(),
+        seen = seen.display(),
+        fail = fail.display(),
+    )
+}
+
+fn version_project(provider: &str) -> Project {
+    let project = project(provider, false);
+    write_shell_script_atomically(
+        &project.binary,
+        &version_writing_platform(project.config.parent().expect("project root")),
+    );
+    project
+}
+
+fn runner_copy(project: &Project) -> PathBuf {
+    project
+        .work
+        .join("infobases/origin/dump-info/main/ConfigDumpInfo.xml")
+}
+
+fn read(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// Последний файл версий, от которого выгрузка по изменившемуся считала разницу.
+fn last_seen(project: &Project) -> String {
+    let seen = read(&project.config.with_file_name("seen.log"));
+    seen.lines()
+        .last()
+        .expect("an incremental dump ran")
+        .to_owned()
+}
+
+fn fail_platform(project: &Project, fail: bool) {
+    let flag = project.config.with_file_name("fail");
+    if fail {
+        fs::write(flag, "").expect("fail flag");
+    } else {
+        fs::remove_file(flag).expect("clear fail flag");
+    }
+}
+
+#[test]
+fn a_foreign_version_file_between_commands_does_not_reach_the_dump() {
+    for provider in ["designer", "ibcmd"] {
+        let project = version_project(provider);
+        succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+        let version_file = project.sources.join("ConfigDumpInfo.xml");
+        assert_eq!(
+            read(&runner_copy(&project)),
+            read(&version_file),
+            "{provider}"
+        );
+        let ours = read(&version_file);
+
+        fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
+        succeeded(run(&project, &["pull", "--source-set", "main"]));
+
+        assert_eq!(format!("{}\n", last_seen(&project)), ours, "{provider}");
+        assert!(read(&version_file).contains("dump="), "{provider}");
+        assert_ne!(read(&version_file), ours, "{provider}");
+        assert_eq!(
+            read(&runner_copy(&project)),
+            read(&version_file),
+            "{provider}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_pull_does_not_change_the_runner_copy() {
+    let project = version_project("designer");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let ours = read(&runner_copy(&project));
+
+    fail_platform(&project, true);
+    for args in [
+        &["pull", "--source-set", "main"][..],
+        &["pull", "--force", "--source-set", "main"][..],
+    ] {
+        assert!(!run(&project, args).status.success(), "{args:?}");
+        assert_eq!(read(&runner_copy(&project)), ours, "{args:?}");
+    }
+    // Сбой выгрузки по изменившемуся успел переписать файл в каталоге; следующая выгрузка
+    // всё равно считает разницу от копии раннера.
+    assert_ne!(read(&project.sources.join("ConfigDumpInfo.xml")), ours);
+
+    fail_platform(&project, false);
+    succeeded(run(&project, &["pull", "--source-set", "main"]));
+    assert_eq!(format!("{}\n", last_seen(&project)), ours);
+}
+
+#[test]
+fn a_push_refreshes_the_runner_copy() {
+    let project = version_project("designer");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let version_file = project.sources.join("ConfigDumpInfo.xml");
+    let ours = read(&version_file);
+    fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
+    fs::write(
+        project.sources.join("Module.bsl"),
+        "Procedure Edited()\nEndProcedure\n",
+    )
+    .expect("edit");
+
+    succeeded(run(&project, &["push"]));
+
+    // Загрузка обновляет файл раннера, а не подменённый.
+    assert_eq!(format!("{}\n", last_seen(&project)), ours);
+    let loaded = read(&version_file);
+    assert!(loaded.contains("load="), "{loaded}");
+    assert_eq!(read(&runner_copy(&project)), loaded);
+
+    fs::write(&version_file, "<ConfigDumpInfo foreign=\"2\"/>\n").expect("foreign write");
+    succeeded(run(&project, &["pull", "--source-set", "main"]));
+    assert_eq!(format!("{}\n", last_seen(&project)), loaded);
+}
+
+#[test]
+fn a_push_that_writes_no_version_file_keeps_the_runner_copy() {
+    let project = version_project("ibcmd");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let ours = read(&runner_copy(&project));
+    let version_file = project.sources.join("ConfigDumpInfo.xml");
+    fs::write(&version_file, "<ConfigDumpInfo foreign=\"1\"/>\n").expect("foreign write");
+    fs::write(
+        project.sources.join("Module.bsl"),
+        "Procedure Edited()\nEndProcedure\n",
+    )
+    .expect("edit");
+
+    succeeded(run(&project, &["push"]));
+
+    assert_eq!(read(&runner_copy(&project)), ours);
+    succeeded(run(&project, &["pull", "--source-set", "main"]));
+    assert_eq!(format!("{}\n", last_seen(&project)), ours);
+}

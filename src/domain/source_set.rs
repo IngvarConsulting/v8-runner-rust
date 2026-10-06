@@ -106,6 +106,21 @@ impl SourceSetContext {
             ),
         }
     }
+
+    /// Каталог копии файла версий этого набора: `workPath/infobases/<база>/dump-info/<набор>`.
+    /// Копия описывает пару «база ↔ каталог», поэтому есть только у памяти именованной базы.
+    pub fn version_file_copy_dir(&self, work_path: &Path) -> Option<PathBuf> {
+        match &self.memory {
+            SnapshotMemory::Infobase { name, .. } => Some(
+                work_path
+                    .join("infobases")
+                    .join(name)
+                    .join("dump-info")
+                    .join(&self.name),
+            ),
+            SnapshotMemory::Shared | SnapshotMemory::Disabled => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -75,6 +75,7 @@ flowchart TB
 | [`agent_session.rs`](../../src/use_cases/agent_session.rs) | Сессия агента на команду, обмен файлами, поколение — [6.4](06-runtime-view.md) |
 | [`staged_publication.rs`](../../src/use_cases/staged_publication.rs), [`destruction_guard.rs`](../../src/use_cases/destruction_guard.rs) | Публикация с заменой и вопрос к git — [8.8](08-cross-cutting-concepts.md) |
 | [`ignored_files.rs`](../../src/use_cases/ignored_files.rs) | Шаблоны `.gitignore` проекта для `init` и `clone`; отказ `pull` и `push`, нашедших опись версий в индексе git — [правило](../rules/use-cases/the-version-file-stays-out-of-version-control.md) |
+| [`version_file.rs`](../../src/use_cases/version_file.rs) | Копия файла версий набора под базой; сверка файла в каталоге перед `pull` и `push` и запись после удачи — [правило](../rules/use-cases/the-runner-owns-the-version-file.md) |
 | [`interruption.rs`](../../src/use_cases/interruption.rs) | Слова о прерывании и учёт отмен, отложенных критической фазой, — [8.7](08-cross-cutting-concepts.md) |
 | [`progress.rs`](../../src/use_cases/progress.rs) | События живой ленты текстового вывода |
 | [`source_inventory.rs`](../../src/use_cases/source_inventory.rs) | Наборы исходников проекта в порядке обработки |

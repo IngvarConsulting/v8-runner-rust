@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
+use crate::use_cases::version_file::RunnerVersionFile;
 
 pub(super) fn run_dump_with_context(
     context: &ExecutionContext,
@@ -292,6 +293,39 @@ fn run_dump_selected(
         }
     }
 
+    // Выгрузка по изменившемуся работает от файла версий в каталоге: подменённый файл
+    // уступает место копии раннера до запуска платформы. Выборку `ibcmd` выгружает как
+    // `--sync` по тому же файлу; что пишет в него выборочная выгрузка Конфигуратора,
+    // раннер не знает и копию ею не меняет.
+    let works_from_version_file = match mode {
+        DumpMode::Incremental => true,
+        DumpMode::Partial => provider == Provider::Ibcmd,
+        DumpMode::Full => false,
+    };
+    let version_file = SourceSetInventory::new(config)
+        .designer_context(&resolved.source_set_name)
+        .and_then(|source| RunnerVersionFile::of(config, source))
+        .filter(|_| works_from_version_file || mode == DumpMode::Full);
+    if let Some(Err(error)) = version_file
+        .as_ref()
+        .filter(|_| works_from_version_file)
+        .map(RunnerVersionFile::restore)
+    {
+        let message = error.to_string();
+        return Err(DumpExecutionFailure::with_payload(
+            error,
+            empty_result(
+                mode,
+                started,
+                Some(resolved.source_set_name.clone()),
+                resolved.extension.clone(),
+                selectors.clone(),
+                Some(resolved.target_path.clone()),
+                Some(message),
+            ),
+        ));
+    }
+
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
     // Агент отвечает ещё и «выгружать нечего» — это состояние ответа, а не проза, и
@@ -463,6 +497,14 @@ fn run_dump_selected(
         };
         (result, false)
     };
+    // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
+    let result = result.map(|(platform_result, message)| {
+        let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
+        (
+            platform_result,
+            merge_optional_messages(message, copy_warning),
+        )
+    });
     drop(lock_guard);
 
     match result {

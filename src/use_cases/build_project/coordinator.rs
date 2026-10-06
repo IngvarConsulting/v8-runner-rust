@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
+use crate::use_cases::version_file::RunnerVersionFile;
 
 /// Кто грузит набор исходников в базу: пакетный Конфигуратор или его агент.
 ///
@@ -260,6 +261,26 @@ fn run_build_with(
                 }
 
                 let step_started = Instant::now();
+                // Загрузка переписывает файл версий в каталоге набора: сначала там должен
+                // лежать файл раннера, а не подменённый, иначе частичная загрузка обновит
+                // чужую опись и раннер примет её за свою.
+                let version_file = RunnerVersionFile::of(config, &source_context);
+                let before = match version_file.as_ref().map(RunnerVersionFile::restore) {
+                    Some(Err(error)) => {
+                        let result = fail_from_source_set_index(
+                            started,
+                            steps,
+                            &ordered_source_sets,
+                            index,
+                            source_set,
+                            mode,
+                            error.to_string(),
+                        );
+                        return Err(BuildExecutionFailure::with_payload(error, result));
+                    }
+                    Some(Ok(before)) => before,
+                    None => None,
+                };
                 match loader.load(
                     context,
                     config,
@@ -269,14 +290,19 @@ fn run_build_with(
                     partial_paths.as_deref(),
                     &commit,
                 ) {
-                    Ok(warnings) => push_build_step(
-                        &mut steps,
-                        &source_set.name,
-                        mode,
-                        true,
-                        append_warnings(message, &warnings),
-                        step_started.elapsed().as_millis() as u64,
-                    ),
+                    Ok(mut warnings) => {
+                        warnings.extend(version_file.as_ref().and_then(|version_file| {
+                            version_file.record_if_rewritten(before.as_deref())
+                        }));
+                        push_build_step(
+                            &mut steps,
+                            &source_set.name,
+                            mode,
+                            true,
+                            append_warnings(message, &warnings),
+                            step_started.elapsed().as_millis() as u64,
+                        )
+                    }
                     Err(error) => {
                         let result = fail_from_source_set_index(
                             started,
