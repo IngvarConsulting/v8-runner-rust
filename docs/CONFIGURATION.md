@@ -302,6 +302,8 @@ command-specific validation, а не ослабление `push`, source `pull`,
 Корень runtime state:
 
 - `workPath/infobases/<имя>/hashes` — хеши исходников выбранной именованной базы
+- `workPath/infobases/<имя>/dump-info/<набор>` — копия файла версий `ConfigDumpInfo.xml` набора
+  формата Конфигуратора; файл в каталоге набора раннер сверяет с ней перед работой по изменившемуся
 - `workPath/hash-storages` — общий кеш EDT и внешних артефактов
 - `workPath/logs`
 - `workPath/temp`
@@ -314,8 +316,8 @@ command-specific validation, а не ослабление `push`, source `pull`,
 а база, заданная строкой соединения, их не сохраняет и не использует. Старые общие
 хеши конфигураций и расширений не мигрируются: первый обычный `push` после обновления
 загружает всё дерево, поэтому при невыгруженных правках в базе начните с полного `pull`.
-Хеши расширений из `tools.extensions` пока остаются общими в `workPath/hash-storages`. Журнал поколений агента и файл версий
-ещё не перенесены в эту структуру — [#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214).
+Хеши расширений из `tools.extensions` пока остаются общими в `workPath/hash-storages`. Журнал поколений агента
+ещё не перенесён в эту структуру — [#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214).
 
 Если каталога нет, он создаётся автоматически при захвате workspace lock. Pure provider
 selection для infobase export не создаёт `workPath` и runtime-файлы.

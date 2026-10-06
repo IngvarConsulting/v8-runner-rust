@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
+use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 
 pub(super) fn run_dump_with_context(
     context: &ExecutionContext,
@@ -292,6 +293,61 @@ fn run_dump_selected(
         }
     }
 
+    // Выгрузка по изменившемуся работает от файла версий в каталоге: подменённый файл
+    // уступает место копии раннера до запуска платформы. Выборку `ibcmd` выгружает как
+    // `--sync` по тому же файлу; что пишет в него выборочная выгрузка Конфигуратора,
+    // раннер не знает и копию ею не меняет.
+    // Временные файлы прошлых замен файла версий убираются в начале любой выгрузки: их
+    // видит `git status` и сторож замены каталога.
+    if let Err(error) = remove_left_candidates(&resolved.platform_target_path) {
+        let message = error.to_string();
+        return Err(DumpExecutionFailure::with_payload(
+            error,
+            empty_result(
+                mode,
+                started,
+                Some(resolved.source_set_name.clone()),
+                resolved.extension.clone(),
+                selectors.clone(),
+                Some(resolved.target_path.clone()),
+                Some(message),
+            ),
+        ));
+    }
+    let version_file_use = match mode {
+        DumpMode::Incremental => VersionFileUse::RestoreAndRecord,
+        DumpMode::Partial if provider == Provider::Ibcmd => VersionFileUse::RestoreAndRecord,
+        DumpMode::Partial => VersionFileUse::Untouched,
+        DumpMode::Full => VersionFileUse::RecordOnly,
+    };
+    let version_file = match version_file_use {
+        VersionFileUse::Untouched => None,
+        VersionFileUse::RestoreAndRecord | VersionFileUse::RecordOnly => {
+            SourceSetInventory::new(config)
+                .designer_context(&resolved.source_set_name)
+                .and_then(|source| RunnerVersionFile::of(config, source))
+        }
+    };
+    if let (VersionFileUse::RestoreAndRecord, Some(version_file)) =
+        (version_file_use, version_file.as_ref())
+    {
+        if let Err(error) = version_file.restore() {
+            let message = error.to_string();
+            return Err(DumpExecutionFailure::with_payload(
+                error,
+                empty_result(
+                    mode,
+                    started,
+                    Some(resolved.source_set_name.clone()),
+                    resolved.extension.clone(),
+                    selectors.clone(),
+                    Some(resolved.target_path.clone()),
+                    Some(message),
+                ),
+            ));
+        }
+    }
+
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
     // Агент отвечает ещё и «выгружать нечего» — это состояние ответа, а не проза, и
@@ -463,6 +519,14 @@ fn run_dump_selected(
         };
         (result, false)
     };
+    // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
+    let result = result.map(|(platform_result, message)| {
+        let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
+        (
+            platform_result,
+            merge_optional_messages(message, copy_warning),
+        )
+    });
     drop(lock_guard);
 
     match result {
@@ -502,4 +566,15 @@ fn run_dump_selected(
             ))
         }
     }
+}
+
+/// Что выгрузка делает с файлом версий набора и копией раннера.
+#[derive(Debug, Clone, Copy)]
+enum VersionFileUse {
+    /// Сверить файл в каталоге с копией до платформы, после удачи записать копию.
+    RestoreAndRecord,
+    /// Полная выгрузка пишет файл заново: только записать копию после удачи.
+    RecordOnly,
+    /// Не трогать ни файл, ни копию.
+    Untouched,
 }
