@@ -93,9 +93,7 @@ impl SourceSetContext {
         match &self.memory {
             SnapshotMemory::Disabled => None,
             SnapshotMemory::Infobase { name, .. } => Some(
-                work_path
-                    .join("infobases")
-                    .join(name)
+                infobase_memory_dir(work_path, name)
                     .join("hashes")
                     .join(format!("{}.redb", self.name)),
             ),
@@ -106,6 +104,24 @@ impl SourceSetContext {
             ),
         }
     }
+
+    /// Каталог копии файла версий этого набора: `workPath/infobases/<база>/dump-info/<набор>`.
+    /// Копия описывает пару «база ↔ каталог», поэтому есть только у памяти именованной базы.
+    pub fn version_file_copy_dir(&self, work_path: &Path) -> Option<PathBuf> {
+        match &self.memory {
+            SnapshotMemory::Infobase { name, .. } => Some(
+                infobase_memory_dir(work_path, name)
+                    .join("dump-info")
+                    .join(&self.name),
+            ),
+            SnapshotMemory::Shared | SnapshotMemory::Disabled => None,
+        }
+    }
+}
+
+/// Память об одной именованной базе: `workPath/infobases/<база>`.
+pub fn infobase_memory_dir(work_path: &Path, infobase: &str) -> PathBuf {
+    work_path.join("infobases").join(infobase)
 }
 
 #[cfg(test)]

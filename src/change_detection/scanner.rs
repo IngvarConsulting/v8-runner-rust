@@ -39,6 +39,15 @@ const IGNORED_DIRS: &[&str] = &[
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 
+/// An ignored file, or the temporary file of its atomic replacement left by a killed process.
+fn is_ignored_file(name: &str) -> bool {
+    IGNORED_FILES.iter().any(|ignored| {
+        name.strip_prefix(ignored).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with(crate::support::fs::ATOMIC_WRITE_CANDIDATE_SUFFIX)
+        })
+    })
+}
+
 /// Coarse filesystem mtime guard (2 seconds).
 pub const COARSE_MARGIN_NS: u64 = 2_000_000_000;
 
@@ -105,7 +114,7 @@ pub fn scan(
 
         // Skip ignored file names.
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if IGNORED_FILES.contains(&name) {
+            if is_ignored_file(name) {
                 continue;
             }
         }
@@ -240,6 +249,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join("Module.bsl"), "module").expect("module");
         fs::write(root.join("ConfigDumpInfo.xml"), "<info/>").expect("dump info");
+        fs::write(root.join("ConfigDumpInfo.xml.candidate-x1"), "<info/>").expect("left write");
         for ignored in [
             ".git", ".gradle", "build", "target", "temp", "tmp", ".yaxunit",
         ] {
