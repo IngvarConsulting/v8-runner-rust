@@ -82,6 +82,23 @@
       },
       "type": "object"
     },
+    "GenerationAfter": {
+      "description": "Операция, после которой записан токен поколения.",
+      "oneOf": [
+        {
+          "enum": [
+            "build",
+            "dump"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "failed_build",
+          "description": "Токен записан до загрузки, которая не удалась: что она успела сделать с базой,\nнеизвестно, и расхождение с ним не называется чужой правкой.",
+          "type": "string"
+        }
+      ]
+    },
     "GenerationVerdict": {
       "description": "Сверка ответа с записью — та же, что сделает `push` перед загрузкой.",
       "oneOf": [
@@ -92,7 +109,7 @@
         },
         {
           "const": "moved_ahead",
-          "description": "Тот же инструмент отдал другой токен: база ушла вперёд, `push` откажет\n`non_fast_forward`.",
+          "description": "Тот же инструмент отдал другой токен: база ушла вперёд, и `push`, который грузит этот\nнабор без `--force`, откажет `non_fast_forward`.",
           "type": "string"
         },
         {
@@ -259,16 +276,21 @@
           "type": "string"
         },
         "source_set": {
-          "description": "Набор проекта с тем же именем; `null` — есть в базе, нет в проекте.",
+          "description": "Набор проекта с тем же именем; `null` — набора нет: расширение-инструмент или\nрасширение, которое есть в базе и нет в проекте.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "tool": {
+          "description": "Расширение-инструмент клиентского MCP (`tools.client_mcp.extension`): раннер ставит\nего сам, и набором оно не объявляется.",
+          "type": "boolean"
         }
       },
       "required": [
         "name",
-        "active"
+        "active",
+        "tool"
       ],
       "type": "object"
     },
@@ -414,8 +436,8 @@
       "description": "Запись журнала поколений.",
       "properties": {
         "after": {
-          "description": "`build`, `dump` или `failed_build` — после чего записан токен.",
-          "type": "string"
+          "$ref": "#/$defs/GenerationAfter",
+          "description": "После чего записан токен."
         },
         "recorded_at": {
           "type": "string"
@@ -490,6 +512,16 @@
       ],
       "type": "object"
     },
+    "SourceSetPurpose": {
+      "description": "Назначение набора исходников — значение ключа `type` в `v8project.yaml`.",
+      "enum": [
+        "CONFIGURATION",
+        "EXTENSION",
+        "EXTERNAL_DATA_PROCESSORS",
+        "EXTERNAL_REPORTS"
+      ],
+      "type": "string"
+    },
     "SourceSetStatus": {
       "additionalProperties": false,
       "description": "Состояние набора исходников относительно базы.",
@@ -522,8 +554,8 @@
           "type": "string"
         },
         "purpose": {
-          "description": "`configuration` или `extension`.",
-          "type": "string"
+          "$ref": "#/$defs/SourceSetPurpose",
+          "description": "Назначение набора, как его пишет ключ `type` проекта: `CONFIGURATION` или `EXTENSION`."
         },
         "recorded": {
           "anyOf": [

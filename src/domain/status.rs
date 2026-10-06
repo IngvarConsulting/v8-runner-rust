@@ -11,6 +11,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::capability::{Provider, ProviderReceipt, TargetKind};
+use crate::domain::source_set::SourceSetPurpose;
+
+/// Что спрашивают у `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusScope {
+    /// Выбранная база, по памяти.
+    Selected,
+    /// Каждая база местного слоя, по памяти (`--all`).
+    All,
+    /// Выбранная база с вопросом к платформе (`--deep`).
+    Deep,
+}
 
 /// Ответ `status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -52,8 +64,8 @@ pub struct InfobaseStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SourceSetStatus {
     pub name: String,
-    /// `configuration` или `extension`.
-    pub purpose: String,
+    /// Назначение набора, как его пишет ключ `type` проекта: `CONFIGURATION` или `EXTENSION`.
+    pub purpose: SourceSetPurpose,
     /// Помнит ли копия базу для этого набора.
     pub memory: MemoryState,
     /// Поколение, записанное после последнего обмена; `null` — записи этой пары нет.
@@ -89,9 +101,31 @@ pub struct RecordedGeneration {
     pub token: String,
     /// Инструмент, которым токен получен: токены разных инструментов несравнимы.
     pub tool: Provider,
-    /// `build`, `dump` или `failed_build` — после чего записан токен.
-    pub after: String,
+    /// После чего записан токен.
+    pub after: GenerationAfter,
     pub recorded_at: String,
+}
+
+/// Операция, после которой записан токен поколения.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GenerationAfter {
+    Build,
+    Dump,
+    /// Токен записан до загрузки, которая не удалась: что она успела сделать с базой,
+    /// неизвестно, и расхождение с ним не называется чужой правкой.
+    #[serde(rename = "failed_build")]
+    FailedBuild,
+}
+
+impl std::fmt::Display for GenerationAfter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Build => "build",
+            Self::Dump => "dump",
+            Self::FailedBuild => "failed build",
+        })
+    }
 }
 
 /// Поколение, которое ответила платформа, и его сверка с записью.
@@ -114,8 +148,8 @@ pub struct BaseGeneration {
 pub enum GenerationVerdict {
     /// Тот же инструмент отдал записанный токен: базу с последнего обмена не меняли.
     Unchanged,
-    /// Тот же инструмент отдал другой токен: база ушла вперёд, `push` откажет
-    /// `non_fast_forward`.
+    /// Тот же инструмент отдал другой токен: база ушла вперёд, и `push`, который грузит этот
+    /// набор без `--force`, откажет `non_fast_forward`.
     MovedAhead,
     /// Запись сделана другим инструментом: сравнивать не с чем.
     OtherTool,
@@ -144,8 +178,12 @@ pub struct InstalledExtensionStatus {
     /// Имя расширения в базе.
     pub name: String,
     pub active: bool,
-    /// Набор проекта с тем же именем; `null` — есть в базе, нет в проекте.
+    /// Набор проекта с тем же именем; `null` — набора нет: расширение-инструмент или
+    /// расширение, которое есть в базе и нет в проекте.
     pub source_set: Option<String>,
+    /// Расширение-инструмент клиентского MCP (`tools.client_mcp.extension`): раннер ставит
+    /// его сам, и набором оно не объявляется.
+    pub tool: bool,
 }
 
 /// Копии, которые держат файловую базу.

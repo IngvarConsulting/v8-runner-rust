@@ -250,6 +250,15 @@ fn run_build_agent(
     Ok(result)
 }
 
+/// Отказ `push`, если выбранный для него исполнитель этот формат проекта не грузит; `None` —
+/// грузит. Тот же ответ видит `status --deep`, прежде чем спросить поколение.
+pub(crate) fn unsupported_push_executor(config: &AppConfig) -> Option<AppError> {
+    match config.format {
+        SourceFormat::Designer => validate_designer_supported_matrix(config),
+        SourceFormat::Edt => validate_edt_supported_matrix(config),
+    }
+}
+
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
     if config.format == SourceFormat::Designer
         && matches!(

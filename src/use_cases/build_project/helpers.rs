@@ -642,26 +642,22 @@ pub(super) fn read_designer_generation(
     source_set: &SourceSetConfig,
     step_index: usize,
 ) -> Result<Option<String>, AppError> {
-    if crate::use_cases::interruption::pending_interruption_error(
-        context,
-        "the configuration generation",
-    )
-    .is_some()
-    {
-        return Ok(None);
-    }
-    build_designer_dsl(
+    use crate::use_cases::generation_reader::{
+        designer_log_file, read_generation, GenerationProcess,
+    };
+    read_generation(
         context,
         config,
-        binary,
-        runner,
-        &source_set.name,
-        step_index,
-        "generation",
-        InterruptionSafetyClass::GracefulThenKill,
-    )?
-    .config_generation_id(extension_name(source_set))
-    .map_err(AppError::from)
+        GenerationProcess::Designer {
+            binary,
+            runner,
+            log_file: designer_log_file(
+                config,
+                &format!("build-{step_index:02}-{}-generation", source_set.name),
+            )?,
+        },
+        extension_name(source_set),
+    )
 }
 
 /// Поколение базы для набора, прочитанное `ibcmd config generation-id`.
@@ -672,23 +668,17 @@ pub(super) fn read_ibcmd_generation(
     runner: &dyn ProcessRunner,
     source_set: &SourceSetConfig,
 ) -> Result<Option<String>, AppError> {
-    if crate::use_cases::interruption::pending_interruption_error(
-        context,
-        "the configuration generation",
-    )
-    .is_some()
-    {
-        return Ok(None);
-    }
-    build_ibcmd_dsl(
+    use crate::use_cases::generation_reader::{read_generation, GenerationProcess};
+    read_generation(
         context,
         config,
-        binary,
-        runner,
-        InterruptionSafetyClass::GracefulThenKill,
-    )?
-    .config_generation_id(extension_name(source_set))
-    .map_err(map_ibcmd_error)
+        GenerationProcess::Ibcmd {
+            binary,
+            runner,
+            data_path: None,
+        },
+        extension_name(source_set),
+    )
 }
 
 /// Один файл версий набора в каталог загрузки — `-configDumpInfoOnly` Конфигуратора.

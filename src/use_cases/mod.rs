@@ -34,6 +34,8 @@ pub mod extension_identity;
 pub mod extension_inventory;
 /// Shared discovery and preparation helpers for external artifacts.
 pub mod external_artifacts;
+/// Единственный читатель поколения процессом платформы.
+pub(crate) mod generation_reader;
 /// Shared formatting helpers for IBCMD diagnostics.
 pub mod ibcmd_diagnostics;
 /// What stays out of the project git: `.gitignore` patterns and the tracked version-file refusal.

@@ -236,25 +236,27 @@ fn execute_status(
     clean_before_execution: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    use crate::use_cases::status::{self, StatusRequest};
+    use crate::domain::status::StatusScope;
+    use crate::use_cases::status;
 
-    let request = StatusRequest {
-        deep: args.deep,
-        all: args.all,
+    let scope = match (args.deep, args.all) {
+        (true, _) => StatusScope::Deep,
+        (false, true) => StatusScope::All,
+        (false, false) => StatusScope::Selected,
     };
     let context = cli_context(config, CommandName::Status, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Status,
-        if args.deep {
+        if scope == StatusScope::Deep {
             BaseAccess::Reads
         } else {
             BaseAccess::Untouched
         },
         clean_before_execution,
         false,
-        || match status::execute(&context, config, request) {
+        || match status::execute(&context, config, scope) {
             Ok(result) => {
                 if presenter.is_json() {
                     presenter.print_envelope(&Envelope::ok(
@@ -367,8 +369,13 @@ fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &
                     (Some(installed), Some(missing)) => {
                         for extension in installed.iter().filter(|e| e.source_set.is_none()) {
                             lines.push(format!(
-                                "— → {}: installed in the infobase, not in the project{}",
+                                "— → {}: {}{}",
                                 extension.name,
+                                if extension.tool {
+                                    "the client MCP tool extension the runner installs itself"
+                                } else {
+                                    "installed in the infobase, not in the project"
+                                },
                                 if extension.active { "" } else { " (inactive)" }
                             ));
                         }

@@ -6,73 +6,66 @@
 //! (`INV.CLI.STATUS-WITHOUT-DEEP-STARTS-NO-PLATFORM`). `--all` отвечает так же о каждой базе,
 //! объявленной в местном слое.
 //!
-//! `--deep` спрашивает платформу: поколение каждого набора тем инструментом, которым его
-//! сверит `push`, и ту же сверку с записью (`INV.CLI.STATUS-DEEP-PREDICTS-THE-PUSH-GENERATION-CHECK`);
-//! состав расширений базы рядом с наборами проекта
-//! (`INV.CLI.STATUS-DEEP-NAMES-AN-EXTENSION-WITHOUT-A-PROJECT`); копии, которые держат файловую
-//! базу (`INV.CLI.STATUS-DEEP-NAMES-THE-OWNING-COPY`). Ничего не пишет: ни памяти, ни метки.
+//! `--deep` спрашивает платформу: поколение каждого набора тем исполнителем, которым его
+//! сверит `push`, и та же сверка с записью (`exchange_guard::predict`,
+//! `INV.CLI.STATUS-DEEP-PREDICTS-THE-PUSH-GENERATION-CHECK`); состав расширений базы рядом с
+//! наборами проекта (`INV.CLI.STATUS-DEEP-NAMES-AN-EXTENSION-WITHOUT-A-PROJECT`); копии,
+//! которые держат файловую базу (`INV.CLI.STATUS-DEEP-NAMES-THE-OWNING-COPY`). Ни памяти, ни
+//! метки он не пишет — только журналы платформы и сессии агента.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
-use crate::change_detection::source_sets::SourceSetsService;
 use crate::config::model::{AppConfig, SourceFormat};
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::{
-    BaseGeneration, ExtensionsStatus, GenerationVerdict, InfobaseStatus, InstalledExtensionStatus,
-    MemoryState, RecordedGeneration, SourceSetStatus, StatusResult,
+    BaseGeneration, ExtensionsStatus, InfobaseStatus, InstalledExtensionStatus, MemoryState,
+    RecordedGeneration, SourceSetStatus, StatusResult, StatusScope,
 };
-use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
+use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    connect, generation_id, transcript_log, wait_policy, AgentHandle, GenerationComparison,
-    GenerationLedger, GenerationRecord, Recorded,
+    connect, generation_id, transcript_log, wait_policy, AgentHandle, GenerationRecord,
 };
-use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::exchange_guard::{memory_of, new_owner_mark};
+use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::exchange_guard::{memory_of, new_owner_since, predict, recorded_generation};
+use crate::use_cases::generation_reader::{designer_log_file, read_generation, GenerationProcess};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
-
-/// Что спрашивают у `status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StatusRequest {
-    /// Спросить платформу.
-    pub deep: bool,
-    /// Ответить о каждой объявленной базе.
-    pub all: bool,
-}
+use crate::use_cases::source_inventory::SourceSetInventory;
 
 /// Состояние выбранной базы или, у `--all`, каждой объявленной.
 pub fn execute(
     context: &ExecutionContext,
     config: &AppConfig,
-    request: StatusRequest,
+    scope: StatusScope,
 ) -> UseCaseResult<StatusResult> {
     let started = Instant::now();
-    let infobases = if request.all {
-        declared(config)
+    let infobases = match scope {
+        StatusScope::All => declared(config)
             .iter()
             .map(|base| from_memory(base, base.infobase_name == config.infobase_name))
-            .collect()
-    } else {
-        let mut status = from_memory(config, true);
-        if request.deep {
+            .collect(),
+        StatusScope::Selected => vec![from_memory(config, true)],
+        StatusScope::Deep => {
+            let mut status = from_memory(config, true);
             deepen(context, config, &mut status).map_err(UseCaseFailure::without_payload)?;
+            vec![status]
         }
-        vec![status]
     };
     Ok(StatusResult {
-        deep: request.deep,
+        deep: scope == StatusScope::Deep,
         infobases,
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
 
-/// Каждая база местного слоя как выбранная: та же конфигурация с другой секцией базы.
+/// Каждая база местного слоя как выбранная: та же конфигурация с другой секцией базы. База,
+/// пришедшая строкой соединения в `--infobase`, в местном слое не объявлена и в перечень не
+/// входит.
 fn declared(config: &AppConfig) -> Vec<AppConfig> {
     config
         .infobases
@@ -89,38 +82,34 @@ fn declared(config: &AppConfig) -> Vec<AppConfig> {
 fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
     let base_path = crate::support::path::absolute_from_current_dir(&config.base_path)
         .unwrap_or_else(|_| config.base_path.clone());
-    let service = SourceSetsService::new(config);
-    let edt = service.edt_contexts();
-    let source_sets = service
-        .designer_contexts()
-        .iter()
-        .zip(&config.source_sets)
-        .filter(|(_, set)| !set.purpose.is_external())
-        .map(|(context, set)| {
+    let inventory = SourceSetInventory::new(config);
+    let source_sets = inventory
+        .configuration_packages()
+        .into_iter()
+        .filter_map(|(set, _)| {
+            let context = inventory.designer_context(&set.name)?;
             let memory = memory_of(context, &config.work_path);
             let sources = match config.format {
                 SourceFormat::Designer => Some(context),
-                SourceFormat::Edt => edt.iter().find(|edt| edt.name() == set.name),
+                SourceFormat::Edt => inventory.edt_context(&set.name),
             };
-            SourceSetStatus {
+            Some(SourceSetStatus {
                 name: set.name.clone(),
-                purpose: set.purpose.as_str().to_owned(),
+                purpose: set.purpose,
                 memory,
-                recorded: own_record(context, &config.work_path).map(|record| RecordedGeneration {
-                    token: record.token,
-                    tool: record.tool,
-                    // Имя операции — то же, что в журнале: его даёт сам тип записи.
-                    after: serde_json::to_value(record.after)
-                        .ok()
-                        .and_then(|value| value.as_str().map(str::to_owned))
-                        .unwrap_or_default(),
-                    recorded_at: record.recorded_at,
+                recorded: recorded_generation(context, &config.work_path).map(|record| {
+                    RecordedGeneration {
+                        token: record.token,
+                        tool: record.tool,
+                        after: record.after,
+                        recorded_at: record.recorded_at,
+                    }
                 }),
-                changed_files: (memory == MemoryState::Remembered)
-                    .then(|| sources.and_then(|sources| changed_files(sources, &config.work_path)))
-                    .flatten(),
+                changed_files: sources
+                    .filter(|_| memory == MemoryState::Remembered)
+                    .and_then(|sources| changed_files(sources, &config.work_path)),
                 base: None,
-            }
+            })
         })
         .collect();
     InfobaseStatus {
@@ -132,18 +121,10 @@ fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
             Some(dir) => Some(format!("file:{}", dir.display())),
             None => config.infobase_memory_address(&base_path),
         },
-        new_owner_since: new_owner_mark(config),
+        new_owner_since: new_owner_since(config),
         source_sets,
         extensions: None,
         holders: None,
-    }
-}
-
-/// Запись журнала поколений этой пары «база ↔ каталог».
-fn own_record(context: &SourceSetContext, work_path: &Path) -> Option<GenerationRecord> {
-    match GenerationLedger::of(context, work_path)?.read() {
-        Recorded::Ours(record) => Some(record),
-        Recorded::Nothing | Recorded::Foreign { .. } => None,
     }
 }
 
@@ -157,80 +138,80 @@ fn changed_files(context: &SourceSetContext, work_path: &Path) -> Option<u64> {
     }
 }
 
+/// Отмена между вопросами к платформе: безопасная точка, после которой вопросов нет.
+fn interrupted(context: &ExecutionContext, place: &str) -> Result<(), AppError> {
+    match crate::use_cases::interruption::pending_interruption_error(context, place) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// То, что знает только платформа: поколение, состав расширений и метка владельца.
 fn deepen(
     context: &ExecutionContext,
     config: &AppConfig,
     status: &mut InfobaseStatus,
 ) -> Result<(), AppError> {
-    let contexts = SourceSetsService::new(config).designer_contexts();
-    let mut reader = GenerationReader::open(context, config);
+    let inventory = SourceSetInventory::new(config);
+    let packages = inventory.configuration_packages();
+    let asker = Asker::open(context, config);
+    let (tool, mut asker) = match asker {
+        Ok(asker) => (Some(asker.tool), Ok(asker)),
+        Err((tool, error)) => (tool, Err(error)),
+    };
+    let mut outcome = Ok(());
     for set in &mut status.source_sets {
-        if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
-            context,
-            "the configuration generation",
-        ) {
-            reader.close();
-            return Err(error);
+        if let Err(error) = interrupted(context, "the configuration generation") {
+            outcome = Err(error);
+            break;
         }
-        let Some(source) = contexts
+        let Some((declared, extension)) = packages
             .iter()
-            .find(|candidate| candidate.name() == set.name)
+            .find(|(declared, _)| declared.name == set.name)
         else {
             continue;
         };
-        let extension = config
-            .source_sets
-            .iter()
-            .any(|declared| {
-                declared.name == set.name
-                    && declared.purpose == crate::config::model::SourceSetPurpose::Extension
-            })
-            .then_some(set.name.as_str());
-        let (tool, answer) = reader.read(context, config, extension);
-        let record = own_record(source, &config.work_path);
-        set.base = Some(verdict(tool, answer, record.as_ref()));
+        let record = inventory
+            .designer_context(&declared.name)
+            .and_then(|context| recorded_generation(context, &config.work_path));
+        set.base = Some(match asker.as_mut() {
+            Ok(asker) => base_generation(
+                tool,
+                asker
+                    .read(context, config, *extension)
+                    .as_ref()
+                    .map(Option::as_deref),
+                record.as_ref(),
+            ),
+            Err(error) => base_generation(tool, Err(&*error), record.as_ref()),
+        });
     }
-    reader.close();
-    if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
-        context,
-        "the extension inventory",
-    ) {
-        return Err(error);
+    if let Ok(asker) = asker {
+        asker.close();
     }
-    status.extensions = Some(extensions(context, config));
-    if let Some(error) =
-        crate::use_cases::interruption::pending_interruption_error(context, "the owner marker")
-    {
-        return Err(error);
-    }
+    outcome?;
+    interrupted(context, "the extension inventory")?;
+    status.extensions = Some(extensions(context, config, &packages));
+    interrupted(context, "the owner marker")?;
     status.holders = crate::use_cases::infobase_owner::holders(config);
     Ok(())
 }
 
-/// Сверка ответа с записью — та же, что `push` делает перед загрузкой.
-fn verdict(
+/// Ответ о поколении набора и та же сверка с записью, что сделает `push`.
+fn base_generation(
     tool: Option<Provider>,
-    answer: Result<Option<String>, String>,
+    answer: Result<Option<&str>, &AppError>,
     record: Option<&GenerationRecord>,
 ) -> BaseGeneration {
     let (token, reason) = match answer {
-        Ok(token) => (token, None),
-        Err(reason) => (None, Some(reason)),
+        Ok(Some(token)) => (Some(token.to_owned()), None),
+        Ok(None) => (
+            None,
+            Some("the tool gave no configuration generation".to_owned()),
+        ),
+        Err(error) => (None, Some(error.to_string())),
     };
-    let comparison = match (tool, token.as_deref(), record) {
-        (_, _, None) => GenerationVerdict::NoRecord,
-        (None, _, Some(_)) | (_, None, Some(_)) => GenerationVerdict::NoAnswer,
-        (Some(tool), Some(token), Some(record)) => match record.compare(tool, token) {
-            GenerationComparison::Unchanged => GenerationVerdict::Unchanged,
-            GenerationComparison::Changed => GenerationVerdict::MovedAhead,
-            GenerationComparison::NoAnswer => GenerationVerdict::OtherTool,
-        },
-    };
-    let reason = reason.or_else(|| {
-        (token.is_none() && tool.is_some())
-            .then(|| "the tool gave no configuration generation".to_owned())
-    });
+    let comparison = predict(record, tool.zip(token.as_deref()));
     BaseGeneration {
         tool,
         token,
@@ -239,214 +220,185 @@ fn verdict(
     }
 }
 
-/// Состав расширений базы рядом с наборами расширений проекта. Имена сравниваются без
-/// учёта регистра, как их сравнивает платформа.
-fn extensions(context: &ExecutionContext, config: &AppConfig) -> ExtensionsStatus {
+/// Состав расширений базы рядом с наборами расширений проекта. Имена 1С регистр не
+/// различают: сопоставление без регистра, как у `pull --all`.
+fn extensions(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    packages: &[(&crate::config::model::SourceSetConfig, Option<&str>)],
+) -> ExtensionsStatus {
     let (provider, read) = crate::use_cases::extension_inventory::read_installed(context, config);
-    let project: Vec<&str> = config
-        .source_sets
-        .iter()
-        .filter(|set| set.purpose == crate::config::model::SourceSetPurpose::Extension)
-        .map(|set| set.name.as_str())
-        .collect();
-    match read {
-        Ok(installed) => {
-            let same = |left: &str, right: &str| left.to_lowercase() == right.to_lowercase();
-            let in_project = |name: &str| {
-                project
-                    .iter()
-                    .find(|set| same(set, name))
-                    .map(|set| (*set).to_owned())
-            };
-            let missing_in_base = project
-                .iter()
-                .filter(|set| !installed.iter().any(|extension| same(&extension.name, set)))
-                .map(|set| (*set).to_owned())
-                .collect();
-            ExtensionsStatus {
+    let installed = match read {
+        Ok(installed) => installed,
+        Err(error) => {
+            return ExtensionsStatus {
                 provider,
-                installed: Some(
-                    installed
-                        .into_iter()
-                        .map(|extension| InstalledExtensionStatus {
-                            source_set: in_project(&extension.name),
-                            active: extension.active,
-                            name: extension.name,
-                        })
-                        .collect(),
-                ),
-                missing_in_base: Some(missing_in_base),
-                reason: None,
+                installed: None,
+                missing_in_base: None,
+                reason: Some(error.to_string()),
             }
         }
-        Err(error) => ExtensionsStatus {
-            provider,
-            installed: None,
-            missing_in_base: None,
-            reason: Some(error.to_string()),
-        },
+    };
+    let project: Vec<(String, &str)> = packages
+        .iter()
+        .filter_map(|(set, extension)| {
+            extension.map(|name| (name.to_lowercase(), set.name.as_str()))
+        })
+        .collect();
+    let tool = config
+        .tools
+        .client_mcp
+        .extension
+        .as_ref()
+        .map(|tool| tool.name.to_lowercase());
+    let installed: Vec<(String, _)> = installed
+        .into_iter()
+        .map(|extension| (extension.name.to_lowercase(), extension))
+        .collect();
+    let missing_in_base = project
+        .iter()
+        .filter(|(key, _)| !installed.iter().any(|(installed, _)| installed == key))
+        .map(|(_, set)| (*set).to_owned())
+        .collect();
+    ExtensionsStatus {
+        provider,
+        installed: Some(
+            installed
+                .into_iter()
+                .map(|(key, extension)| InstalledExtensionStatus {
+                    source_set: project
+                        .iter()
+                        .find(|(project, _)| *project == key)
+                        .map(|(_, set)| (*set).to_owned()),
+                    tool: tool.as_deref() == Some(key.as_str()),
+                    active: extension.active,
+                    name: extension.name,
+                })
+                .collect(),
+        ),
+        missing_in_base: Some(missing_in_base),
+        reason: None,
     }
 }
 
-/// Кто спрашивает поколение: исполнитель `push` для этой базы, одна сессия агента на команду.
-enum GenerationReader {
+/// Кто спрашивает поколение: исполнитель `push` для этой базы, одна сессия агента на
+/// команду. Процесс платформы зовёт общий читатель (`generation_reader`).
+struct Asker {
+    tool: Provider,
+    how: How,
+}
+
+enum How {
     Designer {
-        binary: std::path::PathBuf,
+        binary: PathBuf,
         utilities: PlatformUtilities,
     },
     Ibcmd {
-        binary: std::path::PathBuf,
-        connection: IbcmdConnection,
+        binary: PathBuf,
         utilities: PlatformUtilities,
     },
     Agent {
-        handle: Option<AgentHandle>,
-        wait: crate::platform::agent::WaitPolicy,
-    },
-    /// Спросить некем: почему, и кто был выбран, если был.
-    Nobody {
-        tool: Option<Provider>,
-        reason: String,
+        handle: AgentHandle,
+        wait: WaitPolicy,
     },
 }
 
-impl GenerationReader {
-    fn open(context: &ExecutionContext, config: &AppConfig) -> Self {
+impl Asker {
+    /// Исполнитель `push`, готовый спросить поколение. Отказ — исполнитель и почему ответа не
+    /// будет: исполнителя нет, `push` этим исполнителем такой проект не грузит или он
+    /// поколением у этой базы не отвечает.
+    fn open(
+        context: &ExecutionContext,
+        config: &AppConfig,
+    ) -> Result<Self, (Option<Provider>, AppError)> {
+        if let Some(error) = crate::use_cases::build_project::unsupported_push_executor(config) {
+            return Err((Some(config.selected_provider(Operation::Build)), error));
+        }
         let mut utilities = PlatformUtilities::from_config(config);
-        let selected = match crate::use_cases::provider_selection::select(
-            config,
-            &mut utilities,
-            Operation::Build,
-        ) {
-            Ok(selected) => selected,
-            Err((error, _)) => {
-                return Self::Nobody {
-                    tool: None,
-                    reason: error.to_string(),
-                }
-            }
-        };
+        let selected =
+            crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Build)
+                .map_err(|(error, _)| (None, error))?;
         let tool = selected.provider;
         if !crate::platform::generation::answers_generation(tool, config.target_kind()) {
-            return Self::Nobody {
-                tool: Some(tool),
-                reason: format!(
-                    "{} gives no configuration generation for this infobase",
-                    tool.as_str()
-                ),
-            };
+            return Err((
+                Some(tool),
+                AppError::capability(format!(
+                    "{tool} gives no configuration generation for this infobase"
+                )),
+            ));
         }
-        match (tool, selected.location) {
-            (Provider::Designer, Some(location)) => Self::Designer {
+        let how = match (tool, selected.location) {
+            (Provider::Designer, Some(location)) => How::Designer {
                 binary: location.path,
                 utilities,
             },
-            (Provider::Ibcmd, Some(location)) => {
-                match IbcmdConnection::from_infobase(&config.infobase) {
-                    Ok(connection) => Self::Ibcmd {
-                        binary: location.path,
-                        connection,
-                        utilities,
-                    },
-                    Err(error) => Self::Nobody {
-                        tool: Some(tool),
-                        reason: AppError::from(error).to_string(),
-                    },
-                }
-            }
+            (Provider::Ibcmd, Some(location)) => How::Ibcmd {
+                binary: location.path,
+                utilities,
+            },
             (Provider::Agent, location) => {
                 let wait = wait_policy(context);
-                let handle = transcript_log(config, "status").and_then(|log| {
-                    connect(
-                        context,
-                        config,
-                        &mut utilities,
-                        location.as_ref().map(|location| location.path.as_path()),
-                        log,
-                        &wait,
-                    )
-                });
-                match handle {
-                    Ok(handle) => Self::Agent {
-                        handle: Some(handle),
-                        wait,
-                    },
-                    Err(error) => Self::Nobody {
-                        tool: Some(tool),
-                        reason: error.to_string(),
-                    },
-                }
+                let handle = transcript_log(config, "status")
+                    .and_then(|log| {
+                        connect(
+                            context,
+                            config,
+                            &mut utilities,
+                            location.as_ref().map(|location| location.path.as_path()),
+                            log,
+                            &wait,
+                        )
+                    })
+                    .map_err(|error| (Some(tool), error))?;
+                How::Agent { handle, wait }
             }
-            (other, _) => Self::Nobody {
-                tool: Some(other),
-                reason: format!(
-                    "{} has no adapter that reads the configuration generation",
-                    other.as_str()
-                ),
-            },
-        }
+            (other, _) => {
+                return Err((
+                    Some(other),
+                    crate::use_cases::unimplemented_provider(Operation::Build, other),
+                ))
+            }
+        };
+        Ok(Self { tool, how })
     }
 
-    /// Поколение основной конфигурации или расширения `extension`: инструмент и ответ;
-    /// ошибка — почему ответа нет.
+    /// Поколение основной конфигурации или расширения `extension`; `None` — ответа нет.
     fn read(
         &mut self,
         context: &ExecutionContext,
         config: &AppConfig,
         extension: Option<&str>,
-    ) -> (Option<Provider>, Result<Option<String>, String>) {
-        let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
-        match self {
-            Self::Designer { binary, utilities } => {
-                let log = crate::support::temp::platform_logs_dir(&config.work_path)
-                    .map(|dir| dir.join("status-generation.log"));
-                let answer = match log {
-                    Ok(log) => DesignerDsl::new(
-                        binary.clone(),
-                        config.v8_connection(),
-                        utilities.runner_for(UtilityType::V8),
-                        Some(log),
-                        policy,
-                    )
-                    .config_generation_id(extension)
-                    .map_err(|error| AppError::from(error).to_string()),
-                    Err(error) => Err(format!("failed to create platform logs dir: {error}")),
-                };
-                (Some(Provider::Designer), answer)
-            }
-            Self::Ibcmd {
-                binary,
-                connection,
-                utilities,
-            } => (
-                Some(Provider::Ibcmd),
-                IbcmdDsl::new(
-                    binary.clone(),
-                    connection.clone(),
-                    utilities.runner_for(UtilityType::Ibcmd),
-                    policy,
-                )
-                .config_generation_id(extension)
-                .map_err(|error| AppError::from(error).to_string()),
-            ),
-            Self::Agent { handle, wait } => (
-                Some(Provider::Agent),
-                match handle.as_mut() {
-                    Some(handle) => generation_id(handle.session(), extension, wait)
-                        .map(Some)
-                        .map_err(|error| error.to_string()),
-                    None => Err("the agent session is closed".to_owned()),
+    ) -> Result<Option<String>, AppError> {
+        match &mut self.how {
+            How::Designer { binary, utilities } => read_generation(
+                context,
+                config,
+                GenerationProcess::Designer {
+                    binary,
+                    runner: utilities.runner_for(UtilityType::V8),
+                    log_file: designer_log_file(config, "status-generation")?,
                 },
+                extension,
             ),
-            Self::Nobody { tool, reason } => (*tool, Err(reason.clone())),
+            How::Ibcmd { binary, utilities } => read_generation(
+                context,
+                config,
+                GenerationProcess::Ibcmd {
+                    binary,
+                    runner: utilities.runner_for(UtilityType::Ibcmd),
+                    data_path: None,
+                },
+                extension,
+            ),
+            How::Agent { handle, wait } => {
+                generation_id(handle.session(), extension, wait).map(Some)
+            }
         }
     }
 
-    fn close(&mut self) {
-        if let Self::Agent { handle, wait } = self {
-            if let Some(handle) = handle.take() {
-                handle.finish(wait);
-            }
+    fn close(self) {
+        if let How::Agent { handle, wait } = self.how {
+            handle.finish(&wait);
         }
     }
 }
@@ -454,12 +406,13 @@ impl GenerationReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::status::{GenerationAfter, GenerationVerdict};
 
     fn record(tool: Provider, token: &str) -> GenerationRecord {
         GenerationRecord {
             token: token.to_owned(),
             tool,
-            after: crate::use_cases::agent_session::GenerationAfter::Build,
+            after: GenerationAfter::Build,
             recorded_at: "2026-10-06T00:00:00Z".to_owned(),
             identity: "pair".to_owned(),
         }
@@ -472,22 +425,23 @@ mod tests {
         let a = "a".repeat(40);
         let b = "b".repeat(40);
         let designer = record(Provider::Designer, &a);
+        let failure = AppError::capability("no executor".to_owned());
         let cases = [
             (
                 Some(Provider::Designer),
-                Ok(Some(a.clone())),
+                Ok(Some(a.as_str())),
                 Some(&designer),
                 GenerationVerdict::Unchanged,
             ),
             (
                 Some(Provider::Designer),
-                Ok(Some(b.clone())),
+                Ok(Some(b.as_str())),
                 Some(&designer),
                 GenerationVerdict::MovedAhead,
             ),
             (
                 Some(Provider::Ibcmd),
-                Ok(Some(b.clone())),
+                Ok(Some(b.as_str())),
                 Some(&designer),
                 GenerationVerdict::OtherTool,
             ),
@@ -499,22 +453,22 @@ mod tests {
             ),
             (
                 None,
-                Err("no executor".to_owned()),
+                Err(&failure),
                 Some(&designer),
                 GenerationVerdict::NoAnswer,
             ),
             (
                 Some(Provider::Designer),
-                Ok(Some(a.clone())),
+                Ok(Some(a.as_str())),
                 None,
                 GenerationVerdict::NoRecord,
             ),
         ];
         for (tool, answer, record, expected) in cases {
-            assert_eq!(verdict(tool, answer, record).comparison, expected);
+            assert_eq!(base_generation(tool, answer, record).comparison, expected);
         }
         assert_eq!(
-            verdict(Some(Provider::Designer), Ok(None), Some(&designer))
+            base_generation(Some(Provider::Designer), Ok(None), Some(&designer))
                 .reason
                 .as_deref(),
             Some("the tool gave no configuration generation")

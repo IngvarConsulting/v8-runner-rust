@@ -32,7 +32,7 @@ use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::next_step::NextStep;
 use crate::domain::source_set::SourceSetContext;
-use crate::domain::status::MemoryState;
+use crate::domain::status::{GenerationVerdict, MemoryState};
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
     GenerationAfter, GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
@@ -93,7 +93,7 @@ pub(crate) fn forget_new_owner(config: &AppConfig) -> Option<String> {
 /// Признак, который не прочесть или не разобрать, всё равно признак: выгрузку не предлагаем.
 /// Так безопаснее — лишний раз не предложенный `pull` стоит меньше, чем предложенная
 /// выгрузка чужой работы в этот каталог.
-fn new_owner_since(config: &AppConfig) -> Option<String> {
+pub(crate) fn new_owner_since(config: &AppConfig) -> Option<String> {
     let file = new_owner_file(config)?;
     let text = match std::fs::read(&file) {
         Ok(text) => text,
@@ -304,11 +304,6 @@ pub(crate) fn memory_of(set: &SourceSetContext, work_path: &Path) -> MemoryState
     }
 }
 
-/// Признак нового владельца для ответа `status`: когда копия взяла базу.
-pub(crate) fn new_owner_mark(config: &AppConfig) -> Option<String> {
-    new_owner_since(config)
-}
-
 /// Лежит ли под именем базы память набора, которая не его: записанная для другой пары или
 /// нечитаемая. Её отказ называет, чтобы отсутствие памяти не выглядело чистым листом.
 fn keeps_other_memory(set: &SourceSetContext, work_path: &Path) -> bool {
@@ -319,6 +314,40 @@ fn keeps_other_memory(set: &SourceSetContext, work_path: &Path) -> bool {
             analyzer::snapshot_memory(set, work_path),
             SnapshotMemory::Foreign | SnapshotMemory::Unreadable
         )
+}
+
+/// Запись журнала поколений этой пары «база ↔ каталог»: чужая и неразборчивая — не запись.
+pub(crate) fn recorded_generation(
+    set: &SourceSetContext,
+    work_path: &Path,
+) -> Option<GenerationRecord> {
+    match GenerationLedger::of(set, work_path)?.read() {
+        Recorded::Ours(record) => Some(record),
+        Recorded::Nothing | Recorded::Foreign { .. } => None,
+    }
+}
+
+/// Что покажет сверка поколения перед загрузкой набора — единственное место этого решения:
+/// по нему отказывает `push` ([`GenerationGate`]) и отвечает `status --deep`. Ничего не пишет
+/// и не отказывает. Токены сравниваются только внутри одного инструмента
+/// (`INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`).
+///
+/// `answer` — инструмент и токен, которыми ответила база; `None` — ответа нет.
+pub(crate) fn predict(
+    record: Option<&GenerationRecord>,
+    answer: Option<(Provider, &str)>,
+) -> GenerationVerdict {
+    let Some(record) = record else {
+        return GenerationVerdict::NoRecord;
+    };
+    let Some((tool, token)) = answer else {
+        return GenerationVerdict::NoAnswer;
+    };
+    match record.compare(tool, token) {
+        GenerationComparison::Unchanged => GenerationVerdict::Unchanged,
+        GenerationComparison::Changed => GenerationVerdict::MovedAhead,
+        GenerationComparison::NoAnswer => GenerationVerdict::OtherTool,
+    }
 }
 
 /// Сколько набора загружено: от этого зависит, доказано ли совпадение каталога и базы.
@@ -429,19 +458,18 @@ impl<'a> GenerationGate<'a> {
         let Some(token) = read()? else {
             return Ok(BeforeLoad::Unchecked);
         };
-        match record.compare(tool, &token) {
-            GenerationComparison::Unchanged => Ok(BeforeLoad::Matched),
-            GenerationComparison::NoAnswer => Ok(BeforeLoad::Unchecked),
-            GenerationComparison::Changed => Err(self.moved_ahead(set.name(), &token, &record)),
+        match predict(Some(&record), Some((tool, &token))) {
+            GenerationVerdict::Unchanged => Ok(BeforeLoad::Matched),
+            GenerationVerdict::MovedAhead => Err(self.moved_ahead(set.name(), &token, &record)),
+            GenerationVerdict::OtherTool
+            | GenerationVerdict::NoRecord
+            | GenerationVerdict::NoAnswer => Ok(BeforeLoad::Unchecked),
         }
     }
 
     /// Запись набора, сделанная тем же инструментом.
     fn record_of(&self, set: &SourceSetContext, tool: Provider) -> Option<GenerationRecord> {
-        GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| match ledger.read() {
-            Recorded::Ours(record) if record.tool == tool => Some(record),
-            Recorded::Ours(_) | Recorded::Nothing | Recorded::Foreign { .. } => None,
-        })
+        recorded_generation(set, &self.config.work_path).filter(|record| record.tool == tool)
     }
 
     fn moved_ahead(&self, set: &str, base: &str, record: &GenerationRecord) -> AppError {

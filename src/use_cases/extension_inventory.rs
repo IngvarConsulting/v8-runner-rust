@@ -101,11 +101,17 @@ fn run_read(
     // Открытие сессии и отказ до запуска `ibcmd` работы не дают и отвечают общей формой
     // отказа; всё, что случилось после, отвечает формой чтения: вызывающий узнаёт из неё,
     // что платформа запрос получила.
-    let (extensions, failure) =
-        match read_extensions(context, config, request, executor, &utilities) {
-            Ok(extensions) => (extensions, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
+    let (extensions, failure) = match read_extensions(
+        context,
+        config,
+        request,
+        executor,
+        &utilities,
+        Prefixes::Attest,
+    ) {
+        Ok(extensions) => (extensions, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
     let result = ExtensionInventoryResult {
         provider: Some(receipt),
         ok: failure.is_none(),
@@ -126,8 +132,8 @@ fn run_read(
 }
 
 /// Имена и активность расширений базы — для `status --deep`: тот же выбор исполнителя и то
-/// же чтение, что у `extensions list`, но без снимков ради префиксов, которые статусу не
-/// нужны. Квитанция — `None`, если выбор не начинался.
+/// же чтение, что у `extensions list`, без снимков ради префиксов. Квитанция — `None`, если
+/// выбор не начинался.
 pub(crate) fn read_installed(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -144,38 +150,28 @@ pub(crate) fn read_installed(
         Ok(selected) => selected,
         Err((error, receipt)) => return (Some(receipt), Err(error)),
     };
-    let receipt = selected.receipt;
     let read = Executor::of(selected.provider, selected.location, config).and_then(|executor| {
-        match executor {
-            Executor::Agent { v8 } => {
-                let mut agent = ExtensionAgent::open(context, config, v8.as_deref())?;
-                let inventory = agent.inventory(None);
-                agent.close();
-                inventory
-            }
-            Executor::Ibcmd { binary, connection } => {
-                let dsl = IbcmdDsl::new(
-                    binary,
-                    connection,
-                    utilities.runner_for(UtilityType::Ibcmd),
-                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-                );
-                let subject = inventory_subject(&ExtensionInventoryScope::All);
-                let listed = dsl
-                    .infobase_extension_list()
-                    .map_err(|error| snapshot_dispatch_error(error, "read", &subject))?;
-                validate_snapshot_step(&listed, "read", &subject)?;
-                read_inventory(
-                    &listed,
-                    &ExtensionInventoryRequest {
-                        scope: ExtensionInventoryScope::All,
-                        dry_run: false,
-                    },
-                )
-            }
-        }
+        read_extensions(
+            context,
+            config,
+            &ExtensionInventoryRequest {
+                scope: ExtensionInventoryScope::All,
+                dry_run: false,
+            },
+            executor,
+            &utilities,
+            Prefixes::Skip,
+        )
     });
-    (Some(receipt), read)
+    (Some(selected.receipt), read)
+}
+
+/// Подтверждать ли префиксы имён снимками применённых расширений (`ibcmd`): `extensions
+/// list` подтверждает, статусу они не нужны.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prefixes {
+    Attest,
+    Skip,
 }
 
 /// Состав расширений у исполнителя. Ошибка — какой бы она ни была — возвращается как есть:
@@ -186,6 +182,7 @@ fn read_extensions(
     request: &ExtensionInventoryRequest,
     executor: Executor,
     utilities: &PlatformUtilities,
+    prefixes: Prefixes,
 ) -> Result<Vec<InstalledExtension>, AppError> {
     let extensions = match executor {
         Executor::Agent { v8 } => {
@@ -219,7 +216,9 @@ fn read_extensions(
                 return Err(error);
             }
             let mut extensions = read_inventory(&platform_result, request)?;
-            attest_applied_prefixes(context, config, request, &dsl, &mut extensions)?;
+            if prefixes == Prefixes::Attest {
+                attest_applied_prefixes(context, config, request, &dsl, &mut extensions)?;
+            }
             extensions
         }
     };
