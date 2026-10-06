@@ -904,7 +904,8 @@ mod tests {
     #[test]
     fn a_cancellation_while_reading_the_generation_after_a_load_stops_the_step() {
         use crate::domain::capability::Provider;
-        use crate::use_cases::agent_session::{GenerationAfter, GenerationLedger, Recorded};
+        use crate::domain::status::GenerationAfter;
+        use crate::use_cases::agent_session::{GenerationLedger, Recorded};
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         create_source_tree(&base);

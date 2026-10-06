@@ -648,13 +648,15 @@ pub(super) fn read_designer_generation(
     read_generation(
         context,
         config,
-        GenerationProcess::Designer {
-            binary,
-            runner,
-            log_file: designer_log_file(
-                config,
-                &format!("build-{step_index:02}-{}-generation", source_set.name),
-            )?,
+        || {
+            Ok(GenerationProcess::Designer {
+                binary,
+                runner,
+                log_file: designer_log_file(
+                    config,
+                    &format!("build-{step_index:02}-{}-generation", source_set.name),
+                )?,
+            })
         },
         extension_name(source_set),
     )
@@ -672,10 +674,12 @@ pub(super) fn read_ibcmd_generation(
     read_generation(
         context,
         config,
-        GenerationProcess::Ibcmd {
-            binary,
-            runner,
-            data_path: None,
+        || {
+            Ok(GenerationProcess::Ibcmd {
+                binary,
+                runner,
+                data_path: None,
+            })
         },
         extension_name(source_set),
     )

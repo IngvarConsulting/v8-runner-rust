@@ -289,7 +289,7 @@ fn execute_status(
 }
 
 fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &Presenter) {
-    use crate::domain::status::{GenerationVerdict, MemoryState};
+    use crate::domain::status::{GenerationAfter, GenerationVerdict, MemoryState};
 
     let items = result
         .infobases
@@ -341,17 +341,29 @@ fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &
                 if let Some(base) = &set.base {
                     facts.push(match base.comparison {
                         GenerationVerdict::Unchanged => "the infobase is unchanged".to_owned(),
-                        GenerationVerdict::MovedAhead => format!(
-                            "the infobase moved ahead to {} — pull first",
-                            base.token.as_deref().unwrap_or("?")
-                        ),
+                        GenerationVerdict::MovedAhead => {
+                            let token = base.token.as_deref().unwrap_or("?");
+                            match set.recorded.as_ref().map(|recorded| recorded.after) {
+                                // Тот же совет, что даёт сама отправка (`exchange_guard`).
+                                Some(GenerationAfter::FailedBuild) => format!(
+                                    "the infobase moved ahead to {token} — if the change is that failed push, push again with --force; if someone else changed the infobase, pull first"
+                                ),
+                                _ => format!("the infobase moved ahead to {token} — pull first"),
+                            }
+                        }
                         GenerationVerdict::OtherTool => format!(
                             "the infobase answers {} by another tool: not comparable",
                             base.token.as_deref().unwrap_or("?")
                         ),
                         GenerationVerdict::NoRecord => match &base.token {
                             Some(token) => format!("the infobase answers {token}"),
-                            None => "the infobase gave no generation".to_owned(),
+                            None => format!(
+                                "the infobase gave no generation{}",
+                                base.reason
+                                    .as_deref()
+                                    .map(|reason| format!(": {reason}"))
+                                    .unwrap_or_default()
+                            ),
                         },
                         GenerationVerdict::NoAnswer => format!(
                             "the infobase gave no generation{}",

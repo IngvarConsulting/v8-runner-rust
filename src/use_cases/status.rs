@@ -377,20 +377,24 @@ impl Asker {
             How::Designer { binary, utilities } => read_generation(
                 context,
                 config,
-                GenerationProcess::Designer {
-                    binary,
-                    runner: utilities.runner_for(UtilityType::V8),
-                    log_file: designer_log_file(config, "status-generation")?,
+                || {
+                    Ok(GenerationProcess::Designer {
+                        binary,
+                        runner: utilities.runner_for(UtilityType::V8),
+                        log_file: designer_log_file(config, "status-generation")?,
+                    })
                 },
                 extension,
             ),
             How::Ibcmd { binary, utilities } => read_generation(
                 context,
                 config,
-                GenerationProcess::Ibcmd {
-                    binary,
-                    runner: utilities.runner_for(UtilityType::Ibcmd),
-                    data_path: None,
+                || {
+                    Ok(GenerationProcess::Ibcmd {
+                        binary,
+                        runner: utilities.runner_for(UtilityType::Ibcmd),
+                        data_path: None,
+                    })
                 },
                 extension,
             ),

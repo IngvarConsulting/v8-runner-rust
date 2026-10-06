@@ -33,11 +33,12 @@ pub(crate) enum GenerationProcess<'a> {
 }
 
 /// Поколение основной конфигурации или расширения `extension`; `None` — ответа нет. После
-/// отмены процесс не запускается: ответа нет.
-pub(crate) fn read_generation(
+/// отмены процесс не запускается: ответа нет. `process` собирается только после проверки
+/// отмены — его файлы и каталоги после отмены не создаются.
+pub(crate) fn read_generation<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
-    process: GenerationProcess<'_>,
+    process: impl FnOnce() -> Result<GenerationProcess<'a>, AppError>,
     extension: Option<&str>,
 ) -> Result<Option<String>, AppError> {
     if crate::use_cases::interruption::pending_interruption_error(
@@ -49,7 +50,7 @@ pub(crate) fn read_generation(
         return Ok(None);
     }
     let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
-    match process {
+    match process()? {
         GenerationProcess::Designer {
             binary,
             runner,

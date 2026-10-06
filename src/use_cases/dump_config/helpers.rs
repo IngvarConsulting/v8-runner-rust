@@ -430,7 +430,13 @@ pub(super) fn read_dump_generation(
     use crate::use_cases::generation_reader::{
         designer_log_file, read_generation, GenerationProcess,
     };
-    let process = match provider {
+    if matches!(
+        provider,
+        Provider::Agent | Provider::IbcmdRs | Provider::Webinst
+    ) {
+        return None;
+    }
+    let process = || match provider {
         Provider::Designer => designer_log_file(
             config,
             &format!("dump-{}-generation", resolved.source_set_name),
@@ -445,16 +451,16 @@ pub(super) fn read_dump_generation(
             runner,
             data_path: Some(data_path),
         }),
-        Provider::Agent | Provider::IbcmdRs | Provider::Webinst => return None,
+        Provider::Agent | Provider::IbcmdRs | Provider::Webinst => Err(AppError::capability(
+            format!("{provider} reads no generation by a platform process"),
+        )),
     };
-    process
-        .and_then(|process| {
-            read_generation(context, config, process, resolved.extension.as_deref())
-        })
-        .unwrap_or_else(|error| {
+    read_generation(context, config, process, resolved.extension.as_deref()).unwrap_or_else(
+        |error| {
             tracing::debug!(%error, "the configuration generation is not known");
             None
-        })
+        },
+    )
 }
 
 #[cfg(test)]

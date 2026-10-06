@@ -32,10 +32,10 @@ use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::next_step::NextStep;
 use crate::domain::source_set::SourceSetContext;
-use crate::domain::status::{GenerationVerdict, MemoryState};
+use crate::domain::status::{GenerationAfter, GenerationVerdict, MemoryState};
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    GenerationAfter, GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
+    GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
 };
 use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::ignored_files::VERSION_FILE_NAME;

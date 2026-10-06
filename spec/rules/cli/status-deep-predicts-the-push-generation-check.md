@@ -3,6 +3,7 @@ id: INV.CLI.STATUS-DEEP-PREDICTS-THE-PUSH-GENERATION-CHECK
 check:
   - tests/cli_status.rs::status_deep_predicts_the_push_generation_check
   - src/use_cases/status.rs::the_verdict_compares_within_the_tool_of_the_record
+  - tests/cli_status.rs::status_deep_where_push_does_not_load_with_this_executor_answers_null_with_a_reason
 ---
 
 # `status --deep` сверяет поколение так, как сверит его `push`

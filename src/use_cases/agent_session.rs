@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub(crate) use crate::domain::status::GenerationAfter;
+use crate::domain::status::GenerationAfter;
 use crate::platform::process::{ProcessInterruption, ProcessInterruptionReason};
 use crate::platform::result::PlatformCommandResult;
 

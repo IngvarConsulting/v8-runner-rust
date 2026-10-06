@@ -432,3 +432,59 @@ fn status_deep_without_a_platform_answers_null_with_a_reason() {
     assert_eq!(base["extensions"]["installed"], Value::Null, "{status}");
     assert!(base["extensions"]["reason"].is_string(), "{status}");
 }
+
+/// Где `push` этим исполнителем проект не грузит (EDT и агент), сверки нет: `status --deep`
+/// не спрашивает поколение и отвечает `null` с причиной — тем же отказом, что дал бы `push`.
+#[test]
+fn status_deep_where_push_does_not_load_with_this_executor_answers_null_with_a_reason() {
+    let project = Project::new();
+    let config = fs::read_to_string(&project.config).expect("config");
+    fs::write(
+        &project.config,
+        config.replace(
+            "format: DESIGNER\n",
+            "format: EDT\nproviders:\n  build: agent\n",
+        ),
+    )
+    .expect("EDT project pushed by the agent");
+    for (set, nature) in [
+        ("sources", "V8ConfigurationNature"),
+        ("ext", "V8ExtensionNature"),
+    ] {
+        fs::write(
+            project.root().join(set).join(".project"),
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<projectDescription>\n  <name>{set}</name>\n  <natures>\n    <nature>com._1c.g5.v8.dt.core.{nature}</nature>\n  </natures>\n</projectDescription>\n"
+            ),
+        )
+        .expect("EDT project file");
+        let dir = project.root().join(set);
+        fs::create_dir_all(dir.join("DT-INF")).expect("DT-INF");
+        fs::write(
+            dir.join("DT-INF/PROJECT.PMF"),
+            "Manifest-Version: 1.0\nRuntime-Version: 8.3.27\n",
+        )
+        .expect("manifest");
+        fs::create_dir_all(dir.join("src/Configuration")).expect("src");
+        fs::write(
+            dir.join("src/Configuration/Configuration.mdo"),
+            "<Configuration />\n",
+        )
+        .expect("root object");
+    }
+
+    let status = succeeded(&project.run(&["status", "--deep"]));
+    assert_data_matches_its_command_form(&status, "status --deep, EDT pushed by the agent");
+    let main = set(&status["data"]["infobases"][0], "main");
+    assert_eq!(main["base"]["token"], Value::Null, "{status}");
+    assert_eq!(main["base"]["tool"], "agent", "{status}");
+    // Записи у EDT-набора нет, поэтому сверка без ответа называется `no_record`.
+    assert_eq!(main["base"]["comparison"], "no_record", "{status}");
+    let reason = main["base"]["reason"].as_str().expect("a reason");
+    assert!(reason.contains("format=EDT"), "{status}");
+    assert!(
+        !project.calls().contains("GetConfigGenerationID"),
+        "no generation is asked: {}",
+        project.calls()
+    );
+}
