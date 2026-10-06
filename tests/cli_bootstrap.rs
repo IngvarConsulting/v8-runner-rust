@@ -26,7 +26,8 @@ for arg in "$@"; do
   prev="$arg"
 done
 if [ -n "$out" ]; then printf 'designer log: %s\n' "$args" > "$out"; fi
-if [ "{exit_code}" = "0" ]; then
+# Чтение поколения ничего не выгружает: без каталога выгрузки файл лёг бы в корень.
+if [ "{exit_code}" = "0" ] && [ -n "$target" ]; then
   mkdir -p "$target"
   printf '<Configuration />\n' > "$target/Configuration.xml"
 fi
@@ -681,6 +682,19 @@ fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
     assert_eq!(status.code(), Some(4), "{payload}");
 }
 
+/// Память о базе минимального проекта, как после её создания раннером.
+fn remember_minimal(dir: &Path, work: &Path) {
+    support::memory::remember_base(
+        work,
+        "origin",
+        support::memory::Base::File(&dir.join("ib")),
+        &[support::memory::Set::configuration(
+            "main",
+            &dir.join("project"),
+        )],
+    );
+}
+
 fn write_minimal_config(dir: &Path) -> PathBuf {
     let config_path = dir.join("v8project.yaml");
     let base_path = dir.join("project");
@@ -742,6 +756,7 @@ fn missing_config_in_json_mode_keeps_error_envelope_shape() {
 fn default_config_path_uses_v8project_yaml_from_current_dir() {
     let dir = temp_workspace();
     let _config_path = write_minimal_config(dir.path());
+    remember_minimal(dir.path(), &dir.path().join("work"));
 
     let output = v8_runner_command()
         .current_dir(dir.path())
@@ -765,6 +780,7 @@ fn default_config_path_applies_sibling_local_overlay() {
         "workPath: local-work\n",
     )
     .expect("local overlay");
+    remember_minimal(dir.path(), &local_work_path);
 
     let output = v8_runner_command()
         .current_dir(dir.path())

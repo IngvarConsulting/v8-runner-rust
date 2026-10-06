@@ -153,6 +153,19 @@ fn harness_holding_sftp(
         Channel::Sftp | Channel::SftpReadOnly => sftp_infobase(&harness),
     };
     write_config(&harness, &infobase, "");
+    // Память о базе, как после её создания: тесты шлюза начинают не с первого знакомства.
+    support::memory::remember_base(
+        &root.join("work"),
+        "origin",
+        support::memory::Base::Standalone {
+            host: "127.0.0.1",
+            port,
+        },
+        &[
+            support::memory::Set::configuration("main", &project.join("configuration")),
+            support::memory::Set::extension("Зонд", &project.join("ext")),
+        ],
+    );
     harness
 }
 

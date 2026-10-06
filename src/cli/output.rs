@@ -58,7 +58,13 @@ pub fn with_cli_error<T: Serialize>(envelope: Envelope<T>, error: &UseCaseError)
 
 fn cli_envelope_error(error: &UseCaseError) -> EnvelopeError {
     let (code, kind) = cli_error_contract(error.kind());
-    EnvelopeError::new(code, kind, error.message()).with_next(error.next().cloned())
+    let mut envelope =
+        EnvelopeError::new(code, kind, error.message()).with_next(error.next().cloned());
+    if let Some(generations) = error.generations() {
+        envelope.base_generation = Some(generations.base.clone());
+        envelope.local_generation = Some(generations.local.clone());
+    }
+    envelope
 }
 
 /// Род отказа определяет пару «код, род» на проводе. Причина возможности различает коды
@@ -80,6 +86,8 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
         UseCaseErrorKind::WorkspaceBusy => (ErrorCode::WorkspaceBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InfobaseBusy => (ErrorCode::InfobaseBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InfobaseHeld => (ErrorCode::InfobaseHeld, ErrorKind::Workspace),
+        UseCaseErrorKind::NonFastForward => (ErrorCode::NonFastForward, ErrorKind::NonFastForward),
+        UseCaseErrorKind::NoMemory => (ErrorCode::NoMemory, ErrorKind::NoMemory),
         UseCaseErrorKind::InvalidOutput => (ErrorCode::InvalidOutput, ErrorKind::InvalidOutput),
         UseCaseErrorKind::Cancelled(_) => (ErrorCode::Cancelled, ErrorKind::Interruption),
         UseCaseErrorKind::TimedOut => (ErrorCode::TimedOut, ErrorKind::Interruption),

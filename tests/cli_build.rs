@@ -181,6 +181,17 @@ fn write_live_workspace_lock(work_path: &Path, command: &str) {
     .expect("workspace lock sidecar");
 }
 
+/// Память о базе `File=ib` проекта в `dir`, как после её создания раннером: тесты ниже
+/// начинают не с первого знакомства.
+fn remember(dir: &Path, sets: &[support::memory::Set<'_>]) {
+    support::memory::remember_base(
+        &dir.join("work"),
+        "origin",
+        support::memory::Base::File(&dir.join("ib")),
+        sets,
+    );
+}
+
 fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
@@ -218,6 +229,13 @@ fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
 
     write_build_script(&binary_path, None);
     write_config(&config_path, &base_path, &work_path, &binary_path);
+    remember(
+        dir.path(),
+        &[
+            support::memory::Set::configuration("main", &base_path.join("main")),
+            support::memory::Set::extension("ext", &base_path.join("ext")),
+        ],
+    );
 
     (dir, config_path, binary_path, work_path)
 }
@@ -274,6 +292,13 @@ fn setup_ibcmd_project() -> (
         "IBCMD",
         "File=ib",
     );
+    remember(
+        dir.path(),
+        &[
+            support::memory::Set::configuration("main", &base_path.join("main")),
+            support::memory::Set::extension("ext", &base_path.join("ext")),
+        ],
+    );
 
     (
         dir,
@@ -322,6 +347,13 @@ fn setup_edt_ibcmd_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         edt_cli_path.display(),
     );
     fs::write(&config_path, config).expect("config");
+    remember(
+        dir.path(),
+        &[support::memory::Set::configuration(
+            "configuration",
+            &base_path.join("configuration"),
+        )],
+    );
 
     (dir, config_path, ibcmd_calls_log, edt_calls_log)
 }
@@ -382,12 +414,53 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
         edt_cli_path.display(),
     );
     fs::write(&config_path, config).expect("config");
+    remember(
+        dir.path(),
+        &[
+            support::memory::Set::configuration("configuration", &base_path.join("configuration")),
+            support::memory::Set::extension("client_mcp", &base_path.join("exts/client-mcp")),
+        ],
+    );
 
     (dir, config_path, work_path)
 }
 
 /// Всё, что лежит в рабочем каталоге после превью. Пусто оно быть обязано целиком:
 /// `DEC.2026-09-23.A-PREVIEW-LEAVES-NO-TRACE` не оставляет превью и журнала.
+/// Память о базе `File=<tmp>/ib` (`infobase:` — база `origin`) у набора EDT `configuration`.
+fn remember_edt_configuration(work_path: &Path, tmp: &str, base_path: &Path) {
+    support::memory::remember_base(
+        work_path,
+        "origin",
+        support::memory::Base::File(&Path::new(tmp).join("ib")),
+        &[support::memory::Set::configuration(
+            "configuration",
+            &base_path.join("configuration"),
+        )],
+    );
+}
+
+/// Память о базе публичным путём — перезаписью `push --force`: тест дальше проверяет полную
+/// загрузку `--full`, которая проверки памяти проходит.
+fn force_push(config_path: &Path, current_dir: &Path) {
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "--force",
+        ])
+        .current_dir(current_dir)
+        .output()
+        .expect("run command");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn left_in_work_path(work_path: &Path) -> Vec<String> {
     fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) {
         let Ok(read) = fs::read_dir(dir) else {
@@ -477,6 +550,8 @@ fn a_planned_edt_build_refuses_when_the_utility_that_would_load_it_is_missing() 
             ),
         )
         .expect("config");
+        // Превью без памяти о базе отказало бы `no_memory` раньше поиска утилит.
+        remember_edt_configuration(&work_path, &tmp, &base_path);
 
         let output = v8_runner_command()
             .args([
@@ -570,7 +645,12 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
     .expect("config");
 
     let seed = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "--force",
+        ])
         .output()
         .expect("seed build");
     assert!(
@@ -586,6 +666,9 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
         .join("configuration.redb");
     fs::remove_file(&designer_state).expect("drop designer state");
     fs::remove_file(&v8_calls_log).expect("drop calls log");
+    // Без хеш-памяти и без ответа о поколении превью отказало бы `no_memory`: база здесь
+    // помнится записью поколения, как после её создания раннером.
+    remember_edt_configuration(&work_path, &tmp, &base_path);
 
     let output = v8_runner_command()
         .args([
@@ -672,6 +755,9 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
         ),
     )
     .expect("config");
+    // Превью без памяти о базе отказало бы `no_memory`; сама память — не след превью.
+    remember_edt_configuration(&work_path, &tmp, &base_path);
+    let remembered = left_in_work_path(&work_path);
 
     let output = v8_runner_command()
         .args([
@@ -693,7 +779,10 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
     );
     // Подметается весь рабочий каталог, а не три имени: перечень пропустил бы и журнал
     // платформы, и staging, и всякий новый каталог.
-    let left = left_in_work_path(&work_path);
+    let left: Vec<String> = left_in_work_path(&work_path)
+        .into_iter()
+        .filter(|path| !remembered.contains(path))
+        .collect();
     assert!(
         left.is_empty(),
         "превью оставило в рабочем каталоге: {left:?}"
@@ -1173,6 +1262,7 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
         tool_source.display(),
     );
     fs::write(&config_path, config).expect("config");
+    force_push(&config_path, dir.path());
 
     let output = v8_runner_command()
         .args([
@@ -1504,6 +1594,8 @@ fn build_ibcmd_passes_credentials_to_import_and_apply() {
         binary_path.display(),
     );
     fs::write(&config_path, config).expect("config");
+    force_push(&config_path, dir.path());
+    fs::remove_file(&calls_log).expect("calls of the forced push");
 
     let output = v8_runner_command()
         .args([
@@ -1575,7 +1667,12 @@ fn build_ibcmd_server_connection_fails_at_config_load() {
     );
 
     let output = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "--force",
+        ])
         .output()
         .expect("run command");
 
@@ -1594,6 +1691,8 @@ fn build_ibcmd_server_connection_passes_dbms_and_infobase_credentials() {
         "IBCMD",
         "  connection: 'Srvr=server;Ref=main'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: maindb\n    user: postgres\n    password: pg-secret\n",
     );
+    force_push(&config_path, dir.path());
+    fs::remove_file(&calls_log).expect("calls of the forced push");
 
     let output = v8_runner_command()
         .args([
@@ -1627,6 +1726,8 @@ fn build_ibcmd_accepts_raw_f_connection() {
         "IBCMD",
         &format!("/F {tmp}/ib"),
     );
+    force_push(&config_path, dir.path());
+    fs::remove_file(&calls_log).expect("calls of the forced push");
 
     let output = v8_runner_command()
         .args([
@@ -1687,6 +1788,7 @@ fn ibcmd_push_receives_config_relative_paths_resolved_from_the_config_directory(
             String::from_utf8_lossy(&output.stderr)
         );
     };
+    push(&["--force"]);
     push(&["--full"]);
     fs::write(&module, "procedure Test() // changed endprocedure").expect("change");
     push(&[]);
@@ -1765,4 +1867,82 @@ fn a_push_refuses_when_the_version_file_is_tracked_by_git() {
         );
     }
     assert!(!marker.exists(), "the platform must not start");
+}
+
+/// Набор EDT, чей этап EDT пропущен, а копия Конфигуратора изменилась и потому грузится,
+/// сверяется до первой загрузки команды вместе с остальными: отказ по нему приходит раньше,
+/// чем основная конфигурация легла в базу.
+#[test]
+fn an_edt_set_with_a_skipped_export_is_checked_before_the_first_load() {
+    let (dir, config_path, work_path) = setup_edt_extension_project();
+    let platform_path = dir.path().join("platform").join("bin").join("1cv8");
+    let calls_log = dir.path().join("v8-calls.log");
+    let extension_token = dir.path().join("extension-token");
+    write_script(
+        &platform_path,
+        &format!(
+            r#"printf '%s\n' "$*" >> '{calls}'
+out=''
+previous=''
+for arg in "$@"; do
+  if [ "$previous" = '/Out' ]; then out="$arg"; fi
+  previous="$arg"
+done
+case "$*" in
+  *'/GetConfigGenerationID'*'-Extension client_mcp'*)
+    if [ -f '{extension}' ]; then cat '{extension}' > "$out"; else printf '{zero}\n' > "$out"; fi
+    exit 0 ;;
+  *'/GetConfigGenerationID'*) printf '{zero}\n' > "$out"; exit 0 ;;
+esac
+if [ -n "$out" ]; then : > "$out"; fi
+exit 0"#,
+            calls = calls_log.display(),
+            extension = extension_token.display(),
+            zero = "0".repeat(40),
+        ),
+    );
+    let push = || {
+        v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "push",
+            ])
+            .output()
+            .expect("run command")
+    };
+    let first = push();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    // Копии Конфигуратора обоих наборов изменились сами (оборванный прогон), исходники
+    // EDT — нет: этапы EDT пропускаются, а копии грузятся.
+    for set in ["configuration", "client_mcp"] {
+        let copy = work_path
+            .join("infobases")
+            .join("origin")
+            .join("designer")
+            .join(set);
+        assert!(copy.is_dir(), "the Designer copy of {set}");
+        fs::write(copy.join("Changed.bsl"), "procedure Changed() endprocedure").expect("copy");
+    }
+    fs::write(&extension_token, format!("{}\n", "1".repeat(40))).expect("token");
+    fs::remove_file(&calls_log).expect("calls of the first push");
+
+    let refused = push();
+
+    let payload: Value = serde_json::from_slice(&refused.stdout).expect("json");
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(
+        payload["error"]["next"]["source_set"], "client_mcp",
+        "{payload}"
+    );
+    let calls = fs::read_to_string(&calls_log).unwrap_or_default();
+    assert!(
+        !calls.contains("/LoadConfigFromFiles"),
+        "nothing is loaded before the refusal: {calls}"
+    );
 }

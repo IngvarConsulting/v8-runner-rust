@@ -23,7 +23,7 @@ fn write_ibcmd_script(path: &Path, calls_log: &Path, fail_pattern: Option<&str>)
         })
         .unwrap_or_default();
     let body = format!(
-        "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nmkdir -p \"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nexit 0",
+        "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; esac\n{}\nmkdir -p \"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nexit 0",
         calls_log.display(),
         pattern_branch
     );
@@ -32,7 +32,7 @@ fn write_ibcmd_script(path: &Path, calls_log: &Path, fail_pattern: Option<&str>)
 
 fn write_designer_dump_script_for_edt(path: &Path, calls_log: &Path) {
     let body = format!(
-        "args=\"$*\"\nout=\"\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\nmkdir -p \"$target\"\nprintf '<Configuration />\\n' > \"$target/Configuration.xml\"\nexit 0",
+        "args=\"$*\"\nout=\"\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$target\" ]; then mkdir -p \"$target\"; printf '<Configuration />\\n' > \"$target/Configuration.xml\"; fi\nexit 0",
         calls_log.display()
     );
     write_script(path, &body);
@@ -40,7 +40,7 @@ fn write_designer_dump_script_for_edt(path: &Path, calls_log: &Path) {
 
 fn write_designer_partial_dump_script(path: &Path, captured_list: &Path) {
     let body = format!(
-        "list_file=\"\"\ntarget=\"\"\nprevious=\"\"\nfor argument in \"$@\"; do\n  if [ \"$previous\" = \"-listFile\" ]; then list_file=\"$argument\"; fi\n  if [ \"$previous\" = \"/DumpConfigToFiles\" ]; then target=\"$argument\"; fi\n  previous=\"$argument\"\ndone\ncp \"$list_file\" \"{}\"\nmkdir -p \"$target\"\nprintf '<Configuration />\\n' > \"$target/Configuration.xml\"\nexit 0",
+        "list_file=\"\"\ntarget=\"\"\nprevious=\"\"\nfor argument in \"$@\"; do\n  if [ \"$previous\" = \"-listFile\" ]; then list_file=\"$argument\"; fi\n  if [ \"$previous\" = \"/DumpConfigToFiles\" ]; then target=\"$argument\"; fi\n  previous=\"$argument\"\ndone\ncp \"$list_file\" \"{}\"\nif [ -n \"$target\" ]; then mkdir -p \"$target\"; printf '<Configuration />\\n' > \"$target/Configuration.xml\"; fi\nexit 0",
         captured_list.display()
     );
     write_script(path, &body);

@@ -875,6 +875,10 @@ pub(crate) struct GenerationRecord {
 pub(crate) enum GenerationAfter {
     Build,
     Dump,
+    /// Токен записан до загрузки, которая не удалась: что она успела сделать с базой,
+    /// неизвестно, и расхождение с ним не называется чужой правкой.
+    #[serde(rename = "failed_build")]
+    FailedBuild,
 }
 
 impl std::fmt::Display for GenerationAfter {
@@ -882,6 +886,7 @@ impl std::fmt::Display for GenerationAfter {
         f.write_str(match self {
             Self::Build => "build",
             Self::Dump => "dump",
+            Self::FailedBuild => "failed build",
         })
     }
 }
@@ -1015,7 +1020,21 @@ impl GenerationLedger {
         .map_err(|error| AppError::Runtime(format!("failed to encode generation: {error}")))?;
         let mut records = self.records();
         records.insert(self.source_set.clone(), record);
-        let text = serde_json::to_vec_pretty(&records)
+        self.write(&records)
+    }
+
+    /// Стирает запись набора, сохраняя остальные: после загрузки, о которой инструмент не
+    /// ответил поколением, прежний токен описывает уже не ту базу. `true` — запись была.
+    pub(crate) fn forget(&self) -> Result<bool, AppError> {
+        let mut records = self.records();
+        if records.remove(&self.source_set).is_none() {
+            return Ok(false);
+        }
+        self.write(&records).map(|()| true)
+    }
+
+    fn write(&self, records: &serde_json::Map<String, serde_json::Value>) -> Result<(), AppError> {
+        let text = serde_json::to_vec_pretty(records)
             .map_err(|error| AppError::Runtime(format!("failed to encode generation: {error}")))?;
         crate::support::fs::write_file_atomically(&self.file, |file| {
             std::io::Write::write_all(file, &text)

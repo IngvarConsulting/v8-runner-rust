@@ -171,6 +171,20 @@ fn write_config(
     write_local_origin(path, "File=ib", Some("secret"));
 }
 
+/// Память о базе `origin` проекта, как после её создания раннером: сборка перед тестами идёт
+/// не с первого знакомства.
+fn remember_origin(project: &Path, work: &Path) {
+    support::memory::remember_base(
+        work,
+        "origin",
+        support::memory::Base::File(&project.join("ib")),
+        &[support::memory::Set::configuration(
+            "main",
+            &project.join("main"),
+        )],
+    );
+}
+
 /// Адрес базы живёт в местном слое рядом с проектным файлом.
 fn write_local_origin(config_path: &Path, connection: &str, password: Option<&str>) {
     let mut local = format!("infobases:\n  origin:\n    connection: '{connection}'\n");
@@ -276,6 +290,7 @@ fn setup_project_with_additional_launch_keys(
         timeout_seconds,
         additional_launch_keys,
     );
+    remember_origin(&base_path, &work_path);
 
     (dir, config_path, build_calls, test_calls, captured_config)
 }
@@ -349,6 +364,7 @@ fn setup_va_project_with_work_name(
     );
     fs::write(&config_path, config).expect("config");
     write_local_origin(&config_path, "File=ib", Some("secret"));
+    remember_origin(&base_path, &work_path);
 
     (dir, config_path, build_calls, test_calls, captured_params)
 }
@@ -452,6 +468,52 @@ fn test_all_full_json_runs_build_first_and_returns_report() {
         "ok"
     );
     assert_eq!(payload["data"]["retained_paths"], Value::Null);
+}
+
+/// `test` на базе без памяти о ней отказывает так же, как `push`: род `no_memory`, те же
+/// выходы, платформа не запускается, а шаг сборки называет отказ, а не «build failed».
+#[test]
+fn a_test_on_a_base_without_memory_is_refused_like_a_push() {
+    let (dir, config_path, build_calls, test_calls, _captured_config) = setup_project(
+        "work",
+        JUNIT_SMOKE_REPORT_FIXTURE,
+        "12:00:00.000 [INF] ok",
+        0,
+        false,
+        5,
+        None,
+    );
+    fs::remove_dir_all(dir.path().join("work").join("infobases")).expect("forget the base");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "yaxunit",
+            "all",
+        ])
+        .output()
+        .expect("run");
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(output.status.code(), Some(3), "{payload}");
+    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("push --force`"), "{message}");
+    let build_step = payload["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["name"] == "build")
+        .expect("build step");
+    let step = build_step["message"].as_str().expect("step message");
+    assert!(step.contains("no memory of"), "{payload}");
+    assert!(!step.contains("build failed"), "{payload}");
+    assert!(!build_calls.exists(), "the platform does not start");
+    assert!(!test_calls.exists(), "no test runs");
 }
 
 #[test]
@@ -1406,7 +1468,12 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
     write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
 
     let first = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "--force",
+        ])
         .output()
         .expect("prime build");
     assert!(first.status.success());
@@ -1498,6 +1565,15 @@ fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
     );
     fs::write(&config_path, config).expect("config");
     write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
+    support::memory::remember_base(
+        &work_path,
+        "origin",
+        support::memory::Base::File(&bases.path().join("ib")),
+        &[support::memory::Set::configuration(
+            "configuration",
+            &base_path.join("configuration"),
+        )],
+    );
 
     let first = v8_runner_command()
         .args([
@@ -1721,6 +1797,15 @@ fn vanessa_resolves_a_relative_epf_path_from_a_nested_config_directory() {
     )
     .expect("config");
     write_local_origin(&config_path, "File=./ib", None);
+    support::memory::remember_base(
+        &profile_dir.join("work"),
+        "origin",
+        support::memory::Base::File(&profile_dir.join("ib")),
+        &[support::memory::Set::configuration(
+            "main",
+            &profile_dir.join("main"),
+        )],
+    );
     let run_test_va = || {
         v8_runner_command()
             .args([

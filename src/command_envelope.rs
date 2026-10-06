@@ -18,18 +18,9 @@ pub enum ErrorKind {
     Validation,
     Runtime,
     Platform,
-    /// Отправка в базу, ушедшую вперёд. Производителя пока нет: его приносит сравнение
-    /// поколений.
-    #[allow(
-        dead_code,
-        reason = "заведён под будущего производителя: набор закрыт целиком"
-    )]
+    /// Отправка в базу, ушедшую вперёд записанного поколения.
     NonFastForward,
-    /// Памяти о прошлом разе нет. Производителя пока нет: его приносит память по базе.
-    #[allow(
-        dead_code,
-        reason = "заведён под будущего производителя: набор закрыт целиком"
-    )]
+    /// Отправка в базу, о которой у рабочей копии нет памяти.
     NoMemory,
 }
 
@@ -57,17 +48,9 @@ pub enum ErrorCode {
     UnsupportedValue,
     RuntimeFailure,
     PlatformFailure,
-    /// Пара к роду `non_fast_forward`; производителя пока нет.
-    #[allow(
-        dead_code,
-        reason = "заведён под будущего производителя: набор закрыт целиком"
-    )]
+    /// Пара к роду `non_fast_forward`: база ушла вперёд записанного поколения.
     NonFastForward,
-    /// Пара к роду `no_memory`; производителя пока нет.
-    #[allow(
-        dead_code,
-        reason = "заведён под будущего производителя: набор закрыт целиком"
-    )]
+    /// Пара к роду `no_memory`: памяти о базе нет.
     NoMemory,
 }
 
@@ -407,6 +390,12 @@ mod schema_tests {
             (UseCaseErrorKind::InfobaseBusy, "infobase_busy", "workspace"),
             (UseCaseErrorKind::InfobaseHeld, "infobase_held", "workspace"),
             (
+                UseCaseErrorKind::NonFastForward,
+                "non_fast_forward",
+                "non_fast_forward",
+            ),
+            (UseCaseErrorKind::NoMemory, "no_memory", "no_memory"),
+            (
                 UseCaseErrorKind::InvalidOutput,
                 "invalid_output",
                 "invalid_output",
@@ -467,8 +456,8 @@ mod schema_tests {
         // Что не назвала ни одна таблица — перечислено здесь как заведённое под будущего
         // производителя. Иначе набор растёт молча: порождение схемы повторяет типы и само
         // этого не ловит.
-        const RESERVED_KINDS: &[&str] = &["non_fast_forward", "no_memory"];
-        const RESERVED_CODES: &[&str] = &["non_fast_forward", "no_memory"];
+        const RESERVED_KINDS: &[&str] = &[];
+        const RESERVED_CODES: &[&str] = &[];
         for kind in ErrorKind::ALL {
             let name = kind.as_str();
             assert_eq!(

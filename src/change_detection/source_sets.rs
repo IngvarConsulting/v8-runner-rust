@@ -96,6 +96,14 @@ impl<'a> SourceSetsService<'a> {
         context.with_tool_extension_memory(&memory.key, extension, identity)
     }
 
+    /// Каталог памяти выбранной базы `workPath/infobases/<ключ>`; `None`, если адрес базы не
+    /// распознан и помнить её нельзя.
+    pub fn base_memory_dir(&self) -> Option<PathBuf> {
+        let work_path = absolutize_path(&self.config.work_path);
+        self.base_memory()
+            .map(|memory| crate::domain::source_set::infobase_memory_dir(&work_path, &memory.key))
+    }
+
     /// Where the selected base is remembered: a declared base under its name, a base named
     /// by a connection string under a key derived from its address without credentials.
     /// `None` when the address is not recognized and so cannot be compared.

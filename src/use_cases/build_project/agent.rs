@@ -3,9 +3,8 @@
 //! Загрузка исходников и обновление конфигурации базы — два шага одного разговора,
 //! а не два процесса; наборы исходников идут друг за другом в той же сессии. Агент
 //! читает только внутри своего `AgentBaseDir`, поэтому каталог набора выставляется
-//! ему символической ссылкой. После удачного шага у агента спрашивают поколение
-//! конфигурации и записывают его в учёт: следующая выгрузка сравнит и, если
-//! ничего не менялось, не станет ничего делать.
+//! ему символической ссылкой. Поколение конфигурации у агента спрашивает сверка
+//! координатора — до загрузки и после неё — тем же разговором.
 
 use super::coordinator::SourceSetLoader;
 use super::*;
@@ -13,8 +12,7 @@ use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
     argument, connect, generation_id, run_critical, run_id, stage_dir, stage_dir_partially, tidy,
-    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange, GenerationAfter,
-    GenerationLedger,
+    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange,
 };
 use crate::use_cases::interruption::Deferrals;
 
@@ -87,6 +85,23 @@ impl SourceSetLoader for AgentLoader {
         Ok(())
     }
 
+    fn tool(&self) -> Provider {
+        Provider::Agent
+    }
+
+    /// Поколение спрашивается в той же сессии, что и загрузка: она открывается здесь, если
+    /// её ещё нет. После отмены сессия команд запроса не отдаёт и отвечает отменой.
+    fn read_generation(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        _step_index: usize,
+    ) -> Result<Option<String>, AppError> {
+        let (handle, wait) = self.handle(context, config)?;
+        generation_id(handle.session(), extension_name(source_set), &wait).map(Some)
+    }
+
     fn load(
         &mut self,
         context: &ExecutionContext,
@@ -98,8 +113,7 @@ impl SourceSetLoader for AgentLoader {
         commit: &StepCommit,
     ) -> Result<Vec<String>, AppError> {
         // Всё, что идёт после отложенной отмены, — провал следующей команды, безопасная
-        // точка, фиксация состояния, срезанный `generation-id`, — выходит через учёт,
-        // который её называет.
+        // точка, фиксация состояния, — выходит через учёт, который её называет.
         // Версия формата сверяется до сессии: формат новее платформы — отказ. Версию
         // платформы раннер знает только у своего агента.
         let platform = self.location.as_ref().and_then(|location| {
@@ -153,15 +167,7 @@ impl SourceSetLoader for AgentLoader {
             unstage(handle, &exchange, &exposed);
             outcome?;
 
-            commit_step_state(source_set, source_context, &config.work_path, commit)?;
-
-            // Поколение записывается после удачной загрузки: следующая выгрузка сравнит его
-            // и не станет выгружать то, что не менялось.
-            let token = generation_id(handle.session(), extension, &wait)?;
-            if let Some(ledger) = GenerationLedger::of(source_context, &config.work_path) {
-                ledger.record(Provider::Agent, &token, GenerationAfter::Build)?;
-            }
-            Ok(())
+            commit_step_state(source_set, source_context, &config.work_path, commit)
         })
         .map(|((), mut warnings)| {
             warnings.extend(format_notice);

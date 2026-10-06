@@ -16,7 +16,7 @@ use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
     argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
     run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir, write_text, AgentHandle,
-    Exchange, GenerationAfter, GenerationComparison, GenerationLedger, Recorded,
+    Exchange, GenerationLedger, Recorded,
 };
 
 /// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
@@ -74,9 +74,9 @@ fn dump_through(
 ) -> Result<(String, DumpNotes, bool), AppError> {
     let exchange = handle.exchange(config)?;
     let extension = resolved.extension.as_deref();
-    let ledger = SourceSetInventory::new(config)
-        .designer_context(&resolved.source_set_name)
-        .and_then(|source| GenerationLedger::of(source, &config.work_path));
+    let inventory = SourceSetInventory::new(config);
+    let set = inventory.designer_context(&resolved.source_set_name);
+    let ledger = set.and_then(|source| GenerationLedger::of(source, &config.work_path));
 
     // Поколение спрашивается до выгрузки: сравнение на равенство с записью после
     // последней удачной операции и говорит, есть ли что выгружать.
@@ -93,17 +93,15 @@ fn dump_through(
     // Пропуск по поколению — только у выгрузки по изменившемуся от годного файла версий:
     // полная поверх каталога его пишет, и каталог без него не годится как «уже выгружено».
     if matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile)) && objects.is_none() {
-        if let Recorded::Ours(record) = &recorded {
-            if record.compare(Provider::Agent, &generation) == GenerationComparison::Unchanged {
-                return Ok((
-                    String::new(),
-                    DumpNotes::message(Some(format!(
-                        "configuration generation {generation} is unchanged since the last {} ({}); nothing to dump",
-                        record.after, record.recorded_at
-                    ))),
-                    true,
-                ));
-            }
+        if let Some(unchanged) = set.and_then(|set| {
+            crate::use_cases::exchange_guard::unchanged_since_the_record(
+                set,
+                &config.work_path,
+                Provider::Agent,
+                &generation,
+            )
+        }) {
+            return Ok((String::new(), DumpNotes::message(Some(unchanged)), true));
         }
     }
 
@@ -266,10 +264,31 @@ fn dump_through(
             (outcome?, DumpNotes::default())
         }
     };
-    if let Some(ledger) = &ledger {
-        ledger.record(Provider::Agent, &generation, GenerationAfter::Dump)?;
-    }
-    Ok((transcript, cleanup.after(foreign_note), false))
+    // Поколение спрашивается и после выгрузки: то же — память записывается, другое — базу
+    // правили во время выгрузки, и ответ это называет. Выборка объектов каталог с базой не
+    // сводит и поколения не пишет; после отмены поколение не спрашивается.
+    let changed_note = match (set, plan) {
+        (Some(set), DumpPlan::Full | DumpPlan::OverDirectory(_))
+            if crate::use_cases::interruption::pending_interruption_error(
+                context,
+                "the configuration generation",
+            )
+            .is_none() =>
+        {
+            let after = generation_id(handle.session(), extension, wait).ok();
+            crate::use_cases::exchange_guard::record_after_dump(
+                set,
+                &config.work_path,
+                Provider::Agent,
+                Some(&generation),
+                after.as_deref(),
+            )
+        }
+        _ => None,
+    };
+    let mut notes = cleanup.after(foreign_note);
+    notes.message = merge_optional_messages(notes.message, changed_note);
+    Ok((transcript, notes, false))
 }
 
 fn with_extension(mut command: String, extension: Option<&str>) -> String {

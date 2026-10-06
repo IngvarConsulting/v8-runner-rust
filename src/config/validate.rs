@@ -2814,6 +2814,43 @@ mod tests {
         serde_yaml::from_str(yaml).expect("infobase section")
     }
 
+    /// Всякая цель, которую принимает проверка формы, помнится: адрес памяти у неё есть.
+    /// Страж против «нераспознанного адреса»: форма, которую проверка пропустила бы без
+    /// адреса памяти, оставила бы базу без памяти навсегда, и отказ `no_memory` повторялся бы.
+    #[test]
+    fn every_accepted_target_has_a_memory_address() {
+        let base = std::path::Path::new("/srv/project");
+        let mut accepted = 0;
+        for yaml in [
+            "connection: 'File=/srv/ib'",
+            "connection: 'File=ib'",
+            "connection: 'File=\"C:\\bases\\ib\"'",
+            "connection: '/F /srv/ib'",
+            "connection: 'Srvr=srv:1541;Ref=demo'",
+            "connection: 'Srvr=\"srv\";Ref=\"demo\"'",
+            "connection: '/S srv\\demo'",
+            "connection: '/S srv'",
+            "connection: 'Srvr=srv'",
+            "connection: 'Ref=demo'",
+            "connection: 'ws=http://srv/demo'",
+            "connection: 'Usr=admin'",
+            "connection: ''",
+            "standalone:\n  gate: srv:1543\n  exchange: sftp\n",
+            "standalone:\n  gate: 'srv'\n  exchange: sftp\n",
+            "connection: 'Srvr=srv;Ref=demo'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n",
+        ] {
+            let section = infobase(yaml);
+            if super::validate_infobase_form(&section).is_ok() {
+                accepted += 1;
+                assert!(
+                    section.memory_address(base).is_some(),
+                    "an accepted target has no memory address: {yaml}"
+                );
+            }
+        }
+        assert!(accepted >= 6, "the sample lost its accepted targets");
+    }
+
     /// Секция `cluster` держит то, что есть только у кластера: у файловой базы и у
     /// автономного сервера она отклоняется
     /// (`INV.CONFIG.A-CLUSTER-SECTION-IS-REJECTED-OUTSIDE-A-CLUSTER-BASE`).

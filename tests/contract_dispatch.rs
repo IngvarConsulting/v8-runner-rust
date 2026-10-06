@@ -214,7 +214,8 @@ fn rows(dir: &Path) -> Vec<Dispatching> {
         given(&["make", "--output", &made], "make"),
         given(&["publish"], "publish"),
         given(&["dump", "--force"], "pull"),
-        given(&["build"], "push"),
+        // Образец — первое знакомство с базой: обычная отправка отказала бы без памяти о ней.
+        given(&["build", "--force"], "push"),
         given(&["load", "--path", &artifact], "upload"),
         // Формы выгрузки несут признак только в превью: боевой ответ его не называет,
         // хотя работу исполнитель получил.

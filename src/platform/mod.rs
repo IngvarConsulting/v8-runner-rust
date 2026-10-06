@@ -11,6 +11,8 @@ pub mod edt;
 pub mod edt_session;
 pub mod enterprise;
 pub mod extension_inventory;
+/// Ответ платформы о поколении конфигурации.
+pub mod generation;
 pub mod git;
 pub mod ibcmd;
 pub mod interactive;

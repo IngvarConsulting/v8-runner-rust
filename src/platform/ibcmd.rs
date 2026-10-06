@@ -244,6 +244,28 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
+    /// `config generation-id [--extension <имя>]`: токен поколения — последняя непустая
+    /// строка stdout. Чтение базы, а не запись: отмена снимает его, как всякое чтение.
+    /// Неудачный выход или строка не из сорока шестнадцатеричных знаков — отсутствие ответа.
+    pub fn config_generation_id(
+        &self,
+        extension: Option<&str>,
+    ) -> Result<Option<String>, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "generation-id"]);
+        if let Some(extension) = extension {
+            push_option_value(&mut args, "--extension", extension);
+        }
+        let result = self
+            .run_with(&args, &self.execution_policy.for_reading())
+            .map_err(IbcmdError::Spawn)?;
+        if result.process.exit_code != 0 {
+            return Ok(None);
+        }
+        Ok(crate::platform::generation::generation_token(
+            &result.process.stdout,
+        ))
+    }
+
     /// Ensures the infobase exists, asking the infobase itself what a failed create means.
     ///
     /// `ibcmd infobase create` answers 255 both when the infobase is already registered and

@@ -384,6 +384,22 @@ pub struct InfobaseWebConfig {
 }
 
 impl InfobaseConfig {
+    /// Адрес, к которому привязана память о базе, — без учётных данных и выбора исполнителя.
+    /// У цели, которую приняла проверка конфигурации, он есть всегда
+    /// (`INV.CONFIG.AN-ACCEPTED-TARGET-HAS-A-MEMORY-ADDRESS`); `None` — только у формы, которую
+    /// проверка отвергает: такая цель память ни с кем не делит.
+    pub fn memory_address(&self, base_path: &Path) -> Option<String> {
+        match &self.standalone {
+            Some(standalone) => standalone
+                .gate_endpoint()
+                .ok()
+                .map(|(host, port)| format!("standalone:{host}:{port}")),
+            None => {
+                V8Connection::from_connection_string(&self.connection).snapshot_identity(base_path)
+            }
+        }
+    }
+
     /// Build a file-based infobase config.
     #[cfg(test)]
     pub fn file(connection: impl Into<String>) -> Self {
@@ -533,15 +549,8 @@ impl AppConfig {
     }
 
     /// Address that hash memory is bound to, without credentials or executor choice.
-    /// `None` when the address is not recognised: such a target must never share memory.
     pub fn infobase_memory_address(&self, base_path: &Path) -> Option<String> {
-        match &self.infobase.standalone {
-            Some(standalone) => standalone
-                .gate_endpoint()
-                .ok()
-                .map(|(host, port)| format!("standalone:{host}:{port}")),
-            None => self.v8_connection().snapshot_identity(base_path),
-        }
+        self.infobase.memory_address(base_path)
     }
 
     /// Kind of the target infobase, as declared by the connection contract.
