@@ -413,3 +413,25 @@ fn an_extension_named_like_another_set_is_refused_before_any_dump() {
     );
     assert_eq!(project.project_text(), PROJECT);
 }
+
+/// Отказ набора останавливает обход: ответ несёт выгруженное до него и отказавший набор, а
+/// расширение без набора не выгружено и не объявлено — объявление идёт только после
+/// выгрузки.
+#[test]
+fn a_refused_set_stops_the_walk_before_anything_is_declared() {
+    let project = Project::new(&["Old", "Новое"]);
+    fs::write(project.root.join("exts/old/hand-written.xml"), "by hand\n").expect("work");
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_data_matches_one_of(&envelope["data"], "pull --all refusal", &["pull-all"]);
+    assert_eq!(pulled_sets(&envelope), ["main", "Old"], "{envelope}");
+    assert_eq!(envelope["data"]["declared"], json!([]), "{envelope}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("hand-written.xml"), "{message}");
+    assert!(message.contains("pull Old --force"), "{message}");
+    assert_eq!(project.project_text(), PROJECT);
+    assert!(!project.root.join("src/ext").exists(), "{envelope}");
+}

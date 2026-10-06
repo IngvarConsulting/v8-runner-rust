@@ -8,6 +8,7 @@
 //! памятью базы; объявление нового набора дописывается в `v8project.yaml` после его удачной
 //! выгрузки, так что отказ посреди обхода не оставляет в проекте набора без содержимого.
 
+use super::helpers::ensure_success_of;
 use super::*;
 use crate::config::model::SourceSetConfig;
 use crate::domain::capability::{Operation, Provider};
@@ -18,7 +19,6 @@ use crate::platform::extension_inventory::{
 };
 use crate::use_cases::config_init::{declare_source_sets, with_declared_source_sets};
 use crate::use_cases::extension_agent::ExtensionAgent;
-use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::provider_selection::SelectedProvider;
 use crate::use_cases::request::PullAllRequest;
 use crate::use_cases::result::UseCaseError;
@@ -26,9 +26,6 @@ use crate::use_cases::result::UseCaseError;
 /// Каталог, под которым `pull --all` заводит набор расширения: `src/ext/<Name>` от каталога
 /// проектного файла.
 const DECLARED_EXTENSION_ROOT: &str = "src/ext";
-
-/// Значение `type` объявленного набора — так его пишет `init`.
-const EXTENSION_TYPE: &str = "EXTENSION";
 
 pub fn execute_all(
     context: &ExecutionContext,
@@ -234,12 +231,14 @@ fn pull_one(
     }
 }
 
+/// Отказ посреди обхода: ответ несёт выгруженное до него и называет причину.
 fn finish_failure(
     error: UseCaseError,
     mut result: PullAllResult,
     started: Instant,
 ) -> PullAllFailure {
     result.duration_ms = started.elapsed().as_millis() as u64;
+    result.message = Some(error.to_string());
     PullAllFailure::with_payload(error, result)
 }
 
@@ -305,7 +304,7 @@ fn plan_walk(config: &AppConfig, installed: &[String]) -> Result<Walk, AppError>
         }
         declared.push(ConfigInitSourceSet {
             name: name.clone(),
-            source_type: EXTENSION_TYPE.to_owned(),
+            source_type: SourceSetPurpose::Extension.as_str().to_owned(),
             path,
         });
     }
@@ -352,7 +351,12 @@ fn read_installed_extensions(
             let listed = dsl
                 .dump_db_cfg_list_all_extensions()
                 .map_err(AppError::from)?;
-            ensure_listed(&listed)?;
+            ensure_success_of(
+                "list extensions of",
+                "infobase",
+                "the configured infobase",
+                &listed,
+            )?;
             let Some(out) = listed.platform_log.as_deref() else {
                 return Err(AppError::InvalidOutput(format!(
                     "the Designer extension list was not read: {}",
@@ -372,7 +376,12 @@ fn read_installed_extensions(
                 utilities.runner_for(UtilityType::Ibcmd),
             )?;
             let listed = dsl.infobase_extension_list().map_err(map_ibcmd_error)?;
-            ensure_listed(&listed)?;
+            ensure_success_of(
+                "list extensions of",
+                "infobase",
+                "the configured infobase",
+                &listed,
+            )?;
             parse_extension_inventory(&listed.process.stdout)
                 .map_err(AppError::InvalidOutput)?
                 .into_iter()
@@ -388,10 +397,13 @@ fn read_installed_extensions(
                 .map(|extension| extension.name)
                 .collect()
         }
-        (other, _) => {
+        // Без утилиты исполнитель списка не прочтёт, а прочие исполнители выгрузку не
+        // делают: тот же отказ, что у выгрузки без адаптера.
+        (provider @ (Provider::Designer | Provider::Ibcmd), None)
+        | (provider @ (Provider::IbcmdRs | Provider::Webinst), _) => {
             return Err(crate::use_cases::unimplemented_provider(
                 Operation::Dump,
-                other,
+                provider,
             ))
         }
     };
@@ -404,23 +416,6 @@ fn read_installed_extensions(
         )));
     }
     Ok(names)
-}
-
-/// Исход вызова списка — по коду выхода; текст ответа решения не принимает.
-fn ensure_listed(listed: &PlatformCommandResult) -> Result<(), AppError> {
-    let Err(code) = listed.process.outcome() else {
-        return Ok(());
-    };
-    Err(AppError::Platform(format_ibcmd_failure_details(
-        "list extensions of",
-        "infobase",
-        "the configured infobase",
-        code.get(),
-        &listed.process.stdout,
-        &listed.process.stderr,
-        listed.platform_log.as_deref(),
-        listed.platform_log_path.as_deref(),
-    )))
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ check:
   - tests/cli_pull_all.rs::an_existing_set_is_left_as_declared
   - tests/cli_pull_all.rs::ibcmd_lists_the_installed_extensions
   - tests/cli_pull_all.rs::an_extension_named_like_another_set_is_refused_before_any_dump
+  - tests/cli_pull_all.rs::a_refused_set_stops_the_walk_before_anything_is_declared
   - src/use_cases/dump_config/all.rs::the_walk_keeps_project_sets_and_declares_the_rest
   - src/use_cases/dump_config/all.rs::a_taken_name_or_directory_is_refused
 ---
@@ -23,7 +24,8 @@ check:
 набора — имена сравниваются без учёта регистра, как их сравнивает платформа, — команда
 выгружает расширение целиком в `src/ext/<Name>` от каталога проектного файла и после
 удачной выгрузки дописывает набор с этим именем в `v8project.yaml`. Выключенное расширение
-объявляется наравне с включённым.
+объявляется наравне с включённым. Отказ набора останавливает обход: расширения после него не
+выгружаются и не объявляются.
 
 Имя расширения, занятое набором другого назначения, и каталог, занятый другим набором, —
 отказ до первой выгрузки; проектный файл, в который запись не дописать, — тоже.

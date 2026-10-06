@@ -355,14 +355,25 @@ pub(super) fn ensure_platform_success(
     resolved: &ResolvedDumpTarget,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
+    ensure_success_of(action, "source-set", &resolved.source_set_name, result)
+}
+
+/// Исход вызова платформы по коду выхода; отказ называет действие, предмет и что платформа
+/// написала. Текст ответа решения не принимает.
+pub(super) fn ensure_success_of(
+    action: &str,
+    target_kind: &str,
+    target: &str,
+    result: &PlatformCommandResult,
+) -> Result<(), AppError> {
     let Err(code) = result.process.outcome() else {
         return Ok(());
     };
 
     Err(AppError::Platform(format_ibcmd_failure_details(
         action,
-        "source-set",
-        &resolved.source_set_name,
+        target_kind,
+        target,
         code.get(),
         &result.process.stdout,
         &result.process.stderr,
