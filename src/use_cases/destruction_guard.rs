@@ -205,18 +205,18 @@ pub(super) fn guard_replacement(
     regenerated: &[&str],
     how: Destruction,
 ) -> Result<Losses, AppError> {
-    if *consent == DestructionConsent::RunnerOwned {
-        return Ok(Losses::default());
-    }
-    let losses = losses_in(target, regenerated);
-    match consent {
-        DestructionConsent::AskFirst(ways_out) if !losses.is_empty() => Err(AppError::Validation(
-            refusal(target, &losses, ways_out, context, how),
-        )),
+    let ways_out = match consent {
+        DestructionConsent::RunnerOwned => return Ok(Losses::default()),
         // Попросили уничтожить — уничтожаем, как и обещает имя ключа, и называем что.
-        DestructionConsent::AskFirst(_)
-        | DestructionConsent::Granted
-        | DestructionConsent::RunnerOwned => Ok(losses),
+        DestructionConsent::Granted => None,
+        DestructionConsent::AskFirst(ways_out) => Some(ways_out),
+    };
+    let losses = losses_in(target, regenerated);
+    match ways_out {
+        Some(ways_out) if !losses.is_empty() => Err(AppError::Validation(refusal(
+            target, &losses, ways_out, context, how,
+        ))),
+        Some(_) | None => Ok(losses),
     }
 }
 
@@ -271,7 +271,7 @@ fn refusal(
         how.verb(),
         target.display(),
         losses.describe(Tense::Present),
-        remedy(ways_out, context, losses.unanswered.is_some())
+        remedy(ways_out, context, losses)
     )
 }
 
@@ -284,13 +284,12 @@ fn refusal(
 ///
 /// Без ответа системы контроля версий «закоммитить» нечем: работу сохраняют, взяв каталог
 /// под контроль версий или унеся файлы.
-fn remedy(ways_out: &WaysOut, context: &ExecutionContext, unanswered: bool) -> String {
+fn remedy(ways_out: &WaysOut, context: &ExecutionContext, losses: &Losses) -> String {
     const DISCARDS: &str = "which replaces the directory and discards them";
     let transport = context.transport();
-    let keep = if unanswered {
-        "put them under version control and commit them, or move them away,"
-    } else {
-        "commit or stash them"
+    let keep = match losses.unanswered {
+        Some(_) => "put them under version control and commit them, or move them away,",
+        None => "commit or stash them",
     };
     let again = match transport {
         ExecutionTransport::Cli => "run the same command again",

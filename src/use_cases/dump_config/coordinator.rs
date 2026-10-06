@@ -416,7 +416,16 @@ fn run_dump_selected(
         let (how, regenerated) = destruction_of(config, &plan);
         let discarded = match (how, &resolved.consent) {
             (Destruction::Replace, DestructionConsent::Granted) => Losses::default(),
-            _ => guard_replacement(
+            (
+                Destruction::Replace,
+                DestructionConsent::AskFirst(_) | DestructionConsent::RunnerOwned,
+            )
+            | (
+                Destruction::Overwrite,
+                DestructionConsent::AskFirst(_)
+                | DestructionConsent::Granted
+                | DestructionConsent::RunnerOwned,
+            ) => guard_replacement(
                 context,
                 &resolved.target_path,
                 &resolved.consent,
