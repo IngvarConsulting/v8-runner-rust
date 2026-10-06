@@ -168,7 +168,7 @@ fn write_config(
         additional_launch_keys_block,
     );
     fs::write(path, config).expect("config");
-    write_local_origin(path, "File=/tmp/ib", Some("secret"));
+    write_local_origin(path, "File=ib", Some("secret"));
 }
 
 /// Адрес базы живёт в местном слое рядом с проектным файлом.
@@ -224,8 +224,7 @@ fn configure_server_infobase(config_path: &Path) {
 fn replace_origin_connection(config_path: &Path, connection: &str) {
     let local_path = config_path.with_file_name("v8project.local.yaml");
     let local = fs::read_to_string(&local_path).expect("local config");
-    fs::write(&local_path, local.replace("File=/tmp/ib", connection))
-        .expect("updated local config");
+    fs::write(&local_path, local.replace("File=ib", connection)).expect("updated local config");
 }
 
 fn setup_project_with_additional_launch_keys(
@@ -349,7 +348,7 @@ fn setup_va_project_with_work_name(
         additional_launch_keys_block,
     );
     fs::write(&config_path, config).expect("config");
-    write_local_origin(&config_path, "File=/tmp/ib", Some("secret"));
+    write_local_origin(&config_path, "File=ib", Some("secret"));
 
     (dir, config_path, build_calls, test_calls, captured_params)
 }
@@ -1334,6 +1333,8 @@ fn test_module_build_failure_prevents_enterprise_launch() {
 
 #[test]
 fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -1402,7 +1403,7 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
         edt_cli_path.display(),
     );
     fs::write(&config_path, config).expect("config");
-    write_local_origin(&config_path, "File=/tmp/ib", None);
+    write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
 
     let first = v8_runner_command()
         .args(["--config", &config_path.display().to_string(), "build"])
@@ -1448,6 +1449,8 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
 
 #[test]
 fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -1494,7 +1497,7 @@ fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
         tool_source.display(),
     );
     fs::write(&config_path, config).expect("config");
-    write_local_origin(&config_path, "File=/tmp/ib", None);
+    write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
 
     let first = v8_runner_command()
         .args([

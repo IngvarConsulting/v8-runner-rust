@@ -113,7 +113,7 @@ pub fn run() -> i32 {
     }
 
     let color_mode = color_mode(cli.no_color);
-    let mut presenter = Presenter::new(output_format.to_owned(), color_mode);
+    let presenter = Presenter::new(output_format.to_owned(), color_mode);
 
     if let Command::Config(args) = &cli.command {
         return run_config_command(args, &cli, &presenter);
@@ -141,10 +141,13 @@ pub fn run() -> i32 {
 
     let config = match load_cli_config(&cli) {
         Ok(loaded) => {
-            presenter.note_load_warnings(
-                cli.config
-                    .as_deref()
-                    .unwrap_or(crate::config::loader::DEFAULT_CONFIG_FILE_NAME),
+            presenter.note_leading_warnings(
+                &format!(
+                    "config: {}",
+                    cli.config
+                        .as_deref()
+                        .unwrap_or(crate::config::loader::DEFAULT_CONFIG_FILE_NAME)
+                ),
                 &loaded.warnings,
             );
             loaded.config
@@ -438,6 +441,8 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
         plan.config(),
         presenter,
         CommandName::Bootstrap,
+        // `clone --from` выгружает базу в новый проект — команда записи на ней.
+        crate::use_cases::infobase_lock::BaseAccess::Writes,
         clean_before_execution,
         preview,
         || {

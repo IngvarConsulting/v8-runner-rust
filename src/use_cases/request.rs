@@ -260,6 +260,18 @@ pub struct SyntaxRequest {
     pub dry_run: bool,
 }
 
+impl SyntaxRequest {
+    /// Проверка Конфигуратором открывает базу и сверяет с ней исходники — команда записи;
+    /// проверка EDT базы не открывает.
+    pub fn base_access(&self) -> crate::use_cases::infobase_lock::BaseAccess {
+        use crate::use_cases::infobase_lock::BaseAccess;
+        match self.target {
+            SyntaxTargetRequest::DesignerConfig(_) => BaseAccess::Writes,
+            SyntaxTargetRequest::Edt { .. } => BaseAccess::Untouched,
+        }
+    }
+}
+
 /// Transport-neutral syntax target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntaxTargetRequest {

@@ -1895,6 +1895,8 @@ fn a_slow_provider_runs_to_its_end_instead_of_being_timed_out() {
 
 #[test]
 fn no_ready_provider_wins_over_workspace_contention_without_side_effects() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -1905,7 +1907,7 @@ fn no_ready_provider_wins_over_workspace_contention_without_side_effects() {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
+            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
             work.display(),
             platform.display()
         ),

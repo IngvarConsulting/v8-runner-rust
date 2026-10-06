@@ -157,6 +157,11 @@
           "type": "string"
         },
         {
+          "const": "infobase_busy",
+          "description": "Файловую базу держит другая команда; как `workspace_busy`, можно повторить.",
+          "type": "string"
+        },
+        {
           "const": "non_fast_forward",
           "description": "Пара к роду `non_fast_forward`; производителя пока нет.",
           "type": "string"

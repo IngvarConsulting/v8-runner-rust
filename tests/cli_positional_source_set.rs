@@ -99,10 +99,12 @@ fn commands_with_a_set<'a>(value: &'a str, cf: &'a str) -> Vec<Vec<&'a str>> {
 
 #[test]
 fn a_positional_argument_names_a_source_set_and_never_a_base() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     let cf = project.out.join("main.cf").display().to_string();
     // Имя объявленной базы и строка соединения: ни то, ни другое набором не является.
-    for value in ["test", "File=/tmp/another-ib"] {
+    for value in ["test", &format!("File={tmp}/another-ib")] {
         for args in commands_with_a_set(value, &cf) {
             let output = run(&project, &args);
             assert_eq!(output.status.code(), Some(2), "{args:?}");

@@ -150,8 +150,9 @@ execution model для CLI и MCP.
 - Public CLI/MCP команды, работающие с runtime state под `workPath`, должны брать workspace lock.
 - Workspace lock сериализует доступ к конкретному runtime root, но не заменяет admission limits и
   не делает multi-step orchestration fully atomic.
-- Саму файловую базу workspace lock не защищает: две рабочие копии с разными `workPath` открывают
-  одну базу одновременно; замок базы и метка владельца — [#326](https://github.com/IngvarConsulting/v8-runner-rust/issues/326), [#327](https://github.com/IngvarConsulting/v8-runner-rust/issues/327).
+- Файловую базу команда держит своим замком рядом с каталогом базы, взятым после workspace lock:
+  две рабочие копии с разными `workPath` одновременно с одной базой не работают, вторая получает
+  `infobase_busy`. Метка владельца базы между командами — [#327](https://github.com/IngvarConsulting/v8-runner-rust/issues/327).
 
 Interruption policy:
 

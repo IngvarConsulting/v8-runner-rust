@@ -153,9 +153,11 @@ fn the_three_credential_levels_lie_in_the_local_layer_side_by_side() {
 /// режимах вывода (`INV.CONFIG.A-CLUSTER-SECTION-IS-REJECTED-OUTSIDE-A-CLUSTER-BASE`).
 #[test]
 fn a_cluster_section_next_to_a_file_base_is_refused() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n    cluster:\n      ras: srv:1545\n",
+        &format!("infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n    cluster:\n      ras: srv:1545\n"),
     );
 
     let message = refusal_message(&project.run_json(LAUNCH_PREVIEW));
