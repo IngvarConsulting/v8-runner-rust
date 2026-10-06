@@ -757,9 +757,9 @@ fn build_client_mcp_payload(
 mod tests {
     use super::{execute, platform_resolution};
     use crate::config::model::{
-        AppConfig, BuildConfig, EnterpriseToolConfig, PlatformToolConfig, SourceFormat,
-        SourceSetConfig, SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig,
-        ToolExtensionConfig, ToolExtensionInput, ToolsConfig,
+        AppConfig, EnterpriseToolConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig,
+        ToolExtensionInput, ToolsConfig,
     };
     use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType};
     use crate::use_cases::context::{CommandName, ExecutionContext};
@@ -852,7 +852,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("."),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),

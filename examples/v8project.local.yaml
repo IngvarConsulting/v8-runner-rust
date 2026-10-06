@@ -13,7 +13,7 @@ infobases:
   test:
     connection: "Srvr=srv;Ref=erp_test"
     cluster:                    # the cluster around a server infobase
-      ras: srv:1545             # administration server, host[:port]
+      ras: srv:1545             # administration server, host[:port]; a name or IPv4
       user: cluster-admin       # cluster administrator
       password: cluster-secret
 

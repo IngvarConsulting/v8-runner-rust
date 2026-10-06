@@ -1654,7 +1654,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::config::model::{
-        AppConfig, BuildConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
+        AppConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
     use crate::domain::capability::Provider;
     use crate::domain::execution::{
@@ -1687,7 +1687,6 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             source_sets: Vec::new(),
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: McpConfig::default(),
             tests: TestsConfig::default(),

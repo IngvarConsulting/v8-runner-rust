@@ -2,9 +2,12 @@ use std::path::{Path, PathBuf};
 
 use crate::change_detection::analyzer::{ChangeKind, FileChange};
 
-/// Default maximum number of changed files before forcing a full load.
-#[cfg(test)]
-pub const DEFAULT_PARTIAL_LOAD_THRESHOLD: usize = 20;
+/// Maximum number of changed files a partial load carries; more forces a full load.
+///
+/// The number is the runner's own, not a setting: the key `push.partialLoadThreshold`
+/// is refused by name (`INV.CONFIG.PARTIAL-LOAD-THRESHOLD-KEY-IS-REJECTED`), and the
+/// threshold itself goes away with partial load in place of full (#379).
+pub(crate) const PARTIAL_LOAD_THRESHOLD: usize = 20;
 
 /// The name of the root configuration descriptor — if changed, partial load is forbidden.
 const CONFIGURATION_XML: &str = "Configuration.xml";
@@ -21,11 +24,7 @@ pub enum LoadDecision {
 }
 
 /// Decide whether a partial or full load is appropriate for `changes`.
-pub fn decide(changes: &[FileChange], source_root: &Path, threshold: usize) -> LoadDecision {
-    if threshold == 0 {
-        return LoadDecision::Full;
-    }
-
+pub fn decide(changes: &[FileChange], source_root: &Path) -> LoadDecision {
     if changes
         .iter()
         .any(|change| is_configuration_xml(&change.path))
@@ -44,7 +43,7 @@ pub fn decide(changes: &[FileChange], source_root: &Path, threshold: usize) -> L
         return LoadDecision::Full;
     };
 
-    if expanded.is_empty() || expanded.len() > threshold {
+    if expanded.is_empty() || expanded.len() > PARTIAL_LOAD_THRESHOLD {
         LoadDecision::Full
     } else {
         LoadDecision::Partial(expanded)
@@ -219,9 +218,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{
-        decide, relative_paths, write_list_file, LoadDecision, DEFAULT_PARTIAL_LOAD_THRESHOLD,
-    };
+    use super::{decide, relative_paths, write_list_file, LoadDecision, PARTIAL_LOAD_THRESHOLD};
     use crate::change_detection::analyzer::{ChangeKind, FileChange};
 
     #[test]
@@ -351,7 +348,6 @@ mod tests {
                 kind: ChangeKind::Modified,
             }],
             root,
-            DEFAULT_PARTIAL_LOAD_THRESHOLD,
         );
 
         assert_eq!(decision, LoadDecision::Partial(vec![module, xml]));
@@ -378,7 +374,6 @@ mod tests {
                 kind: ChangeKind::Modified,
             }],
             root,
-            DEFAULT_PARTIAL_LOAD_THRESHOLD,
         );
 
         let LoadDecision::Partial(paths) = decision else {
@@ -402,7 +397,6 @@ mod tests {
                 kind: ChangeKind::Modified,
             }],
             root,
-            DEFAULT_PARTIAL_LOAD_THRESHOLD,
         );
 
         assert_eq!(decision, LoadDecision::Full);
@@ -421,7 +415,6 @@ mod tests {
                 kind: ChangeKind::Modified,
             }],
             root,
-            DEFAULT_PARTIAL_LOAD_THRESHOLD,
         );
 
         assert_eq!(decision, LoadDecision::Full);
@@ -439,7 +432,6 @@ mod tests {
                 kind: ChangeKind::Deleted,
             }],
             root,
-            DEFAULT_PARTIAL_LOAD_THRESHOLD,
         );
 
         assert_eq!(decision, LoadDecision::Full);
@@ -451,7 +443,7 @@ mod tests {
         let root = temp.path();
         let mut changes = Vec::new();
 
-        for index in 0..=DEFAULT_PARTIAL_LOAD_THRESHOLD {
+        for index in 0..=PARTIAL_LOAD_THRESHOLD {
             let path = root.join(format!("CommonModules/Module{index}.bsl"));
             std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
             std::fs::write(&path, "module").expect("write");
@@ -461,7 +453,7 @@ mod tests {
             });
         }
 
-        let decision = decide(&changes, root, DEFAULT_PARTIAL_LOAD_THRESHOLD);
+        let decision = decide(&changes, root);
         assert_eq!(decision, LoadDecision::Full);
     }
 
@@ -487,7 +479,6 @@ mod tests {
                 kind: ChangeKind::Modified,
             }],
             &root,
-            DEFAULT_PARTIAL_LOAD_THRESHOLD,
         );
 
         assert_eq!(decision, LoadDecision::Full);

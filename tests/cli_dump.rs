@@ -1220,7 +1220,8 @@ fn an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir() {
     assert_ibcmd_data_path(&calls, &other_work);
 }
 
-/// Секрет в строке соединения, которого загрузчик не отвергает: `Wsp=`, а не `Pwd=`.
+/// Значение в строке соединения, которого загрузчик не отвергает: учётные данные строка
+/// нести не может (#380), но совет не повторяет и остальное — ни части строки.
 const CONNECTION_SECRET: &str = "SECRETPW";
 
 /// Строка соединения из `--infobase` может нести секрет, и совет её не повторяет: просит
@@ -1237,7 +1238,7 @@ fn a_command_line_advice_never_repeats_the_connection_string() {
     fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
 
     let config = config_path.display().to_string();
-    let connection = format!("File=/tmp/staging-ib-03ba73;Wsp={CONNECTION_SECRET}");
+    let connection = format!("File=/tmp/staging-ib;Locale={CONNECTION_SECRET}");
     let output = v8_runner_command()
         .args([
             "--config",
@@ -1277,7 +1278,7 @@ fn an_mcp_advice_never_repeats_the_connection_string_of_the_server() {
     fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
 
     let config = config_path.display().to_string();
-    let connection = format!("File=/tmp/staging-ib-fe0d89;Wsp={CONNECTION_SECRET}");
+    let connection = format!("File=/tmp/staging-ib;Locale={CONNECTION_SECRET}");
     let answer = support::mcp::call_tool_started_with(
         &[
             "--config",

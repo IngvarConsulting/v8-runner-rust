@@ -1459,8 +1459,7 @@ mod tests {
         EdtSessionMiss, ProjectToValidate,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::domain::issue::{Issue, IssueSeverity};
     use crate::domain::syntax::{CheckName, SyntaxCheckStatus};
@@ -1685,7 +1684,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: Path::new(".").to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: crate::config::model::PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),
@@ -1723,7 +1721,6 @@ mod tests {
                     path: Path::new("ext-edt").to_path_buf(),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: Default::default(),
                 enterprise: Default::default(),

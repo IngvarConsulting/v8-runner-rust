@@ -771,8 +771,7 @@ mod tests {
         render_interactive_validate_command, EdtDsl, EdtError, INTERACTIVE_EDT_ERROR_MARKER,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
     use crate::platform::process::{
@@ -867,7 +866,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("main"),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: Default::default(),
                 enterprise: Default::default(),

@@ -135,7 +135,7 @@
       "description": "The central server agent of the cluster and its administrator.",
       "properties": {
         "address": {
-          "description": "Agent address as `host[:port]` when it differs from the host of `Srvr=` with the\nplatform default port (1540); the runner's own `ras` connects to it.",
+          "description": "Agent address as `host[:port]` when it differs from the host of `Srvr=` with the\nplatform default port (1540); the runner's own `ras` connects to it. The host is a\nname or an IPv4 address: an IPv6 address is refused.",
           "type": [
             "string",
             "null"
@@ -181,7 +181,7 @@
           ]
         },
         "ras": {
-          "description": "Administration server (`ras`) address as `host[:port]` — an IPv6 address in\nbrackets. It goes to `rac` as is, so the port default (1545) stays with the platform.",
+          "description": "Administration server (`ras`) address as `host[:port]`, the host a name or an IPv4\naddress: `rac` and `ras` accept nothing else, so an IPv6 address is refused. It goes\nto `rac` as is, so the port default (1545) stays with the platform. Left empty, the\nrunner is to start its own `ras` against `agent.address` or the host of `Srvr=` and\nrefuse an IPv6 host there (#213); validation does not check `Srvr=` for it.",
           "type": [
             "string",
             "null"

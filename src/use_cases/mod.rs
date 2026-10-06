@@ -69,6 +69,8 @@ pub mod tools_download;
 pub mod transport;
 /// Shared Vanessa Automation launch and runtime params helpers.
 pub(crate) mod vanessa;
+/// The runner's copy of the version file and its restoration into the source directory.
+pub(crate) mod version_file;
 /// Shared locking for commands that mutate the same workspace.
 pub mod workspace_lock;
 

@@ -141,7 +141,7 @@ fn write_config_with_builder_and_infobase(
     infobase_yaml: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\n{}infobase:\n{}build:\n  partialLoadThreshold: 20\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\n  - name: ext\n    type: EXTENSION\n    path: project/ext\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\n{}infobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\n  - name: ext\n    type: EXTENSION\n    path: project/ext\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         providers_yaml(builder),
         infobase_yaml,
@@ -316,7 +316,7 @@ fn setup_edt_ibcmd_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     write_edt_script(&edt_cli_path, &edt_calls_log);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=ib'\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: EDT\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
         work_path.display(),
         ibcmd_path.display(),
         edt_cli_path.display(),
@@ -376,7 +376,7 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
     write_edt_script(&edt_cli_path, &edt_calls_log);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=ib'\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: project/exts/client-mcp\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: project/exts/client-mcp\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
         edt_cli_path.display(),
@@ -1489,7 +1489,7 @@ fn build_ibcmd_full_rebuild_invokes_import_and_apply() {
 fn build_ibcmd_passes_credentials_to_import_and_apply() {
     let (dir, config_path, binary_path, work_path, _base_path, calls_log) = setup_ibcmd_project();
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib-feb95f'\n  user: Admin\n  password: secret\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib-feb95f'\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         binary_path.display(),
     );
@@ -1651,7 +1651,7 @@ fn ibcmd_push_receives_config_relative_paths_resolved_from_the_config_directory(
     write_ibcmd_script(&project.join("ibcmd"), &calls_log, None);
     fs::write(
         project.join("v8project.yaml"),
-        "workPath: ./work\nformat: DESIGNER\nproviders:\n  push: ibcmd\ninfobase:\n  connection: 'File=./ib'\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: cf\n    type: CONFIGURATION\n    path: ./src/cf\ntools:\n  platform:\n    path: ./ibcmd\n",
+        "workPath: ./work\nformat: DESIGNER\nproviders:\n  push: ibcmd\ninfobase:\n  connection: 'File=./ib'\nsource-set:\n  - name: cf\n    type: CONFIGURATION\n    path: ./src/cf\ntools:\n  platform:\n    path: ./ibcmd\n",
     )
     .expect("config");
 

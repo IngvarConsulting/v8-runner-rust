@@ -1114,8 +1114,8 @@ mod tests {
 
     use super::McpService;
     use crate::config::model::{
-        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolsConfig,
+        AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolsConfig,
     };
     use crate::domain::build::{BuildMode, BuildResult, BuildStep};
     use crate::domain::dump::{DumpMode, DumpResult};
@@ -2716,7 +2716,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: Path::new("src").to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig::default(),
                 enterprise: Default::default(),

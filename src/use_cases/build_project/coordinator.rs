@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
+use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 
 /// Кто грузит набор исходников в базу: пакетный Конфигуратор или его агент.
 ///
@@ -185,7 +186,6 @@ fn run_build_with(
             &source_context,
             args.full_rebuild,
             analysis_by_name.as_ref(),
-            config.build.partial_load_threshold,
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -260,6 +260,32 @@ fn run_build_with(
                 }
 
                 let step_started = Instant::now();
+                // Загрузка переписывает файл версий в каталоге набора: сначала там должен
+                // лежать файл раннера, а не подменённый, иначе частичная загрузка обновит
+                // чужую опись и раннер примет её за свою. Временные файлы прошлых замен
+                // убираются в любом случае.
+                let prepared = remove_left_candidates(source_context.path()).and_then(|()| {
+                    RunnerVersionFile::of(config, &source_context)
+                        .map(|version_file| {
+                            version_file.restore().map(|before| (version_file, before))
+                        })
+                        .transpose()
+                });
+                let version_file = match prepared {
+                    Err(error) => {
+                        let result = fail_from_source_set_index(
+                            started,
+                            steps,
+                            &ordered_source_sets,
+                            index,
+                            source_set,
+                            mode,
+                            error.to_string(),
+                        );
+                        return Err(BuildExecutionFailure::with_payload(error, result));
+                    }
+                    Ok(version_file) => version_file,
+                };
                 match loader.load(
                     context,
                     config,
@@ -269,14 +295,21 @@ fn run_build_with(
                     partial_paths.as_deref(),
                     &commit,
                 ) {
-                    Ok(warnings) => push_build_step(
-                        &mut steps,
-                        &source_set.name,
-                        mode,
-                        true,
-                        append_warnings(message, &warnings),
-                        step_started.elapsed().as_millis() as u64,
-                    ),
+                    Ok(mut warnings) => {
+                        warnings.extend(version_file.as_ref().and_then(
+                            |(version_file, before)| {
+                                version_file.record_if_rewritten(before.as_ref())
+                            },
+                        ));
+                        push_build_step(
+                            &mut steps,
+                            &source_set.name,
+                            mode,
+                            true,
+                            append_warnings(message, &warnings),
+                            step_started.elapsed().as_millis() as u64,
+                        )
+                    }
                     Err(error) => {
                         let result = fail_from_source_set_index(
                             started,
@@ -358,7 +391,6 @@ pub(super) fn run_build_ibcmd(
             &source_context,
             args.full_rebuild,
             analysis_by_name.as_ref(),
-            config.build.partial_load_threshold,
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -446,17 +478,21 @@ pub(super) fn run_build_ibcmd(
                 }
 
                 let step_started = Instant::now();
-                match execute_source_set_step_ibcmd(
-                    context,
-                    config,
-                    &binary,
-                    utilities.runner_for(UtilityType::Ibcmd),
-                    source_set,
-                    &source_context,
-                    &source_context,
-                    partial_paths.as_deref(),
-                    &commit,
-                ) {
+                // Загрузка `ibcmd` файл версий не пишет; временные файлы прошлых замен
+                // убираются и здесь.
+                match remove_left_candidates(source_context.path()).and_then(|()| {
+                    execute_source_set_step_ibcmd(
+                        context,
+                        config,
+                        &binary,
+                        utilities.runner_for(UtilityType::Ibcmd),
+                        source_set,
+                        &source_context,
+                        &source_context,
+                        partial_paths.as_deref(),
+                        &commit,
+                    )
+                }) {
                     Ok(warnings) => push_build_step(
                         &mut steps,
                         &source_set.name,
@@ -1028,7 +1064,6 @@ pub(super) fn run_build_edt(
             &designer_context,
             args.full_rebuild,
             edt_stage_skipped,
-            config.build.partial_load_threshold,
             &config.work_path,
         ) {
             Ok(plan) => plan,

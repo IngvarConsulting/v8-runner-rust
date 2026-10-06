@@ -765,8 +765,9 @@ fn command_line_target(
     config: &crate::config::model::AppConfig,
 ) -> CommandLineTarget {
     use crate::config::model::{InfobaseSelector, DEFAULT_INFOBASE_NAME};
-    // Строку соединения совет не повторяет: в ней может лежать секрет, которого
-    // загрузчик не отвергает (`Wsp=`), а совет показывают, пишут в журнал и копируют.
+    // Строку соединения совет не повторяет: учётных данных загрузчик в ней не пропускает,
+    // но адрес чужой базы и незнакомые ему параметры тоже не для журнала, а совет
+    // показывают, пишут в журнал и копируют.
     let infobase = match InfobaseSelector::from_flag(cli.infobase.as_deref()) {
         InfobaseSelector::Default => None,
         InfobaseSelector::Name(name) if name == DEFAULT_INFOBASE_NAME => None,

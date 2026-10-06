@@ -323,6 +323,140 @@ fn mask_connection_value(value: &str, hidden: Hidden) -> String {
     )
 }
 
+/// Что именно из маскируемого несёт строка соединения. Значения рядом с ключом здесь
+/// нет никогда: оно и есть секрет.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaskedKey {
+    /// Ключ, записанный отдельно от значения: `Pwd`, `/P`, `/P=…`.
+    Key(String),
+    /// Ключ слитно со значением (`/Psecret`, `/Password1`): назван кратчайший ключ
+    /// перечня, с которого слово начинается, — длиннейший забрал бы кусок значения.
+    Glued(String),
+    /// Имя или пароль в адресе за ключом (`ws=http://alice:…@host`, `/WS http://…`).
+    Userinfo(String),
+    /// Маскируемое, которое разбор по частям ключом не назвал: показ строки его прячет,
+    /// значит строка его несёт.
+    Unnamed,
+}
+
+impl std::fmt::Display for MaskedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(key) => write!(f, "`{key}`"),
+            Self::Glued(key) => write!(f, "`{key}` glued to its value"),
+            Self::Userinfo(key) => write!(f, "a user or a password in the address of `{key}`"),
+            Self::Unnamed => f.write_str("a value the output masks"),
+        }
+    }
+}
+
+/// Маскируемое, которое несёт строка соединения, — то, что показ этой строки спрятал бы.
+///
+/// Перечень один: строка не несёт ничего, что вывод прячет (`Hidden::SecretsAndIdentities`),
+/// — ни секретов, ни имён пользователей, ни userinfo адреса. База, названная одной строкой,
+/// своих реквизитов не имеет, их место — местный слой. У части объявленной формы сверяется
+/// ключ и userinfo значения; часть без `=` и сырая форма (`/F … /N …`) читаются токенами,
+/// которые получит платформа, — как ключи командной строки и слитно со значением
+/// (`/NAdmin`). Значение за `/F` и `/S` ключом не считается (путь `/pub/ib` — не `/P`), за
+/// `/WS` — проверяется как адрес.
+pub fn connection_masked_key(connection: &str) -> Option<MaskedKey> {
+    let hidden = Hidden::SecretsAndIdentities;
+    let connection = connection.trim();
+    let found = if connection.starts_with(['/', '-']) {
+        masked_key_in_tokens(connection, hidden)
+    } else {
+        // Непарная кавычка не мешает: части тогда делятся по каждой `;`, и ключ, если он
+        // есть, всё равно стоит в начале своей части.
+        let (parts, _quotes_are_balanced) = segments(connection);
+        parts
+            .into_iter()
+            .find_map(|segment| match segment.find('=') {
+                Some(separator) => {
+                    let key = segment[..separator].trim();
+                    let value = &segment[separator + 1..];
+                    if is_hidden_segment_key(key, hidden) {
+                        Some(MaskedKey::Key(key.to_owned()))
+                    } else if mask_userinfo(value, true, hidden) != value {
+                        Some(MaskedKey::Userinfo(key.to_owned()))
+                    } else {
+                        None
+                    }
+                }
+                None => masked_key_in_tokens(segment, hidden),
+            })
+    };
+    // Строку, целиком взятую в кавычки, разбор по частям видит одной частью с ключом
+    // `"Srvr`; ключ в ней находит тот же проход, что и маскирование. Последний рубеж —
+    // сам показ: что он прячет, того строка не несёт, даже если ключа назвать нечем.
+    found
+        .or_else(|| {
+            next_hidden_key(&connection.to_ascii_lowercase(), 0, hidden).map(
+                |(key_start, value_start)| {
+                    MaskedKey::Key(connection[key_start..value_start - 1].to_owned())
+                },
+            )
+        })
+        .or_else(|| {
+            (mask_connection_value(connection, hidden) != connection).then_some(MaskedKey::Unnamed)
+        })
+}
+
+/// Первый маскируемый ключ среди токенов `text` — тех, что получит платформа.
+fn masked_key_in_tokens(text: &str, hidden: Hidden) -> Option<MaskedKey> {
+    let tokens = crate::platform::connection::split_arg_string(text);
+    let mut tokens = tokens.iter().map(String::as_str);
+    while let Some(token) = tokens.next() {
+        if is_infobase_address_key(token) {
+            let address = tokens.next().unwrap_or_default();
+            if is_client_address_key(token) && mask_userinfo(address, false, hidden) != address {
+                return Some(MaskedKey::Userinfo(token.to_owned()));
+            }
+            continue;
+        }
+        let head_len = token.len() - token.trim_start_matches(['/', '-']).len();
+        if head_len == 0 {
+            continue;
+        }
+        let rest = &token[head_len..];
+        let Some(key_len) = matching_flag_len(rest, hidden) else {
+            continue;
+        };
+        let tail = &rest[key_len..];
+        return Some(if tail.is_empty() || tail.starts_with(['=', ':']) {
+            MaskedKey::Key(token[..head_len + key_len].to_owned())
+        } else {
+            let shortest = shortest_flag_len(rest, hidden).unwrap_or(key_len);
+            MaskedKey::Glued(token[..head_len + shortest].to_owned())
+        });
+    }
+    None
+}
+
+/// Длина кратчайшего ключа скрываемого вида, которым начинается `rest`.
+fn shortest_flag_len(rest: &str, hidden: Hidden) -> Option<usize> {
+    flags(hidden)
+        .filter(|key| {
+            rest.get(..key.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(key))
+        })
+        .map(str::len)
+        .min()
+}
+
+/// Ключ адреса базы в сырой форме строки соединения: за ним идёт путь или адрес.
+fn is_infobase_address_key(word: &str) -> bool {
+    flag_name(word).is_some_and(|name| {
+        ["f", "s", "ws"]
+            .iter()
+            .any(|key| name.eq_ignore_ascii_case(key))
+    })
+}
+
+/// Имя ключа командной строки без одного ведущего `/` или `-`.
+fn flag_name(word: &str) -> Option<&str> {
+    word.strip_prefix('/').or_else(|| word.strip_prefix('-'))
+}
+
 /// Прячет пароль в объявленном клиентском адресе, оставляя сам адрес узнаваемым.
 ///
 /// Адрес приходит из `infobase.web.url`, которое не валидируется, поэтому схемы в нём
@@ -334,9 +468,7 @@ pub fn mask_url_userinfo(value: &str) -> String {
 /// Ключ, за которым идёт клиентский адрес: его значение маскируется как адрес,
 /// а не целиком — адрес человеку нужен, чтобы понять, куда раннер собрался.
 fn is_client_address_key(arg: &str) -> bool {
-    arg.strip_prefix('/')
-        .or_else(|| arg.strip_prefix('-'))
-        .is_some_and(|rest| rest.eq_ignore_ascii_case("ws"))
+    flag_name(arg).is_some_and(|name| name.eq_ignore_ascii_case("ws"))
 }
 
 /// Прячет пароль из userinfo адреса: `http://alice:pass@host/base` → `http://alice:***@host/base`.
@@ -401,7 +533,7 @@ fn mask_hidden_key_runs(word: &str, hidden: Hidden) -> String {
     let lowered = word.to_ascii_lowercase();
     let mut masked = String::with_capacity(word.len());
     let mut cursor = 0;
-    while let Some(value_start) = next_hidden_key_value(&lowered, cursor, hidden) {
+    while let Some((_, value_start)) = next_hidden_key(&lowered, cursor, hidden) {
         let value_end = value_start + hidden_value_len(&word[value_start..]);
         masked.push_str(&word[cursor..value_start]);
         masked.push_str(MASKED_VALUE);
@@ -441,8 +573,9 @@ fn quoted_value_len(rest: &str, quote: &str) -> usize {
     rest.len()
 }
 
-/// Смещение значения ближайшего скрываемого ключа строки соединения после `from`.
-fn next_hidden_key_value(lowered: &str, from: usize, hidden: Hidden) -> Option<usize> {
+/// Ближайший скрываемый ключ строки соединения после `from`: смещение ключа и смещение
+/// его значения — за `=`, которой ключ кончается.
+fn next_hidden_key(lowered: &str, from: usize, hidden: Hidden) -> Option<(usize, usize)> {
     segment_keys(hidden)
         .filter_map(|key| {
             let mut search = from;
@@ -455,7 +588,7 @@ fn next_hidden_key_value(lowered: &str, from: usize, hidden: Hidden) -> Option<u
                         Some(';' | ' ' | '\'' | '"')
                     );
                 if at_boundary && lowered[value_start..].starts_with('=') {
-                    return Some(value_start + 1);
+                    return Some((key_start, value_start + 1));
                 }
                 search = value_start;
             }
@@ -478,7 +611,8 @@ fn mask_literals(arg: String, secrets: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        mask_connection_string, mask_preview_args, mask_url_userinfo, render_masked_command,
+        connection_masked_key, flags, mask_connection_string, mask_preview_args, mask_url_userinfo,
+        render_masked_command, segment_keys, Hidden, MaskedKey,
     };
     use std::path::Path;
 
@@ -872,5 +1006,143 @@ mod tests {
             mask_connection_string("File=C:\\My Bases\\erp"),
             "File=C:\\My Bases\\erp"
         );
+    }
+
+    fn key(name: &str) -> Option<MaskedKey> {
+        Some(MaskedKey::Key(name.to_owned()))
+    }
+
+    #[test]
+    fn a_connection_string_names_the_credential_key_as_written() {
+        for (connection, found) in [
+            ("Srvr=srv;Ref=erp;Usr=Admin", key("Usr")),
+            ("Srvr=srv;Ref=erp; PWD = secret;", key("PWD")),
+            ("ws=http://host/ib;Wsn=alice", key("Wsn")),
+            ("ws=http://host/ib;wsp=secret", key("wsp")),
+            ("ws=http://host/ib;Wsppwd=secret", key("Wsppwd")),
+            ("File=/tmp/ib;Password=secret", key("Password")),
+            ("Srvr=srv;Ref=\"a;b\";Usr=Admin", key("Usr")),
+            ("\"Srvr=srv;Ref=erp;Pwd=\"\"secret\"\"\"", key("Pwd")),
+            ("/S srv\\erp /N Admin /P secret", key("/N")),
+            ("/F /tmp/ib /P=secret", key("/P")),
+            ("-F /tmp/ib -wsn admin", key("-wsn")),
+            ("/F /tmp/ib /UC code", key("/UC")),
+        ] {
+            assert_eq!(connection_masked_key(connection), found, "{connection}");
+        }
+    }
+
+    /// Платформа получает токены со снятыми кавычками, и проверка смотрит на те же токены:
+    /// `"/N"` — это `/N`, а закавыченный путь с пробелом — одно значение `/F`.
+    #[test]
+    fn a_raw_connection_is_checked_by_the_tokens_the_platform_gets() {
+        assert_eq!(
+            connection_masked_key("/F /tmp/ib \"/N\" Admin \"/P\" pwd"),
+            key("/N")
+        );
+        assert_eq!(connection_masked_key("/F \"/tmp/my /pub\""), None);
+        for connection in [
+            "/F \"/tmp/my /pub\" /N Admin",
+            "/S srv\\erp \"/P\" pwd",
+            "/F /tmp/ib",
+        ] {
+            let tokens = crate::platform::connection::split_arg_string(connection);
+            assert_eq!(
+                crate::platform::connection::V8Connection::from_connection_string(connection)
+                    .infobase_args(),
+                tokens,
+                "the check reads what the platform gets: {connection}"
+            );
+        }
+    }
+
+    /// Слитная форма называет кратчайший ключ перечня: длиннейший забрал бы начало значения.
+    #[test]
+    fn a_glued_key_is_named_without_its_value() {
+        for (connection, found) in [
+            ("/F /tmp/ib /Psecret", "/P"),
+            ("/F /tmp/ib /Pwdsecret", "/P"),
+            ("/F /tmp/ib /Password1", "/P"),
+            ("-F /tmp/ib -nadmin", "-n"),
+        ] {
+            let named = connection_masked_key(connection);
+            assert_eq!(
+                named,
+                Some(MaskedKey::Glued(found.to_owned())),
+                "{connection}"
+            );
+            let shown = named.map(|named| named.to_string()).unwrap_or_default();
+            assert!(
+                !shown.contains("secret") && !shown.contains("admin") && !shown.contains('1'),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_password_in_the_address_userinfo_is_refused_by_its_key() {
+        for (connection, found) in [
+            ("ws=http://alice:secret@host/ib", "ws"),
+            ("Ws=https://alice@host/ib", "Ws"),
+            ("/WS http://alice:secret@host/ib", "/WS"),
+        ] {
+            assert_eq!(
+                connection_masked_key(connection),
+                Some(MaskedKey::Userinfo(found.to_owned())),
+                "{connection}"
+            );
+        }
+    }
+
+    /// Страж единого перечня: каждый ключ, который показ прячет, строка не несёт — и
+    /// параметром объявленной формы, и ключом командной строки. Второй список, который
+    /// разошёлся бы с маскированием, этот тест поймает на первом же расхождении.
+    #[test]
+    fn every_key_the_output_masks_is_refused() {
+        for segment in segment_keys(Hidden::SecretsAndIdentities) {
+            let connection = format!("File=/tmp/ib;{segment}=value");
+            assert_eq!(
+                connection_masked_key(&connection),
+                key(segment),
+                "{connection}"
+            );
+            assert_ne!(mask_connection_string(&connection), connection);
+        }
+        for flag in flags(Hidden::SecretsAndIdentities) {
+            let connection = format!("/F /tmp/ib /{flag} value");
+            assert_eq!(
+                connection_masked_key(&connection),
+                key(&format!("/{flag}")),
+                "{connection}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_part_without_equals_is_read_as_command_line_keys() {
+        assert_eq!(
+            connection_masked_key("Srvr=srv;Ref=erp;/N Admin"),
+            key("/N")
+        );
+        assert_eq!(
+            connection_masked_key("File=/tmp/ib;garbage;Wsp=secret"),
+            key("Wsp")
+        );
+        assert_eq!(connection_masked_key("File=/tmp/ib;garbage"), None);
+    }
+
+    #[test]
+    fn an_address_without_credentials_carries_no_key() {
+        for connection in [
+            "File=/tmp/ib",
+            "Srvr=srv;Ref=erp;",
+            "ws=http://host/ib",
+            "/F /pub/ib",
+            "/F /nfs/ib",
+            "/S srv\\erp",
+            "/WS http://host/ib",
+        ] {
+            assert_eq!(connection_masked_key(connection), None, "{connection}");
+        }
     }
 }

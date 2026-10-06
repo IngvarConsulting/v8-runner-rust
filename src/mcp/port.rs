@@ -195,8 +195,7 @@ where
 mod tests {
     use super::{DefaultMcpUseCasePort, McpUseCasePort};
     use crate::config::model::{
-        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::mcp::error::{McpBusinessError, McpBusinessErrorKind, McpErrorCode};
     use crate::support::fs::acquire_advisory_lock;
@@ -226,7 +225,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("main"),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),

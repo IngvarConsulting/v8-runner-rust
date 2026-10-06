@@ -224,8 +224,7 @@ mod tests {
         WORKSPACE_LOCK_SIDECAR_FILE_NAME,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::support::fs::acquire_advisory_lock;
     use std::fs;
@@ -247,7 +246,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("main"),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
