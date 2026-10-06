@@ -199,6 +199,8 @@ def table_chains(text: str, comparable: set[str]) -> Chains:
                 f"{ARCHITECTURE_HTML.name}: строка «{name}» таблицы #d-ops не сопоставлена "
                 "со сценарием: впишите её в TABLE_ROWS"
             )
+        if TABLE_ROWS[name] in out:
+            raise Failure(f"{ARCHITECTURE_HTML.name}: строка «{name}» таблицы #d-ops встречается дважды")
         values: list[list[str]] = []
         for attrs, cell in cells[1:]:
             pills = [

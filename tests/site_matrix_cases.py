@@ -69,6 +69,12 @@ class TableCases(unittest.TestCase):
             )
 
 
+    def test_a_repeated_row_is_a_clear_failure(self) -> None:
+        row = '<tr><td class="k">push</td><td></td><td></td><td></td></tr>'
+        with self.assertRaisesRegex(site_matrix.Failure, "«push» таблицы #d-ops встречается дважды"):
+            site_matrix.table_chains(self.table(row + row), PROVIDERS)
+
+
 class ArtifactCases(unittest.TestCase):
     def test_the_artifact_names_every_target_of_every_operation(self) -> None:
         text = (ROOT / "docs" / "schemas" / "capability-matrix.json").read_text(encoding="utf-8")

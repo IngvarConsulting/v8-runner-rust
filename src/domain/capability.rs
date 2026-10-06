@@ -174,6 +174,11 @@ pub enum TargetKind {
 }
 
 impl TargetKind {
+    // Полный перечень держат тесты матрицы и её артефакт; продуктовый путь получает вид
+    // цели из конфигурации и в перечень не ходит.
+    #[allow(dead_code)]
+    pub const ALL: [Self; 3] = [Self::File, Self::Cluster, Self::Standalone];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -527,26 +532,22 @@ mod tests {
         let operations: serde_json::Map<String, serde_json::Value> = Operation::ALL
             .into_iter()
             .map(|operation| {
-                let targets: serde_json::Map<String, serde_json::Value> = [
-                    TargetKind::File,
-                    TargetKind::Cluster,
-                    TargetKind::Standalone,
-                ]
-                .into_iter()
-                .map(|target| {
-                    let row = capabilities(operation, target)
-                        .iter()
-                        .map(|capability| {
-                            serde_json::json!({
-                                "provider": capability.provider.as_str(),
-                                "implemented":
-                                    capability.implementation == Implementation::Implemented,
+                let targets: serde_json::Map<String, serde_json::Value> = TargetKind::ALL
+                    .into_iter()
+                    .map(|target| {
+                        let row = capabilities(operation, target)
+                            .iter()
+                            .map(|capability| {
+                                serde_json::json!({
+                                    "provider": capability.provider.as_str(),
+                                    "implemented":
+                                        capability.implementation == Implementation::Implemented,
+                                })
                             })
-                        })
-                        .collect();
-                    (target.as_str().to_owned(), serde_json::Value::Array(row))
-                })
-                .collect();
+                            .collect();
+                        (target.as_str().to_owned(), serde_json::Value::Array(row))
+                    })
+                    .collect();
                 (
                     operation.as_str().to_owned(),
                     serde_json::Value::Object(targets),
@@ -605,11 +606,7 @@ mod tests {
     #[test]
     fn no_row_names_a_provider_twice() {
         for operation in Operation::ALL {
-            for target in [
-                TargetKind::File,
-                TargetKind::Cluster,
-                TargetKind::Standalone,
-            ] {
+            for target in TargetKind::ALL {
                 let row = capabilities(operation, target);
                 let mut seen = std::collections::BTreeSet::new();
                 for capability in row {
@@ -633,6 +630,20 @@ mod tests {
             assert_eq!(Operation::parse(operation.as_str()), Some(operation));
         }
         assert_eq!(Provider::parse("designer-batch"), None);
+    }
+
+    /// Перечень видов цели полон: новый вид ломает сборку этого сопоставления, и автор
+    /// видит рядом `TargetKind::ALL`, который надо дополнить.
+    #[test]
+    fn every_target_kind_is_listed() {
+        for (position, target) in TargetKind::ALL.into_iter().enumerate() {
+            let expected = match target {
+                TargetKind::File => 0,
+                TargetKind::Cluster => 1,
+                TargetKind::Standalone => 2,
+            };
+            assert_eq!(position, expected, "{} out of place", target.as_str());
+        }
     }
 
     #[test]
