@@ -147,7 +147,7 @@ impl Standing {
 /// Отказ `push` без памяти о базе. Наборы `contexts` — те, что пойдут в базу; каждому
 /// нужна своя память: запись журнала поколений или непустая хеш-память этой пары.
 /// Чужую хеш-память называет свой отказ анализа изменений
-/// (`INV.USE-CASES.FOREIGN-MEMORY-IS-NOT-USED`), поэтому здесь она не считается.
+/// (`INV.USE-CASES.FOREIGN-MEMORY-IS-NOT-USED`), поэтому здесь отсутствием памяти она не считается.
 pub(crate) fn require_memory(
     context: &ExecutionContext,
     config: &AppConfig,
