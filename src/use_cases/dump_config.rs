@@ -310,7 +310,7 @@ pub(super) fn plan_dump(
             };
             let written = platform
                 .and_then(|platform| written_by(platform).map(|written| (platform, written)));
-            DumpPlan::OverDirectory(match whole_reason(recorded, written) {
+            DumpPlan::OverDirectory(match unusable_version_file(recorded, written) {
                 None => OverDirectory::ByVersionFile,
                 Some(reason) => OverDirectory::Whole(reason),
             })
@@ -320,7 +320,7 @@ pub(super) fn plan_dump(
 
 /// Годится ли файл версий для выгрузки по изменившемуся. Версию, которую пишет платформа,
 /// раннер знает только по таблице замеров; где не знает, о чужой версии не судит.
-fn whole_reason(
+fn unusable_version_file(
     recorded: RecordedFormat,
     written: Option<(&PlatformVersion, FormatVersion)>,
 ) -> Option<WholeReason> {
@@ -2483,8 +2483,8 @@ exit 0"#,
     #[test]
     fn an_unrecognized_format_turns_the_dump_full_and_a_version_is_foreign_only_by_measurement() {
         use super::{
-            plan_dump, whole_reason, DumpPlan, FormatVersion, OverDirectory, RecordedFormat,
-            WholeReason, VERSION_FILE_NAME,
+            plan_dump, unusable_version_file, DumpPlan, FormatVersion, OverDirectory,
+            RecordedFormat, WholeReason, VERSION_FILE_NAME,
         };
         let dir = tempdir().expect("tempdir");
         let platform = crate::platform::locator::PlatformVersion {
@@ -2522,17 +2522,18 @@ exit 0"#,
         );
 
         let measured = Some((&platform, FormatVersion::new(2, 20)));
-        let reason = whole_reason(RecordedFormat::Version(FormatVersion::new(2, 17)), measured)
-            .expect("a foreign format");
+        let reason =
+            unusable_version_file(RecordedFormat::Version(FormatVersion::new(2, 17)), measured)
+                .expect("a foreign format");
         let described = reason.describe(dir.path());
         assert!(described.contains("format 2.17"), "{described}");
         assert!(described.contains("8.3.27.2074 writes 2.20"), "{described}");
         assert_eq!(
-            whole_reason(RecordedFormat::Version(FormatVersion::new(2, 20)), measured),
+            unusable_version_file(RecordedFormat::Version(FormatVersion::new(2, 20)), measured),
             None
         );
         assert_eq!(
-            whole_reason(RecordedFormat::Version(FormatVersion::new(2, 17)), None),
+            unusable_version_file(RecordedFormat::Version(FormatVersion::new(2, 17)), None),
             None
         );
     }

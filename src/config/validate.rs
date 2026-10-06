@@ -1034,12 +1034,12 @@ fn validate_edt_runtime_paths(
     // проверки может быть ещё не выбрана, а база, выбранная позже, положит снимок под своим
     // ключом, поэтому исходники не пересекаются со всем корнем памяти `workPath/infobases`.
     let overlap =
-        |source_set: &String, source_path: &Path, generated_for: &String, generated_path: &Path| {
+        |source_set: &str, source_path: &Path, generated_for: &str, generated_path: &Path| {
             paths_overlap(source_path, generated_path).then(|| {
                 ConfigValidationError::EdtSourceSetPathOverlapsGeneratedTarget {
-                    source_set: source_set.clone(),
+                    source_set: source_set.to_owned(),
                     source_path: source_path.display().to_string(),
-                    generated_for: generated_for.clone(),
+                    generated_for: generated_for.to_owned(),
                     generated_path: generated_path.display().to_string(),
                 }
             })
