@@ -827,3 +827,66 @@ fn every_set_is_checked_before_the_first_load() {
         "the step names the refusal once: {refused}"
     );
 }
+
+/// Своя запись поколения не спасает чужую хеш-память: каталог от этой базы она не выводит,
+/// и `push` отказывает `no_memory`, а не идёт в анализ изменений.
+#[test]
+fn a_generation_record_does_not_make_memory_of_another_pair_own() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    let hashes = project
+        .root()
+        .join("work")
+        .join("infobases")
+        .join("origin")
+        .join("hashes")
+        .join("main.redb");
+    let of_the_first_base = fs::read(&hashes).expect("hash memory");
+    let local = project.root().join("v8project.local.yaml");
+    fs::write(
+        &local,
+        fs::read_to_string(&local)
+            .expect("local layer")
+            .replace("File=ib", "File=replacement-ib"),
+    )
+    .expect("retarget");
+    succeeded(&project.run(&["push", "--force"]));
+    assert_eq!(project.ledger()["main"]["tool"], "designer");
+    // Запись поколения — этой пары, хеш-память — прежней.
+    fs::write(&hashes, of_the_first_base).expect("foreign hash memory");
+    project.edit();
+    project.forget_calls();
+
+    let payload = envelope(&project.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("another infobase"), "{message}");
+    assert!(project.calls().is_empty(), "{}", project.calls());
+}
+
+/// Конфигуратор у базы в кластере поколением заведомо не отвечает (#184): выгрузка поверх
+/// каталога памяти не записала бы, и отказ без памяти советует полную `pull <SET> --force`,
+/// предупреждая о потере незакоммиченного. У файловой базы совет — `pull <SET>`.
+#[test]
+fn without_a_generation_answer_a_no_memory_refusal_offers_pull_force() {
+    let project = Project::new("Srvr=cluster;Ref=dev");
+
+    let payload = envelope(&project.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    assert_eq!(payload["error"]["next"]["source_set"], "main", "{payload}");
+    assert_eq!(payload["error"]["next"]["keys"]["--force"], "", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("pull main --force`"), "{message}");
+    assert!(
+        message.contains("discards its uncommitted changes"),
+        "{message}"
+    );
+
+    let file = envelope(&Project::new("File=ib").run(&["push"]));
+    assert_eq!(file["error"]["next"]["command"], "pull", "{file}");
+    assert!(file["error"]["next"].get("keys").is_none(), "{file}");
+}

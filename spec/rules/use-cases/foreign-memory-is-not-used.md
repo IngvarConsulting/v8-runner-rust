@@ -3,6 +3,7 @@ id: INV.USE-CASES.FOREIGN-MEMORY-IS-NOT-USED
 check:
   - tests/cli_pull_memory.rs::foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_credentials
   - tests/cli_push_generation.rs::a_full_push_with_memory_of_another_base_is_refused_as_no_memory
+  - tests/cli_push_generation.rs::a_generation_record_does_not_make_memory_of_another_pair_own
   - src/change_detection/source_sets.rs::base_snapshots_remain_separate_and_reject_a_retargeted_base
   - src/use_cases/version_file.rs::a_copy_of_another_pair_is_not_restored
   - src/use_cases/agent_session.rs::a_generation_recorded_for_another_pair_is_not_used
@@ -13,14 +14,12 @@ check:
 Память под именем базы, записанная для другой базы, объявляется чужой в ответе и не даёт
 основания пропустить работу.
 
-Для `push` чужая хеш-память — отсутствие памяти о базе: без своей записи поколения он
-отказывает `no_memory` до анализа и платформы
-(`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`), и полная загрузка `--full`
-тоже. Если своя запись поколения есть, а хеш-память чужая, анализ изменений отказывает,
-называя записанную и выбранную привязки и выходы с тем же набором: `pull <SET> --force`,
-если права база, и `push <SET> --force`, если прав каталог; каждый заменяет память после
-успеха. Решение владельца от 06.10.2026: выход каталога — `push <SET> --force`, а не
-`push <SET> --full`, потому что `--full` проверки памяти не обходит.
+Для `push` хеш-память другой пары — отсутствие памяти о базе, даже если запись поколения
+своя: он отказывает `no_memory` до анализа изменений и платформы, с выходами `pull <SET>` и
+`push --force` (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`), и у полной
+загрузки `--full` тоже. Отказ говорит, что память под этим именем записана для другой базы
+или каталога. Решение владельца от 06.10.2026: выход каталога — `push --force`, а не
+`--full`, потому что `--full` проверки памяти не обходит.
 
 Остальная память о базе хранит рядом ту же привязку. Копия файла версий другой пары не
 подкладывается в каталог (`INV.USE-CASES.A-REPLACED-VERSION-FILE-GIVES-WAY-TO-THE-RUNNER-COPY`).

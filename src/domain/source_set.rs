@@ -194,7 +194,7 @@ pub fn infobase_memory_dir(work_path: &Path, infobase: &str) -> PathBuf {
 
 /// Снимок Конфигуратора набора формата EDT. Он описывает обмен с базой и лежит под её
 /// памятью: `workPath/infobases/<ключ>/designer/<набор>`. У набора без памяти базы —
-/// внешних обработок и отчётов и базы с нераспознанным адресом — `workPath/designer/<набор>`.
+/// внешних обработок и отчётов — `workPath/designer/<набор>`.
 pub fn designer_copy_dir(work_path: &Path, infobase: Option<&str>, source_set: &str) -> PathBuf {
     match infobase {
         Some(infobase) => infobase_memory_dir(work_path, infobase),

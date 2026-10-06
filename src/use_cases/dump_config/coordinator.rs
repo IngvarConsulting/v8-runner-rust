@@ -485,7 +485,7 @@ fn run_dump_selected(
             &mut utilities,
         ) {
             Ok((platform_result, message, up_to_date)) => {
-                (Ok((platform_result, message)), up_to_date)
+                (Ok((platform_result.platform_log_path, message)), up_to_date)
             }
             Err(error) => (Err(error), false),
         }
@@ -529,20 +529,8 @@ fn run_dump_selected(
             });
         if let Some(unchanged) = unchanged {
             (
-                Ok((
-                    PlatformCommandResult {
-                        process: crate::platform::process::ProcessResult {
-                            exit_code: 0,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            interruption: None,
-                        },
-                        platform_log_path: None,
-                        platform_log: None,
-                        platform_log_read_error: None,
-                    },
-                    DumpNotes::message(Some(unchanged)),
-                )),
+                // Платформа не запускалась: журнала у пропуска нет.
+                Ok((None, DumpNotes::message(Some(unchanged)))),
                 true,
             )
         } else {
@@ -739,13 +727,13 @@ fn run_dump_selected(
                         )
                     });
                 notes.message = merge_optional_messages(notes.message, note);
-                (platform_result, notes)
+                (platform_result.platform_log_path, notes)
             });
             (result, false)
         }
     };
     // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
-    let result = result.map(|(platform_result, notes)| {
+    let result = result.map(|(platform_log_path, notes)| {
         let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
         // Уничтоженное называет вопрос к сторожу при публикации замены.
         let discarded = notes.discarded;
@@ -756,12 +744,12 @@ fn run_dump_selected(
                 merge_optional_messages(notes.message, copy_warning),
             ),
         );
-        (platform_result, message, discarded.into_paths())
+        (platform_log_path, message, discarded.into_paths())
     });
     drop(lock_guard);
 
     match result {
-        Ok((platform_result, cleanup_message, losses)) => Ok(DumpResult {
+        Ok((platform_log_path, cleanup_message, losses)) => Ok(DumpResult {
             provider: None,
             provider_dispatched: false,
             up_to_date,
@@ -771,7 +759,7 @@ fn run_dump_selected(
             selectors,
             mode,
             target_path: resolved.target_path,
-            platform_log_path: platform_result.platform_log_path,
+            platform_log_path,
             duration_ms: started.elapsed().as_millis() as u64,
             message: cleanup_message
                 .or_else(|| Some(crate::domain::dump::DUMP_SUCCESS_MESSAGE.to_owned())),

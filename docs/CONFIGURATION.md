@@ -319,8 +319,7 @@ command-specific validation, а не ослабление `push`, source `pull`,
 - `workPath/logs`
 - `workPath/temp`
 - `workPath/edt-workspace`
-- `workPath/designer` — выгрузки внешних обработок и отчётов формата EDT; у базы, чей адрес
-  раннер не распознаёт, и наборов EDT
+- `workPath/designer` — выгрузки внешних обработок и отчётов формата EDT
 - `workPath/tool-extensions/<имя>` — выгрузка расширения-инструмента с исходниками EDT
 
 Память привязана к адресу базы без учётных данных, каталогу и назначению набора;
