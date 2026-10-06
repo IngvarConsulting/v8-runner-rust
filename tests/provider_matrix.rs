@@ -358,7 +358,7 @@ fn no_default_chain_names_the_publication_provider() {
     for command in [
         vec!["push", "--dry-run"],
         vec!["infobase", "create", "--dry-run"],
-        vec!["pull", "--mode", "full", "--dry-run"],
+        vec!["pull", "--force", "--dry-run"],
     ] {
         let (code, payload) = run(&config_path, &command);
         assert_eq!(code, 0, "{payload}");

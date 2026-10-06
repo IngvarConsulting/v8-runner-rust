@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::use_cases::context::ExecutionTransport;
+use crate::use_cases::context::{CommandLineTarget, ExecutionTransport};
 
 /// Per-call metadata passed into the MCP service layer.
 #[derive(Debug, Clone)]
@@ -10,6 +10,9 @@ pub struct McpCallContext {
     transport: ExecutionTransport,
     edt_timeout: Option<Duration>,
     cancellation: CancellationToken,
+    /// Глобальные ключи, с которыми запущен сервер: совет отказа называет команду строки,
+    /// и она должна попасть в тот же проект, ту же базу и тот же рабочий каталог.
+    command_line: CommandLineTarget,
 }
 
 impl McpCallContext {
@@ -19,6 +22,7 @@ impl McpCallContext {
             transport,
             edt_timeout: None,
             cancellation: CancellationToken::new(),
+            command_line: CommandLineTarget::default(),
         }
     }
 
@@ -52,6 +56,17 @@ impl McpCallContext {
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    /// Attaches the global keys the server was started with.
+    pub fn with_command_line(mut self, command_line: CommandLineTarget) -> Self {
+        self.command_line = command_line;
+        self
+    }
+
+    /// The global keys the server was started with.
+    pub const fn command_line(&self) -> &CommandLineTarget {
+        &self.command_line
     }
 
     /// Returns the shared cancellation token for the call.

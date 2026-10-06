@@ -30,7 +30,7 @@ v8-runner push
 Limit `push` to one configured source-set:
 
 ```bash
-v8-runner push --source-set <NAME>
+v8-runner push <NAME>
 ```
 
 Recover after branch switches, rebases, large object moves, or suspicious incremental state:
@@ -127,21 +127,21 @@ Bring infobase changes back into Git-visible files:
 
 ```bash
 git status --short
-v8-runner pull --mode incremental
+v8-runner pull
 git diff
 ```
 
 Pull specific objects when the backend supports it:
 
 ```bash
-v8-runner pull --mode partial --object <TYPE:NAME>
+v8-runner pull --object <TYPE:NAME>
 ```
 
 Convert configured source-sets between Designer and EDT file formats:
 
 ```bash
 v8-runner convert
-v8-runner convert --source-set <NAME>
+v8-runner convert <NAME>
 v8-runner convert --output <DIR>
 ```
 
@@ -157,7 +157,7 @@ Export release artifacts or publish external artifacts:
 
 ```bash
 v8-runner make --output <TARGET>
-v8-runner make --output <TARGET> --source-set <NAME>
+v8-runner make <NAME> --output <TARGET>
 v8-runner make --output <TARGET> --extension <NAME>
 ```
 

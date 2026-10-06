@@ -207,7 +207,7 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             "upload",
             work.clone(),
         ),
-        row(&["dump", "--mode", "full"], "pull", "pull", work.clone()),
+        row(&["dump", "--force"], "pull", "pull", work.clone()),
         row(
             &["download", "--state", "working", "--output", &artifact],
             "download",

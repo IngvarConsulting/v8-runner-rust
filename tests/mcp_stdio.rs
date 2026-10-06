@@ -826,9 +826,9 @@ async fn mcp_stdio_exposes_expected_tools_and_capabilities() {
 async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     let (_dir, config_path, _designer_calls_log, _enterprise_calls_log, _captured_config) =
         setup_designer_suite_project();
-    let cli_build = run_cli_json(&config_path, &["build", "--full-rebuild"]);
+    let cli_build = run_cli_json(&config_path, &["push", "--full"]);
     let cli_test = run_cli_json(&config_path, &["test", "--full", "yaxunit", "all"]);
-    let cli_dump = run_cli_json(&config_path, &["dump", "--mode", "full"]);
+    let cli_dump = run_cli_json(&config_path, &["dump", "--force"]);
     let (cli_syntax_success, cli_syntax) =
         run_cli_json_with_status(&config_path, &["syntax", "designer-modules", "--server"]);
     assert!(!cli_syntax_success);

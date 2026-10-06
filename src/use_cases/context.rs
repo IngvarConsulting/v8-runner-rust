@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -60,6 +61,97 @@ pub enum ExecutionTransport {
     McpHttp,
 }
 
+/// Global keys of a command line that reach the same project, infobase and work directory
+/// as this run.
+///
+/// A refusal that names a command to run must name one that hits the same target when it
+/// is executed literally — from another directory, or for an MCP server started with
+/// `--infobase`. The transport knows how it was started; the use case only appends them.
+///
+/// A connection string never gets here: it may carry a secret the loader does not refuse
+/// (`Wsp=`, a part without `=`), and an advice is shown, logged and pasted. With
+/// [`AdvisedInfobase::SameConnection`] the advice asks for "the same `--infobase` value"
+/// instead of repeating it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandLineTarget {
+    /// Absolute path of the primary `v8project.yaml`. `None` where it did not resolve (and
+    /// in unit tests, where nothing was loaded from a file): the advice then names the
+    /// project directory as the place to run it from instead of `--config`.
+    pub config: Option<PathBuf>,
+    /// How the advice names the base when the run did not select the default one.
+    pub infobase: Option<AdvisedInfobase>,
+    /// The effective work directory when `--workdir` overrode it.
+    pub workdir: Option<PathBuf>,
+}
+
+/// How a refusal advice names the base that `--infobase` selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvisedInfobase {
+    /// A base declared in the project, repeated as `--infobase <name>`.
+    Name(String),
+    /// A connection string: the advice asks for the same `--infobase` value in words and
+    /// never repeats the string.
+    SameConnection,
+}
+
+impl CommandLineTarget {
+    /// `v8-runner <global keys> <tail>`, with every value quoted for the shell of this
+    /// platform where it needs quoting (see [`shell_word`]). A connection string is not
+    /// among the keys: [`ExecutionContext::advised_command`] asks for it in words.
+    pub fn command(&self, tail: &str) -> String {
+        let infobase = match &self.infobase {
+            Some(AdvisedInfobase::Name(name)) => Some(name.clone()),
+            Some(AdvisedInfobase::SameConnection) | None => None,
+        };
+        let keys = [
+            ("--config", self.config.as_deref().map(path_text)),
+            ("--infobase", infobase),
+            ("--workdir", self.workdir.as_deref().map(path_text)),
+        ];
+        let global_keys = keys
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| format!("{key} {}", shell_word(&value))));
+        std::iter::once("v8-runner".to_owned())
+            .chain(global_keys)
+            .chain(std::iter::once(tail.to_owned()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn path_text(path: &std::path::Path) -> String {
+    path.display().to_string()
+}
+
+/// One shell word: as is when it holds nothing the shell would split, expand or unescape,
+/// otherwise quoted for the shell of this platform.
+///
+/// On Unix the advice is for a POSIX shell: single quotes, and a backslash is not plain,
+/// because unquoted `sh` drops it. On Windows the same text has to run in PowerShell and in
+/// `cmd`: double quotes are the only quoting both understand, and a backslash is an
+/// ordinary path character in both. Inside double quotes PowerShell still expands `$` and
+/// `` ` `` and `cmd` expands `%`; no quoting serves both shells for those. The words quoted
+/// here are paths and source-set names, and a Windows path cannot hold `"`.
+pub(crate) fn shell_word(value: &str) -> String {
+    let plain = !value.is_empty() && value.chars().all(is_plain_shell_char);
+    if plain {
+        value.to_owned()
+    } else if cfg!(windows) {
+        format!("\"{value}\"")
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
+}
+
+fn is_plain_shell_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '_' | '-' | '.' | '/' | ':' | '=' | '+' | ',' | '@' | '%'
+        )
+        || (cfg!(windows) && ch == '\\')
+}
+
 /// Command-boundary interruption signal observed at safe points.
 ///
 /// A command carries no deadline (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), so the only
@@ -109,6 +201,8 @@ pub struct ExecutionContext {
     cancellation: CancellationToken,
     /// Получил ли исполнитель работу этой команды; отмечает платформа, читает ответ.
     work: WorkGiven,
+    /// Глобальные ключи командной строки, которые ведут к той же цели.
+    command_line: CommandLineTarget,
 }
 
 impl ExecutionContext {
@@ -120,6 +214,7 @@ impl ExecutionContext {
             edt_timeout: None,
             cancellation: CancellationToken::new(),
             work: WorkGiven::for_command(),
+            command_line: CommandLineTarget::default(),
         }
     }
 
@@ -160,6 +255,53 @@ impl ExecutionContext {
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    /// Attaches the global keys a command line needs to reach the same target.
+    pub fn with_command_line(mut self, command_line: CommandLineTarget) -> Self {
+        self.command_line = command_line;
+        self
+    }
+
+    /// `` `v8-runner <global keys> <tail>` `` and where to run it, for a refusal that
+    /// advises a command: the command reaches the same target as this run, and an MCP
+    /// client learns that it runs from the command line, over HTTP on the server's machine.
+    ///
+    /// Without a resolved config path the advice says to run it from the project directory
+    /// instead of naming `--config`; a base selected by a connection string is asked for as
+    /// "the same `--infobase` value", and the string itself is never repeated.
+    pub fn advised_command(&self, tail: &str) -> String {
+        let command = self.command_line.command(tail);
+        let config_known = self.command_line.config.is_some();
+        let place = match (self.transport, config_known) {
+            (ExecutionTransport::Cli, true) => "",
+            (ExecutionTransport::Cli, false) => " from the project directory",
+            (ExecutionTransport::McpStdio, true) => " from the command line",
+            (ExecutionTransport::McpStdio, false) => " from the command line in the project directory",
+            (ExecutionTransport::McpHttp, true) => {
+                " from the command line on the machine where the MCP server runs"
+            }
+            (ExecutionTransport::McpHttp, false) => {
+                " from the command line in the project directory on the machine where the MCP server runs"
+            }
+        };
+        let same_connection = match (&self.command_line.infobase, self.transport) {
+            (Some(AdvisedInfobase::SameConnection), ExecutionTransport::Cli) => {
+                ", with the same `--infobase` value as this command"
+            }
+            (
+                Some(AdvisedInfobase::SameConnection),
+                ExecutionTransport::McpStdio | ExecutionTransport::McpHttp,
+            ) => ", with the same `--infobase` value the MCP server was started with",
+            (Some(AdvisedInfobase::Name(_)) | None, _) => "",
+        };
+        format!("`{command}`{place}{same_connection}")
+    }
+
+    /// [`Self::advised_command`] for `pull <SET> --force`: the one spelling of the full
+    /// replacement of a source set that refusals send the caller to.
+    pub fn advised_pull_force(&self, source_set: &str) -> String {
+        self.advised_command(&format!("pull {} --force", shell_word(source_set)))
     }
 
     /// Returns the EDT subprocess timeout budget for this execution.
@@ -226,10 +368,90 @@ mod tests {
 
     use crate::platform::process::ProcessInterruptionSafety;
 
+    use std::path::PathBuf;
+
     use super::{
-        CommandName, ExecutionContext, ExecutionInterruption, ExecutionTransport,
-        InterruptionSafetyClass,
+        AdvisedInfobase, CommandLineTarget, CommandName, ExecutionContext, ExecutionInterruption,
+        ExecutionTransport, InterruptionSafetyClass,
     };
+
+    /// Команда называет только те глобальные ключи, что меняют цель, и каждое значение
+    /// переживает оболочку POSIX: пробел, кавычка и обратная косая черта не дробят слово.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_command_line_names_the_global_keys_of_the_target() {
+        assert_eq!(
+            CommandLineTarget::default().command("pull main --force"),
+            "v8-runner pull main --force"
+        );
+        let elsewhere = CommandLineTarget {
+            config: Some(PathBuf::from("/srv/it's mine/v8project.yaml")),
+            infobase: Some(AdvisedInfobase::Name("staging".to_owned())),
+            workdir: Some(PathBuf::from(r"/var/C:\work")),
+        };
+        assert_eq!(
+            elsewhere.command("pull main --force"),
+            r"v8-runner --config '/srv/it'\''s mine/v8project.yaml' --infobase staging --workdir '/var/C:\work' pull main --force"
+        );
+    }
+
+    /// На Windows совет выполняют PowerShell и `cmd`: значение с пробелом — в двойных
+    /// кавычках, которые понимают обе оболочки, обратная косая черта — обычный знак пути.
+    #[cfg(windows)]
+    #[test]
+    fn a_command_line_names_the_global_keys_of_the_target() {
+        let elsewhere = CommandLineTarget {
+            config: Some(PathBuf::from(r"C:\it's mine\v8project.yaml")),
+            infobase: Some(AdvisedInfobase::Name("staging".to_owned())),
+            workdir: Some(PathBuf::from(r"C:\work")),
+        };
+        assert_eq!(
+            elsewhere.command("pull main --force"),
+            r#"v8-runner --config "C:\it's mine\v8project.yaml" --infobase staging --workdir C:\work pull main --force"#
+        );
+    }
+
+    /// Строка соединения может нести секрет, которого загрузчик не отвергает (`Wsp=`), и
+    /// совет её не повторяет ни в одном транспорте: просит то же значение `--infobase`
+    /// словами.
+    #[test]
+    fn an_advice_never_repeats_a_connection_string() {
+        let target = CommandLineTarget {
+            config: Some(PathBuf::from("/srv/project/v8project.yaml")),
+            infobase: Some(AdvisedInfobase::SameConnection),
+            workdir: None,
+        };
+        for context in [
+            ExecutionContext::cli(CommandName::Dump),
+            ExecutionContext::mcp_stdio(CommandName::Dump),
+            ExecutionContext::mcp_http(CommandName::Dump),
+        ] {
+            let advice = context
+                .with_command_line(target.clone())
+                .advised_pull_force("main");
+            assert!(!advice.contains("--infobase "), "{advice}");
+            assert!(
+                advice.contains("with the same `--infobase` value"),
+                "{advice}"
+            );
+        }
+    }
+
+    /// Путь конфига не разрешился — готовой команды с `--config` нет, и совет называет
+    /// каталог проекта местом запуска.
+    #[test]
+    fn an_advice_without_a_config_path_names_the_project_directory() {
+        let cli = ExecutionContext::cli(CommandName::Dump).advised_pull_force("main");
+        assert_eq!(
+            cli,
+            "`v8-runner pull main --force` from the project directory"
+        );
+        let http = ExecutionContext::mcp_http(CommandName::Dump).advised_pull_force("main");
+        assert_eq!(
+            http,
+            "`v8-runner pull main --force` from the command line in the project directory on the machine where the MCP server runs"
+        );
+    }
 
     #[test]
     fn constructs_mcp_contexts() {

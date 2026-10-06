@@ -24,11 +24,11 @@ use crate::support::path::{
 };
 use crate::support::source_descriptor::{self, ExternalDescriptorParseError};
 use crate::use_cases::context::{CommandName, ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::destruction_guard::DestructionConsent;
+use crate::use_cases::destruction_guard::{DestructionConsent, WaysOut};
 use crate::use_cases::external_artifacts::ExternalArtifactKind;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
-use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs};
+use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs, ForceWayOut};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
@@ -106,11 +106,11 @@ impl ResolvedDumpTarget {
     /// снимок в `workPath/designer/<имя>`, который раннер сам и создаёт: спрашивать
     /// о нём систему контроля версий незачем, а спросив, можно получить отказ на
     /// собственном кеше.
-    fn platform_consent(&self) -> DestructionConsent {
+    fn platform_consent(&self) -> &DestructionConsent {
         if self.platform_target_path == self.target_path {
-            self.consent
+            &self.consent
         } else {
-            DestructionConsent::RunnerOwned
+            &DestructionConsent::RunnerOwned
         }
     }
 }
@@ -683,7 +683,7 @@ fn finalize_edt_dump(
             DUMP_BACKUP_PREFIX,
             "failed to publish staged dump",
             // Здесь публикуется дерево человека, а не служебный снимок.
-            resolved.consent,
+            &resolved.consent,
             // Импорт EDT описи версий не пишет: исключений нет.
             &[],
         )
@@ -1027,7 +1027,14 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
         consent: if args.discard_uncommitted {
             DestructionConsent::Granted
         } else {
-            DestructionConsent::AskFirst
+            DestructionConsent::AskFirst(match args.force_way_out {
+                ForceWayOut::Withheld => WaysOut::SaveWork,
+                // Набор назван по разрешённой цели, а не по тому, как его назвал вызов:
+                // `pull --extension ext` и `pull` без набора приходят сюда с именем.
+                ForceWayOut::PullForce => WaysOut::PullForce {
+                    source_set: source_set.name.clone(),
+                },
+            })
         },
     };
     if matches!(args.mode, DumpModeRequest::Full) {
@@ -1066,7 +1073,7 @@ mod tests {
     use crate::use_cases::context::ExecutionContext;
     use crate::use_cases::destruction_guard::DestructionConsent;
     use crate::use_cases::external_artifacts::ExternalArtifactKind;
-    use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs};
+    use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs, ForceWayOut};
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1097,6 +1104,7 @@ mod tests {
             extension: None,
             objects: vec![],
             discard_uncommitted: true,
+            force_way_out: ForceWayOut::PullForce,
             dry_run: false,
         };
         let resolved = resolve_target(&config, &args).expect("target");
@@ -1261,6 +1269,7 @@ mod tests {
             extension: None,
             objects: vec![],
             discard_uncommitted: true,
+            force_way_out: ForceWayOut::PullForce,
             dry_run: false,
         };
         assert!(resolve_target(&config, &args)
@@ -1290,6 +1299,7 @@ mod tests {
             extension: None,
             objects: vec![],
             discard_uncommitted: true,
+            force_way_out: ForceWayOut::PullForce,
             dry_run: false,
         };
         assert!(resolve_target(&config, &args)
@@ -1743,6 +1753,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1768,6 +1779,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1793,6 +1805,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1819,6 +1832,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1853,6 +1867,7 @@ exit 0"#,
                 &DumpArgs {
                     dry_run: false,
                     discard_uncommitted: false,
+                    force_way_out: ForceWayOut::PullForce,
                     mode: DumpModeRequest::Partial,
                     source_set: None,
                     extension: None,
@@ -1879,6 +1894,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Incremental,
                 source_set: None,
                 extension: None,
@@ -1904,6 +1920,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: None,
                 extension: None,
@@ -1934,6 +1951,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: None,
                 extension: None,
@@ -1961,6 +1979,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -1998,6 +2017,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2244,6 +2264,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2276,6 +2297,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2311,6 +2333,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2379,6 +2402,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2432,6 +2456,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2463,6 +2488,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2497,6 +2523,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2537,6 +2564,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2586,6 +2614,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2627,6 +2656,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2666,6 +2696,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2701,6 +2732,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2735,6 +2767,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2777,6 +2810,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2818,6 +2852,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2855,6 +2890,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2889,6 +2925,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2939,6 +2976,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2986,6 +3024,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3030,6 +3069,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -3045,6 +3085,106 @@ exit 0"#,
         assert!(designer_calls.contains("-Extension"));
         assert!(designer_calls.contains("ext"));
         assert!(edt_calls.contains("--base-project-name BaseProject"));
+    }
+
+    /// Проект EDT в репозитории, где у расширения есть работа вне учёта: любая выгрузка
+    /// расширения заменяет его каталог, и сторож отказывает.
+    fn edt_extension_with_uncommitted_work(dir: &Path) -> AppConfig {
+        let base = dir.join("base");
+        let work = dir.join("work");
+        let designer = dir.join("1cv8");
+        let edt = dir.join("edt").join("1cedtcli");
+        create_edt_source_tree(&base);
+        crate::platform::test_git::init_git_repo(&base);
+        crate::platform::test_git::run_git(&base, &["add", "-A"]);
+        crate::platform::test_git::run_git(&base, &["commit", "-qm", "sources"]);
+        fs::write(base.join("ext").join("hand-written.xml"), "mine\n").expect("hand-written");
+        write_designer_dump_script_for_edt(&designer, &dir.join("designer-calls.log"), None);
+        write_edt_import_script(&edt, &dir.join("edt-calls.log"));
+        build_edt_config(&base, &work, &designer, &edt, Default::default())
+    }
+
+    fn incremental_extension_dump(
+        source_set: Option<&str>,
+        extension: Option<&str>,
+        force_way_out: ForceWayOut,
+    ) -> DumpArgs {
+        DumpArgs {
+            dry_run: false,
+            discard_uncommitted: false,
+            force_way_out,
+            mode: DumpModeRequest::Incremental,
+            source_set: source_set.map(str::to_owned),
+            extension: extension.map(str::to_owned),
+            objects: vec![],
+        }
+    }
+
+    /// `pull ext` и `pull --extension ext` в проекте EDT: совет — точная `pull ext --force`
+    /// с набором разрешённой цели, а не голый `pull --force`, который без набора выгрузил
+    /// бы основную конфигурацию в её каталог.
+    #[test]
+    fn an_edt_extension_refusal_does_not_offer_a_bare_pull_force() {
+        let dir = tempdir().expect("tempdir");
+        let config = edt_extension_with_uncommitted_work(dir.path());
+
+        for args in [
+            incremental_extension_dump(Some("ext"), None, ForceWayOut::PullForce),
+            incremental_extension_dump(None, Some("ext"), ForceWayOut::PullForce),
+        ] {
+            let failure = run_dump(&config, &args).expect_err("refused");
+            let message = failure.error.message();
+            assert_eq!(
+                failure.error.kind(),
+                UseCaseErrorKind::Validation,
+                "{message}"
+            );
+            assert!(message.contains("hand-written.xml"), "{message}");
+            assert!(!message.contains("`pull --force`"), "{message}");
+            assert!(
+                message.contains("`v8-runner pull ext --force`"),
+                "{message}"
+            );
+        }
+    }
+
+    /// MCP `dump_config` с расширением: ключа у MCP нет, и отказ называет точную команду
+    /// строки для той же цели — с именем набора.
+    #[test]
+    fn an_mcp_extension_refusal_names_the_exact_pull_for_the_same_source_set() {
+        let dir = tempdir().expect("tempdir");
+        let config = edt_extension_with_uncommitted_work(dir.path());
+        let context = ExecutionContext::mcp_stdio(crate::use_cases::context::CommandName::Dump);
+
+        let failure = super::execute(
+            &context,
+            &config,
+            &incremental_extension_dump(None, Some("ext"), ForceWayOut::PullForce),
+        )
+        .expect_err("refused");
+        let message = failure.error.message();
+        assert!(
+            message.contains("run `v8-runner pull ext --force` from the command line"),
+            "{message}"
+        );
+        assert!(!message.contains("`v8-runner pull --force`"), "{message}");
+    }
+
+    /// Вызывающий без ключа согласия (клонирование) не получает совета повторить с ключом,
+    /// который у него ничего не делает.
+    #[test]
+    fn a_caller_without_a_force_way_out_is_not_told_to_force() {
+        let dir = tempdir().expect("tempdir");
+        let config = edt_extension_with_uncommitted_work(dir.path());
+
+        let failure = run_dump(
+            &config,
+            &incremental_extension_dump(Some("ext"), None, ForceWayOut::Withheld),
+        )
+        .expect_err("refused");
+        let message = failure.error.message();
+        assert!(message.contains("commit or stash them"), "{message}");
+        assert!(!message.contains("--force"), "{message}");
     }
 
     #[test]
@@ -3072,6 +3212,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3109,6 +3250,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3156,6 +3298,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3211,6 +3354,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3264,6 +3408,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3316,6 +3461,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3475,6 +3621,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3539,6 +3686,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3630,6 +3778,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3642,6 +3791,7 @@ exit 0"#,
             &DumpArgs {
                 dry_run: false,
                 discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,

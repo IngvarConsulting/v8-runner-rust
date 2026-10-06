@@ -10,8 +10,9 @@ use crate::cli::args::{
     DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
     ExtensionsCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationCommand,
     InfobaseConfigurationExportArgs, InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
-    SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
-    TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
+    PreviousDumpMode, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner,
+    TestScope, TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs,
+    ToolsDownloadCommand,
 };
 use crate::cli::output::{
     failure_envelope, pre_dispatch_error_envelope, print_command_use_case_error, with_cli_error,
@@ -54,9 +55,7 @@ use crate::domain::tools_download::{
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
-use crate::support::adapter_input::{
-    parse_launch_target, parse_required_dump_mode, LaunchModeAliases,
-};
+use crate::support::adapter_input::{parse_launch_target, LaunchModeAliases};
 use crate::support::error::AppError;
 use crate::support::fs::clean_dir;
 use crate::support::path::is_safe_path_segment;
@@ -65,7 +64,7 @@ use crate::use_cases::artifacts;
 use crate::use_cases::build_project;
 use crate::use_cases::check_syntax;
 use crate::use_cases::configure_extensions;
-use crate::use_cases::context::{CommandName, ExecutionContext};
+use crate::use_cases::context::{shell_word, CommandLineTarget, CommandName, ExecutionContext};
 use crate::use_cases::convert_sources;
 use crate::use_cases::dump_config;
 use crate::use_cases::extension_inventory;
@@ -79,10 +78,10 @@ use crate::use_cases::request::{
     effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
-    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpRequest,
-    ExtensionInventoryRequest, ExtensionInventoryScope, InitRequest, LaunchRequest, LoadRequest,
-    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
-    ToolsDownloadRequest,
+    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
+    DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut, InitRequest,
+    LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest,
+    TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -95,7 +94,7 @@ use crate::use_cases::transport::dispatch_with_workspace_lock;
 pub fn execute_command(
     config: &AppConfig,
     command: &Command,
-    primary_config_path: Option<PathBuf>,
+    command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
@@ -112,7 +111,7 @@ pub fn execute_command(
         Command::Tools(args) => execute_tools(
             config,
             args,
-            required_primary_config_path(primary_config_path)?,
+            required_primary_config_path(command_line.config.clone())?,
             presenter,
             clean_before_execution,
             cancellation,
@@ -128,6 +127,7 @@ pub fn execute_command(
         Command::Build(args) => execute_build(
             config,
             args,
+            command_line,
             presenter,
             clean_before_execution,
             dry_run,
@@ -144,6 +144,7 @@ pub fn execute_command(
         Command::Test(args) => execute_test(
             config,
             args,
+            command_line,
             presenter,
             clean_before_execution,
             cancellation,
@@ -151,6 +152,7 @@ pub fn execute_command(
         Command::Dump(args) => execute_dump(
             config,
             args,
+            command_line,
             presenter,
             clean_before_execution,
             dry_run,
@@ -886,13 +888,16 @@ fn execute_init(
 fn execute_build(
     config: &AppConfig,
     args: &BuildArgs,
+    command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let request = map_build_request(args, dry_run);
-    let context = cli_context(config, CommandName::Build, cancellation);
+    // Отказ при чужой памяти советует `pull`/`push` с глобальными ключами этого вызова.
+    let context = cli_context(config, CommandName::Build, cancellation)
+        .with_command_line(command_line.clone());
     with_cli_workspace_lock(
         config,
         presenter,
@@ -938,6 +943,7 @@ fn execute_build(
 fn execute_test(
     config: &AppConfig,
     args: &TestArgs,
+    command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     cancellation: CancellationToken,
@@ -946,7 +952,9 @@ fn execute_test(
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Test, error))?;
     let effective_config = effective_test_config(config, args)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Test, error))?;
-    let context = cli_context(&effective_config, CommandName::Test, cancellation);
+    // Прогон собирает проект: совет отказа сборки несёт глобальные ключи этого вызова.
+    let context = cli_context(&effective_config, CommandName::Test, cancellation)
+        .with_command_line(command_line.clone());
     with_cli_workspace_lock(
         &effective_config,
         presenter,
@@ -1040,6 +1048,7 @@ fn execute_load(
 fn execute_dump(
     config: &AppConfig,
     args: &DumpArgs,
+    command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
@@ -1047,7 +1056,9 @@ fn execute_dump(
 ) -> Result<(), UseCaseError> {
     let request = map_dump_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Dump, error))?;
-    let context = cli_context(config, CommandName::Dump, cancellation);
+    // Совет отказа сторожа называет `pull <SET> --force` с глобальными ключами этого вызова.
+    let context = cli_context(config, CommandName::Dump, cancellation)
+        .with_command_line(command_line.clone());
     with_cli_workspace_lock(
         config,
         presenter,
@@ -2806,14 +2817,78 @@ fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCa
     })
 }
 
+/// Что делает `pull --force`: фраза одна для справки отказов, чтобы последствие было видно
+/// без документации.
+const PULL_FORCE_MEANS: &str =
+    "`pull [SET] --force` is a full dump that replaces the source tree of that set and discards uncommitted changes there";
+
+/// Режим выгрузки по ключам словаря: без ключей — инкрементальная поверх каталога,
+/// `--object` — названные объекты, `--force` — полная с заменой каталога.
+///
+/// Прежний `--mode incremental|partial` значит то же, что без ключа. `--mode full` не
+/// отображается в `--force`, а отказывает и называет его: молчаливое отображение дало бы
+/// согласие на уничтожение, о котором не просили. Сочетание, где режим спорит с `--force`,
+/// тоже отказывает и называет выбор: эскалации до замены каталога молча не бывает
+/// (решение владельца 05.10.2026, #191).
+fn dump_mode(args: &DumpArgs) -> Result<DumpModeRequest, UseCaseError> {
+    let refuse = |message: String| Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    // Совет, выполненный буквально, не должен упереться во второй отказ: `--object` рядом с
+    // `--force` отказывает, а второй `--force` не примет разбор ключей.
+    let drop_objects = if args.objects.is_empty() {
+        ""
+    } else {
+        " and every `--object`"
+    };
+    // Готовая форма для того же набора; без набора — заполнитель, а не голый `pull --force`,
+    // который выгрузил бы набор по умолчанию.
+    let replacing_form = format!(
+        "`pull {} --force`",
+        args.source_set
+            .name()
+            .map_or_else(|| "[SET]".to_owned(), shell_word)
+    );
+    match (args.mode, args.discard_uncommitted) {
+        (Some(PreviousDumpMode::Full), discard) => {
+            let force = if discard {
+                "keep `--force`"
+            } else {
+                "add `--force`"
+            };
+            return refuse(format!(
+                "`--mode full` is gone: drop `--mode full`{drop_objects} and {force} in the same command, which then reads {replacing_form} with the same global keys; {PULL_FORCE_MEANS}"
+            ));
+        }
+        (Some(previous @ (PreviousDumpMode::Incremental | PreviousDumpMode::Partial)), true) => {
+            return refuse(format!(
+                "`--mode {}` contradicts `--force`: drop `--mode`{drop_objects} for a full replacement, {replacing_form} with the same global keys ({PULL_FORCE_MEANS}), or drop `--force` for a dump over the source tree",
+                previous.as_str()
+            ));
+        }
+        (None | Some(PreviousDumpMode::Incremental | PreviousDumpMode::Partial), _) => {}
+    }
+    if !args.objects.is_empty() && args.discard_uncommitted {
+        return refuse(format!(
+            "`--object` contradicts `--force`: keep `--object` for a partial dump of the named objects, or keep `--force` alone ({PULL_FORCE_MEANS})"
+        ));
+    }
+    Ok(if !args.objects.is_empty() {
+        DumpModeRequest::Partial
+    } else if args.discard_uncommitted {
+        DumpModeRequest::Full
+    } else {
+        DumpModeRequest::Incremental
+    })
+}
+
 fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCaseError> {
     Ok(DumpRequest {
         dry_run,
-        mode: parse_required_dump_mode(&args.mode)?,
+        mode: dump_mode(args)?,
         source_set: args.source_set.name().map(str::to_owned),
         extension: args.extension.clone(),
         objects: args.objects.clone(),
         discard_uncommitted: args.discard_uncommitted,
+        force_way_out: ForceWayOut::PullForce,
     })
 }
 
@@ -4318,15 +4393,15 @@ mod tests {
         append_interruptions, build_load_envelope, command_name, execute_command,
         map_artifacts_request_with_config, map_build_request, map_designer_config_request,
         map_dump_request, map_extensions_request, map_launch_request, map_load_request,
-        map_syntax_request, map_test_request, workspace_refusal_phase,
+        map_syntax_request, map_test_request, workspace_refusal_phase, CommandLineTarget,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
         DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs, InfobaseCommand,
         InfobaseConfigurationArgs, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SourceSetArg, SyntaxArgs,
-        SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
-        TestYaxunitArgs,
+        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, PreviousDumpMode, SourceSetArg,
+        SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope,
+        TestVaArgs, TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
@@ -4607,7 +4682,7 @@ mod tests {
             map_dump_request(
                 &DumpArgs {
                     discard_uncommitted: false,
-                    mode: "incremental".to_owned(),
+                    mode: Some(PreviousDumpMode::Incremental),
                     source_set: SourceSetArg::named("main"),
                     extension: Some("Ext".to_owned()),
                     objects: vec!["Catalog.Item".to_owned()],
@@ -4616,13 +4691,13 @@ mod tests {
             )
             .expect("request")
             .mode,
-            DumpModeRequest::Incremental
+            DumpModeRequest::Partial
         );
         assert_eq!(
             map_dump_request(
                 &DumpArgs {
                     discard_uncommitted: false,
-                    mode: "incremental".to_owned(),
+                    mode: None,
                     source_set: SourceSetArg::named("main"),
                     extension: Some("Ext".to_owned()),
                     objects: vec!["Catalog.Item".to_owned()],
@@ -4797,16 +4872,13 @@ mod tests {
 
     #[test]
     fn rejects_invalid_mode_mapping() {
-        let dump_error = map_dump_request(
-            &DumpArgs {
-                discard_uncommitted: false,
-                mode: "garbage".to_owned(),
-                source_set: SourceSetArg::default(),
-                extension: None,
-                objects: vec![],
-            },
-            false,
-        )
+        // Значения прежнего `pull --mode` типизированы: чужое отвергает разбор.
+        let dump_error = <crate::cli::args::Cli as clap::Parser>::try_parse_from([
+            "v8-runner",
+            "pull",
+            "--mode",
+            "garbage",
+        ])
         .expect_err("dump mode should be rejected");
         let launch_error = map_launch_request(
             &LaunchArgs {
@@ -4823,8 +4895,98 @@ mod tests {
         )
         .expect_err("launch mode should be rejected");
 
-        assert_eq!(dump_error.kind(), UseCaseErrorKind::Validation);
+        assert_eq!(dump_error.kind(), clap::error::ErrorKind::InvalidValue);
         assert_eq!(launch_error.kind(), UseCaseErrorKind::Validation);
+    }
+
+    /// Прежний `--mode incremental|partial` без `--force` значит то же, что без ключа;
+    /// `--mode full` отказывает и говорит, что делает `pull --force`; режим, который спорит
+    /// с `--force`, отказывает и называет выбор — молчаливой эскалации до замены нет.
+    #[test]
+    fn a_previous_pull_mode_means_no_key_and_full_names_force() {
+        let args = |mode: Option<PreviousDumpMode>, objects: &[&str], force: bool| DumpArgs {
+            mode,
+            source_set: SourceSetArg::named("main"),
+            extension: None,
+            objects: objects.iter().map(|object| (*object).to_owned()).collect(),
+            discard_uncommitted: force,
+        };
+        let request = |args: &DumpArgs| map_dump_request(args, false).expect("request");
+        let refusal = |args: &DumpArgs| {
+            let error = map_dump_request(args, false).expect_err("refused");
+            assert_eq!(error.kind(), UseCaseErrorKind::Validation, "{error}");
+            error.message().to_owned()
+        };
+
+        for objects in [&[][..], &["Catalog:Items"][..]] {
+            let without = request(&args(None, objects, false));
+            for previous in [PreviousDumpMode::Incremental, PreviousDumpMode::Partial] {
+                assert_eq!(
+                    request(&args(Some(previous), objects, false)),
+                    without,
+                    "--mode {previous:?}, objects {objects:?}"
+                );
+                let message = refusal(&args(Some(previous), objects, true));
+                assert!(
+                    message.contains(&format!(
+                        "`--mode {}` contradicts `--force`",
+                        previous.as_str()
+                    )),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("discards uncommitted changes"),
+                    "{message}"
+                );
+                // Рядом с `--object` совет снимает и его: иначе `--force` упёрся бы в отказ.
+                let drop = if objects.is_empty() {
+                    "drop `--mode` for a full replacement, `pull main --force`"
+                } else {
+                    "drop `--mode` and every `--object` for a full replacement, `pull main --force`"
+                };
+                assert!(message.contains(drop), "{message}");
+            }
+            // Рядом с `--object` совет снимает и его: иначе `--force` упёрся бы в отказ.
+            let drop = if objects.is_empty() {
+                "drop `--mode full`"
+            } else {
+                "drop `--mode full` and every `--object`"
+            };
+            for force in [false, true] {
+                let message = refusal(&args(Some(PreviousDumpMode::Full), objects, force));
+                // Второй `--force` разбор ключей не примет: стоящий ключ остаётся.
+                let force_key = if force { "keep" } else { "add" };
+                assert!(
+                    message.contains(&format!(
+                        "`--mode full` is gone: {drop} and {force_key} `--force` in the same command, which then reads `pull main --force`"
+                    )),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(
+                        "full dump that replaces the source tree of that set and discards uncommitted changes"
+                    ),
+                    "{message}"
+                );
+            }
+        }
+        let message = refusal(&args(None, &["Catalog:Items"], true));
+        assert!(
+            message.contains("`--object` contradicts `--force`"),
+            "{message}"
+        );
+
+        assert_eq!(
+            request(&args(None, &[], false)).mode,
+            DumpModeRequest::Incremental
+        );
+        assert_eq!(
+            request(&args(None, &["Catalog:Items"], false)).mode,
+            DumpModeRequest::Partial
+        );
+        let replace = request(&args(None, &[], true));
+        assert_eq!(replace.mode, DumpModeRequest::Full);
+        assert!(replace.discard_uncommitted);
     }
 
     #[test]
@@ -5012,7 +5174,7 @@ mod tests {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             false,
             false,
@@ -5046,7 +5208,7 @@ mod tests {
                     scope: TestScope::All,
                 }),
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             false,
             false,
@@ -5108,8 +5270,15 @@ mod tests {
         ];
 
         for command in commands {
-            let error = execute_command(&config, &command, None, &presenter, false, false)
-                .expect_err("busy workspace");
+            let error = execute_command(
+                &config,
+                &command,
+                &CommandLineTarget::default(),
+                &presenter,
+                false,
+                false,
+            )
+            .expect_err("busy workspace");
             assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
             assert!(error.to_string().contains("workspace"));
             assert!(error.to_string().contains("already"));
@@ -5139,7 +5308,7 @@ mod tests {
                 mcp_port: None,
                 wait_ready: false,
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             false,
             false,
@@ -5174,7 +5343,7 @@ mod tests {
                     },
                 }),
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             false,
             false,
@@ -5206,7 +5375,7 @@ mod tests {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
             }),
-            None,
+            &CommandLineTarget::default(),
             &presenter,
             true,
             false,

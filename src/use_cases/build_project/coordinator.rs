@@ -189,6 +189,7 @@ fn run_build_with(
         ) {
             Ok(plan) => plan,
             Err(error) => {
+                let error = change_detection_failure(&error, context);
                 let result = fail_from_source_set_index(
                     started,
                     steps,
@@ -196,10 +197,10 @@ fn run_build_with(
                     index,
                     source_set,
                     BuildMode::Skipped,
-                    error.to_string(),
+                    error.clone(),
                 );
                 return Err(BuildExecutionFailure::with_payload(
-                    AppError::Runtime(error.to_string()),
+                    AppError::Runtime(error),
                     result,
                 ));
             }
@@ -361,6 +362,7 @@ pub(super) fn run_build_ibcmd(
         ) {
             Ok(plan) => plan,
             Err(error) => {
+                let error = change_detection_failure(&error, context);
                 let result = fail_from_source_set_index(
                     started,
                     steps,
@@ -368,10 +370,10 @@ pub(super) fn run_build_ibcmd(
                     index,
                     source_set,
                     BuildMode::Skipped,
-                    error.to_string(),
+                    error.clone(),
                 );
                 return Err(BuildExecutionFailure::with_payload(
-                    AppError::Runtime(error.to_string()),
+                    AppError::Runtime(error),
                     result,
                 ));
             }
@@ -598,6 +600,7 @@ pub(super) fn run_build_edt(
         ) {
             Ok(plan) => plan,
             Err(error) => {
+                let error = change_detection_failure(&error, context);
                 let result = fail_from_source_set_index(
                     started,
                     steps,
@@ -605,10 +608,10 @@ pub(super) fn run_build_edt(
                     index,
                     source_set,
                     BuildMode::Skipped,
-                    error.to_string(),
+                    error.clone(),
                 );
                 return Err(BuildExecutionFailure::with_payload(
-                    AppError::Runtime(error.to_string()),
+                    AppError::Runtime(error),
                     result,
                 ));
             }
@@ -1030,6 +1033,7 @@ pub(super) fn run_build_edt(
         ) {
             Ok(plan) => plan,
             Err(error) => {
+                let error = change_detection_failure(&error, context);
                 let result = fail_from_source_set_index(
                     started,
                     steps,
@@ -1037,10 +1041,10 @@ pub(super) fn run_build_edt(
                     index,
                     source_set,
                     BuildMode::Skipped,
-                    error.to_string(),
+                    error.clone(),
                 );
                 return Err(BuildExecutionFailure::with_payload(
-                    AppError::Runtime(error.to_string()),
+                    AppError::Runtime(error),
                     result,
                 ));
             }

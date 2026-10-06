@@ -149,6 +149,27 @@ pub struct DumpRequest {
     /// Replace the target directory although it holds work version control cannot
     /// give back. Only a human can grant this; automated transports never do.
     pub discard_uncommitted: bool,
+    /// Whether a refusal to replace the directory may name `pull <SET> --force` as a way
+    /// out. No transport passes a consent key here: MCP has none, and the command line's
+    /// `--force` arrives as `discard_uncommitted`. The value says only whether the same
+    /// target has a full replacement on the command line that a caller may be sent to.
+    pub force_way_out: ForceWayOut,
+}
+
+/// Whether a replacement refusal may send the caller to `pull <SET> --force`.
+///
+/// Not a copy of `destruction_guard::WaysOut`: this is what a transport knows before the
+/// use case runs — whether its caller may be sent to a replacement at all — while the
+/// source set is not resolved yet. `WaysOut` is the way out the use case assembles for its
+/// own target: the resolved set for `pull`, and the `convert` variant, which has no `pull`
+/// request to carry this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceWayOut {
+    /// The caller is not to be sent there (`clone`): the only way out is to save the work.
+    Withheld,
+    /// `pull <SET> --force` with the run's global keys reaches the same target: a full dump
+    /// that replaces the directory of the set and discards the work.
+    PullForce,
 }
 
 /// Transport-neutral convert scope.
