@@ -144,7 +144,7 @@ impl ThrowawayInfobase {
         };
         if let Err(error) = created {
             // Убрать сразу: база, которую не создали, не нужна ни этому прогону, ни уборке.
-            base.close();
+            let _ = base.close();
             return Err(error);
         }
         Ok(base)
