@@ -23,7 +23,7 @@ use tracing::debug;
 
 use crate::config::model::AppConfig;
 use crate::domain::source_set::SourceSetContext;
-use crate::platform::dump_format::{read_recorded, written_by, RecordedFormat};
+use crate::platform::dump_format::{read_recorded, written_by, FormatVersion, RecordedFormat};
 use crate::platform::locator::PlatformVersion;
 use crate::support::error::AppError;
 use crate::support::fs::{
@@ -45,6 +45,16 @@ pub(crate) struct RunnerVersionFile {
     copy: PathBuf,
     identity_file: PathBuf,
     identity: String,
+}
+
+/// Что сверка оставит в каталоге набора.
+enum Restoration {
+    /// Файла в каталоге нет, и он не подкладывается.
+    Absent,
+    /// Файл каталога остаётся: он совпадает с копией или копии той же пары нет.
+    Kept(Fingerprint),
+    /// Подменённый файл уступает копии раннера.
+    FromCopy(Fingerprint),
 }
 
 impl RunnerVersionFile {
@@ -69,25 +79,44 @@ impl RunnerVersionFile {
     /// Перед работой от файла версий: подменённый файл в каталоге заменяется копией
     /// раннера. Возвращает отпечаток того, что лежит в каталоге после сверки.
     pub(crate) fn restore(&self) -> Result<Option<Fingerprint>, AppError> {
+        Ok(match self.restoration()? {
+            Restoration::Absent => None,
+            Restoration::Kept(present) => Some(present),
+            Restoration::FromCopy(copy) => {
+                copy_atomically(&self.copy, &self.in_directory)?;
+                debug!(
+                    source_set = self.source_set.as_str(),
+                    path = %self.in_directory.display(),
+                    "replaced a foreign version file with the runner's copy"
+                );
+                Some(copy)
+            }
+        })
+    }
+
+    /// Какой файл версий окажется в каталоге после [`Self::restore`], ничего не меняя:
+    /// файл каталога, копия раннера или никакой. Так превью видит то же, что выгрузка.
+    pub(crate) fn file_after_restore(&self) -> Result<Option<&Path>, AppError> {
+        Ok(match self.restoration()? {
+            Restoration::Absent => None,
+            Restoration::Kept(_) => Some(&self.in_directory),
+            Restoration::FromCopy(_) => Some(&self.copy),
+        })
+    }
+
+    /// Решение сверки: отсутствующий файл не подкладывается, свой остаётся, подменённый
+    /// уступает копии той же пары.
+    fn restoration(&self) -> Result<Restoration, AppError> {
         let Some(present) = fingerprint(&self.in_directory)? else {
-            return Ok(None);
+            return Ok(Restoration::Absent);
         };
         if !self.copy_is_ours()? {
-            return Ok(Some(present));
+            return Ok(Restoration::Kept(present));
         }
-        let Some(copy) = fingerprint(&self.copy)? else {
-            return Ok(Some(present));
-        };
-        if copy == present {
-            return Ok(Some(present));
-        }
-        copy_atomically(&self.copy, &self.in_directory)?;
-        debug!(
-            source_set = self.source_set.as_str(),
-            path = %self.in_directory.display(),
-            "replaced a foreign version file with the runner's copy"
-        );
-        Ok(Some(copy))
+        Ok(match fingerprint(&self.copy)? {
+            Some(copy) if copy != present => Restoration::FromCopy(copy),
+            Some(_) | None => Restoration::Kept(present),
+        })
     }
 
     /// После удачной выгрузки: копией становится то, что записала платформа.
@@ -156,14 +185,31 @@ impl RunnerVersionFile {
 
 /// Перед загрузкой: версия формата файла версий не новее той, что пишет платформа.
 ///
-/// Версия читается из файла в каталоге набора, а если его там нет — из копии раннера
-/// той же пары. Новее — отказ до запуска платформы, называющий обе версии. Файла нет ни
-/// там, ни там — сверки нет, и возвращается примечание о пропуске для ответа. Версию,
-/// которую пишет платформа, раннер знает не для всех платформ; где не знает, не сверяет.
+/// Версию, которую пишет платформа, раннер берёт из таблицы замеров
+/// ([`written_by`]); для платформы вне таблицы сверки нет и примечания тоже — пока таблица
+/// пуста (#403), сверки нет ни у одной платформы.
 pub(crate) fn check_load_format(
     work_path: &Path,
     context: &SourceSetContext,
     platform: Option<&PlatformVersion>,
+) -> Result<Option<String>, AppError> {
+    let Some((platform, written)) =
+        platform.and_then(|platform| written_by(platform).map(|written| (platform, written)))
+    else {
+        return Ok(None);
+    };
+    check_load_format_against(work_path, context, platform, written)
+}
+
+/// Сверка с известной версией формата платформы. Версия читается из файла в каталоге
+/// набора, а если его там нет — из копии раннера той же пары. Новее — отказ до запуска
+/// платформы, называющий обе версии. Файла нет ни там, ни там или версия в нём не
+/// распознана — сверки нет, и возвращается примечание о пропуске для ответа.
+fn check_load_format_against(
+    work_path: &Path,
+    context: &SourceSetContext,
+    platform: &PlatformVersion,
+    written: FormatVersion,
 ) -> Result<Option<String>, AppError> {
     let in_directory = context.path().join(VERSION_FILE_NAME);
     let mut source = in_directory.clone();
@@ -183,13 +229,13 @@ pub(crate) fn check_load_format(
                 context.path().display()
             )));
         }
-        RecordedFormat::Unrecognized => return Ok(None),
+        RecordedFormat::Unrecognized => {
+            return Ok(Some(format!(
+                "the format version was not checked before the load: the format version of '{}' is not recognized",
+                source.display()
+            )));
+        }
         RecordedFormat::Version(found) => found,
-    };
-    let Some((platform, written)) =
-        platform.and_then(|platform| written_by(platform).map(|written| (platform, written)))
-    else {
-        return Ok(None);
     };
     if found > written {
         return Err(AppError::Validation(format!(
@@ -381,6 +427,8 @@ mod tests {
         assert!(!second.copy_is_ours().expect("identity"));
     }
 
+    use crate::platform::dump_format::FormatVersion;
+
     fn platform_8_3_27() -> crate::platform::locator::PlatformVersion {
         crate::platform::locator::PlatformVersion {
             major: 8,
@@ -394,8 +442,10 @@ mod tests {
         format!("<ConfigDumpInfo format=\"Hierarchical\" version=\"{version}\"/>")
     }
 
-    /// Нет файла в каталоге — версия формата берётся из копии раннера той же пары; формат
-    /// новее платформы — отказ с обеими версиями, не новее — загрузка идёт.
+    /// Механизм сверки на версии формата, переданной тестом: нет файла в каталоге — версия
+    /// берётся из копии раннера той же пары; формат новее платформы — отказ с обеими
+    /// версиями, не новее — загрузка идёт; нет файла или версия не распознана — пропуск
+    /// назван. Таблица замеров пуста (#403), и без неё сверки нет вовсе.
     #[test]
     fn the_load_format_is_read_from_the_runner_copy_when_the_directory_has_none() {
         let root = tempfile::tempdir().expect("root");
@@ -404,7 +454,9 @@ mod tests {
             .with_infobase_memory("origin", "base-a".to_owned());
         let work = root.path().join("work");
         let platform = platform_8_3_27();
-        let check = || super::check_load_format(&work, &context, Some(&platform));
+        let check = || {
+            super::check_load_format_against(&work, &context, &platform, FormatVersion::new(2, 20))
+        };
 
         let skipped = check().expect("no file").expect("the skip is named");
         assert!(skipped.contains("not checked"), "{skipped}");
@@ -418,13 +470,44 @@ mod tests {
             refusal.contains("2.20 that platform 8.3.27.2074 writes"),
             "{refusal}"
         );
+        assert_eq!(
+            super::check_load_format(&work, &context, Some(&platform))
+                .expect("no measured format, no check"),
+            None
+        );
 
         fs::write(&file.in_directory, with_format("2.17")).expect("older");
         assert_eq!(check().expect("an older format loads"), None);
+        fs::write(&file.in_directory, "<ConfigDumpInfo/>").expect("no version");
+        let unrecognized = check().expect("unrecognized").expect("the skip is named");
+        assert!(unrecognized.contains("not recognized"), "{unrecognized}");
         assert_eq!(
             super::check_load_format(&work, &context, None).expect("unknown platform"),
             None
         );
+    }
+
+    /// Превью видит тот файл, который оставит сверка: подменённый уступает копии,
+    /// отсутствующий не подкладывается, и ничего при этом не пишется.
+    #[test]
+    fn the_file_after_restore_is_named_without_writing() {
+        let root = tempfile::tempdir().expect("root");
+        let file = version_file(root.path(), "base-a");
+        assert_eq!(file.file_after_restore().expect("absent"), None);
+        fs::write(&file.in_directory, "ours").expect("platform wrote");
+        assert_eq!(file.record(), None);
+        assert_eq!(
+            file.file_after_restore().expect("kept"),
+            Some(file.in_directory.as_path())
+        );
+        fs::write(&file.in_directory, "foreign").expect("replaced");
+        assert_eq!(
+            file.file_after_restore().expect("from copy"),
+            Some(file.copy.as_path())
+        );
+        assert_eq!(fs::read(&file.in_directory).expect("untouched"), b"foreign");
+        fs::remove_file(&file.in_directory).expect("lost");
+        assert_eq!(file.file_after_restore().expect("not put back"), None);
     }
 
     #[test]

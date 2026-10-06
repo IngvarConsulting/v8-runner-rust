@@ -181,10 +181,27 @@ fn infobase_memory(infobase: &str, identity: String, subject: MemorySubject) -> 
     }
 }
 
+/// Корень памяти о базах: `workPath/infobases`. Всё под ним — состояние раннера.
+pub fn infobases_dir(work_path: &Path) -> PathBuf {
+    work_path.join("infobases")
+}
+
 /// Память об одной базе: `workPath/infobases/<ключ>`, где ключ — имя объявленной базы или
 /// [`connection_memory_key`] базы, названной строкой соединения.
 pub fn infobase_memory_dir(work_path: &Path, infobase: &str) -> PathBuf {
-    work_path.join("infobases").join(infobase)
+    infobases_dir(work_path).join(infobase)
+}
+
+/// Снимок Конфигуратора набора формата EDT. Он описывает обмен с базой и лежит под её
+/// памятью: `workPath/infobases/<ключ>/designer/<набор>`. У набора без памяти базы —
+/// внешних обработок и отчётов и базы с нераспознанным адресом — `workPath/designer/<набор>`.
+pub fn designer_copy_dir(work_path: &Path, infobase: Option<&str>, source_set: &str) -> PathBuf {
+    match infobase {
+        Some(infobase) => infobase_memory_dir(work_path, infobase),
+        None => work_path.to_path_buf(),
+    }
+    .join("designer")
+    .join(source_set)
 }
 
 /// Ключ каталога памяти базы, названной строкой соединения: `@` и начало SHA-256
@@ -195,12 +212,16 @@ pub fn infobase_memory_dir(work_path: &Path, infobase: &str) -> PathBuf {
 /// рядом с памятью лежит полный адрес, и чужая память не используется.
 pub fn connection_memory_key(address: &str) -> String {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    const KEY_BYTES: usize = 16;
     let digest = Sha256::digest(address.as_bytes());
-    let hex: String = digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("@{hex}")
+    let mut key = String::with_capacity(1 + KEY_BYTES * 2);
+    key.push('@');
+    for byte in &digest[..KEY_BYTES] {
+        // Запись в `String` не отказывает.
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
 }
 
 #[cfg(test)]

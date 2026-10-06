@@ -10,9 +10,10 @@ use crate::domain::partial_dump_selector::{
     PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
 };
 use crate::platform::designer::DesignerDsl;
+use crate::platform::dump_format::{read_recorded, written_by, FormatVersion, RecordedFormat};
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
-use crate::platform::locator::UtilityType;
+use crate::platform::locator::{PlatformVersion, UtilityType};
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
@@ -106,7 +107,8 @@ impl ResolvedDumpTarget {
     /// Согласие для публикации каталога платформы.
     ///
     /// У формата Designer это то же дерево, что видит человек. У EDT — служебный
-    /// снимок в `workPath/designer/<имя>`, который раннер сам и создаёт: спрашивать
+    /// снимок Конфигуратора (под памятью базы или в `workPath/designer/<имя>`, см.
+    /// [`crate::domain::source_set::designer_copy_dir`]), который раннер сам и создаёт: спрашивать
     /// о нём систему контроля версий незачем, а спросив, можно получить отказ на
     /// собственном кеше.
     fn platform_consent(&self) -> &DestructionConsent {
@@ -209,30 +211,132 @@ fn validate_full_dump_work_path(
     Ok(())
 }
 
-fn run_incremental_dump_designer(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    resolved: &ResolvedDumpTarget,
-    binary: &Path,
-    runner: &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
-    run_dump_over_directory_designer(
-        context,
-        config,
-        resolved,
-        binary,
-        runner,
-        OverDirectory::ByVersionFile,
-    )
-}
-
 /// Как выгрузка ложится прямо в каталог набора.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OverDirectory {
     /// По изменившемуся от файла версий в каталоге.
     ByVersionFile,
-    /// Целиком поверх каталога: файла версий нет или он чужой, и выгрузка его создаёт.
-    Whole,
+    /// Целиком поверх каталога: файл версий не годится, и выгрузка пишет его заново.
+    Whole(WholeReason),
+}
+
+/// Почему выгрузка по изменившемуся не может опереться на файл версий в каталоге.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum WholeReason {
+    /// Файла нет.
+    Missing,
+    /// Версии формата в корне файла раннер не нашёл: такой файл чужой.
+    Unrecognized,
+    /// Версия формата не та, что пишет выбранная платформа по таблице замеров.
+    Foreign {
+        found: FormatVersion,
+        platform: PlatformVersion,
+        written: FormatVersion,
+    },
+}
+
+impl WholeReason {
+    /// Причина для ответа: что не так с файлом версий в каталоге `dir`.
+    fn describe(&self, dir: &Path) -> String {
+        let path = dir.join(VERSION_FILE_NAME);
+        match self {
+            Self::Missing => format!("no version file {VERSION_FILE_NAME} in '{}'", dir.display()),
+            Self::Unrecognized => {
+                format!(
+                    "the format version of '{}' is not recognized",
+                    path.display()
+                )
+            }
+            Self::Foreign {
+                found,
+                platform,
+                written,
+            } => format!(
+                "'{}' is in format {found}, and platform {platform} writes {written}",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// План выгрузки после сверки файла версий: что запрошено и как ляжет в каталог.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DumpPlan {
+    /// Полная выгрузка через ступенчатую публикацию.
+    Full,
+    /// Выборка объектов.
+    Partial,
+    /// Выгрузка по изменившемуся прямо в каталог набора.
+    OverDirectory(OverDirectory),
+}
+
+impl DumpPlan {
+    /// Режим, который выгрузка выполнит и назовёт ответ: без годного файла версий
+    /// выгрузка по изменившемуся полная.
+    pub(super) fn mode(&self) -> DumpMode {
+        match self {
+            Self::Full | Self::OverDirectory(OverDirectory::Whole(_)) => DumpMode::Full,
+            Self::Partial => DumpMode::Partial,
+            Self::OverDirectory(OverDirectory::ByVersionFile) => DumpMode::Incremental,
+        }
+    }
+
+    /// Причина, по которой выгрузка по изменившемуся стала полной, если стала.
+    pub(super) fn whole_reason(&self) -> Option<&WholeReason> {
+        match self {
+            Self::OverDirectory(OverDirectory::Whole(reason)) => Some(reason),
+            Self::Full | Self::Partial | Self::OverDirectory(OverDirectory::ByVersionFile) => None,
+        }
+    }
+}
+
+/// План выгрузки до запуска платформы. Выгрузка по изменившемуся держится на файле версий
+/// `version_file` (`None` — его нет): нет его, версия формата не распознана или по таблице
+/// замеров не та, что пишет платформа, — выгрузка идёт полной поверх каталога.
+pub(super) fn plan_dump(
+    mode: &DumpMode,
+    version_file: Option<&Path>,
+    platform: Option<&PlatformVersion>,
+) -> Result<DumpPlan, AppError> {
+    Ok(match mode {
+        DumpMode::Full => DumpPlan::Full,
+        DumpMode::Partial => DumpPlan::Partial,
+        DumpMode::Incremental => {
+            let recorded = match version_file {
+                None => RecordedFormat::Missing,
+                Some(path) => read_recorded(path).map_err(|error| {
+                    AppError::Runtime(format!("failed to read '{}': {error}", path.display()))
+                })?,
+            };
+            let written = platform
+                .and_then(|platform| written_by(platform).map(|written| (platform, written)));
+            DumpPlan::OverDirectory(match whole_reason(recorded, written) {
+                None => OverDirectory::ByVersionFile,
+                Some(reason) => OverDirectory::Whole(reason),
+            })
+        }
+    })
+}
+
+/// Годится ли файл версий для выгрузки по изменившемуся. Версию, которую пишет платформа,
+/// раннер знает только по таблице замеров; где не знает, о чужой версии не судит.
+fn whole_reason(
+    recorded: RecordedFormat,
+    written: Option<(&PlatformVersion, FormatVersion)>,
+) -> Option<WholeReason> {
+    match recorded {
+        RecordedFormat::Missing => Some(WholeReason::Missing),
+        RecordedFormat::Unrecognized => Some(WholeReason::Unrecognized),
+        RecordedFormat::Version(found) => {
+            written
+                .filter(|(_, written)| *written != found)
+                .map(|(platform, written)| WholeReason::Foreign {
+                    found,
+                    platform: platform.clone(),
+                    written,
+                })
+        }
+    }
 }
 
 /// Выгрузка Конфигуратором прямо в каталог: с файлом версий — по изменившемуся (`-update`),
@@ -244,7 +348,7 @@ fn run_dump_over_directory_designer(
     resolved: &ResolvedDumpTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-    how: OverDirectory,
+    how: &OverDirectory,
 ) -> Result<(PlatformCommandResult, Option<String>), AppError> {
     debug!(
         source_set = resolved.source_set_name.as_str(),
@@ -257,7 +361,7 @@ fn run_dump_over_directory_designer(
 
     let (stage, label) = match how {
         OverDirectory::ByVersionFile => ("dump: incremental", "incremental"),
-        OverDirectory::Whole => ("dump: full", "full"),
+        OverDirectory::Whole(_) => ("dump: full", "full"),
     };
     log_live_stage(stage, "[Конфигуратор] exporting configuration files");
     let dsl = build_designer_dsl(
@@ -273,7 +377,7 @@ fn run_dump_over_directory_designer(
             &resolved.platform_target_path,
             resolved.extension.as_deref(),
         ),
-        OverDirectory::Whole => dsl.dump_config_to_files(
+        OverDirectory::Whole(_) => dsl.dump_config_to_files(
             &resolved.platform_target_path,
             resolved.extension.as_deref(),
         ),
@@ -325,32 +429,16 @@ fn run_full_dump_designer(
     Ok((dump_result, warning))
 }
 
-fn run_incremental_dump_ibcmd(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    resolved: &ResolvedDumpTarget,
-    binary: &Path,
-    runner: &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
-    run_dump_over_directory_ibcmd(
-        context,
-        config,
-        resolved,
-        binary,
-        runner,
-        OverDirectory::ByVersionFile,
-    )
-}
-
 /// Выгрузка `ibcmd` прямо в каталог: с файлом версий — `--sync`, без него — полная
-/// поверх каталога без `--force`.
+/// поверх каталога без `--force`. Как `config export` без `--sync` и `--force` ведёт себя в
+/// непустом каталоге и пишет ли файл версий, не замерено (#403).
 fn run_dump_over_directory_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-    how: OverDirectory,
+    how: &OverDirectory,
 ) -> Result<(PlatformCommandResult, Option<String>), AppError> {
     debug!(
         source_set = resolved.source_set_name.as_str(),
@@ -370,7 +458,7 @@ fn run_dump_over_directory_ibcmd(
                 resolved.extension.as_deref(),
             )
         }
-        OverDirectory::Whole => {
+        OverDirectory::Whole(_) => {
             log_live_stage("dump: full", "[ibcmd] exporting configuration files");
             dsl.config_export_over(
                 &resolved.platform_target_path,
@@ -467,7 +555,14 @@ fn run_partial_dump_ibcmd(
     _objects: &[PartialDumpSelector],
 ) -> Result<(PlatformCommandResult, Option<String>), AppError> {
     let warning = ibcmd_partial_warning(resolved);
-    match run_incremental_dump_ibcmd(context, config, resolved, binary, runner) {
+    match run_dump_over_directory_ibcmd(
+        context,
+        config,
+        resolved,
+        binary,
+        runner,
+        &OverDirectory::ByVersionFile,
+    ) {
         Ok((dump_result, _)) => Ok((dump_result, Some(warning))),
         Err(error) => Err(decorate_ibcmd_partial_error(error, &warning)),
     }
@@ -498,8 +593,14 @@ fn run_incremental_dump_edt_designer(
         context,
         "before starting EDT follow-up dump after bootstrap publication",
     )?;
-    let (dump_result, dump_message) =
-        run_incremental_dump_designer(context, config, resolved, binary, runner)?;
+    let (dump_result, dump_message) = run_dump_over_directory_designer(
+        context,
+        config,
+        resolved,
+        binary,
+        runner,
+        &OverDirectory::ByVersionFile,
+    )?;
     finalize_edt_dump(
         context,
         config,
@@ -589,8 +690,14 @@ fn run_incremental_dump_edt_ibcmd(
         context,
         "before starting EDT follow-up dump after bootstrap publication",
     )?;
-    let (dump_result, dump_message) =
-        run_incremental_dump_ibcmd(context, config, resolved, binary, runner)?;
+    let (dump_result, dump_message) = run_dump_over_directory_ibcmd(
+        context,
+        config,
+        resolved,
+        binary,
+        runner,
+        &OverDirectory::ByVersionFile,
+    )?;
     finalize_edt_dump(
         context,
         config,
@@ -2370,57 +2477,64 @@ exit 0"#,
         assert!(calls.contains(base.join("main").display().to_string().as_str()));
     }
 
-    /// Чужая версия формата файла версий делает выгрузку полной: для платформы, чью версию
-    /// формата раннер знает. Нераспознанная версия — тоже. Где версия платформы раннеру не
-    /// известна, о чужой версии он не судит.
+    /// Файл без распознанной версии формата чужой, и выгрузка по изменившемуся становится
+    /// полной. Прочитанную версию чужой делает только таблица замеров, а она пуста (#403):
+    /// без неё никакая версия чужой не считается. Механизм сверки — на версии из теста.
     #[test]
-    fn a_foreign_format_version_turns_the_dump_full() {
-        use crate::platform::locator::{
-            PlatformVersion, ResolutionSource, UtilityLocation, UtilityType, UtilityVersion,
+    fn an_unrecognized_format_turns_the_dump_full_and_a_version_is_foreign_only_by_measurement() {
+        use super::{
+            plan_dump, whole_reason, DumpPlan, FormatVersion, OverDirectory, RecordedFormat,
+            WholeReason, VERSION_FILE_NAME,
         };
         let dir = tempdir().expect("tempdir");
-        let location = |version| UtilityLocation {
-            utility: UtilityType::V8,
-            path: dir.path().join("1cv8"),
-            version,
-            source: ResolutionSource::Explicit,
-            installation_root: dir.path().to_path_buf(),
-        };
-        let known = location(Some(UtilityVersion::Platform(PlatformVersion {
+        let platform = crate::platform::locator::PlatformVersion {
             major: 8,
             minor: 3,
             patch: 27,
             build: 2074,
-        })));
-        let file = dir.path().join("ConfigDumpInfo.xml");
-        let write = |version: &str| {
+        };
+        let file = dir.path().join(VERSION_FILE_NAME);
+        let plan = |file: Option<&Path>| {
+            plan_dump(&DumpMode::Incremental, file, Some(&platform)).expect("plan")
+        };
+        let whole = |reason| DumpPlan::OverDirectory(OverDirectory::Whole(reason));
+
+        assert_eq!(plan(None), whole(WholeReason::Missing));
+        assert_eq!(plan(Some(&file)), whole(WholeReason::Missing));
+        fs::write(&file, "<ConfigDumpInfo format=\"Hierarchical\">").expect("no version");
+        assert_eq!(plan(Some(&file)), whole(WholeReason::Unrecognized));
+        assert_eq!(plan(Some(&file)).mode(), DumpMode::Full);
+        for version in ["2.17", "2.20", "9.99"] {
             fs::write(
                 &file,
-                format!("<?xml version=\"1.0\"?>\n<ConfigDumpInfo format=\"Hierarchical\" version=\"{version}\">"),
+                format!("<ConfigDumpInfo format=\"Hierarchical\" version=\"{version}\">"),
             )
-            .expect("version file")
-        };
+            .expect("version file");
+            assert_eq!(
+                plan(Some(&file)),
+                DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
+                "{version}"
+            );
+        }
+        assert_eq!(
+            plan_dump(&DumpMode::Full, None, None).expect("full"),
+            DumpPlan::Full
+        );
 
-        write("2.20");
-        assert_eq!(
-            super::coordinator::version_file_verdict(dir.path(), Some(&known)).expect("verdict"),
-            None
-        );
-        write("2.17");
-        let reason = super::coordinator::version_file_verdict(dir.path(), Some(&known))
-            .expect("verdict")
+        let measured = Some((&platform, FormatVersion::new(2, 20)));
+        let reason = whole_reason(RecordedFormat::Version(FormatVersion::new(2, 17)), measured)
             .expect("a foreign format");
-        assert!(reason.contains("format 2.17"), "{reason}");
-        assert!(reason.contains("8.3.27.2074 writes 2.20"), "{reason}");
+        let described = reason.describe(dir.path());
+        assert!(described.contains("format 2.17"), "{described}");
+        assert!(described.contains("8.3.27.2074 writes 2.20"), "{described}");
         assert_eq!(
-            super::coordinator::version_file_verdict(dir.path(), Some(&location(None)))
-                .expect("verdict"),
+            whole_reason(RecordedFormat::Version(FormatVersion::new(2, 20)), measured),
             None
         );
-        fs::write(&file, "<ConfigDumpInfo>").expect("no version");
-        assert!(super::coordinator::version_file_verdict(dir.path(), None)
-            .expect("verdict")
-            .is_some_and(|reason| reason.contains("not recognized")));
+        assert_eq!(
+            whole_reason(RecordedFormat::Version(FormatVersion::new(2, 17)), None),
+            None
+        );
     }
 
     #[test]
@@ -2433,7 +2547,7 @@ exit 0"#,
         create_source_tree(&base);
         fs::write(
             base.join("ext/ConfigDumpInfo.xml"),
-            "<ConfigDumpInfo version=\"2.20\"/>",
+            "<ConfigDumpInfo version=\"2.17\"/>",
         )
         .expect("version file");
         write_dump_script(&script, &calls, None, 0);
@@ -3032,7 +3146,7 @@ exit 0"#,
         );
         fs::write(
             base.join("main/ConfigDumpInfo.xml"),
-            "<ConfigDumpInfo version=\"2.20\"/>",
+            "<ConfigDumpInfo version=\"2.17\"/>",
         )
         .expect("version file");
         let args = DumpArgs {

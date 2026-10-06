@@ -18,15 +18,13 @@ use crate::use_cases::agent_session::{
     Exchange, GenerationLedger, Recorded,
 };
 
-/// Выгрузка одного режима через одну сессию. Выгрузка по изменившемуся без файла версий
-/// (`OverDirectory::Whole`) идёт полной поверх каталога, без `--update`.
-#[allow(clippy::too_many_arguments)]
+/// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
+/// версий (`OverDirectory::Whole`) идёт полной поверх каталога, без `--update`.
 pub(super) fn run_dump_agent(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
-    mode: &DumpMode,
-    over_directory: OverDirectory,
+    plan: &DumpPlan,
     objects: Option<&[PartialDumpSelector]>,
     location: Option<&UtilityLocation>,
     utilities: &mut PlatformUtilities,
@@ -43,16 +41,7 @@ pub(super) fn run_dump_agent(
         transcript.clone(),
         &wait,
     )?;
-    let outcome = dump_through(
-        context,
-        config,
-        resolved,
-        mode,
-        over_directory,
-        objects,
-        &mut handle,
-        &wait,
-    );
+    let outcome = dump_through(context, config, resolved, plan, objects, &mut handle, &wait);
     handle.finish(&wait);
     let (reply_transcript, message, up_to_date) = outcome?;
 
@@ -73,13 +62,11 @@ pub(super) fn run_dump_agent(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn dump_through(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
-    mode: &DumpMode,
-    over_directory: OverDirectory,
+    plan: &DumpPlan,
     objects: Option<&[PartialDumpSelector]>,
     handle: &mut AgentHandle,
     wait: &WaitPolicy,
@@ -102,10 +89,9 @@ fn dump_through(
         )),
         Recorded::Nothing | Recorded::Ours(_) => None,
     };
-    if matches!(mode, DumpMode::Incremental)
-        && over_directory == OverDirectory::ByVersionFile
-        && objects.is_none()
-    {
+    // Пропуск по поколению — только у выгрузки по изменившемуся от годного файла версий:
+    // полная поверх каталога его пишет, и каталог без него не годится как «уже выгружено».
+    if *plan == DumpPlan::OverDirectory(OverDirectory::ByVersionFile) && objects.is_none() {
         if let Recorded::Ours(record) = &recorded {
             if record.token == generation {
                 return Ok((
@@ -121,17 +107,13 @@ fn dump_through(
     }
 
     let run = run_id();
-    let update = match over_directory {
-        OverDirectory::ByVersionFile => " --update",
-        OverDirectory::Whole => "",
+    let stage = match plan.mode() {
+        DumpMode::Full => "dump: full",
+        DumpMode::Incremental => "dump: incremental",
+        DumpMode::Partial => "dump: partial",
     };
-    let stage = match (mode, over_directory) {
-        (DumpMode::Full, _) | (DumpMode::Incremental, OverDirectory::Whole) => "dump: full",
-        (DumpMode::Incremental, OverDirectory::ByVersionFile) => "dump: incremental",
-        (DumpMode::Partial, _) => "dump: partial",
-    };
-    let (transcript, cleanup) = match mode {
-        DumpMode::Full => {
+    let (transcript, cleanup) = match plan {
+        DumpPlan::Full => {
             let out_relative = format!("dump/{run}");
             make_output_dir(handle, &exchange, &out_relative)?;
             let command = with_extension(
@@ -157,7 +139,11 @@ fn dump_through(
             let _ = std::fs::remove_dir(produced.parent().unwrap_or(&produced));
             (transcript, cleanup?)
         }
-        DumpMode::Incremental => {
+        DumpPlan::OverDirectory(how) => {
+            let update = match how {
+                OverDirectory::ByVersionFile => " --update",
+                OverDirectory::Whole(_) => "",
+            };
             ensure_dir(&resolved.platform_target_path).map_err(|error| {
                 AppError::Runtime(format!("failed to create target dir: {error}"))
             })?;
@@ -218,7 +204,7 @@ fn dump_through(
                 }
             }
         }
-        DumpMode::Partial => {
+        DumpPlan::Partial => {
             let objects = objects.ok_or_else(|| {
                 AppError::Runtime(
                     "partial dump objects were not validated before execution".to_owned(),

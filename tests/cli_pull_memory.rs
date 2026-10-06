@@ -613,11 +613,11 @@ if [ -n "$target" ]; then
   mkdir -p "$target"
   if [ -n "$update" ]; then cat "$target/ConfigDumpInfo.xml" >> '{seen}'; fi
   printf '<Configuration/>\n' > "$target/Configuration.xml"
-  printf '<ConfigDumpInfo version="2.20" dump="%s"/>\n' "$n" > "$target/ConfigDumpInfo.xml"
+  printf '<ConfigDumpInfo version="2.17" dump="%s"/>\n' "$n" > "$target/ConfigDumpInfo.xml"
 fi
 if [ -n "$load" ] && [ -n "$writes" ]; then
   cat "$load/ConfigDumpInfo.xml" >> '{seen}'
-  printf '<ConfigDumpInfo version="2.20" load="%s"/>\n' "$n" > "$load/ConfigDumpInfo.xml"
+  printf '<ConfigDumpInfo version="2.17" load="%s"/>\n' "$n" > "$load/ConfigDumpInfo.xml"
 fi
 if [ -f '{fail}' ]; then exit 1; fi
 exit 0"#,
@@ -898,62 +898,4 @@ fn a_source_edit_keeps_the_pull_incremental() {
     let last = calls.lines().next_back().expect("a dump ran");
     assert!(last.contains("/DumpConfigToFiles"), "{last}");
     assert!(last.contains("-update"), "{last}");
-}
-
-/// Проект, чья платформа лежит в каталоге установки `8.3.27.2074`: версию, которую она
-/// пишет, раннер знает.
-fn project_on_a_known_platform(provider: &str) -> Project {
-    let mut project = project(provider, false);
-    let root = project.config.parent().expect("root").to_path_buf();
-    let name = project.binary.file_name().expect("binary name").to_owned();
-    let versioned = root.join("8.3.27.2074").join(name);
-    fs::create_dir_all(versioned.parent().expect("installation")).expect("installation");
-    write_shell_script(&versioned, &dumping_platform(&project.calls));
-    let config = read(&project.config).replace(
-        &format!("path: '{}'", project.binary.display()),
-        &format!("path: '{}'", versioned.display()),
-    );
-    fs::write(&project.config, config).expect("config");
-    project.binary = versioned;
-    project
-}
-
-/// Загрузка из формата новее того, что пишет платформа, отказывает до её запуска и
-/// называет обе версии; без файла версий сверки нет, и ответ называет пропуск.
-#[test]
-fn a_load_from_a_newer_format_is_refused_before_the_platform_starts() {
-    for provider in ["designer", "ibcmd"] {
-        let unchecked = project_on_a_known_platform(provider);
-        let response = succeeded(run(&unchecked, &["push"]));
-        let message = response["data"]["steps"][0]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        assert!(
-            message.contains("format version was not checked"),
-            "{provider}: {response}"
-        );
-
-        let newer = project_on_a_known_platform(provider);
-        fs::write(
-            newer.sources.join("ConfigDumpInfo.xml"),
-            "<ConfigDumpInfo format=\"Hierarchical\" version=\"2.21\"/>\n",
-        )
-        .expect("a dump of a newer platform");
-        let output = run(&newer, &["push"]);
-        assert!(!output.status.success(), "{provider}");
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(text.contains("format 2.21"), "{provider}: {text}");
-        assert!(text.contains("2.20"), "{provider}: {text}");
-        assert!(text.contains("8.3.27.2074"), "{provider}: {text}");
-        assert_eq!(
-            fs::read_to_string(&newer.calls).unwrap_or_default(),
-            "",
-            "{provider}: the platform must not start"
-        );
-    }
 }

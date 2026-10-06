@@ -24,6 +24,13 @@ pub struct FormatVersion {
 }
 
 impl FormatVersion {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "строки таблицы замеров WRITTEN_FORMATS появятся по #403"
+        )
+    )]
     pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
     }
@@ -43,16 +50,22 @@ impl fmt::Display for FormatVersion {
     }
 }
 
-/// Версии формата, которые пишут известные раннеру платформы. Каждая строка подтверждена
-/// документацией или замером; платформы вне таблицы раннер не угадывает.
-const WRITTEN_FORMATS: &[((u32, u32, u32), FormatVersion)] = &[
-    // ИТС, «Руководство разработчика», 2.17.2: «8.3.27 пишет 2.20».
-    ((8, 3, 27), FormatVersion::new(2, 20)),
-];
+/// Версии формата, которые пишут известные раннеру платформы. Строка попадает сюда только
+/// по замеру (`references/1c/confirmed-runtime-measurements.md`); платформы вне таблицы
+/// раннер не угадывает. Замеренных строк пока нет — #403, и до них никакая прочитанная
+/// версия по таблице чужой не считается, а загрузка по ней не отказывает.
+const WRITTEN_FORMATS: &[((u32, u32, u32), FormatVersion)] = &[];
 
 /// Версия формата, которую пишет платформа этой версии; `None`, если раннер её не знает.
 pub fn written_by(platform: &PlatformVersion) -> Option<FormatVersion> {
-    WRITTEN_FORMATS
+    written_in(WRITTEN_FORMATS, platform)
+}
+
+fn written_in(
+    table: &[((u32, u32, u32), FormatVersion)],
+    platform: &PlatformVersion,
+) -> Option<FormatVersion> {
+    table
         .iter()
         .find(|((major, minor, patch), _)| {
             (platform.major, platform.minor, platform.patch) == (*major, *minor, *patch)
@@ -113,7 +126,7 @@ fn root_version(head: &str) -> Option<FormatVersion> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_recorded, root_version, written_by, FormatVersion, RecordedFormat};
+    use super::{read_recorded, root_version, written_in, FormatVersion, RecordedFormat};
     use crate::platform::locator::PlatformVersion;
 
     #[test]
@@ -156,15 +169,21 @@ mod tests {
         );
     }
 
+    /// Таблица знает платформу по старшей, младшей версии и выпуску; сборка не важна, а
+    /// платформа вне таблицы версии не получает.
     #[test]
-    fn only_a_documented_platform_has_a_known_format() {
+    fn only_a_platform_in_the_table_has_a_known_format() {
         let platform = |patch| PlatformVersion {
             major: 8,
             minor: 3,
             patch,
             build: 2074,
         };
-        assert_eq!(written_by(&platform(27)), Some(FormatVersion::new(2, 20)));
-        assert_eq!(written_by(&platform(26)), None);
+        let table = [((8, 3, 27), FormatVersion::new(2, 20))];
+        assert_eq!(
+            written_in(&table, &platform(27)),
+            Some(FormatVersion::new(2, 20))
+        );
+        assert_eq!(written_in(&table, &platform(26)), None);
     }
 }

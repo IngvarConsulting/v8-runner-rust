@@ -513,7 +513,7 @@ fn dump_ibcmd_incremental_json_success() {
     fs::create_dir_all(base_path.join("main")).expect("target");
     fs::write(
         base_path.join("main/ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.20\"/>",
+        "<ConfigDumpInfo version=\"2.17\"/>",
     )
     .expect("version file");
 

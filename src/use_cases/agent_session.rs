@@ -914,8 +914,20 @@ impl GenerationLedger {
         }
     }
 
+    /// Записывает поколение набора, сохраняя записи остальных наборов базы.
+    ///
+    /// Чтение, правка и запись журнала идут без своего замка: журнал лежит под `workPath`,
+    /// а всякая команда держит замок `workPath` до конца
+    /// (`INV.WIRE.A-BUSY-WORKSPACE-ANSWERS-WORKSPACE-BUSY`), и две команды в одном журнале
+    /// не пишут. Если бы запись другого набора всё же потерялась, следующая выгрузка этого
+    /// набора не пропустилась бы по поколению — лишняя выгрузка, а не потеря правок.
     pub(crate) fn record(&self, token: &str, after: &str) -> Result<(), AppError> {
-        let dir = self.file.parent().unwrap_or(&self.file);
+        let dir = self.file.parent().ok_or_else(|| {
+            AppError::Runtime(format!(
+                "the generation ledger '{}' has no parent directory",
+                self.file.display()
+            ))
+        })?;
         std::fs::create_dir_all(dir).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to create the generation ledger directory '{}': {error}",

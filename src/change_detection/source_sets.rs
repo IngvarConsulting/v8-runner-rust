@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::change_detection::analyzer::{self, ContextAnalysis};
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
-use crate::domain::source_set::{connection_memory_key, infobase_memory_dir, SourceSetContext};
+use crate::domain::source_set::{connection_memory_key, designer_copy_dir, SourceSetContext};
 
 /// Builds the list of [`SourceSetContext`] instances for the given config.
 ///
@@ -37,12 +37,11 @@ impl<'a> SourceSetsService<'a> {
                 let memory = memory.as_ref().filter(|_| !ss.purpose.is_external());
                 let path = match self.config.format {
                     SourceFormat::Designer => ss.root_in(&base_path),
-                    SourceFormat::Edt => match memory {
-                        Some(memory) => infobase_memory_dir(&work_path, &memory.key)
-                            .join("designer")
-                            .join(&ss.name),
-                        None => work_path.join("designer").join(&ss.name),
-                    },
+                    SourceFormat::Edt => designer_copy_dir(
+                        &work_path,
+                        memory.map(|memory| memory.key.as_str()),
+                        &ss.name,
+                    ),
                 };
                 self.designer_context(ss, path, memory, &base_path)
             })

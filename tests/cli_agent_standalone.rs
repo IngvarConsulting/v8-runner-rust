@@ -348,7 +348,7 @@ fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
     let target = harness.dir.path().join("project").join("configuration");
     fs::write(
         target.join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.20\"/>",
+        "<ConfigDumpInfo version=\"2.17\"/>",
     )
     .expect("dump info");
     fs::write(target.join("Untouched.xml"), "<Keep/>").expect("untouched");
