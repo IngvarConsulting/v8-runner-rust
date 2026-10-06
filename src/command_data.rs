@@ -37,7 +37,9 @@ pub const COMMAND_DATA_INDEX_PATH: &str = "docs/schemas/command-data/index.json"
 pub struct CommandDataForm {
     /// Значение поля `command` в конверте, который несёт эту форму.
     pub command: &'static str,
-    /// Имя файла без расширения; оно же — хвост символа контракта.
+    /// Имя файла без расширения; оно же — хвост символа контракта: `push` закреплён
+    /// правилом `CTR.WIRE.PUSH-DATA`. Исключение — `init`: его форма
+    /// `CTR.WIRE.PROJECT-INIT-DATA` (перечень `FORMS_NAMED_APART` в `tests/arch_rules.rs`).
     pub slug: &'static str,
     /// Порождённая схема.
     pub schema: Value,

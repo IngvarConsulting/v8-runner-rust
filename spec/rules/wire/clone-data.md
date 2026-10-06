@@ -1,5 +1,5 @@
 ---
-id: CTR.WIRE.BOOTSTRAP-DATA
+id: CTR.WIRE.CLONE-DATA
 version: 2
 artifact: docs/schemas/command-data/clone.schema.json
 check:
@@ -8,7 +8,7 @@ check:
   - tests/cli_bootstrap.rs::clone_preview_names_the_project_it_would_write_and_writes_nothing
   - tests/cli_bootstrap.rs::clone_into_a_subdirectory_of_a_repository_writes_the_project_gitignore
 ---
-# `data` команды `bootstrap`
+# `data` команды `clone`
 
 Команда заводит проект вокруг существующей базы, и форма называет каждый путь, который
 она пишет: конфиг, локальный слой, `.gitignore` и каталог исходников. `.gitignore` — файл
