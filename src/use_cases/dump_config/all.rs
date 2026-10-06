@@ -15,9 +15,10 @@ use super::*;
 use crate::config::model::SourceSetConfig;
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::config_init::ConfigInitSourceSet;
-use crate::domain::dump::PullAllResult;
+use crate::domain::dump::{NotDeclaredExtension, PullAllResult};
 use crate::platform::extension_inventory::{
-    is_extension_identifier, parse_extension_inventory, parse_extension_name_list,
+    is_extension_identifier, is_windows_device_name, parse_extension_inventory,
+    parse_extension_name_list,
 };
 use crate::use_cases::config_init::{declare_source_sets, with_declared_source_sets};
 use crate::use_cases::extension_agent::ExtensionAgent;
@@ -64,6 +65,7 @@ fn run_all(
         provider_dispatched: false,
         declared: None,
         not_installed: Vec::new(),
+        not_declared: Vec::new(),
         if_installed: Vec::new(),
         sets: Vec::new(),
         duration_ms: 0,
@@ -137,6 +139,7 @@ fn run_all(
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
+    result.not_declared = walk.not_declared.clone();
 
     // Наборы проекта и объявляемые идут одним обходом: в настройках этой команды новые
     // наборы уже есть, на диске — появляются после своей выгрузки.
@@ -280,6 +283,8 @@ struct Walk<'a> {
     declared: Vec<ConfigInitSourceSet>,
     /// Наборы расширений проекта, которых в базе нет.
     not_installed: Vec<&'a str>,
+    /// Расширения без набора, которым набор не объявить, с причиной.
+    not_declared: Vec<NotDeclaredExtension>,
 }
 
 impl Walk<'_> {
@@ -343,8 +348,20 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
         .as_ref()
         .map(|tool| key(&tool.name));
     let mut declared = Vec::new();
+    let mut not_declared = Vec::new();
     for name in installed {
         if claimed.contains(&key(name)) || tool.as_deref() == Some(key(name).as_str()) {
+            continue;
+        }
+        // Имя устройства — верный идентификатор 1С, но каталогом `src/ext/<Name>` в Windows
+        // не стать: объявление пропускается и называется, прочие наборы выгружаются.
+        if is_windows_device_name(name) {
+            not_declared.push(NotDeclaredExtension {
+                name: name.clone(),
+                reason: format!(
+                    "directory '{DECLARED_EXTENSION_ROOT}/{name}' is impossible on Windows, where '{name}' is a device name: declare the set by hand under another path"
+                ),
+            });
             continue;
         }
         if let Some(taken) = config
@@ -369,6 +386,7 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
         existing,
         declared,
         not_installed,
+        not_declared,
     })
 }
 
@@ -465,7 +483,7 @@ fn read_installed_extensions(
     };
     if let Some(name) = names.iter().find(|name| !is_extension_identifier(name)) {
         return Err(AppError::InvalidOutput(format!(
-            "the infobase lists an extension whose name is not an identifier usable as a directory name: {name:?}"
+            "the infobase lists an extension whose name is not an identifier: {name:?}"
         )));
     }
     Ok(names)
@@ -544,7 +562,25 @@ mod tests {
                 existing: vec!["main", "old"],
                 declared: vec![declared("Second"), declared("Новое")],
                 not_installed: vec!["gone"],
+                not_declared: Vec::new(),
             }
+        );
+    }
+
+    /// Расширение с именем устройства Windows набора не получает: объявление пропущено и
+    /// названо с причиной, остальные объявляются.
+    #[test]
+    fn a_windows_device_name_is_named_not_declared() {
+        let config = config(vec![set("main", SourceSetPurpose::Configuration, "src/cf")]);
+
+        let walk = plan_walk(&config, &installed(&["Aux", "Sales"])).expect("walk");
+
+        assert_eq!(walk.declared, vec![declared("Sales")]);
+        assert_eq!(walk.not_declared.len(), 1, "{walk:?}");
+        assert_eq!(walk.not_declared[0].name, "Aux");
+        assert!(
+            walk.not_declared[0].reason.contains("device name"),
+            "{walk:?}"
         );
     }
 

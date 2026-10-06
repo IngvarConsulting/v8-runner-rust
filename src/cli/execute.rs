@@ -4122,6 +4122,12 @@ fn render_pull_all_text(result: &PullAllResult, presenter: &Presenter, succeeded
             result.not_installed.join(", ")
         ));
     }
+    details.extend(
+        result
+            .not_declared
+            .iter()
+            .map(|skipped| format!("not declared {}: {}", skipped.name, skipped.reason)),
+    );
     if !result.if_installed.is_empty() {
         details.push(format!(
             "pulled only if the infobase has them: {}",

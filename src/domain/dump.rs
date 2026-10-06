@@ -81,6 +81,10 @@ pub struct PullAllResult {
     /// таких нет или состав не читали.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_installed: Vec<String>,
+    /// Расширения базы без набора, которым набор не объявлен, с причиной: объявление
+    /// невозможно, а прочие наборы выгружаются. Поля нет, когда таких нет.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_declared: Vec<NotDeclaredExtension>,
     /// Только у превью: наборы расширений проекта, которые превью не выгружало, потому что
     /// состава базы не знает. Настоящий прогон выгрузит те из них, чьё расширение в базе
     /// есть, а прочие назовёт в `not_installed`. Поля нет, когда таких наборов нет.
@@ -93,4 +97,13 @@ pub struct PullAllResult {
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Расширение базы, которому `pull --all` не объявил набор, и почему.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NotDeclaredExtension {
+    /// Имя расширения в базе.
+    pub name: String,
+    /// Почему набор не объявлен и что сделать вместо этого.
+    pub reason: String,
 }

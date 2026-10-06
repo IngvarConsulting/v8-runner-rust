@@ -198,19 +198,18 @@ fn set_descriptor_field(
 }
 
 /// Имя расширения — идентификатор 1С: буква или подчёркивание, затем буквы, цифры и
-/// подчёркивания. Такое имя годится и в аргумент платформы, и в имя каталога: имена
-/// устройств Windows (`CON`, `NUL`, `COM1` и прочие) каталогом не стать, и их нет.
+/// подчёркивания. Такое имя годится в аргумент платформы.
 pub fn is_extension_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     chars
         .next()
         .is_some_and(|first| first == '_' || first.is_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
-        && !is_windows_device_name(value)
 }
 
-/// Имя устройства Windows без учёта регистра: каталог с таким именем там не создать.
-fn is_windows_device_name(value: &str) -> bool {
+/// Имя устройства Windows (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) без
+/// учёта регистра. Идентификатором 1С оно быть может, а каталогом в Windows — нет.
+pub fn is_windows_device_name(value: &str) -> bool {
     let upper = value.to_ascii_uppercase();
     match upper.as_str() {
         "CON" | "PRN" | "AUX" | "NUL" => true,
@@ -329,16 +328,17 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        is_extension_identifier, parse_extension_inventory, parse_extension_name_list,
-        read_applied_extension_descriptor,
+        is_extension_identifier, is_windows_device_name, parse_extension_inventory,
+        parse_extension_name_list, read_applied_extension_descriptor,
     };
 
-    /// Имя устройства Windows идентификатором расширения не считается в любом регистре:
-    /// оно стало бы каталогом, которого там не создать. Похожие имена — обычные.
+    /// Имя устройства Windows — корректный идентификатор 1С, но каталогом в Windows не
+    /// станет; признак видит его в любом регистре, а похожие имена — обычные.
     #[test]
-    fn a_windows_device_name_is_not_an_extension_identifier() {
+    fn a_windows_device_name_is_an_identifier_but_not_a_directory() {
         for reserved in ["CON", "nul", "Prn", "AUX", "COM1", "com9", "LPT1", "lpt9"] {
-            assert!(!is_extension_identifier(reserved), "{reserved}");
+            assert!(is_extension_identifier(reserved), "{reserved}");
+            assert!(is_windows_device_name(reserved), "{reserved}");
         }
         for ordinary in [
             "CONSOLE",
@@ -349,7 +349,7 @@ mod tests {
             "Расширение",
             "_x1",
         ] {
-            assert!(is_extension_identifier(ordinary), "{ordinary}");
+            assert!(!is_windows_device_name(ordinary), "{ordinary}");
         }
     }
 

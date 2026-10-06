@@ -545,16 +545,16 @@ fn a_project_file_that_cannot_take_the_declaration_is_refused_before_any_dump() 
     assert!(message.contains("- name: 'Fresh'"), "{message}");
 }
 
-/// Имя из списка базы, не являющееся идентификатором или совпадающее с именем устройства
-/// Windows, — неверный вывод, а не набор: у Конфигуратора и у `ibcmd` отказ до выгрузки.
+/// Имя из списка базы, не являющееся идентификатором, — неверный вывод, а не набор: у
+/// Конфигуратора и у `ibcmd` отказ до выгрузки.
 #[test]
 fn a_listed_name_that_is_not_an_identifier_is_refused_before_any_dump() {
-    let project = Project::new(&["Old", "CON"]);
+    let project = Project::new(&["Old", "1Bad"]);
 
     let (output, envelope) = project.pull(&["--all"]);
 
     let message = assert_refused_before_any_dump(&project, &output, &envelope, PROJECT);
-    assert!(message.contains("\"CON\""), "{message}");
+    assert!(message.contains("\"1Bad\""), "{message}");
 
     let project = Project::new(&["Old", "Bad Name"]);
     let text = PROJECT.replace(
@@ -567,6 +567,39 @@ fn a_listed_name_that_is_not_an_identifier_is_refused_before_any_dump() {
 
     let message = assert_refused_before_any_dump(&project, &output, &envelope, &text);
     assert!(message.contains("Bad Name"), "{message}");
+}
+
+/// Расширение с именем устройства Windows — верный идентификатор 1С, но каталогом
+/// `src/ext/Aux` в Windows не стать: объявление пропускается и называется с причиной в
+/// `not_declared`, а остальные наборы выгружаются и объявляются.
+#[test]
+fn an_extension_named_like_a_windows_device_is_named_and_the_rest_is_pulled() {
+    let project = Project::new(&["Old", "Aux", "Fresh"]);
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    assert_succeeded(&output, &envelope);
+    assert_eq!(
+        pulled_sets(&envelope),
+        ["main", "Old", "Fresh"],
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["data"]["declared"],
+        json!([{"name": "Fresh", "type": "EXTENSION", "path": "src/ext/Fresh"}]),
+        "{envelope}"
+    );
+    let skipped = &envelope["data"]["not_declared"];
+    assert_eq!(skipped[0]["name"], "Aux", "{envelope}");
+    let reason = skipped[0]["reason"].as_str().expect("reason");
+    assert!(reason.contains("device name"), "{reason}");
+    assert!(reason.contains("declare the set by hand"), "{reason}");
+    assert!(
+        !project.calls().contains("-Extension Aux"),
+        "{}",
+        project.calls()
+    );
+    assert!(!project.project_text().contains("Aux"));
 }
 
 /// Набор `my-ext`, исходники которого называют установленное расширение `MyExt`, второго

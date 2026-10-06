@@ -131,6 +131,25 @@
       ],
       "type": "object"
     },
+    "NotDeclaredExtension": {
+      "additionalProperties": false,
+      "description": "Расширение базы, которому `pull --all` не объявил набор, и почему.",
+      "properties": {
+        "name": {
+          "description": "Имя расширения в базе.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Почему набор не объявлен и что сделать вместо этого.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "reason"
+      ],
+      "type": "object"
+    },
     "Provider": {
       "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
       "oneOf": [
@@ -325,6 +344,13 @@
         "string",
         "null"
       ]
+    },
+    "not_declared": {
+      "description": "Расширения базы без набора, которым набор не объявлен, с причиной: объявление\nневозможно, а прочие наборы выгружаются. Поля нет, когда таких нет.",
+      "items": {
+        "$ref": "#/$defs/NotDeclaredExtension"
+      },
+      "type": "array"
     },
     "not_installed": {
       "description": "Наборы расширений проекта, которых в базе нет: их не выгружали. Поля нет, когда\nтаких нет или состав не читали.",
