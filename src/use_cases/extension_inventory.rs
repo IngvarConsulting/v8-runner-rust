@@ -101,11 +101,17 @@ fn run_read(
     // Открытие сессии и отказ до запуска `ibcmd` работы не дают и отвечают общей формой
     // отказа; всё, что случилось после, отвечает формой чтения: вызывающий узнаёт из неё,
     // что платформа запрос получила.
-    let (extensions, failure) =
-        match read_extensions(context, config, request, executor, &utilities) {
-            Ok(extensions) => (extensions, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
+    let (extensions, failure) = match read_extensions(
+        context,
+        config,
+        request,
+        executor,
+        &utilities,
+        Prefixes::Attest,
+    ) {
+        Ok(extensions) => (extensions, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
     let result = ExtensionInventoryResult {
         provider: Some(receipt),
         ok: failure.is_none(),
@@ -125,6 +131,49 @@ fn run_read(
     }
 }
 
+/// Имена и активность расширений базы — для `status --deep`: тот же выбор исполнителя и то
+/// же чтение, что у `extensions list`, без снимков ради префиксов. Квитанция — `None`, если
+/// выбор не начинался.
+pub(crate) fn read_installed(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> (
+    Option<crate::domain::capability::ProviderReceipt>,
+    Result<Vec<InstalledExtension>, AppError>,
+) {
+    let mut utilities = PlatformUtilities::from_config(config);
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Extensions,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => return (Some(receipt), Err(error)),
+    };
+    let read = Executor::of(selected.provider, selected.location, config).and_then(|executor| {
+        read_extensions(
+            context,
+            config,
+            &ExtensionInventoryRequest {
+                scope: ExtensionInventoryScope::All,
+                dry_run: false,
+            },
+            executor,
+            &utilities,
+            Prefixes::Skip,
+        )
+    });
+    (Some(selected.receipt), read)
+}
+
+/// Подтверждать ли префиксы имён снимками применённых расширений (`ibcmd`): `extensions
+/// list` подтверждает, статусу они не нужны.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prefixes {
+    Attest,
+    Skip,
+}
+
 /// Состав расширений у исполнителя. Ошибка — какой бы она ни была — возвращается как есть:
 /// какой формой на неё ответить, решает отметка работы у вызывающего.
 fn read_extensions(
@@ -133,6 +182,7 @@ fn read_extensions(
     request: &ExtensionInventoryRequest,
     executor: Executor,
     utilities: &PlatformUtilities,
+    prefixes: Prefixes,
 ) -> Result<Vec<InstalledExtension>, AppError> {
     let extensions = match executor {
         Executor::Agent { v8 } => {
@@ -166,7 +216,9 @@ fn read_extensions(
                 return Err(error);
             }
             let mut extensions = read_inventory(&platform_result, request)?;
-            attest_applied_prefixes(context, config, request, &dsl, &mut extensions)?;
+            if prefixes == Prefixes::Attest {
+                attest_applied_prefixes(context, config, request, &dsl, &mut extensions)?;
+            }
             extensions
         }
     };

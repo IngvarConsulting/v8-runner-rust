@@ -2,6 +2,34 @@ use std::path::{Path, PathBuf};
 
 use crate::support::path::is_safe_path_segment;
 
+/// Назначение набора исходников — значение ключа `type` в `v8project.yaml`.
+#[derive(
+    Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SourceSetPurpose {
+    Configuration,
+    Extension,
+    ExternalDataProcessors,
+    ExternalReports,
+}
+
+impl SourceSetPurpose {
+    pub const fn is_external(self) -> bool {
+        matches!(self, Self::ExternalDataProcessors | Self::ExternalReports)
+    }
+
+    /// The YAML `type` spelling. Stable: it is also persisted in hash-memory bindings.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configuration => "CONFIGURATION",
+            Self::Extension => "EXTENSION",
+            Self::ExternalDataProcessors => "EXTERNAL_DATA_PROCESSORS",
+            Self::ExternalReports => "EXTERNAL_REPORTS",
+        }
+    }
+}
+
 /// Runtime context for one logical source-set.
 #[derive(Debug, Clone)]
 pub struct SourceSetContext {

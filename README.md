@@ -158,6 +158,18 @@ v8-runner push
 строку; полную загрузку даёт `push --full`. Загрузка станет частичной всегда, когда есть с чем
 сравнить, — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379).
 
+### Посмотрите, как связаны каталог и база:
+
+```bash
+v8-runner status           # по памяти, платформа не запускается
+v8-runner status --deep    # спрашивает платформу: поколение, расширения, владелец базы
+v8-runner status --all     # каждая объявленная база
+```
+
+`status` называет память о базе у каждого набора, записанное поколение и изменённые файлы;
+`--deep` добавляет, ушла ли база вперёд (тогда `push`, который грузит этот набор без `--force`, откажет `non_fast_forward`), расширения базы без набора в
+проекте и рабочие копии, которые держат файловую базу.
+
 ### Спланируйте или выгрузите состояние ИБ:
 
 ```bash
@@ -174,7 +186,7 @@ v8-runner infobase dump --output dist/base.dt --dry-run
 `--dry-run` валидирует окружение и показывает выбранный provider без запуска платформы и без
 создания файлов. Уберите флаг, чтобы атомарно опубликовать CF/CFE или переносимый DT-файл.
 Ключ глобальный — его место в строке не важно, — а команда без превью (`version`, `init`,
-`tools download`, `test`, `mcp serve`) отвергает его с названной причиной.
+`tools download`, `test`, `status`, `mcp serve`) отвергает его с названной причиной.
 
 Обратная операция загружает ИБ из DT-файла:
 
@@ -264,6 +276,7 @@ v8-runner mcp serve stdio
 | Зона | Команды | Что делает |
 | --- | --- | --- |
 | Project setup (настройка проекта) | `clone`, `init`, `tools download`, `infobase create`, `extensions`, `push` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
+| State (состояние) | `status`, `status --deep`, `status --all` | Показывает, как связаны каталог и база: по памяти или с вопросом к платформе |
 | Verification (проверка) | `check`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
 | File materialization (материализация файлов) | `pull`, `download`, `convert`, `upload`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
 | Direct launch (прямой запуск) | `launch <designer\|thin\|thick\|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |

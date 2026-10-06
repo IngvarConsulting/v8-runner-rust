@@ -216,8 +216,229 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::Status(args) => execute_status(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
     }
+}
+
+/// `status`: без `--deep` базу не открывает; `--deep` — команда чтения базы, она берёт её
+/// замок и метку владельца только читает (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`).
+fn execute_status(
+    config: &AppConfig,
+    args: &crate::cli::args::StatusArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::domain::status::StatusScope;
+    use crate::use_cases::status;
+
+    let scope = match (args.deep, args.all) {
+        (true, _) => StatusScope::Deep,
+        (false, true) => StatusScope::All,
+        (false, false) => StatusScope::Selected,
+    };
+    let context = cli_context(config, CommandName::Status, cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        CommandName::Status,
+        if scope == StatusScope::Deep {
+            BaseAccess::Reads
+        } else {
+            BaseAccess::Untouched
+        },
+        clean_before_execution,
+        false,
+        || match status::execute(&context, config, scope) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        CommandName::Status.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    render_status_text(&result, presenter);
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    print_failure(
+                        presenter,
+                        CommandName::Status,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
+                } else {
+                    presenter.print_error(&error.to_string());
+                }
+                Err(error)
+            }
+        },
+    )
+}
+
+fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &Presenter) {
+    use crate::domain::status::{GenerationAfter, GenerationVerdict, MemoryState};
+
+    let items = result
+        .infobases
+        .iter()
+        .map(|base| {
+            let title = format!(
+                "{}{}",
+                base.name.as_deref().unwrap_or("--infobase"),
+                if base.selected && result.infobases.len() > 1 {
+                    " (selected)"
+                } else {
+                    ""
+                }
+            );
+            let mut lines = vec![match base.address.as_deref() {
+                Some(address) => address.to_owned(),
+                None => format!(
+                    "{} infobase: its address is not recognized",
+                    base.kind.as_str()
+                ),
+            }];
+            if let Some(since) = &base.new_owner_since {
+                lines.push(format!(
+                    "this working copy took the infobase over ({since}) and has not pushed since"
+                ));
+            }
+            for set in &base.source_sets {
+                let mut facts = vec![match set.memory {
+                    MemoryState::Remembered => "remembered".to_owned(),
+                    MemoryState::Missing => {
+                        "no memory of the infobase: push is refused, pull first".to_owned()
+                    }
+                    MemoryState::Foreign => "memory of another infobase or directory".to_owned(),
+                    MemoryState::Unreadable => "memory cannot be read".to_owned(),
+                    MemoryState::Unbound => "the infobase address cannot be remembered".to_owned(),
+                }];
+                if let Some(changed) = set.changed_files {
+                    facts.push(format!("{changed} file(s) changed"));
+                }
+                if let Some(recorded) = &set.recorded {
+                    facts.push(format!(
+                        "generation {} after {} by {} ({})",
+                        recorded.token,
+                        recorded.after,
+                        recorded.tool.as_str(),
+                        recorded.recorded_at
+                    ));
+                }
+                if let Some(base) = &set.base {
+                    facts.push(match base.comparison {
+                        GenerationVerdict::Unchanged => "the infobase is unchanged".to_owned(),
+                        GenerationVerdict::MovedAhead => {
+                            let token = base.token.as_deref().unwrap_or("?");
+                            match set.recorded.as_ref().map(|recorded| recorded.after) {
+                                // Тот же совет, что даёт сама отправка (`exchange_guard`).
+                                Some(GenerationAfter::FailedBuild) => format!(
+                                    "the infobase moved ahead to {token} — if the change is that failed push, push again with --force; if someone else changed the infobase, pull first"
+                                ),
+                                _ => format!("the infobase moved ahead to {token} — pull first"),
+                            }
+                        }
+                        GenerationVerdict::OtherTool => format!(
+                            "the infobase answers {} by another tool: not comparable",
+                            base.token.as_deref().unwrap_or("?")
+                        ),
+                        GenerationVerdict::NoRecord => match &base.token {
+                            Some(token) => format!("the infobase answers {token}"),
+                            None => format!(
+                                "the infobase gave no generation{}",
+                                base.reason
+                                    .as_deref()
+                                    .map(|reason| format!(": {reason}"))
+                                    .unwrap_or_default()
+                            ),
+                        },
+                        GenerationVerdict::NoAnswer => format!(
+                            "the infobase gave no generation{}",
+                            base.reason
+                                .as_deref()
+                                .map(|reason| format!(": {reason}"))
+                                .unwrap_or_default()
+                        ),
+                    });
+                }
+                lines.push(format!("{} → {}", set.name, facts.join(" · ")));
+            }
+            if let Some(extensions) = &base.extensions {
+                match (&extensions.installed, &extensions.missing_in_base) {
+                    (Some(installed), Some(missing)) => {
+                        for extension in installed.iter().filter(|e| e.source_set.is_none()) {
+                            lines.push(format!(
+                                "— → {}: {}{}",
+                                extension.name,
+                                if extension.tool {
+                                    "the client MCP tool extension the runner installs itself"
+                                } else {
+                                    "installed in the infobase, not in the project"
+                                },
+                                if extension.active { "" } else { " (inactive)" }
+                            ));
+                        }
+                        for set in missing {
+                            lines.push(format!(
+                                "{set} → —: in the project, not installed in the infobase"
+                            ));
+                        }
+                    }
+                    _ => lines.push(format!(
+                        "extensions not read: {}",
+                        extensions.reason.as_deref().unwrap_or("unknown reason")
+                    )),
+                }
+            }
+            if let Some(holders) = &base.holders {
+                match &holders.owners {
+                    Some(owners) if owners.is_empty() => {
+                        lines.push("held by no working copy".to_owned())
+                    }
+                    Some(owners) => {
+                        for owner in owners {
+                            lines.push(format!(
+                                "held by '{}'{}{}{}",
+                                owner.project.display(),
+                                owner
+                                    .host
+                                    .as_deref()
+                                    .map(|host| format!(" on '{host}'"))
+                                    .unwrap_or_default(),
+                                if owner.this_copy {
+                                    " (this working copy)"
+                                } else {
+                                    ""
+                                },
+                                if owner.shared { ", shared" } else { "" }
+                            ));
+                        }
+                    }
+                    None => lines.push(
+                        holders
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "the owner marker cannot be read".to_owned()),
+                    ),
+                }
+            }
+            TimelineItem::new(TimelineStatus::Succeeded, title).with_detail(lines.join("\n"))
+        })
+        .collect::<Vec<_>>();
+    presenter.print_timeline(&items);
 }
 
 fn execute_publish(
@@ -414,6 +635,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Syntax(_) => CommandName::Syntax,
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
+        Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
     }
 }

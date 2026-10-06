@@ -343,6 +343,43 @@ pub(crate) fn shared_base_owners(config: &AppConfig) -> Option<Vec<String>> {
     )
 }
 
+/// Копии, которые держат выбранную файловую базу, по её метке — для `status --deep`
+/// (`INV.CLI.STATUS-DEEP-NAMES-THE-OWNING-COPY`). Только читает: ни замка, ни записи в метку
+/// (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`). `None` — база не файловая.
+pub(crate) fn holders(config: &AppConfig) -> Option<crate::domain::status::HoldersStatus> {
+    use crate::domain::status::{HolderStatus, HoldersStatus};
+    let base_dir = config
+        .v8_connection()
+        .file_infobase_dir(&config.base_path)?;
+    let marker = owner_marker_path(&base_dir)?;
+    let beside = marker.parent().unwrap_or(&base_dir).to_path_buf();
+    let this = ThisCopy::of(config);
+    Some(match read_marker(&marker) {
+        Ok(read) => HoldersStatus {
+            owners: Some(
+                read.map(|marker| marker.owners)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|owner| HolderStatus {
+                        this_copy: this.is(&owner),
+                        project: owner.project,
+                        host: owner.host,
+                        shared: owner.shared,
+                        since: owner.since,
+                    })
+                    .collect(),
+            ),
+            reason: None,
+            marker,
+        },
+        Err(error) => HoldersStatus {
+            owners: None,
+            reason: Some(error.describe(&beside)),
+            marker,
+        },
+    })
+}
+
 /// Согласие этой копии делить базу: из её местного слоя в момент команды.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThisConsent {

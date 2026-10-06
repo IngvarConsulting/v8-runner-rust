@@ -1,0 +1,618 @@
+{
+  "$defs": {
+    "BaseGeneration": {
+      "additionalProperties": false,
+      "description": "Поколение, которое ответила платформа, и его сверка с записью.",
+      "properties": {
+        "comparison": {
+          "$ref": "#/$defs/GenerationVerdict"
+        },
+        "reason": {
+          "description": "Почему ответа нет, если его нет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "description": "Ответ; `null` — ответа нет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Инструмент, которым спрошено поколение: исполнитель `push` для этой базы. `null` —\nготового исполнителя нет."
+        }
+      },
+      "required": [
+        "comparison"
+      ],
+      "type": "object"
+    },
+    "ExtensionsStatus": {
+      "additionalProperties": false,
+      "description": "Состав расширений базы рядом с наборами проекта.",
+      "properties": {
+        "installed": {
+          "description": "Расширения базы; `null` — состав не прочитан, причина в `reason`.",
+          "items": {
+            "$ref": "#/$defs/InstalledExtensionStatus"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "missing_in_base": {
+          "description": "Наборы расширений проекта, которых в базе нет; `null` — состав не прочитан.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Квитанция о выборе исполнителя; `null` — выбор не начинался."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GenerationAfter": {
+      "description": "Операция, после которой записан токен поколения.",
+      "oneOf": [
+        {
+          "enum": [
+            "build",
+            "dump"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "failed_build",
+          "description": "Токен записан до загрузки, которая не удалась: что она успела сделать с базой,\nнеизвестно, и расхождение с ним не называется чужой правкой.",
+          "type": "string"
+        }
+      ]
+    },
+    "GenerationVerdict": {
+      "description": "Сверка ответа с записью — та же, что сделает `push` перед загрузкой.",
+      "oneOf": [
+        {
+          "const": "unchanged",
+          "description": "Тот же инструмент отдал записанный токен: базу с последнего обмена не меняли.",
+          "type": "string"
+        },
+        {
+          "const": "moved_ahead",
+          "description": "Тот же инструмент отдал другой токен: база ушла вперёд, и `push`, который грузит этот\nнабор без `--force`, откажет `non_fast_forward`.",
+          "type": "string"
+        },
+        {
+          "const": "other_tool",
+          "description": "Запись сделана другим инструментом: сравнивать не с чем.",
+          "type": "string"
+        },
+        {
+          "const": "no_record",
+          "description": "Записи этой пары нет.",
+          "type": "string"
+        },
+        {
+          "const": "no_answer",
+          "description": "Платформа поколением не ответила.",
+          "type": "string"
+        }
+      ]
+    },
+    "HolderStatus": {
+      "additionalProperties": false,
+      "description": "Копия из метки владельца.",
+      "properties": {
+        "host": {
+          "description": "Имя хоста на момент записи.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "Каталог проекта копии.",
+          "type": "string"
+        },
+        "shared": {
+          "description": "Согласие копии делить базу, записанное в метке.",
+          "type": "boolean"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "this_copy": {
+          "description": "Это та копия, из которой спрашивают.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project",
+        "shared",
+        "since",
+        "this_copy"
+      ],
+      "type": "object"
+    },
+    "HoldersStatus": {
+      "additionalProperties": false,
+      "description": "Копии, которые держат файловую базу.",
+      "properties": {
+        "marker": {
+          "description": "Файл метки рядом с каталогом базы.",
+          "type": "string"
+        },
+        "owners": {
+          "description": "Записи метки; `null` — метку не прочитать, причина в `reason`. Пустой список — базу\nникто не держит.",
+          "items": {
+            "$ref": "#/$defs/HolderStatus"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "marker"
+      ],
+      "type": "object"
+    },
+    "InfobaseStatus": {
+      "additionalProperties": false,
+      "description": "Состояние одной базы.",
+      "properties": {
+        "address": {
+          "description": "Адрес базы без учётных данных: `file:<каталог>`, `server:<сервер>\\<база>` или\n`standalone:<хост>:<порт>`; `null` — адрес не распознан, и памяти о базе у копии быть\nне может.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extensions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtensionsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Состав расширений базы рядом с наборами проекта; только у `--deep`."
+        },
+        "holders": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HoldersStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Копии, которые держат файловую базу, по её метке; только у `--deep` и только у\nфайловой базы."
+        },
+        "kind": {
+          "$ref": "#/$defs/TargetKind"
+        },
+        "name": {
+          "description": "Имя базы в местном слое; `null` — база пришла строкой соединения в `--infobase`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "new_owner_since": {
+          "description": "Копия взяла базу без метки или сменила ушедшего владельца и с тех пор не отправляла\nв неё: когда. `null` — признака нет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected": {
+          "description": "Та база, с которой работает команда без `--infobase` или с ним.",
+          "type": "boolean"
+        },
+        "source_sets": {
+          "description": "Наборы исходников, которые ходят в базу: конфигурация и расширения.",
+          "items": {
+            "$ref": "#/$defs/SourceSetStatus"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "selected",
+        "kind",
+        "source_sets"
+      ],
+      "type": "object"
+    },
+    "InstalledExtensionStatus": {
+      "additionalProperties": false,
+      "description": "Расширение, установленное в базе.",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Имя расширения в базе.",
+          "type": "string"
+        },
+        "source_set": {
+          "description": "Набор проекта с тем же именем; `null` — набора нет: расширение-инструмент или\nрасширение, которое есть в базе и нет в проекте.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "description": "Расширение-инструмент клиентского MCP (`tools.client_mcp.extension`): раннер ставит\nего сам, и набором оно не объявляется.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "active",
+        "tool"
+      ],
+      "type": "object"
+    },
+    "MemoryState": {
+      "description": "Память о базе у набора (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).",
+      "oneOf": [
+        {
+          "const": "remembered",
+          "description": "Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `no_memory`.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "Памяти нет: `push` откажет `no_memory`.",
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Под именем базы лежит память другой пары «база ↔ каталог»; она не используется.",
+          "type": "string"
+        },
+        {
+          "const": "unreadable",
+          "description": "Хеш-память не открывается; она не используется.",
+          "type": "string"
+        },
+        {
+          "const": "unbound",
+          "description": "Адрес базы не распознан: помнить её нельзя.",
+          "type": "string"
+        }
+      ]
+    },
+    "Provider": {
+      "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
+      "oneOf": [
+        {
+          "const": "designer",
+          "description": "Конфигуратор пакетным процессом на операцию.",
+          "type": "string"
+        },
+        {
+          "const": "agent",
+          "description": "Агентский shell: Конфигуратор в агентском режиме или шлюз автономного сервера.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd",
+          "description": "Утилита `ibcmd`.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd-rs",
+          "description": "Конвертер XML ↔ CF без платформы.",
+          "type": "string"
+        },
+        {
+          "const": "webinst",
+          "description": "Публикация базы на веб-сервере.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProviderOrigin": {
+      "description": "Откуда взялся выбранный исполнитель.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Первый готовый из цепочки умолчаний.",
+          "properties": {
+            "kind": {
+              "const": "default",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Назначен ключом `providers.<операция>` в названном файле.",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "override",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProviderReceipt": {
+      "additionalProperties": false,
+      "description": "Квитанция о выборе исполнителя — одна форма у всех операций.\n\nОбъясняет принятое решение и не предлагает другого: неиспользованные альтернативы\nне перечисляются, потому что выбор вызывающему не принадлежит. `selected: null`\nзначит, что выбор состоялся и никто не подошёл: каждый пропущенный назван с причиной.",
+      "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Точка входа сессии агента, через которую шло исполнение. Нет — сессия не\nоткрывалась: исполнял процесс платформы, это превью или отказ до подключения."
+        },
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin"
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skipped": {
+          "items": {
+            "$ref": "#/$defs/SkippedProvider"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin"
+      ],
+      "type": "object"
+    },
+    "RecordedGeneration": {
+      "additionalProperties": false,
+      "description": "Запись журнала поколений.",
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/GenerationAfter",
+          "description": "После чего записан токен."
+        },
+        "recorded_at": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "tool": {
+          "$ref": "#/$defs/Provider",
+          "description": "Инструмент, которым токен получен: токены разных инструментов несравнимы."
+        }
+      },
+      "required": [
+        "token",
+        "tool",
+        "after",
+        "recorded_at"
+      ],
+      "type": "object"
+    },
+    "SessionEndpoint": {
+      "additionalProperties": false,
+      "description": "Точка входа открытой сессии: режим и `host:port`, к которому раннер подключился.\n\nАдрес строится из разобранных хоста и порта, а не из записи конфига, поэтому\nучётных данных в нём нет: ни `user:pass@`, ни пароля строки соединения.",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/SessionMode"
+        }
+      },
+      "required": [
+        "mode",
+        "address"
+      ],
+      "type": "object"
+    },
+    "SessionMode": {
+      "description": "Как раннер добрался до точки входа агента.",
+      "oneOf": [
+        {
+          "const": "managed",
+          "description": "Агента Конфигуратора поднял сам раннер.",
+          "type": "string"
+        },
+        {
+          "const": "attached",
+          "description": "Агент Конфигуратора поднят не раннером, раннер к нему подключился.",
+          "type": "string"
+        },
+        {
+          "const": "gate",
+          "description": "SSH-шлюз автономного сервера.",
+          "type": "string"
+        }
+      ]
+    },
+    "SkippedProvider": {
+      "additionalProperties": false,
+      "description": "Исполнитель, пропущенный до выбранного, и почему.",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "SourceSetPurpose": {
+      "description": "Назначение набора исходников — значение ключа `type` в `v8project.yaml`.",
+      "enum": [
+        "CONFIGURATION",
+        "EXTENSION",
+        "EXTERNAL_DATA_PROCESSORS",
+        "EXTERNAL_REPORTS"
+      ],
+      "type": "string"
+    },
+    "SourceSetStatus": {
+      "additionalProperties": false,
+      "description": "Состояние набора исходников относительно базы.",
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaseGeneration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Что о поколении ответила платформа; только у `--deep`."
+        },
+        "changed_files": {
+          "description": "Файлы каталога, изменившиеся с тех пор, как раннер его последний раз читал; `null` —\nсравнить не с чем.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "memory": {
+          "$ref": "#/$defs/MemoryState",
+          "description": "Помнит ли копия базу для этого набора."
+        },
+        "name": {
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/$defs/SourceSetPurpose",
+          "description": "Назначение набора, как его пишет ключ `type` проекта: `CONFIGURATION` или `EXTENSION`."
+        },
+        "recorded": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecordedGeneration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Поколение, записанное после последнего обмена; `null` — записи этой пары нет."
+        }
+      },
+      "required": [
+        "name",
+        "purpose",
+        "memory"
+      ],
+      "type": "object"
+    },
+    "TargetKind": {
+      "description": "Вид информационной базы — вторая координата матрицы.",
+      "enum": [
+        "file",
+        "cluster",
+        "standalone"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/status.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Ответ `status`.",
+  "properties": {
+    "deep": {
+      "description": "Спрашивали ли платформу (`--deep`). `false` — ответ собран из памяти под `workPath`.",
+      "type": "boolean"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "infobases": {
+      "description": "Базы ответа: выбранная или, у `--all`, все объявленные в местном слое по имени.",
+      "items": {
+        "$ref": "#/$defs/InfobaseStatus"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "deep",
+    "infobases",
+    "duration_ms"
+  ],
+  "title": "StatusResult",
+  "type": "object"
+}

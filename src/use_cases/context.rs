@@ -25,6 +25,7 @@ pub enum CommandName {
     Syntax,
     Launch,
     Publish,
+    Status,
 }
 
 impl CommandName {
@@ -47,6 +48,7 @@ impl CommandName {
             Self::Syntax => "check",
             Self::Launch => "launch",
             Self::Publish => "publish",
+            Self::Status => "status",
         }
     }
 }

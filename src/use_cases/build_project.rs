@@ -250,6 +250,15 @@ fn run_build_agent(
     Ok(result)
 }
 
+/// Отказ `push`, если выбранный для него исполнитель этот формат проекта не грузит; `None` —
+/// грузит. Тот же ответ видит `status --deep`, прежде чем спросить поколение.
+pub(crate) fn unsupported_push_executor(config: &AppConfig) -> Option<AppError> {
+    match config.format {
+        SourceFormat::Designer => validate_designer_supported_matrix(config),
+        SourceFormat::Edt => validate_edt_supported_matrix(config),
+    }
+}
+
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
     if config.format == SourceFormat::Designer
         && matches!(
@@ -895,7 +904,8 @@ mod tests {
     #[test]
     fn a_cancellation_while_reading_the_generation_after_a_load_stops_the_step() {
         use crate::domain::capability::Provider;
-        use crate::use_cases::agent_session::{GenerationAfter, GenerationLedger, Recorded};
+        use crate::domain::status::GenerationAfter;
+        use crate::use_cases::agent_session::{GenerationLedger, Recorded};
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         create_source_tree(&base);

@@ -45,6 +45,9 @@
     "push": [
       "push"
     ],
+    "status": [
+      "status"
+    ],
     "test": [
       "test"
     ],

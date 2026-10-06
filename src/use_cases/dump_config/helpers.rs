@@ -225,14 +225,7 @@ pub(super) fn build_ibcmd_dsl<'a>(
     runner: &'a dyn ProcessRunner,
 ) -> Result<IbcmdDsl<'a>, AppError> {
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(map_ibcmd_error)?;
-
-    let data_path = config.work_path.join("ibcmd-data");
-    std::fs::create_dir_all(&data_path).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to create IBCMD standalone-server data directory '{}': {error}",
-            data_path.display()
-        ))
-    })?;
+    let data_path = ibcmd_data_path(config)?;
 
     Ok(IbcmdDsl::new(
         binary.to_path_buf(),
@@ -241,6 +234,18 @@ pub(super) fn build_ibcmd_dsl<'a>(
         context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
     )
     .with_data_path(data_path))
+}
+
+/// Каталог данных автономного сервера `ibcmd` у выгрузки — один на все её вызовы.
+fn ibcmd_data_path(config: &AppConfig) -> Result<PathBuf, AppError> {
+    let data_path = config.work_path.join("ibcmd-data");
+    std::fs::create_dir_all(&data_path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to create IBCMD standalone-server data directory '{}': {error}",
+            data_path.display()
+        ))
+    })?;
+    Ok(data_path)
 }
 
 pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {
@@ -422,40 +427,40 @@ pub(super) fn read_dump_generation(
     runner: &dyn ProcessRunner,
     resolved: &ResolvedDumpTarget,
 ) -> Option<String> {
-    if crate::use_cases::interruption::pending_interruption_error(
-        context,
-        "the configuration generation",
-    )
-    .is_some()
-    {
+    use crate::use_cases::generation_reader::{
+        designer_log_file, read_generation, GenerationProcess,
+    };
+    if matches!(
+        provider,
+        Provider::Agent | Provider::IbcmdRs | Provider::Webinst
+    ) {
         return None;
     }
-    let extension = resolved.extension.as_deref();
-    let answer = match provider {
-        Provider::Designer => build_designer_dsl(
-            context,
+    let process = || match provider {
+        Provider::Designer => designer_log_file(
             config,
+            &format!("dump-{}-generation", resolved.source_set_name),
+        )
+        .map(|log_file| GenerationProcess::Designer {
             binary,
             runner,
-            &resolved.source_set_name,
-            "generation",
-        )
-        .and_then(|designer| {
-            designer
-                .config_generation_id(extension)
-                .map_err(AppError::from)
+            log_file,
         }),
-        Provider::Ibcmd => build_ibcmd_dsl(context, config, binary, runner).and_then(|ibcmd| {
-            ibcmd
-                .config_generation_id(extension)
-                .map_err(map_ibcmd_error)
+        Provider::Ibcmd => ibcmd_data_path(config).map(|data_path| GenerationProcess::Ibcmd {
+            binary,
+            runner,
+            data_path: Some(data_path),
         }),
-        Provider::Agent | Provider::IbcmdRs | Provider::Webinst => Ok(None),
+        Provider::Agent | Provider::IbcmdRs | Provider::Webinst => Err(AppError::capability(
+            format!("{provider} reads no generation by a platform process"),
+        )),
     };
-    answer.unwrap_or_else(|error| {
-        tracing::debug!(%error, "the configuration generation is not known");
-        None
-    })
+    read_generation(context, config, process, resolved.extension.as_deref()).unwrap_or_else(
+        |error| {
+            tracing::debug!(%error, "the configuration generation is not known");
+            None
+        },
+    )
 }
 
 #[cfg(test)]

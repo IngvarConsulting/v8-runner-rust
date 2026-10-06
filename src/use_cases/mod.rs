@@ -34,6 +34,8 @@ pub mod extension_identity;
 pub mod extension_inventory;
 /// Shared discovery and preparation helpers for external artifacts.
 pub mod external_artifacts;
+/// Единственный читатель поколения процессом платформы.
+pub(crate) mod generation_reader;
 /// Shared formatting helpers for IBCMD diagnostics.
 pub mod ibcmd_diagnostics;
 /// What stays out of the project git: `.gitignore` patterns and the tracked version-file refusal.
@@ -67,6 +69,8 @@ pub mod run_tests;
 pub(crate) mod source_inventory;
 /// Shared staged publication mechanics for full-replacement use-case outputs.
 mod staged_publication;
+/// `status`: состояние пары «каталог ↔ база» по памяти и, с `--deep`, по ответу платформы.
+pub mod status;
 /// Shared internal preparation for tool extensions.
 pub(crate) mod tool_extension;
 /// Supported external tool download use case.

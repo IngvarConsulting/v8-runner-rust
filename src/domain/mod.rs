@@ -38,6 +38,8 @@ pub mod publish;
 pub mod runner;
 /// Source set domain models.
 pub mod source_set;
+/// Состояние пары «каталог ↔ база» у `status`.
+pub mod status;
 /// Syntax-check domain models.
 pub mod syntax;
 /// Test domain models.
