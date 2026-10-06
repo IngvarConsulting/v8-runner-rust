@@ -300,16 +300,18 @@ pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork 
     }
 
     // При нулевом выходе ответ получен; предупреждения в stderr (например, о замене концов
-    // строк) его не отменяют и уходят только в журнал.
+    // строк) его не отменяют и уходят только в журнал. Полнота перечня — условие, без
+    // которого он ничего не значит: замер #176 — нечитаемый подкаталог даёт нулевой выход
+    // и предупреждение в stderr. Непустой stderr только повод проверить полноту; текст не
+    // разбирается, решает обход каталога. Без stderr обход не нужен.
     if let Some(warning) = first_line(&stderr) {
         tracing::debug!(dir = %dir.display(), warning, "git status warning ignored");
-    }
-    // Полнота перечня — условие, без которого он ничего не значит.
-    if let Some(unreadable) = unreadable_directory_in(dir) {
-        return UncommittedWork::Unknown(NoAnswer::Failed(format!(
-            "'{}' could not be read, so git status could not list it",
-            unreadable.display()
-        )));
+        if let Some(unreadable) = unreadable_directory_in(dir) {
+            return UncommittedWork::Unknown(NoAnswer::Failed(format!(
+                "'{}' could not be read, so git status could not list it",
+                unreadable.display()
+            )));
+        }
     }
 
     UncommittedWork::AtRisk(parse_at_risk(&output.stdout)).normalized()
@@ -745,9 +747,13 @@ mod tests {
 
         let repo = repo_with_committed_source();
         let hook = repo.path().join("warn.sh");
+        let fired = repo.path().join("hook-fired");
         fs::write(
             &hook,
-            "#!/bin/sh\necho 'warning: in the working copy of x, LF will be replaced by CRLF' >&2\nexit 1\n",
+            format!(
+                "#!/bin/sh\ntouch '{}'\necho 'warning: in the working copy of x, LF will be replaced by CRLF' >&2\nexit 1\n",
+                fired.display()
+            ),
         )
         .expect("hook");
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -765,6 +771,9 @@ mod tests {
             uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/hand-written.xml")])
         );
+        // Без метки хук не сработал (старый git без `core.fsmonitor`-хука), и предупреждения
+        // не было — тест прошёл бы впустую.
+        assert!(fired.is_file(), "the fsmonitor hook must have run");
     }
 
     /// Замерено: нечитаемый подкаталог даёт нулевой выход, пустой список и

@@ -2290,6 +2290,48 @@ exit 0"#,
         assert!(matches!(error, AppError::Validation(_)));
     }
 
+    /// Служебный снимок Конфигуратора у проекта EDT раннер заводит сам: его публикация
+    /// сторожа не спрашивает, а каталог проекта человека спрашивает.
+    #[test]
+    fn the_edt_designer_snapshot_is_runner_owned() {
+        let dir = tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        let snapshot = dir.path().join("work").join("designer");
+        let resolved = super::ResolvedDumpTarget {
+            source_set_name: "main".to_owned(),
+            source_set_purpose: SourceSetPurpose::Configuration,
+            extension: None,
+            target_path: project.clone(),
+            canonical_target_path: project.clone(),
+            platform_target_path: snapshot.clone(),
+            canonical_platform_target_path: snapshot,
+            canonical_base_path: dir.path().to_path_buf(),
+            canonical_work_path: dir.path().join("work"),
+            target_identity: "id".to_owned(),
+            platform_target_identity: "snapshot".to_owned(),
+            lock_path: dir.path().join(".lock"),
+            edt_base_project_name: None,
+            consent: DestructionConsent::AskFirst(
+                crate::use_cases::destruction_guard::WaysOut::SaveWork,
+            ),
+        };
+
+        assert_eq!(
+            resolved.platform_consent(),
+            &DestructionConsent::RunnerOwned
+        );
+
+        let designer = super::ResolvedDumpTarget {
+            platform_target_path: project.clone(),
+            canonical_platform_target_path: project,
+            ..resolved
+        };
+        assert_eq!(
+            designer.platform_consent(),
+            &DestructionConsent::AskFirst(crate::use_cases::destruction_guard::WaysOut::SaveWork)
+        );
+    }
+
     #[test]
     fn nearest_existing_canonical_path_uses_existing_ancestor() {
         let dir = tempdir().expect("tempdir");
