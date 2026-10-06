@@ -97,6 +97,7 @@ v8-runner infobase create
 ## Default Use-Case Routing
 
 - Source files changed and infobase may be stale: run `v8-runner push`.
+- Unsure how the sources and the base relate: run `v8-runner status` (memory only, no platform, works without one) — per set `memory` (`none` → `push` is refused `no_memory`), the recorded generation and `changed_files`; `status --all` for every declared base. `status --deep` asks the platform (the `push` executor): `base.comparison: moved_ahead` means a `push` that loads this set without `--force` is refused `non_fast_forward` — pull first; `extensions.installed[].source_set: null` with `tool: false` is an extension of the base with no project set (names match case-insensitively); `holders` lists the copies holding a file base. It writes nothing but logs. An ad hoc `--infobase` connection string is not listed by `--all`. CLI only.
 - `push` checks, in order: who holds the base, memory of it, its generation. No memory for a set (fresh `workPath`, even an empty base; memory of another base or directory counts as none) → `no_memory` (exit 3; also for `push --full`, `push --dry-run` and `test`): run `pull <SET>` if the base is right (`pull <SET> --force` for a cluster base reached through Designer, which gives no generation yet: a dump over the directory would not record memory), `push --force` if the sources are; `infobase create`, a full `pull` and any successful push write memory. Base moved ahead of the recorded generation → `non_fast_forward` (exit 3, `base_generation`/`local_generation`, `next: pull <SET>`); a server base may have been changed by another copy. After taking a base over (no marker / gone owner) the only way out until the first push is `push --force`. `push --force` loads every selected set in full and overwrites the base; it is the only way past the memory and generation checks (`--full` is checked too); CLI only, not in MCP.
 - A `pull` message saying the infobase was changed while being dumped: the next `push` is refused `non_fast_forward`; pull again before pushing. A failed push leaves the base unverified: if its generation moved, the next push is refused naming the failed load — pull or `push --force`.
 - Only one source-set changed: name it positionally (`push <SET>`, `pull <SET>`, `make <SET>`, `download <SET>`, `convert <SET>`) instead of rebuilding or materializing everything. A positional value is always a source set, never a base: name the base with `--infobase`.
@@ -223,7 +224,7 @@ v8-runner infobase create
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.
 - `--dry-run` is a global key: it means the same before and after the command. Commands with no
-  preview — `version`, `init`, `tools download`, `test`, `mcp serve` — refuse it
+  preview — `version`, `init`, `tools download`, `test`, `status`, `mcp serve` — refuse it
   with a named reason instead of running.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
   what it would do: `clone`, `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`,

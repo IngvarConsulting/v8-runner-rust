@@ -660,30 +660,8 @@ impl SourceSetConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum SourceSetPurpose {
-    Configuration,
-    Extension,
-    ExternalDataProcessors,
-    ExternalReports,
-}
-
-impl SourceSetPurpose {
-    pub const fn is_external(self) -> bool {
-        matches!(self, Self::ExternalDataProcessors | Self::ExternalReports)
-    }
-
-    /// The YAML `type` spelling. Stable: it is also persisted in hash-memory bindings.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Configuration => "CONFIGURATION",
-            Self::Extension => "EXTENSION",
-            Self::ExternalDataProcessors => "EXTERNAL_DATA_PROCESSORS",
-            Self::ExternalReports => "EXTERNAL_REPORTS",
-        }
-    }
-}
+/// Назначение набора живёт в домене: его называет и ответ `status`.
+pub use crate::domain::source_set::SourceSetPurpose;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ToolsConfig {

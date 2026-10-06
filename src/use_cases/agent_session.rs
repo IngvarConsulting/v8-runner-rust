@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::domain::status::GenerationAfter;
 use crate::platform::process::{ProcessInterruption, ProcessInterruptionReason};
 use crate::platform::result::PlatformCommandResult;
 
@@ -867,28 +868,6 @@ pub(crate) struct GenerationRecord {
     pub recorded_at: String,
     /// Привязка памяти набора (база, каталог, назначение, имя): запись другой пары чужая.
     pub identity: String,
-}
-
-/// Операция, после которой записан токен поколения.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum GenerationAfter {
-    Build,
-    Dump,
-    /// Токен записан до загрузки, которая не удалась: что она успела сделать с базой,
-    /// неизвестно, и расхождение с ним не называется чужой правкой.
-    #[serde(rename = "failed_build")]
-    FailedBuild,
-}
-
-impl std::fmt::Display for GenerationAfter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Build => "build",
-            Self::Dump => "dump",
-            Self::FailedBuild => "failed build",
-        })
-    }
 }
 
 /// Ответ записи на вопрос «менялась ли база с прошлого чтения».

@@ -62,6 +62,7 @@ fn without_preview() -> Vec<(&'static str, Vec<&'static str>, &'static str)> {
             "test",
         ),
         ("test va", vec!["test", "va"], "test"),
+        ("status", vec!["status"], "status"),
     ]
 }
 

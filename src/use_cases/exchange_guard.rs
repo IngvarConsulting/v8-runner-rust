@@ -32,9 +32,10 @@ use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::next_step::NextStep;
 use crate::domain::source_set::SourceSetContext;
+use crate::domain::status::{GenerationAfter, GenerationVerdict, MemoryState};
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    GenerationAfter, GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
+    GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
 };
 use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::ignored_files::VERSION_FILE_NAME;
@@ -92,7 +93,7 @@ pub(crate) fn forget_new_owner(config: &AppConfig) -> Option<String> {
 /// Признак, который не прочесть или не разобрать, всё равно признак: выгрузку не предлагаем.
 /// Так безопаснее — лишний раз не предложенный `pull` стоит меньше, чем предложенная
 /// выгрузка чужой работы в этот каталог.
-fn new_owner_since(config: &AppConfig) -> Option<String> {
+pub(crate) fn new_owner_since(config: &AppConfig) -> Option<String> {
     let file = new_owner_file(config)?;
     let text = match std::fs::read(&file) {
         Ok(text) => text,
@@ -281,11 +282,25 @@ pub(crate) fn require_memory(
 /// или нечитаемая отменяет и свою запись поколения: каталог от этой базы она не выводит
 /// (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
 fn remembers(set: &SourceSetContext, work_path: &Path) -> bool {
+    memory_of(set, work_path) == MemoryState::Remembered
+}
+
+/// Что копия помнит о базе для набора — единственное определение памяти: по нему отказывает
+/// `push` и отвечает `status`. Своя хеш-память решает первой; без неё — запись журнала
+/// поколений. Чужая или нечитаемая хеш-память — не память, даже рядом со своей записью.
+pub(crate) fn memory_of(set: &SourceSetContext, work_path: &Path) -> MemoryState {
+    if set.storage_identity().is_none() {
+        return MemoryState::Unbound;
+    }
     match analyzer::snapshot_memory(set, work_path) {
-        SnapshotMemory::Own => true,
-        SnapshotMemory::Foreign | SnapshotMemory::Unreadable => false,
-        SnapshotMemory::Nothing => GenerationLedger::of(set, work_path)
-            .is_some_and(|ledger| matches!(ledger.read(), Recorded::Ours(_))),
+        SnapshotMemory::Own => MemoryState::Remembered,
+        SnapshotMemory::Foreign => MemoryState::Foreign,
+        SnapshotMemory::Unreadable => MemoryState::Unreadable,
+        SnapshotMemory::Nothing => match GenerationLedger::of(set, work_path).map(|l| l.read()) {
+            Some(Recorded::Ours(_)) => MemoryState::Remembered,
+            Some(Recorded::Foreign { .. }) => MemoryState::Foreign,
+            Some(Recorded::Nothing) | None => MemoryState::Missing,
+        },
     }
 }
 
@@ -299,6 +314,40 @@ fn keeps_other_memory(set: &SourceSetContext, work_path: &Path) -> bool {
             analyzer::snapshot_memory(set, work_path),
             SnapshotMemory::Foreign | SnapshotMemory::Unreadable
         )
+}
+
+/// Запись журнала поколений этой пары «база ↔ каталог»: чужая и неразборчивая — не запись.
+pub(crate) fn recorded_generation(
+    set: &SourceSetContext,
+    work_path: &Path,
+) -> Option<GenerationRecord> {
+    match GenerationLedger::of(set, work_path)?.read() {
+        Recorded::Ours(record) => Some(record),
+        Recorded::Nothing | Recorded::Foreign { .. } => None,
+    }
+}
+
+/// Что покажет сверка поколения перед загрузкой набора — единственное место этого решения:
+/// по нему отказывает `push` ([`GenerationGate`]) и отвечает `status --deep`. Ничего не пишет
+/// и не отказывает. Токены сравниваются только внутри одного инструмента
+/// (`INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`).
+///
+/// `answer` — инструмент и токен, которыми ответила база; `None` — ответа нет.
+pub(crate) fn predict(
+    record: Option<&GenerationRecord>,
+    answer: Option<(Provider, &str)>,
+) -> GenerationVerdict {
+    let Some(record) = record else {
+        return GenerationVerdict::NoRecord;
+    };
+    let Some((tool, token)) = answer else {
+        return GenerationVerdict::NoAnswer;
+    };
+    match record.compare(tool, token) {
+        GenerationComparison::Unchanged => GenerationVerdict::Unchanged,
+        GenerationComparison::Changed => GenerationVerdict::MovedAhead,
+        GenerationComparison::NoAnswer => GenerationVerdict::OtherTool,
+    }
 }
 
 /// Сколько набора загружено: от этого зависит, доказано ли совпадение каталога и базы.
@@ -409,19 +458,18 @@ impl<'a> GenerationGate<'a> {
         let Some(token) = read()? else {
             return Ok(BeforeLoad::Unchecked);
         };
-        match record.compare(tool, &token) {
-            GenerationComparison::Unchanged => Ok(BeforeLoad::Matched),
-            GenerationComparison::NoAnswer => Ok(BeforeLoad::Unchecked),
-            GenerationComparison::Changed => Err(self.moved_ahead(set.name(), &token, &record)),
+        match predict(Some(&record), Some((tool, &token))) {
+            GenerationVerdict::Unchanged => Ok(BeforeLoad::Matched),
+            GenerationVerdict::MovedAhead => Err(self.moved_ahead(set.name(), &token, &record)),
+            GenerationVerdict::OtherTool
+            | GenerationVerdict::NoRecord
+            | GenerationVerdict::NoAnswer => Ok(BeforeLoad::Unchecked),
         }
     }
 
     /// Запись набора, сделанная тем же инструментом.
     fn record_of(&self, set: &SourceSetContext, tool: Provider) -> Option<GenerationRecord> {
-        GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| match ledger.read() {
-            Recorded::Ours(record) if record.tool == tool => Some(record),
-            Recorded::Ours(_) | Recorded::Nothing | Recorded::Foreign { .. } => None,
-        })
+        recorded_generation(set, &self.config.work_path).filter(|record| record.tool == tool)
     }
 
     fn moved_ahead(&self, set: &str, base: &str, record: &GenerationRecord) -> AppError {

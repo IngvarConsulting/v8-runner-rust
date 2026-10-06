@@ -1,7 +1,7 @@
 ---
 id: INV.CLI.STATUS-WITHOUT-DEEP-STARTS-NO-PLATFORM
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/216
+check:
+  - tests/cli_status.rs::status_without_deep_starts_no_platform
 ---
 
 # `status` без `--deep` не запускает платформу

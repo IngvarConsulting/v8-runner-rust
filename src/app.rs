@@ -269,7 +269,8 @@ pub fn run() -> i32 {
         | Command::Artifacts(_)
         | Command::Syntax(_)
         | Command::Launch(_)
-        | Command::Publish(_) => execute::execute_command(
+        | Command::Publish(_)
+        | Command::Status(_) => execute::execute_command(
             &config,
             &cli.command,
             &command_line_target(&cli, Some(primary_config_path), &config),
