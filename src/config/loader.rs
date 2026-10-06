@@ -617,7 +617,9 @@ pub fn load_declared_infobases(
     let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
     if regular_file_exists(&project_path)? {
         let mut project = read_yaml_file(&project_path)?;
-        // Согласие из проектного файла не считается: такой проект не загрузился бы и сам.
+        // Ключи местного слоя в проектном файле владельца — `shared` в прежней секции
+        // `infobase:` или карта `infobases:` — дают ошибку: такой проект не загрузился бы и
+        // сам, и проверка владельца считает его живым и несогласным.
         reject_local_keys_in_project_file(&project)?;
         fold_infobase_synonym(&mut project, ConfigFile::Project(&project_path))?;
         if let Some(infobases) = root_mapping_mut(&mut project)?.remove(yaml_key("infobases")) {

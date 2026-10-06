@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::loader::{load_declared_infobases, ConfigLoadError};
-use crate::config::model::AppConfig;
+use crate::config::model::{AppConfig, InfobaseConfig};
 use crate::domain::next_step::NextStep;
 use crate::platform::connection::V8Connection;
 use crate::support::fs::{read_optional, write_file_atomically};
@@ -185,21 +185,23 @@ fn check_as(
             ),
         )
     })?;
-    let owners = marker.map(|marker| marker.owners).unwrap_or_default();
+    let owners: Vec<(OwnerRecord, Standing)> = marker
+        .map(|marker| marker.owners)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|owner| {
+            let standing = standing(this, &owner, &base_dir);
+            (owner, standing)
+        })
+        .collect();
     let nobody_held_it = owners.is_empty();
-    // Согласие этой копии — из её местного слоя в момент команды; у строки соединения его
-    // нет: она базу не делит, а только подчиняется владельцу.
-    let consents = config.infobase_name.is_some() && config.infobase.shared;
+    let this_consent = ThisConsent::of(config, &base_dir);
+    let shares = this_consent == ThisConsent::Shares;
     // Метку пишет только прогон команды записи на базе, названной в местном слое.
     let records = check == OwnerCheck::Run && config.infobase_name.is_some();
 
-    let standings: Vec<Standing> = owners
-        .iter()
-        .map(|owner| standing(this, owner, &base_dir))
-        .collect();
     let alive: Vec<(&OwnerRecord, &Alive)> = owners
         .iter()
-        .zip(&standings)
         .filter_map(|(owner, standing)| match standing {
             Standing::Alive(why) => Some((owner, why)),
             Standing::This | Standing::Gone(_) => None,
@@ -207,38 +209,29 @@ fn check_as(
         .collect();
     let recorded_consent = owners
         .iter()
-        .zip(&standings)
         .find_map(|(owner, standing)| matches!(standing, Standing::This).then_some(owner.shared));
 
-    if !alive.is_empty() && (!consents || alive.iter().any(|(owner, why)| !why.consents(owner))) {
+    if !alive.is_empty() && (!shares || alive.iter().any(|(owner, why)| !why.consents(owner))) {
         // Копия, уже записанная в метке, сообщает своё согласие и при отказе: копии других
-        // машин видят отзыв только так.
-        let mut unrecorded = None;
-        if records && recorded_consent.is_some_and(|recorded| recorded != consents) {
-            let reported = OwnerMarker {
-                version: OWNER_MARKER_VERSION,
-                owners: owners
-                    .iter()
-                    .zip(&standings)
-                    .map(|(owner, standing)| match standing {
-                        Standing::This => OwnerRecord {
-                            shared: consents,
-                            ..owner.clone()
-                        },
-                        Standing::Alive(_) | Standing::Gone(_) => owner.clone(),
-                    })
-                    .collect(),
-            };
-            unrecorded = write_marker(&marker_path, &reported).err();
-        }
-        return Err(held_refusal(
+        // машин видят отзыв только так. Ушедших отказ не сменяет.
+        let unrecorded = (records && recorded_consent.is_some_and(|recorded| recorded != shares))
+            .then(|| {
+                let reported = OwnerMarker {
+                    version: OWNER_MARKER_VERSION,
+                    owners: rewritten(&owners, shares, Departed::Stay),
+                };
+                write_marker(&marker_path, &reported).err()
+            })
+            .flatten();
+        return Err(HeldRefusal {
             command_name,
-            &base_dir,
-            &marker_path,
-            consents,
-            &alive,
-            unrecorded.as_ref(),
-        ));
+            base_dir: &base_dir,
+            marker_path: &marker_path,
+            this: this_consent,
+            alive,
+            unrecorded,
+        }
+        .into_error());
     }
     // Превью ничего не берёт, а строка соединения подчиняется владельцу, но им не
     // становится — даже на базе без метки или с ушедшим владельцем.
@@ -247,13 +240,12 @@ fn check_as(
     }
     let gone: Vec<(&OwnerRecord, &Gone)> = owners
         .iter()
-        .zip(&standings)
         .filter_map(|(owner, standing)| match standing {
             Standing::Gone(why) => Some((owner, why)),
             Standing::This | Standing::Alive(_) => None,
         })
         .collect();
-    if recorded_consent == Some(consents) && gone.is_empty() {
+    if recorded_consent == Some(shares) && gone.is_empty() {
         return Ok(Vec::new());
     }
     let Some(machine) = this.machine.clone() else {
@@ -283,26 +275,13 @@ fn check_as(
             marker_path.display()
         ));
     }
-    // Ушедшие выбывают, живые — на общей базе — остаются, эта копия записана со своим
-    // согласием.
-    let mut kept: Vec<OwnerRecord> = owners
-        .iter()
-        .zip(&standings)
-        .filter_map(|(owner, standing)| match standing {
-            Standing::This => Some(OwnerRecord {
-                shared: consents,
-                ..owner.clone()
-            }),
-            Standing::Alive(_) => Some(owner.clone()),
-            Standing::Gone(_) => None,
-        })
-        .collect();
+    let mut kept = rewritten(&owners, shares, Departed::Leave);
     if recorded_consent.is_none() {
         kept.push(OwnerRecord {
             machine,
             host: this.host.clone(),
             project: this.project.clone(),
-            shared: consents,
+            shared: shares,
             since: Utc::now(),
         });
     }
@@ -321,6 +300,80 @@ fn check_as(
         )
     })?;
     Ok(notes)
+}
+
+/// Согласие этой копии делить базу: из её местного слоя в момент команды.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThisConsent {
+    Shares,
+    DoesNotShare,
+    /// База пришла строкой соединения в `--infobase`: согласия у неё нет, она базу не делит,
+    /// а только подчиняется владельцу.
+    ConnectionString,
+}
+
+impl ThisConsent {
+    fn of(config: &AppConfig, base_dir: &Path) -> Self {
+        if config.infobase_name.is_none() {
+            return Self::ConnectionString;
+        }
+        // Выбранная секция объявляет базу всегда; остальные секции той же базы тоже
+        // должны согласиться — так же, как у копии-владельца.
+        let sections = std::iter::once(&config.infobase).chain(config.infobases.values());
+        match consent_of(sections, &config.base_path, base_dir) {
+            Some(true) => Self::Shares,
+            Some(false) | None => Self::DoesNotShare,
+        }
+    }
+}
+
+/// Согласие копии делить файловую базу `base_dir` по секциям её местного слоя, пути — от её
+/// каталога `project`. `None` — ни одна секция базу не объявляет; иначе копия согласна, только
+/// если `shared: true` стоит у каждой секции, которая базу объявляет.
+fn consent_of<'a>(
+    sections: impl IntoIterator<Item = &'a InfobaseConfig>,
+    project: &Path,
+    base_dir: &Path,
+) -> Option<bool> {
+    let mut declaring = sections
+        .into_iter()
+        .filter(|infobase| {
+            V8Connection::from_connection_string(&infobase.connection)
+                .file_infobase_dir(project)
+                .is_some_and(|dir| same_path(&dir, base_dir))
+        })
+        .peekable();
+    declaring.peek()?;
+    Some(declaring.all(|infobase| infobase.shared))
+}
+
+/// Что делать с ушедшими владельцами, когда метка переписывается.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Departed {
+    /// Команда записи прошла и сменяет их.
+    Leave,
+    /// Команда отказала: метку она меняет только согласием этой копии.
+    Stay,
+}
+
+/// Записи метки после команды: у этой копии — её нынешнее согласие, живые остаются,
+/// ушедшие — по `departed`.
+fn rewritten(
+    owners: &[(OwnerRecord, Standing)],
+    shares: bool,
+    departed: Departed,
+) -> Vec<OwnerRecord> {
+    owners
+        .iter()
+        .filter_map(|(owner, standing)| match standing {
+            Standing::This => Some(OwnerRecord {
+                shared: shares,
+                ..owner.clone()
+            }),
+            Standing::Alive(_) => Some(owner.clone()),
+            Standing::Gone(_) => (departed == Departed::Stay).then(|| owner.clone()),
+        })
+        .collect()
 }
 
 /// Где копия-владелец по отношению к этой команде.
@@ -409,39 +462,38 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
         Err(_) => Standing::Alive(Alive::Unreadable(
             "its v8project.yaml or v8project.local.yaml cannot be parsed".to_owned(),
         )),
-        Ok(declared) => {
-            // Согласна копия, только если согласие стоит у каждой её секции, которая
-            // объявляет эту базу.
-            let mut declaring = declared
-                .values()
-                .filter(|infobase| {
-                    V8Connection::from_connection_string(&infobase.connection)
-                        .file_infobase_dir(&owner.project)
-                        .is_some_and(|dir| same_path(&dir, base_dir))
-                })
-                .peekable();
-            if declaring.peek().is_none() {
-                return Standing::Gone(Gone::NoLongerDeclares);
-            }
-            let shared = declaring.all(|infobase| infobase.shared);
-            Standing::Alive(Alive::Declares { shared })
-        }
+        Ok(declared) => match consent_of(declared.values(), &owner.project, base_dir) {
+            Some(shared) => Standing::Alive(Alive::Declares { shared }),
+            None => Standing::Gone(Gone::NoLongerDeclares),
+        },
     }
 }
 
 /// Отказ на базе другой копии: кто её держит и согласен ли делить её, как освободить базу,
 /// где метка и какие выходы есть у этой копии. Следующий шаг — первый и безопасный: своя
-/// чистая база. Выгрузку отказ не предлагает: на общей базе она увела бы копию в чужую ветку
-/// (`INV.USE-CASES.A-SHARED-BASE-REFUSAL-NEVER-OFFERS-PULL`).
-fn held_refusal(
-    command_name: &str,
-    base_dir: &Path,
-    marker_path: &Path,
-    consents: bool,
-    alive: &[(&OwnerRecord, &Alive)],
-    unrecorded: Option<&std::io::Error>,
-) -> UseCaseError {
-    let holders = alive
+/// чистая база. Выгрузку отказ не предлагает: базу держит другая копия, и выгрузка увела бы эту
+/// копию в её ветку.
+struct HeldRefusal<'a> {
+    command_name: &'a str,
+    base_dir: &'a Path,
+    marker_path: &'a Path,
+    this: ThisConsent,
+    alive: Vec<(&'a OwnerRecord, &'a Alive)>,
+    /// Почему согласие этой копии не записалось в метку при отказе.
+    unrecorded: Option<std::io::Error>,
+}
+
+impl HeldRefusal<'_> {
+    fn into_error(self) -> UseCaseError {
+        let Self {
+            command_name,
+            base_dir,
+            marker_path,
+            this,
+            alive,
+            unrecorded,
+        } = self;
+        let holders = alive
         .iter()
         .map(|(owner, why)| {
             let sharing = if why.consents(owner) {
@@ -467,12 +519,14 @@ fn held_refusal(
         })
         .collect::<Vec<_>>()
         .join("; ");
-    let this_copy = if consents {
-        "this working copy shares it"
-    } else {
-        "this working copy does not share it"
+        let this_copy = match this {
+        ThisConsent::Shares => "this working copy shares it",
+        ThisConsent::DoesNotShare => "this working copy does not share it",
+        ThisConsent::ConnectionString => {
+            "a connection string does not share an infobase — pass its name (declared in v8project.local.yaml with shared: true)"
+        }
     };
-    let release = alive
+        let release = alive
         .iter()
         .map(|(owner, why)| match why {
             Alive::Declares { .. } | Alive::Unreadable(_) => format!(
@@ -494,14 +548,14 @@ fn held_refusal(
         })
         .collect::<Vec<_>>()
         .join("; ");
-    let unrecorded = unrecorded
-        .map(|error| {
-            format!(
+        let unrecorded = unrecorded
+            .map(|error| {
+                format!(
                 ". The consent of this working copy cannot be recorded in the owner marker: {error}"
             )
-        })
-        .unwrap_or_default();
-    UseCaseError::new(
+            })
+            .unwrap_or_default();
+        UseCaseError::new(
         UseCaseErrorKind::InfobaseHeld,
         format!(
             "cannot start {command_name}: the infobase '{}' is held by {holders}; {this_copy}. A command that writes a development infobase runs only in the working copy that holds it, or on a shared infobase when every working copy that holds it and this one share it, and repeating it does not help. \
@@ -514,6 +568,7 @@ fn held_refusal(
         ),
     )
     .with_next(NextStep::command("infobase create"))
+    }
 }
 
 /// Почему метку не прочитать.
@@ -1156,5 +1211,63 @@ mod tests {
             check_as(&this, &config, "push", BaseAccess::Writes, OwnerCheck::Run).expect("run");
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(consents(&base), [(config.base_path.clone(), true)]);
+    }
+
+    /// Согласие, которое не записать в метку при отказе, отказ не подменяет: ответ остаётся
+    /// `InfobaseHeld` и говорит, что согласие не записано. Каталог рядом с базой закрыт на
+    /// запись; под root права не действуют, и тогда проверке не на чем стоять.
+    #[cfg(unix)]
+    #[test]
+    fn a_consent_that_cannot_be_recorded_keeps_the_held_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let here = shared_project(&dir.path().join("here"), &base, true);
+        let there = shared_project(&dir.path().join("there"), &base, true);
+        let other_machine = on("machine-b", "there-host", &there);
+        check_as(
+            &on("machine-a", "here-host", &here),
+            &here,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("run");
+        check_as(
+            &other_machine,
+            &there,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("run");
+        let recorded = marker(&base);
+        let there = shared_project(&dir.path().join("there"), &base, false);
+        let beside = base.parent().expect("parent").to_path_buf();
+        fs::set_permissions(&beside, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let probe = beside.join("probe");
+        if fs::write(&probe, "").is_ok() {
+            fs::remove_file(&probe).expect("remove probe");
+            fs::set_permissions(&beside, fs::Permissions::from_mode(0o755)).expect("chmod back");
+            eprintln!("skipped: permissions do not apply to this user");
+            return;
+        }
+
+        let refused = check_as(
+            &other_machine,
+            &there,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        );
+        fs::set_permissions(&beside, fs::Permissions::from_mode(0o755)).expect("chmod back");
+
+        let refused = refused.expect_err("the copy that withdrew is refused");
+        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseHeld);
+        assert!(
+            refused.message().contains("cannot be recorded"),
+            "{refused}"
+        );
+        assert_eq!(marker(&base), recorded);
     }
 }

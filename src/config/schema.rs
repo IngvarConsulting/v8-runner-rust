@@ -66,13 +66,12 @@ pub fn schema_json_pretty(schema: &Value) -> String {
 pub(crate) const LOCAL_ONLY_INFOBASE_KEYS: [&str; 1] = ["shared"];
 
 fn remove_local_only_infobase_keys(schema: &mut Value) {
-    if let Some(properties) = schema_object_mut(schema, &["InfobaseSchema"])
+    let properties = schema_object_mut(schema, &["InfobaseSchema"])
         .and_then(|section| section.get_mut("properties"))
         .and_then(Value::as_object_mut)
-    {
-        for key in LOCAL_ONLY_INFOBASE_KEYS {
-            properties.remove(key);
-        }
+        .expect("the project schema describes the infobase section");
+    for key in LOCAL_ONLY_INFOBASE_KEYS {
+        properties.remove(key);
     }
 }
 
@@ -1685,6 +1684,15 @@ mod tests {
         assert_overlay_loader_error(agent_stranger);
     }
 
+    /// Проектный файл без секции базы: базы объявляет местный слой.
+    const PROJECT_WITHOUT_AN_INFOBASE: &str = r"workPath: build
+format: DESIGNER
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: .
+";
+
     /// Согласие делить файловую базу — ключ местного слоя: его принимают схема слоя и
     /// загрузчик, и выбранная база его несёт (`INV.USE-CASES.A-BASE-IS-SHARED-BY-CONSENT-OF-EVERY-COPY`).
     #[test]
@@ -1697,7 +1705,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
             let config_path = dir.path().join("v8project.yaml");
-            std::fs::write(&config_path, "workPath: build\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n").expect("config");
+            std::fs::write(&config_path, PROJECT_WITHOUT_AN_INFOBASE).expect("config");
             std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
             let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
                 .map(|loaded| loaded.config)
@@ -1718,8 +1726,11 @@ mod tests {
     #[test]
     fn the_project_file_refuses_consent_to_share_a_base() {
         let project = format!(
-            "{}  shared: true\n",
-            "workPath: build\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\ninfobase:\n  connection: 'File=build/ib'\n"
+            "{PROJECT_WITHOUT_AN_INFOBASE}{}",
+            r"infobase:
+  connection: 'File=build/ib'
+  shared: true
+"
         );
         assert_schema_invalid(&main_config_schema_json(), &project);
         assert_config_loader_error(

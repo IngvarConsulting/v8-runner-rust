@@ -156,7 +156,9 @@ v8-runner infobase create
   `shared: true` at the base in `v8project.local.yaml` of every copy that writes it — the project
   file refuses the key. One copy without it (or with `false`) makes writes of every copy refuse
   `infobase_held`, naming who does not share; a copy on another machine reports its consent
-  through the marker at its next write. No incremental guarantees on a shared base.
+  through the marker at its next write; every section declaring that base needs the key. An
+  ad hoc `--infobase <connection string>` never consents: on a shared base it is refused — pass
+  the base name. No incremental guarantees on a shared base.
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
