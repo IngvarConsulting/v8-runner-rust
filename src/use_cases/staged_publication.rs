@@ -10,7 +10,7 @@ use crate::support::fs::{
     write_temp_dir_metadata, ReplaceFileFailureState, TempDirKind, TempDirMetadata,
 };
 use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
-use crate::use_cases::destruction_guard::{guard_replacement, DestructionConsent};
+use crate::use_cases::destruction_guard::{guard_replacement, Destruction, DestructionConsent};
 use crate::use_cases::interruption;
 
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -133,7 +133,13 @@ impl StagedPublication {
         regenerated: &[&str],
     ) -> Result<StagedPublicationOutcome, AppError> {
         // Сторож спрашивает до подмены: после неё прежнего содержимого уже нет.
-        guard_replacement(context, &self.target_path, consent, regenerated)?;
+        guard_replacement(
+            context,
+            &self.target_path,
+            consent,
+            regenerated,
+            Destruction::Replace,
+        )?;
         if let Some(error) = interruption_before_publish(context, "staged directory publication") {
             return Err(error);
         }

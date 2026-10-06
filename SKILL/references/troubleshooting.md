@@ -47,11 +47,12 @@ workPath/temp/<runner-id>/runs/<run-id>/
 
 Useful `workPath` locations:
 
-- `workPath/infobases/<name>/hashes/<source-set>.redb`: named-base source hashes; foreign memory is refused.
+- `workPath/infobases/<base>/hashes/<source-set>.redb`: source hashes per base (`<base>` is a declared name or `@<hash>` of an ad hoc connection string); foreign memory is refused.
+- `workPath/infobases/<base>/dump-info/<source-set>/`, `designer/<source-set>/`, `generation.json`: version-file copy, EDT Designer snapshot, agent generation ledger of that base.
 - `workPath/hash-storages/`: shared EDT export and external-artifact caches.
 - `workPath/edt-workspace/`: shared EDT workspace for `infobase create`.
 - `workPath/convert/edt-workspace/`: separate EDT workspace for `convert`.
-- `workPath/designer/<sourceSetName>/`: generated Designer representation, especially for EDT flows.
+- `workPath/designer/<sourceSetName>/`: generated Designer representation of EDT external processors/reports (and of EDT sets when the base address is not recognized).
 - `workPath/ibcmd-data/`: project-local standalone-server data for IBCMD dump; safe to remove only when no project command is running.
 - `workPath/logs/platform/`: platform logs.
 - `workPath/temp/partial-lists/`: Designer partial load/dump list files; failed partial-load builds preserve the relevant list file for diagnostics.

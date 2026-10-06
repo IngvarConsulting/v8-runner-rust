@@ -62,6 +62,24 @@ pub(super) enum WaysOut {
     },
 }
 
+/// Что работа делает с каталогом — так её и называет отказ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Destruction {
+    /// Каталог заменяется целиком.
+    Replace,
+    /// Выгрузка ложится поверх каталога и переписывает файлы в нём.
+    Overwrite,
+}
+
+impl Destruction {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Overwrite => "overwrite",
+        }
+    }
+}
+
 /// Отказывает до того, как что-либо стёрто, либо пропускает работу дальше.
 ///
 /// `regenerated` — имена файлов в корне `target`, которые эта замена пишет заново;
@@ -79,6 +97,7 @@ pub(super) fn guard_replacement(
     target: &Path,
     consent: &DestructionConsent,
     regenerated: &[&str],
+    how: Destruction,
 ) -> Result<(), AppError> {
     let ways_out = match consent {
         DestructionConsent::RunnerOwned => return Ok(()),
@@ -93,7 +112,7 @@ pub(super) fn guard_replacement(
             // Попросили уничтожить — уничтожаем, как и обещает имя ключа.
             None => Ok(()),
             Some(ways_out) => Err(AppError::Validation(refusal(
-                target, &paths, ways_out, context,
+                target, &paths, ways_out, context, how,
             ))),
         },
         // Ответа нет — работа идёт, как шла до сторожа. Это не защита и не
@@ -107,6 +126,7 @@ fn refusal(
     paths: &[PathBuf],
     ways_out: &WaysOut,
     context: &ExecutionContext,
+    how: Destruction,
 ) -> String {
     let named: Vec<String> = paths
         .iter()
@@ -122,7 +142,8 @@ fn refusal(
     // Одной строкой: человеческий вывод — закреплённая форма, и многострочная
     // подробность в нём рассыпается по разным видам строк.
     format!(
-        "refusing to replace '{}': {} file(s) there exist nowhere else ({}{}); {}",
+        "refusing to {} '{}': {} file(s) there exist nowhere else ({}{}); {}",
+        how.verb(),
         target.display(),
         paths.len(),
         named.join(", "),
@@ -191,7 +212,13 @@ mod tests {
     }
 
     fn cli_refusal(target: &Path, paths: &[PathBuf]) -> String {
-        refusal(target, paths, &WaysOut::SameCallWithForce, &cli())
+        refusal(
+            target,
+            paths,
+            &WaysOut::SameCallWithForce,
+            &cli(),
+            Destruction::Replace,
+        )
     }
 
     /// Сервер, запущенный с конфигом в другом каталоге, с невыбранной по умолчанию базой
@@ -207,9 +234,14 @@ mod tests {
     #[test]
     fn a_runner_owned_directory_is_never_questioned() {
         let dir = tempdir().expect("tempdir");
-        assert!(
-            guard_replacement(&cli(), dir.path(), &DestructionConsent::RunnerOwned, &[]).is_ok()
-        );
+        assert!(guard_replacement(
+            &cli(),
+            dir.path(),
+            &DestructionConsent::RunnerOwned,
+            &[],
+            Destruction::Replace
+        )
+        .is_ok());
     }
 
     /// Вне репозитория ответа нет — и сторож не притворяется, что защитил.
@@ -217,7 +249,9 @@ mod tests {
     fn without_an_answer_the_work_goes_on_as_before() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("hand-written.xml"), "mine\n").expect("write");
-        assert!(guard_replacement(&cli(), dir.path(), &ask_first(), &[]).is_ok());
+        assert!(
+            guard_replacement(&cli(), dir.path(), &ask_first(), &[], Destruction::Replace).is_ok()
+        );
     }
 
     #[test]
@@ -236,7 +270,13 @@ mod tests {
         let lost = [PathBuf::from("src/cf/hand-written.xml")];
         let target = Path::new("/project/src/cf");
 
-        let same_call = refusal(target, &lost, &WaysOut::SameCallWithForce, &cli());
+        let same_call = refusal(
+            target,
+            &lost,
+            &WaysOut::SameCallWithForce,
+            &cli(),
+            Destruction::Replace,
+        );
         assert!(
             same_call.contains("commit or stash them and run the same command again"),
             "{same_call}"
@@ -246,7 +286,13 @@ mod tests {
             "{same_call}"
         );
 
-        let pull = refusal(target, &lost, &pull_force("ext"), &cli());
+        let pull = refusal(
+            target,
+            &lost,
+            &pull_force("ext"),
+            &cli(),
+            Destruction::Replace,
+        );
         assert!(
             pull.contains("commit or stash them and run the same command again"),
             "{pull}"
@@ -258,7 +304,13 @@ mod tests {
             ExecutionContext::mcp_stdio(CommandName::Dump),
             ExecutionContext::mcp_http(CommandName::Dump),
         ] {
-            let save_only = refusal(target, &lost, &WaysOut::SaveWork, &context);
+            let save_only = refusal(
+                target,
+                &lost,
+                &WaysOut::SaveWork,
+                &context,
+                Destruction::Replace,
+            );
             assert!(save_only.contains("commit or stash them"), "{save_only}");
             assert!(!save_only.contains("--force"), "{save_only}");
         }
@@ -267,7 +319,13 @@ mod tests {
             ExecutionContext::mcp_stdio(CommandName::Dump),
             ExecutionContext::mcp_http(CommandName::Dump),
         ] {
-            let mcp = refusal(target, &lost, &pull_force("ext"), &context);
+            let mcp = refusal(
+                target,
+                &lost,
+                &pull_force("ext"),
+                &context,
+                Destruction::Replace,
+            );
             assert!(
                 mcp.contains("commit or stash them and call the tool again"),
                 "{mcp}"
@@ -296,7 +354,13 @@ mod tests {
         ] {
             let transport = context.transport();
             let context = context.with_command_line(started_elsewhere());
-            let message = refusal(target, &lost, &pull_force("ext"), &context);
+            let message = refusal(
+                target,
+                &lost,
+                &pull_force("ext"),
+                &context,
+                Destruction::Replace,
+            );
             assert!(message.contains(expected), "{transport:?}: {message}");
             assert!(
                 message
@@ -319,9 +383,16 @@ mod tests {
         init_git_repo(root);
         fs::write(root.join("hand-written.xml"), "mine\n").expect("write");
 
-        assert!(guard_replacement(&cli(), root, &DestructionConsent::Granted, &[]).is_ok());
+        assert!(guard_replacement(
+            &cli(),
+            root,
+            &DestructionConsent::Granted,
+            &[],
+            Destruction::Replace
+        )
+        .is_ok());
         assert!(matches!(
-            guard_replacement(&cli(), root, &ask_first(), &[]),
+            guard_replacement(&cli(), root, &ask_first(), &[], Destruction::Replace),
             Err(AppError::Validation(_))
         ));
     }
@@ -337,7 +408,14 @@ mod tests {
         let asked = root.join("cf");
         fs::create_dir_all(&asked).expect("cf");
         fs::write(asked.join(VERSION_FILE_NAME), "<info/>\n").expect("version file");
-        assert!(guard_replacement(&cli(), &asked, &ask_first(), &[VERSION_FILE_NAME]).is_ok());
+        assert!(guard_replacement(
+            &cli(),
+            &asked,
+            &ask_first(),
+            &[VERSION_FILE_NAME],
+            Destruction::Replace
+        )
+        .is_ok());
     }
 
     /// Замена, которая опись не пишет (преобразование, проект EDT), не вправе
@@ -353,7 +431,7 @@ mod tests {
         fs::create_dir_all(&asked).expect("cf");
         fs::write(asked.join(VERSION_FILE_NAME), "<info/>\n").expect("version file");
         assert!(matches!(
-            guard_replacement(&cli(), &asked, &ask_first(), &[]),
+            guard_replacement(&cli(), &asked, &ask_first(), &[], Destruction::Replace),
             Err(AppError::Validation(_))
         ));
     }

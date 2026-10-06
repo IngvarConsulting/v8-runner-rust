@@ -446,8 +446,11 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
     succeeded(run(&project, &["--infobase", "second", "push"]));
 }
 
+/// База, названная строкой соединения, помнится по строке: первая отправка грузит, вторая
+/// с той же строкой продолжает с памятью и пропускает неизменившееся. Память именованной
+/// базы при этом не трогается, а каталог памяти по строке с её именем не совпадает.
 #[test]
-fn an_ad_hoc_base_never_uses_the_named_hash_baseline() {
+fn an_ad_hoc_base_is_remembered_by_its_connection_string() {
     let project = project("designer", false);
     pull(&project);
     let memory = fs::read(snapshot(&project)).expect("memory");
@@ -455,19 +458,25 @@ fn an_ad_hoc_base_never_uses_the_named_hash_baseline() {
         "File={}",
         project.config.parent().expect("root").join("ib").display()
     );
-    for _ in 0..2 {
-        let response = succeeded(run(&project, &["--infobase", &connection, "push"]));
-        assert_ne!(
-            response["data"]["steps"][0]["mode"], "skipped",
-            "{response}"
-        );
-        assert_eq!(fs::read(snapshot(&project)).expect("named memory"), memory);
-    }
-    let bases: Vec<_> = fs::read_dir(project.work.join("infobases"))
+    let first = succeeded(run(&project, &["--infobase", &connection, "push"]));
+    assert_ne!(first["data"]["steps"][0]["mode"], "skipped", "{first}");
+    assert_eq!(fs::read(snapshot(&project)).expect("named memory"), memory);
+    let again = succeeded(run(&project, &["--infobase", &connection, "push"]));
+    assert_eq!(again["data"]["steps"][0]["mode"], "skipped", "{again}");
+    let mut bases: Vec<_> = fs::read_dir(project.work.join("infobases"))
         .expect("bases")
-        .map(|entry| entry.expect("entry").file_name())
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
-    assert_eq!(bases, [std::ffi::OsString::from("origin")]);
+    bases.sort();
+    assert_eq!(bases.len(), 2, "{bases:?}");
+    assert!(bases[0].starts_with('@'), "{bases:?}");
+    assert_eq!(bases[1], "origin");
     assert_push_skips(&project);
 }
 
@@ -604,11 +613,11 @@ if [ -n "$target" ]; then
   mkdir -p "$target"
   if [ -n "$update" ]; then cat "$target/ConfigDumpInfo.xml" >> '{seen}'; fi
   printf '<Configuration/>\n' > "$target/Configuration.xml"
-  printf '<ConfigDumpInfo dump="%s"/>\n' "$n" > "$target/ConfigDumpInfo.xml"
+  printf '<ConfigDumpInfo version="2.17" dump="%s"/>\n' "$n" > "$target/ConfigDumpInfo.xml"
 fi
 if [ -n "$load" ] && [ -n "$writes" ]; then
   cat "$load/ConfigDumpInfo.xml" >> '{seen}'
-  printf '<ConfigDumpInfo load="%s"/>\n' "$n" > "$load/ConfigDumpInfo.xml"
+  printf '<ConfigDumpInfo version="2.17" load="%s"/>\n' "$n" > "$load/ConfigDumpInfo.xml"
 fi
 if [ -f '{fail}' ]; then exit 1; fi
 exit 0"#,
@@ -889,4 +898,129 @@ fn a_source_edit_keeps_the_pull_incremental() {
     let last = calls.lines().next_back().expect("a dump ran");
     assert!(last.contains("/DumpConfigToFiles"), "{last}");
     assert!(last.contains("-update"), "{last}");
+}
+
+fn output_text(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// Полная выгрузка поверх каталога без файла версий переписывает файлы человека, как и
+/// замена каталога: незакоммиченная правка отслеживаемого файла останавливает её до
+/// платформы, отказ называет файл и выход `pull main --force`, файл цел. Выход работает:
+/// с согласием выгрузка идёт полной.
+#[test]
+fn a_full_dump_over_the_directory_asks_the_replacement_guard() {
+    for provider in ["designer", "ibcmd", "agent"] {
+        let project = project(provider, false);
+        let repository = project.sources.parent().expect("project root");
+        fs::write(repository.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+        git(repository, &["init", "-q", "-b", "main"]);
+        git(repository, &["add", ".gitignore", "sources"]);
+        git(repository, &["commit", "-qm", "baseline"]);
+        let edited = project.sources.join("old.txt");
+        fs::write(&edited, "an edit nobody committed").expect("edit");
+        assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+
+        let output = run(&project, &["pull", "--source-set", "main"]);
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{provider}: {}",
+            output_text(&output)
+        );
+        let text = output_text(&output);
+        assert!(text.contains("refusing to overwrite"), "{provider}: {text}");
+        assert!(text.contains("old.txt"), "{provider}: {text}");
+        assert!(text.contains("pull main --force"), "{provider}: {text}");
+        assert_eq!(read(&edited), "an edit nobody committed", "{provider}");
+        let calls = fs::read_to_string(&project.calls).unwrap_or_default();
+        assert!(
+            !calls.contains("DumpConfigToFiles")
+                && !calls.contains("export")
+                && !calls.contains("dump-config-to-files"),
+            "{provider}: the platform must not start: {calls}"
+        );
+
+        let response = succeeded(run(&project, &["pull", "main", "--force"]));
+        assert_eq!(response["data"]["mode"], "FULL", "{provider}: {response}");
+    }
+}
+
+/// Превью называет тот режим, который выполнит выгрузка: без файла версий — полный и
+/// причину; подменённый файл при своей копии раннера уступит ей, и выгрузка останется по
+/// изменившемуся. Платформа не запускается.
+#[test]
+fn a_preview_names_the_mode_the_pull_would_run() {
+    let project = version_project("designer");
+    let preview = |project: &Project| {
+        let calls_before = fs::read_to_string(&project.calls).unwrap_or_default();
+        let response = succeeded(run(project, &["pull", "--source-set", "main", "--dry-run"]));
+        assert_eq!(
+            fs::read_to_string(&project.calls).unwrap_or_default(),
+            calls_before,
+            "the preview must not start the platform"
+        );
+        response
+    };
+
+    let missing = preview(&project);
+    assert_eq!(missing["data"]["mode"], "FULL", "{missing}");
+    assert!(
+        missing["data"]["message"].as_str().is_some_and(|message| {
+            message.contains("no version file ConfigDumpInfo.xml")
+                && message.contains("would run full instead of incremental")
+        }),
+        "{missing}"
+    );
+
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let version_file = project.sources.join("ConfigDumpInfo.xml");
+    fs::write(&version_file, "<ConfigDumpInfo/>\n").expect("a replaced version file");
+    let restored = preview(&project);
+    assert_eq!(restored["data"]["mode"], "INCREMENTAL", "{restored}");
+    assert_eq!(read(&version_file), "<ConfigDumpInfo/>\n");
+    let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
+    assert_eq!(response["data"]["mode"], "INCREMENTAL", "{response}");
+
+    fs::remove_file(&version_file).expect("a lost version file");
+    let lost = preview(&project);
+    assert_eq!(lost["data"]["mode"], "FULL", "{lost}");
+    let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
+    assert_eq!(response["data"]["mode"], "FULL", "{response}");
+}
+
+/// Полная выгрузка поверх каталога без файла версий лишнего не удаляет и хеш-память не
+/// пишет: каталог с файлами, которых нет в базе, базу не описывает. Ответ называет это и
+/// совет `pull <SET> --force` для полного выравнивания.
+#[test]
+fn a_full_dump_over_the_directory_names_the_memory_it_does_not_write() {
+    let project = project("designer", false);
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+
+    let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
+
+    assert_eq!(response["data"]["mode"], "FULL", "{response}");
+    let message = response["data"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("files the base does not have stay in the directory")
+            && message.contains("hash memory is not updated")
+            && message.contains("pull main --force"),
+        "{response}"
+    );
+    assert_eq!(
+        read(&project.sources.join("old.txt")),
+        "local contents before pull"
+    );
+    assert!(
+        !project
+            .work
+            .join("infobases/origin/hashes/main.redb")
+            .exists(),
+        "a dump over the directory records no hashes"
+    );
 }

@@ -2,7 +2,7 @@
 id: INV.USE-CASES.EDT-KEEPS-TWO-CHANGE-CONTEXTS
 check:
   - tests/cli_build.rs::build_edt_text_interleaves_export_stage_after_edt_log
-  - src/change_detection/source_sets.rs::edt_designer_contexts_use_nested_designer_directory
+  - src/change_detection/source_sets.rs::an_edt_designer_copy_lies_under_the_base_memory
   - tests/architecture_guardrails.rs::change_detection_never_reads_the_executor_choice
 ---
 

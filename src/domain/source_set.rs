@@ -19,7 +19,19 @@ pub struct SourceSetContext {
 enum SnapshotMemory {
     Shared,
     Disabled,
-    Infobase { name: String, identity: String },
+    Infobase {
+        base: String,
+        identity: String,
+        subject: MemorySubject,
+    },
+}
+
+/// Чья память лежит под базой: набора исходников или расширения-инструмента.
+#[derive(Debug, Clone)]
+enum MemorySubject {
+    SourceSet,
+    /// `tools.extensions[].name`; его хеши лежат в `hashes/tools/<имя>.redb`.
+    ToolExtension(String),
 }
 
 impl SourceSetContext {
@@ -44,20 +56,35 @@ impl SourceSetContext {
         }
     }
 
-    /// Bind hash memory to a named infobase; `identity` is stored and compared with the snapshot.
+    /// Bind hash memory to an infobase: `infobase` names its directory under
+    /// `workPath/infobases/` (a declared name or [`connection_memory_key`]); `identity` is
+    /// stored and compared with the snapshot.
     pub fn with_infobase_memory(mut self, infobase: &str, identity: String) -> Self {
         assert!(
             is_safe_path_segment(&self.name),
             "source set name must be a safe path segment"
         );
+        self.memory = infobase_memory(infobase, identity, MemorySubject::SourceSet);
+        self
+    }
+
+    /// Bind the hash memory of a tool extension's sources to an infobase, beside the memory
+    /// of its source sets but never sharing a file with one of them.
+    pub fn with_tool_extension_memory(
+        mut self,
+        infobase: &str,
+        extension: &str,
+        identity: String,
+    ) -> Self {
         assert!(
-            is_safe_path_segment(infobase),
-            "infobase name must be a safe path segment"
+            is_safe_path_segment(extension),
+            "tool extension name must be a safe path segment"
         );
-        self.memory = SnapshotMemory::Infobase {
-            name: infobase.to_owned(),
+        self.memory = infobase_memory(
+            infobase,
             identity,
-        };
+            MemorySubject::ToolExtension(extension.to_owned()),
+        );
         self
     }
 
@@ -92,11 +119,15 @@ impl SourceSetContext {
     pub fn storage_path(&self, work_path: &Path) -> Option<PathBuf> {
         match &self.memory {
             SnapshotMemory::Disabled => None,
-            SnapshotMemory::Infobase { name, .. } => Some(
-                infobase_memory_dir(work_path, name)
-                    .join("hashes")
-                    .join(format!("{}.redb", self.name)),
-            ),
+            SnapshotMemory::Infobase { base, subject, .. } => {
+                let hashes = infobase_memory_dir(work_path, base).join("hashes");
+                Some(match subject {
+                    MemorySubject::SourceSet => hashes.join(format!("{}.redb", self.name)),
+                    MemorySubject::ToolExtension(extension) => {
+                        hashes.join("tools").join(format!("{extension}.redb"))
+                    }
+                })
+            }
             SnapshotMemory::Shared => Some(
                 work_path
                     .join("hash-storages")
@@ -106,22 +137,91 @@ impl SourceSetContext {
     }
 
     /// Каталог копии файла версий этого набора: `workPath/infobases/<база>/dump-info/<набор>`.
-    /// Копия описывает пару «база ↔ каталог», поэтому есть только у памяти именованной базы.
+    /// Копия описывает пару «база ↔ каталог», поэтому есть только у набора с памятью базы.
     pub fn version_file_copy_dir(&self, work_path: &Path) -> Option<PathBuf> {
+        self.source_set_base().map(|base| {
+            infobase_memory_dir(work_path, base)
+                .join("dump-info")
+                .join(&self.name)
+        })
+    }
+
+    /// Журнал поколений базы этого набора: `workPath/infobases/<база>/generation.json`.
+    pub fn generation_file(&self, work_path: &Path) -> Option<PathBuf> {
+        self.source_set_base()
+            .map(|base| infobase_memory_dir(work_path, base).join(GENERATION_FILE_NAME))
+    }
+
+    fn source_set_base(&self) -> Option<&str> {
         match &self.memory {
-            SnapshotMemory::Infobase { name, .. } => Some(
-                infobase_memory_dir(work_path, name)
-                    .join("dump-info")
-                    .join(&self.name),
-            ),
-            SnapshotMemory::Shared | SnapshotMemory::Disabled => None,
+            SnapshotMemory::Infobase {
+                base,
+                subject: MemorySubject::SourceSet,
+                ..
+            } => Some(base),
+            SnapshotMemory::Infobase { .. } | SnapshotMemory::Shared | SnapshotMemory::Disabled => {
+                None
+            }
         }
     }
 }
 
-/// Память об одной именованной базе: `workPath/infobases/<база>`.
+/// Имя журнала поколений под каталогом базы.
+pub const GENERATION_FILE_NAME: &str = "generation.json";
+
+fn infobase_memory(infobase: &str, identity: String, subject: MemorySubject) -> SnapshotMemory {
+    assert!(
+        is_safe_path_segment(infobase),
+        "infobase memory key must be a safe path segment"
+    );
+    SnapshotMemory::Infobase {
+        base: infobase.to_owned(),
+        identity,
+        subject,
+    }
+}
+
+/// Корень памяти о базах: `workPath/infobases`. Всё под ним — состояние раннера.
+pub fn infobases_dir(work_path: &Path) -> PathBuf {
+    work_path.join("infobases")
+}
+
+/// Память об одной базе: `workPath/infobases/<ключ>`, где ключ — имя объявленной базы или
+/// [`connection_memory_key`] базы, названной строкой соединения.
 pub fn infobase_memory_dir(work_path: &Path, infobase: &str) -> PathBuf {
-    work_path.join("infobases").join(infobase)
+    infobases_dir(work_path).join(infobase)
+}
+
+/// Снимок Конфигуратора набора формата EDT. Он описывает обмен с базой и лежит под её
+/// памятью: `workPath/infobases/<ключ>/designer/<набор>`. У набора без памяти базы —
+/// внешних обработок и отчётов и базы с нераспознанным адресом — `workPath/designer/<набор>`.
+pub fn designer_copy_dir(work_path: &Path, infobase: Option<&str>, source_set: &str) -> PathBuf {
+    match infobase {
+        Some(infobase) => infobase_memory_dir(work_path, infobase),
+        None => work_path.to_path_buf(),
+    }
+    .join("designer")
+    .join(source_set)
+}
+
+/// Ключ каталога памяти базы, названной строкой соединения: `@` и начало SHA-256
+/// нормализованного адреса без учётных данных.
+///
+/// Имя объявленной базы начинается с буквы или цифры (`INFOBASE_NAME_PATTERN`), поэтому
+/// с ним такой ключ не совпадает. Совпадение ключей разных адресов памятью не делится:
+/// рядом с памятью лежит полный адрес, и чужая память не используется.
+pub fn connection_memory_key(address: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    const KEY_BYTES: usize = 16;
+    let digest = Sha256::digest(address.as_bytes());
+    let mut key = String::with_capacity(1 + KEY_BYTES * 2);
+    key.push('@');
+    for byte in &digest[..KEY_BYTES] {
+        // Запись в `String` не отказывает.
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
 }
 
 #[cfg(test)]

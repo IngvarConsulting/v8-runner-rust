@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::change_detection::analyzer::{self, ContextAnalysis};
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
-use crate::domain::source_set::SourceSetContext;
+use crate::domain::source_set::{connection_memory_key, designer_copy_dir, SourceSetContext};
 
 /// Builds the list of [`SourceSetContext`] instances for the given config.
 ///
@@ -21,35 +21,40 @@ impl<'a> SourceSetsService<'a> {
     /// Return all Designer-format contexts that should be scanned and built.
     ///
     /// In `DESIGNER` mode this is simply each source-set resolved against the project base path.
-    /// In `EDT` mode (Wave 2) this returns the generated Designer copies in
-    /// `workPath/designer`.
+    /// In `EDT` mode this returns the generated Designer copies: under the memory of the
+    /// selected base (`workPath/infobases/<base>/designer/<name>`), because the copy and its
+    /// version file describe the exchange with that base; a base the runner cannot remember
+    /// and external artifacts keep `workPath/designer/<name>`.
     pub fn designer_contexts(&self) -> Vec<SourceSetContext> {
         let base_path = absolutize_path(&self.config.base_path);
         let work_path = absolutize_path(&self.config.work_path);
+        let memory = self.base_memory();
 
-        match self.config.format {
-            SourceFormat::Designer => self
-                .config
-                .source_sets
-                .iter()
-                .map(|ss| self.designer_context(ss, ss.root_in(&base_path)))
-                .collect(),
-
-            SourceFormat::Edt => self
-                .config
-                .source_sets
-                .iter()
-                .map(|ss| {
-                    // Generated Designer copy lives at workPath/designer/<name>/
-                    let path = work_path.join("designer").join(&ss.name);
-                    self.designer_context(ss, path)
-                })
-                .collect(),
-        }
+        self.config
+            .source_sets
+            .iter()
+            .map(|ss| {
+                let memory = memory.as_ref().filter(|_| !ss.purpose.is_external());
+                let path = match self.config.format {
+                    SourceFormat::Designer => ss.root_in(&base_path),
+                    SourceFormat::Edt => designer_copy_dir(
+                        &work_path,
+                        memory.map(|memory| memory.key.as_str()),
+                        &ss.name,
+                    ),
+                };
+                self.designer_context(ss, path, memory, &base_path)
+            })
+            .collect()
     }
 
-    fn designer_context(&self, source_set: &SourceSetConfig, path: PathBuf) -> SourceSetContext {
-        use crate::support::path::{nearest_existing_canonical_path, snapshot_path_identity};
+    fn designer_context(
+        &self,
+        source_set: &SourceSetConfig,
+        path: PathBuf,
+        memory: Option<&BaseMemory>,
+        base_path: &Path,
+    ) -> SourceSetContext {
         let context = SourceSetContext::new(
             &source_set.name,
             path,
@@ -58,24 +63,50 @@ impl<'a> SourceSetsService<'a> {
         if source_set.purpose.is_external() {
             return context;
         }
-        let base_path = absolutize_path(&self.config.base_path);
-        // An unrecognized address, or an ad hoc base without a name, must never share memory.
-        let (Some(address), Some(infobase)) = (
-            self.config.infobase_memory_address(&base_path),
-            self.config.infobase_name.as_deref(),
-        ) else {
+        // An unrecognized address must never share memory.
+        let Some(memory) = memory else {
             return context.without_memory();
         };
-        let original = source_set.root_in(&base_path);
-        let original = nearest_existing_canonical_path(&original).unwrap_or(original);
         let identity = format!(
             "{}; source={}; purpose={}; set={}",
-            address,
-            snapshot_path_identity(&original),
+            memory.address,
+            source_identity(&source_set.root_in(base_path)),
             source_set.purpose.as_str(),
             source_set.name
         );
-        context.with_infobase_memory(infobase, identity)
+        context.with_infobase_memory(&memory.key, identity)
+    }
+
+    /// Context of a tool extension's sources: its hashes live under the memory of the
+    /// selected base, like a source set's (`hashes/tools/<name>.redb`).
+    pub fn tool_extension_context(&self, extension: &str, root: PathBuf) -> SourceSetContext {
+        let context = SourceSetContext::new(
+            format!("tool:{extension}"),
+            root.clone(),
+            format!("tool-{extension}-source"),
+        );
+        let Some(memory) = self.base_memory() else {
+            return context.without_memory();
+        };
+        let identity = format!(
+            "{}; source={}; tool-extension={extension}",
+            memory.address,
+            source_identity(&root),
+        );
+        context.with_tool_extension_memory(&memory.key, extension, identity)
+    }
+
+    /// Where the selected base is remembered: a declared base under its name, a base named
+    /// by a connection string under a key derived from its address without credentials.
+    /// `None` when the address is not recognized and so cannot be compared.
+    fn base_memory(&self) -> Option<BaseMemory> {
+        let base_path = absolutize_path(&self.config.base_path);
+        let address = self.config.infobase_memory_address(&base_path)?;
+        let key = match self.config.infobase_name.as_deref() {
+            Some(name) => name.to_owned(),
+            None => connection_memory_key(&address),
+        };
+        Some(BaseMemory { key, address })
     }
 
     /// Return EDT source-set contexts (only meaningful in `EDT` format).
@@ -96,6 +127,19 @@ impl<'a> SourceSetsService<'a> {
     pub fn analyze_contexts(&self, contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
         analyzer::analyze_contexts(contexts, &self.config.work_path)
     }
+}
+
+/// Каталог памяти выбранной базы и её адрес без учётных данных.
+struct BaseMemory {
+    key: String,
+    address: String,
+}
+
+/// Канонический каталог исходников в привязке памяти: точное представление ОС.
+fn source_identity(root: &Path) -> String {
+    use crate::support::path::{nearest_existing_canonical_path, snapshot_path_identity};
+    let canonical = nearest_existing_canonical_path(root).unwrap_or_else(|_| root.to_path_buf());
+    snapshot_path_identity(&canonical)
 }
 
 /// Пути проекта приходят из загрузчика абсолютными; относительный — только у настроек,
@@ -147,8 +191,9 @@ mod tests {
         assert!(contexts[0].path().ends_with(Path::new("src")));
     }
 
+    /// Снимок Конфигуратора набора EDT описывает обмен с базой и лежит под её памятью.
     #[test]
-    fn edt_designer_contexts_use_nested_designer_directory() {
+    fn an_edt_designer_copy_lies_under_the_base_memory() {
         let config = single_set_config(SourceFormat::Edt, "target/tmp-work");
 
         let service = SourceSetsService::new(&config);
@@ -157,7 +202,7 @@ mod tests {
         assert_eq!(contexts.len(), 1);
         assert!(contexts[0]
             .path()
-            .ends_with(Path::new("target/tmp-work/designer/main")));
+            .ends_with(Path::new("target/tmp-work/infobases/main/designer/main")));
     }
 
     /// Готовит в корне контекста модуль и служебный дочерний `build`, запоминает снимок и
@@ -208,7 +253,7 @@ mod tests {
         assert_root_named_like_a_service_dir_is_analyzed(&config);
     }
 
-    /// Порождённая копия набора EDT `workPath/designer/build` анализируется так же.
+    /// Порождённая копия набора EDT `workPath/infobases/<база>/designer/build` анализируется так же.
     #[test]
     fn a_generated_designer_copy_named_build_is_analyzed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -221,7 +266,7 @@ mod tests {
             .to_path_buf();
         assert_eq!(
             generated_root,
-            config.work_path.join("designer").join("build")
+            config.work_path.join("infobases/main/designer/build")
         );
 
         assert_root_named_like_a_service_dir_is_analyzed(&config);
@@ -307,11 +352,14 @@ mod tests {
         assert!(analyze_context(&moved, &config.work_path).outcome.is_err());
     }
 
+    /// База, названная строкой соединения, помнится по строке: память лежит под
+    /// `workPath/infobases/` в каталоге с ключом из адреса без учётных данных, не
+    /// пересекается с памятью объявленных баз, и следующий анализ продолжает с неё.
+    /// Отсутствующий снимок — не ошибка, а пустой набор пропускается.
     #[test]
-    fn ad_hoc_analysis_never_reads_or_writes_memory_and_empty_sources_skip() {
-        use crate::change_detection::analyzer::{
-            analyze_context, commit_success, rescan_and_commit_full, AnalysisOutcome,
-        };
+    fn an_ad_hoc_base_is_remembered_by_its_address_and_empty_sources_skip() {
+        use crate::change_detection::analyzer::{analyze_context, commit_success, AnalysisOutcome};
+        use crate::domain::source_set::connection_memory_key;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = single_set_config(SourceFormat::Designer, "unused");
         config.base_path = dir.path().to_path_buf();
@@ -325,23 +373,105 @@ mod tests {
             analyze_context(&context, &config.work_path).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
+        let address = config
+            .infobase_memory_address(dir.path())
+            .expect("a recognized address");
+        let key = connection_memory_key(&address);
+        assert!(!crate::config::model::is_infobase_name(&key));
+        assert_eq!(
+            context.storage_path(&config.work_path),
+            Some(
+                config
+                    .work_path
+                    .join("infobases")
+                    .join(&key)
+                    .join("hashes/main.redb")
+            )
+        );
+
         std::fs::write(dir.path().join("src/module.bsl"), "source").expect("write");
-        rescan_and_commit_full(&context, &config.work_path).expect("no-op");
-        assert!(!config.work_path.exists());
-        assert_eq!(context.storage_path(&config.work_path), None);
-        // An ad hoc base never touches the old shared file, even when it is unreadable.
-        let legacy = config
-            .work_path
-            .join("hash-storages")
-            .join(format!("designer-{}.redb", context.name()));
-        std::fs::create_dir_all(&legacy).expect("unreadable old memory");
         let Ok(AnalysisOutcome::Changes { prepared, .. }) =
             analyze_context(&context, &config.work_path).outcome
         else {
-            panic!("ordinary added files");
+            panic!("the first analysis sees existing files as added");
         };
-        commit_success(&context, &config.work_path, &prepared).expect("no-op");
-        assert!(legacy.is_dir());
+        commit_success(&context, &config.work_path, &prepared).expect("remembered");
+
+        config.infobase.connection = "File=/tmp/ib;Usr=alice;Pwd=secret".to_owned();
+        let again = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert_eq!(
+            again.storage_path(&config.work_path),
+            context.storage_path(&config.work_path)
+        );
+        assert!(matches!(
+            analyze_context(&again, &config.work_path).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        let bases: Vec<_> = std::fs::read_dir(config.work_path.join("infobases"))
+            .expect("bases")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(bases, [std::ffi::OsString::from(&key)]);
+
+        config.infobase.connection = "File=/tmp/other-ib".to_owned();
+        let other = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert_ne!(
+            other.storage_path(&config.work_path),
+            context.storage_path(&config.work_path)
+        );
+        assert!(matches!(
+            analyze_context(&other, &config.work_path).outcome,
+            Ok(AnalysisOutcome::Changes { .. })
+        ));
+    }
+
+    /// Хеши исходников расширения-инструмента лежат под памятью базы рядом с хешами
+    /// наборов, но в своём подкаталоге: набор с тем же именем файла с ними не делит.
+    #[test]
+    fn tool_extension_memory_lies_under_the_base_apart_from_source_sets() {
+        let mut config = single_set_config(SourceFormat::Designer, "/tmp/work");
+        config.source_sets[0].name = "client_mcp".to_owned();
+        let service = SourceSetsService::new(&config);
+        let tool = service.tool_extension_context("client_mcp", PathBuf::from("/tmp/tool"));
+        let set = service.designer_contexts().remove(0);
+        assert_eq!(
+            tool.storage_path(&config.work_path),
+            Some(
+                config
+                    .work_path
+                    .join("infobases/main/hashes/tools/client_mcp.redb")
+            )
+        );
+        assert_ne!(
+            tool.storage_path(&config.work_path),
+            set.storage_path(&config.work_path)
+        );
+        assert!(tool.storage_identity().expect("bound").contains("/tmp/ib"));
+        assert_eq!(tool.version_file_copy_dir(&config.work_path), None);
+        assert_eq!(tool.generation_file(&config.work_path), None);
+        config.infobase_name = Some("other".to_owned());
+        let other = SourceSetsService::new(&config)
+            .tool_extension_context("client_mcp", PathBuf::from("/tmp/tool"));
+        assert_ne!(
+            other.storage_path(&config.work_path),
+            tool.storage_path(&config.work_path)
+        );
+    }
+
+    /// Строка, чей адрес раннер не распознаёт, сравнить не с чем: памяти у неё нет.
+    #[test]
+    fn an_unrecognized_address_keeps_no_memory() {
+        let mut config = single_set_config(SourceFormat::Designer, "/tmp/work");
+        config.infobase_name = None;
+        config.infobase.connection = "Something=else".to_owned();
+        let context = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert_eq!(context.storage_path(&config.work_path), None);
     }
 
     #[test]

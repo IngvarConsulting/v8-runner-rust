@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
 use crate::domain::capability::{SessionEndpoint, SessionMode};
+use crate::domain::source_set::SourceSetContext;
 use crate::platform::agent::{
     self, AgentEndpoint, AgentError, AgentLaunch, AgentSession, AgentSessionRequest,
     HostKeyExpectation, ManagedAgent, WaitPolicy,
@@ -861,54 +862,97 @@ pub(crate) struct GenerationRecord {
     /// Что было сделано, когда токен записан: `build` или `dump`.
     pub after: String,
     pub recorded_at: String,
+    /// Привязка памяти набора (база, каталог, назначение, имя): запись другой пары чужая.
+    pub identity: String,
 }
 
-/// Учёт поколений по предмету: файл на каждый набор исходников под `workPath`.
+/// Что журнал помнит о поколении набора.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Recorded {
+    Nothing,
+    Ours(GenerationRecord),
+    /// Запись сделана для другой пары «база ↔ каталог»: её привязка без учётных данных.
+    Foreign {
+        identity: String,
+    },
+}
+
+/// Журнал поколений базы: `workPath/infobases/<база>/generation.json`, запись на набор.
+///
+/// Запись годится только для той пары «база ↔ каталог», для которой сделана: запись с
+/// другой привязкой чужая и основанием не выгружать не служит. У набора без памяти о
+/// базе журнала нет, и агент выгружает всегда.
 pub(crate) struct GenerationLedger {
-    dir: PathBuf,
+    file: PathBuf,
+    source_set: String,
+    identity: String,
 }
 
 impl GenerationLedger {
-    pub(crate) fn new(config: &AppConfig) -> Self {
-        Self::at(config.work_path.join("agent").join("generation"))
+    pub(crate) fn of(context: &SourceSetContext, work_path: &Path) -> Option<Self> {
+        Some(Self {
+            file: context.generation_file(work_path)?,
+            source_set: context.name().to_owned(),
+            identity: context.storage_identity()?.to_owned(),
+        })
     }
 
-    fn at(dir: PathBuf) -> Self {
-        Self { dir }
+    fn records(&self) -> std::collections::BTreeMap<String, GenerationRecord> {
+        std::fs::read_to_string(&self.file)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
     }
 
-    fn path(&self, source_set: &str) -> PathBuf {
-        self.dir.join(format!("{source_set}.json"))
+    pub(crate) fn read(&self) -> Recorded {
+        match self.records().remove(&self.source_set) {
+            None => Recorded::Nothing,
+            Some(record) if record.identity == self.identity => Recorded::Ours(record),
+            Some(record) => Recorded::Foreign {
+                identity: record.identity,
+            },
+        }
     }
 
-    pub(crate) fn read(&self, source_set: &str) -> Option<GenerationRecord> {
-        let text = std::fs::read_to_string(self.path(source_set)).ok()?;
-        serde_json::from_str(&text).ok()
-    }
-
-    pub(crate) fn record(
-        &self,
-        source_set: &str,
-        token: &str,
-        after: &str,
-    ) -> Result<(), AppError> {
-        std::fs::create_dir_all(&self.dir).map_err(|error| {
+    /// Записывает поколение набора, сохраняя записи остальных наборов базы.
+    ///
+    /// Чтение, правка и запись журнала идут без своего замка: журнал лежит под `workPath`,
+    /// а всякая команда держит замок `workPath` до конца
+    /// (`INV.WIRE.A-BUSY-WORKSPACE-ANSWERS-WORKSPACE-BUSY`), и две команды в одном журнале
+    /// не пишут. Если бы запись другого набора всё же потерялась, следующая выгрузка этого
+    /// набора не пропустилась бы по поколению — лишняя выгрузка, а не потеря правок.
+    pub(crate) fn record(&self, token: &str, after: &str) -> Result<(), AppError> {
+        let dir = self.file.parent().ok_or_else(|| {
             AppError::Runtime(format!(
-                "failed to create the generation ledger '{}': {error}",
-                self.dir.display()
+                "the generation ledger '{}' has no parent directory",
+                self.file.display()
             ))
         })?;
-        let record = GenerationRecord {
-            token: token.to_owned(),
-            after: after.to_owned(),
-            recorded_at: chrono::Utc::now().to_rfc3339(),
-        };
-        let text = serde_json::to_string_pretty(&record)
+        std::fs::create_dir_all(dir).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to create the generation ledger directory '{}': {error}",
+                dir.display()
+            ))
+        })?;
+        let mut records = self.records();
+        records.insert(
+            self.source_set.clone(),
+            GenerationRecord {
+                token: token.to_owned(),
+                after: after.to_owned(),
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+                identity: self.identity.clone(),
+            },
+        );
+        let text = serde_json::to_vec_pretty(&records)
             .map_err(|error| AppError::Runtime(format!("failed to encode generation: {error}")))?;
-        std::fs::write(self.path(source_set), text).map_err(|error| {
+        crate::support::fs::write_file_atomically(&self.file, |file| {
+            std::io::Write::write_all(file, &text)
+        })
+        .map_err(|error| {
             AppError::Runtime(format!(
                 "failed to write the generation ledger '{}': {error}",
-                self.path(source_set).display()
+                self.file.display()
             ))
         })
     }
@@ -974,16 +1018,50 @@ mod tests {
         );
     }
 
+    fn ledger(root: &Path, set: &str, identity: &str) -> GenerationLedger {
+        let context = SourceSetContext::new(set, root.join(set), "designer-x")
+            .with_infobase_memory("origin", identity.to_owned());
+        GenerationLedger::of(&context, &root.join("work")).expect("a remembered base")
+    }
+
     #[test]
-    fn the_ledger_keeps_one_record_per_source_set() {
+    fn the_ledger_keeps_one_record_per_source_set_under_the_base() {
         let root = tempfile::tempdir().expect("tempdir");
-        let ledger = GenerationLedger::at(root.path().join("generation"));
-        assert!(ledger.read("main").is_none());
-        ledger.record("main", "abc", "build").expect("record");
-        let record = ledger.read("main").expect("record");
+        let main = ledger(root.path(), "main", "base-a main");
+        assert_eq!(main.read(), Recorded::Nothing);
+        main.record("abc", "build").expect("record");
+        let ext = ledger(root.path(), "ext", "base-a ext");
+        ext.record("def", "dump").expect("record");
+        let Recorded::Ours(record) = main.read() else {
+            panic!("the record of the same pair");
+        };
         assert_eq!(record.token, "abc");
         assert_eq!(record.after, "build");
-        assert!(ledger.read("ext").is_none());
+        assert!(matches!(ext.read(), Recorded::Ours(record) if record.token == "def"));
+        assert!(root
+            .path()
+            .join("work/infobases/origin/generation.json")
+            .is_file());
+    }
+
+    /// Запись о поколении, сделанная для другой пары «база ↔ каталог», чужая: агент не
+    /// считает по ней, что выгружать нечего.
+    #[test]
+    fn a_generation_recorded_for_another_pair_is_not_used() {
+        let root = tempfile::tempdir().expect("tempdir");
+        ledger(root.path(), "main", "base-a")
+            .record("abc", "dump")
+            .expect("record");
+        let retargeted = ledger(root.path(), "main", "base-b");
+        assert_eq!(
+            retargeted.read(),
+            Recorded::Foreign {
+                identity: "base-a".to_owned()
+            }
+        );
+        let unbound = SourceSetContext::new("main", root.path().join("main"), "designer-main")
+            .without_memory();
+        assert!(GenerationLedger::of(&unbound, &root.path().join("work")).is_none());
     }
 
     /// Отложенное прерывание едет тем же полем, что и у процессов платформы: иначе о нём
