@@ -911,10 +911,10 @@ const FORMS_NAMED_APART: &[(&str, &str)] = &[("PROJECT-INIT", "init")];
 /// Форма `data` команды названа по команде — и в имени правила, и в имени файла.
 ///
 /// Команды переименовывали, а символы форм оставались прежними: `CTR.WIRE.BUILD-DATA`
-/// закреплял схему `push`, `CTR.WIRE.SYNTAX-DATA` лежал в `check-data.md` (#224). Схемы
-/// порождаются из кода под именем команды, поэтому имя схемы — опора: от него выводятся
-/// имя правила и имя файла. Расхождение допускает только `FORMS_NAMED_APART`, и запись в
-/// нём, которой ни одна форма не пользуется, тоже ошибка.
+/// закреплял схему `push`, `CTR.WIRE.SYNTAX-DATA` лежал в `check-data.md` (#224). Опора
+/// стража — slug: имя файла схемы, которое код задаёт формой (`CommandDataForm::slug`).
+/// От него выводятся имя правила и имя файла. Расхождение допускает только
+/// `FORMS_NAMED_APART`, и запись в нём, которой ни одна форма не пользуется, тоже ошибка.
 #[test]
 fn a_command_form_is_named_after_its_command() {
     let mut wrong = Vec::new();
@@ -928,11 +928,9 @@ fn a_command_form_is_named_after_its_command() {
         else {
             continue;
         };
-        let id = props
-            .get("id")
-            .and_then(|values| values.first())
-            .map(String::as_str)
-            .unwrap_or_default();
+        let Some(id) = props.get("id").and_then(|values| values.first()) else {
+            continue;
+        };
         let Some(form) = id
             .splitn(3, '.')
             .nth(2)
@@ -966,6 +964,164 @@ fn a_command_form_is_named_after_its_command() {
             wrong.push(format!(
                 "FORMS_NAMED_APART: запись `{name}` → `{slug}` ни одной формой не используется"
             ));
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Выведенные хвосты имён форм `data`. Прежние символы не возвращаются ни под какой
+/// формой: ссылка, оставшаяся от прежнего имени, должна повиснуть, а не указать на чужую
+/// команду. `INIT` здесь же: прежнее имя формы `infobase create` форме `init` не
+/// достаётся (#224).
+const RETIRED_FORM_NAMES: &[&str] = &[
+    "BUILD",
+    "SYNTAX",
+    "BOOTSTRAP",
+    "CONFIG-INIT",
+    "DUMP",
+    "INFOBASE-CONFIGURATION-EXPORT",
+    "INIT",
+    "LOAD",
+];
+
+/// Выведенное имя формы не носит ни одно правило.
+#[test]
+fn a_retired_form_name_is_not_reused() {
+    let retired: BTreeSet<String> = RETIRED_FORM_NAMES
+        .iter()
+        .map(|name| format!("CTR.WIRE.{name}-DATA"))
+        .collect();
+    let wrong: Vec<String> = read_rules()
+        .into_iter()
+        .filter_map(|(shown, props)| {
+            let id = props.get("id").and_then(|values| values.first())?;
+            retired
+                .contains(id)
+                .then(|| format!("{shown}: имя `{id}` выведено и не переиспользуется"))
+        })
+        .collect();
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Каждая форма из перечня `index.json` закреплена правилом.
+///
+/// Обратная сторона `a_command_form_is_named_after_its_command`: тот страж начинает с
+/// правила и не видит формы, у которой правила нет. Здесь опора — перечень форм,
+/// порождённый из кода: и формы команд (`forms`), и общие формы отказа (`shared`).
+/// Исключений нет: общие формы тоже закреплены правилами.
+#[test]
+fn every_published_form_has_a_rule() {
+    let index: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join(COMMAND_DATA_SCHEMAS).join("index.json"))
+            .expect("form index is readable"),
+    )
+    .expect("form index is JSON");
+    let mut slugs = BTreeSet::new();
+    if let Some(forms) = index["forms"].as_object() {
+        slugs.extend(forms.values().flat_map(|value| {
+            value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+        }));
+    }
+    slugs.extend(
+        index["shared"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str),
+    );
+    assert!(
+        !slugs.is_empty(),
+        "в перечне форм не найдено ни одной формы"
+    );
+
+    let pinned: BTreeSet<String> = read_rules()
+        .into_iter()
+        .filter_map(|(_, props)| {
+            props
+                .get("artifact")
+                .and_then(|values| values.first())
+                .cloned()
+        })
+        .collect();
+    let missing: Vec<String> = slugs
+        .iter()
+        .filter(|slug| !pinned.contains(&format!("{COMMAND_DATA_SCHEMAS}{slug}.schema.json")))
+        .map(|slug| format!("форма `{slug}` не закреплена ни одним правилом"))
+        .collect();
+
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+/// Где имена правил упоминаются как ссылки: реестр и документы, которые читают люди и
+/// агенты. Код и тесты сюда не входят — их комментарии вспоминают прежние имена как
+/// историю.
+const NAME_MENTIONS: &[&str] = &[
+    "spec/rules",
+    "docs",
+    "SKILL",
+    "AGENTS.md",
+    "AI_DEV.md",
+    "README.md",
+];
+
+fn text_files(path: &Path) -> Vec<PathBuf> {
+    if path.is_file() {
+        return vec![path.to_path_buf()];
+    }
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(path)
+        .expect("directory is readable")
+        .flatten()
+    {
+        found.extend(text_files(&entry.path()));
+    }
+    found.sort();
+    found
+}
+
+/// Упомянутое имя правила существует.
+///
+/// Переименование правила оставляло ссылки на прежний символ: новое правило могло назвать
+/// `CTR.WIRE.DUMP-DATA` уже после того, как форма стала `PULL-DATA`. Ссылка по шаблону
+/// имени, которой нет в реестре, — ошибка, где бы она ни стояла в названных местах.
+/// Нечитаемые как текст файлы (картинки) пропускаются.
+#[test]
+fn every_mentioned_rule_name_exists() {
+    let names: BTreeSet<String> = read_rules()
+        .into_iter()
+        .filter_map(|(_, props)| props.get("id").and_then(|values| values.first()).cloned())
+        .collect();
+    let pattern = regex::Regex::new(r"\b(?:CTR|INV)\.[A-Z][A-Z0-9-]*\.[A-Z0-9][A-Z0-9-]*")
+        .expect("name pattern compiles");
+    let root = repo_root();
+    let mut wrong = Vec::new();
+    for place in NAME_MENTIONS {
+        for file in text_files(&root.join(place)) {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let shown = file
+                .strip_prefix(&root)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for (number, line) in text.lines().enumerate() {
+                for found in pattern.find_iter(line) {
+                    let name = found.as_str().trim_end_matches('-');
+                    if !names.contains(name) {
+                        wrong.push(format!(
+                            "{shown}:{}: правила `{name}` в реестре нет",
+                            number + 1
+                        ));
+                    }
+                }
+            }
         }
     }
 
