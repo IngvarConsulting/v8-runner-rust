@@ -371,8 +371,8 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "расширение-инструмент, когда сборку ведёт `ibcmd`",
         ),
         (
-            "crate::use_cases::status::GenerationReader::open",
-            "поколение у `status --deep`, когда `push` ведёт `ibcmd`",
+            "crate::use_cases::generation_reader::read_generation",
+            "поколение, когда его спрашивают у `ibcmd`, выбранного для обмена",
         ),
     ];
     let expected = BUILT_FOR_IBCMD

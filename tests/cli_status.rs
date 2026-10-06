@@ -126,6 +126,37 @@ impl Project {
         self.forget_calls();
     }
 
+    /// Состав расширений базы по именам, в ответе `ibcmd config extension list`.
+    fn installed(&self, names: &[&str]) {
+        let text = names
+            .iter()
+            .map(|name| INSTALLED.replace("Проба", name))
+            .collect::<String>();
+        fs::write(self.root().join("extensions"), text).expect("extensions");
+    }
+
+    /// Ещё один набор расширения `name` в каталоге `name`.
+    fn with_extension_set(self, name: &str) -> Self {
+        let path = self.root().join(name);
+        fs::create_dir_all(&path).expect("sources");
+        fs::write(path.join("Configuration.xml"), "<Configuration/>\n").expect("source");
+        let text = fs::read_to_string(&self.config).expect("config").replace(
+            "tools:\n",
+            &format!("  - name: {name}\n    type: EXTENSION\n    path: {name}\ntools:\n"),
+        );
+        fs::write(&self.config, text).expect("config");
+        self
+    }
+
+    /// Расширение-инструмент клиентского MCP `client_mcp`.
+    fn with_tool_extension(self) -> Self {
+        fs::write(self.root().join("client-mcp.cfe"), "cfe").expect("tool artifact");
+        let mut text = fs::read_to_string(&self.config).expect("config");
+        text.push_str("  client_mcp:\n    extension:\n      name: client_mcp\n      artifact:\n        path: client-mcp.cfe\n");
+        fs::write(&self.config, text).expect("config");
+        self
+    }
+
     fn memory(&self) -> PathBuf {
         self.root().join("work").join("infobases").join("origin")
     }
@@ -342,4 +373,62 @@ fn status_deep_and_all_do_not_combine() {
     let output = project.run(&["status", "--deep", "--all"]);
     assert!(!output.status.success());
     assert!(project.calls().is_empty());
+}
+
+/// Имена расширений сопоставляются без регистра — и латиница, и кириллица: набор `ext` —
+/// то же расширение, что `EXT` в базе.
+#[test]
+fn status_deep_matches_extension_names_without_case() {
+    let project = Project::new().with_extension_set("Расширение");
+    project.remember(FIRST);
+    project.installed(&["EXT", "РАСШИРЕНИЕ"]);
+
+    let status = succeeded(&project.run(&["status", "--deep"]));
+    let extensions = &status["data"]["infobases"][0]["extensions"];
+    assert_eq!(extensions["installed"][0]["name"], "EXT", "{status}");
+    assert_eq!(extensions["installed"][0]["source_set"], "ext", "{status}");
+    assert_eq!(
+        extensions["installed"][1]["source_set"], "Расширение",
+        "{status}"
+    );
+    assert_eq!(
+        extensions["missing_in_base"],
+        serde_json::json!([]),
+        "{status}"
+    );
+}
+
+/// Расширение-инструмент клиентского MCP набором не объявляется, и `status --deep` не
+/// выдаёт его за расширение без проекта: у него `tool: true`.
+#[test]
+fn status_deep_marks_the_client_mcp_tool_extension() {
+    let project = Project::new().with_tool_extension();
+    project.remember(FIRST);
+    project.installed(&["ext", "Client_Mcp"]);
+
+    let status = succeeded(&project.run(&["status", "--deep"]));
+    let installed = &status["data"]["infobases"][0]["extensions"]["installed"];
+    assert_eq!(installed[0]["tool"], false, "{status}");
+    assert_eq!(installed[1]["name"], "Client_Mcp", "{status}");
+    assert_eq!(installed[1]["source_set"], Value::Null, "{status}");
+    assert_eq!(installed[1]["tool"], true, "{status}");
+}
+
+/// Без платформы `status --deep` не отказывает: чего платформа не ответила, форма называет
+/// `null` с причиной.
+#[test]
+fn status_deep_without_a_platform_answers_null_with_a_reason() {
+    let project = Project::new();
+    project.remember(FIRST);
+    fs::remove_dir_all(project.root().join("bin")).expect("no platform on the machine");
+
+    let status = succeeded(&project.run(&["status", "--deep"]));
+    assert_data_matches_its_command_form(&status, "status --deep without a platform");
+    let base = &status["data"]["infobases"][0];
+    let main = set(base, "main");
+    assert_eq!(main["base"]["token"], Value::Null, "{status}");
+    assert_eq!(main["base"]["comparison"], "no_answer", "{status}");
+    assert!(main["base"]["reason"].is_string(), "{status}");
+    assert_eq!(base["extensions"]["installed"], Value::Null, "{status}");
+    assert!(base["extensions"]["reason"].is_string(), "{status}");
 }

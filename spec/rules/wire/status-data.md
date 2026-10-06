@@ -6,19 +6,22 @@ check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_status.rs::status_without_deep_starts_no_platform
   - tests/cli_status.rs::status_deep_predicts_the_push_generation_check
+  - tests/cli_status.rs::status_deep_without_a_platform_answers_null_with_a_reason
 ---
 
 # `data` команды `status`
 
 Форма отвечает о каждой базе ответа — выбранной или, у `--all`, о каждой объявленной в
 местном слое — тем, что раннер о ней помнит: адрес без учётных данных, признак нового
-владельца и по набору конфигурации и расширений — память о базе (`memory`), запись журнала
+владельца и по набору конфигурации и расширений — назначение (`purpose`, как ключ `type`
+проекта: `CONFIGURATION` или `EXTENSION`), память о базе (`memory`), запись журнала
 поколений (`recorded`) и число файлов каталога, изменившихся с последнего чтения
 (`changed_files`; `null` — сравнить не с чем).
 
 У `--deep` к набору добавляется `base`: поколение, которое ответил исполнитель `push`, и его
 сверка с записью — `unchanged`, `moved_ahead`, `other_tool`, `no_record` или `no_answer`. К базе
-добавляются `extensions` — состав расширений базы рядом с наборами проекта — и, у файловой
+добавляются `extensions` — состав расширений базы рядом с наборами проекта, у
+расширения-инструмента клиентского MCP `tool: true`, — и, у файловой
 базы, `holders` — копии из метки владельца. Без `--deep` этих полей нет. Что платформа не
 ответила, форма называет `null` с причиной в `reason`, а не отказом команды.
 
@@ -37,7 +40,7 @@ check:
       "source_sets": [
         {
           "name": "main",
-          "purpose": "configuration",
+          "purpose": "CONFIGURATION",
           "memory": "remembered",
           "recorded": {
             "token": "1111111111111111111111111111111111111111",
@@ -55,7 +58,7 @@ check:
       ],
       "extensions": {
         "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
-        "installed": [{"name": "Patch_007", "active": true, "source_set": null}],
+        "installed": [{"name": "Patch_007", "active": true, "source_set": null, "tool": false}],
         "missing_in_base": []
       },
       "holders": {

@@ -298,7 +298,8 @@ enum How {
         utilities: PlatformUtilities,
     },
     Agent {
-        handle: AgentHandle,
+        /// Сессия крупнее процесса утилиты, поэтому лежит в куче.
+        handle: Box<AgentHandle>,
         wait: WaitPolicy,
     },
 }
@@ -350,7 +351,10 @@ impl Asker {
                         )
                     })
                     .map_err(|error| (Some(tool), error))?;
-                How::Agent { handle, wait }
+                How::Agent {
+                    handle: Box::new(handle),
+                    wait,
+                }
             }
             (other, _) => {
                 return Err((
