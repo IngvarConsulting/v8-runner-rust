@@ -1267,8 +1267,8 @@ mod tests {
         validate_supported_matrix, ResolvedArtifactsTarget, StagedPublicationOutcome,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolsConfig,
+        AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolsConfig,
     };
     use crate::domain::artifact::{
         ArtifactSet, ARTIFACT_ROLE_PACKAGE_FILE, ARTIFACT_ROLE_PLATFORM_LOG,
@@ -1417,7 +1417,6 @@ mod tests {
                     path: PathBuf::from("extensions/ext-sales"),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),

@@ -1176,8 +1176,6 @@ fn render_config(
         yaml.push_str("#     # How long to wait for the client MCP endpoint to come up.\n");
         yaml.push_str("#     wait_ready_timeout_ms: 300000\n");
     }
-    yaml.push_str("push:\n");
-    yaml.push_str("  partialLoadThreshold: 20\n");
     yaml
 }
 

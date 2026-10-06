@@ -217,13 +217,6 @@ fn add_numeric_runtime_bounds(schema: &mut Value) {
     );
     set_numeric_bounds(
         schema,
-        &["BuildSchema"],
-        "partialLoadThreshold",
-        Some(1),
-        None,
-    );
-    set_numeric_bounds(
-        schema,
         &["EdtCliSchema"],
         "startup_timeout_ms",
         Some(1),
@@ -370,7 +363,9 @@ struct MainConfigSchema {
     /// Project source sets to build, test, dump, or materialize.
     #[serde(rename = "source-set", default)]
     source_sets: Vec<SourceSetSchema>,
-    /// Settings of `push`: how sources reach the infobase.
+    /// Settings of `push`: how sources reach the infobase. The section takes no keys today:
+    /// `partialLoadThreshold` is refused by name — delete the line; a full load on demand
+    /// is `push --full`.
     #[serde(
         default,
         deserialize_with = "deserialize_non_null_optional",
@@ -685,8 +680,11 @@ struct InfobaseWebSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseClusterSchema {
-    /// Administration server (`ras`) address as `host[:port]` — an IPv6 address in
-    /// brackets. It goes to `rac` as is, so the port default (1545) stays with the platform.
+    /// Administration server (`ras`) address as `host[:port]`, the host a name or an IPv4
+    /// address: `rac` and `ras` accept nothing else, so an IPv6 address is refused. It goes
+    /// to `rac` as is, so the port default (1545) stays with the platform. Left empty, the
+    /// runner is to start its own `ras` against `agent.address` or the host of `Srvr=` and
+    /// refuse an IPv6 host there (#213); validation does not check `Srvr=` for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ras: Option<String>,
     /// Cluster administrator name; `sessions` (#212) and `infobase create` in a cluster (#204)
@@ -706,7 +704,8 @@ struct InfobaseClusterSchema {
 #[serde(deny_unknown_fields)]
 struct InfobaseClusterAgentSchema {
     /// Agent address as `host[:port]` when it differs from the host of `Srvr=` with the
-    /// platform default port (1540); the runner's own `ras` connects to it.
+    /// platform default port (1540); the runner's own `ras` connects to it. The host is a
+    /// name or an IPv4 address: an IPv6 address is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     address: Option<String>,
     /// Central server administrator name; no runner operation asks for it by itself.
@@ -759,17 +758,8 @@ enum SourceSetPurposeSchema {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BuildSchema {
-    /// Maximum changed-file count for partial Designer load before falling back to full load.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_non_null_optional",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(with = "usize")]
-    partial_load_threshold: Option<usize>,
-}
+#[serde(deny_unknown_fields)]
+struct BuildSchema {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1440,6 +1430,35 @@ mod tests {
         );
     }
 
+    /// Корневые синонимы сворачивает загрузчик, а не `serde`, и обход модели в
+    /// `tests/config_schema_synonyms.rs` их не видит: каждый из списка загрузчика есть в
+    /// схеме проектного файла с `deprecated: true`, а в схеме слоя — если она его называет
+    /// (`INV.CONFIG.A-KEY-SYNONYM-IS-MARKED-DEPRECATED-IN-THE-SCHEMA`).
+    #[test]
+    fn every_root_synonym_the_loader_folds_is_deprecated_in_the_schema() {
+        let main_schema = main_config_schema_json();
+        let local_schema = local_config_schema_json();
+        for (previous, current) in crate::config::loader::ROOT_SECTION_SYNONYMS {
+            assert_eq!(
+                main_schema["properties"][previous]["deprecated"],
+                serde_json::Value::Bool(true),
+                "`{previous}` (now `{current}`) in the project schema"
+            );
+            if let Some(entry) = local_schema["properties"].get(previous) {
+                assert_eq!(
+                    entry["deprecated"],
+                    serde_json::Value::Bool(true),
+                    "`{previous}` (now `{current}`) in the local schema"
+                );
+            }
+        }
+        assert_eq!(
+            main_schema["properties"]["build"]["deprecated"],
+            serde_json::Value::Bool(true),
+            "the previous name of the push section"
+        );
+    }
+
     #[test]
     fn generated_schemas_include_user_facing_field_descriptions() {
         let main_schema = main_config_schema_json();
@@ -1887,7 +1906,11 @@ mod tests {
                 minimal_project_config_without_base_path()
             ),
             format!(
-                "{}build:\n  partialLoadThreshold: 0\n",
+                "{}push:\n  partialLoadThreshold: 20\n",
+                minimal_project_config_without_base_path()
+            ),
+            format!(
+                "{}build:\n  partialLoadThreshold: 20\n",
                 minimal_project_config_without_base_path()
             ),
             format!(
@@ -1963,7 +1986,7 @@ mod tests {
     #[test]
     fn schemas_and_loader_accept_supported_runtime_sections() {
         let config = format!(
-            "{}build:\n  partialLoadThreshold: 20\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\nmcp:\n  http:\n    bind_address: '127.0.0.1:3000'\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 64\n    idle_ttl_secs: 900\n    allowed_hosts:\n      - runner\n  execution:\n    max_concurrent_calls: 1\n    shutdown_grace_period_secs: 30\ntests:\n  execution_timeout_seconds: 300\n  yaxunit:\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n  va:\n    fail_fast: false\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n",
+            "{}push: {{}}\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\nmcp:\n  http:\n    bind_address: '127.0.0.1:3000'\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 64\n    idle_ttl_secs: 900\n    allowed_hosts:\n      - runner\n  execution:\n    max_concurrent_calls: 1\n    shutdown_grace_period_secs: 30\ntests:\n  execution_timeout_seconds: 300\n  yaxunit:\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n  va:\n    fail_fast: false\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n",
             minimal_project_config_without_base_path()
         );
         assert_schema_valid(&main_config_schema_json(), &config);
@@ -1978,10 +2001,6 @@ mod tests {
     fn schemas_and_loader_reject_null_for_defaulted_non_optional_fields() {
         for config in [
             minimal_project_config_with_format_null(),
-            format!(
-                "{}build:\n  partialLoadThreshold: null\n",
-                minimal_project_config_without_base_path()
-            ),
             format!(
                 "{}tools: null\n",
                 minimal_project_config_without_base_path()

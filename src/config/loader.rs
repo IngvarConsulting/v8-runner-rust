@@ -354,6 +354,17 @@ impl ConfigFile<'_> {
     }
 }
 
+/// Прежнее имя секции `push:`, которое загрузчик сворачивает: `(прежнее, нынешнее)`.
+const PUSH_SECTION_SYNONYM: (&str, &str) = ("build", "push");
+/// Прежнее имя карты баз, которое загрузчик сворачивает: `(прежнее, нынешнее)`.
+const INFOBASE_SECTION_SYNONYM: (&str, &str) = ("infobase", "infobases");
+/// Корневые синонимы, которые сворачивает загрузчик, а не `serde`: модель их не видит,
+/// поэтому схема сверяется с этим списком
+/// (`INV.CONFIG.A-KEY-SYNONYM-IS-MARKED-DEPRECATED-IN-THE-SCHEMA`).
+#[cfg(test)]
+pub(crate) const ROOT_SECTION_SYNONYMS: [(&str, &str); 2] =
+    [PUSH_SECTION_SYNONYM, INFOBASE_SECTION_SYNONYM];
+
 /// Прежний ключ `infobase:` один цикл выпуска читается как `infobases.origin` — в
 /// каждом файле отдельно, чтобы проектный файл с прежним ключом и местный слой с
 /// новым сливались по полям, как сливались до переименования. Оба ключа в одном
@@ -364,18 +375,19 @@ fn fold_infobase_synonym(
     root: &mut serde_yaml::Value,
     file: ConfigFile<'_>,
 ) -> Result<Option<String>, ConfigValidationError> {
+    let (old, new) = INFOBASE_SECTION_SYNONYM;
     let mapping = root_mapping_mut(root)?;
-    let has_old = mapping.contains_key(yaml_key("infobase"));
-    let has_new = mapping.contains_key(yaml_key("infobases"));
+    let has_old = mapping.contains_key(yaml_key(old));
+    let has_new = mapping.contains_key(yaml_key(new));
     if has_old && has_new {
         return Err(ConfigValidationError::InfobaseKeysMixed { file: file.name() });
     }
-    let Some(section) = mapping.remove(yaml_key("infobase")) else {
+    let Some(section) = mapping.remove(yaml_key(old)) else {
         return Ok(None);
     };
     let mut origin = serde_yaml::Mapping::new();
     origin.insert(yaml_key(DEFAULT_INFOBASE_NAME), section);
-    mapping.insert(yaml_key("infobases"), serde_yaml::Value::Mapping(origin));
+    mapping.insert(yaml_key(new), serde_yaml::Value::Mapping(origin));
     let name = file.name();
     let warning = match file {
         ConfigFile::Local => format!(
@@ -427,16 +439,17 @@ fn fold_push_synonym(
     root: &mut serde_yaml::Value,
     file: ConfigFile<'_>,
 ) -> Result<Option<String>, ConfigValidationError> {
+    let (old, new) = PUSH_SECTION_SYNONYM;
     let mapping = root_mapping_mut(root)?;
-    let has_old = mapping.contains_key(yaml_key("build"));
-    let has_new = mapping.contains_key(yaml_key("push"));
+    let has_old = mapping.contains_key(yaml_key(old));
+    let has_new = mapping.contains_key(yaml_key(new));
     if has_old && has_new {
         return Err(ConfigValidationError::PushSectionKeysMixed { file: file.name() });
     }
-    let Some(section) = mapping.remove(yaml_key("build")) else {
+    let Some(section) = mapping.remove(yaml_key(old)) else {
         return Ok(None);
     };
-    mapping.insert(yaml_key("push"), section);
+    mapping.insert(yaml_key(new), section);
     let name = file.name();
     Ok(Some(format!(
         "`build:` in {name} is a one-cycle synonym for `push:`; rename the key"
@@ -731,6 +744,19 @@ fn reject_legacy_config_keys(root: &serde_yaml::Value) -> Result<(), ConfigValid
         return Err(ConfigValidationError::ExecutionTimeoutKeyRemoved);
     }
 
+    // Порога больше нет, и синонимом `build:` ключ не проходит: отказ идёт раньше
+    // свёртки синонима, иначе автор получил бы совет переименовать секцию, в которой
+    // строку надо удалить (`INV.CONFIG.PARTIAL-LOAD-THRESHOLD-KEY-IS-REJECTED`).
+    for section in ["push", "build"] {
+        if mapping
+            .get(yaml_key(section))
+            .and_then(serde_yaml::Value::as_mapping)
+            .is_some_and(|body| mapping_contains_key(body, "partialLoadThreshold"))
+        {
+            return Err(ConfigValidationError::PartialLoadThresholdKeyRemoved { section });
+        }
+    }
+
     if let Some(mcp) = mapping
         .get(serde_yaml::Value::String("mcp".to_owned()))
         .and_then(serde_yaml::Value::as_mapping)
@@ -866,7 +892,6 @@ fn resolve_config_path(config_path: Option<&str>) -> Result<PathBuf, ConfigLoadE
 #[cfg(test)]
 mod tests {
     use super::{load_config, ConfigLoadError, InfobaseSelector, LOCAL_CONFIG_FILE_NAME};
-    use crate::change_detection::partial_load::DEFAULT_PARTIAL_LOAD_THRESHOLD;
     use crate::config::validate::ConfigValidationError;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -1403,33 +1428,6 @@ mod tests {
     }
 
     #[test]
-    fn load_config_uses_default_build_settings_when_section_is_omitted() {
-        let dir = tempdir().expect("tempdir");
-        let base = dir.path().join("base");
-        let work = dir.path().join("work");
-        let src = base.join("src");
-        std::fs::create_dir_all(&src).expect("src dir");
-        let config_path = dir.path().join("v8project.yaml");
-        std::fs::write(
-            &config_path,
-            format!(
-                "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
-                work.display()
-            ),
-        )
-        .expect("write config");
-
-        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
-            .map(|loaded| loaded.config)
-            .expect("load config");
-
-        assert_eq!(
-            config.build.partial_load_threshold,
-            DEFAULT_PARTIAL_LOAD_THRESHOLD
-        );
-    }
-
-    #[test]
     fn load_config_rejects_legacy_source_set_purpose_key() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
@@ -1458,28 +1456,65 @@ mod tests {
         );
     }
 
+    /// Ключ порога отклоняется по имени в проектном файле — в секции `push` и в прежней
+    /// `build` без цикла синонима — и в местном слое; отказ говорит, что строку удалить,
+    /// а полную загрузку даёт `push --full`.
     #[test]
-    fn load_config_reads_custom_partial_load_threshold() {
+    fn the_partial_load_threshold_key_is_refused_by_name() {
+        for (section, file, body) in [
+            ("push", "project", "push:\n  partialLoadThreshold: 20\n"),
+            ("build", "project", "build:\n  partialLoadThreshold: 7\n"),
+            ("push", "local", "push:\n  partialLoadThreshold: 20\n"),
+            ("build", "local", "build:\n  partialLoadThreshold: 20\n"),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let config_dir = dir.path().join("project");
+            let project = if file == "project" { body } else { "" };
+            let config_path = write_minimal_project_config(
+                &config_dir,
+                &minimal_config_without_base_path(project),
+            );
+            if file == "local" {
+                std::fs::write(config_dir.join(LOCAL_CONFIG_FILE_NAME), body)
+                    .expect("local overlay");
+            }
+
+            let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+                .map(|loaded| loaded.config)
+                .expect_err("the threshold key must be refused");
+
+            assert!(
+                matches!(
+                    error,
+                    ConfigLoadError::ValidationError(
+                        ConfigValidationError::PartialLoadThresholdKeyRemoved { section: named }
+                    ) if named == section
+                ),
+                "{section} in the {file} file: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("{section}.partialLoadThreshold")),
+                "{message}"
+            );
+            assert!(message.contains("delete the line"), "{message}");
+            assert!(message.contains("--full"), "{message}");
+            assert!(!message.contains("synonym"), "{message}");
+        }
+    }
+
+    /// Секция `push` без ключа порога по-прежнему принимается — пустой.
+    #[test]
+    fn an_empty_push_section_is_accepted() {
         let dir = tempdir().expect("tempdir");
-        let base = dir.path().join("base");
-        let work = dir.path().join("work");
-        let src = base.join("src");
-        std::fs::create_dir_all(&src).expect("src dir");
-        let config_path = dir.path().join("v8project.yaml");
-        std::fs::write(
-            &config_path,
-            format!(
-                "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\nbuild:\n  partialLoadThreshold: 7\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
-                work.display()
-            ),
-        )
-        .expect("write config");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            &minimal_config_without_base_path("push: {}\n"),
+        );
 
-        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
-            .map(|loaded| loaded.config)
-            .expect("load config");
-
-        assert_eq!(config.build.partial_load_threshold, 7);
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .expect("an empty push section is accepted");
     }
 
     #[test]

@@ -69,7 +69,6 @@ pub(super) fn plan_configurator_load_step(
     source_context: &SourceSetContext,
     full_rebuild: bool,
     analysis_by_name: Option<&AnalysisByName>,
-    partial_load_threshold: usize,
 ) -> Result<StepPlan, analyzer::ChangeDetectionError> {
     if full_rebuild {
         return Ok(StepPlan::Execute {
@@ -90,7 +89,6 @@ pub(super) fn plan_configurator_load_step(
         source_set,
         source_context.path(),
         outcome,
-        partial_load_threshold,
     ))
 }
 
@@ -164,7 +162,6 @@ pub(super) fn plan_generated_designer_load_step(
     designer_context: &SourceSetContext,
     full_rebuild: bool,
     edt_stage_skipped: bool,
-    partial_load_threshold: usize,
     work_path: &Path,
 ) -> Result<StepPlan, analyzer::ChangeDetectionError> {
     if edt_stage_skipped && !designer_context.path().exists() {
@@ -190,7 +187,6 @@ pub(super) fn plan_generated_designer_load_step(
         source_set,
         designer_context.path(),
         outcome,
-        partial_load_threshold,
     ))
 }
 
@@ -198,7 +194,6 @@ fn plan_configurator_load_from_analysis(
     source_set: &SourceSetConfig,
     context_path: &Path,
     outcome: AnalysisOutcome,
-    partial_load_threshold: usize,
 ) -> StepPlan {
     match outcome {
         AnalysisOutcome::NoChanges => {
@@ -240,7 +235,6 @@ fn plan_configurator_load_from_analysis(
                 context_path,
                 changes,
                 prepared,
-                partial_load_threshold,
                 LoadPlanSource::Configurator,
             )
         }
@@ -251,7 +245,6 @@ fn plan_generated_designer_load_from_analysis(
     source_set: &SourceSetConfig,
     context_path: &Path,
     outcome: AnalysisOutcome,
-    partial_load_threshold: usize,
 ) -> StepPlan {
     match outcome {
         AnalysisOutcome::NoChanges => {
@@ -293,7 +286,6 @@ fn plan_generated_designer_load_from_analysis(
                 context_path,
                 changes,
                 prepared,
-                partial_load_threshold,
                 LoadPlanSource::GeneratedDesigner,
             )
         }
@@ -331,7 +323,6 @@ fn plan_partial_or_full_load(
     context_path: &Path,
     changes: Vec<analyzer::FileChange>,
     prepared: PreparedStateUpdate,
-    partial_load_threshold: usize,
     source: LoadPlanSource,
 ) -> StepPlan {
     let decision = if source.forces_full_for_extension()
@@ -343,7 +334,7 @@ fn plan_partial_or_full_load(
         );
         LoadDecision::Full
     } else {
-        partial_load::decide(&changes, context_path, partial_load_threshold)
+        partial_load::decide(&changes, context_path)
     };
 
     match decision {
@@ -351,7 +342,7 @@ fn plan_partial_or_full_load(
             debug!(
                 source_set = source_set.name.as_str(),
                 partial_file_count = paths.len(),
-                threshold = partial_load_threshold,
+                threshold = partial_load::PARTIAL_LOAD_THRESHOLD,
                 "{}",
                 source.partial_log_message()
             );
@@ -367,7 +358,7 @@ fn plan_partial_or_full_load(
         LoadDecision::Full => {
             debug!(
                 source_set = source_set.name.as_str(),
-                threshold = partial_load_threshold,
+                threshold = partial_load::PARTIAL_LOAD_THRESHOLD,
                 "{}",
                 source.full_log_message()
             );
