@@ -655,6 +655,7 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ("cli/apply-is-a-separate-step.md", "два,оба,три"),
     ("cli/concurrent-processes-are-serialized.md", "два"),
     ("cli/init-declares-and-clone-pulls.md", "двух"),
+    ("cli/push-delete-deactivates-then-deletes.md", "оба"),
     ("cli/text-output.md", "двух,дважды"),
     ("cli/via-is-rejected-where-there-is-no-choice.md", "обеих"),
     (
@@ -673,10 +674,6 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ("platform/agent-session-lives-with-the-lock.md", "два,два"),
     ("platform/edt-has-two-execution-modes.md", "два"),
     ("platform/prose-debt-only-shrinks.md", "трёх"),
-    (
-        "use-cases/a-generation-token-is-compared-within-its-own-tool.md",
-        "сорок,сорок,двух",
-    ),
     (
         "use-cases/a-push-into-a-base-that-moved-ahead-is-refused.md",
         "оба",

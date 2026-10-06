@@ -127,7 +127,7 @@
 [состав привязки](../rules/use-cases/hash-memory-is-scoped-to-its-base-and-source.md),
 [раскладка памяти](../rules/use-cases/memory-lives-under-the-base-it-describes.md),
 [чужая память](../rules/use-cases/foreign-memory-is-not-used.md),
-[подключение строкой](../rules/use-cases/a-base-named-by-a-connection-string-leaves-no-memory.md).
+[подключение строкой](../rules/use-cases/a-base-named-by-a-connection-string-is-remembered-by-the-string.md).
 
 ### 8.6 Ответ
 

@@ -261,8 +261,8 @@ window.RUNNER_DATA = (function () {
         return { chain: ctx.tools.designer ? [P.designer] : [], config: ['connection'], note: 'только Конфигуратор' };
       },
       target: function (ctx) {
-        // Пакет собирается из исходников без базы: ibcmd config import --out. Конфигуратор — запасной путь через временную базу.
-        return { chain: [P.ibcmd, P.rs, P.designer], config: ['source-set[]'], note: 'база не нужна: ibcmd собирает пакет из XML, ibcmd-rs — без платформы; Конфигуратор — через временную базу' };
+        // Пакет собирается без базы проекта: ibcmd config import --out во временной базе раннера, ibcmd-rs — без базы. Конфигуратор — запасной путь через временную базу.
+        return { chain: [P.ibcmd, P.rs, P.designer], config: ['source-set[]'], note: 'база проекта не нужна: ibcmd собирает пакет во временной базе раннера, всегда с --out; ibcmd-rs — без платформы; Конфигуратор — тоже через временную базу' };
       }
     },
     {
@@ -369,7 +369,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return null; },
       today: function (ctx) { return ctx.tools.edt ? { chain: [P.edt], config: ['format', 'source-set[]', 'tools.edt_cli.path'], note: 'только между EDT и XML; только CLI, в MCP не публикуется' } : { chain: [], config: [], note: 'нет' }; },
       target: function (ctx) {
-        return { chain: [P.edt, P.ibcmd, P.rs], config: ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd или ibcmd-rs без базы' };
+        return { chain: [P.edt, P.ibcmd, P.rs], config: ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd или ibcmd-rs без базы проекта; ibcmd собирает пакет во временной базе раннера' };
       }
     }
   ];

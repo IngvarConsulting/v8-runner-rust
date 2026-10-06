@@ -23,11 +23,6 @@ source-set:
   #   type: EXTENSION
   #   path: extensions/my-extension
 
-# Push settings: how sources reach the infobase (optional)
-push:
-  # Switch to full load when the expanded partial file list grows beyond this number.
-  partialLoadThreshold: 20
-
 # Platform tools configuration (optional)
 tools:
   platform:
