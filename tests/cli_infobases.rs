@@ -227,6 +227,90 @@ fn an_ad_hoc_connection_string_must_not_carry_credentials() {
     }
 }
 
+/// Отказ строке с учётными данными: `invalid_argument`, ключ назван, место учётных данных —
+/// местный слой, а сама строка и значение рядом с ключом не повторяются (#380).
+fn assert_refused_naming_the_key(connection: &str, key: &str) {
+    let project = project();
+
+    let output = project.run_json(&["--infobase", connection], LAUNCH_PREVIEW);
+
+    let message = refusal_message(&output);
+    let payload = json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+    assert!(message.contains(&format!("`{key}`")), "{message}");
+    assert!(message.contains("local layer"), "{message}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("secret"),
+        "the refusal must not echo the value: {stdout}"
+    );
+    assert!(
+        !stdout.contains(connection),
+        "the refusal must not echo the connection string: {stdout}"
+    );
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_usr_is_refused() {
+    assert_refused_naming_the_key("Srvr=srv;Ref=erp;Usr=secret-user", "Usr");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_pwd_is_refused() {
+    assert_refused_naming_the_key("Srvr=srv;Ref=erp;Pwd=secret", "Pwd");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_wsn_is_refused() {
+    assert_refused_naming_the_key("ws=http://host/ib;Wsn=secret-user", "Wsn");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_wsp_is_refused() {
+    assert_refused_naming_the_key("ws=http://host/ib;Wsp=secret", "Wsp");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_wsppwd_is_refused() {
+    assert_refused_naming_the_key("ws=http://host/ib;Wsppwd=secret", "Wsppwd");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_password_is_refused() {
+    assert_refused_naming_the_key("File=/tmp/ad-hoc-ib;Password=secret", "Password");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_the_n_key_is_refused() {
+    assert_refused_naming_the_key("/F /tmp/ad-hoc-ib /N secret-user", "/N");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_the_p_key_is_refused() {
+    assert_refused_naming_the_key("/F /tmp/ad-hoc-ib /Psecret", "/P");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_part_without_equals_is_checked() {
+    // Часть без `=` раньше обрывала проверку всей строки: соседний `Wsp=` проходил.
+    assert_refused_naming_the_key("File=/tmp/ad-hoc-ib;garbage;Wsp=secret", "Wsp");
+    // И сама такая часть читается как ключи командной строки.
+    assert_refused_naming_the_key("File=/tmp/ad-hoc-ib;/N secret-user", "/N");
+}
+
+#[test]
+fn an_ad_hoc_path_that_starts_like_a_credential_key_is_not_refused() {
+    let project = project();
+
+    let output = project.run_json(&["--infobase", "/F /pub/ad-hoc-ib"], LAUNCH_PREVIEW);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 #[test]
 fn an_undeclared_name_is_refused_with_the_declared_names() {
     let project = project();

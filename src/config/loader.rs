@@ -496,8 +496,13 @@ fn select_infobase(
                 }
             },
             InfobaseSelector::Connection(connection) => {
-                if connection_string_carries_credentials(connection) {
-                    return Err(ConfigValidationError::AdHocConnectionCarriesCredentials);
+                // Перечень ключей учётных данных — у `secrets.rs`: второй список здесь
+                // разошёлся бы с маскированием, и строка с ключом, которого он не знает,
+                // прошла бы в базу (#380).
+                if let Some(key) = crate::platform::secrets::connection_credential_key(connection) {
+                    return Err(ConfigValidationError::AdHocConnectionCarriesCredentials {
+                        key: key.to_owned(),
+                    });
                 }
                 let mut section = serde_yaml::Mapping::new();
                 section.insert(
@@ -514,25 +519,6 @@ fn select_infobase(
         name.map_or(serde_yaml::Value::Null, serde_yaml::Value::String),
     );
     Ok(())
-}
-
-/// Реквизиты в строке соединения: `Usr=`/`Pwd=` в объявленной форме, `/N`/`/P` в сырой —
-/// и слитно с значением (`/NAdmin /Psecret`), как платформа их принимает. База, названная
-/// строкой, учётных данных не несёт — они принадлежат объявленной секции.
-fn connection_string_carries_credentials(connection: &str) -> bool {
-    let trimmed = connection.trim();
-    if trimmed.starts_with('/') || trimmed.starts_with('-') {
-        return trimmed.split_whitespace().any(|token| {
-            token
-                .get(..2)
-                .is_some_and(|key| key.eq_ignore_ascii_case("/n") || key.eq_ignore_ascii_case("/p"))
-        });
-    }
-    crate::platform::connection::declared_parameters(trimmed).is_some_and(|parameters| {
-        parameters
-            .iter()
-            .any(|(key, _)| key == "usr" || key == "pwd")
-    })
 }
 
 pub fn resolve_primary_config_path(config_path: Option<&str>) -> Result<PathBuf, ConfigLoadError> {
