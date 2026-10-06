@@ -128,7 +128,7 @@ artifact без привязки к release tag.
 
 - top-level app keys: `workPath`, `format`, `providers`, `source-set`, `push`, `tools`,
   `mcp`, `tests`; базы объявляет местный слой ключом `infobases`;
-- `push` использует `partialLoadThreshold`;
+- `push` использует `partialLoadThreshold` (ключ будет отвергаться валидацией — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379));
 - `mcp.*` и `tests.*` используют `snake_case`;
 - canonical key для EDT tool section: `tools.edt_cli`;
 - у `tools.edt_cli` literal child keys смешанные:
@@ -165,9 +165,6 @@ source-set:
   - name: ext
     type: EXTENSION
     path: ext
-
-push:
-  partialLoadThreshold: 20
 
 tools:
   client_mcp:
@@ -603,10 +600,11 @@ infobases:
 
 Поддержанные поля:
 
-- `ras` — адрес сервера администрирования (`host` или `host:port`, IPv6 в скобках:
-  `[::1]:1545`). Раннер по этому адресу сам не звонит: он уходит `rac` как есть, и порт
+- `ras` — адрес сервера администрирования (`host` или `host:port`). Раннер по этому адресу сам не звонит: он уходит `rac` как есть, и порт
   по умолчанию (1545) остаётся за платформой; поэтому, в отличие от `standalone.gate`, порт
-  не обязателен.
+  не обязателен. Адрес IPv6 сегодня принимается, но `rac` его не разбирает, а `ras` слушает
+  только IPv4; валидация будет отвергать IPv6 здесь и в `agent.address` и называть ключ —
+  [#378](https://github.com/IngvarConsulting/v8-runner-rust/issues/378).
 - `user`, `password` — администратор кластера.
 - `agent.address` — адрес агента центрального сервера в той же форме; нужен, когда раннер
   поднимает `ras` сам, а агент отвечает не по хосту из `Srvr=` с портом платформы (1540).
@@ -668,7 +666,10 @@ Validation rules:
 - По умолчанию: `20`
 - Минимум: `1`
 
-Порог между partial и full load.
+Порог между partial и full load. Ключ необязательный; сегодня он принимается, но порог
+снимается: загрузка будет частичной всегда, когда у набора есть память, а ключ будет
+отвергаться валидацией с просьбой удалить строку — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379). Полную загрузку по желанию
+даёт `push --full`.
 
 Позиционный набор `v8-runner push <name>` использует `source-set[].name` как stable
 runtime identity и не добавляет отдельное поле конфигурации. Если набор не назван, `push`

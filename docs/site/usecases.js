@@ -35,8 +35,8 @@ window.RUNNER_USECASES = [
     pre: 'установлена платформа 1С',
     steps: [
       { id: 'init', in: ['repo'], out: ['cfg'], note: 'раннер находит наборы исходников' },
-      { id: 'infobase-create', in: ['cfg'], out: ['ib'], note: 'появляется пустая база' },
-      { id: 'push', in: ['repo', 'cfg'], out: ['ib', 'state'], note: 'исходники попадают в базу' },
+      { id: 'infobase-create', in: ['cfg'], out: ['ib'], note: 'файловая база создаётся сразу с основной конфигурацией из исходников, и раннер её помнит' },
+      { id: 'push', in: ['repo', 'cfg'], out: ['ib', 'state'], note: 'досылаются расширения; отказа первого знакомства нет' },
       { id: 'test', in: ['ib'], out: ['reports'], note: 'проверяем, что база живая' }
     ] },
 
