@@ -1157,7 +1157,9 @@ fn extension_source_set_name(
     Ok(raw_name)
 }
 
-fn read_configuration_logical_name(path: &Path) -> Result<Option<String>, AppError> {
+/// `Name` описания конфигурации по пути `path`: `None`, когда описание не конфигурации или
+/// имени в нём нет.
+pub(crate) fn read_configuration_logical_name(path: &Path) -> Result<Option<String>, AppError> {
     let content = std::fs::read_to_string(path).map_err(|error| {
         AppError::Runtime(format!(
             "failed to read configuration marker '{}': {error}",

@@ -1084,38 +1084,13 @@ fn execute_dump(
             BaseAccess::Writes,
             clean_before_execution,
             dry_run,
-            || match dump_config::execute_all(&context, config, &request) {
-                Ok(result) => {
-                    if presenter.is_json() {
-                        presenter.print_envelope(&Envelope::ok(
-                            CommandName::Dump.as_str(),
-                            result.duration_ms,
-                            result,
-                        ));
-                    } else {
-                        render_pull_all_text(&result, presenter, true);
-                    }
-                    Ok(())
-                }
-                Err(failure) => {
-                    let error = failure.error;
-                    if presenter.is_json() {
-                        if let Some(result) = failure.payload {
-                            presenter.print_envelope(&failure_envelope(
-                                CommandName::Dump.as_str(),
-                                result.duration_ms,
-                                result,
-                                &error,
-                            ));
-                        }
-                    } else {
-                        if let Some(result) = failure.payload.as_ref() {
-                            render_pull_all_text(result, presenter, false);
-                        }
-                        presenter.print_error(&error.to_string());
-                    }
-                    Err(error)
-                }
+            || {
+                present_pull_outcome(
+                    presenter,
+                    dump_config::execute_all(&context, config, &request),
+                    |result| result.duration_ms,
+                    render_pull_all_text,
+                )
             },
         );
     }
@@ -1126,40 +1101,59 @@ fn execute_dump(
         BaseAccess::Writes,
         clean_before_execution,
         dry_run,
-        || match dump_config::execute(&context, config, &request) {
-            Ok(result) => {
-                if presenter.is_json() {
-                    presenter.print_envelope(&Envelope::ok(
-                        CommandName::Dump.as_str(),
-                        result.duration_ms,
-                        result,
-                    ));
-                } else {
-                    render_dump_text(&result, presenter, true);
-                }
-                Ok(())
-            }
-            Err(failure) => {
-                let error = failure.error;
-                if presenter.is_json() {
-                    if let Some(result) = failure.payload {
-                        presenter.print_envelope(&failure_envelope(
-                            CommandName::Dump.as_str(),
-                            result.duration_ms,
-                            result,
-                            &error,
-                        ));
-                    }
-                } else {
-                    if let Some(result) = failure.payload.as_ref() {
-                        render_dump_text(result, presenter, false);
-                    }
-                    presenter.print_error(&error.to_string());
-                }
-                Err(error)
-            }
+        || {
+            present_pull_outcome(
+                presenter,
+                dump_config::execute(&context, config, &request),
+                |result| result.duration_ms,
+                render_dump_text,
+            )
         },
     )
+}
+
+/// Исход `pull` и `pull --all`: конверт с формой ответа в JSON, лента `render` в тексте.
+/// Отказ несёт то, что сценарий успел, — в JSON конвертом отказа с формой, в тексте лентой
+/// перед строкой ошибки.
+fn present_pull_outcome<T: Serialize>(
+    presenter: &Presenter,
+    outcome: Result<T, crate::use_cases::result::UseCaseFailure<T>>,
+    duration_ms: impl Fn(&T) -> u64,
+    render: impl Fn(&T, &Presenter, bool),
+) -> Result<(), UseCaseError> {
+    match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    CommandName::Dump.as_str(),
+                    duration_ms(&result),
+                    result,
+                ));
+            } else {
+                render(&result, presenter, true);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                if let Some(result) = failure.payload {
+                    presenter.print_envelope(&failure_envelope(
+                        CommandName::Dump.as_str(),
+                        duration_ms(&result),
+                        result,
+                        &error,
+                    ));
+                }
+            } else {
+                if let Some(result) = failure.payload.as_ref() {
+                    render(result, presenter, false);
+                }
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    }
 }
 
 pub enum PreparedInfobaseCommand {
@@ -4126,6 +4120,12 @@ fn render_pull_all_text(result: &PullAllResult, presenter: &Presenter, succeeded
         details.push(format!(
             "not in the infobase, not pulled: {}",
             result.not_installed.join(", ")
+        ));
+    }
+    if !result.if_installed.is_empty() {
+        details.push(format!(
+            "pulled only if the infobase has them: {}",
+            result.if_installed.join(", ")
         ));
     }
     if !details.is_empty() || result.sets.is_empty() {

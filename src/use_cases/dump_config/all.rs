@@ -2,11 +2,13 @@
 //!
 //! Команда спрашивает базу, какие расширения в ней установлены (замер #187: у каждого
 //! исполнителя свой вызов, ответ разбирается по структуре, а не по тексту сообщений), и
-//! обходит пакеты конфигурации одним порядком [`SourceSetInventory::configuration_packages`]:
+//! обходит пакеты конфигурации порядком [`SourceSetInventory::configuration_packages`]:
 //! сперва наборы проекта, затем по набору `src/ext/<Name>` на каждое расширение без набора.
 //! Каждый набор выгружается тем же сценарием, что `pull <SET>`, со сторожем каталога и
 //! памятью базы; объявление нового набора дописывается в `v8project.yaml` после его удачной
 //! выгрузки, так что отказ посреди обхода не оставляет в проекте набора без содержимого.
+
+use std::collections::HashSet;
 
 use super::helpers::ensure_success_of;
 use super::*;
@@ -19,12 +21,13 @@ use crate::platform::extension_inventory::{
 };
 use crate::use_cases::config_init::{declare_source_sets, with_declared_source_sets};
 use crate::use_cases::extension_agent::ExtensionAgent;
+use crate::use_cases::extension_identity::source_extension_name;
 use crate::use_cases::provider_selection::SelectedProvider;
 use crate::use_cases::request::PullAllRequest;
 use crate::use_cases::result::UseCaseError;
 
-/// Каталог, под которым `pull --all` заводит набор расширения: `src/ext/<Name>` от каталога
-/// проектного файла.
+/// Каталог, под которым `pull --all` заводит набор расширения: `src/ext/<Name>` от
+/// `basePath`, как пути всех наборов.
 const DECLARED_EXTENSION_ROOT: &str = "src/ext";
 
 pub fn execute_all(
@@ -61,18 +64,14 @@ fn run_all(
         provider_dispatched: false,
         declared: None,
         not_installed: Vec::new(),
+        if_installed: Vec::new(),
         sets: Vec::new(),
         duration_ms: 0,
         message: None,
     };
-    let refuse = |error: AppError, mut result: PullAllResult| {
-        result.duration_ms = started.elapsed().as_millis() as u64;
-        result.message = Some(error.to_string());
-        PullAllFailure::with_payload(error, result)
-    };
 
     if let Some(error) = validate_supported_matrix(config) {
-        return Err(refuse(error, result));
+        return Err(fail(error, result, started));
     }
     let mut utilities = PlatformUtilities::from_config(config);
     let selected =
@@ -81,33 +80,13 @@ fn run_all(
             Ok(selected) => selected,
             Err((error, receipt)) => {
                 result.provider = Some(receipt);
-                return Err(refuse(error, result));
+                return Err(fail(error, result, started));
             }
         };
     result.provider = Some(selected.receipt.clone());
 
     if request.dry_run {
-        // Состав базы читает платформа, а превью её не запускает: объявлять пока нечего, и
-        // `declared` остаётся `null`. Наборы проекта названы превью их выгрузки.
-        for (source_set, _) in SourceSetInventory::new(config).configuration_packages() {
-            pull_one(
-                context,
-                config,
-                request,
-                &source_set.name,
-                SetKind::Project,
-                &mut result,
-            )
-            .map_err(|error| finish_failure(error, result.clone(), started))?;
-        }
-        result.message = Some(format!(
-            "would read the extensions installed in the infobase via {} and, for each one without a source-set, declare `{DECLARED_EXTENSION_ROOT}/<Name>` in '{}' and pull it there; nothing read, nothing written",
-            provider_label(&selected),
-            request.project_file.display()
-        ));
-        result.ok = true;
-        result.duration_ms = started.elapsed().as_millis() as u64;
-        return Ok(result);
+        return preview(context, config, request, &selected, result, started);
     }
 
     let installed = match read_installed_extensions(context, config, &selected, &utilities) {
@@ -125,8 +104,15 @@ fn run_all(
         }
     };
     let walk = match plan_walk(config, &installed).and_then(|walk| {
-        // Дописать проектный файл должно получиться до первой выгрузки: иначе выгруженное
-        // осталось бы без объявления.
+        // Проект с новыми наборами проверяется до первой выгрузки и тем же валидатором, что
+        // проект при загрузке: выгруженное не должно остаться без объявления, а объявление —
+        // ломать следующий запуск.
+        crate::config::validate::validate_with_declared_source_sets(config, &walk.declared_configs())
+            .map_err(|error| {
+                AppError::Validation(format!(
+                    "the source-sets pull --all would declare leave the project invalid, so nothing was pulled: {error}"
+                ))
+            })?;
         let text = std::fs::read_to_string(&request.project_file).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to read project file '{}': {error}",
@@ -137,52 +123,94 @@ fn run_all(
         Ok(walk)
     }) {
         Ok(walk) => walk,
-        Err(error) => return Err(refuse(error, result)),
+        Err(error) => return Err(fail(error, result, started)),
     };
-    result.not_installed = walk.not_installed.clone();
-    result.declared = Some(Vec::new());
+    result.not_installed = walk
+        .not_installed
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
 
     // Наборы проекта и объявляемые идут одним обходом: в настройках этой команды новые
     // наборы уже есть, на диске — появляются после своей выгрузки.
     let mut walked = config.clone();
-    walked
-        .source_sets
-        .extend(walk.declared.iter().map(|declared| SourceSetConfig {
-            name: declared.name.clone(),
-            purpose: SourceSetPurpose::Extension,
-            path: PathBuf::from(&declared.path),
-        }));
+    walked.source_sets.extend(walk.declared_configs());
+    let walker = Walker {
+        context,
+        config: &walked,
+        request,
+    };
+    let mut declared = Vec::with_capacity(walk.declared.len());
     for name in &walk.existing {
-        pull_one(
-            context,
-            &walked,
-            request,
-            name,
-            SetKind::Project,
-            &mut result,
-        )
-        .map_err(|error| finish_failure(error, result.clone(), started))?;
+        if let Err(error) = walker.pull(name, SetKind::Project, &mut result) {
+            result.declared = Some(declared);
+            return Err(fail(error, result, started));
+        }
     }
-    for declared in &walk.declared {
-        pull_one(
-            context,
-            &walked,
-            request,
-            &declared.name,
-            SetKind::Declared,
-            &mut result,
-        )
-        .map_err(|error| finish_failure(error, result.clone(), started))?;
-        declare_source_sets(&request.project_file, std::slice::from_ref(declared))
-            .map_err(|error| finish_failure(error.into(), result.clone(), started))?;
-        result
-            .declared
-            .get_or_insert_with(Vec::new)
-            .push(declared.clone());
+    for set in &walk.declared {
+        let pulled = walker
+            .pull(&set.name, SetKind::Declared, &mut result)
+            .and_then(|()| {
+                declare_source_sets(&request.project_file, std::slice::from_ref(set))
+                    .map_err(UseCaseError::from)
+            });
+        if let Err(error) = pulled {
+            result.declared = Some(declared);
+            return Err(fail(error, result, started));
+        }
+        declared.push(set.clone());
     }
+    result.declared = Some(declared);
     result.ok = true;
     result.duration_ms = started.elapsed().as_millis() as u64;
     Ok(result)
+}
+
+/// Превью платформу не запускает, поэтому состава базы не знает: какие наборы объявит
+/// настоящий прогон и каких расширений проекта в базе нет, выясняется только им. Превью
+/// выгрузки называет наборы, которые прогон выгрузит при любом составе, — основную
+/// конфигурацию; наборы расширений проекта названы в `if_installed`, а объявляемые —
+/// шаблоном `src/ext/<Name>`.
+fn preview(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &PullAllRequest,
+    selected: &SelectedProvider,
+    mut result: PullAllResult,
+    started: Instant,
+) -> UseCaseResult<PullAllResult> {
+    let walker = Walker {
+        context,
+        config,
+        request,
+    };
+    for (source_set, extension) in SourceSetInventory::new(config).configuration_packages() {
+        if extension.is_some() {
+            result.if_installed.push(source_set.name.clone());
+        } else if let Err(error) = walker.pull(&source_set.name, SetKind::Project, &mut result) {
+            return Err(fail(error, result, started));
+        }
+    }
+    result.message = Some(format!(
+        "would read the extensions installed in the infobase via {}, pull each extension set of the project the infobase has and name the others as not installed, and, for each extension without a set, pull it into `{DECLARED_EXTENSION_ROOT}/<Name>` and then declare that set in '{}'; which sets would be declared is known only once the infobase is read; nothing read, nothing written",
+        provider_label(selected),
+        request.project_file.display()
+    ));
+    result.ok = true;
+    result.duration_ms = started.elapsed().as_millis() as u64;
+    Ok(result)
+}
+
+/// Отказ: ответ несёт выгруженное до него и называет причину.
+fn fail(
+    error: impl Into<UseCaseError>,
+    mut result: PullAllResult,
+    started: Instant,
+) -> PullAllFailure {
+    let error = error.into();
+    result.duration_ms = started.elapsed().as_millis() as u64;
+    result.message = Some(error.to_string());
+    PullAllFailure::with_payload(error, result)
 }
 
 /// Чем выгружается набор обхода.
@@ -192,120 +220,147 @@ enum SetKind {
     Project,
     /// Объявляемый набор: каталога у него ещё нет, и выгрузка полная, как первая. Сторож
     /// спрашивается так же — каталог, оставшийся от прерванного прогона, без согласия не
-    /// заменяется, — а полная выгрузка записывает хеши и копию файла версий.
+    /// заменяется, — но в совете нет `pull <SET> --force`: набора в проекте ещё нет.
     Declared,
 }
 
-/// Выгружает один набор сценарием `pull <SET>` и кладёт его ответ в обход; отказ набора
-/// останавливает обход.
-fn pull_one(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    request: &PullAllRequest,
-    source_set: &str,
-    kind: SetKind,
-    result: &mut PullAllResult,
-) -> Result<(), UseCaseError> {
-    let set_request = DumpArgs {
-        mode: if request.discard_uncommitted || kind == SetKind::Declared {
-            DumpModeRequest::Full
-        } else {
-            DumpModeRequest::Incremental
-        },
-        source_set: Some(source_set.to_owned()),
-        extension: None,
-        objects: Vec::new(),
-        dry_run: request.dry_run,
-        discard_uncommitted: request.discard_uncommitted,
-        force_way_out: ForceWayOut::PullForce,
-    };
-    match super::execute(context, config, &set_request) {
-        Ok(pulled) => {
-            result.sets.push(pulled);
-            Ok(())
-        }
-        Err(failure) => {
-            result.sets.extend(failure.payload);
-            Err(failure.error)
-        }
-    }
+/// Общее для каждой выгрузки обхода: сценарий, настройки с объявляемыми наборами и запрос.
+struct Walker<'a> {
+    context: &'a ExecutionContext,
+    config: &'a AppConfig,
+    request: &'a PullAllRequest,
 }
 
-/// Отказ посреди обхода: ответ несёт выгруженное до него и называет причину.
-fn finish_failure(
-    error: UseCaseError,
-    mut result: PullAllResult,
-    started: Instant,
-) -> PullAllFailure {
-    result.duration_ms = started.elapsed().as_millis() as u64;
-    result.message = Some(error.to_string());
-    PullAllFailure::with_payload(error, result)
+impl Walker<'_> {
+    /// Выгружает один набор сценарием `pull <SET>` и кладёт его ответ в обход; отказ набора
+    /// останавливает обход.
+    fn pull(
+        &self,
+        source_set: &str,
+        kind: SetKind,
+        result: &mut PullAllResult,
+    ) -> Result<(), UseCaseError> {
+        let set_request = DumpArgs {
+            mode: if self.request.discard_uncommitted || kind == SetKind::Declared {
+                DumpModeRequest::Full
+            } else {
+                DumpModeRequest::Incremental
+            },
+            source_set: Some(source_set.to_owned()),
+            extension: None,
+            objects: Vec::new(),
+            dry_run: self.request.dry_run,
+            discard_uncommitted: self.request.discard_uncommitted,
+            force_way_out: match kind {
+                SetKind::Project => ForceWayOut::PullForce,
+                SetKind::Declared => ForceWayOut::Undeclared,
+            },
+        };
+        match super::execute(self.context, self.config, &set_request) {
+            Ok(pulled) => {
+                result.sets.push(pulled);
+                Ok(())
+            }
+            Err(failure) => {
+                result.sets.extend(failure.payload);
+                Err(failure.error)
+            }
+        }
+    }
 }
 
 /// Что обойти: наборы проекта в порядке пакетов и наборы, которые надо объявить.
 #[derive(Debug, PartialEq, Eq)]
-struct Walk {
+struct Walk<'a> {
     /// Пакеты проекта в порядке обхода: основная конфигурация и расширения, которые в базе
     /// есть.
-    existing: Vec<String>,
+    existing: Vec<&'a str>,
     /// Наборы для расширений базы без набора, по имени.
     declared: Vec<ConfigInitSourceSet>,
     /// Наборы расширений проекта, которых в базе нет.
-    not_installed: Vec<String>,
+    not_installed: Vec<&'a str>,
 }
 
-/// Сопоставляет состав базы с наборами проекта. Имена 1С регистр не различают, поэтому и
-/// сопоставление без регистра: `old` в проекте — то же расширение, что `Old` в базе.
-fn plan_walk(config: &AppConfig, installed: &[String]) -> Result<Walk, AppError> {
+impl Walk<'_> {
+    /// Объявляемые наборы так, как их прочтёт следующий запуск.
+    fn declared_configs(&self) -> Vec<SourceSetConfig> {
+        self.declared
+            .iter()
+            .map(|declared| SourceSetConfig {
+                name: declared.name.clone(),
+                purpose: SourceSetPurpose::Extension,
+                path: PathBuf::from(&declared.path),
+            })
+            .collect()
+    }
+}
+
+/// Сопоставляет состав базы с наборами проекта по имени расширения — тому, каким набор
+/// называет расширение платформе ([`SourceSetInventory::configuration_packages`]). Имена
+/// 1С регистр не различают, поэтому и сопоставление без регистра: `old` в проекте — то же
+/// расширение, что `Old` в базе.
+///
+/// Набор, исходники которого называют другое установленное расширение, — отказ: под
+/// своим именем он выгрузил бы не то расширение, а объявить второй набор для того же
+/// расширения значило бы раздвоить его. Расширение-инструмент клиентского MCP
+/// (`tools.client_mcp.extension`) раннер ставит сам, и набором оно не объявляется.
+fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>, AppError> {
     let key = |name: &str| name.to_lowercase();
     let installed_keys = installed
         .iter()
         .map(|name| key(name))
-        .collect::<std::collections::HashSet<_>>();
-    let inventory = SourceSetInventory::new(config);
+        .collect::<HashSet<_>>();
     let mut existing = Vec::new();
     let mut not_installed = Vec::new();
-    for (source_set, extension) in inventory.configuration_packages() {
-        match extension {
-            Some(extension) if !installed_keys.contains(&key(extension)) => {
-                not_installed.push(source_set.name.clone())
-            }
-            _ => existing.push(source_set.name.clone()),
+    let mut claimed = HashSet::new();
+    for (source_set, extension) in SourceSetInventory::new(config).configuration_packages() {
+        let Some(extension) = extension else {
+            existing.push(source_set.name.as_str());
+            continue;
+        };
+        let root = source_set.root_in(&config.base_path);
+        if let Some(held) = source_extension_name(config.format, &root)?
+            .filter(|held| key(held) != key(extension) && installed_keys.contains(&key(held)))
+        {
+            return Err(AppError::Validation(format!(
+                "source-set '{}' holds extension '{held}' by the Name in its sources, but the runner pulls an extension set by the set's name, '{extension}' (#218): rename the set to '{held}' in the project file; no second set is declared for '{held}'",
+                source_set.name
+            )));
+        }
+        claimed.insert(key(extension));
+        if installed_keys.contains(&key(extension)) {
+            existing.push(source_set.name.as_str());
+        } else {
+            not_installed.push(source_set.name.as_str());
         }
     }
 
+    let tool = config
+        .tools
+        .client_mcp
+        .extension
+        .as_ref()
+        .map(|tool| key(&tool.name));
     let mut declared = Vec::new();
     for name in installed {
+        if claimed.contains(&key(name)) || tool.as_deref() == Some(key(name).as_str()) {
+            continue;
+        }
         if let Some(taken) = config
             .source_sets
             .iter()
             .find(|source_set| key(&source_set.name) == key(name))
         {
-            if taken.purpose == SourceSetPurpose::Extension {
-                continue;
-            }
             return Err(AppError::Validation(format!(
                 "the infobase has extension '{name}', and its name is taken by the {} source-set '{}' in the project: an extension source-set cannot be declared under it; rename that source-set",
                 taken.purpose.as_str(),
                 taken.name
             )));
         }
-        let path = format!("{DECLARED_EXTENSION_ROOT}/{name}");
-        let root = config.base_path.join(&path);
-        if let Some(taken) = config
-            .source_sets
-            .iter()
-            .find(|source_set| source_set.root_in(&config.base_path) == root)
-        {
-            return Err(AppError::Validation(format!(
-                "extension '{name}' would be declared at '{path}', which source-set '{}' already uses",
-                taken.name
-            )));
-        }
         declared.push(ConfigInitSourceSet {
             name: name.clone(),
             source_type: SourceSetPurpose::Extension.as_str().to_owned(),
-            path,
+            path: format!("{DECLARED_EXTENSION_ROOT}/{name}"),
         });
     }
     declared.sort_by(|left, right| left.name.cmp(&right.name));
@@ -407,12 +462,9 @@ fn read_installed_extensions(
             ))
         }
     };
-    if let Some(name) = names
-        .iter()
-        .find(|name: &&String| !is_extension_identifier(name))
-    {
+    if let Some(name) = names.iter().find(|name| !is_extension_identifier(name)) {
         return Err(AppError::InvalidOutput(format!(
-            "the infobase lists an extension whose name is not an identifier: {name:?}"
+            "the infobase lists an extension whose name is not an identifier usable as a directory name: {name:?}"
         )));
     }
     Ok(names)
@@ -423,7 +475,7 @@ mod tests {
     use super::{plan_walk, Walk};
     use crate::config::model::{
         AppConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        ToolExtensionArtifactConfig, ToolExtensionConfig, ToolExtensionInput, ToolsConfig,
     };
     use crate::domain::config_init::ConfigInitSourceSet;
 
@@ -435,11 +487,10 @@ mod tests {
         }
     }
 
-    fn config(source_sets: Vec<SourceSetConfig>) -> AppConfig {
-        let root = std::env::temp_dir().join("v8-runner-pull-all-plan");
+    fn config_in(base_path: &std::path::Path, source_sets: Vec<SourceSetConfig>) -> AppConfig {
         AppConfig {
-            base_path: root.join("base"),
-            work_path: root.join("work"),
+            base_path: base_path.join("base"),
+            work_path: base_path.join("work"),
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -453,8 +504,23 @@ mod tests {
         }
     }
 
+    fn config(source_sets: Vec<SourceSetConfig>) -> AppConfig {
+        config_in(
+            &std::env::temp_dir().join("v8-runner-pull-all-plan"),
+            source_sets,
+        )
+    }
+
     fn installed(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn declared(name: &str) -> ConfigInitSourceSet {
+        ConfigInitSourceSet {
+            name: name.to_owned(),
+            source_type: "EXTENSION".to_owned(),
+            path: format!("src/ext/{name}"),
+        }
     }
 
     /// Наборы проекта идут первыми в порядке пакетов, расширения без набора объявляются под
@@ -471,33 +537,72 @@ mod tests {
 
         let walk = plan_walk(&config, &installed(&["Новое", "Old", "Second"])).expect("walk");
 
-        let declared = |name: &str| ConfigInitSourceSet {
-            name: name.to_owned(),
-            source_type: "EXTENSION".to_owned(),
-            path: format!("src/ext/{name}"),
-        };
         assert_eq!(
             walk,
             Walk {
-                existing: vec!["main".to_owned(), "old".to_owned()],
+                existing: vec!["main", "old"],
                 declared: vec![declared("Second"), declared("Новое")],
-                not_installed: vec!["gone".to_owned()],
+                not_installed: vec!["gone"],
             }
         );
     }
 
-    /// Имя расширения, занятое набором другого назначения, и каталог, занятый другим
-    /// набором, — отказ до выгрузки.
+    /// Имя расширения, занятое набором другого назначения, — отказ до выгрузки.
     #[test]
-    fn a_taken_name_or_directory_is_refused() {
-        let config = config(vec![
-            set("main", SourceSetPurpose::Configuration, "src/cf"),
-            set("other", SourceSetPurpose::Extension, "src/ext/Ext"),
-        ]);
+    fn a_name_taken_by_a_set_of_another_purpose_is_refused() {
+        let config = config(vec![set("main", SourceSetPurpose::Configuration, "src/cf")]);
 
         let taken_name = plan_walk(&config, &installed(&["MAIN"])).expect_err("name");
+
         assert!(taken_name.to_string().contains("'main'"), "{taken_name}");
-        let taken_path = plan_walk(&config, &installed(&["Ext"])).expect_err("path");
-        assert!(taken_path.to_string().contains("'other'"), "{taken_path}");
+    }
+
+    /// Расширение-инструмент клиентского MCP ставит раннер: набором оно не объявляется,
+    /// в каком бы регистре его ни назвала база.
+    #[test]
+    fn the_client_mcp_tool_extension_is_not_declared() {
+        let mut config = config(vec![set("main", SourceSetPurpose::Configuration, "src/cf")]);
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Artifact(ToolExtensionArtifactConfig {
+                path: "client-mcp.cfe".into(),
+            }),
+        });
+
+        let walk = plan_walk(&config, &installed(&["Client_MCP", "Sales"])).expect("walk");
+
+        assert_eq!(walk.declared, vec![declared("Sales")]);
+    }
+
+    /// Набор `my-ext`, исходники которого называют установленное расширение `MyExt`, не
+    /// даёт второго набора: пока раннер называет расширение по имени набора (#218), обход
+    /// отказывает и просит переименовать набор.
+    #[test]
+    fn a_set_holding_an_installed_extension_under_another_name_is_not_doubled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config_in(
+            dir.path(),
+            vec![
+                set("main", SourceSetPurpose::Configuration, "src/cf"),
+                set("my-ext", SourceSetPurpose::Extension, "src/ext"),
+            ],
+        );
+        let root = config.base_path.join("src/ext");
+        std::fs::create_dir_all(&root).expect("set dir");
+        std::fs::write(
+            root.join("Configuration.xml"),
+            "<MetaDataObject><Configuration><Properties><Name>MyExt</Name><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose></Properties></Configuration></MetaDataObject>\n",
+        )
+        .expect("descriptor");
+
+        let refusal = plan_walk(&config, &installed(&["MyExt"])).expect_err("doubled");
+
+        let message = refusal.to_string();
+        assert!(message.contains("'my-ext'"), "{message}");
+        assert!(message.contains("rename the set to 'MyExt'"), "{message}");
+
+        // Исходники, называющие то же расширение, что и имя набора, — обычный набор.
+        let walk = plan_walk(&config, &installed(&["My-Ext"]));
+        assert!(walk.is_ok(), "{walk:?}");
     }
 }

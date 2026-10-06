@@ -198,13 +198,28 @@ fn set_descriptor_field(
 }
 
 /// Имя расширения — идентификатор 1С: буква или подчёркивание, затем буквы, цифры и
-/// подчёркивания. Такое имя годится и в аргумент платформы, и в имя каталога.
+/// подчёркивания. Такое имя годится и в аргумент платформы, и в имя каталога: имена
+/// устройств Windows (`CON`, `NUL`, `COM1` и прочие) каталогом не стать, и их нет.
 pub fn is_extension_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     chars
         .next()
         .is_some_and(|first| first == '_' || first.is_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
+        && !is_windows_device_name(value)
+}
+
+/// Имя устройства Windows без учёта регистра: каталог с таким именем там не создать.
+fn is_windows_device_name(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => ["COM", "LPT"].iter().any(|prefix| {
+            upper
+                .strip_prefix(prefix)
+                .is_some_and(|digit| matches!(digit.as_bytes(), [b'1'..=b'9']))
+        }),
+    }
 }
 
 /// Разбирает `/Out` вызова `/DumpDBCfgList -AllExtensions`: одно имя на строку, BOM снят
@@ -314,8 +329,29 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        parse_extension_inventory, parse_extension_name_list, read_applied_extension_descriptor,
+        is_extension_identifier, parse_extension_inventory, parse_extension_name_list,
+        read_applied_extension_descriptor,
     };
+
+    /// Имя устройства Windows идентификатором расширения не считается в любом регистре:
+    /// оно стало бы каталогом, которого там не создать. Похожие имена — обычные.
+    #[test]
+    fn a_windows_device_name_is_not_an_extension_identifier() {
+        for reserved in ["CON", "nul", "Prn", "AUX", "COM1", "com9", "LPT1", "lpt9"] {
+            assert!(!is_extension_identifier(reserved), "{reserved}");
+        }
+        for ordinary in [
+            "CONSOLE",
+            "COM",
+            "COM10",
+            "LPT0",
+            "NUL_",
+            "Расширение",
+            "_x1",
+        ] {
+            assert!(is_extension_identifier(ordinary), "{ordinary}");
+        }
+    }
 
     /// Список Конфигуратора — имена по строке; пустой вывод — пустой список, а строка,
     /// не являющаяся идентификатором, — отказ, а не имя.

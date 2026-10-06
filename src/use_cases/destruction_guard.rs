@@ -61,6 +61,15 @@ pub(super) enum WaysOut {
         /// Набор так, как его принимает позиционный аргумент командной строки.
         source_set: String,
     },
+    /// Набор объявляет `pull --all`, и в проектном файле его ещё нет: `pull <SET> --force` в
+    /// него не попадёт. Выходы — унести каталог, объявить набор руками или
+    /// `pull --all --force`, который заменяет и каталоги всех прочих наборов.
+    Undeclared {
+        /// Имя набора, который команда объявила бы.
+        source_set: String,
+        /// Путь набора так, как он лёг бы в `source-set:`.
+        path: String,
+    },
 }
 
 /// Что работа делает с каталогом — так её и называет отказ.
@@ -331,6 +340,14 @@ fn remedy(ways_out: &WaysOut, context: &ExecutionContext, losses: &Losses) -> St
             let command = context.advised_pull_force(source_set);
             format!(
                 "{save}, or run {command}: a full dump of source-set '{source_set}' that replaces its whole directory and discards them"
+            )
+        }
+        // Набора в проекте нет: `pull <SET>` в него не попадёт, а единственная замена
+        // командой затронула бы весь проект — это сказано прямо.
+        WaysOut::Undeclared { source_set, path } => {
+            let all_force = context.advised_command("pull --all --force");
+            format!(
+                "{save}; source-set '{source_set}' is not declared in the project file yet (a run stopped between its dump and its declaration leaves exactly this), so no `pull {source_set}` reaches it: move the directory away and run the same command again, or declare it by hand in the project file (name '{source_set}', type EXTENSION, path '{path}') and pull it as that set; {all_force} replaces it too, but it also replaces the directory of every other set of the project and discards uncommitted work there"
             )
         }
     }

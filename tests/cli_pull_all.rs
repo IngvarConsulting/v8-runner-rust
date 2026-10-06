@@ -46,10 +46,14 @@ if [ -n "$out" ]; then : > "$out"; fi
 exit 0"#;
 
 /// `ibcmd`: `config extension list` печатает блоки «ключ : значение» из файла `records`,
-/// `config export` создаёт каталог выгрузки — последний довод.
+/// `config export` создаёт каталог выгрузки — последний довод. Прочие вызовы только
+/// записываются: каталог по последнему доводу чужой команды лёг бы куда попало, хоть в
+/// каталог репозитория.
 const IBCMD: &str = r#"printf '%s\n' "$*" >> "$(dirname "$0")/../../calls"
 case "$*" in
   *"config extension list"*) cat "$(dirname "$0")/../../records"; exit 0 ;;
+  *" config export "*) ;;
+  *) exit 0 ;;
 esac
 for argument in "$@"; do target="$argument"; done
 mkdir -p "$target"
@@ -309,7 +313,9 @@ fn an_existing_set_is_left_as_declared() {
 }
 
 /// Превью платформу не запускает, поэтому состава базы не знает: `declared` у него `null`,
-/// а наборы проекта названы превью их выгрузки. Ничего не пишется.
+/// новые наборы названы шаблоном `src/ext/<Name>`, а наборы расширений проекта — в
+/// `if_installed`, без превью выгрузки: настоящий прогон выгрузит лишь те, что есть в базе.
+/// Превью выгрузки — только у основной конфигурации. Ничего не пишется.
 #[test]
 fn a_pull_all_preview_reads_nothing_and_writes_nothing() {
     let project = Project::new(&["Old", "Новое"]);
@@ -319,13 +325,19 @@ fn a_pull_all_preview_reads_nothing_and_writes_nothing() {
     assert_succeeded(&output, &envelope);
     assert_eq!(envelope["data"]["declared"], Value::Null, "{envelope}");
     assert_eq!(envelope["data"]["provider_dispatched"], false, "{envelope}");
+    assert_eq!(pulled_sets(&envelope), ["main"], "{envelope}");
     assert_eq!(
-        pulled_sets(&envelope),
-        ["main", "Old", "Gone"],
+        envelope["data"]["if_installed"],
+        json!(["Old", "Gone"]),
+        "{envelope}"
+    );
+    assert!(
+        envelope["data"].get("not_installed").is_none(),
         "{envelope}"
     );
     let message = envelope["data"]["message"].as_str().expect("message");
     assert!(message.contains("src/ext/<Name>"), "{message}");
+    assert!(message.contains("known only once"), "{message}");
     assert_eq!(project.calls(), "", "the platform is not started");
     assert_eq!(project.project_text(), PROJECT);
     assert!(!project.root.join("src/ext").exists());
@@ -434,4 +446,225 @@ fn a_refused_set_stops_the_walk_before_anything_is_declared() {
     assert!(message.contains("pull Old --force"), "{message}");
     assert_eq!(project.project_text(), PROJECT);
     assert!(!project.root.join("src/ext").exists(), "{envelope}");
+}
+
+/// Отказ, который случился до первой выгрузки: ни один набор не выгружен, проектный файл
+/// остался `project_text`. Возвращает текст отказа.
+fn assert_refused_before_any_dump(
+    project: &Project,
+    output: &Output,
+    envelope: &Value,
+    project_text: &str,
+) -> String {
+    assert!(!output.status.success(), "{envelope}");
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_eq!(pulled_sets(envelope), Vec::<String>::new(), "{envelope}");
+    let calls = project.calls();
+    assert!(!calls.contains("/DumpConfigToFiles"), "{calls}");
+    assert!(!calls.contains(" config export "), "{calls}");
+    assert_eq!(project.project_text(), project_text);
+    assert!(!project.root.join("src/ext").exists(), "{envelope}");
+    envelope["error"]["message"]
+        .as_str()
+        .expect("message")
+        .to_owned()
+}
+
+/// Переписывает проектный файл и фиксирует его: сторож каталога смотрит только на наборы.
+fn rewrite_project(project: &Project, text: &str) {
+    fs::write(project.project_file(), text).expect("project file");
+    commit_sources(&project.root);
+}
+
+/// Расширение-инструмент клиентского MCP раннер ставит в базу сам, и его имя занято
+/// `tools.client_mcp.extension`: набором оно не объявляется, иначе следующий запуск
+/// отказал бы на проверке конфигурации. Повторный `pull --all` проходит.
+#[test]
+fn the_client_mcp_tool_extension_is_not_declared_and_the_project_stays_valid() {
+    let project = Project::new(&["Old", "Client_Mcp", "Fresh"]);
+    fs::write(project.root.join("client-mcp.cfe"), "cfe").expect("tool artifact");
+    let text = format!(
+        "{PROJECT}  client_mcp:\n    extension:\n      name: client_mcp\n      artifact:\n        path: client-mcp.cfe\n"
+    );
+    rewrite_project(&project, &text);
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    assert_succeeded(&output, &envelope);
+    assert_eq!(
+        envelope["data"]["declared"],
+        json!([{"name": "Fresh", "type": "EXTENSION", "path": "src/ext/Fresh"}]),
+        "{envelope}"
+    );
+    assert!(!project.project_text().contains("Client_Mcp"));
+    assert!(!project.root.join("src/ext/Client_Mcp").exists());
+
+    commit_sources(&project.root);
+    let (output, envelope) = project.pull(&["--all"]);
+    assert_succeeded(&output, &envelope);
+    assert_eq!(envelope["data"]["declared"], json!([]), "{envelope}");
+}
+
+/// Объявление проверяется тем же валидатором, что проект при загрузке, до первой выгрузки:
+/// каталог `src/ext/Fresh` уже назван другим набором — записью, которая с ним совпадает
+/// лишь после канонизации, — и команда отказывает, ничего не выгрузив и не дописав.
+#[test]
+fn a_declaration_that_breaks_the_project_is_refused_before_any_dump() {
+    let project = Project::new(&["Old", "Fresh"]);
+    let text = PROJECT.replace(
+        "tools:\n",
+        "  - name: Legacy\n    type: EXTENSION\n    path: ./src/ext/../ext/Fresh\ntools:\n",
+    );
+    rewrite_project(&project, &text);
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    let message = assert_refused_before_any_dump(&project, &output, &envelope, &text);
+    assert!(message.contains("would declare"), "{message}");
+    assert!(message.contains("src/ext/Fresh"), "{message}");
+    assert_data_matches_one_of(&envelope["data"], "pull --all refusal", &["pull-all"]);
+}
+
+/// Проектный файл, куда запись не дописать, — отказ до первой выгрузки: выгруженный набор
+/// иначе остался бы без объявления. Отказ называет записи для ручного внесения.
+#[test]
+fn a_project_file_that_cannot_take_the_declaration_is_refused_before_any_dump() {
+    let project = Project::new(&["Old", "Fresh"]);
+    let text = "workPath: work\nformat: DESIGNER\nsource-set: [{name: main, type: CONFIGURATION, path: src/cf}, {name: Old, type: EXTENSION, path: exts/old}]\ntools:\n  platform:\n    path: platform\n";
+    rewrite_project(&project, text);
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    let message = assert_refused_before_any_dump(&project, &output, &envelope, text);
+    assert!(
+        message.contains("declare these sets there by hand"),
+        "{message}"
+    );
+    assert!(message.contains("- name: 'Fresh'"), "{message}");
+}
+
+/// Имя из списка базы, не являющееся идентификатором или совпадающее с именем устройства
+/// Windows, — неверный вывод, а не набор: у Конфигуратора и у `ibcmd` отказ до выгрузки.
+#[test]
+fn a_listed_name_that_is_not_an_identifier_is_refused_before_any_dump() {
+    let project = Project::new(&["Old", "CON"]);
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    let message = assert_refused_before_any_dump(&project, &output, &envelope, PROJECT);
+    assert!(message.contains("\"CON\""), "{message}");
+
+    let project = Project::new(&["Old", "Bad Name"]);
+    let text = PROJECT.replace(
+        "format: DESIGNER\n",
+        "format: DESIGNER\nproviders:\n  pull: ibcmd\n",
+    );
+    rewrite_project(&project, &text);
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    let message = assert_refused_before_any_dump(&project, &output, &envelope, &text);
+    assert!(message.contains("Bad Name"), "{message}");
+}
+
+/// Набор `my-ext`, исходники которого называют установленное расширение `MyExt`, второго
+/// набора не получает: пока раннер называет расширение по имени набора (#218), обход
+/// отказывает до выгрузки и просит переименовать набор.
+#[test]
+fn a_set_holding_an_extension_under_another_name_gets_no_second_set() {
+    let project = Project::new(&["Old", "MyExt"]);
+    let set_dir = project.root.join("exts/my");
+    fs::create_dir_all(&set_dir).expect("set dir");
+    fs::write(
+        set_dir.join("Configuration.xml"),
+        "<MetaDataObject><Configuration><Properties><Name>MyExt</Name><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose></Properties></Configuration></MetaDataObject>\n",
+    )
+    .expect("descriptor");
+    let text = PROJECT.replace(
+        "tools:\n",
+        "  - name: my-ext\n    type: EXTENSION\n    path: exts/my\ntools:\n",
+    );
+    rewrite_project(&project, &text);
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    let message = assert_refused_before_any_dump(&project, &output, &envelope, &text);
+    assert!(message.contains("rename the set to 'MyExt'"), "{message}");
+}
+
+/// `--all --force` — `pull <SET> --force` для каждого набора: работа в каталоге набора
+/// проекта заменяется и называется в его `losses`, а расширение без набора объявляется.
+#[test]
+fn pull_all_force_replaces_every_set() {
+    let project = Project::new(&["Old", "Fresh"]);
+    fs::write(project.root.join("exts/old/hand-written.xml"), "by hand\n").expect("work");
+
+    let (output, envelope) = project.pull(&["--all", "--force"]);
+
+    assert_succeeded(&output, &envelope);
+    assert_eq!(
+        pulled_sets(&envelope),
+        ["main", "Old", "Fresh"],
+        "{envelope}"
+    );
+    let sets = envelope["data"]["sets"].as_array().expect("sets");
+    assert!(
+        sets.iter().all(|set| set["mode"] == "FULL"),
+        "every set is replaced whole: {envelope}"
+    );
+    assert!(
+        sets[1]["losses"].to_string().contains("hand-written.xml"),
+        "{envelope}"
+    );
+    assert!(!project.root.join("exts/old/hand-written.xml").exists());
+    assert_eq!(
+        envelope["data"]["declared"],
+        json!([{"name": "Fresh", "type": "EXTENSION", "path": "src/ext/Fresh"}]),
+        "{envelope}"
+    );
+}
+
+/// Каталог нового набора уже есть — так выглядит проект после сбоя между выгрузкой набора и
+/// его объявлением, или после ручной работы. Незафиксированное в нём сторож не заменяет, а
+/// совет не шлёт к `pull Fresh --force`, которого нет: он называет, что унести, что
+/// объявить руками и что `pull --all --force` заменит каталоги и всех прочих наборов. Когда
+/// каталог зафиксирован, терять нечего: следующий прогон выгружает и объявляет набор.
+#[test]
+fn a_leftover_directory_of_a_new_set_is_not_replaced_and_the_advice_fits_it() {
+    let project = Project::new(&["Old", "Fresh"]);
+    let leftover = project.root.join("src/ext/Fresh");
+    fs::create_dir_all(&leftover).expect("leftover");
+    fs::write(leftover.join("Configuration.xml"), "<Configuration/>\n").expect("leftover file");
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_data_matches_one_of(&envelope["data"], "pull --all refusal", &["pull-all"]);
+    assert_eq!(
+        pulled_sets(&envelope),
+        ["main", "Old", "Fresh"],
+        "{envelope}"
+    );
+    assert_eq!(envelope["data"]["declared"], json!([]), "{envelope}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("refusing to"), "{message}");
+    assert!(!message.contains("pull Fresh --force"), "{message}");
+    assert!(
+        message.contains("not declared in the project file yet"),
+        "{message}"
+    );
+    assert!(message.contains("path 'src/ext/Fresh'"), "{message}");
+    assert!(message.contains("pull --all --force"), "{message}");
+    assert!(message.contains("every other set"), "{message}");
+    assert_eq!(project.project_text(), PROJECT);
+    assert!(leftover.join("Configuration.xml").is_file());
+
+    commit_sources(&project.root);
+    let (output, envelope) = project.pull(&["--all"]);
+    assert_succeeded(&output, &envelope);
+    assert_eq!(
+        envelope["data"]["declared"],
+        json!([{"name": "Fresh", "type": "EXTENSION", "path": "src/ext/Fresh"}]),
+        "{envelope}"
+    );
 }

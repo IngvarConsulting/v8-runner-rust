@@ -182,6 +182,9 @@ pub enum ForceWayOut {
     /// `pull <SET> --force` with the run's global keys reaches the same target: a full dump
     /// that replaces the directory of the set and discards the work.
     PullForce,
+    /// The set is being declared by `pull --all` and is not in the project file yet, so no
+    /// `pull <SET> --force` reaches it; `pull --all --force` does, but replaces every set.
+    Undeclared,
 }
 
 /// Transport-neutral convert scope.

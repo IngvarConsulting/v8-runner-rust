@@ -1248,6 +1248,10 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
                 ForceWayOut::PullForce => WaysOut::PullForce {
                     source_set: source_set.name.clone(),
                 },
+                ForceWayOut::Undeclared => WaysOut::Undeclared {
+                    source_set: source_set.name.clone(),
+                    path: source_set.path.display().to_string(),
+                },
             })
         },
     };
