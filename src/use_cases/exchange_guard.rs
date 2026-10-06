@@ -32,6 +32,7 @@ use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::next_step::NextStep;
 use crate::domain::source_set::SourceSetContext;
+use crate::domain::status::MemoryState;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
     GenerationAfter, GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
@@ -281,12 +282,31 @@ pub(crate) fn require_memory(
 /// или нечитаемая отменяет и свою запись поколения: каталог от этой базы она не выводит
 /// (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
 fn remembers(set: &SourceSetContext, work_path: &Path) -> bool {
-    match analyzer::snapshot_memory(set, work_path) {
-        SnapshotMemory::Own => true,
-        SnapshotMemory::Foreign | SnapshotMemory::Unreadable => false,
-        SnapshotMemory::Nothing => GenerationLedger::of(set, work_path)
-            .is_some_and(|ledger| matches!(ledger.read(), Recorded::Ours(_))),
+    memory_of(set, work_path) == MemoryState::Remembered
+}
+
+/// Что копия помнит о базе для набора — единственное определение памяти: по нему отказывает
+/// `push` и отвечает `status`. Своя хеш-память решает первой; без неё — запись журнала
+/// поколений. Чужая или нечитаемая хеш-память — не память, даже рядом со своей записью.
+pub(crate) fn memory_of(set: &SourceSetContext, work_path: &Path) -> MemoryState {
+    if set.storage_identity().is_none() {
+        return MemoryState::Unbound;
     }
+    match analyzer::snapshot_memory(set, work_path) {
+        SnapshotMemory::Own => MemoryState::Remembered,
+        SnapshotMemory::Foreign => MemoryState::Foreign,
+        SnapshotMemory::Unreadable => MemoryState::Unreadable,
+        SnapshotMemory::Nothing => match GenerationLedger::of(set, work_path).map(|l| l.read()) {
+            Some(Recorded::Ours(_)) => MemoryState::Remembered,
+            Some(Recorded::Foreign { .. }) => MemoryState::Foreign,
+            Some(Recorded::Nothing) | None => MemoryState::Missing,
+        },
+    }
+}
+
+/// Признак нового владельца для ответа `status`: когда копия взяла базу.
+pub(crate) fn new_owner_mark(config: &AppConfig) -> Option<String> {
+    new_owner_since(config)
 }
 
 /// Лежит ли под именем базы память набора, которая не его: записанная для другой пары или

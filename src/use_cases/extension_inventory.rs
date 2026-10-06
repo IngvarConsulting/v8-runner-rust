@@ -125,6 +125,59 @@ fn run_read(
     }
 }
 
+/// Имена и активность расширений базы — для `status --deep`: тот же выбор исполнителя и то
+/// же чтение, что у `extensions list`, но без снимков ради префиксов, которые статусу не
+/// нужны. Квитанция — `None`, если выбор не начинался.
+pub(crate) fn read_installed(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> (
+    Option<crate::domain::capability::ProviderReceipt>,
+    Result<Vec<InstalledExtension>, AppError>,
+) {
+    let mut utilities = PlatformUtilities::from_config(config);
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Extensions,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => return (Some(receipt), Err(error)),
+    };
+    let receipt = selected.receipt;
+    let read = Executor::of(selected.provider, selected.location, config).and_then(|executor| {
+        match executor {
+            Executor::Agent { v8 } => {
+                let mut agent = ExtensionAgent::open(context, config, v8.as_deref())?;
+                let inventory = agent.inventory(None);
+                agent.close();
+                inventory
+            }
+            Executor::Ibcmd { binary, connection } => {
+                let dsl = IbcmdDsl::new(
+                    binary,
+                    connection,
+                    utilities.runner_for(UtilityType::Ibcmd),
+                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+                );
+                let subject = inventory_subject(&ExtensionInventoryScope::All);
+                let listed = dsl
+                    .infobase_extension_list()
+                    .map_err(|error| snapshot_dispatch_error(error, "read", &subject))?;
+                validate_snapshot_step(&listed, "read", &subject)?;
+                read_inventory(
+                    &listed,
+                    &ExtensionInventoryRequest {
+                        scope: ExtensionInventoryScope::All,
+                        dry_run: false,
+                    },
+                )
+            }
+        }
+    });
+    (Some(receipt), read)
+}
+
 /// Состав расширений у исполнителя. Ошибка — какой бы она ни была — возвращается как есть:
 /// какой формой на неё ответить, решает отметка работы у вызывающего.
 fn read_extensions(

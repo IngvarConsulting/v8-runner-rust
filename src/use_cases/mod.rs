@@ -67,6 +67,8 @@ pub mod run_tests;
 pub(crate) mod source_inventory;
 /// Shared staged publication mechanics for full-replacement use-case outputs.
 mod staged_publication;
+/// `status`: состояние пары «каталог ↔ база» по памяти и, с `--deep`, по ответу платформы.
+pub mod status;
 /// Shared internal preparation for tool extensions.
 pub(crate) mod tool_extension;
 /// Supported external tool download use case.

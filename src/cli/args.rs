@@ -104,8 +104,24 @@ pub enum Command {
     Launch(LaunchArgs),
     /// Publish the infobase on a web server with webinst, or delete the publication
     Publish(PublishArgs),
+    /// Show how the sources and the infobase relate: from the runner's memory, or with
+    /// --deep by asking the platform
+    Status(StatusArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct StatusArgs {
+    /// Ask the platform: the configuration generation of every source-set, the extensions
+    /// installed in the infobase, and the working copies that hold a file infobase
+    #[arg(long, conflicts_with = "all")]
+    pub deep: bool,
+
+    /// Every infobase declared in v8project.local.yaml, each with its state, from memory
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Args, Debug)]
