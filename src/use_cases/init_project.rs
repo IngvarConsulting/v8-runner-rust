@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::platform::designer::DesignerDsl;
@@ -768,24 +768,7 @@ fn edt_workspace_marker_path(path: &Path) -> PathBuf {
 }
 
 fn ordered_source_sets(config: &AppConfig) -> Vec<&SourceSetConfig> {
-    let mut configuration = Vec::new();
-    let mut extensions = Vec::new();
-    let mut external_processors = Vec::new();
-    let mut external_reports = Vec::new();
-
-    for source_set in &config.source_sets {
-        match source_set.purpose {
-            SourceSetPurpose::Configuration => configuration.push(source_set),
-            SourceSetPurpose::Extension => extensions.push(source_set),
-            SourceSetPurpose::ExternalDataProcessors => external_processors.push(source_set),
-            SourceSetPurpose::ExternalReports => external_reports.push(source_set),
-        }
-    }
-
-    configuration.extend(extensions);
-    configuration.extend(external_processors);
-    configuration.extend(external_reports);
-    configuration
+    crate::use_cases::source_inventory::ordered_by_purpose(&config.source_sets)
 }
 
 #[derive(Debug)]

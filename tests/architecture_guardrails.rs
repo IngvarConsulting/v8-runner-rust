@@ -174,7 +174,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 24,
+        report.accepted, 25,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -5534,4 +5534,63 @@ fn f(set: &str) -> String { format!("run `pull {set} --force`") }"#,
     ] {
         assert!(!caught(allowed), "the guard must allow: {allowed}");
     }
+}
+
+/// Корзины наборов по назначению — то, из чего собирают свой порядок обхода: арм `match`
+/// по `SourceSetPurpose`, кладущий набор в отдельный список. Так был написан второй порядок
+/// в `init_project`, рядом с `SourceSetInventory::ordered_source_sets`.
+static PURPOSE_BUCKET: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"SourceSetPurpose::[A-Za-z]+=>[A-Za-z_][A-Za-z0-9_]*\.push\(")
+        .expect("purpose bucket pattern")
+});
+
+fn sorts_source_sets_into_purpose_buckets(production: &str) -> bool {
+    PURPOSE_BUCKET.is_match(production)
+}
+
+/// Порядок наборов по назначению — основная конфигурация, расширения, внешние файлы —
+/// решает `source_inventory::ordered_by_purpose`, и обход пакетов конфигурации
+/// (`SourceSetInventory::configuration_packages`) идёт им. Корень прежней проблемы — второй
+/// порядок, собранный корзинами в другом сценарии; страж ловит такие корзины под любым
+/// именем функции.
+#[test]
+fn the_order_of_source_sets_is_decided_in_one_place() {
+    let owner = repo_path("src/use_cases/source_inventory.rs");
+    let owner_tokens = production_tokens(&owner);
+    assert!(
+        owner_tokens.contains("fnconfiguration_packages(")
+            && owner_tokens.contains("ordered_by_purpose(&self.config.source_sets)"),
+        "the walk of configuration packages must go through ordered_by_purpose"
+    );
+    let all = production_tokens(&repo_path("src/use_cases/dump_config/all.rs"));
+    assert!(
+        all.contains(".configuration_packages()") && !all.contains("ordered_source_sets("),
+        "pull --all must walk the packages through SourceSetInventory::configuration_packages"
+    );
+
+    let offenders = collect_rust_files(&repo_path("src"))
+        .into_iter()
+        .filter(|file| *file != owner)
+        .filter(|file| sorts_source_sets_into_purpose_buckets(&production_tokens(file)))
+        .map(|file| file.display().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "these modules order source-sets by purpose on their own instead of calling \
+         source_inventory::ordered_by_purpose:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Страж видит корзины, как бы ни назывались функция и списки.
+#[test]
+fn the_purpose_bucket_finder_sees_a_second_order_under_another_name() {
+    let second_order = production_tokens_of(
+        "fn walk(config: &AppConfig) -> Vec<&SourceSetConfig> {\n    let (mut first, mut rest) = (Vec::new(), Vec::new());\n    for set in &config.source_sets {\n        match set.purpose {\n            SourceSetPurpose::Configuration => first.push(set),\n            _ => rest.push(set),\n        }\n    }\n    first.extend(rest);\n    first\n}\n",
+    );
+    assert!(sorts_source_sets_into_purpose_buckets(&second_order));
+    let a_plain_match = production_tokens_of(
+        "fn kind(purpose: SourceSetPurpose) -> u8 {\n    match purpose {\n        SourceSetPurpose::Configuration => 0,\n        _ => 1,\n    }\n}\n",
+    );
+    assert!(!sorts_source_sets_into_purpose_buckets(&a_plain_match));
 }

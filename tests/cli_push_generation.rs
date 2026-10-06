@@ -375,6 +375,25 @@ fn a_pull_records_the_generation_it_saw_before_and_after() {
     succeeded(&project.run(&["push"]));
 }
 
+/// `pull --all` выгружает каждый набор как `pull <SET>` и так же записывает поколение, после
+/// чего обычная отправка не отказывает.
+#[test]
+fn a_pull_all_records_the_generation_of_each_set() {
+    let project = Project::new("File=ib");
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    project.base_generation(SECOND);
+
+    succeeded(&project.run(&["pull", "--all", "--force"]));
+
+    let record = &project.ledger()["main"];
+    assert_eq!(record["token"], SECOND, "{record}");
+    assert_eq!(record["after"], "dump", "{record}");
+    project.edit();
+    succeeded(&project.run(&["push"]));
+}
+
 /// Потерянный файл версий восстанавливается одной выгрузкой `-configDumpInfoOnly` сразу после
 /// полной отправки, когда поколение до и после неё одно и то же.
 #[test]

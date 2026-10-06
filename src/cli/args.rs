@@ -519,7 +519,7 @@ pub enum TestScope {
 #[derive(Args, Debug)]
 #[command(
     next_help_heading = "Command options",
-    after_help = "Without keys: incremental dump - changed objects are written over the source tree; in a Designer-format project nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded, and the answer names them.\nEDT-format project: every dump replaces the whole project directory, with or without keys.\nWithout --force, in any format, uncommitted work there makes the dump refuse before the platform starts, and so does a source directory outside git that holds files: commit or stash it and repeat, or run the full replacement the refusal names: `pull <SET> --force` for the same set with the same global options and without --object (it discards that work). --dry-run names what would be lost."
+    after_help = "Without keys: incremental dump - changed objects are written over the source tree; in a Designer-format project nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded, and the answer names them.\nEDT-format project: every dump replaces the whole project directory, with or without keys.\nWithout --force, in any format, uncommitted work there makes the dump refuse before the platform starts, and so does a source directory outside git that holds files: commit or stash it and repeat, or run the full replacement the refusal names: `pull <SET> --force` for the same set with the same global options and without --object (it discards that work). --dry-run names what would be lost.\nWith --all: every configuration and extension set in turn, each as `pull <SET>` (with --force, each one replaced); the infobase is asked which extensions it has, and each one without a set is declared in v8project.yaml as src/ext/<Name> once it has been pulled there (relative to basePath); the project with the new sets is validated before the first dump. --dry-run reads nothing from the infobase: it previews the configuration set, names the extension sets that would be pulled if installed and the src/ext/<Name> template."
 )]
 pub struct DumpArgs {
     /// Previous mode key; hidden from help for one release cycle. `incremental` and
@@ -533,6 +533,11 @@ pub struct DumpArgs {
     /// Extension name
     #[arg(long)]
     pub extension: Option<String>,
+
+    /// Every configuration and extension set, and a new set src/ext/<Name> declared in
+    /// v8project.yaml for each extension of the infobase that has none
+    #[arg(long, conflicts_with_all = ["set", "previous_key", "extension", "objects"])]
+    pub all: bool,
 
     /// Partial dump of these objects only; cannot be combined with --force. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
     #[arg(long = "object")]

@@ -163,6 +163,7 @@ carries_receipt!(
     crate::domain::init::InitResult,
     crate::domain::build::BuildResult,
     crate::domain::dump::DumpResult,
+    crate::domain::dump::PullAllResult,
     crate::domain::extensions::ExtensionsResult,
     crate::domain::extensions::ExtensionInventoryResult,
     crate::domain::syntax::SyntaxCheckResult,

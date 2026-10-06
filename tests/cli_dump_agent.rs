@@ -12,13 +12,14 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
 use support::fake_agent::{
     fingerprint_of, process_is_alive, random_host_key, read_or_empty,
     start_fake_agent_with_host_key, write_fake_designer, write_host_key_file, FakeAgent,
-    AGENT_PASSWORD,
+    FakeExtension, AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command, wait_until};
 
@@ -31,6 +32,8 @@ struct Harness {
     base_dir_file: PathBuf,
     target: PathBuf,
     port: u16,
+    /// Состав расширений базы двойника; `None`, когда двойник не запущен.
+    extensions: Option<Arc<Mutex<Vec<FakeExtension>>>>,
 }
 
 /// Проект с версионной раскладкой платформы: строгий поиск не уходит за её пределы.
@@ -85,18 +88,22 @@ fn harness_with(
         .expect("attached map");
         base
     });
-    let port = match agent {
-        Some(accept_password) => start_fake_agent_with_host_key(
-            FakeAgent::new(
+    let (port, extensions) = match agent {
+        Some(accept_password) => {
+            let agent = FakeAgent::new(
                 accept_password,
                 commands_log.clone(),
                 attached_base.clone(),
                 base_dir_file.clone(),
                 designer_pid_file.clone(),
-            ),
-            host_key,
-        ),
-        None => support::free_tcp_port(),
+            );
+            let extensions = Arc::clone(&agent.extensions);
+            (
+                start_fake_agent_with_host_key(agent, host_key),
+                Some(extensions),
+            )
+        }
+        None => (support::free_tcp_port(), None),
     };
     if with_designer {
         write_fake_designer(
@@ -135,6 +142,7 @@ fn harness_with(
         target,
         dir,
         port,
+        extensions,
     }
 }
 
@@ -710,5 +718,70 @@ fn attach_does_not_mix_with_launch_keys() {
             .as_str()
             .is_some_and(|message| message.contains("tools.designer_agent.attach")),
         "{payload}"
+    );
+}
+
+/// `pull --all` через агента: состав базы читается `config extensions properties get
+/// --all-extensions` (у агента нет команды списка, замер #187), и расширение без набора
+/// выгружается в `src/ext/<Name>` и объявляется.
+#[test]
+fn pull_all_through_the_agent_reads_the_installed_extensions() {
+    let harness = harness(true, Some(true), false);
+    commit_project(&harness);
+
+    let (code, payload) = run_dump(&harness, &["--all"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["declared"],
+        serde_json::json!([{"name": "Зонд", "type": "EXTENSION", "path": "src/ext/Зонд"}]),
+        "{payload}"
+    );
+    let commands = commands(&harness);
+    assert!(
+        commands.contains(&"config extensions properties get --all-extensions".to_owned()),
+        "{commands:?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.starts_with("config dump-config-to-files")
+                && command.contains("--extension=Зонд")),
+        "{commands:?}"
+    );
+    let project = fs::read_to_string(&harness.config_path).expect("project file");
+    assert!(project.contains("name: 'Зонд'"), "{project}");
+}
+
+/// Имя из ответа агента, не являющееся идентификатором, — неверный вывод: отказ до первой
+/// выгрузки, проектный файл не тронут.
+#[test]
+fn pull_all_through_the_agent_refuses_a_name_that_is_not_an_identifier() {
+    let harness = harness(true, Some(true), false);
+    commit_project(&harness);
+    harness
+        .extensions
+        .as_ref()
+        .expect("agent")
+        .lock()
+        .expect("extensions")[0]
+        .name = "Bad Name".to_owned();
+    let before = fs::read_to_string(&harness.config_path).expect("project file");
+
+    let (code, payload) = run_dump(&harness, &["--all"]);
+
+    assert_ne!(code, 0, "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("Bad Name"), "{message}");
+    assert!(
+        !commands(&harness)
+            .iter()
+            .any(|command| command.starts_with("config dump-config-to-files")),
+        "{:?}",
+        commands(&harness)
+    );
+    assert_eq!(
+        fs::read_to_string(&harness.config_path).expect("project file"),
+        before
     );
 }

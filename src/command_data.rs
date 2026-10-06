@@ -85,6 +85,7 @@ command_data_forms! {
     "upload", "upload" => crate::cli::execute::LoadJsonData<'static>;
     "test", "test" => crate::command_envelope::TestEnvelopeData;
     "pull", "pull" => crate::domain::dump::DumpResult;
+    "pull", "pull-all" => crate::domain::dump::PullAllResult;
     "download", "download"
         => crate::domain::infobase_export::ExportConfigurationPackageResult;
     "infobase.dump", "infobase-dump"

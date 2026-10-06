@@ -1157,7 +1157,9 @@ fn extension_source_set_name(
     Ok(raw_name)
 }
 
-fn read_configuration_logical_name(path: &Path) -> Result<Option<String>, AppError> {
+/// `Name` описания конфигурации по пути `path`: `None`, когда описание не конфигурации или
+/// имени в нём нет.
+pub(crate) fn read_configuration_logical_name(path: &Path) -> Result<Option<String>, AppError> {
     let content = std::fs::read_to_string(path).map_err(|error| {
         AppError::Runtime(format!(
             "failed to read configuration marker '{}': {error}",
@@ -1279,9 +1281,7 @@ fn render_config(
     yaml.push_str(&format!("format: {}\n", format.as_yaml()));
     yaml.push_str("source-set:\n");
     for source_set in source_sets {
-        yaml.push_str(&format!("  - name: '{}'\n", escape_yaml(&source_set.name)));
-        yaml.push_str(&format!("    type: {}\n", source_set.source_type));
-        yaml.push_str(&format!("    path: '{}'\n", escape_yaml(&source_set.path)));
+        yaml.push_str(&render_source_set_entry("  ", source_set, "\n"));
     }
     if let Some(platform_version) = platform_version {
         yaml.push_str("tools:\n");
@@ -1300,6 +1300,158 @@ fn render_config(
         yaml.push_str("#     wait_ready_timeout_ms: 300000\n");
     }
     yaml
+}
+
+/// Запись набора в `source-set:` с отступом `indent` перед дефисом.
+fn render_source_set_entry(
+    indent: &str,
+    source_set: &ConfigInitSourceSet,
+    line_end: &str,
+) -> String {
+    format!(
+        "{indent}- name: '{}'{line_end}{indent}  type: {}{line_end}{indent}  path: '{}'{line_end}",
+        escape_yaml(&source_set.name),
+        source_set.source_type,
+        escape_yaml(&source_set.path)
+    )
+}
+
+/// Дописывает наборы в конец `source-set:` проектного файла `path` и заменяет файл целиком.
+///
+/// Писатель проектного файла один — этот модуль: `init` пишет файл заново, а объявление
+/// набора дописывает запись текстом, как местный слой дописывает `origin`, так что
+/// комментарии, порядок и вид остального текста остаются.
+pub(crate) fn declare_source_sets(
+    path: &Path,
+    source_sets: &[ConfigInitSourceSet],
+) -> Result<(), AppError> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to read project file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let declared = with_declared_source_sets(&text, path, source_sets)?;
+    crate::support::fs::write_file_atomically(path, |file| {
+        std::io::Write::write_all(file, declared.as_bytes())
+    })
+    .map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to write project file '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+/// Текст проектного файла с наборами, дописанными в конец блочной последовательности
+/// `source-set:` с отступом её записей.
+///
+/// Дописанный текст разбирается заново и сверяется с документом, в котором к наборам
+/// прибавлены новые: не совпало — отказ, а не переписанный файл. Последовательность в
+/// потоковой записи, якоря и прочее, куда строку не вставить, получают тот же отказ с
+/// записями, которые надо внести руками.
+pub(crate) fn with_declared_source_sets(
+    text: &str,
+    path: &Path,
+    source_sets: &[ConfigInitSourceSet],
+) -> Result<String, AppError> {
+    let refusal = |reason: &str| {
+        let entries = source_sets
+            .iter()
+            .map(|source_set| render_source_set_entry("  ", source_set, "\n"))
+            .collect::<String>();
+        AppError::Validation(format!(
+            "cannot append to source-set of '{}' without rewriting it: {reason}; declare these sets there by hand:\n{entries}",
+            path.display()
+        ))
+    };
+    if source_sets.is_empty() {
+        return Ok(text.to_owned());
+    }
+    let mut expected: serde_yaml::Value = serde_yaml::from_str(text).map_err(|error| {
+        AppError::Validation(format!(
+            "project file '{}' is not valid YAML: {error}",
+            path.display()
+        ))
+    })?;
+    let Some(sequence) = expected
+        .get_mut("source-set")
+        .and_then(serde_yaml::Value::as_sequence_mut)
+    else {
+        return Err(refusal("it has no source-set sequence"));
+    };
+    for source_set in source_sets {
+        let mut entry = serde_yaml::Mapping::new();
+        for (key, value) in [
+            ("name", &source_set.name),
+            ("type", &source_set.source_type),
+            ("path", &source_set.path),
+        ] {
+            entry.insert(
+                serde_yaml::Value::String(key.to_owned()),
+                serde_yaml::Value::String(value.clone()),
+            );
+        }
+        sequence.push(serde_yaml::Value::Mapping(entry));
+    }
+
+    let lines = text.split_inclusive('\n').collect::<Vec<_>>();
+    let line_end = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let Some(key) = lines.iter().position(|line| {
+        line.strip_prefix("source-set:").is_some_and(|rest| {
+            let rest = rest.trim();
+            rest.is_empty() || rest.starts_with('#')
+        })
+    }) else {
+        return Err(refusal(
+            "source-set is not a block sequence at the top level",
+        ));
+    };
+    // Блок кончается на первой строке верхнего уровня, которая не запись и не комментарий;
+    // дописывается после его последней содержательной строки, перед хвостовыми
+    // комментариями, которые относятся уже к следующему ключу.
+    let mut indent = None;
+    let mut last_content = None;
+    for (index, line) in lines.iter().enumerate().skip(key + 1) {
+        let trimmed = line.trim();
+        let top_level = !line.starts_with([' ', '\t', '-', '#']) && !trimmed.is_empty();
+        if top_level {
+            break;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let entry = trimmed
+            .strip_prefix('-')
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']));
+        if indent.is_none() && entry {
+            indent = Some(line.len() - line.trim_start_matches(' ').len());
+        }
+        last_content = Some(index);
+    }
+    let (Some(indent), Some(last_content)) = (indent, last_content) else {
+        return Err(refusal("source-set has no block entries"));
+    };
+
+    let mut declared = lines[..=last_content].concat();
+    if !declared.ends_with('\n') {
+        declared.push_str(line_end);
+    }
+    for source_set in source_sets {
+        declared.push_str(&render_source_set_entry(
+            &" ".repeat(indent),
+            source_set,
+            line_end,
+        ));
+    }
+    declared.push_str(&lines[last_content + 1..].concat());
+
+    match serde_yaml::from_str::<serde_yaml::Value>(&declared) {
+        Ok(document) if document == expected => Ok(declared),
+        _ => Err(refusal(
+            "the appended text does not read back as those sets",
+        )),
+    }
 }
 
 fn validate_discovered_source_sets(
@@ -2904,5 +3056,64 @@ mod tests {
             config.infobase.connection,
             format!("File={}", canonical(dir.path()).join("build/ib").display())
         );
+    }
+
+    fn extension(name: &str) -> crate::domain::config_init::ConfigInitSourceSet {
+        crate::domain::config_init::ConfigInitSourceSet {
+            name: name.to_owned(),
+            source_type: "EXTENSION".to_owned(),
+            path: format!("src/ext/{name}"),
+        }
+    }
+
+    fn declared(text: &str, names: &[&str]) -> Result<String, String> {
+        let sets = names.iter().map(|name| extension(name)).collect::<Vec<_>>();
+        super::with_declared_source_sets(text, Path::new("v8project.yaml"), &sets)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Набор дописывается в конец `source-set:` с отступом его записей: комментарии,
+    /// порядок и остальной текст файла остаются как были.
+    #[test]
+    fn a_declared_set_is_appended_and_the_rest_of_the_text_is_kept() {
+        let text = "# заголовок\nworkPath: build\nsource-set:\n  # основная\n  - name: main   # имя\n    type: CONFIGURATION\n    path: src/cf\n\n# про инструменты\ntools:\n  platform:\n    version: '8.3.27'\n";
+
+        let result = declared(text, &["Новое", "It's"]).expect("appended");
+
+        assert_eq!(
+            result,
+            "# заголовок\nworkPath: build\nsource-set:\n  # основная\n  - name: main   # имя\n    type: CONFIGURATION\n    path: src/cf\n  - name: 'Новое'\n    type: EXTENSION\n    path: 'src/ext/Новое'\n  - name: 'It''s'\n    type: EXTENSION\n    path: 'src/ext/It''s'\n\n# про инструменты\ntools:\n  platform:\n    version: '8.3.27'\n"
+        );
+    }
+
+    /// Последовательность без отступа, последний ключ без перевода строки и CRLF — та же
+    /// запись тем же видом.
+    #[test]
+    fn a_declared_set_follows_the_layout_of_the_sequence() {
+        assert_eq!(
+            declared("source-set:\n- name: main\n  type: CONFIGURATION\n  path: src/cf", &["E"])
+                .expect("appended"),
+            "source-set:\n- name: main\n  type: CONFIGURATION\n  path: src/cf\n- name: 'E'\n  type: EXTENSION\n  path: 'src/ext/E'\n"
+        );
+        assert_eq!(
+            declared("source-set:\r\n  - {name: main, type: CONFIGURATION, path: src/cf}\r\nformat: DESIGNER\r\n", &["E"])
+                .expect("appended"),
+            "source-set:\r\n  - {name: main, type: CONFIGURATION, path: src/cf}\r\n  - name: 'E'\r\n    type: EXTENSION\r\n    path: 'src/ext/E'\r\nformat: DESIGNER\r\n"
+        );
+    }
+
+    /// Куда строку не вставить, файл не переписывается: отказ называет записи для ручного
+    /// внесения.
+    #[test]
+    fn a_sequence_without_a_block_layout_is_refused_not_rewritten() {
+        let flow = declared(
+            "source-set: [{name: main, type: CONFIGURATION, path: src/cf}]\n",
+            &["E"],
+        )
+        .expect_err("flow sequence");
+        assert!(flow.contains("declare these sets there by hand"), "{flow}");
+        assert!(flow.contains("- name: 'E'"), "{flow}");
+        let absent = declared("workPath: build\n", &["E"]).expect_err("no sets");
+        assert!(absent.contains("no source-set sequence"), "{absent}");
     }
 }

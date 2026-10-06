@@ -197,6 +197,51 @@ fn set_descriptor_field(
     Ok(())
 }
 
+/// Имя расширения — идентификатор 1С: буква или подчёркивание, затем буквы, цифры и
+/// подчёркивания. Такое имя годится в аргумент платформы.
+pub fn is_extension_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
+}
+
+/// Имя устройства Windows (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) без
+/// учёта регистра. Идентификатором 1С оно быть может, а каталогом в Windows — нет.
+pub fn is_windows_device_name(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => ["COM", "LPT"].iter().any(|prefix| {
+            upper
+                .strip_prefix(prefix)
+                .is_some_and(|digit| matches!(digit.as_bytes(), [b'1'..=b'9']))
+        }),
+    }
+}
+
+/// Разбирает `/Out` вызова `/DumpDBCfgList -AllExtensions`: одно имя на строку, BOM снят
+/// при чтении журнала, пустой вывод — расширений нет (замер #187). Строка, которая не
+/// является идентификатором, — неверный вывод, а не имя: текст сообщения платформы именем
+/// расширения не становится.
+pub fn parse_extension_name_list(output: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for line in output.lines() {
+        let name = line.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !is_extension_identifier(name) {
+            return Err(format!(
+                "extension list line is not an extension name: {name:?}"
+            ));
+        }
+        names.push(name.to_owned());
+    }
+    Ok(names)
+}
+
 /// Parses the inventory text into one record per extension.
 ///
 /// A record missing a required field is a refusal, not a record with a guessed value:
@@ -282,7 +327,45 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{parse_extension_inventory, read_applied_extension_descriptor};
+    use super::{
+        is_extension_identifier, is_windows_device_name, parse_extension_inventory,
+        parse_extension_name_list, read_applied_extension_descriptor,
+    };
+
+    /// Имя устройства Windows — корректный идентификатор 1С, но каталогом в Windows не
+    /// станет; признак видит его в любом регистре, а похожие имена — обычные.
+    #[test]
+    fn a_windows_device_name_is_an_identifier_but_not_a_directory() {
+        for reserved in ["CON", "nul", "Prn", "AUX", "COM1", "com9", "LPT1", "lpt9"] {
+            assert!(is_extension_identifier(reserved), "{reserved}");
+            assert!(is_windows_device_name(reserved), "{reserved}");
+        }
+        for ordinary in [
+            "CONSOLE",
+            "COM",
+            "COM10",
+            "LPT0",
+            "NUL_",
+            "Расширение",
+            "_x1",
+        ] {
+            assert!(!is_windows_device_name(ordinary), "{ordinary}");
+        }
+    }
+
+    /// Список Конфигуратора — имена по строке; пустой вывод — пустой список, а строка,
+    /// не являющаяся идентификатором, — отказ, а не имя.
+    #[test]
+    fn the_designer_name_list_is_read_line_by_line_and_fail_closed() {
+        assert_eq!(
+            parse_extension_name_list("Расширение1\r\nРасширение2\r\n\r\n"),
+            Ok(vec!["Расширение1".to_owned(), "Расширение2".to_owned()])
+        );
+        assert_eq!(parse_extension_name_list(""), Ok(Vec::new()));
+        assert_eq!(parse_extension_name_list("\n  \n"), Ok(Vec::new()));
+        assert!(parse_extension_name_list("Ext\nОшибка в параметрах.\n").is_err());
+        assert!(parse_extension_name_list("1Ext\n").is_err());
+    }
 
     fn parse_descriptor(xml: &str) -> Result<super::AppliedExtensionDescriptor, String> {
         let dir = tempfile::tempdir().expect("tempdir");

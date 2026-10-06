@@ -15,7 +15,7 @@ use crate::domain::extensions::{
     RequestedInventory,
 };
 use crate::platform::extension_inventory::{
-    parse_extension_inventory, read_applied_extension_descriptor,
+    is_extension_identifier, parse_extension_inventory, read_applied_extension_descriptor,
 };
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
 use crate::platform::locator::UtilityType;
@@ -59,7 +59,7 @@ fn run_read(
     // Имя проверяется до подключения и до запуска утилиты: иначе пустое имя доходило
     // до платформы и возвращалось жалобой на перечень, в котором его нет.
     if let ExtensionInventoryScope::Named { name } = &request.scope {
-        if !valid_extension_name(name) {
+        if !is_extension_identifier(name) {
             return Err(UseCaseFailure::without_payload(AppError::Validation(
                 "--name must be a non-empty 1C identifier".to_owned(),
             )));
@@ -355,14 +355,6 @@ fn validate_change(verb: &str, result: &PlatformCommandResult) -> Result<(), App
 ///
 /// Имя расширения — идентификатор 1С: буква или подчёркивание в начале, дальше буквы,
 /// цифры и подчёркивания. Пустая строка и пробелы именем не являются.
-fn valid_extension_name(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|first| first == '_' || first.is_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
-}
-
 /// The platform answers `info --name` with the same record shape as `list`, so without
 /// this check a renamed or substituted record would be reported as the requested one.
 fn read_inventory(

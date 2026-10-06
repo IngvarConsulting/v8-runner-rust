@@ -59,3 +59,51 @@ pub enum DumpMode {
     Incremental,
     Partial,
 }
+
+/// Ответ `pull --all`: наборы по составу базы.
+///
+/// Каждая выгрузка отчитывается формой `pull <SET>` в порядке обхода; объявленные этой
+/// командой наборы названы отдельно, теми же полями, какими их записал `init`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PullAllResult {
+    /// Квитанция о выборе исполнителя, который читал состав базы и выгружал наборы;
+    /// `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+    pub ok: bool,
+    /// Получил ли исполнитель работу этой команды — то же, что у `pull <SET>`.
+    pub provider_dispatched: bool,
+    /// Наборы, которые команда объявила в `v8project.yaml` для расширений базы без набора,
+    /// в порядке объявления. `null` — состав базы не читали: у превью и у отказа до чтения.
+    #[schemars(required, extend("type" = ["array", "null"]))]
+    pub declared: Option<Vec<crate::domain::config_init::ConfigInitSourceSet>>,
+    /// Наборы расширений проекта, которых в базе нет: их не выгружали. Поля нет, когда
+    /// таких нет или состав не читали.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_installed: Vec<String>,
+    /// Расширения базы без набора, которым набор не объявлен, с причиной: объявление
+    /// невозможно, а прочие наборы выгружаются. Поля нет, когда таких нет.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_declared: Vec<NotDeclaredExtension>,
+    /// Только у превью: наборы расширений проекта, которые превью не выгружало, потому что
+    /// состава базы не знает. Настоящий прогон выгрузит те из них, чьё расширение в базе
+    /// есть, а прочие назовёт в `not_installed`. Поля нет, когда таких наборов нет.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub if_installed: Vec<String>,
+    /// Выгрузка каждого набора формой `pull <SET>` в порядке обхода: сперва наборы проекта,
+    /// затем объявленные. После первого отказа обход останавливается. У превью — только
+    /// основная конфигурация: её прогон выгрузит при любом составе базы.
+    pub sets: Vec<DumpResult>,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Расширение базы, которому `pull --all` не объявил набор, и почему.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NotDeclaredExtension {
+    /// Имя расширения в базе.
+    pub name: String,
+    /// Почему набор не объявлен и что сделать вместо этого.
+    pub reason: String,
+}

@@ -385,6 +385,34 @@ pub fn validate_planned(config: &AppConfig) -> Result<(), ConfigValidationError>
     validate_project_checks(config)
 }
 
+/// Проект, каким он станет, когда команда допишет в него наборы `declared`, — теми же
+/// смысловыми проверками, что загруженный проект.
+///
+/// Каталога объявляемого набора может ещё не быть: его создаст выгрузка. Поэтому у этих
+/// наборов не требуются ни существование каталога, ни его раскладка; имя, путь, его
+/// совпадение с путями других наборов и с рабочими каталогами, расширение-инструмент и всё
+/// прочее проверяются как у объявленных.
+pub fn validate_with_declared_source_sets(
+    config: &AppConfig,
+    declared: &[SourceSetConfig],
+) -> Result<(), ConfigValidationError> {
+    let mut planned = config.clone();
+    planned.source_sets.extend_from_slice(declared);
+    validate_project_checks_with(&planned, Pending(declared))
+}
+
+/// Наборы, которые команда объявляет и ещё не выгрузила.
+#[derive(Clone, Copy)]
+struct Pending<'a>(&'a [SourceSetConfig]);
+
+impl Pending<'_> {
+    const NONE: Pending<'static> = Pending(&[]);
+
+    fn contains(self, source_set: &SourceSetConfig) -> bool {
+        self.0.iter().any(|pending| pending.name == source_set.name)
+    }
+}
+
 /// Рабочий каталог глазами того, кто его не создаёт.
 ///
 /// Живёт отдельной функцией, а не строками внутри одного из режимов: режимов без создания
@@ -420,8 +448,15 @@ fn validate_planned_work_path(config: &AppConfig) -> Result<(), ConfigValidation
 }
 
 fn validate_project_checks(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_project_checks_with(config, Pending::NONE)
+}
+
+fn validate_project_checks_with(
+    config: &AppConfig,
+    pending: Pending<'_>,
+) -> Result<(), ConfigValidationError> {
     validate_providers(config, &Operation::ALL)?;
-    validate_source_sets(config)?;
+    validate_source_sets(config, pending)?;
     validate_connection_contract(config)?;
     validate_web_publication(config)?;
     validate_platform_version(config)?;
@@ -514,7 +549,10 @@ fn validate_work_path(path: &Path) -> Result<(), ConfigValidationError> {
     Ok(())
 }
 
-fn validate_source_sets(config: &AppConfig) -> Result<(), ConfigValidationError> {
+fn validate_source_sets(
+    config: &AppConfig,
+    pending: Pending<'_>,
+) -> Result<(), ConfigValidationError> {
     if config.format == SourceFormat::Edt && config.source_sets.is_empty() {
         return Err(ConfigValidationError::EdtNoProjects);
     }
@@ -557,7 +595,11 @@ fn validate_source_sets(config: &AppConfig) -> Result<(), ConfigValidationError>
 
         let full_path = ss.root_in(&config.base_path);
 
-        let path_must_exist = config.format == SourceFormat::Edt || ss.purpose.is_external();
+        // Каталог объявляемого набора создаст его выгрузка: ни существования, ни раскладки
+        // у него пока не спросить.
+        let pending = pending.contains(ss);
+        let path_must_exist =
+            !pending && (config.format == SourceFormat::Edt || ss.purpose.is_external());
         if path_must_exist && !full_path.exists() {
             return Err(ConfigValidationError::SourceSetPathInvalid {
                 name: ss.name.clone(),
@@ -571,9 +613,14 @@ fn validate_source_sets(config: &AppConfig) -> Result<(), ConfigValidationError>
             ));
         }
 
-        validate_source_set_layout(config.format, ss, &full_path)?;
+        if !pending {
+            validate_source_set_layout(config.format, ss, &full_path)?;
+        }
 
-        let normalized = std::fs::canonicalize(&full_path).unwrap_or(full_path.clone());
+        // Каталога может ещё не быть: канонический путь ближайшего существующего предка с
+        // хвостом, так `src/ext/X` и `./src/../src/ext/X` — один каталог и до выгрузки.
+        let normalized = crate::support::path::nearest_existing_canonical_path(&full_path)
+            .unwrap_or(full_path.clone());
         let normalized_key = normalized.display().to_string();
         if !resolved_paths.insert(normalized_key.clone()) {
             return Err(ConfigValidationError::DuplicateSourceSetPath(
@@ -2095,6 +2142,113 @@ mod tests {
             ConfigValidationError::SourceSetLayoutInvalid { name, details }
                 if name == "main" && details.contains(".project")
         ));
+    }
+
+    fn extension(name: &str, path: &str) -> SourceSetConfig {
+        SourceSetConfig {
+            name: name.to_owned(),
+            purpose: SourceSetPurpose::Extension,
+            path: path.into(),
+        }
+    }
+
+    /// Объявляемый набор проверяется тем же валидатором, что объявленный, а каталога у него
+    /// может ещё не быть: EDT-проект с ним валиден, пока имя и путь ничему не мешают.
+    #[test]
+    fn a_declared_set_without_its_directory_yet_passes_the_project_checks() {
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        let source_dir = base.path().join("edt-main");
+        write_native_edt_project(
+            &source_dir,
+            "BaseProject",
+            crate::support::edt_project::V8_CONFIGURATION_NATURE,
+            None,
+        );
+        let config = single_source_set_config(
+            base.path(),
+            work.path(),
+            SourceFormat::Edt,
+            Default::default(),
+            SourceSetPurpose::Configuration,
+            "main",
+            &source_dir,
+        );
+
+        super::validate_with_declared_source_sets(&config, &[extension("Sales", "src/ext/Sales")])
+            .expect("a set to be pulled needs no directory yet");
+        assert!(!base.path().join("src/ext/Sales").exists());
+    }
+
+    /// Объявление, которое сломало бы следующий запуск, видно до выгрузки: имя, занятое
+    /// расширением-инструментом, имя, которое EDT держит за собой, и каталог другого
+    /// набора, записанный иначе, но тот же — пусть его ещё и нет на диске.
+    #[test]
+    fn a_declared_set_that_would_break_the_project_is_refused() {
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        let source_dir = base.path().join("edt-main");
+        write_native_edt_project(
+            &source_dir,
+            "BaseProject",
+            crate::support::edt_project::V8_CONFIGURATION_NATURE,
+            None,
+        );
+        let mut config = single_source_set_config(
+            base.path(),
+            work.path(),
+            SourceFormat::Edt,
+            Default::default(),
+            SourceSetPurpose::Configuration,
+            "main",
+            &source_dir,
+        );
+        let reserved = super::validate_with_declared_source_sets(
+            &config,
+            &[extension("Logs", "src/ext/Logs")],
+        )
+        .expect_err("reserved EDT name");
+        assert!(
+            matches!(reserved, ConfigValidationError::ReservedSourceSetName(ref name) if name == "Logs"),
+            "{reserved}"
+        );
+
+        config.format = SourceFormat::Designer;
+        config
+            .source_sets
+            .push(extension("Sales", "./src/../src/ext/Sales"));
+        let same_directory = super::validate_with_declared_source_sets(
+            &config,
+            &[extension("Other", "src/ext/Sales")],
+        )
+        .expect_err("one directory under two spellings");
+        assert!(
+            matches!(
+                same_directory,
+                ConfigValidationError::DuplicateSourceSetPath(_)
+            ),
+            "{same_directory}"
+        );
+
+        config.source_sets.pop();
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Artifact(ToolExtensionArtifactConfig {
+                path: base.path().join("client-mcp.cfe"),
+            }),
+        });
+        let tool = super::validate_with_declared_source_sets(
+            &config,
+            &[extension("client_mcp", "src/ext/client_mcp")],
+        )
+        .expect_err("the tool extension name");
+        assert!(
+            matches!(
+                tool,
+                ConfigValidationError::ToolExtensionNameDuplicatesSourceSet(_)
+            ),
+            "{tool}"
+        );
     }
 
     #[test]

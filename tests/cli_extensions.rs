@@ -549,6 +549,38 @@ fn extensions_info_rejects_a_name_that_is_not_an_identifier_before_touching_the_
     }
 }
 
+/// Имя устройства Windows — корректный идентификатор 1С: `extensions info` по имени его
+/// не отвергает и спрашивает базу.
+#[test]
+fn extensions_info_accepts_a_windows_device_name_as_an_identifier() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "extensions",
+            "info",
+            "--name",
+            "CON",
+        ])
+        .output()
+        .expect("run command");
+
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !reported.contains("must be a non-empty 1C identifier"),
+        "{reported}"
+    );
+    assert!(calls_log.exists(), "the infobase is asked: {reported}");
+}
+
 #[test]
 fn extensions_info_refuses_a_reply_about_another_extension() {
     let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();

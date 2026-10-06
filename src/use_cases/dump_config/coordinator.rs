@@ -826,7 +826,10 @@ fn whole_consequences(
         SourceFormat::Edt => String::new(),
         SourceFormat::Designer => {
             let advice = match &resolved.consent {
-                DestructionConsent::AskFirst(WaysOut::SaveWork) => String::new(),
+                // Набора ещё нет в проекте: `pull <SET> --force` в него не попадёт.
+                DestructionConsent::AskFirst(WaysOut::SaveWork | WaysOut::Undeclared { .. }) => {
+                    String::new()
+                }
                 DestructionConsent::AskFirst(
                     WaysOut::PullForce { .. } | WaysOut::SameCallWithForce,
                 )

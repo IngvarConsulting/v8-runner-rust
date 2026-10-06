@@ -9,6 +9,24 @@ use crate::support::error::AppError;
 use crate::use_cases::context::CommandName;
 use crate::use_cases::extension_identity::platform_extension_name;
 
+/// Наборы в порядке обработки: основная конфигурация, расширения, внешние обработки,
+/// внешние отчёты, а внутри назначения — в порядке объявления.
+///
+/// Порядок по назначению решается здесь: обходы наборов берут его отсюда, а не собирают
+/// свои корзины (страж — `tests/architecture_guardrails.rs::the_order_of_source_sets_is_decided_in_one_place`).
+pub(crate) fn ordered_by_purpose(source_sets: &[SourceSetConfig]) -> Vec<&SourceSetConfig> {
+    let rank = |purpose: SourceSetPurpose| match purpose {
+        SourceSetPurpose::Configuration => 0,
+        SourceSetPurpose::Extension => 1,
+        SourceSetPurpose::ExternalDataProcessors => 2,
+        SourceSetPurpose::ExternalReports => 3,
+    };
+    let mut ordered = source_sets.iter().collect::<Vec<_>>();
+    // Сортировка устойчивая: внутри назначения остаётся порядок объявления.
+    ordered.sort_by_key(|source_set| rank(source_set.purpose));
+    ordered
+}
+
 /// Read-only runtime index for source-set orchestration.
 pub(crate) struct SourceSetInventory<'a> {
     config: &'a AppConfig,
@@ -44,24 +62,28 @@ impl<'a> SourceSetInventory<'a> {
     }
 
     pub(crate) fn ordered_source_sets(&self) -> Vec<&'a SourceSetConfig> {
-        let mut configuration = Vec::new();
-        let mut extensions = Vec::new();
-        let mut external_processors = Vec::new();
-        let mut external_reports = Vec::new();
+        ordered_by_purpose(&self.config.source_sets)
+    }
 
-        for source_set in &self.config.source_sets {
-            match source_set.purpose {
-                SourceSetPurpose::Configuration => configuration.push(source_set),
-                SourceSetPurpose::Extension => extensions.push(source_set),
-                SourceSetPurpose::ExternalDataProcessors => external_processors.push(source_set),
-                SourceSetPurpose::ExternalReports => external_reports.push(source_set),
-            }
-        }
-
-        configuration.extend(extensions);
-        configuration.extend(external_processors);
-        configuration.extend(external_reports);
-        configuration
+    /// Пакеты конфигурации проекта в порядке обхода [`Self::ordered_source_sets`]: основная
+    /// конфигурация (`None`), затем расширения — каждое с именем расширения в базе. Наборы
+    /// внешних файлов пакета конфигурации не называют и в обход не входят.
+    ///
+    /// Один порядок на все команды, которые идут по пакетам без аргумента: так `pull --all`
+    /// выгружает, и тем же порядком идут `make` и `download` без набора (#364).
+    pub(crate) fn configuration_packages(&self) -> Vec<(&'a SourceSetConfig, Option<&'a str>)> {
+        self.ordered_source_sets()
+            .into_iter()
+            .filter_map(|source_set| match source_set.purpose {
+                SourceSetPurpose::Configuration => Some((source_set, None)),
+                SourceSetPurpose::Extension => {
+                    Some((source_set, Some(platform_extension_name(source_set))))
+                }
+                SourceSetPurpose::ExternalDataProcessors | SourceSetPurpose::ExternalReports => {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn source_set(&self, name: &str) -> Option<&'a SourceSetConfig> {
@@ -208,6 +230,34 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["main", "ext", "processors", "reports"]);
+    }
+
+    /// Пакеты конфигурации обходятся в одном порядке: основная конфигурация, затем
+    /// расширения в порядке объявления; наборы внешних файлов в обход не входят.
+    #[test]
+    fn configuration_packages_are_walked_in_one_order() {
+        let mut config = config(SourceFormat::Designer);
+        config.source_sets.push(SourceSetConfig {
+            name: "later".to_owned(),
+            purpose: SourceSetPurpose::Extension,
+            path: "extensions/later".into(),
+        });
+        let inventory = SourceSetInventory::new(&config);
+
+        let packages = inventory
+            .configuration_packages()
+            .into_iter()
+            .map(|(source_set, extension)| (source_set.name.as_str(), extension))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            packages,
+            vec![
+                ("main", None),
+                ("ext", Some("ext")),
+                ("later", Some("later"))
+            ]
+        );
     }
 
     /// Набор называет пакет конфигурации: основную конфигурацию или расширение с именем

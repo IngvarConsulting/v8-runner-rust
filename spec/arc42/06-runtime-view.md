@@ -213,6 +213,19 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 6. После удачной полной выгрузки, выгрузки по изменившемуся или выборки `ibcmd` файл версий
    из каталога становится копией раннера; сбой её не меняет.
 
+`pull --all` ([`dump_config/all.rs`](../../src/use_cases/dump_config/all.rs)) — обход поверх
+этого сценария: тот же выбор исполнителя; превью базу не спрашивает и выгрузку показывает
+только у основной конфигурации, наборы расширений проекта называет условными, а новые —
+шаблоном `src/ext/<Name>`. Иначе исполнитель отдаёт список расширений базы, проект с
+объявляемыми наборами проверяется валидатором конфигурации
+(`config::validate::validate_with_declared_source_sets`) и проверкой дописывания в проектный
+файл, затем пакеты проекта в порядке `SourceSetInventory::configuration_packages`
+выгружаются как `pull <SET>`, а расширения без набора — полной выгрузкой в `src/ext/<Name>`.
+Набор дописывается в `v8project.yaml` (`config_init::declare_source_sets`) после своей
+выгрузки; отказ набора останавливает обход. Сбой между выгрузкой и объявлением оставляет
+каталог без записи: следующий прогон снова планирует его, а сторож с советом
+`ForceWayOut::Undeclared` не заменяет в нём незафиксированное.
+
 `make` публикует тем же способом — файл пакета или каталог внешних обработок — и без
 вопроса к git; цель он сверяет при разрешении и заново перед публикацией.
 
@@ -227,7 +240,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [базу, изменённую во время выгрузки, не запоминают](../rules/use-cases/a-base-changed-during-a-dump-is-named-and-not-remembered.md),
 [`--force` называет уничтоженное](../rules/use-cases/force-names-what-it-destroyed.md),
 [каталог вне системы контроля версий не заменяют](../rules/use-cases/an-untracked-directory-is-refused-not-replaced.md),
-[выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md).
+[выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md),
+[`pull --all` объявляет набор каждому расширению базы](../rules/cli/pull-all-declares-a-set-for-each-installed-extension.md).
 
 ### 6.7 EDT-проверка по MCP
 

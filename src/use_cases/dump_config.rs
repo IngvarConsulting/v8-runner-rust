@@ -34,8 +34,11 @@ use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
 mod agent;
+mod all;
 mod coordinator;
 mod helpers;
+
+pub use self::all::execute_all;
 
 #[cfg(test)]
 use self::helpers::create_dump_object_list_file_with;
@@ -1244,6 +1247,10 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
                 // `pull --extension ext` и `pull` без набора приходят сюда с именем.
                 ForceWayOut::PullForce => WaysOut::PullForce {
                     source_set: source_set.name.clone(),
+                },
+                ForceWayOut::Undeclared => WaysOut::Undeclared {
+                    source_set: source_set.name.clone(),
+                    path: source_set.path.display().to_string(),
                 },
             })
         },

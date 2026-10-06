@@ -371,6 +371,7 @@ carries_dispatch!(
     crate::domain::syntax::SyntaxCheckResult,
     crate::domain::bootstrap::BootstrapResult,
     crate::domain::dump::DumpResult,
+    crate::domain::dump::PullAllResult,
     crate::domain::convert::ConvertResult,
     crate::domain::extensions::ExtensionsResult,
     crate::domain::extensions::ExtensionInventoryResult,
