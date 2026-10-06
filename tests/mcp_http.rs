@@ -776,10 +776,12 @@ async fn mcp_http_dump_config_full_ibcmd_server_contract_passes_dbms_and_infobas
 /// работает сервер, — клиент HTTP может сидеть на другой машине.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_http_refusal_advises_the_command_line_of_the_server_target() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (dir, config_path, url, _calls_log) = setup_http_ibcmd_dump_project(None, 4, 900);
     fs::write(
         config_path.with_file_name("v8project.local.yaml"),
-        "infobases:\n  staging:\n    connection: 'File=/tmp/staging-ib-63d8d9'\n",
+        format!("infobases:\n  staging:\n    connection: 'File={tmp}/staging-ib'\n"),
     )
     .expect("local config");
     let project = dir.path().join("project");

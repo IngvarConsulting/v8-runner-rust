@@ -101,6 +101,19 @@ impl Stand {
     }
 }
 
+/// Команда первой копии, которая держит базу. Сброс отпускает заглушку платформы и
+/// снимает раннер, даже если тест упал раньше.
+struct Holder {
+    release: PathBuf,
+    runner: RunnerGuard,
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.release, "");
+    }
+}
+
 impl Copy {
     fn run(&self, args: &[&str]) -> Output {
         v8_runner_command()
@@ -114,7 +127,7 @@ impl Copy {
 
     /// Запускает `push`, который держит базу, пока тест не создаст `release`, и
     /// возвращает раннер, когда платформа уже получила работу.
-    fn hold_the_base(&self) -> (RunnerGuard, PathBuf) {
+    fn hold_the_base(&self) -> Holder {
         let started = self.root.join("platform-started");
         let release = self.root.join("platform-release");
         write_shell_script(&self.platform, &interruptible_stub(&started, &release));
@@ -133,7 +146,7 @@ impl Copy {
             wait_for_file(&started, Duration::from_secs(30)),
             "the holding push never reached the platform"
         );
-        (runner, release)
+        Holder { release, runner }
     }
 
     fn canonical_work(&self) -> String {
@@ -191,7 +204,7 @@ fn a_second_command_on_a_held_base_is_refused_at_once_and_names_the_first() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
-    let (holder, release) = first.hold_the_base();
+    let mut holder = first.hold_the_base();
 
     let started = Instant::now();
     let refused = second.run(&["push"]);
@@ -200,9 +213,8 @@ fn a_second_command_on_a_held_base_is_refused_at_once_and_names_the_first() {
     assert_infobase_busy(&refused, "push", &first);
     assert!(waited < AT_ONCE, "the refusal waited {waited:?}");
 
-    fs::write(&release, "").expect("release the first push");
-    let mut holder = holder;
-    let status = holder.0.wait().expect("first push");
+    fs::write(&holder.release, "").expect("release the first push");
+    let status = holder.runner.0.wait().expect("first push");
     assert!(status.success(), "the first push finished");
     succeeded(&second.run(&["push"]));
     assert_eq!(stand.lock_files(), Vec::<String>::new());
@@ -215,11 +227,11 @@ fn a_base_held_by_a_killed_command_lets_the_next_one_in() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
-    let (mut holder, release) = first.hold_the_base();
+    let mut holder = first.hold_the_base();
 
-    holder.0.kill().expect("kill -9 the holding push");
-    holder.0.wait().expect("killed push");
-    fs::write(&release, "").expect("release the orphaned platform");
+    holder.runner.0.kill().expect("kill -9 the holding push");
+    holder.runner.0.wait().expect("killed push");
+    fs::write(&holder.release, "").expect("release the orphaned platform");
     assert_ne!(
         stand.lock_files(),
         Vec::<String>::new(),
@@ -236,7 +248,7 @@ fn a_busy_work_path_is_refused_before_the_base_lock() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
-    let (_holder, _release) = first.hold_the_base();
+    let _holder = first.hold_the_base();
     hold_workspace_lock(&second.work);
 
     let refused = second.run(&["push"]);
@@ -252,7 +264,7 @@ fn a_preview_on_a_held_base_takes_no_base_lock() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
-    let (_holder, _release) = first.hold_the_base();
+    let _holder = first.hold_the_base();
 
     let preview = succeeded(&second.run(&["push", "--dry-run"]));
 
@@ -327,7 +339,7 @@ fn an_mcp_tool_on_a_held_base_is_refused_at_once() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
-    let (_holder, _release) = first.hold_the_base();
+    let _holder = first.hold_the_base();
 
     let started = Instant::now();
     let answer = support::mcp::call_tool(&second.config, "build_project", json!({}));

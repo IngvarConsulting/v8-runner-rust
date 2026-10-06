@@ -12,6 +12,8 @@ pub mod build_project;
 pub mod check_syntax;
 /// Client-side MCP HTTP readiness probes.
 pub(in crate::use_cases) mod client_mcp_readiness;
+/// Command lock with its owner record, shared by the workspace and infobase locks.
+pub(crate) mod command_lock;
 /// Config bootstrap use case.
 pub mod config_init;
 /// Extension properties orchestration use case.

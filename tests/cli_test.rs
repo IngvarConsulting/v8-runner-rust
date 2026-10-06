@@ -1333,6 +1333,8 @@ fn test_module_build_failure_prevents_enterprise_launch() {
 
 #[test]
 fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -1401,7 +1403,7 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
         edt_cli_path.display(),
     );
     fs::write(&config_path, config).expect("config");
-    write_local_origin(&config_path, "File=/tmp/ib-d6f822", None);
+    write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
 
     let first = v8_runner_command()
         .args(["--config", &config_path.display().to_string(), "build"])
@@ -1447,6 +1449,8 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
 
 #[test]
 fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -1493,7 +1497,7 @@ fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
         tool_source.display(),
     );
     fs::write(&config_path, config).expect("config");
-    write_local_origin(&config_path, "File=/tmp/ib-6f63bd", None);
+    write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
 
     let first = v8_runner_command()
         .args([

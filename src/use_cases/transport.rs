@@ -4,12 +4,13 @@ use tracing::warn;
 
 use crate::config::model::AppConfig;
 use crate::domain::infobase_export::InfobaseTransferPhase;
+use crate::use_cases::command_lock::CommandLockGuard;
 use crate::use_cases::context::CommandName;
 use crate::use_cases::infobase_lock::{acquire_infobase_lock, BaseAccess, InfobaseLock};
 use crate::use_cases::result::UseCaseError;
 #[cfg(test)]
 use crate::use_cases::result::UseCaseFailure;
-use crate::use_cases::workspace_lock::{acquire_workspace_lock, CommandLockGuard};
+use crate::use_cases::workspace_lock::acquire_workspace_lock;
 
 /// Отказ границы команды: шаг и ошибка. Сценарий не запускался.
 ///

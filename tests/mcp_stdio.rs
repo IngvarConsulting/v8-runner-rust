@@ -477,6 +477,8 @@ fn mcp_missing_config_reports_error_on_stderr() {
 
 #[test]
 fn mcp_legacy_top_level_connection_reports_error_on_stderr() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let base_path = dir.path().join("project");
@@ -486,7 +488,7 @@ fn mcp_legacy_top_level_connection_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\nconnection: 'File=/tmp/ib-058580'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\nconnection: 'File={tmp}/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -513,6 +515,8 @@ fn mcp_legacy_top_level_connection_reports_error_on_stderr() {
 
 #[test]
 fn mcp_legacy_top_level_credentials_reports_error_on_stderr() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let base_path = dir.path().join("project");
@@ -522,7 +526,7 @@ fn mcp_legacy_top_level_credentials_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-82e956'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -549,6 +553,8 @@ fn mcp_legacy_top_level_credentials_reports_error_on_stderr() {
 
 #[test]
 fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let base_path = dir.path().join("project");
@@ -558,7 +564,7 @@ fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-e35af7'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -586,6 +592,8 @@ fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
 
 #[test]
 fn mcp_unsupported_main_config_shape_reports_error_on_stderr() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let base_path = dir.path().join("project");
@@ -595,7 +603,7 @@ fn mcp_unsupported_main_config_shape_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-c6be99'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    typo: value\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    typo: value\n",
             work_path.display()
         ),
     )

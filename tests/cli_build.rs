@@ -444,6 +444,8 @@ fn write_edt_external_project(path: &Path, name: &str) {
 /// пропажа поиска у одного из них прошла бы молча.
 #[test]
 fn a_planned_edt_build_refuses_when_the_utility_that_would_load_it_is_missing() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     for (providers, missing) in [("", "1cv8"), ("providers:\n  build: ibcmd\n", "ibcmd")] {
         let dir = temp_workspace();
         let base_path = dir.path().join("project");
@@ -468,7 +470,7 @@ fn a_planned_edt_build_refuses_when_the_utility_that_would_load_it_is_missing() 
         fs::write(
             &config_path,
             format!(
-                "workPath: '{}'\nformat: EDT\n{providers}infobase:\n  connection: 'File=/tmp/ib-dca9b5'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n  edt_cli:\n    path: '{}'\n",
+                "workPath: '{}'\nformat: EDT\n{providers}infobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n  edt_cli:\n    path: '{}'\n",
                 work_path.display(),
                 empty_platform.display(),
                 edt_cli_path.display()
@@ -520,6 +522,8 @@ fn a_planned_edt_build_refuses_when_the_utility_that_would_load_it_is_missing() 
 /// нарушение здесь дороже прочих.
 #[test]
 fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -557,7 +561,7 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib-d0d6a6'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
             work_path.display(),
             platform_path.display(),
             edt_cli_path.display()
@@ -633,6 +637,8 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
 /// превью не делает ничего из этого (`INV.CLI.PREVIEW-DISPATCHES-NOTHING`).
 #[test]
 fn a_planned_edt_build_does_not_export_the_external_artifacts() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -659,7 +665,7 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib-c411f0'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/processors\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/processors\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
             work_path.display(),
             platform_path.display(),
             edt_cli_path.display()
@@ -1132,6 +1138,8 @@ fn build_edt_text_interleaves_export_stage_after_edt_log() {
 
 #[test]
 fn build_text_groups_tool_extension_stages_under_single_build_node() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -1158,7 +1166,7 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
     write_edt_script(&edt_cli_path, &edt_calls_log);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib-48b787'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n        format: EDT\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n        format: EDT\n",
         work_path.display(),
         platform_path.display(),
         edt_cli_path.display(),
@@ -1487,9 +1495,11 @@ fn build_ibcmd_full_rebuild_invokes_import_and_apply() {
 
 #[test]
 fn build_ibcmd_passes_credentials_to_import_and_apply() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (dir, config_path, binary_path, work_path, _base_path, calls_log) = setup_ibcmd_project();
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib-feb95f'\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File={tmp}/ib'\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         binary_path.display(),
     );
@@ -1508,11 +1518,12 @@ fn build_ibcmd_passes_credentials_to_import_and_apply() {
 
     assert!(output.status.success());
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains(
-        "infobase --db-path /tmp/ib-feb95f config import --user Admin --password secret"
-    ));
-    assert!(calls
-        .contains("infobase --db-path /tmp/ib-feb95f config apply --user Admin --password secret"));
+    assert!(calls.contains(&format!(
+        "infobase --db-path {tmp}/ib config import --user Admin --password secret"
+    )));
+    assert!(calls.contains(&format!(
+        "infobase --db-path {tmp}/ib config apply --user Admin --password secret"
+    )));
     assert!(calls.contains("--user Admin"));
     assert!(calls.contains("--password secret"));
 }
@@ -1605,6 +1616,8 @@ fn build_ibcmd_server_connection_passes_dbms_and_infobase_credentials() {
 
 #[test]
 fn build_ibcmd_accepts_raw_f_connection() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (dir, config_path, binary_path, _work_path, _base_path, calls_log) = setup_ibcmd_project();
     write_config_with_builder(
         &config_path,
@@ -1612,7 +1625,7 @@ fn build_ibcmd_accepts_raw_f_connection() {
         &dir.path().join("work"),
         &binary_path,
         "IBCMD",
-        "/F /tmp/ib-bf2ee5",
+        &format!("/F {tmp}/ib"),
     );
 
     let output = v8_runner_command()
@@ -1627,7 +1640,7 @@ fn build_ibcmd_accepts_raw_f_connection() {
 
     assert!(output.status.success());
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("--db-path /tmp/ib-bf2ee5"));
+    assert!(calls.contains(&format!("--db-path {tmp}/ib")));
     assert!(calls.contains("config apply"));
 }
 

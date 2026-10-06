@@ -165,6 +165,8 @@ fn a_preview_of_the_configuration_check_plans_without_running_the_designer() {
 /// Иначе отказ поиска утилиты сообщал бы о запуске, которого не было.
 #[test]
 fn a_preview_that_cannot_find_the_platform_still_reports_no_dispatch() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -178,7 +180,7 @@ fn a_preview_that_cannot_find_the_platform_still_reports_no_dispatch() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-497139'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
             work_path.display(),
             install_dir.display()
         ),
@@ -595,6 +597,8 @@ fn check_refuses_its_keys_next_to_a_previous_name() {
 /// получил бы «чисто», не проверив предмета. Отказ — по предмету, и он не изменится.
 #[test]
 fn check_refuses_a_project_of_external_subjects_only() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (dir, config_path) = setup_project("exit 0");
     let work_path = dir.path().join("work");
     let install_dir = dir.path().join("platform");
@@ -606,7 +610,7 @@ fn check_refuses_a_project_of_external_subjects_only() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-3bc18c'\nsource-set:\n  - name: reports\n    type: EXTERNAL_REPORTS\n    path: reports\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: reports\n    type: EXTERNAL_REPORTS\n    path: reports\ntools:\n  platform:\n    path: '{}'\n",
             work_path.display(),
             install_dir.display()
         ),

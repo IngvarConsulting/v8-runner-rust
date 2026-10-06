@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::config::model::AppConfig;
 use crate::support::error::AppError;
 use crate::support::path::nearest_existing_canonical_path;
-use crate::use_cases::workspace_lock::{command_lock_holder, take_command_lock, CommandLockGuard};
+use crate::use_cases::command_lock::{command_lock_holder, take_command_lock, CommandLockGuard};
 
 /// Что команда делает с файловой базой — от этого зависит, берёт ли она замок базы и что
 /// делает, если замок не взять не из-за другой команды.
@@ -54,12 +54,20 @@ pub(crate) fn acquire_infobase_lock(
     command_name: &str,
     access: BaseAccess,
 ) -> Result<InfobaseLock, AppError> {
-    if access == BaseAccess::Untouched {
-        return Ok(InfobaseLock::default());
-    }
+    let writes = match access {
+        BaseAccess::Untouched => return Ok(InfobaseLock::default()),
+        BaseAccess::Reads => false,
+        BaseAccess::Writes => true,
+    };
     let Some(base_dir) = config.v8_connection().file_infobase_dir(&config.base_path) else {
         return Ok(InfobaseLock::default());
     };
+    // Чтение каталогов не создаёт: нет родителя — нет и базы, беречь нечего, и отказ о
+    // несуществующей базе остаётся за сценарием и платформой. Команда записи родителя
+    // создаёт: `infobase create` заводит базу там, где её ещё нет.
+    if !writes && base_dir.parent().is_some_and(|parent| !parent.exists()) {
+        return Ok(InfobaseLock::default());
+    }
     let canonical_work_path = nearest_existing_canonical_path(&config.work_path)
         .unwrap_or_else(|_| config.work_path.clone());
     let error = match infobase_lock_path(&base_dir) {
@@ -93,19 +101,19 @@ pub(crate) fn acquire_infobase_lock(
         }
     };
     let beside = base_dir.parent().unwrap_or(&base_dir).display().to_string();
-    match access {
-        BaseAccess::Writes => Err(AppError::Runtime(format!(
+    if writes {
+        return Err(AppError::Runtime(format!(
             "cannot start {command_name}: the infobase lock cannot be taken next to '{beside}': {error}; a command that writes the infobase '{}' does not run without its lock",
             base_dir.display()
-        ))),
-        BaseAccess::Reads | BaseAccess::Untouched => Ok(InfobaseLock {
-            _guard: None,
-            warning: Some(format!(
-                "infobase lock was not taken next to '{beside}': {error}; {command_name} reads the infobase '{}' without it, and another command may change the infobase meanwhile",
-                base_dir.display()
-            )),
-        }),
+        )));
     }
+    Ok(InfobaseLock {
+        _guard: None,
+        warning: Some(format!(
+            "infobase lock was not taken next to '{beside}': {error}; {command_name} reads the infobase '{}' without it, and another command may change the infobase meanwhile",
+            base_dir.display()
+        )),
+    })
 }
 
 /// Файл замка рядом с каталогом базы: `.<имя каталога>.v8-runner.infobase.lock`.
@@ -118,6 +126,9 @@ fn infobase_lock_path(base_dir: &Path) -> Option<PathBuf> {
     Some(parent.join(lock_name))
 }
 
+/// Отказ занятой базы называет владельца, если запись о нём относится к нынешней
+/// блокировке, и всегда — ответ общего механизма: для записи переиспользованного pid,
+/// записи с другой машины или от прежней версии только он говорит, что файл удаляют вручную.
 fn render_busy_message(
     command_name: &str,
     base_dir: &Path,
@@ -126,7 +137,7 @@ fn render_busy_message(
 ) -> String {
     match command_lock_holder(lock_path) {
         Some(holder) => format!(
-            "cannot start {command_name}: infobase '{}' is in use by '{}' of the working copy with workPath '{}' (pid {}, started at {}); retry when it finishes",
+            "cannot start {command_name}: infobase '{}' is in use by '{}' of the working copy with workPath '{}' (pid {}, started at {}); retry when it finishes; {error}",
             base_dir.display(),
             holder.command,
             holder.canonical_work_path.display(),
@@ -144,8 +155,7 @@ fn render_busy_message(
 mod tests {
     use super::{acquire_infobase_lock, infobase_lock_path, BaseAccess};
     use crate::config::model::{
-        AppConfig, BuildConfig, InfobaseConfig, InfobaseDbmsConfig, SourceFormat, TestsConfig,
-        ToolsConfig,
+        AppConfig, InfobaseConfig, InfobaseDbmsConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
     use crate::support::error::AppError;
     use std::fs;
@@ -163,7 +173,6 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             source_sets: Vec::new(),
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -229,6 +238,62 @@ mod tests {
                 .expect("the lock lives only with its command");
         drop(again);
         assert_eq!(entries(&dir.path().join("shared")), ["ib"]);
+    }
+
+    /// Чтение не создаёт каталог-родитель базы: базы там нет, и замок не нужен; запись его
+    /// создаёт, как создаст и базу.
+    #[test]
+    fn a_read_of_a_base_without_a_parent_creates_nothing() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("missing").join("ib");
+
+        let read = acquire_infobase_lock(
+            &file_base(dir.path(), &base),
+            "infobase.dump",
+            BaseAccess::Reads,
+        )
+        .expect("a read of a missing base is left to the platform");
+
+        assert!(read.warning().is_none());
+        assert!(!dir.path().join("missing").exists());
+        let _write = acquire_infobase_lock(
+            &file_base(dir.path(), &base),
+            "infobase create",
+            BaseAccess::Writes,
+        )
+        .expect("a write creates the parent for its lock");
+        assert!(dir.path().join("missing").is_dir());
+    }
+
+    /// Запись, которую общий механизм не заменяет (здесь — без отметки о замке ОС, как у
+    /// прежних версий), держит базу; отказ сохраняет его подсказку удалить файл вручную.
+    #[test]
+    fn a_record_left_for_manual_removal_is_named_in_the_refusal() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("ib");
+        fs::create_dir_all(&base).expect("base");
+        let lock_path =
+            infobase_lock_path(&fs::canonicalize(&base).expect("canonical")).expect("lock path");
+        fs::write(
+            &lock_path,
+            format!(
+                "{{\"tool\":\"v8-runner\",\"pid\":{},\"owner_id\":\"legacy\",\"created_at\":\"2026-09-02T00:00:00Z\"}}",
+                std::process::id()
+            ),
+        )
+        .expect("legacy record");
+
+        let busy = acquire_infobase_lock(&file_base(dir.path(), &base), "push", BaseAccess::Writes)
+            .expect_err("the record holds the base");
+
+        let AppError::InfobaseBusy(message) = &busy else {
+            panic!("a held base is InfobaseBusy: {busy}");
+        };
+        assert!(message.contains("remove this file manually"), "{message}");
+        assert!(
+            message.contains(&lock_path.display().to_string()),
+            "{message}"
+        );
     }
 
     #[cfg(unix)]

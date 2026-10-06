@@ -56,7 +56,9 @@ fn write_project(dir: &Path, yaml_tail: &str) -> Project {
 /// Каждое сочетание ниже — ошибка конфига, и ни одно из них не доходит до платформы.
 #[test]
 fn an_unsupported_combination_is_refused_before_any_utility_runs() {
-    let ib = "File=/tmp/ib-3e1923";
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
+    let ib = &format!("File={tmp}/ib");
     let cases: [(&str, String); 4] = [
         (
             "dbms on a file infobase",

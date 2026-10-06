@@ -590,6 +590,8 @@ fn setup_mcp_va_project_with_options(
 
 #[test]
 fn launch_without_sources_previews_only_the_selected_client() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     for source_declaration in ["", "source-set: []\n", "source-set:\n  - name: unavailable\n    type: CONFIGURATION\n    path: missing-edt-project\n"] {
         for mode in ["thin", "thick", "ordinary", "designer", "web", "mcp"] {
             let dir = temp_workspace();
@@ -602,7 +604,7 @@ fn launch_without_sources_previews_only_the_selected_client() {
                 write_logging_script(&install_dir.join("bin").join(executable), &dispatch_log);
             }
             let config = format!(
-                "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib-3ec5c4'\n  web:\n    url: http://localhost/demo\n{source_declaration}tools:\n  platform:\n    path: '{}'\n",
+                "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File={tmp}/ib'\n  web:\n    url: http://localhost/demo\n{source_declaration}tools:\n  platform:\n    path: '{}'\n",
                 work_path.display(), install_dir.display(),
             );
             fs::write(&config_path, &config).expect("config");
@@ -638,6 +640,8 @@ fn launch_without_sources_previews_only_the_selected_client() {
 
 #[test]
 fn launch_without_sources_dispatches_the_client_when_requested() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     for source_declaration in ["", "source-set: []\n"] {
         let dir = temp_workspace();
         let work_path = dir.path().join("work");
@@ -645,7 +649,7 @@ fn launch_without_sources_dispatches_the_client_when_requested() {
         let install_dir = dir.path().join("platform");
         let dispatch_log = dir.path().join("dispatch.log");
         write_logging_script(&install_dir.join("bin/1cv8c"), &dispatch_log);
-        fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-e755f0'\n{source_declaration}tools:\n  platform:\n    path: '{}'\n", work_path.display(), install_dir.display())).unwrap();
+        fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\n{source_declaration}tools:\n  platform:\n    path: '{}'\n", work_path.display(), install_dir.display())).unwrap();
         let output = v8_runner_command()
             .args([
                 "--config",
@@ -677,10 +681,12 @@ fn launch_without_sources_dispatches_the_client_when_requested() {
 
 #[test]
 fn launch_without_sources_does_not_admit_a_source_command() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let work_path = dir.path().join("work");
-    fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-3dafa8'\nsource-set: []\n", work_path.display())).unwrap();
+    fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set: []\n", work_path.display())).unwrap();
     let output = v8_runner_command()
         .args([
             "--config",
@@ -699,7 +705,7 @@ fn launch_without_sources_does_not_admit_a_source_command() {
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(!work_path.exists());
-    fs::write(&config_path, format!("workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib-3dafa8'\nsource-set:\n  - name: unavailable\n    type: CONFIGURATION\n    path: missing-edt-project\n", work_path.display())).unwrap();
+    fs::write(&config_path, format!("workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: unavailable\n    type: CONFIGURATION\n    path: missing-edt-project\n", work_path.display())).unwrap();
     let output = v8_runner_command()
         .args([
             "--config",
@@ -718,11 +724,13 @@ fn launch_without_sources_does_not_admit_a_source_command() {
 
 #[test]
 fn launch_without_sources_still_validates_client_settings() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     for settings in ["port: 0", "wait_ready_timeout_ms: 0"] {
         let dir = temp_workspace();
         let config_path = dir.path().join("v8project.yaml");
         let work_path = dir.path().join("work");
-        fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-092231'\nsource-set: []\ntools:\n  client_mcp:\n    {settings}\n", work_path.display())).unwrap();
+        fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set: []\ntools:\n  client_mcp:\n    {settings}\n", work_path.display())).unwrap();
         let output = v8_runner_command()
             .args([
                 "--config",
@@ -2463,9 +2471,11 @@ fn a_client_address_is_reported_without_its_userinfo_password() {
 /// раннер не теряет `/WS` и не падает, даже когда рядом положили второй адрес.
 #[test]
 fn additional_launch_keys_do_not_displace_the_web_address() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (_dir, config_path, _install) = setup_web_project(
         "http://localhost/base",
-        "  enterprise:\n    additional-launch-keys: ['/IBConnectionString', 'File=/tmp/other-d508b5']\n",
+        &format!("  enterprise:\n    additional-launch-keys: ['/IBConnectionString', 'File={tmp}/other']\n"),
     );
 
     let payload = launch_json(

@@ -5,6 +5,7 @@ artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
   - src/command_envelope.rs::every_error_kind_and_code_is_named_by_the_schema_and_by_a_table
+  - tests/cli_infobase_lock.rs::an_mcp_tool_on_a_held_base_is_refused_at_once
 ---
 
 # Конверт ответа команды
@@ -40,8 +41,8 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 `validation`, `runtime` и `platform` (`DEC.2026-04-20.BUSINESS-FAILURES-ARE-NOT-TRANSPORT-FAULTS`),
 поэтому ни одного кода возможности там не появляется — отказ по возможности приезжает как
 `runtime_failure`. Так же приезжают занятый каталог и занятая база: MCP отказывает сразу,
-а текст называет базу и команду, которая её держит. Шаг `next` от этого не зависит и едет
-обоими транспортами: он про предмет, а не про провод.
+а у занятой базы текст называет базу и команду, которая её держит. Шаг `next` от этого не
+зависит и едет обоими транспортами: он про предмет, а не про провод.
 
 **Что изменила версия 2.** Рода и коды стали перечислениями, у отказа появились `next` и
 два поля поколений. Определения переименованы вслед за типами: `$defs/error` →
