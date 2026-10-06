@@ -602,6 +602,43 @@ fn an_extension_named_like_a_windows_device_is_named_and_the_rest_is_pulled() {
     assert!(!project.project_text().contains("Aux"));
 }
 
+/// Каталог `src/ext/Fresh` вмещает каталог набора проекта: объявление пропускается и
+/// называется с причиной в `not_declared`, а остальные наборы выгружаются и объявляются.
+#[test]
+fn an_extension_whose_directory_overlaps_a_set_is_named_and_the_rest_is_pulled() {
+    let project = Project::new(&["Old", "Deep", "Fresh", "Sales"]);
+    let text = PROJECT.replace(
+        "tools:\n",
+        "  - name: Deep\n    type: EXTENSION\n    path: src/ext/Fresh/inner\ntools:\n",
+    );
+    rewrite_project(&project, &text);
+
+    let (output, envelope) = project.pull(&["--all"]);
+
+    assert_succeeded(&output, &envelope);
+    assert_eq!(
+        pulled_sets(&envelope),
+        ["main", "Old", "Deep", "Sales"],
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["data"]["declared"],
+        json!([{"name": "Sales", "type": "EXTENSION", "path": "src/ext/Sales"}]),
+        "{envelope}"
+    );
+    let skipped = &envelope["data"]["not_declared"];
+    assert_eq!(skipped[0]["name"], "Fresh", "{envelope}");
+    let reason = skipped[0]["reason"].as_str().expect("reason");
+    assert!(reason.contains("source-set 'Deep'"), "{reason}");
+    assert!(reason.contains("declare the set by hand"), "{reason}");
+    assert!(
+        !project.calls().contains("-Extension Fresh"),
+        "{}",
+        project.calls()
+    );
+    assert!(!project.project_text().contains("name: Fresh"));
+}
+
 /// Набор `my-ext`, исходники которого называют установленное расширение `MyExt`, второго
 /// набора не получает: пока раннер называет расширение по имени набора (#218), обход
 /// отказывает до выгрузки и просит переименовать набор.

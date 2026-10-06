@@ -347,6 +347,16 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
         .extension
         .as_ref()
         .map(|tool| key(&tool.name));
+    let set_roots = config
+        .source_sets
+        .iter()
+        .map(|source_set| {
+            (
+                source_set,
+                normalized_root(&source_set.root_in(&config.base_path)),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut declared = Vec::new();
     let mut not_declared = Vec::new();
     for name in installed {
@@ -376,20 +386,24 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
             )));
         }
         // Каталог нового набора не должен лежать внутри каталога набора проекта или вмещать его:
-        // полная выгрузка внешнего каталога заменила бы вложенный целиком.
+        // полная выгрузка внешнего каталога заменила бы вложенный целиком. Совпадающий
+        // каталог — отказ проверки плана, а не пропуск, кто бы ни стоял в проекте раньше.
         let path = format!("{DECLARED_EXTENSION_ROOT}/{name}");
         let root = normalized_root(&config.base_path.join(&path));
-        if let Some(nesting) = config.source_sets.iter().find(|source_set| {
-            let other = normalized_root(&source_set.root_in(&config.base_path));
-            // Совпадающий каталог — отказ проверки плана, а не пропуск.
-            root != other && (root.starts_with(&other) || other.starts_with(&root))
-        }) {
+        let overlapping = (!set_roots.iter().any(|(_, other)| *other == root))
+            .then(|| {
+                set_roots
+                    .iter()
+                    .find(|(_, other)| root.starts_with(other) || other.starts_with(&root))
+            })
+            .flatten();
+        if let Some((overlapping, _)) = overlapping {
             not_declared.push(NotDeclaredExtension {
                 name: name.clone(),
                 reason: format!(
                     "directory '{path}' overlaps the directory '{}' of source-set '{}', and a full pull of one would replace the other: declare the set by hand under another path",
-                    nesting.path.display(),
-                    nesting.name
+                    overlapping.path.display(),
+                    overlapping.name
                 ),
             });
             continue;
@@ -632,12 +646,27 @@ mod tests {
             set("main", SourceSetPurpose::Configuration, "src/cf"),
             set("deep", SourceSetPurpose::Extension, "src/ext/Sales/inner"),
         ]);
-        let walk = plan_walk(&inner, &installed(&["Deep", "Sales"])).expect("walk");
+        let walk = plan_walk(&inner, &installed(&["Deep", "Other", "Sales"])).expect("walk");
+        assert_eq!(walk.declared, vec![declared("Other")]);
         assert_eq!(walk.not_declared.len(), 1, "{walk:?}");
-        assert!(
-            walk.not_declared[0].reason.contains("source-set 'deep'"),
-            "{walk:?}"
-        );
+        let reason = &walk.not_declared[0].reason;
+        assert!(reason.contains("source-set 'deep'"), "{walk:?}");
+        assert!(reason.contains("declare the set by hand"), "{walk:?}");
+    }
+
+    /// Совпадающий каталог остаётся отказом проверки плана, даже если раньше в проекте стоит
+    /// набор, который каталог нового набора вмещает.
+    #[test]
+    fn an_equal_directory_is_left_to_the_plan_check_despite_an_earlier_overlap() {
+        let config = config(vec![
+            set("main", SourceSetPurpose::Configuration, "src"),
+            set("legacy", SourceSetPurpose::Extension, "src/ext/Sales"),
+        ]);
+
+        let walk = plan_walk(&config, &installed(&["Legacy", "Sales"])).expect("walk");
+
+        assert_eq!(walk.declared, vec![declared("Sales")]);
+        assert!(walk.not_declared.is_empty(), "{walk:?}");
     }
 
     /// Имя расширения, занятое набором другого назначения, — отказ до выгрузки.
