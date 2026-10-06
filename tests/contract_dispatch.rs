@@ -214,6 +214,9 @@ fn rows(dir: &Path) -> Vec<Dispatching> {
         given(&["make", "--output", &made], "make"),
         given(&["publish"], "publish"),
         given(&["dump", "--force"], "pull"),
+        // Заглушка списка не пишет: чтение состава базы отказывает уже после запуска
+        // Конфигуратора и отвечает формой обхода.
+        given(&["pull", "--all"], "pull-all"),
         given(&["build"], "push"),
         given(&["load", "--path", &artifact], "upload"),
         // Формы выгрузки несут признак только в превью: боевой ответ его не называет,

@@ -1419,7 +1419,10 @@ pub(crate) fn with_declared_source_sets(
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if indent.is_none() && (trimmed == "-" || trimmed.starts_with("- ")) {
+        let entry = trimmed
+            .strip_prefix('-')
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']));
+        if indent.is_none() && entry {
             indent = Some(line.len() - line.trim_start_matches(' ').len());
         }
         last_content = Some(index);
