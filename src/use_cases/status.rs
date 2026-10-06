@@ -106,13 +106,11 @@ fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
                 name: set.name.clone(),
                 purpose: set.purpose.as_str().to_owned(),
                 memory,
-                recorded: own_record(context, &config.work_path).map(|record| {
-                    RecordedGeneration {
-                        token: record.token,
-                        tool: record.tool,
-                        after: after_label(record.after).to_owned(),
-                        recorded_at: record.recorded_at,
-                    }
+                recorded: own_record(context, &config.work_path).map(|record| RecordedGeneration {
+                    token: record.token,
+                    tool: record.tool,
+                    after: after_label(record.after).to_owned(),
+                    recorded_at: record.recorded_at,
                 }),
                 changed_files: (memory == MemoryState::Remembered)
                     .then(|| sources.and_then(|sources| changed_files(sources, &config.work_path)))
@@ -125,7 +123,11 @@ fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
         name: config.infobase_name.clone(),
         selected,
         kind: config.target_kind(),
-        address: config.infobase_memory_address(&base_path),
+        // Память привязана к адресу с хешем пути; человеку показывается сам путь.
+        address: match config.v8_connection().file_infobase_dir(&base_path) {
+            Some(dir) => Some(format!("file:{}", dir.display())),
+            None => config.infobase_memory_address(&base_path),
+        },
         new_owner_since: new_owner_mark(config),
         source_sets,
         extensions: None,
@@ -175,7 +177,10 @@ fn deepen(
             reader.close();
             return Err(error);
         }
-        let Some(source) = contexts.iter().find(|candidate| candidate.name() == set.name) else {
+        let Some(source) = contexts
+            .iter()
+            .find(|candidate| candidate.name() == set.name)
+        else {
             continue;
         };
         let extension = (set.purpose == "extension").then_some(set.name.as_str());

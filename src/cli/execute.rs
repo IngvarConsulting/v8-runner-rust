@@ -302,11 +302,13 @@ fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &
                     ""
                 }
             );
-            let mut lines = vec![format!(
-                "{}: {}",
-                base.kind.as_str(),
-                base.address.as_deref().unwrap_or("address not recognized")
-            )];
+            let mut lines = vec![match base.address.as_deref() {
+                Some(address) => address.to_owned(),
+                None => format!(
+                    "{} infobase: its address is not recognized",
+                    base.kind.as_str()
+                ),
+            }];
             if let Some(since) = &base.new_owner_since {
                 lines.push(format!(
                     "this working copy took the infobase over ({since}) and has not pushed since"
@@ -315,7 +317,9 @@ fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &
             for set in &base.source_sets {
                 let mut facts = vec![match set.memory {
                     MemoryState::Remembered => "remembered".to_owned(),
-                    MemoryState::Missing => "no memory of the infobase: push is refused, pull first".to_owned(),
+                    MemoryState::Missing => {
+                        "no memory of the infobase: push is refused, pull first".to_owned()
+                    }
                     MemoryState::Foreign => "memory of another infobase or directory".to_owned(),
                     MemoryState::Unreadable => "memory cannot be read".to_owned(),
                     MemoryState::Unbound => "the infobase address cannot be remembered".to_owned(),
@@ -395,7 +399,11 @@ fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &
                                     .as_deref()
                                     .map(|host| format!(" on '{host}'"))
                                     .unwrap_or_default(),
-                                if owner.this_copy { " (this working copy)" } else { "" },
+                                if owner.this_copy {
+                                    " (this working copy)"
+                                } else {
+                                    ""
+                                },
                                 if owner.shared { ", shared" } else { "" }
                             ));
                         }

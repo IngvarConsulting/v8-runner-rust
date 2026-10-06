@@ -4,6 +4,7 @@ check:
   - tests/cli_infobase_owner.rs::a_read_on_a_base_of_another_copy_passes_and_leaves_the_marker
   - tests/cli_infobase_owner.rs::a_read_of_a_base_without_a_marker_makes_no_owner
   - src/use_cases/infobase_owner.rs::only_a_run_of_a_write_on_a_declared_base_records_a_copy
+  - tests/cli_status.rs::status_deep_on_a_base_without_a_marker_makes_no_owner
 ---
 
 # Чтение базы владельцем не делает

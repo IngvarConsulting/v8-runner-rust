@@ -370,6 +370,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "crate::use_cases::tool_extension::build_ibcmd_dsl",
             "расширение-инструмент, когда сборку ведёт `ibcmd`",
         ),
+        (
+            "crate::use_cases::status::GenerationReader::open",
+            "поколение у `status --deep`, когда `push` ведёт `ibcmd`",
+        ),
     ];
     let expected = BUILT_FOR_IBCMD
         .iter()
