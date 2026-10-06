@@ -1,44 +1,87 @@
 use std::future::Future;
 
+use tracing::warn;
+
 use crate::config::model::AppConfig;
+use crate::domain::infobase_export::InfobaseTransferPhase;
 use crate::use_cases::context::CommandName;
+use crate::use_cases::infobase_lock::{acquire_infobase_lock, BaseAccess, InfobaseLock};
 use crate::use_cases::result::UseCaseError;
 #[cfg(test)]
 use crate::use_cases::result::UseCaseFailure;
-use crate::use_cases::workspace_lock::{acquire_workspace_lock, WorkspaceLockGuard};
+use crate::use_cases::workspace_lock::{acquire_workspace_lock, CommandLockGuard};
 
-/// Runs an adapter dispatch under the shared workspace lock.
+/// Отказ границы команды: шаг и ошибка. Сценарий не запускался.
 ///
-/// Занятый каталог отказывает здесь своим родом `WorkspaceBusy` для всякой команды: словарь
-/// провода выбирает транспорт, а не граница замка.
+/// Шаг — `workspace lock`, `infobase lock` или `workspace preparation` из словаря фаз
+/// домена: адаптер печатает его тем же шагом, что и отказы своих сценариев.
+#[derive(Debug)]
+pub struct BoundaryRefusal {
+    pub phase: InfobaseTransferPhase,
+    pub error: UseCaseError,
+}
+
+/// Runs an adapter dispatch under the shared workspace lock and, for a command that opens a
+/// file infobase, under the infobase lock taken after it.
+///
+/// Занятый каталог отказывает здесь своим родом `WorkspaceBusy`, занятая база —
+/// `InfobaseBusy` для всякой команды: словарь провода выбирает транспорт, а не граница
+/// замка. `before_dispatch` идёт под обоими замками и получает предупреждение команды
+/// чтения, которой замок базы не достался.
 pub fn dispatch_with_workspace_lock<TResult>(
     config: &AppConfig,
     command: CommandName,
-    before_dispatch: impl FnOnce() -> Result<(), UseCaseError>,
+    base: BaseAccess,
+    before_dispatch: impl FnOnce(Option<&str>) -> Result<(), UseCaseError>,
     run: impl FnOnce() -> TResult,
-) -> Result<TResult, UseCaseError> {
-    let _workspace_lock = acquire(config, command)?;
-    before_dispatch()?;
+) -> Result<TResult, BoundaryRefusal> {
+    let (_workspace_lock, infobase_lock) = acquire(config, command, base)?;
+    before_dispatch(infobase_lock.warning()).map_err(|error| BoundaryRefusal {
+        phase: InfobaseTransferPhase::WorkspacePreparation,
+        error,
+    })?;
     Ok(run())
 }
 
-/// Та же граница для асинхронного сценария: замок держится, пока сценарий не дошёл до
-/// конечного состояния, и снимается вместе с его будущим — раньше, чем вызывающий
-/// отпустит что-то своё. Сценарий создаётся уже под замком.
+/// Та же граница для асинхронного сценария: замки держатся, пока сценарий не дошёл до
+/// конечного состояния, и снимаются вместе с его будущим — раньше, чем вызывающий
+/// отпустит что-то своё. Сценарий создаётся уже под замками; предупреждение команды
+/// чтения без замка базы уходит в журнал.
 pub(crate) async fn dispatch_with_workspace_lock_async<TFuture>(
     config: &AppConfig,
     command: CommandName,
+    base: BaseAccess,
     run: impl FnOnce() -> TFuture,
 ) -> Result<TFuture::Output, UseCaseError>
 where
     TFuture: Future,
 {
-    let _workspace_lock = acquire(config, command)?;
+    let (_workspace_lock, infobase_lock) =
+        acquire(config, command, base).map_err(|refusal| refusal.error)?;
+    if let Some(warning) = infobase_lock.warning() {
+        warn!(command = command.as_str(), "{warning}");
+    }
     Ok(run().await)
 }
 
-fn acquire(config: &AppConfig, command: CommandName) -> Result<WorkspaceLockGuard, UseCaseError> {
-    acquire_workspace_lock(config, command.as_str()).map_err(UseCaseError::from)
+/// Замок `workPath`, затем замок базы. Порядок сброса обратный: база отпускается раньше
+/// каталога.
+fn acquire(
+    config: &AppConfig,
+    command: CommandName,
+    base: BaseAccess,
+) -> Result<(CommandLockGuard, InfobaseLock), BoundaryRefusal> {
+    let workspace_lock =
+        acquire_workspace_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
+            phase: InfobaseTransferPhase::WorkspaceLock,
+            error: error.into(),
+        })?;
+    let infobase_lock =
+        acquire_infobase_lock(config, command.as_str(), base).map_err(|error| BoundaryRefusal {
+            phase: InfobaseTransferPhase::InfobaseLock,
+            error: error.into(),
+        })?;
+    Ok((workspace_lock, infobase_lock))
 }
 
 /// Maps a use-case failure payload into a transport-specific response while preserving the
@@ -68,8 +111,10 @@ mod tests {
         AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
         ToolsConfig,
     };
+    use crate::domain::infobase_export::InfobaseTransferPhase;
     use crate::support::fs::acquire_advisory_lock;
     use crate::use_cases::context::CommandName;
+    use crate::use_cases::infobase_lock::BaseAccess;
     use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure};
     use crate::use_cases::workspace_lock::workspace_lock_path;
     use std::cell::Cell;
@@ -84,7 +129,10 @@ mod tests {
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
-            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobase: crate::config::model::InfobaseConfig::file(format!(
+                "File={}",
+                work_path.with_file_name("ib").display()
+            )),
             infobases: Default::default(),
             infobase_name: None,
             source_sets: vec![SourceSetConfig {
@@ -126,17 +174,62 @@ mod tests {
         let _guard = acquire_advisory_lock(&lock_path).expect("workspace lock");
         let ran = Cell::new(false);
 
-        let error = dispatch_with_workspace_lock(
+        let refusal = dispatch_with_workspace_lock(
             &config,
             CommandName::Build,
-            || Ok(()),
+            BaseAccess::Writes,
+            |_| Ok(()),
             || {
                 ran.set(true);
             },
         )
         .expect_err("busy workspace");
 
-        assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
+        assert_eq!(refusal.phase, InfobaseTransferPhase::WorkspaceLock);
+        assert_eq!(refusal.error.kind(), UseCaseErrorKind::WorkspaceBusy);
+        assert!(!ran.get());
+        // Замок базы идёт после замка `workPath`: занятый каталог его не трогает.
+        assert_eq!(
+            fs::read_dir(dir.path())
+                .expect("dir")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains("infobase"))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_held_base_stops_the_dispatch_after_the_workspace_lock() {
+        let dir = tempdir().expect("tempdir");
+        let first_work = dir.path().join("first");
+        let second_work = dir.path().join("second");
+        fs::create_dir_all(&first_work).expect("first work");
+        fs::create_dir_all(&second_work).expect("second work");
+        let mut second = sample_config(&second_work);
+        second.infobase = sample_config(&first_work).infobase;
+        let ran = Cell::new(false);
+
+        let refusal = dispatch_with_workspace_lock(
+            &sample_config(&first_work),
+            CommandName::Build,
+            BaseAccess::Writes,
+            |_| Ok(()),
+            || {
+                dispatch_with_workspace_lock(
+                    &second,
+                    CommandName::Test,
+                    BaseAccess::Writes,
+                    |_| Ok(()),
+                    || ran.set(true),
+                )
+            },
+        )
+        .expect("first command holds both locks")
+        .expect_err("second command is refused on the base");
+
+        assert_eq!(refusal.phase, InfobaseTransferPhase::InfobaseLock);
+        assert_eq!(refusal.error.kind(), UseCaseErrorKind::InfobaseBusy);
         assert!(!ran.get());
     }
 }

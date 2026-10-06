@@ -102,7 +102,7 @@ fn a_positional_argument_names_a_source_set_and_never_a_base() {
     let project = project();
     let cf = project.out.join("main.cf").display().to_string();
     // Имя объявленной базы и строка соединения: ни то, ни другое набором не является.
-    for value in ["test", "File=/tmp/another-ib"] {
+    for value in ["test", "File=/tmp/another-ib-27a9d3"] {
         for args in commands_with_a_set(value, &cf) {
             let output = run(&project, &args);
             assert_eq!(output.status.code(), Some(2), "{args:?}");

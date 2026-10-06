@@ -78,6 +78,10 @@ pub enum AppError {
     #[error("workspace busy: {0}")]
     WorkspaceBusy(String),
 
+    /// Файловую базу держит другая команда раннера: занято, можно повторить.
+    #[error("infobase busy: {0}")]
+    InfobaseBusy(String),
+
     #[error("cancelled: {message}")]
     Cancelled { message: String, at: CancelledAt },
 
@@ -217,6 +221,7 @@ impl AppError {
             Self::CapabilityUnavailable(_)
             | Self::EnvironmentUnavailable(_)
             | Self::WorkspaceBusy(_)
+            | Self::InfobaseBusy(_)
             | Self::TimedOut(_)
             | Self::InvalidOutput(_)
             | Self::Validation(_)
@@ -243,6 +248,7 @@ impl AppError {
                 Self::EnvironmentUnavailable(format!("{context}; {message}"))
             }
             Self::WorkspaceBusy(message) => Self::WorkspaceBusy(format!("{context}; {message}")),
+            Self::InfobaseBusy(message) => Self::InfobaseBusy(format!("{context}; {message}")),
             Self::Cancelled { message, at } => Self::Cancelled {
                 message: format!("{context}; {message}"),
                 at,

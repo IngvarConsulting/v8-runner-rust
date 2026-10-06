@@ -118,7 +118,7 @@ fn write_config(path: &Path, base_path: &Path, work_path: &Path, platform_path: 
         base_path,
         work_path,
         platform_path,
-        "  connection: 'File=/tmp/ib'\n",
+        "  connection: 'File=ib'\n",
     );
 }
 
@@ -181,7 +181,7 @@ fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
 
 fn write_designer_config(path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -197,7 +197,7 @@ fn write_edt_dump_config(
     edt_path: &Path,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n    interactive-mode: false\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n    interactive-mode: false\n",
         work_path.display(),
         platform_path.display(),
         edt_path.display(),
@@ -1156,7 +1156,7 @@ fn an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir() {
     let (dir, config_path, _binary, _work, base_path, calls_log) = setup_project_in_a_repository();
     fs::write(
         config_path.with_file_name("v8project.local.yaml"),
-        "infobases:\n  staging:\n    connection: 'File=/tmp/staging-ib'\n",
+        "infobases:\n  staging:\n    connection: 'File=/tmp/staging-ib-e5d2d6'\n",
     )
     .expect("local config");
     let hand_written = base_path.join("main").join("hand-written.xml");
@@ -1237,7 +1237,7 @@ fn a_command_line_advice_never_repeats_the_connection_string() {
     fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
 
     let config = config_path.display().to_string();
-    let connection = format!("File=/tmp/staging-ib;Wsp={CONNECTION_SECRET}");
+    let connection = format!("File=/tmp/staging-ib-03ba73;Wsp={CONNECTION_SECRET}");
     let output = v8_runner_command()
         .args([
             "--config",
@@ -1277,7 +1277,7 @@ fn an_mcp_advice_never_repeats_the_connection_string_of_the_server() {
     fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
 
     let config = config_path.display().to_string();
-    let connection = format!("File=/tmp/staging-ib;Wsp={CONNECTION_SECRET}");
+    let connection = format!("File=/tmp/staging-ib-fe0d89;Wsp={CONNECTION_SECRET}");
     let answer = support::mcp::call_tool_started_with(
         &[
             "--config",

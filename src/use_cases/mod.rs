@@ -35,6 +35,8 @@ pub mod ibcmd_diagnostics;
 /// What stays out of the project git: `.gitignore` patterns and the tracked version-file refusal.
 pub(crate) mod ignored_files;
 pub mod infobase_export;
+/// File infobase lock held for the whole command, after the workspace lock.
+pub mod infobase_lock;
 /// Init orchestration use case.
 pub mod init_project;
 /// Shared command interruption status, metadata and message vocabulary.

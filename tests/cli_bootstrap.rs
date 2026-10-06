@@ -67,7 +67,7 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
         .args(bootstrap_args(
             &project_dir,
             &platform_path,
-            "File=/tmp/source ib",
+            "File=/tmp/source ib-7da9f6",
         ))
         .output()
         .expect("run command");
@@ -87,7 +87,7 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     );
     assert!(fs::read_to_string(project_dir.join("v8project.local.yaml"))
         .expect("local")
-        .contains("connection: '/F \"/tmp/source ib\"'"));
+        .contains("connection: '/F \"/tmp/source ib-7da9f6\"'"));
     assert!(config.contains("path: 'src/configuration'"));
     assert!(config.contains("version: '8.3.27'"));
     assert!(!config.contains("platform_path"));
@@ -108,7 +108,7 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
 
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("/DumpConfigToFiles"));
-    assert!(calls.contains("/F /tmp/source ib"));
+    assert!(calls.contains("/F /tmp/source ib-7da9f6"));
 }
 
 /// `--source-dir ./src`: `v8project.yaml` хранит написание пользователя, а argv платформы,
@@ -121,7 +121,7 @@ fn clone_with_a_dotted_source_dir_hands_the_platform_a_clean_path() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-a32ad7");
     args.insert(0, "--json-message".to_owned());
     args.extend(["--source-dir".to_owned(), "./src".to_owned()]);
 
@@ -165,7 +165,7 @@ fn bootstrap_unquotes_simple_file_connection_path() {
         .args(bootstrap_args(
             &project_dir,
             &platform_path,
-            "File=\"/tmp/source ib\"",
+            "File=\"/tmp/source ib-6563c9\"",
         ))
         .output()
         .expect("run command");
@@ -180,10 +180,10 @@ fn bootstrap_unquotes_simple_file_connection_path() {
     assert!(!config.contains("infobase"), "{config}");
     assert!(fs::read_to_string(project_dir.join("v8project.local.yaml"))
         .expect("local")
-        .contains("connection: '/F \"/tmp/source ib\"'"));
+        .contains("connection: '/F \"/tmp/source ib-6563c9\"'"));
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("/F /tmp/source ib"));
-    assert!(!calls.contains("\\\"/tmp/source ib\\\""));
+    assert!(calls.contains("/F /tmp/source ib-6563c9"));
+    assert!(!calls.contains("\\\"/tmp/source ib-6563c9\\\""));
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-fdfed5");
     args.splice(
         0..0,
         [
@@ -260,7 +260,7 @@ fn bootstrap_preserves_non_secret_connection_attributes() {
         .args(bootstrap_args(
             &project_dir,
             &platform_path,
-            "File=/tmp/source-ib;Locale=ru",
+            "File=/tmp/source-ib-e0e0d6;Locale=ru",
         ))
         .output()
         .expect("run command");
@@ -275,9 +275,9 @@ fn bootstrap_preserves_non_secret_connection_attributes() {
     assert!(!config.contains("infobase"), "{config}");
     assert!(fs::read_to_string(project_dir.join("v8project.local.yaml"))
         .expect("local")
-        .contains("connection: 'File=/tmp/source-ib;Locale=ru'"));
+        .contains("connection: 'File=/tmp/source-ib-e0e0d6;Locale=ru'"));
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("/IBConnectionString File=/tmp/source-ib;Locale=ru"));
+    assert!(calls.contains("/IBConnectionString File=/tmp/source-ib-e0e0d6;Locale=ru"));
 }
 
 #[test]
@@ -303,7 +303,7 @@ fn bootstrap_rejects_existing_targets_without_force() {
             .args(bootstrap_args(
                 &project_dir,
                 &platform_path,
-                "File=/tmp/source-ib",
+                "File=/tmp/source-ib-773372",
             ))
             .output()
             .expect("run command");
@@ -323,7 +323,7 @@ fn bootstrap_does_not_write_local_overlay_when_gitignore_update_fails() {
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
     fs::create_dir_all(project_dir.join(".gitignore")).expect("gitignore dir");
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-81b299");
     // Каталог с `.gitignore` не пуст: `--force` снимает этот отказ, чтобы дойти до записи.
     args.extend([
         "--force".to_owned(),
@@ -355,7 +355,7 @@ fn bootstrap_force_overwrites_existing_targets() {
     fs::create_dir_all(project_dir.join("src/configuration")).expect("source dir");
     fs::write(project_dir.join("v8project.yaml"), "existing").expect("config");
     fs::write(project_dir.join("v8project.local.yaml"), "existing").expect("local");
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-dd5d95");
     args.push("--force".to_owned());
 
     let output = v8_runner_command()
@@ -372,8 +372,8 @@ fn bootstrap_force_overwrites_existing_targets() {
 #[test]
 fn bootstrap_rejects_embedded_connection_credentials() {
     for connection in [
-        "File=/tmp/source-ib;Usr=Admin;Pwd=secret",
-        "/F /tmp/source-ib /N Admin /P secret",
+        "File=/tmp/source-ib-ebf5e4;Usr=Admin;Pwd=secret",
+        "/F /tmp/source-ib-ebf5e4 /N Admin /P secret",
         "/S server/ref /N=Admin /P=secret",
     ] {
         let dir = temp_workspace();
@@ -405,7 +405,7 @@ fn bootstrap_rejects_global_config_flag_in_text_mode() {
             "--project-dir",
             &project_dir.display().to_string(),
             "--connection",
-            "File=/tmp/source-ib",
+            "File=/tmp/source-ib-d6b84d",
             "--platform-version",
             "8.3.27",
             "--platform-path",
@@ -436,7 +436,7 @@ fn bootstrap_rejects_global_config_flag_in_json_mode() {
             "--project-dir",
             &project_dir.display().to_string(),
             "--connection",
-            "File=/tmp/source-ib",
+            "File=/tmp/source-ib-28863a",
             "--platform-version",
             "8.3.27",
             "--platform-path",
@@ -465,7 +465,7 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 17);
     let action_log = dir.path().join("actions.log");
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-2c4a25");
     args.splice(
         0..0,
         [
@@ -525,7 +525,7 @@ fn clone_refuses_a_busy_workspace_before_writing_the_project() {
     write_designer_dump_script(&platform_path, &calls_log, 0);
     hold_workspace_lock(&project_dir.join("build"));
 
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-e461de");
     args.insert(0, "--json-message".to_owned());
     let output = v8_runner_command()
         .args(&args)
@@ -549,7 +549,7 @@ fn clone_refuses_a_busy_workspace_before_writing_the_project() {
         .args(bootstrap_args(
             &project_dir,
             &platform_path,
-            "File=/tmp/source-ib",
+            "File=/tmp/source-ib-e461de",
         ))
         .output()
         .expect("run command");
@@ -580,7 +580,7 @@ fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
     let stderr = dir.path().join("stderr.log");
     write_script(&platform_path, &interruptible_stub(&started, &release));
 
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-6a33f0");
     args.insert(0, "--json-message".to_owned());
     let mut runner = RunnerGuard(
         v8_runner_command()
@@ -632,7 +632,7 @@ fn write_minimal_config(dir: &Path) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
             work_path.display()
         ),
     )
@@ -910,7 +910,7 @@ fn legacy_top_level_connection_is_rejected_in_json_mode() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nconnection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+            "workPath: '{}'\nformat: DESIGNER\nconnection: 'File=/tmp/ib-778600'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
             work_path.display()
         ),
     )
@@ -948,7 +948,7 @@ fn legacy_top_level_credentials_is_rejected_in_json_mode() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-4311a0'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
             work_path.display()
         ),
     )
@@ -986,7 +986,7 @@ fn top_level_execution_timeout_seconds_is_rejected_in_json_mode() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+            "workPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-fefeda'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
             work_path.display()
         ),
     )
@@ -1025,7 +1025,7 @@ fn clone_preview_names_the_project_it_would_write_and_writes_nothing() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-2d2dc2");
     args.insert(0, "--json-message".to_owned());
     args.push("--dry-run".to_owned());
 
@@ -1088,7 +1088,7 @@ fn clone_preview_refuses_without_a_platform_and_names_what_it_looked_for() {
     // Каталог есть, утилиты в нём нет: подсказка пути замыкает поиск, и в PATH он не уходит.
     let platform_dir = dir.path().join("platform");
     fs::create_dir_all(platform_dir.join("bin")).expect("platform dir");
-    let mut args = bootstrap_args(&project_dir, &platform_dir, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_dir, "File=/tmp/source-ib-a86510");
     args.insert(0, "--json-message".to_owned());
     args.push("--dry-run".to_owned());
 
@@ -1119,7 +1119,7 @@ fn clone_preview_text_output_does_not_announce_a_cloned_project() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-fa3db2");
     args.push("--dry-run".to_owned());
 
     let preview = v8_runner_command()
@@ -1144,7 +1144,7 @@ fn clone_preview_text_output_does_not_announce_a_cloned_project() {
         .args(bootstrap_args(
             &project_dir,
             &platform_path,
-            "File=/tmp/source-ib",
+            "File=/tmp/source-ib-fa3db2",
         ))
         .output()
         .expect("run command");
@@ -1168,7 +1168,7 @@ fn clone_resolves_a_symlinked_project_directory_to_its_target() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    let mut args = bootstrap_args(&link, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&link, &platform_path, "File=/tmp/source-ib-ead46b");
     args.insert(0, "--json-message".to_owned());
     args.push("--dry-run".to_owned());
 
@@ -1214,7 +1214,7 @@ fn clone_into_a_subdirectory_of_a_repository_writes_the_project_gitignore() {
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
     write_designer_dump_script(&platform_path, &calls_log, 0);
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-a37d82");
     args.insert(0, "--json-message".to_owned());
 
     let output = v8_runner_command()
@@ -1262,7 +1262,7 @@ fn clone_takes_its_source_from_the_from_key() {
             "--project-dir",
             &project_dir.display().to_string(),
             "--from",
-            "File=/tmp/source-ib",
+            "File=/tmp/source-ib-f03762",
             "--platform-version",
             "8.3.27",
             "--platform-path",
@@ -1279,12 +1279,12 @@ fn clone_takes_its_source_from_the_from_key() {
     );
     let local = fs::read_to_string(project_dir.join("v8project.local.yaml")).expect("local");
     assert!(
-        local.contains("connection: '/F \"/tmp/source-ib\"'"),
+        local.contains("connection: '/F \"/tmp/source-ib-f03762\"'"),
         "{local}"
     );
     assert!(fs::read_to_string(calls_log)
         .expect("calls")
-        .contains("/F /tmp/source-ib"));
+        .contains("/F /tmp/source-ib-f03762"));
 
     let help = v8_runner_command()
         .args(["clone", "--help"])
@@ -1327,7 +1327,7 @@ fn clone_refuses_a_non_empty_directory_before_writing_anything() {
     fs::write(project_dir.join("notes.txt"), "user file").expect("user file");
 
     for preview in [false, true] {
-        let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+        let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-5e3072");
         if preview {
             args.insert(0, "--dry-run".to_owned());
         }
@@ -1357,7 +1357,7 @@ fn clone_refuses_a_non_empty_directory_before_writing_anything() {
     let (code, payload) = run_clone_json(bootstrap_args(
         &project_dir,
         &platform_path,
-        "File=/tmp/source-ib",
+        "File=/tmp/source-ib-5e3072",
     ));
     assert_eq!(code, Some(3), "{payload}");
     assert_eq!(payload["error"]["code"], "workspace_busy", "{payload}");
@@ -1378,7 +1378,7 @@ fn clone_refuses_a_work_path_holding_a_foreign_file() {
     let (code, payload) = run_clone_json(bootstrap_args(
         &project_dir,
         &platform_path,
-        "File=/tmp/source-ib",
+        "File=/tmp/source-ib-7849f6",
     ));
 
     assert_eq!(code, Some(2), "{payload}");
@@ -1405,7 +1405,7 @@ fn clone_into_a_directory_holding_only_git_writes_the_project() {
     let (code, payload) = run_clone_json(bootstrap_args(
         &project_dir,
         &platform_path,
-        "File=/tmp/source-ib",
+        "File=/tmp/source-ib-e0ccf6",
     ));
 
     assert_eq!(code, Some(0), "{payload}");
@@ -1426,7 +1426,7 @@ fn clone_force_writes_the_project_into_a_non_empty_directory() {
     write_designer_dump_script(&platform_path, &calls_log, 0);
     fs::create_dir_all(&project_dir).expect("project dir");
     fs::write(project_dir.join("notes.txt"), "user file").expect("user file");
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-532665");
     args.push("--force".to_owned());
 
     let (code, payload) = run_clone_json(args);
@@ -1471,7 +1471,7 @@ fn a_clone_refusal_does_not_offer_force() {
     vcs(&["commit", "-qm", "readme"]);
     fs::write(source_dir.join("hand-written.xml"), "mine\n").expect("hand-written");
 
-    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib-8b94e9");
     args.push("--force".to_owned());
     let (code, payload) = run_clone_json(args);
 

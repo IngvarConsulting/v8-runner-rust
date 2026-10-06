@@ -60,7 +60,7 @@ fn write_config(
         .map(|path| format!("  edt_cli:\n    path: '{}'\n", path.display()))
         .unwrap_or_default();
     let config = format!(
-        "workPath: '{}'\nformat: {}\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\ntools:\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: {}\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\ntools:\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         format,
         platform_path.display(),
@@ -178,7 +178,7 @@ fn a_preview_that_cannot_find_the_platform_still_reports_no_dispatch() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-497139'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
             work_path.display(),
             install_dir.display()
         ),
@@ -606,7 +606,7 @@ fn check_refuses_a_project_of_external_subjects_only() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: reports\n    type: EXTERNAL_REPORTS\n    path: reports\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib-3bc18c'\nsource-set:\n  - name: reports\n    type: EXTERNAL_REPORTS\n    path: reports\ntools:\n  platform:\n    path: '{}'\n",
             work_path.display(),
             install_dir.display()
         ),

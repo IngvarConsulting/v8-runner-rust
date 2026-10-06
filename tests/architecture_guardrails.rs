@@ -1055,11 +1055,18 @@ impl SourceIndex {
     /// замыкание либо отдаёт его другому помощнику. Точка неподвижная: помощники зовут
     /// друг друга.
     fn lock_api(&self) -> LockApi {
-        let acquire = path_of("crate::use_cases::workspace_lock::acquire_workspace_lock");
-        let mut acquirers = std::collections::HashSet::from([acquire.clone()]);
+        // Замок `workPath` и замок файловой базы берёт одна граница; повторный захват
+        // любого из них внутри сценария — та же ошибка.
+        let seeds = [
+            path_of("crate::use_cases::workspace_lock::acquire_workspace_lock"),
+            path_of("crate::use_cases::infobase_lock::acquire_infobase_lock"),
+        ];
+        let mut acquirers: std::collections::HashSet<_> = seeds.iter().cloned().collect();
         for (path, function) in &self.functions {
             if closure_parameters(&function.item.sig).is_empty()
-                && self.body_references(function, &acquire)
+                && seeds
+                    .iter()
+                    .any(|acquire| self.body_references(function, acquire))
             {
                 acquirers.insert(path.clone());
             }
@@ -1608,12 +1615,14 @@ fn nested_orchestration_never_acquires_the_workspace_lock_inside_use_cases() {
     );
 }
 
-/// Ссылки слоя сценариев на захват замка или его помощников. `workspace_lock` замок
-/// реализует, `transport` — граница адаптера, где он берётся один раз за команду.
+/// Ссылки слоя сценариев на захват замка или его помощников. `workspace_lock` и
+/// `infobase_lock` замки реализуют, `transport` — граница адаптера, где они берутся один
+/// раз за команду.
 fn relocks_in_the_scenario_layer(index: &SourceIndex) -> Vec<String> {
     let lock = index.lock_api();
     let boundary = [
         path_of("crate::use_cases::workspace_lock"),
+        path_of("crate::use_cases::infobase_lock"),
         path_of("crate::use_cases::transport"),
     ];
     let mut relocks = Vec::new();

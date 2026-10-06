@@ -127,7 +127,7 @@ fn config_init_uses_json_envelope_and_output_override() {
             "--output",
             &config_path.display().to_string(),
             "--connection",
-            "File=/tmp/test-ib",
+            "File=/tmp/test-ib-50378c",
         ])
         .output()
         .expect("run command");
@@ -164,7 +164,8 @@ fn config_init_uses_json_envelope_and_output_override() {
     )
     .expect("local config");
     assert!(
-        local_config.contains("infobases:\n  origin:\n    connection: 'File=/tmp/test-ib'\n"),
+        local_config
+            .contains("infobases:\n  origin:\n    connection: 'File=/tmp/test-ib-50378c'\n"),
         "{local_config}"
     );
 }

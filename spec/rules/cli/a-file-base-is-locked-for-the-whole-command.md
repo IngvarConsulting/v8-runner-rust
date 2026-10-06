@@ -1,7 +1,10 @@
 ---
 id: INV.CLI.A-FILE-BASE-IS-LOCKED-FOR-THE-WHOLE-COMMAND
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/326
+check:
+  - tests/cli_infobase_lock.rs::a_second_command_on_a_held_base_is_refused_at_once_and_names_the_first
+  - tests/cli_infobase_lock.rs::an_mcp_tool_on_a_held_base_is_refused_at_once
+  - src/use_cases/infobase_lock.rs::a_held_base_refuses_a_second_command_and_names_the_first
+  - src/use_cases/infobase_lock.rs::a_base_reached_through_a_symlink_is_the_same_base
 ---
 
 # Файловая база занята на всё время команды

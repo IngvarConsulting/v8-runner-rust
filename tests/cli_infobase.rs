@@ -1905,7 +1905,7 @@ fn no_ready_provider_wins_over_workspace_contention_without_side_effects() {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
+            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib-99c468'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
             work.display(),
             platform.display()
         ),

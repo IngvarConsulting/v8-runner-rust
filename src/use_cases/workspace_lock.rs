@@ -15,33 +15,41 @@ use crate::support::fs::{
 use crate::support::path::nearest_existing_canonical_path;
 
 const WORKSPACE_LOCK_FILE_NAME: &str = ".v8-runner.workspace.lock";
+#[cfg(test)]
 const WORKSPACE_LOCK_SIDECAR_FILE_NAME: &str = ".v8-runner.workspace.lock.json";
 
+/// Замок команды: блокировка ОС и рядом с ней запись о команде, которая его держит.
+///
+/// Владеет замком только блокировка ОС (`support::fs`); запись — диагностика для отказа
+/// второй команде. Её удаляет сброс охранника, а запись убитой команды отказ не
+/// использует: она названа другим владельцем, чем текущая блокировка.
 #[derive(Debug)]
-pub(crate) struct WorkspaceLockGuard {
+pub(crate) struct CommandLockGuard {
     _lock: AdvisoryLockGuard,
     sidecar_path: PathBuf,
 }
 
-impl Drop for WorkspaceLockGuard {
+impl Drop for CommandLockGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.sidecar_path);
     }
 }
 
+/// Кто держит замок команды: запись рядом с блокировкой.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkspaceLockMetadata {
-    pid: u32,
+pub(crate) struct CommandLockHolder {
+    pub(crate) pid: u32,
     lock_owner: String,
-    command: String,
-    started_at: DateTime<Utc>,
-    canonical_work_path: PathBuf,
+    pub(crate) command: String,
+    pub(crate) started_at: DateTime<Utc>,
+    /// Рабочий каталог команды-владельца: он называет и рабочую копию.
+    pub(crate) canonical_work_path: PathBuf,
 }
 
 pub(crate) fn acquire_workspace_lock(
     config: &AppConfig,
     command_name: &str,
-) -> Result<WorkspaceLockGuard, AppError> {
+) -> Result<CommandLockGuard, AppError> {
     let canonical_work_path =
         nearest_existing_canonical_path(&config.work_path).map_err(|error| {
             AppError::Runtime(format!(
@@ -50,42 +58,60 @@ pub(crate) fn acquire_workspace_lock(
             ))
         })?;
     let lock_path = workspace_lock_path(&canonical_work_path);
-    let sidecar_path = workspace_lock_sidecar_path(&canonical_work_path);
 
-    let lock = try_acquire_advisory_lock(&lock_path).map_err(|error| match error.kind() {
-        ErrorKind::WouldBlock | ErrorKind::AlreadyExists => AppError::WorkspaceBusy(format!(
-            "{}; {error}",
-            render_busy_message(
-                command_name,
-                &canonical_work_path,
-                &lock_path,
-                &sidecar_path,
-            )
-        )),
-        _ => AppError::Runtime(format!(
-            "failed to acquire {command_name} workspace lock '{}': {error}",
-            lock_path.display()
-        )),
-    })?;
+    take_command_lock(&lock_path, command_name, &canonical_work_path).map_err(|error| {
+        match error.kind() {
+            ErrorKind::WouldBlock | ErrorKind::AlreadyExists => AppError::WorkspaceBusy(format!(
+                "{}; {error}",
+                render_busy_message(command_name, &canonical_work_path, &lock_path)
+            )),
+            _ => AppError::Runtime(format!(
+                "failed to acquire {command_name} workspace lock '{}': {error}",
+                lock_path.display()
+            )),
+        }
+    })
+}
 
-    cleanup_sidecar_temp_files(&canonical_work_path);
+/// Берёт замок команды без ожидания и записывает рядом, кто его держит.
+///
+/// Ошибка — та же, что у [`try_acquire_advisory_lock`]: `WouldBlock` или `AlreadyExists`
+/// значат, что замок держит другой владелец, остальные — что взять его здесь нельзя.
+/// Запись о владельце не пишется — замок всё равно взят: она только диагностика.
+pub(crate) fn take_command_lock(
+    lock_path: &Path,
+    command_name: &str,
+    canonical_work_path: &Path,
+) -> std::io::Result<CommandLockGuard> {
+    let sidecar_path = command_lock_sidecar_path(lock_path);
+    let lock = try_acquire_advisory_lock(lock_path)?;
 
-    if let Err(error) =
-        write_lock_metadata(&sidecar_path, command_name, &canonical_work_path, &lock)
+    cleanup_sidecar_temp_files(&sidecar_path);
+
+    if let Err(error) = write_lock_metadata(&sidecar_path, command_name, canonical_work_path, &lock)
     {
         let _ = std::fs::remove_file(&sidecar_path);
         warn!(
             command = command_name,
             sidecar_path = %sidecar_path.display(),
             error = %error,
-            "failed to write workspace lock metadata; continuing without sidecar"
+            "failed to write command lock metadata; continuing without sidecar"
         );
     }
 
-    Ok(WorkspaceLockGuard {
+    Ok(CommandLockGuard {
         _lock: lock,
         sidecar_path,
     })
+}
+
+/// Запись о том, кто держит замок, — если она относится к нынешней блокировке. Запись
+/// убитой команды или чужая запись не годится: отказ тогда не называет владельца.
+pub(crate) fn command_lock_holder(lock_path: &Path) -> Option<CommandLockHolder> {
+    let active_lock = read_advisory_lock_metadata(lock_path).ok()?;
+    read_lock_metadata(&command_lock_sidecar_path(lock_path))
+        .ok()
+        .filter(|holder| holder.lock_owner == active_lock.owner_id)
 }
 
 pub(crate) fn workspace_lock_path(work_path: &Path) -> PathBuf {
@@ -99,8 +125,11 @@ pub(crate) fn is_workspace_lock_file(name: &std::ffi::OsStr) -> bool {
         .is_some_and(|name| name.starts_with(WORKSPACE_LOCK_FILE_NAME))
 }
 
-fn workspace_lock_sidecar_path(work_path: &Path) -> PathBuf {
-    work_path.join(WORKSPACE_LOCK_SIDECAR_FILE_NAME)
+/// Запись о владельце лежит рядом с замком под его именем и `.json`.
+fn command_lock_sidecar_path(lock_path: &Path) -> PathBuf {
+    let mut name = lock_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".json");
+    lock_path.with_file_name(name)
 }
 
 fn write_lock_metadata(
@@ -109,7 +138,7 @@ fn write_lock_metadata(
     canonical_work_path: &Path,
     lock: &AdvisoryLockGuard,
 ) -> Result<(), AppError> {
-    let metadata = WorkspaceLockMetadata {
+    let metadata = CommandLockHolder {
         pid: std::process::id(),
         lock_owner: advisory_lock_owner_id(lock).to_owned(),
         command: command_name.to_owned(),
@@ -117,7 +146,7 @@ fn write_lock_metadata(
         canonical_work_path: canonical_work_path.to_path_buf(),
     };
     let encoded = serde_json::to_vec_pretty(&metadata).map_err(|error| {
-        AppError::Runtime(format!("failed to encode workspace lock metadata: {error}"))
+        AppError::Runtime(format!("failed to encode command lock metadata: {error}"))
     })?;
     let temp_path = sidecar_path.with_extension(format!(
         "{}.tmp.{}",
@@ -129,38 +158,27 @@ fn write_lock_metadata(
     ));
     std::fs::write(&temp_path, encoded).map_err(|error| {
         AppError::Runtime(format!(
-            "failed to write temporary workspace lock metadata '{}': {error}",
+            "failed to write temporary command lock metadata '{}': {error}",
             temp_path.display()
         ))
     })?;
     publish_file_atomically(&temp_path, sidecar_path).map_err(|error| {
         let _ = std::fs::remove_file(&temp_path);
         AppError::Runtime(format!(
-            "failed to publish workspace lock metadata '{}': {error}",
+            "failed to publish command lock metadata '{}': {error}",
             sidecar_path.display()
         ))
     })
 }
 
-fn render_busy_message(
-    command_name: &str,
-    canonical_work_path: &Path,
-    lock_path: &Path,
-    sidecar_path: &Path,
-) -> String {
-    let active_lock = read_advisory_lock_metadata(lock_path).ok();
-    match read_lock_metadata(sidecar_path)
-        .ok()
-        .zip(active_lock)
-        .filter(|(metadata, lock)| metadata.lock_owner == lock.owner_id)
-        .map(|(metadata, _)| metadata)
-    {
-        Some(metadata) => format!(
+fn render_busy_message(command_name: &str, canonical_work_path: &Path, lock_path: &Path) -> String {
+    match command_lock_holder(lock_path) {
+        Some(holder) => format!(
             "cannot start {command_name}: workspace '{}' is already locked by '{}' (pid {}, started at {})",
             canonical_work_path.display(),
-            metadata.command,
-            metadata.pid,
-            metadata.started_at.to_rfc3339(),
+            holder.command,
+            holder.pid,
+            holder.started_at.to_rfc3339(),
         ),
         None => format!(
             "cannot start {command_name}: workspace '{}' is already in use by another command",
@@ -169,15 +187,22 @@ fn render_busy_message(
     }
 }
 
-fn read_lock_metadata(path: &Path) -> std::io::Result<WorkspaceLockMetadata> {
+fn read_lock_metadata(path: &Path) -> std::io::Result<CommandLockHolder> {
     let raw = std::fs::read(path)?;
     serde_json::from_slice(&raw)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
-fn cleanup_sidecar_temp_files(work_path: &Path) {
-    let prefix = format!("{WORKSPACE_LOCK_SIDECAR_FILE_NAME}.tmp.");
-    let Ok(entries) = std::fs::read_dir(work_path) else {
+/// Убирает временные копии записи о владельце, оставленные прерванной записью.
+fn cleanup_sidecar_temp_files(sidecar_path: &Path) {
+    let (Some(dir), Some(name)) = (
+        sidecar_path.parent(),
+        sidecar_path.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return;
+    };
+    let prefix = format!("{name}.tmp.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -195,7 +220,7 @@ fn cleanup_sidecar_temp_files(work_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_workspace_lock, workspace_lock_path, WorkspaceLockGuard,
+        acquire_workspace_lock, workspace_lock_path, CommandLockGuard,
         WORKSPACE_LOCK_SIDECAR_FILE_NAME,
     };
     use crate::config::model::{
@@ -229,7 +254,7 @@ mod tests {
         }
     }
 
-    fn hold_lock(config: &AppConfig, command_name: &str) -> WorkspaceLockGuard {
+    fn hold_lock(config: &AppConfig, command_name: &str) -> CommandLockGuard {
         acquire_workspace_lock(config, command_name).expect("workspace lock")
     }
 
@@ -309,7 +334,7 @@ mod tests {
         let canonical =
             crate::support::path::nearest_existing_canonical_path(work.path()).expect("canonical");
         // Каталог на месте sidecar: переименовать поверх него файл нельзя.
-        std::fs::create_dir_all(super::workspace_lock_sidecar_path(&canonical)).expect("blocker");
+        std::fs::create_dir_all(canonical.join(WORKSPACE_LOCK_SIDECAR_FILE_NAME)).expect("blocker");
 
         let guard = acquire_workspace_lock(&config, "build")
             .expect("the OS lock is taken even when the sidecar cannot be written");

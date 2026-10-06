@@ -109,7 +109,7 @@ fn write_config(path: &Path, base_path: &Path, work_path: &Path, platform_path: 
         work_path,
         platform_path,
         "DESIGNER",
-        "File=/tmp/ib",
+        "File=ib",
     );
 }
 
@@ -272,7 +272,7 @@ fn setup_ibcmd_project() -> (
         &work_path,
         &binary_path,
         "IBCMD",
-        "File=/tmp/ib",
+        "File=ib",
     );
 
     (
@@ -316,7 +316,7 @@ fn setup_edt_ibcmd_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     write_edt_script(&edt_cli_path, &edt_calls_log);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib'\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: EDT\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=ib'\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
         work_path.display(),
         ibcmd_path.display(),
         edt_cli_path.display(),
@@ -376,7 +376,7 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
     write_edt_script(&edt_cli_path, &edt_calls_log);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: project/exts/client-mcp\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=ib'\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: project/exts/client-mcp\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
         edt_cli_path.display(),
@@ -468,7 +468,7 @@ fn a_planned_edt_build_refuses_when_the_utility_that_would_load_it_is_missing() 
         fs::write(
             &config_path,
             format!(
-                "workPath: '{}'\nformat: EDT\n{providers}infobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n  edt_cli:\n    path: '{}'\n",
+                "workPath: '{}'\nformat: EDT\n{providers}infobase:\n  connection: 'File=/tmp/ib-dca9b5'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n  edt_cli:\n    path: '{}'\n",
                 work_path.display(),
                 empty_platform.display(),
                 edt_cli_path.display()
@@ -557,7 +557,7 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib-d0d6a6'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
             work_path.display(),
             platform_path.display(),
             edt_cli_path.display()
@@ -659,7 +659,7 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/processors\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib-c411f0'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/processors\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
             work_path.display(),
             platform_path.display(),
             edt_cli_path.display()
@@ -1158,7 +1158,7 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
     write_edt_script(&edt_cli_path, &edt_calls_log);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n        format: EDT\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib-48b787'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n        format: EDT\n",
         work_path.display(),
         platform_path.display(),
         edt_cli_path.display(),
@@ -1274,7 +1274,7 @@ fn write_client_mcp_config(
     fs::write(
         path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n{platform_extra}  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n{platform_extra}  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n",
             work_path.display(),
             platform_path.display(),
             tool_source.display()
@@ -1489,7 +1489,7 @@ fn build_ibcmd_full_rebuild_invokes_import_and_apply() {
 fn build_ibcmd_passes_credentials_to_import_and_apply() {
     let (dir, config_path, binary_path, work_path, _base_path, calls_log) = setup_ibcmd_project();
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib'\n  user: Admin\n  password: secret\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib-feb95f'\n  user: Admin\n  password: secret\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         binary_path.display(),
     );
@@ -1508,12 +1508,11 @@ fn build_ibcmd_passes_credentials_to_import_and_apply() {
 
     assert!(output.status.success());
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(
-        calls.contains("infobase --db-path /tmp/ib config import --user Admin --password secret")
-    );
-    assert!(
-        calls.contains("infobase --db-path /tmp/ib config apply --user Admin --password secret")
-    );
+    assert!(calls.contains(
+        "infobase --db-path /tmp/ib-feb95f config import --user Admin --password secret"
+    ));
+    assert!(calls
+        .contains("infobase --db-path /tmp/ib-feb95f config apply --user Admin --password secret"));
     assert!(calls.contains("--user Admin"));
     assert!(calls.contains("--password secret"));
 }
@@ -1613,7 +1612,7 @@ fn build_ibcmd_accepts_raw_f_connection() {
         &dir.path().join("work"),
         &binary_path,
         "IBCMD",
-        "/F /tmp/ib",
+        "/F /tmp/ib-bf2ee5",
     );
 
     let output = v8_runner_command()
@@ -1628,7 +1627,7 @@ fn build_ibcmd_accepts_raw_f_connection() {
 
     assert!(output.status.success());
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("--db-path /tmp/ib"));
+    assert!(calls.contains("--db-path /tmp/ib-bf2ee5"));
     assert!(calls.contains("config apply"));
 }
 

@@ -79,15 +79,19 @@ impl V8Connection {
             .map(|(_, value)| value)
     }
 
+    /// Каталог файловой базы: относительный путь — от каталога проекта, путь через
+    /// символическую ссылку — к тому же каталогу, что и прямой. `None` у серверной базы.
+    pub fn file_infobase_dir(&self, base_path: &std::path::Path) -> Option<std::path::PathBuf> {
+        use crate::support::path::{nearest_existing_canonical_path, resolve_from};
+        let path = std::path::Path::new(unquote_connection_value(self.file_path()?));
+        let absolute = resolve_from(base_path, path);
+        Some(nearest_existing_canonical_path(&absolute).unwrap_or(absolute))
+    }
+
     /// Stable address identity, excluding credentials and the selected executor.
     pub fn snapshot_identity(&self, base_path: &std::path::Path) -> Option<String> {
-        use crate::support::path::{
-            nearest_existing_canonical_path, resolve_from, snapshot_path_identity,
-        };
-        if let Some(path) = self.file_path() {
-            let path = std::path::Path::new(unquote_connection_value(path));
-            let absolute = resolve_from(base_path, path);
-            let canonical = nearest_existing_canonical_path(&absolute).unwrap_or(absolute);
+        use crate::support::path::snapshot_path_identity;
+        if let Some(canonical) = self.file_infobase_dir(base_path) {
             return Some(format!(
                 "file:{} ({})",
                 snapshot_path_identity(&canonical),

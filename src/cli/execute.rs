@@ -70,6 +70,7 @@ use crate::use_cases::dump_config;
 use crate::use_cases::extension_inventory;
 use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
+use crate::use_cases::infobase_lock::BaseAccess;
 use crate::use_cases::init_project;
 use crate::use_cases::interruption::record_cancellation;
 use crate::use_cases::launch_app;
@@ -87,7 +88,7 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
-use crate::use_cases::transport::dispatch_with_workspace_lock;
+use crate::use_cases::transport::{dispatch_with_workspace_lock, BoundaryRefusal};
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
 /// rendering the resulting command output.
@@ -241,6 +242,7 @@ fn execute_publish(
         config,
         presenter,
         CommandName::Publish,
+        BaseAccess::Untouched,
         clean_before_execution,
         dry_run,
         || match publish_infobase::execute(&context, config, &request) {
@@ -474,6 +476,7 @@ fn execute_tools_download(
         config,
         presenter,
         CommandName::ToolsDownload,
+        BaseAccess::Untouched,
         clean_before_execution,
         // превью у загрузки инструментов нет.
         false,
@@ -553,6 +556,7 @@ fn execute_extensions(
         config,
         presenter,
         CommandName::Extensions,
+        BaseAccess::Writes,
         clean_before_execution,
         dry_run,
         || match configure_extensions::execute(&context, config, &request) {
@@ -604,6 +608,7 @@ fn execute_extension_command(
         config,
         presenter,
         CommandName::Extensions,
+        extension_base_access(command),
         clean_before_execution,
         // Превью любой подкоманды платформу не поднимает, значит и `workPath` ему не нужен.
         dry_run,
@@ -847,6 +852,7 @@ fn execute_init(
         config,
         presenter,
         CommandName::Init,
+        BaseAccess::Writes,
         clean_before_execution,
         dry_run,
         || match init_project::execute(&context, config, &request) {
@@ -902,6 +908,7 @@ fn execute_build(
         config,
         presenter,
         CommandName::Build,
+        BaseAccess::Writes,
         clean_before_execution,
         dry_run,
         || match build_project::execute(&context, config, &request) {
@@ -959,6 +966,7 @@ fn execute_test(
         &effective_config,
         presenter,
         CommandName::Test,
+        BaseAccess::Writes,
         clean_before_execution,
         // превью у прогона тестов нет.
         false,
@@ -1006,6 +1014,7 @@ fn execute_load(
         config,
         presenter,
         CommandName::Load,
+        BaseAccess::Writes,
         clean_before_execution,
         dry_run,
         || match load_artifact::execute(&context, config, &request) {
@@ -1063,6 +1072,7 @@ fn execute_dump(
         config,
         presenter,
         CommandName::Dump,
+        BaseAccess::Writes,
         clean_before_execution,
         dry_run,
         || match dump_config::execute(&context, config, &request) {
@@ -1586,8 +1596,13 @@ fn execute_infobase_restore(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseRestore;
     let started = Instant::now();
-    let outcome =
-        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
+    let outcome = dispatch_under_cli_workspace_lock(
+        config,
+        presenter,
+        command,
+        BaseAccess::Writes,
+        clean_before_execution,
+        || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1635,7 +1650,8 @@ fn execute_infobase_restore(
                     Err(error)
                 }
             }
-        });
+        },
+    );
     outcome.unwrap_or_else(|refusal| {
         let result = restore_pre_dispatch_failure(
             &request,
@@ -1658,8 +1674,13 @@ fn execute_infobase_configuration_export(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseConfigurationExport;
     let started = Instant::now();
-    let outcome =
-        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
+    let outcome = dispatch_under_cli_workspace_lock(
+        config,
+        presenter,
+        command,
+        BaseAccess::Reads,
+        clean_before_execution,
+        || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1709,7 +1730,8 @@ fn execute_infobase_configuration_export(
                     Err(error)
                 }
             }
-        });
+        },
+    );
     outcome.unwrap_or_else(|refusal| {
         let result = configuration_pre_dispatch_failure(
             &request,
@@ -1732,8 +1754,13 @@ fn execute_infobase_dump(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseDump;
     let started = Instant::now();
-    let outcome =
-        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
+    let outcome = dispatch_under_cli_workspace_lock(
+        config,
+        presenter,
+        command,
+        BaseAccess::Reads,
+        clean_before_execution,
+        || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1781,7 +1808,8 @@ fn execute_infobase_dump(
                     Err(error)
                 }
             }
-        });
+        },
+    );
     outcome.unwrap_or_else(|refusal| {
         let result = snapshot_pre_dispatch_failure(
             &request,
@@ -1792,14 +1820,6 @@ fn execute_infobase_dump(
         render_snapshot_failure(command, result, &refusal.error, presenter);
         Err(refusal.error)
     })
-}
-
-fn workspace_refusal_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
-    if workspace_lock_acquired {
-        InfobaseTransferPhase::WorkspacePreparation
-    } else {
-        InfobaseTransferPhase::WorkspaceLock
-    }
 }
 
 /// Шаг, на котором команда отказала до работы исполнителя.
@@ -2180,6 +2200,7 @@ fn execute_convert(
         config,
         presenter,
         CommandName::Convert,
+        BaseAccess::Untouched,
         clean_before_execution,
         dry_run,
         || match convert_sources::execute(&context, config, &request) {
@@ -2233,6 +2254,7 @@ fn execute_artifacts(
         config,
         presenter,
         CommandName::Artifacts,
+        BaseAccess::Reads,
         clean_before_execution,
         dry_run,
         || match artifacts::execute(&context, config, &request) {
@@ -2279,6 +2301,7 @@ fn execute_syntax(
         config,
         presenter,
         CommandName::Syntax,
+        request.base_access(),
         clean_before_execution,
         dry_run,
         || match check_syntax::execute(&context, config, &request) {
@@ -2333,6 +2356,7 @@ fn execute_launch(
         config,
         presenter,
         CommandName::Launch,
+        BaseAccess::Writes,
         clean_before_execution,
         dry_run,
         || match launch_app::execute(&context, config, &request) {
@@ -2399,6 +2423,7 @@ pub(crate) fn with_cli_workspace_lock<T>(
     config: &AppConfig,
     presenter: &Presenter,
     command: CommandName,
+    base: BaseAccess,
     clean_before_execution: bool,
     preview: bool,
     run: impl FnOnce() -> Result<T, UseCaseError>,
@@ -2413,7 +2438,14 @@ pub(crate) fn with_cli_workspace_lock<T>(
         );
         return run();
     }
-    match dispatch_under_cli_workspace_lock(config, command, clean_before_execution, run) {
+    match dispatch_under_cli_workspace_lock(
+        config,
+        presenter,
+        command,
+        base,
+        clean_before_execution,
+        run,
+    ) {
         Ok(outcome) => outcome,
         Err(refusal) => {
             print_workspace_refusal(presenter, command, &refusal);
@@ -2422,29 +2454,26 @@ pub(crate) fn with_cli_workspace_lock<T>(
     }
 }
 
-/// Отказ границы `workPath` до сценария: замок не взят или каталог не подготовлен.
-///
-/// Фаза называет шаг отказа — `workspace lock` или `workspace preparation`; отказ печатает
-/// вызывающий, своей формой `data`, но с тем же шагом.
-struct WorkspaceRefusal {
-    phase: InfobaseTransferPhase,
-    error: UseCaseError,
-}
-
-/// Граница `workPath` без печати: внешняя ошибка — отказ границы, внутренний итог —
-/// сценария. Занятый каталог у всякой команды — `WorkspaceBusy` на шаге `workspace lock`.
+/// Граница команды без печати: внешняя ошибка — отказ границы, внутренний итог —
+/// сценария. Занятый каталог у всякой команды — `WorkspaceBusy` на шаге `workspace lock`,
+/// занятая база — `InfobaseBusy` на шаге `infobase lock`. Команда чтения, которой замок
+/// базы не достался, идёт дальше, и ответ несёт её предупреждение.
 fn dispatch_under_cli_workspace_lock<T>(
     config: &AppConfig,
+    presenter: &Presenter,
     command: CommandName,
+    base: BaseAccess,
     clean_before_execution: bool,
     run: impl FnOnce() -> T,
-) -> Result<T, WorkspaceRefusal> {
-    let mut workspace_lock_acquired = false;
+) -> Result<T, BoundaryRefusal> {
     dispatch_with_workspace_lock(
         config,
         command,
-        || {
-            workspace_lock_acquired = true;
+        base,
+        |warning| {
+            if let Some(warning) = warning {
+                presenter.note_leading_warnings("infobase lock", &[warning.to_owned()]);
+            }
             if clean_before_execution {
                 clean_platform_logs_under_lock(config)
             } else {
@@ -2453,18 +2482,20 @@ fn dispatch_under_cli_workspace_lock<T>(
         },
         run,
     )
-    .map_err(|error| WorkspaceRefusal {
-        phase: workspace_refusal_phase(workspace_lock_acquired),
-        error,
-    })
+}
+
+/// Подкоманды `extensions`, которые только читают состав базы, — команды чтения.
+fn extension_base_access(command: &ExtensionsCommand) -> BaseAccess {
+    match command {
+        ExtensionsCommand::List | ExtensionsCommand::Info(_) => BaseAccess::Reads,
+        ExtensionsCommand::Create(_)
+        | ExtensionsCommand::Delete(_)
+        | ExtensionsCommand::Activate(_) => BaseAccess::Writes,
+    }
 }
 
 /// Отказ границы у команды без своей формы отказа: `data` — текст отказа, шаг — фаза.
-fn print_workspace_refusal(
-    presenter: &Presenter,
-    command: CommandName,
-    refusal: &WorkspaceRefusal,
-) {
+fn print_workspace_refusal(presenter: &Presenter, command: CommandName, refusal: &BoundaryRefusal) {
     if presenter.is_json() {
         let mut envelope = pre_dispatch_error_envelope(command.as_str(), &refusal.error);
         envelope.steps = vec![failed_phase_step(refusal.phase, &refusal.error)];
@@ -4393,7 +4424,7 @@ mod tests {
         append_interruptions, build_load_envelope, command_name, execute_command,
         map_artifacts_request_with_config, map_build_request, map_designer_config_request,
         map_dump_request, map_extensions_request, map_launch_request, map_load_request,
-        map_syntax_request, map_test_request, workspace_refusal_phase, CommandLineTarget,
+        map_syntax_request, map_test_request, CommandLineTarget,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
@@ -4413,7 +4444,6 @@ mod tests {
         ExecutionInterruptionDetails, ExecutionInterruptionKind, ExecutionInterruptionPhase,
         ExecutionOutcome, ExecutionStatus,
     };
-    use crate::domain::infobase_export::InfobaseTransferPhase;
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
@@ -5403,18 +5433,6 @@ mod tests {
             assert_eq!(json["data"]["message"], "workspace is busy");
             assert_eq!(json["error"]["code"], "runtime_failure");
         }
-    }
-
-    #[test]
-    fn workspace_refusal_phase_distinguishes_lock_from_workspace_preparation() {
-        assert_eq!(
-            workspace_refusal_phase(false),
-            InfobaseTransferPhase::WorkspaceLock
-        );
-        assert_eq!(
-            workspace_refusal_phase(true),
-            InfobaseTransferPhase::WorkspacePreparation
-        );
     }
 
     #[test]

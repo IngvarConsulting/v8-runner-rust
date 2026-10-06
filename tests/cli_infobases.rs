@@ -137,7 +137,7 @@ fn warnings(payload: &Value) -> Vec<String> {
 fn origin_is_selected_without_a_flag() {
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  test:\n    connection: 'File=/tmp/test-ib'\n",
+        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-3b820f'\n  test:\n    connection: 'File=/tmp/test-ib-3b820f'\n",
     );
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -151,11 +151,11 @@ fn origin_is_selected_without_a_flag() {
     assert_eq!(payload["ok"], true);
     let args = planned_args(&payload);
     assert!(
-        args.iter().any(|arg| arg.contains("/tmp/origin-ib")),
+        args.iter().any(|arg| arg.contains("/tmp/origin-ib-3b820f")),
         "{args:?}"
     );
     assert!(
-        !args.iter().any(|arg| arg.contains("/tmp/test-ib")),
+        !args.iter().any(|arg| arg.contains("/tmp/test-ib-3b820f")),
         "{args:?}"
     );
     assert!(warnings(&payload).is_empty(), "{payload}");
@@ -165,7 +165,7 @@ fn origin_is_selected_without_a_flag() {
 fn a_declared_name_is_selected_with_the_flag() {
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  test:\n    connection: 'File=/tmp/test-ib'\n",
+        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-b62b5f'\n  test:\n    connection: 'File=/tmp/test-ib-b62b5f'\n",
     );
 
     let output = project.run_json(&["--infobase", "test"], LAUNCH_PREVIEW);
@@ -177,11 +177,11 @@ fn a_declared_name_is_selected_with_the_flag() {
     );
     let args = planned_args(&json(&output));
     assert!(
-        args.iter().any(|arg| arg.contains("/tmp/test-ib")),
+        args.iter().any(|arg| arg.contains("/tmp/test-ib-b62b5f")),
         "{args:?}"
     );
     assert!(
-        !args.iter().any(|arg| arg.contains("/tmp/origin-ib")),
+        !args.iter().any(|arg| arg.contains("/tmp/origin-ib-b62b5f")),
         "{args:?}"
     );
 }
@@ -190,7 +190,10 @@ fn a_declared_name_is_selected_with_the_flag() {
 fn a_connection_string_selects_an_ad_hoc_base_even_without_a_local_layer() {
     let project = project();
 
-    let output = project.run_json(&["--infobase", "File=/tmp/ad-hoc-ib"], LAUNCH_PREVIEW);
+    let output = project.run_json(
+        &["--infobase", "File=/tmp/ad-hoc-ib-b16570"],
+        LAUNCH_PREVIEW,
+    );
 
     assert!(
         output.status.success(),
@@ -199,7 +202,7 @@ fn a_connection_string_selects_an_ad_hoc_base_even_without_a_local_layer() {
     );
     let args = planned_args(&json(&output));
     assert!(
-        args.iter().any(|arg| arg.contains("/tmp/ad-hoc-ib")),
+        args.iter().any(|arg| arg.contains("/tmp/ad-hoc-ib-b16570")),
         "{args:?}"
     );
 }
@@ -231,7 +234,7 @@ fn an_ad_hoc_connection_string_must_not_carry_credentials() {
 fn an_undeclared_name_is_refused_with_the_declared_names() {
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  test:\n    connection: 'File=/tmp/test-ib'\n",
+        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-c6a76b'\n  test:\n    connection: 'File=/tmp/test-ib-c6a76b'\n",
     );
 
     let output = project.run_json(&["--infobase", "prod"], LAUNCH_PREVIEW);
@@ -249,7 +252,7 @@ fn an_undeclared_name_is_refused_with_the_declared_names() {
 #[test]
 fn a_command_without_origin_names_the_missing_step() {
     let project = project();
-    project.write_local("infobases:\n  test:\n    connection: 'File=/tmp/test-ib'\n");
+    project.write_local("infobases:\n  test:\n    connection: 'File=/tmp/test-ib-33a7be'\n");
 
     let output = project.run_json(&[], &["build"]);
 
@@ -270,7 +273,7 @@ fn a_command_without_origin_names_the_missing_step() {
 fn an_infobase_name_is_a_plain_identifier() {
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  '../escape':\n    connection: 'File=/tmp/other-ib'\n",
+        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-13e9eb'\n  '../escape':\n    connection: 'File=/tmp/other-ib-13e9eb'\n",
     );
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -286,7 +289,7 @@ fn an_infobase_name_is_a_plain_identifier() {
 fn a_connection_without_a_supported_shape_is_refused_as_neither_file_nor_server() {
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  prod:\n    connection: 'not a connection'\n",
+        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-d94c9a'\n  prod:\n    connection: 'not a connection'\n",
     );
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -304,7 +307,7 @@ fn a_connection_without_a_supported_shape_is_refused_as_neither_file_nor_server(
 fn the_map_is_refused_in_the_project_file() {
     let project = project();
     let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str("infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n");
+    config.push_str("infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-5be424'\n");
     fs::write(&project.config_path, config).expect("config");
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -320,7 +323,7 @@ fn the_map_is_refused_in_the_project_file() {
 fn both_keys_in_the_project_file_are_refused() {
     let project = project();
     let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str("infobase:\n  connection: 'File=/tmp/old-ib'\ninfobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n");
+    config.push_str("infobase:\n  connection: 'File=/tmp/old-ib-c9213d'\ninfobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-c9213d'\n");
     fs::write(&project.config_path, config).expect("config");
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -336,7 +339,7 @@ fn both_keys_in_the_project_file_are_refused() {
 fn both_keys_in_one_file_are_refused() {
     let project = project();
     project.write_local(
-        "infobase:\n  connection: 'File=/tmp/old-ib'\ninfobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n",
+        "infobase:\n  connection: 'File=/tmp/old-ib-6f0219'\ninfobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-6f0219'\n",
     );
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -355,7 +358,7 @@ fn both_keys_in_one_file_are_refused() {
 fn the_project_synonym_merges_with_the_local_map_by_field() {
     let project = project();
     let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str("infobase:\n  connection: 'File=/tmp/project-ib'\n");
+    config.push_str("infobase:\n  connection: 'File=/tmp/project-ib-1a78af'\n");
     fs::write(&project.config_path, config).expect("config");
     project.write_local("infobases:\n  origin:\n    user: 'Admin'\n");
 
@@ -369,7 +372,8 @@ fn the_project_synonym_merges_with_the_local_map_by_field() {
     let payload = json(&output);
     let args = planned_args(&payload);
     assert!(
-        args.iter().any(|arg| arg.contains("/tmp/project-ib")),
+        args.iter()
+            .any(|arg| arg.contains("/tmp/project-ib-1a78af")),
         "{args:?}"
     );
     assert!(args.contains(&"Admin".to_owned()), "{args:?}");
@@ -385,7 +389,7 @@ fn the_project_synonym_merges_with_the_local_map_by_field() {
 #[test]
 fn the_synonym_in_the_local_layer_is_read_as_origin_and_warned_about() {
     let project = project();
-    project.write_local("infobase:\n  connection: 'File=/tmp/local-ib'\n");
+    project.write_local("infobase:\n  connection: 'File=/tmp/local-ib-4b4380'\n");
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
 
@@ -397,7 +401,7 @@ fn the_synonym_in_the_local_layer_is_read_as_origin_and_warned_about() {
     let payload = json(&output);
     assert!(planned_args(&payload)
         .iter()
-        .any(|arg| arg.contains("/tmp/local-ib")));
+        .any(|arg| arg.contains("/tmp/local-ib-4b4380")));
     let warnings = warnings(&payload);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(
@@ -412,7 +416,7 @@ fn the_synonym_in_the_local_layer_is_read_as_origin_and_warned_about() {
 fn the_synonym_warning_is_a_node_of_its_own_in_text_mode() {
     let project = project();
     let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str("infobase:\n  connection: 'File=/tmp/project-ib'\n");
+    config.push_str("infobase:\n  connection: 'File=/tmp/project-ib-b1247f'\n");
     fs::write(&project.config_path, config).expect("config");
 
     let output = project.run_text(&[], LAUNCH_PREVIEW);
@@ -449,7 +453,7 @@ fn the_synonym_warning_is_a_node_of_its_own_in_text_mode() {
 #[test]
 fn mcp_serve_selects_the_infobase_by_the_same_flag() {
     let project = project();
-    project.write_local("infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n");
+    project.write_local("infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-bd561c'\n");
 
     let output = v8_runner_command()
         .arg("--config")

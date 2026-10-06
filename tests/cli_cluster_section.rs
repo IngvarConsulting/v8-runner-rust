@@ -155,7 +155,7 @@ fn the_three_credential_levels_lie_in_the_local_layer_side_by_side() {
 fn a_cluster_section_next_to_a_file_base_is_refused() {
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n    cluster:\n      ras: srv:1545\n",
+        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib-b84b01'\n    cluster:\n      ras: srv:1545\n",
     );
 
     let message = refusal_message(&project.run_json(LAUNCH_PREVIEW));

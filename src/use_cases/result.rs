@@ -17,6 +17,8 @@ pub enum UseCaseErrorKind {
     Capability(CapabilityReason),
     Environment,
     WorkspaceBusy,
+    /// Файловую базу держит другая команда: занято, как `WorkspaceBusy`, можно повторить.
+    InfobaseBusy,
     InvalidOutput,
     /// Отмена оператором; место остановки говорит, оборвана ли работа исполнителя.
     Cancelled(CancelledAt),
@@ -32,7 +34,7 @@ impl UseCaseErrorKind {
         match self {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment => VALIDATION_EXIT_CODE,
-            Self::WorkspaceBusy => RUNTIME_EXIT_CODE,
+            Self::WorkspaceBusy | Self::InfobaseBusy => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
@@ -51,6 +53,7 @@ impl UseCaseErrorKind {
             | AppError::PlatformLocator(_)
             | AppError::PlatformLocatorContext { .. } => Self::Environment,
             AppError::WorkspaceBusy(_) => Self::WorkspaceBusy,
+            AppError::InfobaseBusy(_) => Self::InfobaseBusy,
             AppError::Cancelled { at, .. } => Self::Cancelled(*at),
             AppError::TimedOut(_) => Self::TimedOut,
             AppError::InvalidOutput(_) => Self::InvalidOutput,
@@ -82,6 +85,7 @@ impl UseCaseErrorKind {
             Self::Capability(_) => "capability_unavailable",
             Self::Environment => "environment_unavailable",
             Self::WorkspaceBusy => "workspace_busy",
+            Self::InfobaseBusy => "infobase_busy",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled(_) => CANCELLED_ERROR_CODE,
             Self::TimedOut => "timed_out",
@@ -100,6 +104,7 @@ impl UseCaseErrorKind {
             Self::Capability(_)
             | Self::Environment
             | Self::WorkspaceBusy
+            | Self::InfobaseBusy
             | Self::Validation
             | Self::Runtime
             | Self::Platform => ExecutionStatus::Failed,
@@ -111,6 +116,7 @@ impl UseCaseErrorKind {
             Self::Capability(_) => "capability unavailable",
             Self::Environment => "environment unavailable",
             Self::WorkspaceBusy => "workspace busy",
+            Self::InfobaseBusy => "infobase busy",
             Self::InvalidOutput => "invalid output",
             Self::Cancelled(_) => "cancelled",
             Self::TimedOut => "timed out",
@@ -209,6 +215,7 @@ impl UseCaseError {
             AppError::CapabilityUnavailable(refusal) => refusal.message,
             AppError::EnvironmentUnavailable(message)
             | AppError::WorkspaceBusy(message)
+            | AppError::InfobaseBusy(message)
             | AppError::Cancelled { message, .. }
             | AppError::TimedOut(message)
             | AppError::InvalidOutput(message)
@@ -516,6 +523,7 @@ mod tests {
         }
         assert_eq!(UseCaseErrorKind::Environment.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
+        assert_eq!(UseCaseErrorKind::InfobaseBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InvalidOutput.exit_code(), 4);
         for at in [CancelledAt::Boundary, CancelledAt::Work] {
             assert_eq!(UseCaseErrorKind::Cancelled(at).exit_code(), 4, "{at:?}");

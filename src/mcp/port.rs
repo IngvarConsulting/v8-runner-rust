@@ -10,6 +10,7 @@ use crate::use_cases::build_project;
 use crate::use_cases::check_syntax;
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config;
+use crate::use_cases::infobase_lock::BaseAccess;
 use crate::use_cases::launch_app;
 use crate::use_cases::request::{
     BuildRequest, DumpRequest, LaunchRequest, SyntaxRequest, TestRequest,
@@ -17,6 +18,7 @@ use crate::use_cases::request::{
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::run_tests;
 use crate::use_cases::transport::dispatch_with_workspace_lock;
+use tracing::warn;
 
 /// Thin indirection layer used by the MCP service to call use cases.
 pub trait McpUseCasePort {
@@ -67,7 +69,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         config: &AppConfig,
         request: &BuildRequest,
     ) -> UseCaseResult<BuildResult> {
-        with_workspace_lock(context, config, || {
+        with_workspace_lock(context, config, BaseAccess::Writes, || {
             build_project::execute(context, config, request)
         })
     }
@@ -78,7 +80,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         config: &AppConfig,
         request: &TestRequest,
     ) -> UseCaseResult<TestRunResult> {
-        with_workspace_lock(context, config, || {
+        with_workspace_lock(context, config, BaseAccess::Writes, || {
             run_tests::execute(context, config, request)
         })
     }
@@ -89,7 +91,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         config: &AppConfig,
         request: &DumpRequest,
     ) -> UseCaseResult<DumpResult> {
-        with_workspace_lock(context, config, || {
+        with_workspace_lock(context, config, BaseAccess::Writes, || {
             dump_config::execute(context, config, request)
         })
     }
@@ -100,7 +102,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         config: &AppConfig,
         request: &LaunchRequest,
     ) -> UseCaseResult<LaunchResult> {
-        with_workspace_lock(context, config, || {
+        with_workspace_lock(context, config, BaseAccess::Writes, || {
             launch_app::execute(context, config, request)
         })
     }
@@ -111,20 +113,31 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         config: &AppConfig,
         request: &SyntaxRequest,
     ) -> UseCaseResult<SyntaxCheckResult> {
-        with_workspace_lock(context, config, || {
+        with_workspace_lock(context, config, request.base_access(), || {
             check_syntax::execute(context, config, request)
         })
     }
 }
 
+/// Граница порта: замок `workPath`, затем замок базы. Инструменты MCP — команды записи
+/// или базу не открывают, поэтому предупреждения команды чтения здесь не бывает; если оно
+/// всё же придёт, оно уходит в журнал.
 fn with_workspace_lock<T>(
     context: &ExecutionContext,
     config: &AppConfig,
+    base: BaseAccess,
     run: impl FnOnce() -> UseCaseResult<T>,
 ) -> UseCaseResult<T> {
-    match dispatch_with_workspace_lock(config, context.command(), || Ok(()), run) {
+    let command = context.command();
+    let before_dispatch = |warning: Option<&str>| {
+        if let Some(warning) = warning {
+            warn!(command = command.as_str(), "{warning}");
+        }
+        Ok(())
+    };
+    match dispatch_with_workspace_lock(config, command, base, before_dispatch, run) {
         Ok(result) => result,
-        Err(error) => Err(UseCaseFailure::without_payload(error)),
+        Err(refusal) => Err(UseCaseFailure::without_payload(refusal.error)),
     }
 }
 
@@ -202,7 +215,10 @@ mod tests {
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
-            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobase: crate::config::model::InfobaseConfig::file(format!(
+                "File={}",
+                work_path.with_file_name("ib").display()
+            )),
             infobases: Default::default(),
             infobase_name: None,
             source_sets: vec![SourceSetConfig {
