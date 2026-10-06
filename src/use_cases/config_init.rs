@@ -340,6 +340,9 @@ fn local_config_with_origin(
     // только местный слой: поля проектного файла в него не копируются, пока файл остаётся.
     let mut warnings = Vec::new();
     let mut layered = None;
+    // Поля проектной секции, кроме адреса, загрузчик подмешает и в перенаправленный
+    // `origin`: их имена называет предупреждение, если перенаправление случится.
+    let mut inherited_fields = Vec::new();
     if let Some(project) = project {
         let merged = layered_origin(&project.path, &project.document, &document)
             .map_err(|error| AppError::Validation(error.to_string()))?;
@@ -349,6 +352,11 @@ fn local_config_with_origin(
             document = view;
         } else {
             warnings.extend(merged.project_synonym_warning);
+            inherited_fields = merged
+                .project_fields
+                .into_iter()
+                .filter(|field| field != "connection")
+                .collect();
             layered = Some(view);
         }
     }
@@ -426,7 +434,24 @@ fn local_config_with_origin(
             path,
         )?)),
     };
-    plan.map(|plan| LocalLayerPlan { warnings, ..plan })
+    let mut plan = plan?;
+    if plan.origin.change == OriginChange::Redirected && !inherited_fields.is_empty() {
+        warnings.push(inherited_fields_warning(&inherited_fields));
+    }
+    plan.warnings = warnings;
+    Ok(plan)
+}
+
+/// Предупреждение называет только имена полей: значения — учётные данные и адреса.
+fn inherited_fields_warning(fields: &[String]) -> String {
+    let fields = fields
+        .iter()
+        .map(|field| format!("`{field}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{fields} of `infobase:` in the project file still apply to the redirected infobases.origin: the loader merges that section field by field; move `infobase:` to {LOCAL_CONFIG_FILE_NAME}"
+    )
 }
 
 /// Местный документ, в котором `origin` — данная секция: так местный слой выглядит для

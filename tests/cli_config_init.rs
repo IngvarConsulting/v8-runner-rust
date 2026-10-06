@@ -886,6 +886,57 @@ fn init_with_an_infobase_redirects_the_origin_declared_by_the_infobase_synonym()
     );
 }
 
+/// После `init --infobase` загрузчик по-прежнему подмешивает в новый `origin` поля
+/// проектной секции `infobase:`, кроме адреса. Ответ предупреждает об этом и называет
+/// только имена полей; секция из одного адреса предупреждения не даёт.
+#[test]
+fn init_with_an_infobase_warns_which_project_fields_still_apply_to_the_new_origin() {
+    let dir = synonym_project();
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+    let text = printed(&output);
+    assert!(output.status.success(), "{text}");
+    let warning = text
+        .lines()
+        .find(|line| line.contains("[warning]") && line.contains("redirected infobases.origin"))
+        .unwrap_or_else(|| panic!("the inherited fields are named: {text}"));
+    assert!(warning.contains("`user`"), "{warning}");
+    assert!(warning.contains("`password`"), "{warning}");
+    assert!(!warning.contains("`connection`"), "{warning}");
+    assert!(warning.contains("v8project.local.yaml"), "{warning}");
+    for secret in SYNONYM_SECRETS {
+        assert!(!text.contains(secret), "{secret} is printed: {text}");
+    }
+
+    let dir = temp_workspace();
+    fs::write(
+        dir.path().join("v8project.yaml"),
+        "workPath: build\ninfobase:\n  connection: 'File=/srv/ib'\n",
+    )
+    .expect("project file");
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["--json-message", "init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+    assert!(output.status.success(), "{}", printed(&output));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert_eq!(
+        payload["data"]["origin"]["change"], "redirected",
+        "{payload}"
+    );
+    let warnings = payload["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().all(|warning| !warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("redirected infobases.origin"))),
+        "an address alone leaves nothing to inherit: {payload}"
+    );
+}
+
 /// Занятый `upstream` не перезаписывается и тогда, когда `origin` объявлен старым ключом
 /// проектного файла: отказ, оба файла как были.
 #[test]

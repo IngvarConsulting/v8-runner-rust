@@ -361,6 +361,9 @@ pub(crate) struct LayeredOrigin {
     /// Слитая секция; `None`, если `origin` не объявлен ни в одном слое.
     pub section: Option<serde_yaml::Mapping>,
     pub project_synonym_warning: Option<String>,
+    /// Имена полей, которые задаёт секция `infobase:` проектного файла: загрузчик
+    /// подмешивает их в `origin`, какой бы адрес ни объявил местный слой.
+    pub project_fields: Vec<String>,
 }
 
 /// `origin` двух слоёв тем же путём, что в [`build_config`]: карта `infobases` в проектном
@@ -376,18 +379,30 @@ pub(crate) fn layered_origin(
     let mut merged = project.clone();
     let project_synonym_warning =
         fold_infobase_synonym(&mut merged, ConfigFile::Project(project_path))?;
+    let project_fields = origin_section(&merged)
+        .map(|section| {
+            section
+                .keys()
+                .filter_map(serde_yaml::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     let mut local = local.clone();
     fold_infobase_synonym(&mut local, ConfigFile::Local)?;
     merge_yaml_values(&mut merged, local);
-    let section = merged
+    Ok(LayeredOrigin {
+        section: origin_section(&merged).cloned(),
+        project_synonym_warning,
+        project_fields,
+    })
+}
+
+fn origin_section(document: &serde_yaml::Value) -> Option<&serde_yaml::Mapping> {
+    document
         .get("infobases")
         .and_then(|infobases| infobases.get(DEFAULT_INFOBASE_NAME))
         .and_then(serde_yaml::Value::as_mapping)
-        .cloned();
-    Ok(LayeredOrigin {
-        section,
-        project_synonym_warning,
-    })
 }
 
 /// Прежний ключ `infobase:` один цикл выпуска читается как `infobases.origin` — в
