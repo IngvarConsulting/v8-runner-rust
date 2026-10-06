@@ -318,6 +318,26 @@ impl FakeAgent {
                 ));
             }
             self.generation.fetch_add(1, Ordering::SeqCst);
+            // Как платформа: с `--update-config-dump-info` файл версий в каталоге загрузки
+            // переписывается; рядом с журналом команд (`<журнал>.version-files`) записано,
+            // какой файл загрузка там застала.
+            if has("update-config-dump-info") {
+                let version_file = source.join("ConfigDumpInfo.xml");
+                let found = fs::read_to_string(&version_file).unwrap_or_default();
+                if let Ok(mut seen) = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.commands_log.with_extension("version-files"))
+                {
+                    use std::io::Write;
+                    let _ = writeln!(seen, "{}", found.trim());
+                }
+                fs::write(
+                    &version_file,
+                    format!("<ConfigDumpInfo agent-load=\"{}\"/>\n", self.token()),
+                )
+                .expect("agent version file");
+            }
             return (progress_then_success("Загрузка конфигурации"), false);
         }
         if line.starts_with("config update-db-cfg") {
