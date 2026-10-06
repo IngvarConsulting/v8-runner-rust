@@ -5,6 +5,8 @@ check:
   - src/platform/secrets.rs::masks_a_password_quoted_around_a_semicolon
   - src/platform/secrets.rs::masks_a_connection_string_password_that_holds_a_space
   - src/platform/secrets.rs::a_connection_string_shown_as_a_value_hides_the_password_and_the_user
+  - src/platform/secrets.rs::a_space_inside_a_value_does_not_split_its_masking
+  - src/platform/secrets.rs::masks_the_password_of_a_connection_string_quoted_as_a_whole
   - tests/cli_launch.rs::launch_failure_never_echoes_the_password_inside_the_connection_string
   - tests/cli_launch.rs::launch_dry_run_text_masks_credentials_and_says_nothing_was_dispatched
   - tests/cli_extensions.rs::extension_preview_never_echoes_the_infobase_password

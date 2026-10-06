@@ -225,7 +225,7 @@ fn plan_local_config(
             content: Some(render_local_config_with_origin(connection)),
             origin: OriginDeclaration {
                 change: OriginChange::Declared,
-                connection: Some(shown_address(connection)),
+                connection: Some(mask_connection_string(connection)),
                 replaced: None,
             },
         });
@@ -253,12 +253,6 @@ fn write_local_config(path: &Path, plan: &LocalLayerPlan) -> Result<(), AppError
             path.display()
         ))
     })
-}
-
-/// Адрес так, как его показывают ответ и отказ: пароль и имя пользователя внутри строки
-/// соединения замаскированы тем же владельцем, что и в показе команд.
-fn shown_address(connection: &str) -> String {
-    mask_connection_string(connection)
 }
 
 fn with_local_schema_modeline(existing: &str) -> String {
@@ -330,7 +324,7 @@ fn local_config_with_origin(
         content: Some(content),
         origin: OriginDeclaration {
             change: OriginChange::Declared,
-            connection: Some(shown_address(connection)),
+            connection: Some(mask_connection_string(connection)),
             replaced: None,
         },
     };
@@ -338,7 +332,7 @@ fn local_config_with_origin(
         content: Some(content),
         origin: OriginDeclaration {
             change: OriginChange::Unchanged,
-            connection: connection.map(shown_address),
+            connection: connection.map(mask_connection_string),
             replaced: None,
         },
     };
@@ -350,8 +344,8 @@ fn local_config_with_origin(
                     Err(AppError::Validation(format!(
                         "local config file '{}' already declares infobases.origin.connection = '{}'; it is not replaced by {key} '{}'",
                         path.display(),
-                        shown_address(&declared_address),
-                        shown_address(address),
+                        mask_connection_string(&declared_address),
+                        mask_connection_string(address),
                     )))
                 }
                 OriginConflict::Redirect => {
@@ -366,7 +360,7 @@ fn local_config_with_origin(
                 Err(AppError::Validation(format!(
                     "local config file '{}' already declares infobases.origin as a standalone server; it is not replaced by {key} '{}'",
                     path.display(),
-                    shown_address(address),
+                    mask_connection_string(address),
                 )))
             }
             (Some(requested), OriginConflict::Redirect) => {
@@ -419,7 +413,7 @@ fn redirect_origin(
             "local config file '{}' already declares infobases.{UPSTREAM_INFOBASE_NAME}; infobases.origin is not redirected to {} '{}', because its section would replace infobases.{UPSTREAM_INFOBASE_NAME}",
             path.display(),
             requested.key.flag(),
-            shown_address(&requested.connection),
+            mask_connection_string(&requested.connection),
         )));
     }
     let content = rewrite_with_origin(
@@ -432,8 +426,8 @@ fn redirect_origin(
         content: Some(content),
         origin: OriginDeclaration {
             change: OriginChange::Redirected,
-            connection: Some(shown_address(&requested.connection)),
-            replaced: replaced.map(shown_address),
+            connection: Some(mask_connection_string(&requested.connection)),
+            replaced: replaced.map(mask_connection_string),
         },
     })
 }
