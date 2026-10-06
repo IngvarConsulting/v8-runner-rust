@@ -356,3 +356,53 @@ fn an_update_that_deferred_the_cancellation_is_named_when_the_generation_is_refu
         "no request goes to the agent after the interrupt: {lines:?}"
     );
 }
+
+/// Агент спрашивает поколение до загрузки: база ушла вперёд записанного им — отказ
+/// `non_fast_forward` до загрузки, агенту загрузка не уходит.
+#[test]
+fn an_agent_push_into_a_base_that_moved_ahead_is_refused_before_the_load() {
+    let harness = harness();
+    let (code, payload) = run(&harness, &["push", "--force"]);
+    assert_eq!(code, 0, "{payload}");
+    let ledger_path = harness
+        .dir
+        .path()
+        .join("work")
+        .join("infobases")
+        .join("origin")
+        .join("generation.json");
+    let mut ledger: Value =
+        serde_json::from_str(&fs::read_to_string(&ledger_path).expect("ledger")).expect("json");
+    assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
+    let base = ledger["main"]["token"].as_str().expect("token").to_owned();
+    // Память помнит другое поколение — как если бы базу правили после прошлой отправки.
+    ledger["main"]["token"] = Value::String("f".repeat(40));
+    fs::write(&ledger_path, ledger.to_string()).expect("ledger");
+    fs::write(
+        harness.sources.join("Catalogs").join("Items.xml"),
+        "<Catalog edited=\"1\"/>",
+    )
+    .expect("edit");
+    let loads_before = commands(&harness)
+        .iter()
+        .filter(|line| line.starts_with("config load-config-from-files"))
+        .count();
+
+    let (code, payload) = run(&harness, &["push"]);
+
+    assert_eq!(code, 3, "{payload}");
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(
+        payload["error"]["base_generation"],
+        base.as_str(),
+        "{payload}"
+    );
+    assert_eq!(
+        commands(&harness)
+            .iter()
+            .filter(|line| line.starts_with("config load-config-from-files"))
+            .count(),
+        loads_before,
+        "nothing is loaded"
+    );
+}

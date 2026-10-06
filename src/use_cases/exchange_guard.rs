@@ -132,7 +132,7 @@ impl Standing {
             ));
         } else if let Some(since) = &self.new_owner {
             text.push_str(&format!(
-                " This working copy took the infobase over ({since}) and has not pushed into it since: other working copies may have changed it, and a pull would bring their work into this directory, so no pull is offered."
+                " This working copy took the infobase over ({since}) and has not pushed into it since: other working copies may have changed it, and taking its state into this directory would bring their work here, so only the overwrite is offered."
             ));
         }
         if self.server {
@@ -482,4 +482,78 @@ pub(crate) fn holds_only_new_owner_marks(infobases: &Path) -> bool {
                 .all(|entry| entry.file_name() == NEW_OWNER_FILE_NAME)
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::model::{
+        InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
+    };
+    use crate::use_cases::context::CommandName;
+
+    fn project(root: &Path) -> AppConfig {
+        std::fs::create_dir_all(root.join("main")).expect("sources");
+        AppConfig {
+            base_path: root.to_path_buf(),
+            work_path: root.join("work"),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: InfobaseConfig::file(format!("File={}", root.join("ib").display())),
+            infobases: Default::default(),
+            infobase_name: Some("origin".to_owned()),
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: PathBuf::from("main"),
+            }],
+            tools: ToolsConfig::default(),
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        }
+    }
+
+    fn require(config: &AppConfig) -> Result<(), UseCaseError> {
+        require_memory(
+            &ExecutionContext::cli(CommandName::Build),
+            config,
+            &SourceSetsService::new(config).designer_contexts(),
+            None,
+        )
+    }
+
+    /// Базу, созданную раннером, он помнит: первая отправка в неё без отказа первого
+    /// знакомства, а признак нового владельца снят.
+    #[test]
+    fn a_base_created_by_the_runner_is_remembered() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        remember_new_owner(&config).expect("new owner mark");
+        assert_eq!(
+            require(&config).expect_err("no memory yet").kind(),
+            UseCaseErrorKind::NoMemory
+        );
+
+        assert_eq!(remember_created_base(&config), None);
+
+        require(&config).expect("the created base is remembered");
+        assert_eq!(new_owner_since(&config), None);
+    }
+
+    /// Признак нового владельца не считается содержимым каталога клона.
+    #[test]
+    fn a_new_owner_mark_alone_leaves_the_memory_empty_for_a_clone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        remember_new_owner(&config).expect("new owner mark");
+
+        assert!(holds_only_new_owner_marks(
+            &root.path().join("work/infobases")
+        ));
+        remember_created_base(&config);
+        assert!(!holds_only_new_owner_marks(
+            &root.path().join("work/infobases")
+        ));
+    }
 }

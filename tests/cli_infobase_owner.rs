@@ -1031,3 +1031,63 @@ fn a_connection_string_on_a_shared_base_is_refused() {
     );
     assert_eq!(stand.marker_text(), marker);
 }
+
+/// На общей базе отказ первого знакомства и отказ «база ушла вперёд» предлагают выгрузку
+/// следующим шагом, называют `push --force` текстом, говорят, что базу меняют и другие копии,
+/// и называют остальных владельцев — и тогда, когда эта копия взяла базу без метки.
+#[test]
+fn a_refusal_on_a_shared_base_offers_pull_first_and_names_push_force() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    first.declare_shared(&stand, true);
+    second.declare_shared(&stand, true);
+    succeeded(&first.run(&["push"]));
+    fs::remove_dir_all(second.root.join("work")).expect("forget the base");
+
+    let refused = second.run(&["push"]);
+    let payload = envelope(&refused);
+
+    assert_eq!(refused.status.code(), Some(3), "{payload}");
+    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("push --force`"), "{message}");
+    assert!(message.contains("shared"), "{message}");
+    assert!(message.contains(&first.canonical_root()), "{message}");
+
+    // База ушла вперёд записанного поколения той же копии.
+    write_shell_script(
+        &second.root.join("1cv8"),
+        &format!(
+            "out=''; previous=''\nfor a in \"$@\"; do [ \"$previous\" = /Out ] && out=\"$a\"; previous=\"$a\"; done\ncase \"$*\" in *GetConfigGenerationID*) printf '{}\\n' > \"$out\" ;; esac\nexit 0",
+            "2".repeat(40)
+        ),
+    );
+    succeeded(&second.run(&["push", "--force"]));
+    let ledger = second
+        .root
+        .join("work")
+        .join("infobases")
+        .join("origin")
+        .join("generation.json");
+    let mut records: Value =
+        serde_json::from_str(&fs::read_to_string(&ledger).expect("ledger")).expect("json");
+    records["main"] = json!({
+        "token": "1".repeat(40),
+        "tool": "designer",
+        "after": "build",
+        "recorded_at": "2026-10-06T00:00:00Z",
+        "identity": records["main"]["identity"],
+    });
+    fs::write(&ledger, records.to_string()).expect("ledger");
+    fs::write(second.root.join("sources").join("Module.bsl"), "edited").expect("edit");
+
+    let payload = envelope(&second.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("push main --force`"), "{message}");
+    assert!(message.contains(&first.canonical_root()), "{message}");
+}

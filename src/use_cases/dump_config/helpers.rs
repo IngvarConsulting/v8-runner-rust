@@ -400,34 +400,6 @@ pub(super) fn empty_result(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::decorate_ibcmd_partial_error;
-    use crate::platform::process::ProcessError;
-    use crate::support::error::AppError;
-
-    #[test]
-    fn ibcmd_partial_warning_preserves_typed_process_error_source() {
-        let warning = "IBCMD does not support object-scoped partial dump";
-        let error = decorate_ibcmd_partial_error(
-            AppError::PlatformProcess(ProcessError::SpawnFailed {
-                cmd: "ibcmd config export".to_owned(),
-                source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing ibcmd"),
-            }),
-            warning,
-        );
-
-        assert!(error.to_string().contains(warning));
-        assert!(matches!(
-            error,
-            AppError::PlatformProcessContext {
-                source: ProcessError::SpawnFailed { .. },
-                ..
-            }
-        ));
-    }
-}
-
 /// Поколение базы, прочитанное инструментом выгрузки — Конфигуратором или `ibcmd`, — до или
 /// после неё. Другой инструмент, отмена и сбой чтения — отсутствие ответа: выгрузку оно не
 /// останавливает, а память о поколении тогда не пишется.
@@ -473,4 +445,32 @@ pub(super) fn read_dump_generation(
         tracing::debug!(%error, "the configuration generation is not known");
         None
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decorate_ibcmd_partial_error;
+    use crate::platform::process::ProcessError;
+    use crate::support::error::AppError;
+
+    #[test]
+    fn ibcmd_partial_warning_preserves_typed_process_error_source() {
+        let warning = "IBCMD does not support object-scoped partial dump";
+        let error = decorate_ibcmd_partial_error(
+            AppError::PlatformProcess(ProcessError::SpawnFailed {
+                cmd: "ibcmd config export".to_owned(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing ibcmd"),
+            }),
+            warning,
+        );
+
+        assert!(error.to_string().contains(warning));
+        assert!(matches!(
+            error,
+            AppError::PlatformProcessContext {
+                source: ProcessError::SpawnFailed { .. },
+                ..
+            }
+        ));
+    }
 }

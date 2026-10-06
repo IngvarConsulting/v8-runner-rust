@@ -312,6 +312,16 @@ fn setup_designer_suite_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathB
     write_script(&platform_dir.join("bin").join("1cv8c"), &enterprise_script);
 
     write_designer_suite_config(&config_path, &base_path, &work_path, &platform_dir);
+    // Память о базе, как после её создания раннером: сборка идёт не с первого знакомства.
+    support::memory::remember_base(
+        &work_path,
+        "origin",
+        support::memory::Base::File(&dir.path().join("ib")),
+        &[support::memory::Set::configuration(
+            "main",
+            &base_path.join("main"),
+        )],
+    );
 
     (
         dir,
