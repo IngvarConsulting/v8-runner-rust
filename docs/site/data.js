@@ -254,7 +254,7 @@ window.RUNNER_DATA = (function () {
     {
       id: 'make', verb: 'make', title: 'Собрать пакет из исходников',
       what: 'Собирает .cf, .cfe, .epf, .erf из исходников; база не нужна.',
-      cmd: function (ctx) { return (ctx.type === 'EXTERNAL' ? 'v8-runner make --output build/epf' : ctx.type === 'EXTENSION' ? 'v8-runner make my-ext --output build/ext.cfe' : 'v8-runner make --output build/main.cf'); },
+      cmd: function (ctx) { return (ctx.type === 'EXTERNAL' ? 'v8-runner make my-epf --output build/epf' : ctx.type === 'EXTENSION' ? 'v8-runner make my-ext --output build/ext.cfe' : 'v8-runner make main --output build/main.cf'); },
       applies: function (ctx) { return null; },
       today: function (ctx) {
         if (ctx.type === 'EXTERNAL') return { chain: ctx.tools.designer ? [P.designer] : [], config: ['source-set[] с type EXTERNAL_*'], note: 'внешние собираются Конфигуратором из XML; базы не касается' };
@@ -268,7 +268,7 @@ window.RUNNER_DATA = (function () {
     {
       id: 'download', verb: 'download', title: 'Забрать конфигурацию базы в пакет .cf / .cfe',
       what: 'Забирает конфигурацию базы в пакет: основную или, с --state db, конфигурацию базы данных.',
-      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner download my-ext --output ext.cfe' : 'v8-runner download --output main.cf'); },
+      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner download my-ext --output ext.cfe' : 'v8-runner download main --output main.cf'); },
       applies: function (ctx) { return notExternal(ctx, 'экспорт конфигурации'); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, ctx.target === 'file' || ctx.target === 'cluster');

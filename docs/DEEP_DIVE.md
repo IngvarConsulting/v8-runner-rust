@@ -151,6 +151,14 @@ runtime snapshot commit только указанным source-set.
   выгрузки: отказ посреди обхода не оставляет в проекте набора без содержимого, а сбой между
   выгрузкой и объявлением оставляет каталог без записи — его сторож охраняет советом
   `ForceWayOut::Undeclared` (без `pull <SET> --force`).
+- `download` без набора (`infobase_export::execute_configuration_export_all`) выбирает
+  исполнителя выгрузки один раз, читает им состав базы тем же
+  `dump_config::read_installed_extensions` и обходит
+  `SourceSetInventory::configuration_packages`; каждый пакет идёт сценарием `download <SET>`
+  в `source_inventory::package_in_directory`. `make` без набора
+  (`artifacts::execute_all`) обходит `SourceSetInventory::ordered_source_sets` сценарием
+  `make <SET>`. Каталог вместо файла проверяет `SourceSetInventory::packages_directory`;
+  проект без пакетов (`source-set: []`) у `download` идёт прежним путём одной выгрузки.
 
 ### `convert`
 

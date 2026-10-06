@@ -229,6 +229,16 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 `make` публикует тем же способом — файл пакета или каталог внешних обработок — и без
 вопроса к git; цель он сверяет при разрешении и заново перед публикацией.
 
+`make` и `download` без набора — обходы поверх своих сценариев одного набора, с каталогом
+вместо файла (`SourceSetInventory::packages_directory`, путь пакета —
+`source_inventory::package_in_directory`). `make` ([`artifacts/all.rs`](../../src/use_cases/artifacts/all.rs))
+идёт по `SourceSetInventory::ordered_source_sets` сценарием `make <SET>`. `download`
+([`infobase_export/all.rs`](../../src/use_cases/infobase_export/all.rs)) выбирает исполнителя
+один раз, спрашивает им состав базы читателем `pull --all` и выгружает пакеты
+`SourceSetInventory::configuration_packages`, которые в базе есть, сценарием `download <SET>`;
+превью базу не спрашивает и наборы расширений называет условными. Отказ набора останавливает
+оба обхода.
+
 Правила: [промежуточный каталог — рядом с целью](../rules/use-cases/staging-shares-the-parent-directory.md),
 [цель перепроверяется перед публикацией](../rules/use-cases/a-target-is-rechecked-before-publication.md),
 [неудачный откат называет себя](../rules/use-cases/a-failed-rollback-is-named.md),
@@ -241,7 +251,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [`--force` называет уничтоженное](../rules/use-cases/force-names-what-it-destroyed.md),
 [каталог вне системы контроля версий не заменяют](../rules/use-cases/an-untracked-directory-is-refused-not-replaced.md),
 [выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md),
-[`pull --all` объявляет набор каждому расширению базы](../rules/cli/pull-all-declares-a-set-for-each-installed-extension.md).
+[`pull --all` объявляет набор каждому расширению базы](../rules/cli/pull-all-declares-a-set-for-each-installed-extension.md),
+[`make` и `download` без набора пишут в каталог](../rules/cli/make-and-download-without-a-set-write-into-a-directory.md).
 
 ### 6.7 EDT-проверка по MCP
 

@@ -676,7 +676,7 @@ if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
     run_test_stage
 
     print_stage "package artifacts"
-    run_cli make --output "$OUTPUT_ROOT/artifacts/configuration.cf"
+    run_cli make "$CONFIGURATION_SOURCE_SET_NAME" --output "$OUTPUT_ROOT/artifacts/configuration.cf"
     assert_file_nonempty "$OUTPUT_ROOT/artifacts/configuration.cf"
 
     run_cli make "$EXTENSION_SOURCE_SET_NAME" \

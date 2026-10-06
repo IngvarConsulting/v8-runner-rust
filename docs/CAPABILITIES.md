@@ -944,9 +944,10 @@ v8-runner download [--state db] --output <DIR> [--dry-run]
   выгружает план только набору конфигурации).
 - **Несовместимо с 0.12.0:** путь к файлу без набора (`download --output main.cf`) больше не
   выгружает основную конфигурацию, а отказывает до платформы родом `validation`; `next`
-  называет `download <основной набор> --output main.cf`. У проекта без набора конфигурации
-  (`source-set: []`) шага нет: основная конфигурация выгружается через набор, поэтому объявите
-  набор `CONFIGURATION`.
+  называет `download <основной набор> --output main.cf`.
+- Проект без наборов конфигурации и расширений (`source-set: []`, только база) обходить
+  нечего: там `download --output <FILE.cf>` без набора, как прежде, выгружает основную
+  конфигурацию в файл.
 - Пока набор не разрешён (настройки не загрузились или набора нет), `subject` в ответе об
   отказе следует суффиксу `--output`: `.cfe` — расширение с именем набора, иначе основная
   конфигурация.
@@ -1085,16 +1086,23 @@ v8-runner upload <FILE> [--mode <load|combine>] [--settings <FILE>] [--extension
 ### `make` / `artifacts`
 
 ```bash
-v8-runner make [<SET>] --output <TARGET> [--extension <NAME>] [--dry-run]
+v8-runner make <SET> --output <TARGET> [--extension <NAME>] [--dry-run]
+v8-runner make --extension <NAME> --output <FILE.cfe> [--dry-run]
+v8-runner make --output <DIR> [--dry-run]
 v8-runner artifacts [<SET>] --output <TARGET> [--extension <NAME>] [--dry-run]
 ```
 
 - Это один use case с двумя CLI names.
 - Позиционный аргумент — набор исходников; набор расширения собирает расширение с именем
   набора, `--extension` при наборе только сверяется с ним. Значение, которое набором не
-  является, — validation error. Прежний ключ `--source-set` принимается скрыто. Без набора,
-  как и прежде, собирается основная конфигурация; сборка всех наборов без аргумента пока не
-  сделана — [#364](https://github.com/IngvarConsulting/v8-runner-rust/issues/364).
+  является, — validation error. Прежний ключ `--source-set` принимается скрыто.
+- Без набора и `--extension` `--output` — каталог: собирается каждый набор проекта в порядке
+  основная конфигурация, расширения, внешние обработки, внешние отчёты — в `<DIR>/<SET>.cf`,
+  `<DIR>/<SET>.cfe` и каталог `<DIR>/<SET>` для внешних файлов. Отказ набора останавливает
+  обход. Ответ — форма `CTR.WIRE.MAKE-ALL-DATA`: `sets[]` формы `make <SET>`.
+- **Несовместимо с 0.12.0:** `make --output main.cf` без набора больше не собирает основную
+  конфигурацию, а отказывает до платформы родом `validation`; `next` называет
+  `make <основной набор> --output main.cf`.
 - `.cf` используется для основной конфигурации.
 - `.cfe` используется для extension export.
 - Каталог output используется для external `.epf` / `.erf` publication.
