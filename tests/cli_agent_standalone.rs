@@ -178,7 +178,7 @@ fn a_declared_fingerprint_lets_the_gate_through() {
         Some(fingerprint_of(key))
     });
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_eq!(code, 0, "{payload}");
 }
@@ -194,7 +194,7 @@ fn a_declared_fingerprint_is_compared_with_its_own_algorithm() {
         Some(fingerprint_with(key, russh::keys::ssh_key::HashAlg::Sha512))
     });
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_eq!(code, 0, "{payload}");
 }
@@ -208,7 +208,7 @@ fn a_gate_that_presents_another_key_is_refused_by_name() {
         Some(someone_else.clone())
     });
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_ne!(code, 0, "{payload}");
     let message = payload["error"]["message"]
@@ -239,7 +239,7 @@ fn a_full_dump_travels_through_sftp() {
     let harness = harness_with_channel(Channel::Sftp);
     let target = harness.dir.path().join("project").join("configuration");
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_eq!(code, 0, "{payload}\n{:?}", commands(&harness));
     assert_eq!(
@@ -349,7 +349,7 @@ fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
     fs::write(target.join("ConfigDumpInfo.xml"), "<ConfigDumpInfo/>").expect("dump info");
     fs::write(target.join("Untouched.xml"), "<Keep/>").expect("untouched");
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "incremental"]);
+    let (code, payload) = run(&harness, &["dump"]);
 
     assert_eq!(code, 0, "{payload}");
     let sftp = sftp_lines(&harness);
@@ -450,7 +450,7 @@ fn gate_commands_carry_target_side_relative_paths() {
     let harness = harness();
     let target = harness.dir.path().join("project").join("configuration");
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_eq!(code, 0, "{payload}");
     assert_eq!(
@@ -584,7 +584,7 @@ fn a_standalone_server_without_a_declared_channel_is_refused_before_any_session(
         "",
     );
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
@@ -613,7 +613,7 @@ fn a_work_path_on_the_target_side_is_refused() {
     .expect("config");
     let _ = infobase;
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
@@ -635,7 +635,7 @@ fn launch_keys_do_not_apply_to_a_standalone_server() {
         "tools:\n  designer_agent:\n    port: 1543\n",
     );
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
@@ -660,7 +660,7 @@ fn a_direct_gate_address_next_to_the_standalone_section_is_accepted_but_not_used
     );
     write_config(&harness, &infobase, "");
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_eq!(code, 0, "{payload}");
     let commands = commands(&harness);
@@ -703,7 +703,7 @@ fn a_file_address_next_to_the_standalone_section_is_refused() {
     );
     write_config(&harness, &infobase, "");
 
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
@@ -721,7 +721,7 @@ fn a_standalone_server_has_one_executor_and_no_load() {
     let harness = harness();
     let infobase = standalone_infobase(&harness);
     write_config(&harness, &infobase, "providers:\n  dump: agent\n");
-    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (code, payload) = run(&harness, &["dump", "--force"]);
     assert_ne!(code, 0, "{payload}");
     assert!(
         error_message(&payload).contains("providers.pull is not allowed"),

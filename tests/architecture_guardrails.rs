@@ -5318,9 +5318,28 @@ fn dump_format_arguments(file: &syn::File) -> Vec<String> {
         Regex::new(r"(?i)(^|[\s\x22'=])--?format\b").expect("dump format key regex")
     });
 
+    production_string_literals(file)
+        .into_iter()
+        .filter(|literal| {
+            let cleaned = literal.to_lowercase().replace("--output-format", "");
+            KEY.is_match(&cleaned)
+        })
+        .collect()
+}
+
+/// Строковые литералы рабочего кода: в выражениях, в аргументах макросов (`format!`) и
+/// атрибутов (`#[error(…)]`, справка `clap`). Doc-комментарии и тесты не в счёт.
+fn production_string_literals(file: &syn::File) -> Vec<String> {
+    use quote::ToTokens;
+
     struct Literals(Vec<String>);
     impl<'ast> syn::visit::Visit<'ast> for Literals {
-        fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
+        fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+            if !attribute.path().is_ident("doc") {
+                let buffer = syn::buffer::TokenBuffer::new2(attribute.meta.to_token_stream());
+                collect_cursor_strings(buffer.begin(), &mut self.0);
+            }
+        }
         fn visit_item(&mut self, item: &'ast syn::Item) {
             if !item_has_cfg_test(item) {
                 syn::visit::visit_item(self, item);
@@ -5338,11 +5357,11 @@ fn dump_format_arguments(file: &syn::File) -> Vec<String> {
             // Аргументы макроса для syn — сырые токены: строковые литералы, сырые тоже,
             // достаются из них разбором, а не по тексту.
             let buffer = syn::buffer::TokenBuffer::new2(mac.tokens.clone());
-            collect_macro_strings(buffer.begin(), &mut self.0);
+            collect_cursor_strings(buffer.begin(), &mut self.0);
         }
     }
 
-    fn collect_macro_strings(mut cursor: syn::buffer::Cursor<'_>, out: &mut Vec<String>) {
+    fn collect_cursor_strings(mut cursor: syn::buffer::Cursor<'_>, out: &mut Vec<String>) {
         while !cursor.eof() {
             if let Some((literal, next)) = cursor.literal() {
                 if let Ok(text) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
@@ -5350,7 +5369,7 @@ fn dump_format_arguments(file: &syn::File) -> Vec<String> {
                 }
                 cursor = next;
             } else if let Some((inside, _, _, next)) = cursor.any_group() {
-                collect_macro_strings(inside, out);
+                collect_cursor_strings(inside, out);
                 cursor = next;
             } else if let Some((_, next)) = cursor.token_tree() {
                 cursor = next;
@@ -5362,12 +5381,69 @@ fn dump_format_arguments(file: &syn::File) -> Vec<String> {
 
     let mut literals = Literals(Vec::new());
     syn::visit::visit_file(&mut literals, file);
-    literals
-        .0
+    literals.0
+}
+
+/// Совет без набора: `pull --force` или `push --full` сразу за именем команды. Выполненный
+/// буквально, он бьёт в набор по умолчанию или во все наборы, а не в тот, о котором отказ.
+fn bare_set_advice(file: &syn::File) -> Vec<String> {
+    static BARE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\bpull\s+--force\b|\bpush\s+--full\b").expect("bare advice regex")
+    });
+    production_string_literals(file)
         .into_iter()
-        .filter(|literal| {
-            let cleaned = literal.to_lowercase().replace("--output-format", "");
-            KEY.is_match(&cleaned)
-        })
+        .filter(|literal| BARE.is_match(literal))
         .collect()
+}
+
+/// Тексты отказов и справки в `src/` не советуют голый `pull --force` или `push --full`.
+///
+/// `INV.USE-CASES.A-REFUSAL-ADVICE-REPEATS-THE-TARGET`. Корень: совет собирали из имени
+/// команды, и набор пропадал. Владелец набора в совете — тот, кто его разрешил (отказ
+/// сторожа берёт его из разрешённой цели, отказ чужой памяти — из контекста набора).
+#[test]
+fn no_production_text_advises_a_bare_pull_force_or_push_full() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let found: Vec<String> = collect_rust_files(&root)
+        .into_iter()
+        .flat_map(|file| {
+            bare_set_advice(&parse_rust_file(&file))
+                .into_iter()
+                .map(move |literal| format!("{}: {literal}", file.display()))
+        })
+        .collect();
+
+    assert!(
+        found.is_empty(),
+        "advice must name the source set (`pull <SET> --force`, `push <SET> --full`):\n{}",
+        found.join("\n")
+    );
+}
+
+/// Страж видит голый совет в выражении, в `format!`, в `#[error]` и в справке `clap`, а
+/// совет с набором, doc-комментарии и тесты не трогает.
+#[test]
+fn the_bare_advice_guard_sees_every_place_a_message_is_written() {
+    let caught = |source: &str| {
+        !bare_set_advice(&syn::parse_file(source).expect("sample parses")).is_empty()
+    };
+    for bypass in [
+        r#"fn f() -> &'static str { "run `pull --force` to record it" }"#,
+        r#"fn f(s: &str) -> String { format!("{s}: run `push --full`") }"#,
+        r#"fn f() -> String { format!("{}", "v8-runner pull --force") }"#,
+        r#"#[derive(Error)] enum E { #[error("memory of '{set}' is foreign; run `pull --force`")] Foreign { set: String } }"#,
+        r#"#[derive(Args)] #[command(after_help = "or run `push --full`")] struct A;"#,
+        r##"fn f() -> String { format!(r#"run "pull --force""#) }"##,
+    ] {
+        assert!(caught(bypass), "the guard must catch: {bypass}");
+    }
+    for allowed in [
+        r#"/// A bare `pull --force` loses the set.
+fn f(set: &str) -> String { format!("run `pull {set} --force`") }"#,
+        r#"fn f() -> &'static str { "`pull [SET] --force` replaces the set" }"#,
+        r#"fn f() -> &'static str { "run `push main --full`" }"#,
+        r#"#[cfg(test)] mod tests { fn f() -> &'static str { "`pull --force`" } }"#,
+    ] {
+        assert!(!caught(allowed), "the guard must allow: {allowed}");
+    }
 }

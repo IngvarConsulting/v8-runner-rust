@@ -684,7 +684,7 @@ fn run_external_designer_export(
             ARTIFACTS_BACKUP_PREFIX,
             "failed to publish staged external directory",
             // Путь вывода — место для порождённого, а не для чьей-то работы.
-            crate::use_cases::destruction_guard::DestructionConsent::RunnerOwned,
+            &crate::use_cases::destruction_guard::DestructionConsent::RunnerOwned,
             &[],
         )
         .map_err(|error| {

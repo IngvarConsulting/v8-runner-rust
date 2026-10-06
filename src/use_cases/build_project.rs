@@ -40,8 +40,8 @@ mod helpers;
 
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
-    build_designer_dsl, build_ibcmd_dsl, commit_step_state, extension_name,
-    fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
+    build_designer_dsl, build_ibcmd_dsl, change_detection_failure, commit_step_state,
+    extension_name, fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
     plan_configurator_load_step, plan_edt_export_step, plan_generated_designer_load_step,
     push_build_step, remove_storage_path, StepCommit, StepPlan,
 };

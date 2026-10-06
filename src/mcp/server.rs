@@ -51,6 +51,7 @@ use crate::mcp::telemetry::{
 };
 use crate::support::authority::{host_of_authority, host_of_url, Host};
 use crate::use_cases::check_syntax::{self, EdtSessionMiss};
+use crate::use_cases::context::CommandLineTarget;
 use crate::use_cases::context::CommandName;
 use crate::use_cases::result::UseCaseFailure;
 use crate::use_cases::transport::dispatch_with_workspace_lock_async;
@@ -134,7 +135,10 @@ pub enum McpServerError {
 }
 
 /// Runs the MCP stdio server until the transport closes.
-pub fn serve_stdio(config: AppConfig) -> Result<(), McpServerError> {
+pub fn serve_stdio(
+    config: AppConfig,
+    command_line: CommandLineTarget,
+) -> Result<(), McpServerError> {
     let shutdown_timeout = shutdown_grace_period(&config);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -143,7 +147,7 @@ pub fn serve_stdio(config: AppConfig) -> Result<(), McpServerError> {
         .map_err(McpServerError::BuildRuntime)?;
 
     let result = runtime.block_on(async move {
-        let server = McpToolServer::stdio(Arc::new(config))?;
+        let server = McpToolServer::stdio(Arc::new(config), command_line)?;
         let edt_session = server.edt_session.clone();
         let running = server
             .serve(rmcp::transport::stdio())
@@ -162,7 +166,10 @@ pub fn serve_stdio(config: AppConfig) -> Result<(), McpServerError> {
 }
 
 /// Runs the MCP streamable HTTP server until shutdown.
-pub fn serve_http(config: AppConfig) -> Result<(), McpServerError> {
+pub fn serve_http(
+    config: AppConfig,
+    command_line: CommandLineTarget,
+) -> Result<(), McpServerError> {
     let shutdown_timeout = shutdown_grace_period(&config);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -173,7 +180,7 @@ pub fn serve_http(config: AppConfig) -> Result<(), McpServerError> {
     let result = runtime.block_on(async move {
         let config = Arc::new(config);
         let shutdown = CancellationToken::new();
-        let server = McpToolServer::http(config.clone())?;
+        let server = McpToolServer::http(config.clone(), command_line)?;
         let edt_session = server.edt_session.clone();
         let service = HttpMcpService::new(server, config.clone(), shutdown.child_token());
         let listener = tokio::net::TcpListener::bind(config.mcp.http.bind_address.as_str())
@@ -248,20 +255,26 @@ pub struct McpToolServer {
 
 impl McpToolServer {
     /// Creates a stdio server using the production use-case port.
-    pub fn stdio(config: Arc<AppConfig>) -> Result<Self, McpServerError> {
+    pub fn stdio(
+        config: Arc<AppConfig>,
+        command_line: CommandLineTarget,
+    ) -> Result<Self, McpServerError> {
         Self::with_port(
             config,
             Arc::new(DefaultMcpUseCasePort),
-            McpCallContext::stdio(),
+            McpCallContext::stdio().with_command_line(command_line),
         )
     }
 
     /// Creates an HTTP server using the production use-case port.
-    pub fn http(config: Arc<AppConfig>) -> Result<Self, McpServerError> {
+    pub fn http(
+        config: Arc<AppConfig>,
+        command_line: CommandLineTarget,
+    ) -> Result<Self, McpServerError> {
         Self::with_port(
             config,
             Arc::new(DefaultMcpUseCasePort),
-            McpCallContext::http(),
+            McpCallContext::http().with_command_line(command_line),
         )
     }
 

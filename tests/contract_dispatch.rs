@@ -213,7 +213,7 @@ fn rows(dir: &Path) -> Vec<Dispatching> {
         given(&["launch", "thin"], "launch"),
         given(&["make", "--output", &made], "make"),
         given(&["publish"], "publish"),
-        given(&["dump", "--mode", "full"], "pull"),
+        given(&["dump", "--force"], "pull"),
         given(&["build"], "push"),
         given(&["load", "--path", &artifact], "upload"),
         // Формы выгрузки несут признак только в превью: боевой ответ его не называет,

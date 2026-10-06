@@ -139,7 +139,7 @@ fn an_attached_agent_that_presents_another_key_is_refused_by_name() {
         format!("    host-fingerprint: '{someone_else}'\n")
     });
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (code, payload) = run_dump(&harness, &["--force"]);
 
     assert_ne!(code, 0, "{payload}");
     let message = payload["error"]["message"].as_str().unwrap_or_default();
@@ -173,7 +173,7 @@ fn a_managed_agent_is_pinned_by_the_host_key_file_it_was_given() {
     )
     .expect("rewrite config");
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (code, payload) = run_dump(&harness, &["--force"]);
 
     assert_ne!(
         code, 0,
@@ -217,7 +217,7 @@ fn commands(harness: &Harness) -> Vec<String> {
 fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from_disk() {
     let harness = harness(true, Some(true), false);
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (code, payload) = run_dump(&harness, &["--force"]);
 
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["ok"], true, "{payload}");
@@ -319,7 +319,7 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
 fn incremental_mode_updates_the_target_in_place_through_a_link() {
     let harness = harness(true, Some(true), false);
 
-    let (code, payload) = run_dump(&harness, &["--mode", "incremental"]);
+    let (code, payload) = run_dump(&harness, &[]);
 
     assert_eq!(code, 0, "{payload}");
     assert!(harness.target.join("Configuration.xml").is_file());
@@ -354,7 +354,7 @@ fn incremental_mode_updates_the_target_in_place_through_a_link() {
 fn an_unchanged_generation_skips_an_incremental_dump() {
     let harness = harness(true, Some(true), false);
 
-    let (first, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (first, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(first, 0, "{payload}");
     let dumps_after_first = commands(&harness)
         .iter()
@@ -362,7 +362,7 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
         .count();
     assert_eq!(dumps_after_first, 1);
 
-    let (second, payload) = run_dump(&harness, &["--mode", "incremental"]);
+    let (second, payload) = run_dump(&harness, &[]);
 
     assert_eq!(second, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
@@ -388,11 +388,11 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
 #[test]
 fn a_full_dump_repeats_even_when_the_generation_is_unchanged() {
     let harness = harness(true, Some(true), false);
-    let (first, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (first, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(first, 0, "{payload}");
     fs::write(harness.target.join("local-edit.txt"), "local edit").expect("local edit");
 
-    let (second, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (second, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(second, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
     assert!(!harness.target.join("local-edit.txt").exists());
@@ -411,7 +411,7 @@ fn a_full_dump_repeats_even_when_the_generation_is_unchanged() {
 fn an_attached_agent_is_used_without_launching_or_stopping_anything() {
     let harness = harness(true, Some(true), true);
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (code, payload) = run_dump(&harness, &["--force"]);
 
     assert_eq!(code, 0, "{payload}");
     assert_eq!(
@@ -444,7 +444,7 @@ fn an_attached_agent_is_used_without_launching_or_stopping_anything() {
 fn an_attached_agent_session_is_named_in_the_receipt() {
     let harness = harness(false, Some(true), true);
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (code, payload) = run_dump(&harness, &["--force"]);
 
     assert_eq!(code, 0, "{payload}");
     let receipt = &payload["data"]["provider"];
@@ -503,7 +503,7 @@ fn an_attached_agent_released_without_a_request_command_gives_no_work() {
 fn a_rejected_password_is_an_environment_refusal_even_though_the_port_answers() {
     let harness = harness(true, Some(false), false);
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (code, payload) = run_dump(&harness, &["--force"]);
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(
@@ -530,7 +530,7 @@ fn a_rejected_password_is_an_environment_refusal_even_though_the_port_answers() 
 fn a_managed_agent_without_the_local_platform_is_refused_before_any_connection() {
     let harness = harness(false, Some(true), false);
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (code, payload) = run_dump(&harness, &["--force"]);
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(
@@ -558,7 +558,7 @@ fn a_managed_agent_without_the_local_platform_is_refused_before_any_connection()
 fn an_unreachable_attached_agent_is_refused_and_no_process_is_launched_instead() {
     let harness = harness(true, None, true);
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (code, payload) = run_dump(&harness, &["--force"]);
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(
@@ -592,7 +592,7 @@ fn attach_does_not_mix_with_launch_keys() {
     )
     .expect("rewrite config");
 
-    let (code, payload) = run_dump(&harness, &["--mode", "full", "--dry-run"]);
+    let (code, payload) = run_dump(&harness, &["--force", "--dry-run"]);
 
     assert_ne!(code, 0, "{payload}");
     assert!(

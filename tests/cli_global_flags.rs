@@ -5,6 +5,10 @@
 
 mod support;
 
+/// Перечень прежних имён: отказ называет лист словаря и тогда, когда вызван прежний путь.
+#[path = "../src/cli/synonyms.rs"]
+mod synonyms;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -18,6 +22,22 @@ include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/cli/global_flags_expected.in"
 ));
+
+/// Ответ называет лист словаря и молчит о прежнем пути. Имя словаря даёт тот же владелец,
+/// что и коду: прежний путь (`config init`) отвечает записью словаря.
+fn assert_names_the_leaf(arguments: &[&str], leaf: &str, reported: &str) {
+    let name = synonyms::dictionary_path(leaf);
+    assert!(
+        reported.contains(&format!("`{name}`")),
+        "{arguments:?}: {reported}"
+    );
+    if name != leaf {
+        assert!(
+            !reported.contains(leaf),
+            "{arguments:?} names the previous path `{leaf}`: {reported}"
+        );
+    }
+}
 
 /// Листья без превью: минимальный вызов, доходящий до отказа, и путь листа, который
 /// отказ обязан назвать.
@@ -145,10 +165,7 @@ fn a_leaf_without_a_preview_refuses_the_key_and_names_itself() {
             "{arguments:?}: {reported}"
         );
         // Отказ называет сам лист, а не корень: вызывающий видит, о какой команде речь.
-        assert!(
-            reported.contains(&format!("`{leaf}`")),
-            "{arguments:?}: {reported}"
-        );
+        assert_names_the_leaf(arguments, leaf, &reported);
     }
 }
 
@@ -205,10 +222,7 @@ fn a_leaf_that_selects_no_base_refuses_the_base_key() {
             reported.contains("selects no infobase"),
             "{arguments:?}: {reported}"
         );
-        assert!(
-            reported.contains(&format!("`{leaf}`")),
-            "{arguments:?}: {reported}"
-        );
+        assert_names_the_leaf(arguments, leaf, &reported);
     }
 }
 
@@ -228,10 +242,7 @@ fn a_leaf_that_declares_the_base_refuses_a_name_from_the_map() {
             reported.contains("takes a connection string here, not the name `origin`"),
             "{arguments:?}: {reported}"
         );
-        assert!(
-            reported.contains(&format!("`{leaf}`")),
-            "{arguments:?}: {reported}"
-        );
+        assert_names_the_leaf(arguments, leaf, &reported);
     }
 }
 
