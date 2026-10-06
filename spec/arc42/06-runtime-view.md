@@ -138,8 +138,9 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    тогда, когда ответ не дочитан. После отмены команд запроса агенту не отдают — служебные
    команды закрытия идут.
 6. Поколение: `push` после применения записывает ответ `config generation-id` в журнал
-   базы `workPath/infobases/<база>/generation.json`; `pull` спрашивает его до выгрузки;
-   инкрементальная при совпадении с записью той же пары не выгружает, иначе выгружает и
+   базы `workPath/infobases/<база>/generation.json` вместе с именем инструмента (`agent`);
+   `pull` спрашивает его до выгрузки; инкрементальная при совпадении с записью той же пары и
+   того же инструмента не выгружает, иначе выгружает и
    записывает; запись другой пары ответ называет чужой. Полная выгрузка и выгрузка с перечнем объектов идут всегда.
    Полная выгрузка в формате Designer готовит хеши staging и после публикации записывает
    их в память именованной базы через общий `dump_config::publish_full_dump`. После отмены поколение не спрашивается и не
@@ -150,7 +151,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [сессия открывается в JSON](../rules/platform/agent-session-opens-in-json-mode.md),
 [сессия не живёт дольше замка](../rules/platform/agent-session-lives-with-the-lock.md),
 [файлы удалённой цели — объявленным каналом](../rules/platform/remote-files-travel-by-a-declared-channel.md),
-[неизменившееся поколение не выгружается](../rules/use-cases/an-unchanged-generation-is-not-dumped.md).
+[неизменившееся поколение не выгружается](../rules/use-cases/an-unchanged-generation-is-not-dumped.md),
+[токен сравнивается внутри своего инструмента](../rules/use-cases/a-generation-token-is-compared-within-its-own-tool.md).
 
 ### 6.5 `test`
 

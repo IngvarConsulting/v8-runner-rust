@@ -13,7 +13,8 @@ use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
     argument, connect, generation_id, run_critical, run_id, stage_dir, stage_dir_partially, tidy,
-    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange, GenerationLedger,
+    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange, GenerationAfter,
+    GenerationLedger,
 };
 use crate::use_cases::interruption::Deferrals;
 
@@ -158,7 +159,7 @@ impl SourceSetLoader for AgentLoader {
             // и не станет выгружать то, что не менялось.
             let token = generation_id(handle.session(), extension, &wait)?;
             if let Some(ledger) = GenerationLedger::of(source_context, &config.work_path) {
-                ledger.record(&token, "build")?;
+                ledger.record(Provider::Agent, &token, GenerationAfter::Build)?;
             }
             Ok(())
         })
