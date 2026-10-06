@@ -1,6 +1,11 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
+use crate::platform::locator::{UtilityLocation, UtilityVersion};
+use crate::use_cases::destruction_guard::{
+    guard_replacement, Destruction, DestructionConsent, WaysOut,
+};
 use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
+use std::fmt::Write as _;
 
 pub(super) fn run_dump_with_context(
     context: &ExecutionContext,
@@ -181,22 +186,56 @@ fn run_dump_selected(
             "dump: preview",
             "[Dump] preview only, nothing written",
         );
+        // Превью называет режим, который выполнит выгрузка: тот же план по тому файлу
+        // версий, который оставит в каталоге сверка с копией раннера.
+        let plan = match preview_plan(config, &resolved, &mode, location.as_ref()) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let message = error.to_string();
+                return Err(DumpExecutionFailure::with_payload(
+                    error,
+                    empty_result(
+                        mode,
+                        started,
+                        Some(resolved.source_set_name.clone()),
+                        resolved.extension.clone(),
+                        selectors.clone(),
+                        Some(resolved.target_path.clone()),
+                        Some(message),
+                    ),
+                ));
+            }
+        };
+        let planned = plan.mode();
+        let mut message = format!(
+            "would dump {planned:?} into '{}' via {}; nothing written",
+            resolved.target_path.display(),
+            match location.as_ref() {
+                Some(found) => found.path.display().to_string(),
+                None => "the attached Designer agent".to_owned(),
+            }
+        );
+        if let Some(reason) = plan.whole_reason() {
+            let _ = write!(
+                message,
+                "; {}: the dump would run full instead of incremental{}",
+                reason.describe(&resolved.platform_target_path),
+                whole_consequences(context, config, &resolved)
+            );
+            if config.format == SourceFormat::Designer {
+                message.push_str(
+                    "; uncommitted work in the directory would stop it before the platform starts",
+                );
+            }
+        }
         let mut preview = empty_result(
-            mode.clone(),
+            planned,
             started,
             Some(resolved.source_set_name.clone()),
             resolved.extension.clone(),
             selectors.clone(),
             Some(resolved.target_path.clone()),
-            Some(format!(
-                "would dump {:?} into '{}' via {}; nothing written",
-                mode.clone(),
-                resolved.target_path.display(),
-                match location.as_ref() {
-                    Some(found) => found.path.display().to_string(),
-                    None => "the attached Designer agent".to_owned(),
-                }
-            )),
+            Some(message),
         );
         preview.ok = true;
         return Ok(preview);
@@ -323,9 +362,7 @@ fn run_dump_selected(
     let version_file = match version_file_use {
         VersionFileUse::Untouched => None,
         VersionFileUse::RestoreAndRecord | VersionFileUse::RecordOnly => {
-            SourceSetInventory::new(config)
-                .designer_context(&resolved.source_set_name)
-                .and_then(|source| RunnerVersionFile::of(config, source))
+            runner_version_file(config, &resolved)
         }
     };
     if let (VersionFileUse::RestoreAndRecord, Some(version_file)) =
@@ -348,6 +385,56 @@ fn run_dump_selected(
         }
     }
 
+    // Выгрузка по изменившемуся держится на файле версий в каталоге. Нет его или формат в
+    // нём чужой — она становится полной до запуска платформы: `-update` у платформы без
+    // файла отказывает, а при чужом формате считает разницу не от того.
+    let plan = plan_dump(
+        &mode,
+        Some(&resolved.platform_target_path.join(VERSION_FILE_NAME)),
+        platform_of(location.as_ref()),
+    )
+    .and_then(|plan| {
+        // Полная выгрузка поверх каталога переписывает файлы человека, как и замена
+        // каталога: незафиксированное в нём останавливает её до платформы. Снимок EDT —
+        // собственный каталог раннера, а проект EDT публикуется ступенчато со своим сторожем.
+        if plan.whole_reason().is_some() {
+            guard_replacement(
+                context,
+                &resolved.platform_target_path,
+                resolved.platform_consent(),
+                &[VERSION_FILE_NAME],
+                Destruction::Overwrite,
+            )?;
+        }
+        Ok(plan)
+    });
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            let message = error.to_string();
+            return Err(DumpExecutionFailure::with_payload(
+                error,
+                empty_result(
+                    mode,
+                    started,
+                    Some(resolved.source_set_name.clone()),
+                    resolved.extension.clone(),
+                    selectors.clone(),
+                    Some(resolved.target_path.clone()),
+                    Some(message),
+                ),
+            ));
+        }
+    };
+    let whole_note = plan.whole_reason().map(|reason| {
+        format!(
+            "{}: the dump ran full instead of incremental{}",
+            reason.describe(&resolved.platform_target_path),
+            whole_consequences(context, config, &resolved)
+        )
+    });
+    let mode = plan.mode();
+
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
     // Агент отвечает ещё и «выгружать нечего» — это состояние ответа, а не проза, и
@@ -359,7 +446,7 @@ fn run_dump_selected(
             context,
             config,
             &resolved,
-            &mode,
+            &plan,
             partial_objects,
             location.as_ref(),
             &mut utilities,
@@ -370,29 +457,33 @@ fn run_dump_selected(
             Err(error) => (Err(error), false),
         }
     } else {
-        let result = match (config.format, &mode, provider, partial_objects, edt_binary) {
+        let result = match (config.format, &plan, provider, partial_objects, edt_binary) {
             (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
                 crate::use_cases::unimplemented_provider(Operation::Dump, other),
             ),
-            (SourceFormat::Designer, DumpMode::Incremental, Provider::Designer, _, _) => {
-                run_incremental_dump_designer(
+            // Выгрузка по изменившемуся без годного файла версий — полная поверх каталога:
+            // каталог человека она не заменяет, лишнего в нём не удаляет.
+            (SourceFormat::Designer, DumpPlan::OverDirectory(how), Provider::Designer, _, _) => {
+                run_dump_over_directory_designer(
                     context,
                     config,
                     &resolved,
                     binary.as_path(),
                     utilities.runner_for(UtilityType::V8),
+                    how,
                 )
             }
-            (SourceFormat::Designer, DumpMode::Incremental, Provider::Ibcmd, _, _) => {
-                run_incremental_dump_ibcmd(
+            (SourceFormat::Designer, DumpPlan::OverDirectory(how), Provider::Ibcmd, _, _) => {
+                run_dump_over_directory_ibcmd(
                     context,
                     config,
                     &resolved,
                     binary.as_path(),
                     utilities.runner_for(UtilityType::Ibcmd),
+                    how,
                 )
             }
-            (SourceFormat::Designer, DumpMode::Full, Provider::Designer, _, _) => {
+            (SourceFormat::Designer, DumpPlan::Full, Provider::Designer, _, _) => {
                 run_full_dump_designer(
                     context,
                     config,
@@ -401,14 +492,14 @@ fn run_dump_selected(
                     utilities.runner_for(UtilityType::V8),
                 )
             }
-            (SourceFormat::Designer, DumpMode::Full, Provider::Ibcmd, _, _) => run_full_dump_ibcmd(
+            (SourceFormat::Designer, DumpPlan::Full, Provider::Ibcmd, _, _) => run_full_dump_ibcmd(
                 context,
                 config,
                 &resolved,
                 binary.as_path(),
                 utilities.runner_for(UtilityType::Ibcmd),
             ),
-            (SourceFormat::Designer, DumpMode::Partial, Provider::Designer, Some(objects), _) => {
+            (SourceFormat::Designer, DumpPlan::Partial, Provider::Designer, Some(objects), _) => {
                 run_partial_dump_designer(
                     context,
                     config,
@@ -418,7 +509,7 @@ fn run_dump_selected(
                     objects,
                 )
             }
-            (SourceFormat::Designer, DumpMode::Partial, Provider::Ibcmd, Some(objects), _) => {
+            (SourceFormat::Designer, DumpPlan::Partial, Provider::Ibcmd, Some(objects), _) => {
                 run_partial_dump_ibcmd(
                     context,
                     config,
@@ -428,53 +519,69 @@ fn run_dump_selected(
                     objects,
                 )
             }
-            (SourceFormat::Edt, DumpMode::Incremental, Provider::Designer, _, Some(edt_binary)) => {
-                run_incremental_dump_edt_designer(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    edt_binary,
-                    utilities.runner_for(UtilityType::V8),
-                    utilities.runner_for(UtilityType::EdtCli),
-                )
-            }
-            (SourceFormat::Edt, DumpMode::Incremental, Provider::Ibcmd, _, Some(edt_binary)) => {
-                run_incremental_dump_edt_ibcmd(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    edt_binary,
-                    utilities.runner_for(UtilityType::Ibcmd),
-                    utilities.runner_for(UtilityType::EdtCli),
-                )
-            }
-            (SourceFormat::Edt, DumpMode::Full, Provider::Designer, _, Some(edt_binary)) => {
-                run_full_dump_edt_designer(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    edt_binary,
-                    utilities.runner_for(UtilityType::V8),
-                    utilities.runner_for(UtilityType::EdtCli),
-                )
-            }
-            (SourceFormat::Edt, DumpMode::Full, Provider::Ibcmd, _, Some(edt_binary)) => {
-                run_full_dump_edt_ibcmd(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    edt_binary,
-                    utilities.runner_for(UtilityType::Ibcmd),
-                    utilities.runner_for(UtilityType::EdtCli),
-                )
-            }
             (
                 SourceFormat::Edt,
-                DumpMode::Partial,
+                DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
+                Provider::Designer,
+                _,
+                Some(edt_binary),
+            ) => run_incremental_dump_edt_designer(
+                context,
+                config,
+                &resolved,
+                binary.as_path(),
+                edt_binary,
+                utilities.runner_for(UtilityType::V8),
+                utilities.runner_for(UtilityType::EdtCli),
+            ),
+            (
+                SourceFormat::Edt,
+                DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
+                Provider::Ibcmd,
+                _,
+                Some(edt_binary),
+            ) => run_incremental_dump_edt_ibcmd(
+                context,
+                config,
+                &resolved,
+                binary.as_path(),
+                edt_binary,
+                utilities.runner_for(UtilityType::Ibcmd),
+                utilities.runner_for(UtilityType::EdtCli),
+            ),
+            (
+                SourceFormat::Edt,
+                DumpPlan::Full | DumpPlan::OverDirectory(OverDirectory::Whole(_)),
+                Provider::Designer,
+                _,
+                Some(edt_binary),
+            ) => run_full_dump_edt_designer(
+                context,
+                config,
+                &resolved,
+                binary.as_path(),
+                edt_binary,
+                utilities.runner_for(UtilityType::V8),
+                utilities.runner_for(UtilityType::EdtCli),
+            ),
+            (
+                SourceFormat::Edt,
+                DumpPlan::Full | DumpPlan::OverDirectory(OverDirectory::Whole(_)),
+                Provider::Ibcmd,
+                _,
+                Some(edt_binary),
+            ) => run_full_dump_edt_ibcmd(
+                context,
+                config,
+                &resolved,
+                binary.as_path(),
+                edt_binary,
+                utilities.runner_for(UtilityType::Ibcmd),
+                utilities.runner_for(UtilityType::EdtCli),
+            ),
+            (
+                SourceFormat::Edt,
+                DumpPlan::Partial,
                 Provider::Designer,
                 Some(objects),
                 Some(edt_binary),
@@ -490,7 +597,7 @@ fn run_dump_selected(
             ),
             (
                 SourceFormat::Edt,
-                DumpMode::Partial,
+                DumpPlan::Partial,
                 Provider::Ibcmd,
                 Some(objects),
                 Some(edt_binary),
@@ -504,7 +611,7 @@ fn run_dump_selected(
                 utilities.runner_for(UtilityType::EdtCli),
                 objects,
             ),
-            (_, DumpMode::Partial, _, None, _) => Err(AppError::Runtime(
+            (_, DumpPlan::Partial, _, None, _) => Err(AppError::Runtime(
                 "partial dump objects were not validated before execution".to_owned(),
             )),
             (SourceFormat::Edt, _, _, _, None) => Err(AppError::Runtime(
@@ -524,7 +631,7 @@ fn run_dump_selected(
         let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
         (
             platform_result,
-            merge_optional_messages(message, copy_warning),
+            merge_optional_messages(whole_note, merge_optional_messages(message, copy_warning)),
         )
     });
     drop(lock_guard);
@@ -566,6 +673,73 @@ fn run_dump_selected(
             ))
         }
     }
+}
+
+/// Файл версий набора и копия раннера: есть у набора с памятью базы.
+fn runner_version_file(
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+) -> Option<RunnerVersionFile> {
+    SourceSetInventory::new(config)
+        .designer_context(&resolved.source_set_name)
+        .and_then(|source| RunnerVersionFile::of(config, source))
+}
+
+/// Чего не делает полная выгрузка поверх каталога Конфигуратора: лишнего не удаляет и
+/// хеш-память не пишет — каталог с файлами, которых нет в базе, базу не описывает. Совет —
+/// полная выгрузка со ступенчатой публикацией, если вызывающего можно к ней отправить.
+/// Снимок EDT заменяется целиком, и оговорки у него нет.
+fn whole_consequences(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+) -> String {
+    match config.format {
+        SourceFormat::Edt => String::new(),
+        SourceFormat::Designer => {
+            let advice = match &resolved.consent {
+                DestructionConsent::AskFirst(WaysOut::SaveWork) => String::new(),
+                DestructionConsent::AskFirst(
+                    WaysOut::PullForce { .. } | WaysOut::SameCallWithForce,
+                )
+                | DestructionConsent::Granted
+                | DestructionConsent::RunnerOwned => format!(
+                    "; run {} to replace the directory with the base and record its hashes",
+                    context.advised_pull_force(&resolved.source_set_name)
+                ),
+            };
+            format!(
+                "; files the base does not have stay in the directory and hash memory is not updated{advice}"
+            )
+        }
+    }
+}
+
+/// Версия платформы выбранной утилиты, если раннер её знает.
+fn platform_of(location: Option<&UtilityLocation>) -> Option<&PlatformVersion> {
+    location.and_then(|found| match &found.version {
+        Some(UtilityVersion::Platform(version)) => Some(version),
+        Some(UtilityVersion::Edt(_)) | None => None,
+    })
+}
+
+/// План превью: тот же [`plan_dump`], что у выгрузки, по файлу версий, который оставит в
+/// каталоге сверка с копией раннера. Ничего не пишет.
+fn preview_plan(
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    mode: &DumpMode,
+    location: Option<&UtilityLocation>,
+) -> Result<DumpPlan, AppError> {
+    let in_directory = resolved.platform_target_path.join(VERSION_FILE_NAME);
+    let version_file = runner_version_file(config, resolved);
+    let file = match (mode, &version_file) {
+        (DumpMode::Incremental, Some(version_file)) => version_file.file_after_restore()?,
+        (DumpMode::Incremental | DumpMode::Full | DumpMode::Partial, _) => {
+            Some(in_directory.as_path())
+        }
+    };
+    plan_dump(mode, file, platform_of(location))
 }
 
 /// Что выгрузка делает с файлом версий набора и копией раннера.

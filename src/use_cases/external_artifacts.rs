@@ -94,11 +94,9 @@ pub fn prepare_edt_external_artifacts(
     let items = discover_edt_items(&source_dir, expected_kind)?;
     let mut exported = Vec::new();
     for item in items {
-        let export_target = config
-            .work_path
-            .join("designer")
-            .join(&source_set.name)
-            .join(&item.stable_id);
+        let export_target =
+            crate::domain::source_set::designer_copy_dir(&config.work_path, None, &source_set.name)
+                .join(&item.stable_id);
         remove_path_if_exists(&export_target).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to clean external export target '{}': {error}",

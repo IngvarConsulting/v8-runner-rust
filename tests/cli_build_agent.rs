@@ -165,9 +165,17 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
         1,
         "one agent process per command"
     );
-    let ledger = harness.dir.path().join("work/agent/generation/main.json");
-    let record: Value =
-        serde_json::from_str(&read_or_empty(&ledger)).expect("generation ledger record");
+    // Журнал поколений лежит под памятью базы, запись — на набор.
+    let bases: Vec<_> = fs::read_dir(harness.dir.path().join("work/infobases"))
+        .expect("base memory")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    let [base] = bases.as_slice() else {
+        panic!("one remembered base: {bases:?}");
+    };
+    let ledger: Value = serde_json::from_str(&read_or_empty(&base.join("generation.json")))
+        .expect("generation ledger");
+    let record = &ledger["main"];
     assert_eq!(record["after"], "build");
     assert!(record["token"]
         .as_str()

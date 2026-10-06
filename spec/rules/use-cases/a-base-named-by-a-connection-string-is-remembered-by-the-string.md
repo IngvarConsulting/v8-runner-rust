@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.A-BASE-NAMED-BY-A-CONNECTION-STRING-IS-REMEMBERED-BY-THE-STRING
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/214
+check:
+  - src/change_detection/source_sets.rs::an_ad_hoc_base_is_remembered_by_its_address_and_empty_sources_skip
+  - tests/cli_pull_memory.rs::an_ad_hoc_base_is_remembered_by_its_connection_string
 ---
 
 # База, названная строкой соединения, помнится по строке
@@ -13,7 +14,4 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/214
 `INV.USE-CASES.HASH-MEMORY-IS-SCOPED-TO-ITS-BASE-AND-SOURCE`. Следующая команда с той же
 строкой продолжает с этой памятью, а не начинает как первая.
 
-Сегодня такая команда памяти не читает и не пишет
-(`src/change_detection/source_sets.rs::ad_hoc_analysis_never_reads_or_writes_memory_and_empty_sources_skip`,
-`tests/cli_pull_memory.rs::an_ad_hoc_base_never_uses_the_named_hash_baseline`); эти проверки
-меняются вместе с #214.
+Строку, адрес которой раннер не распознаёт, сравнить не с чем: памяти у такой базы нет.

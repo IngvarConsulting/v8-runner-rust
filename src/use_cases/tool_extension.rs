@@ -337,11 +337,13 @@ fn tool_extension_source_context(
         crate::support::path::absolute_from_current_dir(&config.base_path).map_err(|error| {
             AppError::Runtime(format!("failed to resolve current directory: {error}"))
         })?;
-    Ok(SourceSetContext::new(
-        format!("tool:{}", extension.name),
-        crate::support::path::resolve_from(&base_path, &source.path),
-        format!("tool-{}-source", extension.name),
-    ))
+    Ok(
+        crate::change_detection::source_sets::SourceSetsService::new(config)
+            .tool_extension_context(
+                &extension.name,
+                crate::support::path::resolve_from(&base_path, &source.path),
+            ),
+    )
 }
 
 fn log_tool_extension_stage(extension: &ToolExtensionConfig, stage: &str, detail: &str) {

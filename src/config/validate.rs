@@ -1029,18 +1029,33 @@ fn validate_edt_runtime_paths(
         ))
     })?;
 
+    // Снимок Конфигуратора набора лежит под памятью выбранной базы или, без неё, в
+    // `workPath/designer/<набор>` — оба пути называет `designer_copy_dir`. База на этапе
+    // проверки может быть ещё не выбрана, а база, выбранная позже, положит снимок под своим
+    // ключом, поэтому исходники не пересекаются со всем корнем памяти `workPath/infobases`.
+    let overlap =
+        |source_set: &str, source_path: &Path, generated_for: &str, generated_path: &Path| {
+            paths_overlap(source_path, generated_path).then(|| {
+                ConfigValidationError::EdtSourceSetPathOverlapsGeneratedTarget {
+                    source_set: source_set.to_owned(),
+                    source_path: source_path.display().to_string(),
+                    generated_for: generated_for.to_owned(),
+                    generated_path: generated_path.display().to_string(),
+                }
+            })
+        };
+    let memory_root = crate::domain::source_set::infobases_dir(&canonical_work_path);
+    for (source_set, source_path) in edt_source_paths {
+        if let Some(error) = overlap(source_set, source_path, "workPath/infobases", &memory_root) {
+            return Err(error);
+        }
+    }
     for (generated_for, _) in edt_source_paths {
-        let generated_path = canonical_work_path.join("designer").join(generated_for);
+        let generated_path =
+            crate::domain::source_set::designer_copy_dir(&canonical_work_path, None, generated_for);
         for (source_set, source_path) in edt_source_paths {
-            if paths_overlap(source_path, &generated_path) {
-                return Err(
-                    ConfigValidationError::EdtSourceSetPathOverlapsGeneratedTarget {
-                        source_set: source_set.clone(),
-                        source_path: source_path.display().to_string(),
-                        generated_for: generated_for.clone(),
-                        generated_path: generated_path.display().to_string(),
-                    },
-                );
+            if let Some(error) = overlap(source_set, source_path, generated_for, &generated_path) {
+                return Err(error);
             }
         }
     }
@@ -2601,8 +2616,10 @@ mod tests {
 
     #[test]
     fn rejects_edt_source_set_path_overlapping_generated_work_target() {
+        // Снимок Конфигуратора набора EDT лежит под памятью базы: исходники внутри
+        // `workPath/infobases/<база>/designer/<набор>` пересекаются с ним.
         let shared = tempdir().expect("shared");
-        let source_dir = shared.path().join("designer").join("main");
+        let source_dir = shared.path().join("infobases/main/designer/main");
         write_native_edt_project(
             &source_dir,
             "BaseProject",
@@ -2622,7 +2639,7 @@ mod tests {
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
-                path: std::path::PathBuf::from("designer/main"),
+                path: std::path::PathBuf::from("infobases/main/designer/main"),
             }],
             tools: ToolsConfig::default(),
             mcp: Default::default(),
@@ -2630,14 +2647,20 @@ mod tests {
         };
 
         let err = validate(&config).expect_err("expected EDT overlap validation error");
-        assert!(matches!(
-            err,
-            ConfigValidationError::EdtSourceSetPathOverlapsGeneratedTarget {
-                source_set,
-                generated_for,
-                ..
-            } if source_set == "main" && generated_for == "main"
-        ));
+        assert!(
+            matches!(
+                err,
+                ConfigValidationError::EdtSourceSetPathOverlapsGeneratedTarget {
+                    ref source_set,
+                    ref generated_for,
+                    ref generated_path,
+                    ..
+                } if source_set == "main"
+                    && generated_for == "workPath/infobases"
+                    && std::path::Path::new(generated_path).ends_with("infobases")
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -295,11 +295,14 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
         .path()
         .join("work/logs/platform/dump-main-agent.log")
         .is_file());
-    assert!(harness
-        .dir
-        .path()
-        .join("work/agent/generation/main.json")
-        .is_file());
+    let ledgers: Vec<_> = fs::read_dir(harness.dir.path().join("work/infobases"))
+        .expect("base memory")
+        .map(|entry| entry.expect("entry").path().join("generation.json"))
+        .collect();
+    assert!(
+        ledgers.len() == 1 && ledgers[0].is_file(),
+        "the generation is recorded under the base: {ledgers:?}"
+    );
 
     // Поднятый процесс не переживает команду.
     let pid: u32 = read_or_empty(&harness.designer_pid_file)
@@ -318,6 +321,11 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
 #[test]
 fn incremental_mode_updates_the_target_in_place_through_a_link() {
     let harness = harness(true, Some(true), false);
+    fs::write(
+        harness.target.join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.17\"/>",
+    )
+    .expect("version file");
 
     let (code, payload) = run_dump(&harness, &[]);
 
@@ -381,6 +389,40 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
     assert_eq!(
         dumps_after_second, 1,
         "the second command must ask for the generation and stop there"
+    );
+}
+
+/// Каталог без файла версий: выгрузка по изменившемуся идёт полной поверх каталога —
+/// агенту уходит команда без `--update`, ответ называет `FULL` и причину, а прежнее
+/// поколение не даёт её пропустить.
+#[test]
+fn a_directory_without_a_version_file_is_dumped_full_without_the_generation_skip() {
+    let harness = harness(true, Some(true), false);
+    let (first, payload) = run_dump(&harness, &["--force"]);
+    assert_eq!(first, 0, "{payload}");
+    let _ = fs::remove_file(harness.target.join("ConfigDumpInfo.xml"));
+
+    let (second, payload) = run_dump(&harness, &[]);
+
+    assert_eq!(second, 0, "{payload}");
+    assert_eq!(payload["data"]["mode"], "FULL", "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
+    assert!(
+        payload["data"]["message"].as_str().is_some_and(|message| {
+            message.contains("no version file ConfigDumpInfo.xml")
+                && message.contains("ran full instead of incremental")
+        }),
+        "{payload}"
+    );
+    let dumps: Vec<_> = commands(&harness)
+        .into_iter()
+        .filter(|line| line.starts_with("config dump-config-to-files"))
+        .collect();
+    assert_eq!(dumps.len(), 2, "{dumps:?}");
+    assert!(
+        dumps[1].starts_with("config dump-config-to-files --dir=target/")
+            && !dumps[1].contains("--update"),
+        "{dumps:?}"
     );
 }
 

@@ -15,15 +15,16 @@ use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
     argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
     run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir, write_text, AgentHandle,
-    Exchange, GenerationLedger,
+    Exchange, GenerationLedger, Recorded,
 };
 
-/// Выгрузка одного режима через одну сессию.
+/// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
+/// версий (`OverDirectory::Whole`) идёт полной поверх каталога, без `--update`.
 pub(super) fn run_dump_agent(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
-    mode: &DumpMode,
+    plan: &DumpPlan,
     objects: Option<&[PartialDumpSelector]>,
     location: Option<&UtilityLocation>,
     utilities: &mut PlatformUtilities,
@@ -40,7 +41,7 @@ pub(super) fn run_dump_agent(
         transcript.clone(),
         &wait,
     )?;
-    let outcome = dump_through(context, config, resolved, mode, objects, &mut handle, &wait);
+    let outcome = dump_through(context, config, resolved, plan, objects, &mut handle, &wait);
     handle.finish(&wait);
     let (reply_transcript, message, up_to_date) = outcome?;
 
@@ -65,20 +66,33 @@ fn dump_through(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
-    mode: &DumpMode,
+    plan: &DumpPlan,
     objects: Option<&[PartialDumpSelector]>,
     handle: &mut AgentHandle,
     wait: &WaitPolicy,
 ) -> Result<(String, Option<String>, bool), AppError> {
     let exchange = handle.exchange(config)?;
     let extension = resolved.extension.as_deref();
-    let ledger = GenerationLedger::new(config);
+    let ledger = SourceSetInventory::new(config)
+        .designer_context(&resolved.source_set_name)
+        .and_then(|source| GenerationLedger::of(source, &config.work_path));
 
     // Поколение спрашивается до выгрузки: сравнение на равенство с записью после
     // последней удачной операции и говорит, есть ли что выгружать.
     let generation = generation_id(handle.session(), extension, wait)?;
-    if matches!(mode, DumpMode::Incremental) && objects.is_none() {
-        if let Some(record) = ledger.read(&resolved.source_set_name) {
+    let recorded = ledger
+        .as_ref()
+        .map_or(Recorded::Nothing, GenerationLedger::read);
+    let foreign_note = match &recorded {
+        Recorded::Foreign { identity } => Some(format!(
+            "the recorded configuration generation belongs to {identity}, not to this base and directory; it was not used"
+        )),
+        Recorded::Nothing | Recorded::Ours(_) => None,
+    };
+    // Пропуск по поколению — только у выгрузки по изменившемуся от годного файла версий:
+    // полная поверх каталога его пишет, и каталог без него не годится как «уже выгружено».
+    if matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile)) && objects.is_none() {
+        if let Recorded::Ours(record) = &recorded {
             if record.token == generation {
                 return Ok((
                     String::new(),
@@ -93,13 +107,13 @@ fn dump_through(
     }
 
     let run = run_id();
-    let stage = match mode {
+    let stage = match plan.mode() {
         DumpMode::Full => "dump: full",
         DumpMode::Incremental => "dump: incremental",
         DumpMode::Partial => "dump: partial",
     };
-    let (transcript, cleanup) = match mode {
-        DumpMode::Full => {
+    let (transcript, cleanup) = match plan {
+        DumpPlan::Full => {
             let out_relative = format!("dump/{run}");
             make_output_dir(handle, &exchange, &out_relative)?;
             let command = with_extension(
@@ -125,7 +139,11 @@ fn dump_through(
             let _ = std::fs::remove_dir(produced.parent().unwrap_or(&produced));
             (transcript, cleanup?)
         }
-        DumpMode::Incremental => {
+        DumpPlan::OverDirectory(how) => {
+            let update = match how {
+                OverDirectory::ByVersionFile => " --update",
+                OverDirectory::Whole(_) => "",
+            };
             ensure_dir(&resolved.platform_target_path).map_err(|error| {
                 AppError::Runtime(format!("failed to create target dir: {error}"))
             })?;
@@ -138,7 +156,7 @@ fn dump_through(
                         expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
                     let command = with_extension(
                         format!(
-                            "config dump-config-to-files --dir={} --update",
+                            "config dump-config-to-files --dir={}{update}",
                             argument(&target)
                         ),
                         extension,
@@ -164,7 +182,7 @@ fn dump_through(
                     }
                     let command = with_extension(
                         format!(
-                            "config dump-config-to-files --dir={} --update",
+                            "config dump-config-to-files --dir={}{update}",
                             argument(&target_relative)
                         ),
                         extension,
@@ -186,7 +204,7 @@ fn dump_through(
                 }
             }
         }
-        DumpMode::Partial => {
+        DumpPlan::Partial => {
             let objects = objects.ok_or_else(|| {
                 AppError::Runtime(
                     "partial dump objects were not validated before execution".to_owned(),
@@ -247,8 +265,14 @@ fn dump_through(
             (outcome?, None)
         }
     };
-    ledger.record(&resolved.source_set_name, &generation, "dump")?;
-    Ok((transcript, cleanup, false))
+    if let Some(ledger) = &ledger {
+        ledger.record(&generation, "dump")?;
+    }
+    Ok((
+        transcript,
+        merge_optional_messages(foreign_note, cleanup),
+        false,
+    ))
 }
 
 fn with_extension(mut command: String, extension: Option<&str>) -> String {

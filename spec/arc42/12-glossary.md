@@ -18,7 +18,7 @@
 | Свой и чужой агент | Запущенный раннером и объявленный ключом `attach` | `DesignerAgentMode::Managed`, `Attached` |
 | Шлюз | Вход SSH автономного сервера | `infobase.standalone.gate` |
 | Канал обмена | Как файлы идут к агенту и шлюзу | `Exchange` |
-| Поколение | Ответ `config generation-id`, по которому видно, менялась ли база | `agent/generation` |
+| Поколение | Ответ `config generation-id`, по которому видно, менялась ли база | `infobases/<база>/generation.json` |
 | Превью | Показ плана без запуска | `--dry-run` |
 | Замок | Исключительное владение `workPath` на время команды | `acquire_workspace_lock` |
 | Допуск | Ограничение одновременных вызовов MCP | `mcp.execution.max_concurrent_calls` |
