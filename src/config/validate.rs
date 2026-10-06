@@ -4,8 +4,8 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::config::model::{
-    AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, ToolExtensionConfig,
-    ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
+    names_an_ipv6_host, AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+    ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
 };
 use crate::domain::capability::Operation;
 use crate::platform::connection::V8Connection;
@@ -132,11 +132,6 @@ pub enum ConfigValidationError {
         "{key} '{value}' is an IPv6 address: rac and ras accept only a name or IPv4 — `host` or `host:port`"
     )]
     ClusterAddressIsIpv6 { key: &'static str, value: String },
-
-    #[error(
-        "infobase.connection names the cluster by the IPv6 address '{server}', and with infobase.cluster.ras empty the runner takes the ras address from Srvr=: rac and ras accept only a name or IPv4 — declare infobase.cluster.ras as a name or IPv4"
-    )]
-    DerivedClusterAddressIsIpv6 { server: String },
 
     #[error(
         "infobase.connection 'ws=…' is a web-client address, not an administrative channel: put it into infobase.web.url and declare the target with File=… or Srvr=…;Ref=…"
@@ -897,16 +892,11 @@ fn validate_infobase_form(
         }
         return Ok(());
     }
+    // Адрес, который раннер выводит из `Srvr=` без `cluster.ras`, здесь не проверяется:
+    // его выводит и отвергает IPv6 `InfobaseConfig::cluster_administration`, а вызовет её
+    // операция, которой адрес нужен (#212, #213) — решение владельца от 06.10.2026.
     if let Some(cluster) = infobase.cluster.as_ref() {
         validate_cluster_section(cluster)?;
-    }
-    if infobase
-        .cluster
-        .as_ref()
-        .and_then(|cluster| cluster.ras.as_deref())
-        .is_none()
-    {
-        validate_derived_cluster_address(&parsed)?;
     }
 
     Ok(())
@@ -940,7 +930,7 @@ fn validate_cluster_address(
     // Общий разборщик адресов IPv6 принимает — шлюзу автономного сервера и агенту
     // Конфигуратора он нужен. `rac` же скобки не разбирает, а `ras` слушает только IPv4,
     // поэтому отказ здесь, а не в разборщике.
-    if is_ipv6_literal(value) {
+    if names_an_ipv6_host(value) {
         return Err(ConfigValidationError::ClusterAddressIsIpv6 {
             key,
             value: value.to_owned(),
@@ -954,33 +944,6 @@ fn validate_cluster_address(
         });
     }
     Ok(())
-}
-
-/// Без `cluster.ras` адрес сервера администрирования раннер берёт из хоста `Srvr=`, и к
-/// нему относится тот же запрет IPv6, что к объявленному адресу. В `Srvr=` бывает
-/// список серверов через запятую и префикс протокола (`tcp://`); проверяется каждый.
-fn validate_derived_cluster_address(
-    connection: &V8Connection,
-) -> Result<(), ConfigValidationError> {
-    let Some(server) = connection.server_address() else {
-        return Ok(());
-    };
-    let names_ipv6 = server.split(',').map(str::trim).any(|address| {
-        let address = address.split_once("://").map_or(address, |(_, rest)| rest);
-        is_ipv6_literal(address)
-    });
-    if names_ipv6 {
-        return Err(ConfigValidationError::DerivedClusterAddressIsIpv6 {
-            server: server.to_owned(),
-        });
-    }
-    Ok(())
-}
-
-/// Запись `host[:port]` называет адрес IPv6: в скобках или голым. У имени и у IPv4
-/// двоеточие бывает только одно — перед портом.
-fn is_ipv6_literal(address: &str) -> bool {
-    address.starts_with('[') || address.matches(':').count() >= 2
 }
 
 /// Каталог обмена автономного сервера лежит на той стороне; `workPath` — на этой.
@@ -2857,7 +2820,17 @@ mod tests {
             ));
             assert!(super::validate_infobase_form(&section).is_ok(), "{address}");
         }
-        for address in ["", ":1545", "srv:0", "srv:x", " srv:1545", "srv:1545 "] {
+        // `tcp://srv:1545` и `srv::1545` — опечатки, а не IPv6: отказ о форме, не о протоколе.
+        for address in [
+            "",
+            ":1545",
+            "srv:0",
+            "srv:x",
+            " srv:1545",
+            "srv:1545 ",
+            "tcp://srv:1545",
+            "srv::1545",
+        ] {
             let section = infobase(&format!(
                 "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: '{address}'\n"
             ));
@@ -2928,54 +2901,6 @@ mod tests {
                     "{message}"
                 );
             }
-        }
-    }
-
-    /// Без `cluster.ras` адрес берётся из `Srvr=`, и IPv6-хост там даёт тот же отказ;
-    /// объявленный `cluster.ras` его снимает, а имя и IPv4 в `Srvr=` проходят.
-    #[test]
-    fn a_ras_address_derived_from_an_ipv6_server_is_refused() {
-        for connection in [
-            "Srvr=[::1]:1541;Ref=demo",
-            "Srvr=\"[::1]\";Ref=\"demo\"",
-            "Srvr=tcp://[fe80::1]:1541;Ref=demo",
-            "Srvr=srv1,[::1]:1541;Ref=demo",
-            "/S [::1]:1541\\demo",
-        ] {
-            for cluster in ["", "cluster:\n  user: cluster-admin\n"] {
-                let section = infobase(&format!("connection: '{connection}'\n{cluster}"));
-                let error = super::validate_infobase_form(&section).expect_err(connection);
-                assert!(
-                    matches!(
-                        &error,
-                        ConfigValidationError::DerivedClusterAddressIsIpv6 { .. }
-                    ),
-                    "{connection}: {error}"
-                );
-                let message = error.to_string();
-                assert!(message.contains("infobase.cluster.ras"), "{message}");
-                assert!(
-                    message.contains("rac and ras accept only a name or IPv4"),
-                    "{message}"
-                );
-            }
-
-            let declared = infobase(&format!(
-                "connection: '{connection}'\ncluster:\n  ras: 10.0.0.5:1545\n"
-            ));
-            super::validate_infobase_form(&declared)
-                .expect("a declared ras address is not derived from Srvr=");
-        }
-
-        for connection in [
-            "Srvr=srv:1541;Ref=demo",
-            "Srvr=10.0.0.5;Ref=demo",
-            "Srvr=tcp://srv:1541;Ref=demo",
-            "Srvr=srv1:1541,srv2:1541;Ref=demo",
-            "/S srv:1541\\demo",
-        ] {
-            let section = infobase(&format!("connection: '{connection}'\n"));
-            super::validate_infobase_form(&section).expect(connection);
         }
     }
 

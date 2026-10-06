@@ -683,7 +683,8 @@ struct InfobaseClusterSchema {
     /// Administration server (`ras`) address as `host[:port]`, the host a name or an IPv4
     /// address: `rac` and `ras` accept nothing else, so an IPv6 address is refused. It goes
     /// to `rac` as is, so the port default (1545) stays with the platform. Left empty, the
-    /// address comes from the host of `Srvr=`, and an IPv6 host there is refused the same way.
+    /// runner is to start its own `ras` against `agent.address` or the host of `Srvr=` and
+    /// refuse an IPv6 host there (#213); validation does not check `Srvr=` for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ras: Option<String>,
     /// Cluster administrator name; `sessions` (#212) and `infobase create` in a cluster (#204)
@@ -1426,6 +1427,35 @@ mod tests {
         assert!(
             section.get("standalone").is_some(),
             "the local layer declares whole sections, a standalone server included"
+        );
+    }
+
+    /// Корневые синонимы сворачивает загрузчик, а не `serde`, и обход модели в
+    /// `tests/config_schema_synonyms.rs` их не видит: каждый из списка загрузчика есть в
+    /// схеме проектного файла с `deprecated: true`, а в схеме слоя — если она его называет
+    /// (`INV.CONFIG.A-KEY-SYNONYM-IS-MARKED-DEPRECATED-IN-THE-SCHEMA`).
+    #[test]
+    fn every_root_synonym_the_loader_folds_is_deprecated_in_the_schema() {
+        let main_schema = main_config_schema_json();
+        let local_schema = local_config_schema_json();
+        for (previous, current) in crate::config::loader::ROOT_SECTION_SYNONYMS {
+            assert_eq!(
+                main_schema["properties"][previous]["deprecated"],
+                serde_json::Value::Bool(true),
+                "`{previous}` (now `{current}`) in the project schema"
+            );
+            if let Some(entry) = local_schema["properties"].get(previous) {
+                assert_eq!(
+                    entry["deprecated"],
+                    serde_json::Value::Bool(true),
+                    "`{previous}` (now `{current}`) in the local schema"
+                );
+            }
+        }
+        assert_eq!(
+            main_schema["properties"]["build"]["deprecated"],
+            serde_json::Value::Bool(true),
+            "the previous name of the push section"
         );
     }
 

@@ -7,7 +7,7 @@ use crate::change_detection::analyzer::{ChangeKind, FileChange};
 /// The number is the runner's own, not a setting: the key `push.partialLoadThreshold`
 /// is refused by name (`INV.CONFIG.PARTIAL-LOAD-THRESHOLD-KEY-IS-REJECTED`), and the
 /// threshold itself goes away with partial load in place of full (#379).
-pub const PARTIAL_LOAD_THRESHOLD: usize = 20;
+pub(crate) const PARTIAL_LOAD_THRESHOLD: usize = 20;
 
 /// The name of the root configuration descriptor — if changed, partial load is forbidden.
 const CONFIGURATION_XML: &str = "Configuration.xml";

@@ -354,6 +354,17 @@ impl ConfigFile<'_> {
     }
 }
 
+/// Прежнее имя секции `push:`, которое загрузчик сворачивает: `(прежнее, нынешнее)`.
+const PUSH_SECTION_SYNONYM: (&str, &str) = ("build", "push");
+/// Прежнее имя карты баз, которое загрузчик сворачивает: `(прежнее, нынешнее)`.
+const INFOBASE_SECTION_SYNONYM: (&str, &str) = ("infobase", "infobases");
+/// Корневые синонимы, которые сворачивает загрузчик, а не `serde`: модель их не видит,
+/// поэтому схема сверяется с этим списком
+/// (`INV.CONFIG.A-KEY-SYNONYM-IS-MARKED-DEPRECATED-IN-THE-SCHEMA`).
+#[cfg(test)]
+pub(crate) const ROOT_SECTION_SYNONYMS: [(&str, &str); 2] =
+    [PUSH_SECTION_SYNONYM, INFOBASE_SECTION_SYNONYM];
+
 /// Прежний ключ `infobase:` один цикл выпуска читается как `infobases.origin` — в
 /// каждом файле отдельно, чтобы проектный файл с прежним ключом и местный слой с
 /// новым сливались по полям, как сливались до переименования. Оба ключа в одном
@@ -364,18 +375,19 @@ fn fold_infobase_synonym(
     root: &mut serde_yaml::Value,
     file: ConfigFile<'_>,
 ) -> Result<Option<String>, ConfigValidationError> {
+    let (old, new) = INFOBASE_SECTION_SYNONYM;
     let mapping = root_mapping_mut(root)?;
-    let has_old = mapping.contains_key(yaml_key("infobase"));
-    let has_new = mapping.contains_key(yaml_key("infobases"));
+    let has_old = mapping.contains_key(yaml_key(old));
+    let has_new = mapping.contains_key(yaml_key(new));
     if has_old && has_new {
         return Err(ConfigValidationError::InfobaseKeysMixed { file: file.name() });
     }
-    let Some(section) = mapping.remove(yaml_key("infobase")) else {
+    let Some(section) = mapping.remove(yaml_key(old)) else {
         return Ok(None);
     };
     let mut origin = serde_yaml::Mapping::new();
     origin.insert(yaml_key(DEFAULT_INFOBASE_NAME), section);
-    mapping.insert(yaml_key("infobases"), serde_yaml::Value::Mapping(origin));
+    mapping.insert(yaml_key(new), serde_yaml::Value::Mapping(origin));
     let name = file.name();
     let warning = match file {
         ConfigFile::Local => format!(
@@ -427,16 +439,17 @@ fn fold_push_synonym(
     root: &mut serde_yaml::Value,
     file: ConfigFile<'_>,
 ) -> Result<Option<String>, ConfigValidationError> {
+    let (old, new) = PUSH_SECTION_SYNONYM;
     let mapping = root_mapping_mut(root)?;
-    let has_old = mapping.contains_key(yaml_key("build"));
-    let has_new = mapping.contains_key(yaml_key("push"));
+    let has_old = mapping.contains_key(yaml_key(old));
+    let has_new = mapping.contains_key(yaml_key(new));
     if has_old && has_new {
         return Err(ConfigValidationError::PushSectionKeysMixed { file: file.name() });
     }
-    let Some(section) = mapping.remove(yaml_key("build")) else {
+    let Some(section) = mapping.remove(yaml_key(old)) else {
         return Ok(None);
     };
-    mapping.insert(yaml_key("push"), section);
+    mapping.insert(yaml_key(new), section);
     let name = file.name();
     Ok(Some(format!(
         "`build:` in {name} is a one-cycle synonym for `push:`; rename the key"
@@ -752,7 +765,7 @@ fn reject_legacy_config_keys(root: &serde_yaml::Value) -> Result<(), ConfigValid
         if mapping
             .get(yaml_key(section))
             .and_then(serde_yaml::Value::as_mapping)
-            .is_some_and(|push| mapping_contains_key(push, "partialLoadThreshold"))
+            .is_some_and(|body| mapping_contains_key(body, "partialLoadThreshold"))
         {
             return Err(ConfigValidationError::PartialLoadThresholdKeyRemoved { section });
         }

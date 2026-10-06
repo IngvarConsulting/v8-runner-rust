@@ -27,7 +27,7 @@ check: [src/config/schema.rs::generated_schema_artifacts_are_current]
 workPath: build
 format: DESIGNER
 providers:
-  build: ibcmd
+  push: ibcmd
 source-set:
   - name: main
     type: CONFIGURATION

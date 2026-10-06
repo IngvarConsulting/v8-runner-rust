@@ -222,7 +222,7 @@
           ]
         },
         "ras": {
-          "description": "Administration server (`ras`) address as `host[:port]`, the host a name or an IPv4\naddress: `rac` and `ras` accept nothing else, so an IPv6 address is refused. It goes\nto `rac` as is, so the port default (1545) stays with the platform. Left empty, the\naddress comes from the host of `Srvr=`, and an IPv6 host there is refused the same way.",
+          "description": "Administration server (`ras`) address as `host[:port]`, the host a name or an IPv4\naddress: `rac` and `ras` accept nothing else, so an IPv6 address is refused. It goes\nto `rac` as is, so the port default (1545) stays with the platform. Left empty, the\nrunner is to start its own `ras` against `agent.address` or the host of `Srvr=` and\nrefuse an IPv6 host there (#213); validation does not check `Srvr=` for it.",
           "type": [
             "string",
             "null"

@@ -125,6 +125,16 @@ impl V8Connection {
             .map(|(server, _)| server.trim().to_owned())
     }
 
+    /// Серверы кластера из `Srvr=` или из `/S <server>\<base>` — каждый `host[:port]` без
+    /// префикса протокола (`tcp://`), в порядке записи: основной, затем резервные. Пусто
+    /// у файловой базы и у иной формы строки. Список читает `cluster_servers` — тот же
+    /// разбор, по которому `DeclaredServerAddress::sole_s_argument` узнаёт резервные.
+    pub fn cluster_hosts(&self) -> Vec<String> {
+        self.server_address()
+            .map(|server| cluster_servers(&server).map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
     /// Returns whether the raw value has a supported file or server connection shape.
     /// The declared form is answered by [`declared_server_address`], the same predicate
     /// that decides how the address reaches the platform.
@@ -201,11 +211,21 @@ impl DeclaredServerAddress {
     /// несёт, и терять их нельзя), и хост не перечисляет резервные серверы через запятую
     /// (справка платформы знает у `/S` одну машину, а замера списка нет — #55).
     fn sole_s_argument(&self) -> Option<String> {
-        if self.parts != 2 || self.server.contains(',') {
+        if self.parts != 2 || cluster_servers(&self.server).nth(1).is_some() {
             return None;
         }
         Some(format!("{}\\{}", self.server, self.reference))
     }
+}
+
+/// Записи серверов в значении `Srvr=`: через запятую перечислены основной и резервные,
+/// у каждого бывает префикс протокола (`tcp://srv:1541`). Пустая запись не выбрасывается:
+/// `srv,` — тоже список, а не одна машина.
+fn cluster_servers(server: &str) -> impl Iterator<Item = &str> {
+    server.split(',').map(|entry| {
+        let entry = entry.trim();
+        entry.split_once("://").map_or(entry, |(_, rest)| rest)
+    })
 }
 
 /// Один предикат серверной формы на все вопросы к объявленной строке — валидации и
@@ -476,6 +496,36 @@ mod tests {
             assert_eq!(
                 V8Connection::from_connection_string(raw).args(),
                 vec!["/S", expected],
+                "{raw}"
+            );
+        }
+    }
+
+    /// Серверы кластера читаются из `Srvr=` и из `/S`: список через запятую, без префикса
+    /// протокола, в порядке записи; у файловой базы их нет.
+    #[test]
+    fn cluster_hosts_list_the_servers_of_srvr_and_s_in_order() {
+        for (raw, expected) in [
+            ("Srvr=srv:1541;Ref=demo", vec!["srv:1541"]),
+            ("Srvr=\"[::1]\";Ref=\"demo\"", vec!["[::1]"]),
+            (
+                "Srvr='tcp://srv1:1541, srv2';Ref=demo",
+                vec!["srv1:1541", "srv2"],
+            ),
+            ("Srvr=srv;Ref=demo;Locale=ru", vec!["srv"]),
+            ("/S srv:1541\\demo", vec!["srv:1541"]),
+        ] {
+            assert_eq!(
+                V8Connection::from_connection_string(raw).cluster_hosts(),
+                expected,
+                "{raw}"
+            );
+        }
+        for raw in ["File=/tmp/ib", "/F /tmp/ib", "Srvr=host"] {
+            assert!(
+                V8Connection::from_connection_string(raw)
+                    .cluster_hosts()
+                    .is_empty(),
                 "{raw}"
             );
         }
