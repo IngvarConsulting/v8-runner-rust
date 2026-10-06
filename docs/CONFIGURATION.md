@@ -324,7 +324,9 @@ command-specific validation, а не ослабление `push`, source `pull`,
 и `tool-*.redb`, снимки `workPath/designer/<набор>` формата EDT и журнал
 `workPath/agent/generation/`. Первый обычный `push` после обновления загружает всё дерево,
 поэтому при невыгруженных правках в базе начните с полного `pull`; первая выгрузка агентом
-не пропускается по поколению. Старые каталоги можно удалить вручную.
+не пропускается по поколению. Вручную можно удалить `workPath/hash-storages/designer-*.redb`
+и `tool-*.redb`, `workPath/agent/generation/` и `workPath/designer/<набор>` наборов EDT; весь
+`workPath/designer` не удаляйте — там живут выгрузки внешних обработок и отчётов.
 
 Если каталога нет, он создаётся автоматически при захвате workspace lock. Pure provider
 selection для infobase export не создаёт `workPath` и runtime-файлы.

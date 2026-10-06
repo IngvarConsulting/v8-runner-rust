@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/214
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/215
 ---
 
 # Один файл версий выгружается, только когда каталог совпадает с базой
