@@ -21,6 +21,10 @@ pub enum UseCaseErrorKind {
     InfobaseBusy,
     /// Файловую базу держит другая рабочая копия: повтор не поможет.
     InfobaseHeld,
+    /// База ушла вперёд записанного поколения: сперва `pull` или перезапись `push --force`.
+    NonFastForward,
+    /// Памяти о базе у рабочей копии нет: сперва `pull` или перезапись `push --force`.
+    NoMemory,
     InvalidOutput,
     /// Отмена оператором; место остановки говорит, оборвана ли работа исполнителя.
     Cancelled(CancelledAt),
@@ -37,6 +41,7 @@ impl UseCaseErrorKind {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment => VALIDATION_EXIT_CODE,
             Self::WorkspaceBusy | Self::InfobaseBusy | Self::InfobaseHeld => RUNTIME_EXIT_CODE,
+            Self::NonFastForward | Self::NoMemory => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
@@ -56,6 +61,7 @@ impl UseCaseErrorKind {
             | AppError::PlatformLocatorContext { .. } => Self::Environment,
             AppError::WorkspaceBusy(_) => Self::WorkspaceBusy,
             AppError::InfobaseBusy(_) => Self::InfobaseBusy,
+            AppError::NonFastForward(_) => Self::NonFastForward,
             AppError::Cancelled { at, .. } => Self::Cancelled(*at),
             AppError::TimedOut(_) => Self::TimedOut,
             AppError::InvalidOutput(_) => Self::InvalidOutput,
@@ -89,6 +95,8 @@ impl UseCaseErrorKind {
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
             Self::InfobaseHeld => "infobase_held",
+            Self::NonFastForward => "non_fast_forward",
+            Self::NoMemory => "no_memory",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled(_) => CANCELLED_ERROR_CODE,
             Self::TimedOut => "timed_out",
@@ -109,6 +117,8 @@ impl UseCaseErrorKind {
             | Self::WorkspaceBusy
             | Self::InfobaseBusy
             | Self::InfobaseHeld
+            | Self::NonFastForward
+            | Self::NoMemory
             | Self::Validation
             | Self::Runtime
             | Self::Platform => ExecutionStatus::Failed,
@@ -122,6 +132,8 @@ impl UseCaseErrorKind {
             Self::WorkspaceBusy => "workspace busy",
             Self::InfobaseBusy => "infobase busy",
             Self::InfobaseHeld => "infobase held",
+            Self::NonFastForward => "non-fast-forward",
+            Self::NoMemory => "no memory of the infobase",
             Self::InvalidOutput => "invalid output",
             Self::Cancelled(_) => "cancelled",
             Self::TimedOut => "timed out",
@@ -140,6 +152,17 @@ pub struct UseCaseError {
     /// Шаг, которым вызывающий выходит из отказа. Живёт здесь и только здесь: конверт его
     /// печатает, а транспорт не выдумывает.
     next: Option<Box<NextStep>>,
+    /// Поколения у отказа `non_fast_forward`: базы сейчас и записанное после прошлого обмена.
+    generations: Option<Box<Generations>>,
+}
+
+/// Оба поколения отказа «база ушла вперёд».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generations {
+    /// Поколение базы сейчас.
+    pub base: String,
+    /// Поколение, записанное после прошлого обмена.
+    pub local: String,
 }
 
 impl UseCaseError {
@@ -149,7 +172,13 @@ impl UseCaseError {
             kind,
             message: message.into(),
             next: None,
+            generations: None,
         }
+    }
+
+    /// Оба поколения отказа «база ушла вперёд».
+    pub fn generations(&self) -> Option<&Generations> {
+        self.generations.as_deref()
     }
 
     /// Называет шаг, которым вызывающий выходит из отказа.
@@ -200,6 +229,9 @@ impl From<AppError> for UseCaseError {
         // Отмена одна для всех: где бы её ни заметили — на безопасной точке, в снятом
         // процессе, в брошенной команде агента, — род отказа у неё `cancelled`.
         let cancelled_at = value.cancellation();
+        if let AppError::NonFastForward(refusal) = value {
+            return Self::non_fast_forward(*refusal);
+        }
         let error = Self::classified(value);
         match cancelled_at {
             Some(at) => Self {
@@ -212,12 +244,31 @@ impl From<AppError> for UseCaseError {
 }
 
 impl UseCaseError {
+    /// Отказ «база ушла вперёд»: оба поколения и следующий шаг — `pull` набора или, когда
+    /// выгрузку предлагать нельзя, `push` набора с `--force`.
+    fn non_fast_forward(refusal: crate::support::error::NonFastForward) -> Self {
+        let next = if refusal.offers_pull {
+            NextStep::command("pull")
+        } else {
+            NextStep::command("push").with_key("--force", "")
+        }
+        .for_source_set(&refusal.source_set);
+        Self {
+            generations: Some(Box::new(Generations {
+                base: refusal.base_generation,
+                local: refusal.local_generation,
+            })),
+            ..Self::new(UseCaseErrorKind::NonFastForward, refusal.message).with_next(next)
+        }
+    }
+
     /// Отказ по ошибке: род — от [`UseCaseErrorKind::of`], текст — без метки рода; отмену
     /// поверх него узнаёт `From`.
     fn classified(value: AppError) -> Self {
         let kind = UseCaseErrorKind::of(&value);
         let message = match value {
             AppError::CapabilityUnavailable(refusal) => refusal.message,
+            AppError::NonFastForward(refusal) => refusal.message,
             AppError::EnvironmentUnavailable(message)
             | AppError::WorkspaceBusy(message)
             | AppError::InfobaseBusy(message)
@@ -530,6 +581,8 @@ mod tests {
         assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InfobaseBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InfobaseHeld.exit_code(), 3);
+        assert_eq!(UseCaseErrorKind::NonFastForward.exit_code(), 3);
+        assert_eq!(UseCaseErrorKind::NoMemory.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InvalidOutput.exit_code(), 4);
         for at in [CancelledAt::Boundary, CancelledAt::Work] {
             assert_eq!(UseCaseErrorKind::Cancelled(at).exit_code(), 4, "{at:?}");

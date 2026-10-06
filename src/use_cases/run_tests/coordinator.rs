@@ -82,6 +82,7 @@ pub(super) fn run_tests(
                     dry_run: false,
                     full_rebuild: false,
                     source_set: None,
+                    force: false,
                 },
             ) {
                 Ok(result) => result,

@@ -2561,6 +2561,7 @@ fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
         dry_run,
         full_rebuild: args.full_rebuild,
         source_set: args.source_set.name().map(str::to_owned),
+        force: args.force,
     }
 }
 
@@ -4721,6 +4722,7 @@ mod tests {
                 &BuildArgs {
                     full_rebuild: true,
                     source_set: SourceSetArg::default(),
+                    force: false,
                 },
                 false,
             )
@@ -5159,6 +5161,7 @@ mod tests {
             command_name(&Command::Build(BuildArgs {
                 full_rebuild: false,
                 source_set: SourceSetArg::default(),
+                force: false,
             })),
             CommandName::Build
         );
@@ -5232,6 +5235,7 @@ mod tests {
             &Command::Build(BuildArgs {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
+                force: false,
             }),
             &CommandLineTarget::default(),
             &presenter,
@@ -5433,6 +5437,7 @@ mod tests {
             &Command::Build(BuildArgs {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
+                force: false,
             }),
             &CommandLineTarget::default(),
             &presenter,

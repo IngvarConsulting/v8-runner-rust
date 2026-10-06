@@ -16,7 +16,7 @@ use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
     argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
     run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir, write_text, AgentHandle,
-    Exchange, GenerationAfter, GenerationComparison, GenerationLedger, Recorded,
+    Exchange, GenerationComparison, GenerationLedger, Recorded,
 };
 
 /// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
@@ -74,9 +74,9 @@ fn dump_through(
 ) -> Result<(String, Option<String>, bool), AppError> {
     let exchange = handle.exchange(config)?;
     let extension = resolved.extension.as_deref();
-    let ledger = SourceSetInventory::new(config)
-        .designer_context(&resolved.source_set_name)
-        .and_then(|source| GenerationLedger::of(source, &config.work_path));
+    let inventory = SourceSetInventory::new(config);
+    let set = inventory.designer_context(&resolved.source_set_name);
+    let ledger = set.and_then(|source| GenerationLedger::of(source, &config.work_path));
 
     // Поколение спрашивается до выгрузки: сравнение на равенство с записью после
     // последней удачной операции и говорит, есть ли что выгружать.
@@ -266,12 +266,27 @@ fn dump_through(
             (outcome?, None)
         }
     };
-    if let Some(ledger) = &ledger {
-        ledger.record(Provider::Agent, &generation, GenerationAfter::Dump)?;
-    }
+    // Поколение спрашивается и после выгрузки: то же — память записывается, другое — базу
+    // правили во время выгрузки, и ответ это называет. Выборка объектов каталог с базой не
+    // сводит и поколения не пишет; после отмены поколение не спрашивается.
+    let changed_note = match (set, plan) {
+        (Some(set), DumpPlan::Full | DumpPlan::OverDirectory(_))
+            if context.interruption().is_none() =>
+        {
+            let after = generation_id(handle.session(), extension, wait).ok();
+            crate::use_cases::exchange_guard::record_after_dump(
+                set,
+                &config.work_path,
+                Provider::Agent,
+                Some(&generation),
+                after.as_deref(),
+            )?
+        }
+        _ => None,
+    };
     Ok((
         transcript,
-        merge_optional_messages(foreign_note, cleanup),
+        merge_optional_messages(merge_optional_messages(foreign_note, cleanup), changed_note),
         false,
     ))
 }

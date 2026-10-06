@@ -1015,7 +1015,21 @@ impl GenerationLedger {
         .map_err(|error| AppError::Runtime(format!("failed to encode generation: {error}")))?;
         let mut records = self.records();
         records.insert(self.source_set.clone(), record);
-        let text = serde_json::to_vec_pretty(&records)
+        self.write(&records)
+    }
+
+    /// Стирает запись набора, сохраняя остальные: после загрузки, о которой инструмент не
+    /// ответил поколением, прежний токен описывает уже не ту базу.
+    pub(crate) fn forget(&self) -> Result<(), AppError> {
+        let mut records = self.records();
+        if records.remove(&self.source_set).is_none() {
+            return Ok(());
+        }
+        self.write(&records)
+    }
+
+    fn write(&self, records: &serde_json::Map<String, serde_json::Value>) -> Result<(), AppError> {
+        let text = serde_json::to_vec_pretty(records)
             .map_err(|error| AppError::Runtime(format!("failed to encode generation: {error}")))?;
         crate::support::fs::write_file_atomically(&self.file, |file| {
             std::io::Write::write_all(file, &text)

@@ -68,6 +68,8 @@ where
             dry_run: false,
             full_rebuild: request.full_rebuild.unwrap_or(false),
             source_set: request.source_set.clone(),
+            // `push --force` — ключ командной строки: отказы MCP называют его командой.
+            force: false,
         };
 
         match self

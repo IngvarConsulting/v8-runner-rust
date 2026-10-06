@@ -631,3 +631,77 @@ pub(super) fn fail_from_source_set_index(
         message,
     )
 }
+
+/// Поколение базы для набора, прочитанное Конфигуратором (`/GetConfigGenerationID`).
+/// После отмены новый процесс не запускается: ответа нет.
+pub(super) fn read_designer_generation(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+    step_index: usize,
+) -> Result<Option<String>, AppError> {
+    if context.interruption().is_some() {
+        return Ok(None);
+    }
+    build_designer_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        &source_set.name,
+        step_index,
+        "generation",
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .config_generation_id(extension_name(source_set))
+    .map_err(AppError::from)
+}
+
+/// Поколение базы для набора, прочитанное `ibcmd config generation-id`.
+pub(super) fn read_ibcmd_generation(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+) -> Result<Option<String>, AppError> {
+    if context.interruption().is_some() {
+        return Ok(None);
+    }
+    build_ibcmd_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .config_generation_id(extension_name(source_set))
+    .map_err(map_ibcmd_error)
+}
+
+/// Один файл версий набора в каталог загрузки — `-configDumpInfoOnly` Конфигуратора.
+pub(super) fn dump_designer_version_file(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+    load_context: &SourceSetContext,
+    step_index: usize,
+) -> Result<(), AppError> {
+    let result = build_designer_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        &source_set.name,
+        step_index,
+        "dump-info",
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .dump_config_dump_info_only(load_context.path(), extension_name(source_set))
+    .map_err(AppError::from)?;
+    ensure_platform_success("dump_info", source_set, &result)
+}

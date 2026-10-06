@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
+use crate::use_cases::exchange_guard::GenerationGate;
 use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 
 /// Кто грузит набор исходников в базу: пакетный Конфигуратор или его агент.
@@ -9,6 +10,30 @@ use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 /// платформу не запускает.
 pub(super) trait SourceSetLoader {
     fn locate(&mut self) -> Result<(), AppError>;
+
+    /// Инструмент, которым читается и записывается поколение.
+    fn tool(&self) -> Provider;
+
+    /// Поколение базы для набора; `None` — ответа нет.
+    fn read_generation(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        step_index: usize,
+    ) -> Result<Option<String>, AppError>;
+
+    /// Один файл версий набора в каталог загрузки; `None` — инструмент этого не умеет.
+    fn dump_version_file(
+        &mut self,
+        _context: &ExecutionContext,
+        _config: &AppConfig,
+        _source_set: &SourceSetConfig,
+        _source_context: &SourceSetContext,
+        _step_index: usize,
+    ) -> Option<Result<(), AppError>> {
+        None
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn load(
@@ -41,6 +66,14 @@ impl DesignerLoader {
     }
 }
 
+impl DesignerLoader {
+    fn binary(&self) -> Result<PathBuf, AppError> {
+        self.binary
+            .clone()
+            .ok_or_else(|| AppError::Runtime("Designer was not located before the load".to_owned()))
+    }
+}
+
 impl SourceSetLoader for DesignerLoader {
     fn locate(&mut self) -> Result<(), AppError> {
         if self.binary.is_none() {
@@ -48,6 +81,48 @@ impl SourceSetLoader for DesignerLoader {
             self.binary = Some(location.path);
         }
         Ok(())
+    }
+
+    fn tool(&self) -> Provider {
+        Provider::Designer
+    }
+
+    fn read_generation(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        step_index: usize,
+    ) -> Result<Option<String>, AppError> {
+        read_designer_generation(
+            context,
+            config,
+            &self.binary()?,
+            self.utilities.runner_for(UtilityType::V8),
+            source_set,
+            step_index,
+        )
+    }
+
+    fn dump_version_file(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        source_context: &SourceSetContext,
+        step_index: usize,
+    ) -> Option<Result<(), AppError>> {
+        Some(self.binary().and_then(|binary| {
+            dump_designer_version_file(
+                context,
+                config,
+                &binary,
+                self.utilities.runner_for(UtilityType::V8),
+                source_set,
+                source_context,
+                step_index,
+            )
+        }))
     }
 
     fn load(
@@ -60,9 +135,7 @@ impl SourceSetLoader for DesignerLoader {
         partial_paths: Option<&[PathBuf]>,
         commit: &StepCommit,
     ) -> Result<Vec<String>, AppError> {
-        let binary = self.binary.clone().ok_or_else(|| {
-            AppError::Runtime("Designer was not located before the load".to_owned())
-        })?;
+        let binary = self.binary()?;
         execute_source_set_step(
             context,
             config,
@@ -140,6 +213,7 @@ fn run_build_with(
     };
 
     let mut steps = Vec::new();
+    let gate = GenerationGate::new(context, config, args.force);
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
         let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
@@ -286,16 +360,59 @@ fn run_build_with(
                     }
                     Ok(version_file) => version_file,
                 };
-                match loader.load(
-                    context,
-                    config,
-                    source_set,
-                    &source_context,
-                    index,
-                    partial_paths.as_deref(),
-                    &commit,
-                ) {
-                    Ok(mut warnings) => {
+                let full = partial_paths.is_none();
+                let loaded = gate
+                    .before_load(&source_context, loader.tool(), || {
+                        loader.read_generation(context, config, source_set, index)
+                    })
+                    .and_then(|before| {
+                        loader
+                            .load(
+                                context,
+                                config,
+                                source_set,
+                                &source_context,
+                                index,
+                                partial_paths.as_deref(),
+                                &commit,
+                            )
+                            .map(|warnings| (before, warnings))
+                    });
+                match loaded {
+                    Ok((before, mut warnings)) => {
+                        let token = loader
+                            .read_generation(context, config, source_set, index)
+                            .unwrap_or_else(|error| {
+                                debug!(%error, "the generation after the load is not known");
+                                None
+                            });
+                        warnings.extend(gate.after_load(
+                            &source_context,
+                            loader.tool(),
+                            token.as_deref(),
+                        ));
+                        warnings.extend(gate.restore_version_file(
+                            &source_context,
+                            full,
+                            &before,
+                            token.as_deref(),
+                            || {
+                                loader
+                                    .dump_version_file(
+                                        context,
+                                        config,
+                                        source_set,
+                                        &source_context,
+                                        index,
+                                    )
+                                    .map(|dumped| {
+                                        dumped.and_then(|()| {
+                                            loader
+                                                .read_generation(context, config, source_set, index)
+                                        })
+                                    })
+                            },
+                        ));
                         warnings.extend(version_file.as_ref().and_then(
                             |(version_file, before)| {
                                 version_file.record_if_rewritten(before.as_ref())
@@ -380,6 +497,7 @@ pub(super) fn run_build_ibcmd(
     let mut utilities = PlatformUtilities::from_config(config);
     let mut ibcmd_binary: Option<PathBuf> = None;
     let mut steps = Vec::new();
+    let gate = GenerationGate::new(context, config, args.force);
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
         let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
@@ -480,18 +598,22 @@ pub(super) fn run_build_ibcmd(
                 let step_started = Instant::now();
                 // Загрузка `ibcmd` файл версий не пишет; временные файлы прошлых замен
                 // убираются и здесь.
+                let runner = utilities.runner_for(UtilityType::Ibcmd);
+                let read = || read_ibcmd_generation(context, config, &binary, runner, source_set);
                 match remove_left_candidates(source_context.path()).and_then(|()| {
-                    execute_source_set_step_ibcmd(
-                        context,
-                        config,
-                        &binary,
-                        utilities.runner_for(UtilityType::Ibcmd),
-                        source_set,
-                        &source_context,
-                        &source_context,
-                        partial_paths.as_deref(),
-                        &commit,
-                    )
+                    guarded_load(&gate, &source_context, Provider::Ibcmd, read, || {
+                        execute_source_set_step_ibcmd(
+                            context,
+                            config,
+                            &binary,
+                            runner,
+                            source_set,
+                            &source_context,
+                            &source_context,
+                            partial_paths.as_deref(),
+                            &commit,
+                        )
+                    })
                 }) {
                     Ok(warnings) => push_build_step(
                         &mut steps,
@@ -620,6 +742,7 @@ pub(super) fn run_build_edt(
     let mut edt_binary: Option<PathBuf> = None;
     let mut interactive_edt = None;
     let mut steps = Vec::new();
+    let gate = GenerationGate::new(context, config, args.force);
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
         let Some(edt_context) = inventory.edt_context(&source_set.name).cloned() else {
@@ -1146,18 +1269,26 @@ pub(super) fn run_build_edt(
                             );
                             continue;
                         }
-                        execute_source_set_step(
-                            context,
-                            config,
-                            designer,
-                            utilities.runner_for(UtilityType::V8),
-                            source_set,
-                            &designer_context,
-                            &designer_context,
-                            index,
-                            partial_paths.as_deref(),
-                            &commit,
-                        )
+                        let runner = utilities.runner_for(UtilityType::V8);
+                        let read = || {
+                            read_designer_generation(
+                                context, config, designer, runner, source_set, index,
+                            )
+                        };
+                        guarded_load(&gate, &designer_context, Provider::Designer, read, || {
+                            execute_source_set_step(
+                                context,
+                                config,
+                                designer,
+                                runner,
+                                source_set,
+                                &designer_context,
+                                &designer_context,
+                                index,
+                                partial_paths.as_deref(),
+                                &commit,
+                            )
+                        })
                     }
                     Provider::Ibcmd => {
                         let ibcmd = &loader;
@@ -1172,17 +1303,22 @@ pub(super) fn run_build_edt(
                             );
                             continue;
                         }
-                        execute_source_set_step_ibcmd(
-                            context,
-                            config,
-                            ibcmd,
-                            utilities.runner_for(UtilityType::Ibcmd),
-                            source_set,
-                            &designer_context,
-                            &designer_context,
-                            partial_paths.as_deref(),
-                            &commit,
-                        )
+                        let runner = utilities.runner_for(UtilityType::Ibcmd);
+                        let read =
+                            || read_ibcmd_generation(context, config, ibcmd, runner, source_set);
+                        guarded_load(&gate, &designer_context, Provider::Ibcmd, read, || {
+                            execute_source_set_step_ibcmd(
+                                context,
+                                config,
+                                ibcmd,
+                                runner,
+                                source_set,
+                                &designer_context,
+                                &designer_context,
+                                partial_paths.as_deref(),
+                                &commit,
+                            )
+                        })
                     }
                 };
                 match load_result {
@@ -1218,4 +1354,24 @@ pub(super) fn run_build_edt(
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+/// Загрузка набора под сверкой поколения: до неё — отказ, если база ушла вперёд записанного
+/// тем же инструментом; после — запись поколения. Восстановления файла версий здесь нет:
+/// `ibcmd` один файл версий не выгружает, а снимок EDT пишет его полной выгрузкой.
+fn guarded_load(
+    gate: &GenerationGate<'_>,
+    set: &SourceSetContext,
+    tool: Provider,
+    read: impl Fn() -> Result<Option<String>, AppError>,
+    load: impl FnOnce() -> Result<Vec<String>, AppError>,
+) -> Result<Vec<String>, AppError> {
+    gate.before_load(set, tool, &read)?;
+    let mut warnings = load()?;
+    let token = read().unwrap_or_else(|error| {
+        debug!(%error, "the generation after the load is not known");
+        None
+    });
+    warnings.extend(gate.after_load(set, tool, token.as_deref()));
+    Ok(warnings)
 }

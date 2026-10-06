@@ -41,9 +41,10 @@ mod helpers;
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
     build_designer_dsl, build_ibcmd_dsl, change_detection_failure, commit_step_state,
-    extension_name, fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
-    plan_configurator_load_step, plan_edt_export_step, plan_generated_designer_load_step,
-    push_build_step, remove_storage_path, StepCommit, StepPlan,
+    dump_designer_version_file, extension_name, fail_from_source_set_index,
+    interruption_before_safe_point, map_ibcmd_error, plan_configurator_load_step,
+    plan_edt_export_step, plan_generated_designer_load_step, push_build_step,
+    read_designer_generation, read_ibcmd_generation, remove_storage_path, StepCommit, StepPlan,
 };
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 
@@ -103,8 +104,83 @@ fn run_build_branch(
         Ok(selected) => (selected.provider, selected.receipt),
         Err((_error, receipt)) => (config.selected_provider(Operation::Build), receipt),
     };
-    let outcome = run_build_selected(context, config, args, provider);
+    // `--force` перезаписывает базу: каждый выбранный набор грузится целиком.
+    let forced;
+    let args = if args.force {
+        forced = BuildArgs {
+            full_rebuild: true,
+            ..args.clone()
+        };
+        &forced
+    } else {
+        args
+    };
+    let outcome = match require_memory(context, config, args) {
+        Ok(()) => run_build_selected(context, config, args, provider),
+        Err(error) => Err(BuildExecutionFailure::with_payload(
+            error,
+            BuildResult {
+                provider: None,
+                provider_dispatched: false,
+                ok: false,
+                steps: vec![],
+                duration_ms: 0,
+            },
+        )),
+    };
+    let outcome = forget_new_owner_after_a_push(config, args, outcome);
     crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+/// Память о базе у каждого набора, который пойдёт в неё, — до анализа изменений и до
+/// платформы; у `--force` проверки нет. Неверно названный набор здесь пропускается: отказ о
+/// нём — дело плана сборки.
+fn require_memory(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+) -> Result<(), crate::use_cases::result::UseCaseError> {
+    if args.force {
+        return Ok(());
+    }
+    let inventory = SourceSetInventory::new(config);
+    let Ok(source_sets) = selected_ordered_source_sets(&inventory, args.source_set.as_deref())
+    else {
+        return Ok(());
+    };
+    let contexts: Vec<SourceSetContext> = source_sets
+        .iter()
+        .filter(|source_set| !source_set.purpose.is_external())
+        .filter_map(|source_set| inventory.designer_context(&source_set.name).cloned())
+        .collect();
+    crate::use_cases::exchange_guard::require_memory(
+        context,
+        config,
+        &contexts,
+        args.source_set.as_deref(),
+    )
+}
+
+/// Первая удачная отправка — загрузка хотя бы одного набора — снимает признак нового
+/// владельца: с ней выгрузка снова становится выходом из отказа.
+fn forget_new_owner_after_a_push(
+    config: &AppConfig,
+    args: &BuildArgs,
+    outcome: UseCaseResult<BuildResult>,
+) -> UseCaseResult<BuildResult> {
+    let Ok(result) = &outcome else {
+        return outcome;
+    };
+    let loaded = result
+        .steps
+        .iter()
+        .any(|step| step.ok && matches!(step.mode, BuildMode::Full | BuildMode::Partial { .. }));
+    if !args.dry_run && loaded {
+        if let Some(warning) = crate::use_cases::exchange_guard::forget_new_owner(config) {
+            tracing::warn!("{warning}");
+        }
+    }
+    outcome
 }
 
 fn run_build_selected(
@@ -1089,6 +1165,7 @@ mod tests {
             dry_run: false,
             full_rebuild,
             source_set: None,
+            force: false,
         }
     }
 
@@ -3465,6 +3542,7 @@ mod tests {
                 dry_run: false,
                 full_rebuild: false,
                 source_set: Some("ext".to_owned()),
+                force: false,
             },
         )
         .expect("build");
@@ -3516,6 +3594,7 @@ mod tests {
                 dry_run: false,
                 full_rebuild: false,
                 source_set: Some("ext".to_owned()),
+                force: false,
             },
         )
         .expect("build");
@@ -3554,6 +3633,7 @@ mod tests {
                 dry_run: false,
                 full_rebuild: false,
                 source_set: Some("missing".to_owned()),
+                force: false,
             },
         )
         .expect_err("unknown source-set must fail");

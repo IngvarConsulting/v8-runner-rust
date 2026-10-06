@@ -21,6 +21,9 @@ pub struct BuildRequest {
     pub source_set: Option<String>,
     /// Plan every step and locate the platform without dispatching it.
     pub dry_run: bool,
+    /// `push --force`: load every selected set in full without the checks of memory and
+    /// generation; the configuration in the infobase is overwritten.
+    pub force: bool,
 }
 
 /// Transport-neutral request for the `tools download` use case.

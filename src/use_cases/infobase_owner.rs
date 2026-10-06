@@ -233,6 +233,19 @@ fn check_as(
             marker_path.display()
         ));
     }
+    // Взявшая базу копия до первой удачной отправки выгрузку не предлагает: признак пишется
+    // в её память о базе раньше метки, чтобы метка без признака не появилась.
+    if !notes.is_empty() {
+        crate::use_cases::exchange_guard::remember_new_owner(config).map_err(|error| {
+            UseCaseError::new(
+                UseCaseErrorKind::Runtime,
+                format!(
+                    "cannot start {command_name}: the mark that this working copy took the infobase '{}' over cannot be written: {error}",
+                    base_dir.display()
+                ),
+            )
+        })?;
+    }
     if kept.is_empty() {
         kept.push(OwnerRecord {
             machine,

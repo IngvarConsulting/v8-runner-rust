@@ -250,6 +250,7 @@ mod tests {
                     dry_run: false,
                     full_rebuild: true,
                     source_set: None,
+                    force: false,
                 },
             )
             .expect_err("busy workspace");

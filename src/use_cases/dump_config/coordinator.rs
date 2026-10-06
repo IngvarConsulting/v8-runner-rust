@@ -1,3 +1,4 @@
+use super::helpers::read_dump_generation;
 use super::*;
 use crate::domain::capability::{Operation, Provider};
 use crate::platform::locator::{UtilityLocation, UtilityVersion};
@@ -457,6 +458,19 @@ fn run_dump_selected(
             Err(error) => (Err(error), false),
         }
     } else {
+        // Поколение спрашивается до выгрузки и после: одно и то же — память записывается,
+        // разное — базу правили во время выгрузки, и ответ это называет. Выборка объектов
+        // каталог с базой не сводит, поэтому поколения не пишет.
+        let tool_runner = match provider {
+            Provider::Ibcmd => utilities.runner_for(UtilityType::Ibcmd),
+            _ => utilities.runner_for(UtilityType::V8),
+        };
+        let reads_generation = location.is_some() && !matches!(plan, DumpPlan::Partial);
+        let generation_before = reads_generation
+            .then(|| {
+                read_dump_generation(context, config, provider, &binary, tool_runner, &resolved)
+            })
+            .flatten();
         let result = match (config.format, &plan, provider, partial_objects, edt_binary) {
             (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
                 crate::use_cases::unimplemented_provider(Operation::Dump, other),
@@ -624,6 +638,28 @@ fn run_dump_selected(
                 other,
             )),
         };
+        let result = result.map(|(platform_result, message)| {
+            let generation_after = generation_before.as_ref().and_then(|_| {
+                read_dump_generation(context, config, provider, &binary, tool_runner, &resolved)
+            });
+            let note = SourceSetInventory::new(config)
+                .designer_context(&resolved.source_set_name)
+                .and_then(|set| {
+                    crate::use_cases::exchange_guard::record_after_dump(
+                        set,
+                        &config.work_path,
+                        provider,
+                        generation_before.as_deref(),
+                        generation_after.as_deref(),
+                    )
+                    .unwrap_or_else(|error| {
+                        Some(format!(
+                            "the configuration generation was not recorded: {error}"
+                        ))
+                    })
+                });
+            (platform_result, merge_optional_messages(message, note))
+        });
         (result, false)
     };
     // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.

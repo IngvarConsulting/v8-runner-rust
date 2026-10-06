@@ -26,6 +26,8 @@ pub mod convert_sources;
 mod destruction_guard;
 /// Dump orchestration use case.
 pub mod dump_config;
+/// Проверки перед обменом с базой: память о ней и её поколение.
+pub(crate) mod exchange_guard;
 /// Shared extension identity helpers.
 pub(crate) mod extension_agent;
 pub mod extension_identity;
