@@ -166,6 +166,8 @@ const NEEDS_THE_EDT_SAMPLE: &[&str] = &["check edt"];
 fn every_previewable_command_answers_in_the_form_declared_for_it() {
     let designer = temp_workspace();
     previews::write_project(designer.path(), true);
+    // Превью `push` без памяти о базе называет отказ `no_memory`, а не план.
+    support::memory::remember_sample(designer.path());
     write_preview_inputs(designer.path());
     let edt = temp_workspace();
     write_edt_project(edt.path());

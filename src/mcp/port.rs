@@ -248,7 +248,7 @@ mod tests {
                 &config,
                 &BuildRequest {
                     dry_run: false,
-                    full_rebuild: true,
+                    load: crate::use_cases::request::PushMode::Full,
                     source_set: None,
                 },
             )

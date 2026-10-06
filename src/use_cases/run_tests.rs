@@ -23,7 +23,7 @@ use crate::parsers::yaxunit_log;
 use crate::support::error::AppError;
 use crate::use_cases::build_project;
 use crate::use_cases::context::ExecutionContext;
-use crate::use_cases::request::{BuildRequest as BuildArgs, TestRequest as TestArgs};
+use crate::use_cases::request::{BuildRequest as BuildArgs, PushMode, TestRequest as TestArgs};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::vanessa::{self, VanessaTestArtifacts};
 use tracing::debug;

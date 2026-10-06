@@ -95,6 +95,23 @@ impl Copy {
             format!("infobases:\n  origin:\n    connection: '{connection}'\n"),
         )
         .expect("local layer");
+        if let Some(base) = connection.strip_prefix("File=") {
+            self.remember(&self.root.join(base));
+        }
+    }
+
+    /// Память копии о базе, как после её создания раннером: тесты владельца начинают не с
+    /// первого знакомства.
+    fn remember(&self, base: &Path) {
+        support::memory::remember_base(
+            &self.root.join("work"),
+            "origin",
+            support::memory::Base::File(base),
+            &[support::memory::Set::configuration(
+                "main",
+                &self.root.join("sources"),
+            )],
+        );
     }
 
     /// Объявляет `origin` местного слоя общей базой стенда: `shared` — согласие этой копии
@@ -108,6 +125,7 @@ impl Copy {
             ),
         )
         .expect("local layer");
+        self.remember(&stand.base);
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -378,18 +396,23 @@ fn a_project_copied_whole_leaves_no_live_owner() {
     let copied_marker = copied.root.join("build").join(MARKER_NAME);
     assert_eq!(owners_of(&copied_marker), [original.canonical_root()]);
 
-    // Память в скопированном `work/` описывает прежнюю базу; полная отправка — выход,
-    // который называет её отказ. Отказ по владельцу шёл бы раньше и выхода не дал бы.
-    let pushed = succeeded(&copied.run(&["push", "main", "--full"]));
+    // Память в скопированном `work/` описывает прежнюю базу, то есть памяти о новой нет:
+    // `--full` отказал бы `no_memory`, а выход каталога — перезапись `--force`. Отказ по
+    // владельцу шёл бы раньше и выхода не дал бы.
+    // Владельца сменяет граница команды, раньше проверки памяти: смену называет уже отказ.
+    let refused = envelope(&copied.run(&["push", "main", "--full"]));
+    assert_eq!(refused["error"]["code"], "no_memory", "{refused}");
+    assert!(
+        warnings(&refused)
+            .iter()
+            .any(|warning| warning.contains(&original.canonical_root())),
+        "names the replaced owner: {refused}"
+    );
+    assert_eq!(owners_of(&copied_marker), [copied.canonical_root()]);
+    succeeded(&copied.run(&["push", "main", "--force"]));
 
     assert_eq!(owners_of(&copied_marker), [copied.canonical_root()]);
     assert_eq!(owners_of(&original_marker), [original.canonical_root()]);
-    assert!(
-        warnings(&pushed)
-            .iter()
-            .any(|warning| warning.contains(&original.canonical_root())),
-        "names the replaced owner: {pushed}"
-    );
 }
 
 /// Местный слой владельца, который нельзя прочитать, делает его живым и несогласным.
@@ -589,16 +612,16 @@ fn a_connection_string_obeys_the_owner_and_never_owns() {
     let second = stand.copy("second");
     let connection = format!("File={}", stand.base.display());
 
-    succeeded(&second.run(&["--infobase", &connection, "push"]));
+    succeeded(&second.run(&["--infobase", &connection, "push", "--force"]));
     assert_eq!(stand.marker_text(), None, "an ad hoc base is not recorded");
 
     succeeded(&first.run(&["push"]));
-    let refused = second.run(&["--infobase", &connection, "push"]);
+    let refused = second.run(&["--infobase", &connection, "push", "--force"]);
     assert_infobase_held(&refused, "push", &first, &stand);
 
     let marker = stand.marker_text();
     fs::remove_dir_all(&first.root).expect("remove the first copy");
-    succeeded(&second.run(&["--infobase", &connection, "push"]));
+    succeeded(&second.run(&["--infobase", &connection, "push", "--force"]));
     assert_eq!(
         stand.marker_text(),
         marker,
@@ -1026,7 +1049,7 @@ fn a_connection_string_on_a_shared_base_is_refused() {
     let marker = stand.marker_text();
 
     let connection = format!("File={}", stand.base.display());
-    let refused = second.run(&["--infobase", &connection, "push"]);
+    let refused = second.run(&["--infobase", &connection, "push", "--force"]);
 
     let message = assert_infobase_held(&refused, "push", &first, &stand);
     assert!(
@@ -1034,4 +1057,64 @@ fn a_connection_string_on_a_shared_base_is_refused() {
         "{message}"
     );
     assert_eq!(stand.marker_text(), marker);
+}
+
+/// На общей базе отказ первого знакомства и отказ «база ушла вперёд» предлагают выгрузку
+/// следующим шагом, называют `push --force` текстом, говорят, что базу меняют и другие копии,
+/// и называют остальных владельцев — и тогда, когда эта копия взяла базу без метки.
+#[test]
+fn a_refusal_on_a_shared_base_offers_pull_first_and_names_push_force() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    first.declare_shared(&stand, true);
+    second.declare_shared(&stand, true);
+    succeeded(&first.run(&["push"]));
+    fs::remove_dir_all(second.root.join("work")).expect("forget the base");
+
+    let refused = second.run(&["push"]);
+    let payload = envelope(&refused);
+
+    assert_eq!(refused.status.code(), Some(3), "{payload}");
+    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("push --force`"), "{message}");
+    assert!(message.contains("shared"), "{message}");
+    assert!(message.contains(&first.canonical_root()), "{message}");
+
+    // База ушла вперёд записанного поколения той же копии.
+    write_shell_script(
+        &second.root.join("1cv8"),
+        &format!(
+            "out=''; previous=''\nfor a in \"$@\"; do [ \"$previous\" = /Out ] && out=\"$a\"; previous=\"$a\"; done\ncase \"$*\" in *GetConfigGenerationID*) printf '{}\\n' > \"$out\" ;; esac\nexit 0",
+            "2".repeat(40)
+        ),
+    );
+    succeeded(&second.run(&["push", "--force"]));
+    let ledger = second
+        .root
+        .join("work")
+        .join("infobases")
+        .join("origin")
+        .join("generation.json");
+    let mut records: Value =
+        serde_json::from_str(&fs::read_to_string(&ledger).expect("ledger")).expect("json");
+    records["main"] = json!({
+        "token": "1".repeat(40),
+        "tool": "designer",
+        "after": "build",
+        "recorded_at": "2026-10-06T00:00:00Z",
+        "identity": records["main"]["identity"],
+    });
+    fs::write(&ledger, records.to_string()).expect("ledger");
+    fs::write(second.root.join("sources").join("Module.bsl"), "edited").expect("edit");
+
+    let payload = envelope(&second.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("push main --force`"), "{message}");
+    assert!(message.contains(&first.canonical_root()), "{message}");
 }

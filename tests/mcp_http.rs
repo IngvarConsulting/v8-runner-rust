@@ -188,7 +188,7 @@ fn write_ibcmd_script(path: &Path, calls_log: &Path, fail_pattern: Option<&str>)
         })
         .unwrap_or_default();
     let body = format!(
-        "args=\"$*\"\nprintf '%s\\n' \"$args\" >> '{}'\n{}\nmkdir -p \"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nexit 0",
+        "args=\"$*\"\nprintf '%s\\n' \"$args\" >> '{}'\ncase \" $args \" in *\" generation-id \"*) exit 0;; esac\n{}\nmkdir -p \"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nexit 0",
         calls_log.display(),
         fail_branch
     );

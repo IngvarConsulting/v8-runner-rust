@@ -54,9 +54,9 @@ pub(super) fn change_detection_failure(
     match error {
         analyzer::ChangeDetectionError::ForeignMemory { source_set, .. } => {
             format!(
-                "{error}. If the infobase holds the right state, run a full pull {}, which replaces the directory of source-set '{source_set}' and discards its uncommitted changes, to record it; if the source directory does, run {} to load it",
+                "{error}. If the infobase holds the right state, run a full pull {}, which replaces the directory of source-set '{source_set}' and discards its uncommitted changes, to record it; if the source directory does, run {}, which loads it whole and replaces the configuration in the infobase",
                 context.advised_pull_force(source_set),
-                context.advised_command(&format!("push {} --full", shell_word(source_set))),
+                context.advised_command(&format!("push {} --force", shell_word(source_set))),
             )
         }
         analyzer::ChangeDetectionError::StorageHard { .. }
@@ -630,4 +630,88 @@ pub(super) fn fail_from_source_set_index(
         failed_mode,
         message,
     )
+}
+
+/// Поколение базы для набора, прочитанное Конфигуратором (`/GetConfigGenerationID`).
+/// После отмены новый процесс не запускается: ответа нет.
+pub(super) fn read_designer_generation(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+    step_index: usize,
+) -> Result<Option<String>, AppError> {
+    if crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the configuration generation",
+    )
+    .is_some()
+    {
+        return Ok(None);
+    }
+    build_designer_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        &source_set.name,
+        step_index,
+        "generation",
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .config_generation_id(extension_name(source_set))
+    .map_err(AppError::from)
+}
+
+/// Поколение базы для набора, прочитанное `ibcmd config generation-id`.
+pub(super) fn read_ibcmd_generation(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+) -> Result<Option<String>, AppError> {
+    if crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the configuration generation",
+    )
+    .is_some()
+    {
+        return Ok(None);
+    }
+    build_ibcmd_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .config_generation_id(extension_name(source_set))
+    .map_err(map_ibcmd_error)
+}
+
+/// Один файл версий набора в каталог загрузки — `-configDumpInfoOnly` Конфигуратора.
+pub(super) fn dump_designer_version_file(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+    load_context: &SourceSetContext,
+    step_index: usize,
+) -> Result<(), AppError> {
+    let result = build_designer_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        &source_set.name,
+        step_index,
+        "dump-info",
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .dump_config_dump_info_only(load_context.path(), extension_name(source_set))
+    .map_err(AppError::from)?;
+    ensure_platform_success("dump_info", source_set, &result)
 }

@@ -411,6 +411,53 @@ pub(super) fn empty_result(
     }
 }
 
+/// Поколение базы, прочитанное инструментом выгрузки — Конфигуратором или `ibcmd`, — до или
+/// после неё. Другой инструмент, отмена и сбой чтения — отсутствие ответа: выгрузку оно не
+/// останавливает, а память о поколении тогда не пишется.
+pub(super) fn read_dump_generation(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    provider: Provider,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    resolved: &ResolvedDumpTarget,
+) -> Option<String> {
+    if crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "the configuration generation",
+    )
+    .is_some()
+    {
+        return None;
+    }
+    let extension = resolved.extension.as_deref();
+    let answer = match provider {
+        Provider::Designer => build_designer_dsl(
+            context,
+            config,
+            binary,
+            runner,
+            &resolved.source_set_name,
+            "generation",
+        )
+        .and_then(|designer| {
+            designer
+                .config_generation_id(extension)
+                .map_err(AppError::from)
+        }),
+        Provider::Ibcmd => build_ibcmd_dsl(context, config, binary, runner).and_then(|ibcmd| {
+            ibcmd
+                .config_generation_id(extension)
+                .map_err(map_ibcmd_error)
+        }),
+        Provider::Agent | Provider::IbcmdRs | Provider::Webinst => Ok(None),
+    };
+    answer.unwrap_or_else(|error| {
+        tracing::debug!(%error, "the configuration generation is not known");
+        None
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::decorate_ibcmd_partial_error;

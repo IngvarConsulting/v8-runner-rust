@@ -228,6 +228,51 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
+    /// `/DumpConfigToFiles <dir> -configDumpInfoOnly [-Extension <name>]`: только файл версий.
+    pub fn dump_config_dump_info_only(
+        &self,
+        target_dir: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/DumpConfigToFiles".to_owned());
+        args.push(target_dir.display().to_string());
+        args.push("-configDumpInfoOnly".to_owned());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        self.run(&args)
+    }
+
+    /// `/GetConfigGenerationID [-Extension <name>]`: токен поколения из файла `/Out`.
+    ///
+    /// Ответ без токена — неудачный выход, файл `/Out` не прочитан или в нём нет строки из
+    /// сорока шестнадцатеричных знаков — это отсутствие ответа, `None`: так и у базы в
+    /// кластере, где формат ответа Конфигуратора не замерен.
+    pub fn config_generation_id(
+        &self,
+        extension: Option<&str>,
+    ) -> Result<Option<String>, DesignerError> {
+        if self.log_file.is_none() {
+            return Ok(None);
+        }
+        let mut args = self.base_args();
+        args.push("/GetConfigGenerationID".to_owned());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        let result = self.run(&args)?;
+        if result.process.exit_code != 0 {
+            return Ok(None);
+        }
+        Ok(result
+            .platform_log
+            .as_deref()
+            .and_then(crate::platform::generation::generation_token))
+    }
+
     /// `/DumpCfg <file> [-Extension <name>]`
     pub fn dump_cfg(
         &self,

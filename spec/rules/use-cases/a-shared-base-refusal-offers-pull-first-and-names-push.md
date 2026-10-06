@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-SHARED-BASE-REFUSAL-OFFERS-PULL-FIRST-AND-NAMES-PUSH
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/215
+check:
+  - tests/cli_infobase_owner.rs::a_refusal_on_a_shared_base_offers_pull_first_and_names_push_force
 ---
 
 # Отказ на общей базе предлагает выгрузку первой и называет отправку

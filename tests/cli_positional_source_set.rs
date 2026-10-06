@@ -132,6 +132,18 @@ fn a_positional_source_set_selects_that_set() {
     let project = project();
     let cfe = project.out.join("sales.cfe").display().to_string();
 
+    // Превью отправки без памяти о базе отказало бы `no_memory`; платформу здесь не
+    // запускают, поэтому память о базе пишется так, как её оставляет создание базы.
+    let home = project.root.parent().expect("workspace");
+    support::memory::remember_base(
+        &home.join("work"),
+        "origin",
+        support::memory::Base::File(&home.join("ib")),
+        &[support::memory::Set::extension(
+            "sales",
+            &project.root.join("sales"),
+        )],
+    );
     let push = envelope(&run(&project, &["push", "sales", "--dry-run"]));
     assert_eq!(push["ok"], true, "{push}");
     let planned = push["data"]["steps"]

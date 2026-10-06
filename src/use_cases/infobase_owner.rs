@@ -275,6 +275,19 @@ fn check_as(
             marker_path.display()
         ));
     }
+    // Взявшая базу копия до первой удачной отправки выгрузку не предлагает: признак пишется
+    // в её память о базе раньше метки, чтобы метка без признака не появилась.
+    if !notes.is_empty() {
+        crate::use_cases::exchange_guard::remember_new_owner(config).map_err(|error| {
+            UseCaseError::new(
+                UseCaseErrorKind::Runtime,
+                format!(
+                    "cannot start {command_name}: the mark that this working copy took the infobase '{}' over cannot be written: {error}",
+                    base_dir.display()
+                ),
+            )
+        })?;
+    }
     let mut kept = rewritten(&owners, shares, Departed::Leave);
     if recorded_consent.is_none() {
         kept.push(OwnerRecord {
@@ -300,6 +313,34 @@ fn check_as(
         )
     })?;
     Ok(notes)
+}
+
+/// Остальные владельцы общей базы — для отказов обмена с ней
+/// (`INV.USE-CASES.A-SHARED-BASE-REFUSAL-OFFERS-PULL-FIRST-AND-NAMES-PUSH`). `None` — эта
+/// копия базу не делит (или это не файловая база); иначе — копии из метки, кроме этой:
+/// каталог проекта и хост. Метку, которую не прочитать, отказ обмена не называет.
+pub(crate) fn shared_base_owners(config: &AppConfig) -> Option<Vec<String>> {
+    let base_dir = config
+        .v8_connection()
+        .file_infobase_dir(&config.base_path)?;
+    if ThisConsent::of(config, &base_dir) != ThisConsent::Shares {
+        return None;
+    }
+    let this = ThisCopy::of(config);
+    let owners = owner_marker_path(&base_dir)
+        .and_then(|path| read_marker(&path).ok().flatten())
+        .map(|marker| marker.owners)
+        .unwrap_or_default();
+    Some(
+        owners
+            .iter()
+            .filter(|owner| !this.is(owner))
+            .map(|owner| match &owner.host {
+                Some(host) => format!("'{}' on '{host}'", owner.project.display()),
+                None => format!("'{}'", owner.project.display()),
+            })
+            .collect(),
+    )
 }
 
 /// Согласие этой копии делить базу: из её местного слоя в момент команды.

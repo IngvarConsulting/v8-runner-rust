@@ -81,7 +81,7 @@ use crate::use_cases::request::{
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
     DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut, InitRequest,
-    LaunchRequest, LoadRequest, PullAllRequest, SyntaxExtensionScope, SyntaxRequest,
+    LaunchRequest, LoadRequest, PullAllRequest, PushMode, SyntaxExtensionScope, SyntaxRequest,
     SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
@@ -2602,7 +2602,14 @@ fn render_pre_dispatch_error(
 fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
     BuildRequest {
         dry_run,
-        full_rebuild: args.full_rebuild,
+        // `--force` включает и полную загрузку: он сильнее `--full`.
+        load: if args.force {
+            PushMode::Force
+        } else if args.full_rebuild {
+            PushMode::Full
+        } else {
+            PushMode::Changes
+        },
         source_set: args.source_set.name().map(str::to_owned),
     }
 }
@@ -4804,10 +4811,12 @@ mod tests {
                 &BuildArgs {
                     full_rebuild: true,
                     source_set: SourceSetArg::default(),
+                    force: false,
                 },
                 false,
             )
-            .full_rebuild
+            .load
+                == crate::use_cases::request::PushMode::Full
         );
         assert_eq!(
             map_extensions_request(
@@ -5245,6 +5254,7 @@ mod tests {
             command_name(&Command::Build(BuildArgs {
                 full_rebuild: false,
                 source_set: SourceSetArg::default(),
+                force: false,
             })),
             CommandName::Build
         );
@@ -5318,6 +5328,7 @@ mod tests {
             &Command::Build(BuildArgs {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
+                force: false,
             }),
             &CommandLineTarget::default(),
             &presenter,
@@ -5519,6 +5530,7 @@ mod tests {
             &Command::Build(BuildArgs {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
+                force: false,
             }),
             &CommandLineTarget::default(),
             &presenter,

@@ -48,6 +48,8 @@ fn write_project(dir: &Path, utilities: &[&str], providers_yaml: &str) -> PathBu
         ),
     )
     .expect("write config");
+    // Отправка без памяти о базе отказала бы `no_memory`, не дойдя до выбора исполнителя.
+    support::memory::remember_sample(dir);
     config_path
 }
 

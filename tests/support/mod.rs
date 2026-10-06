@@ -3,6 +3,7 @@
 pub mod command_data;
 #[cfg(unix)]
 pub mod mcp;
+pub mod memory;
 #[cfg(unix)]
 pub mod previews;
 

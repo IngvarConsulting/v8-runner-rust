@@ -20,6 +20,7 @@ use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::exchange_guard::remember_created_base;
 use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals};
 use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStageStatus};
@@ -325,7 +326,10 @@ fn ensure_file_infobase(
                 "create",
                 started,
                 format!("infobase created: {}", marker.display()),
-            )),
+            )
+            // Созданную раннером базу он помнит с рождения
+            // (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`).
+            .with_warnings(&Vec::from_iter(remember_created_base(config)))),
             IbcmdInfobaseCreateStatus::Created => Err(missing_infobase_marker_error(
                 "infobase creation did not produce marker file",
                 &marker,
@@ -398,7 +402,10 @@ fn ensure_server_infobase(
                 "create",
                 started,
                 format!("{target} ensured via ibcmd"),
-            )),
+            )
+            // Созданную раннером базу он помнит с рождения
+            // (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`).
+            .with_warnings(&Vec::from_iter(remember_created_base(config)))),
             IbcmdInfobaseCreateStatus::AlreadyExists => Ok(StepOutcome::skipped(
                 "infobase",
                 "create",

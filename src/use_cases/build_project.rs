@@ -27,7 +27,7 @@ use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
 use crate::use_cases::ignored_files::refuse_tracked_version_file;
-use crate::use_cases::request::BuildRequest as BuildArgs;
+use crate::use_cases::request::{BuildRequest as BuildArgs, PushMode};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tool_extension;
@@ -41,9 +41,10 @@ mod helpers;
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
     build_designer_dsl, build_ibcmd_dsl, change_detection_failure, commit_step_state,
-    extension_name, fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
-    plan_configurator_load_step, plan_edt_export_step, plan_generated_designer_load_step,
-    push_build_step, remove_storage_path, StepCommit, StepPlan,
+    dump_designer_version_file, extension_name, fail_from_source_set_index,
+    interruption_before_safe_point, map_ibcmd_error, plan_configurator_load_step,
+    plan_edt_export_step, plan_generated_designer_load_step, push_build_step,
+    read_designer_generation, read_ibcmd_generation, remove_storage_path, StepCommit, StepPlan,
 };
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 
@@ -78,6 +79,9 @@ pub(crate) type BuildExecutionFailure = UseCaseFailure<BuildResult>;
 
 #[cfg(test)]
 pub(crate) fn run_build(config: &AppConfig, args: &BuildArgs) -> UseCaseResult<BuildResult> {
+    // Тесты сценария начинают с базы, которую раннер помнит пустой: отказ первого
+    // знакомства проверяют свои тесты.
+    crate::use_cases::exchange_guard::remember_unknown_sets(config);
     execute(
         &ExecutionContext::cli(crate::use_cases::context::CommandName::Build),
         config,
@@ -103,8 +107,72 @@ fn run_build_branch(
         Ok(selected) => (selected.provider, selected.receipt),
         Err((_error, receipt)) => (config.selected_provider(Operation::Build), receipt),
     };
-    let outcome = run_build_selected(context, config, args, provider);
+    let outcome = match require_memory(context, config, args) {
+        Ok(()) => run_build_selected(context, config, args, provider),
+        Err(error) => Err(BuildExecutionFailure::with_payload(
+            error,
+            BuildResult {
+                provider: None,
+                provider_dispatched: false,
+                ok: false,
+                steps: vec![],
+                duration_ms: 0,
+            },
+        )),
+    };
+    let outcome = forget_new_owner_after_a_push(config, args, outcome);
     crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+/// Память о базе у каждого набора, который пойдёт в неё, — до анализа изменений и до
+/// платформы; у `--force` проверки нет. Превью называет тот же отказ: ему платформа не
+/// нужна. Неверно названный набор здесь пропускается: отказ о нём — дело плана сборки.
+fn require_memory(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+) -> Result<(), crate::use_cases::result::UseCaseError> {
+    if args.load == PushMode::Force {
+        return Ok(());
+    }
+    let inventory = SourceSetInventory::new(config);
+    let Ok(source_sets) = selected_ordered_source_sets(&inventory, args.source_set.as_deref())
+    else {
+        return Ok(());
+    };
+    let contexts: Vec<SourceSetContext> = source_sets
+        .iter()
+        .filter(|source_set| !source_set.purpose.is_external())
+        .filter_map(|source_set| inventory.designer_context(&source_set.name).cloned())
+        .collect();
+    crate::use_cases::exchange_guard::require_memory(
+        context,
+        config,
+        &contexts,
+        args.source_set.as_deref(),
+    )
+}
+
+/// Первая удачная отправка — загрузка хотя бы одного набора — снимает признак нового
+/// владельца: с ней выгрузка снова становится выходом из отказа.
+fn forget_new_owner_after_a_push(
+    config: &AppConfig,
+    args: &BuildArgs,
+    outcome: UseCaseResult<BuildResult>,
+) -> UseCaseResult<BuildResult> {
+    let Ok(result) = &outcome else {
+        return outcome;
+    };
+    let loaded = result
+        .steps
+        .iter()
+        .any(|step| step.ok && matches!(step.mode, BuildMode::Full | BuildMode::Partial { .. }));
+    if !args.dry_run && loaded {
+        if let Some(warning) = crate::use_cases::exchange_guard::forget_new_owner(config) {
+            tracing::warn!("{warning}");
+        }
+    }
+    outcome
 }
 
 fn run_build_selected(
@@ -251,7 +319,7 @@ fn append_client_mcp_extension_step(
     match tool_extension::prepare_client_mcp_extension(
         context,
         config,
-        args.full_rebuild,
+        args.load.is_whole(),
         args.dry_run,
     ) {
         Ok(Some(step)) => {
@@ -813,13 +881,66 @@ mod tests {
     #[cfg(unix)]
     use crate::support::error::CancelledAt;
     use crate::use_cases::context::{CommandName, ExecutionContext};
-    use crate::use_cases::request::BuildRequest as BuildArgs;
+    use crate::use_cases::request::{BuildRequest as BuildArgs, PushMode};
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    /// Отмена, замеченная при чтении поколения после загрузки, останавливает шаг у всех
+    /// исполнителей одинаково: и у `ibcmd` и EDT (`guarded_load`), не только у Конфигуратора
+    /// и агента. Запись поколения стирается, и ответ это называет.
+    #[test]
+    fn a_cancellation_while_reading_the_generation_after_a_load_stops_the_step() {
+        use crate::domain::capability::Provider;
+        use crate::use_cases::agent_session::{GenerationAfter, GenerationLedger, Recorded};
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        create_source_tree(&base);
+        let config = build_config(
+            &base,
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        let set = SourceSetsService::new(&config)
+            .designer_contexts()
+            .into_iter()
+            .find(|set| set.name() == "main")
+            .expect("main");
+        let ledger = GenerationLedger::of(&set, &config.work_path).expect("ledger");
+        ledger
+            .record(Provider::Ibcmd, &"1".repeat(40), GenerationAfter::Build)
+            .expect("record");
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = crate::use_cases::exchange_guard::GenerationGate::new(
+            &context,
+            &config,
+            PushMode::Changes,
+        );
+
+        let error = super::coordinator::generation_after_load(
+            &gate,
+            &set,
+            Provider::Ibcmd,
+            vec!["loaded".to_owned()],
+            Err(crate::support::error::AppError::Cancelled {
+                message: "stopped".to_owned(),
+                at: crate::support::error::CancelledAt::Work,
+            }),
+        )
+        .expect_err("a cancellation stops the step");
+
+        assert!(error.cancellation().is_some(), "{error}");
+        assert!(
+            error.to_string().contains("previous record is erased"),
+            "{error}"
+        );
+        assert_eq!(ledger.read(), Recorded::Nothing);
+    }
 
     #[cfg(unix)]
     fn make_executable(path: &Path) {
@@ -1087,7 +1208,11 @@ mod tests {
     fn build_args(full_rebuild: bool) -> BuildArgs {
         BuildArgs {
             dry_run: false,
-            full_rebuild,
+            load: if full_rebuild {
+                PushMode::Full
+            } else {
+                PushMode::Changes
+            },
             source_set: None,
         }
     }
@@ -1115,6 +1240,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
+        crate::use_cases::exchange_guard::remember_unknown_sets(&config);
         let failure = super::execute(
             &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),
             &config,
@@ -1214,9 +1340,12 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("exit code 17"), "{message}");
-        assert_eq!(
-            failed_step_message(failure.payload.expect("payload")),
-            failure.error.to_string()
+        // Шаг называет ещё, что поколение после неудачной загрузки не записано.
+        let step = failed_step_message(failure.payload.expect("payload"));
+        assert!(step.starts_with(&failure.error.to_string()), "{step}");
+        assert!(
+            step.contains("is not recorded after the failed load"),
+            "{step}"
         );
     }
 
@@ -1254,9 +1383,12 @@ mod tests {
             message.starts_with("load ended after cancellation request during critical phase"),
             "{message}"
         );
-        assert_eq!(
-            failed_step_message(failure.payload.expect("payload")),
-            failure.error.to_string()
+        // Шаг называет ещё, что поколение после неудачной загрузки не записано.
+        let step = failed_step_message(failure.payload.expect("payload"));
+        assert!(step.starts_with(&failure.error.to_string()), "{step}");
+        assert!(
+            step.contains("is not recorded after the failed load"),
+            "{step}"
         );
         let calls = fs::read_to_string(&calls_log).expect("calls");
         assert!(calls.contains("/LoadConfigFromFiles"), "{calls}");
@@ -1522,6 +1654,7 @@ mod tests {
         args: &BuildArgs,
     ) -> crate::use_cases::result::UseCaseResult<crate::domain::build::BuildResult> {
         let cancellation = CancellationToken::new();
+        crate::use_cases::exchange_guard::remember_unknown_sets(config);
         held.interrupt_during(cancellation.clone(), || {
             super::execute(
                 &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),
@@ -3463,7 +3596,7 @@ mod tests {
             &config,
             &BuildArgs {
                 dry_run: false,
-                full_rebuild: false,
+                load: PushMode::Changes,
                 source_set: Some("ext".to_owned()),
             },
         )
@@ -3514,7 +3647,7 @@ mod tests {
             &config,
             &BuildArgs {
                 dry_run: false,
-                full_rebuild: false,
+                load: PushMode::Changes,
                 source_set: Some("ext".to_owned()),
             },
         )
@@ -3552,7 +3685,7 @@ mod tests {
             &config,
             &BuildArgs {
                 dry_run: false,
-                full_rebuild: false,
+                load: PushMode::Changes,
                 source_set: Some("missing".to_owned()),
             },
         )
@@ -3631,8 +3764,20 @@ mod tests {
             .expect("memory path");
         std::fs::remove_file(&storage_path).expect("remove storage file");
         std::fs::create_dir_all(&storage_path).expect("replace with directory");
+        // Нечитаемая память — отсутствие памяти: `--full` отказал бы `no_memory`, не тронув её,
+        // а до записи состояния доходит только перезапись `--force`.
+        let refused = run_build(&config, &build_args(true)).expect_err("no memory");
+        assert_eq!(refused.error.kind(), UseCaseErrorKind::NoMemory);
+        assert!(storage_path.is_dir());
 
-        let failure = run_build(&config, &build_args(true)).expect_err("failure");
+        let failure = run_build(
+            &config,
+            &BuildArgs {
+                load: PushMode::Force,
+                ..build_args(true)
+            },
+        )
+        .expect_err("failure");
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Runtime);
         assert!(storage_path.exists());

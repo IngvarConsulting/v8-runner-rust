@@ -282,6 +282,11 @@ pub struct BuildArgs {
     #[arg(long = "full", alias = "full-rebuild")]
     pub full_rebuild: bool,
 
+    /// Overwrite the infobase: load every selected set in full even when the infobase moved
+    /// ahead or this working copy has no memory of it; changes made there are lost
+    #[arg(long)]
+    pub force: bool,
+
     #[command(flatten)]
     pub source_set: SourceSetArg,
 }

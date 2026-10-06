@@ -29,11 +29,13 @@ impl NextStep {
         }
     }
 
-    /// Добавляет ключ команды со значением.
-    #[allow(
-        dead_code,
-        reason = "шаги с ключами приходят вместе со своими отказами"
-    )]
+    /// Шаг для одного набора исходников.
+    pub fn for_source_set(mut self, source_set: impl Into<String>) -> Self {
+        self.source_set = Some(source_set.into());
+        self
+    }
+
+    /// Добавляет ключ команды со значением; у ключа без значения оно пустое.
     pub fn with_key(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.keys.insert(key.into(), value.into());
         self

@@ -191,6 +191,51 @@ fn load_bound_snapshot(
     Ok(Some(snapshot))
 }
 
+/// Что хеш-память набора помнит о выбранной базе.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotMemory {
+    /// Памяти нет: ничего не записано, она пуста или повреждена так, что не читается.
+    Nothing,
+    /// Непустая память этой пары «база ↔ каталог».
+    Own,
+    /// Память записана для другой базы или другого каталога.
+    Foreign,
+    /// Хранилище не открывается: ответ даст анализ изменений своим отказом.
+    Unreadable,
+}
+
+/// Помнит ли хеш-память набора выбранную базу. Ничего не пишет.
+pub fn snapshot_memory(context: &SourceSetContext, work_path: &Path) -> SnapshotMemory {
+    let Some(path) = context.storage_path(work_path) else {
+        return SnapshotMemory::Nothing;
+    };
+    if context.storage_identity().is_none() {
+        return SnapshotMemory::Nothing;
+    }
+    match load_bound_snapshot(context, &HashStorage::new(path)) {
+        Ok(Some(snapshot)) if !snapshot.is_blank() => SnapshotMemory::Own,
+        Ok(_) => SnapshotMemory::Nothing,
+        Err(ChangeDetectionError::ForeignMemory { .. }) => SnapshotMemory::Foreign,
+        Err(_) => SnapshotMemory::Unreadable,
+    }
+}
+
+/// Записывает пустую память набора о базе: база есть, и в ней нет ничего из каталога.
+/// Первая отправка после этого грузит весь набор.
+pub fn commit_empty_snapshot(
+    context: &SourceSetContext,
+    work_path: &Path,
+) -> Result<(), ChangeDetectionError> {
+    commit_full_snapshot(
+        context,
+        work_path,
+        &FullSnapshot {
+            snapshot: HashMap::new(),
+            scan_started_at: 0,
+        },
+    )
+}
+
 /// Analyze multiple source-set contexts using the same work directory.
 pub fn analyze_contexts(contexts: &[SourceSetContext], work_path: &Path) -> Vec<ContextAnalysis> {
     contexts

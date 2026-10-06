@@ -1,27 +1,29 @@
 ---
 id: INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/215
+check:
+  - tests/cli_push_generation.rs::a_push_without_memory_of_the_base_is_refused_with_both_ways_out
+  - tests/cli_push_generation.rs::a_push_force_loads_without_memory_and_remembers_the_generation
+  - tests/cli_push_generation.rs::a_full_push_with_memory_of_another_base_is_refused_as_no_memory
 ---
 
 # Отправка в базу без памяти о ней отказывает
 
-`push` в базу, о которой у рабочей копии нет памяти, отказывает до запуска загрузки, в том
-числе когда база пуста: пустую базу раннер не различает, потому что значение поколения у
-пустой базы зависит от версии платформы ([замер](../../../references/1c/confirmed-runtime-measurements.md)). Отказ называет выходы: `pull`, если
-права база, и `push --force`, если прав каталог. В базе под хранилищем конфигурации полная
-загрузка невозможна, и выход `push --force` заменяет `pull --force`.
+`push` в базу, о которой у рабочей копии нет памяти, отказывает родом `no_memory` до запуска
+загрузки, в том числе когда база пуста: пустую базу раннер не различает, потому что значение
+поколения у пустой базы зависит от версии платформы ([замер](../../../references/1c/confirmed-runtime-measurements.md)).
+Отказ называет выходы: выгрузку, если права база, — следующим шагом, и `push --force`, если
+прав каталог. Проверку проходит и полная загрузка `--full` (у MCP — `build_project` с
+`full_rebuild`); обходит её только `push --force`.
 
-Выходы уточняют свои правила: на общей базе — `INV.USE-CASES.A-SHARED-BASE-REFUSAL-OFFERS-PULL-FIRST-AND-NAMES-PUSH`
-(под хранилищем вместо `push --force` — `pull --force`), у копии и у нового владельца до первой отправки —
-`INV.USE-CASES.A-COPIED-BASE-OFFERS-NO-PULL-BEFORE-ITS-FIRST-PUSH` и
-`INV.USE-CASES.A-NEW-OWNER-IS-OFFERED-NO-PULL-UNTIL-ITS-FIRST-PUSH`. Памяти, записанной для
-другой базы, отвечает `INV.USE-CASES.FOREIGN-MEMORY-IS-NOT-USED` со своими выходами. Базы,
-которой нет, отказ не касается: выходы называет
-`INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`.
+Что считается памятью, держит `INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`. Выходы
+уточняют свои правила: без ответа о поколении —
+`INV.USE-CASES.WITHOUT-A-GENERATION-ANSWER-A-NO-MEMORY-REFUSAL-OFFERS-PULL-FORCE`, под
+хранилищем — `INV.USE-CASES.UNDER-A-REPOSITORY-A-REFUSAL-OFFERS-PULL-FORCE`, на общей базе —
+`INV.USE-CASES.A-SHARED-BASE-REFUSAL-OFFERS-PULL-FIRST-AND-NAMES-PUSH`, у копии и у нового
+владельца до первой отправки — `INV.USE-CASES.A-COPIED-BASE-OFFERS-NO-PULL-BEFORE-ITS-FIRST-PUSH`
+и `INV.USE-CASES.A-NEW-OWNER-IS-OFFERED-NO-PULL-UNTIL-ITS-FIRST-PUSH`. Базы, которой нет,
+отказ не касается: выходы называет `INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`.
 
-Память о базе пишут её создание раннером (`INV.CLI.INFOBASE-CREATE-FOLLOWS-THE-TARGET-KIND`,
-`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`) и полный `pull`
-(`INV.USE-CASES.FULL-PULL-RECORDS-THE-PUBLISHED-TREE`), поэтому после них отказа нет.
+Решение владельца от 06.10.2026: `--full` проходит проверки памяти и поколения.
 
 Источник: [`cli.html#refusals`](../../../docs/site/cli.html#refusals).

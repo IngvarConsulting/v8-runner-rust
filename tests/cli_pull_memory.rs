@@ -175,7 +175,7 @@ fn first_full_pull_establishes_the_baseline_for_all_exporters() {
 fn full_pull_replaces_a_previous_push_baseline() {
     for provider in ["designer", "ibcmd", "agent"] {
         let project = project(provider, false);
-        succeeded(run(&project, &["push"]));
+        succeeded(run(&project, &["push", "--force"]));
         pull(&project);
         assert_push_skips(&project);
     }
@@ -312,13 +312,12 @@ fn git_refusal_preserves_memory_and_a_retry_can_publish() {
 fn a_pull_from_one_base_does_not_mark_another_base_as_loaded() {
     let project = project("designer", false);
     pull(&project);
-    let response = succeeded(run(
-        &project,
-        &["--infobase", "second", "push", "--dry-run"],
-    ));
-    let steps = response["data"]["steps"].as_array().expect("push steps");
-    assert!(
-        steps.iter().any(|step| step["mode"] != "skipped"),
+    // Память первой базы другой не достаётся: о второй памяти нет, и превью её отправки
+    // называет отказ `no_memory`, а не пропуск неизменившегося.
+    let output = run(&project, &["--infobase", "second", "push", "--dry-run"]);
+    let response: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
+    assert_eq!(
+        response["error"]["code"], "no_memory",
         "another base inherited the first baseline: {response}"
     );
     assert_push_skips(&project);
@@ -349,20 +348,22 @@ fn foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_crede
     let output = run(&project, &["push"]);
     assert!(!output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
+    // Чужая память — отсутствие памяти (решение владельца от 06.10.2026): отказ
+    // `no_memory` называет её и оба выхода — выгрузку набора и перезапись.
+    assert_eq!(json["error"]["code"], "no_memory", "{json}");
     let message = json.to_string();
-    assert!(message.contains("belongs to"), "{message}");
-    // Совет называет набор: голый `pull --force` выгрузил бы набор по умолчанию, а голый
-    // `push --full` загрузил бы все наборы, а не тот, чья память чужая.
-    assert!(message.contains(" pull main --force`"), "{message}");
-    assert!(message.contains(" push main --full`"), "{message}");
-    assert!(!message.contains("`pull --force`"), "{message}");
-    assert!(!message.contains("`push --full`"), "{message}");
+    assert!(
+        message.contains("written for another infobase or source directory"),
+        "{message}"
+    );
+    assert!(message.contains(" pull main`"), "{message}");
+    assert!(message.contains(" push --force`"), "{message}");
     assert!(message.contains("replacement-ib"), "{message}");
     assert!(!message.contains(AGENT_PASSWORD), "{message}");
     assert_eq!(json["data"]["provider_dispatched"], false, "{json}");
     assert_eq!(fs::read_to_string(&project.calls).expect("calls"), before);
     assert_eq!(fs::read(snapshot(&project)).expect("memory"), old_memory);
-    // Совет, выполненный буквально, записывает память для выбранной базы.
+    // Выгрузка набора записывает память для выбранной базы.
     succeeded(run(&project, &["pull", "main", "--force"]));
     assert_push_skips(&project);
 }
@@ -401,7 +402,8 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
     assert!(!output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     let message = json["error"]["message"].as_str().expect("message");
-    assert!(message.contains("belongs to"), "{message}");
+    assert_eq!(json["error"]["code"], "no_memory", "{json}");
+    assert!(message.contains("another infobase"), "{message}");
     // Раннер называет конфиг каноническим путём: на macOS временный `/var/…` — ссылка на
     // `/private/var/…`.
     let config = format!(
@@ -410,15 +412,13 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
             .expect("canonical config")
             .display()
     );
-    for tail in ["pull main --force", "push main --full"] {
+    for tail in ["pull main", "push --force"] {
         let advice = format!("`v8-runner {config} --infobase second {tail}`");
         assert!(message.contains(&advice), "must advise {advice}: {message}");
     }
-    // Замена каталога названа вместе с потерей: совет не уводит молча в уничтожение.
+    // Перезапись названа вместе с потерей: совет не уводит молча в уничтожение.
     assert!(
-        message.contains(
-            "which replaces the directory of source-set 'main' and discards its uncommitted changes"
-        ),
+        message.contains("losing what was changed there"),
         "{message}"
     );
     assert_eq!(fs::read(&second_memory).expect("memory"), old_memory);
@@ -426,8 +426,10 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
     // Совет буквально, оболочкой и из другого каталога.
     let advice = message
         .split('`')
-        .find(|part| part.starts_with("v8-runner ") && part.ends_with(" pull main --force"))
+        .find(|part| part.starts_with("v8-runner ") && part.ends_with(" pull main"))
         .expect("pull advice");
+    // Выгрузка поверх каталога спрашивает git: каталог под учётом, ей нечего терять.
+    support::commit_sources(project.config.parent().expect("root"));
     let binary = support::v8_runner_binary();
     let literal = advice.replacen("v8-runner", &format!("'{}'", binary.display()), 1);
     let elsewhere = tempfile::tempdir().expect("another directory");
@@ -450,11 +452,17 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
         dispatched.contains(&moved.display().to_string()),
         "the advice must dump the selected base: {dispatched}"
     );
-    assert_ne!(fs::read(&second_memory).expect("memory"), old_memory);
     assert!(
         !snapshot(&project).exists(),
         "the advice must not touch the default base"
     );
+    // Поддельная платформа о поколении не отвечает, а выгрузка поверх каталога хеш-памяти не
+    // пишет; память о выбранной базе записывает полная выгрузка.
+    succeeded(run(
+        &project,
+        &["--infobase", "second", "pull", "main", "--force"],
+    ));
+    assert_ne!(fs::read(&second_memory).expect("memory"), old_memory);
     succeeded(run(&project, &["--infobase", "second", "push"]));
 }
 
@@ -470,7 +478,10 @@ fn an_ad_hoc_base_is_remembered_by_its_connection_string() {
         "File={}",
         project.config.parent().expect("root").join("ib").display()
     );
-    let first = succeeded(run(&project, &["--infobase", &connection, "push"]));
+    let first = succeeded(run(
+        &project,
+        &["--infobase", &connection, "push", "--force"],
+    ));
     assert_ne!(first["data"]["steps"][0]["mode"], "skipped", "{first}");
     assert_eq!(fs::read(snapshot(&project)).expect("named memory"), memory);
     let again = succeeded(run(&project, &["--infobase", &connection, "push"]));
@@ -834,7 +845,7 @@ fn an_ibcmd_partial_pull_dumps_from_the_runner_copy() {
 fn an_agent_push_loads_over_the_runner_copy_and_records_the_new_one() {
     let project = project("agent", false);
     let version_file = project.sources.join("ConfigDumpInfo.xml");
-    succeeded(run(&project, &["push"]));
+    succeeded(run(&project, &["push", "--force"]));
     let ours = read(&version_file);
     assert!(ours.contains("agent-load="), "{ours}");
     assert_eq!(read(&runner_copy(&project)), ours);
