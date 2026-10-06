@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "OwnerRecord": {
+      "additionalProperties": false,
+      "description": "Рабочая копия, которая держит базу.",
+      "properties": {
+        "host": {
+          "description": "Имя хоста на момент записи — для людей; машину называет `machine`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "machine": {
+          "description": "Машина копии: SHA-256 от `v8-runner/owner/` и идентификатора машины, который\nпереживает смену имени хоста (`machine-id` у Linux, аппаратный UUID у macOS,\n`MachineGuid` у Windows; без него — `host:<имя хоста>`), шестнадцатеричной строкой.\nСам идентификатор в метку не попадает: `machine-id(5)` просит его не показывать.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "project": {
+          "description": "Канонический абсолютный каталог проекта копии: там лежит её местный слой.",
+          "type": "string"
+        },
+        "shared": {
+          "description": "Согласие копии делить базу.",
+          "type": "boolean"
+        },
+        "since": {
+          "description": "Когда копия записана в метку.",
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "project",
+        "shared",
+        "since"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/infobase-owner-marker.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Кто держит файловую базу: метка лежит рядом с каталогом базы как `.<имя каталога>.v8-runner.owners.json`.",
+  "properties": {
+    "owners": {
+      "description": "Рабочие копии, которые держат базу.",
+      "items": {
+        "$ref": "#/$defs/OwnerRecord"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Версия формы. Метку другой версии раннер не переписывает.",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "owners"
+  ],
+  "title": "v8-runner infobase owner marker",
+  "type": "object"
+}

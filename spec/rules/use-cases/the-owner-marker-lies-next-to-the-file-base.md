@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.THE-OWNER-MARKER-LIES-NEXT-TO-THE-FILE-BASE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::a_base_without_a_marker_is_taken_and_the_answer_says_so
+  - tests/cli_infobase_owner.rs::a_project_copied_whole_leaves_no_live_owner
 ---
 
 # Метка владельца лежит рядом с файловой базой

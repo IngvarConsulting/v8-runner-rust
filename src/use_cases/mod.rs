@@ -39,6 +39,8 @@ pub(crate) mod ignored_files;
 pub mod infobase_export;
 /// File infobase lock held for the whole command, after the workspace lock.
 pub mod infobase_lock;
+/// Owner marker of a file infobase: which working copy holds it.
+pub mod infobase_owner;
 /// Init orchestration use case.
 pub mod init_project;
 /// Shared command interruption status, metadata and message vocabulary.

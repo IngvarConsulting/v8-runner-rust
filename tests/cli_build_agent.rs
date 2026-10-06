@@ -177,6 +177,7 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
         .expect("generation ledger");
     let record = &ledger["main"];
     assert_eq!(record["after"], "build");
+    assert_eq!(record["tool"], "agent");
     assert!(record["token"]
         .as_str()
         .is_some_and(|token| token.len() == 40));

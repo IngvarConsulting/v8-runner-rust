@@ -15,7 +15,9 @@
 3. Журнал действий открывается при `--json-message` или заданном `V8TR_ACTION_LOG_FILE`;
    Ctrl+C и SIGTERM становятся отменой — [8.7](08-cross-cutting-concepts.md).
 4. Адаптер собирает запрос. Превью идёт без замка, иначе берётся замок `workPath`, а у
-   команды, которая открывает файловую базу, за ним — замок базы — [8.3](08-cross-cutting-concepts.md).
+   команды, которая открывает файловую базу, за ним — замок базы и под ним проверка, чья
+   база, — [8.3](08-cross-cutting-concepts.md). Превью читает метку владельца без замка и
+   называет отказ заранее.
 5. Сценарий получает `ExecutionContext` и возвращает результат или ошибку; адаптер
    печатает текст или конверт — [8.6](08-cross-cutting-concepts.md).
 
@@ -40,6 +42,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 Правила: [замок берёт адаптер](../rules/cli/lock-boundary-is-the-adapter.md),
 [превью без замка](../rules/cli/preview-takes-no-lock.md),
 [замок базы после замка `workPath`](../rules/cli/the-base-lock-follows-the-workpath-lock.md),
+[базу держит одна рабочая копия](../rules/use-cases/a-development-base-is-held-by-one-working-copy.md),
+[сначала владелец, затем память и поколение](../rules/use-cases/ownership-is-checked-before-memory-and-generation.md),
 [допуск общий для обоих транспортов](../rules/mcp/admission-is-shared-by-both-transports.md),
 [недопущенный вызов — ошибка протокола](../rules/mcp/an-unadmitted-call-is-a-protocol-error.md),
 [перегрузка и запрос без сессии](../rules/mcp/overload-answers-503-and-stateless-post-400.md),
@@ -134,8 +138,9 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    тогда, когда ответ не дочитан. После отмены команд запроса агенту не отдают — служебные
    команды закрытия идут.
 6. Поколение: `push` после применения записывает ответ `config generation-id` в журнал
-   базы `workPath/infobases/<база>/generation.json`; `pull` спрашивает его до выгрузки;
-   инкрементальная при совпадении с записью той же пары не выгружает, иначе выгружает и
+   базы `workPath/infobases/<база>/generation.json` вместе с именем инструмента (`agent`);
+   `pull` спрашивает его до выгрузки; инкрементальная при совпадении с записью той же пары и
+   того же инструмента не выгружает, иначе выгружает и
    записывает; запись другой пары ответ называет чужой. Полная выгрузка и выгрузка с перечнем объектов идут всегда.
    Полная выгрузка в формате Designer готовит хеши staging и после публикации записывает
    их в память именованной базы через общий `dump_config::publish_full_dump`. После отмены поколение не спрашивается и не
@@ -146,7 +151,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [сессия открывается в JSON](../rules/platform/agent-session-opens-in-json-mode.md),
 [сессия не живёт дольше замка](../rules/platform/agent-session-lives-with-the-lock.md),
 [файлы удалённой цели — объявленным каналом](../rules/platform/remote-files-travel-by-a-declared-channel.md),
-[неизменившееся поколение не выгружается](../rules/use-cases/an-unchanged-generation-is-not-dumped.md).
+[неизменившееся поколение не выгружается](../rules/use-cases/an-unchanged-generation-is-not-dumped.md),
+[токен сравнивается внутри своего инструмента](../rules/use-cases/a-generation-token-is-compared-within-its-own-tool.md).
 
 ### 6.5 `test`
 

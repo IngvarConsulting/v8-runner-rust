@@ -30,7 +30,8 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
             UseCaseErrorKind::Capability(_) => Self::Runtime,
             UseCaseErrorKind::Environment
             | UseCaseErrorKind::WorkspaceBusy
-            | UseCaseErrorKind::InfobaseBusy => Self::Runtime,
+            | UseCaseErrorKind::InfobaseBusy
+            | UseCaseErrorKind::InfobaseHeld => Self::Runtime,
             UseCaseErrorKind::InvalidOutput
             | UseCaseErrorKind::Cancelled(_)
             | UseCaseErrorKind::TimedOut => Self::Platform,
@@ -61,7 +62,8 @@ impl McpBusinessError {
             UseCaseErrorKind::Capability(_) => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::Environment
             | UseCaseErrorKind::WorkspaceBusy
-            | UseCaseErrorKind::InfobaseBusy => McpErrorCode::RuntimeFailure,
+            | UseCaseErrorKind::InfobaseBusy
+            | UseCaseErrorKind::InfobaseHeld => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::InvalidOutput
             | UseCaseErrorKind::Cancelled(_)
             | UseCaseErrorKind::TimedOut => McpErrorCode::PlatformFailure,

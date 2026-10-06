@@ -586,6 +586,63 @@ fn select_infobase(
     Ok(())
 }
 
+/// Базы, которые объявляет проект в каталоге `project_dir`: карта `infobases` его местного
+/// слоя и прежний ключ `infobase:` в обоих файлах, с путями от этого каталога.
+///
+/// Так владельца базы спрашивают, держит ли он её ещё. Местный слой проходит ту же границу,
+/// что у загрузки проекта, а от проектного файла берётся только прежний ключ: остальное
+/// проекта к объявлению баз не относится. Нет ни одного из файлов — пустая карта; файл,
+/// который не прочитать или не разобрать, — ошибка.
+pub fn load_declared_infobases(
+    project_dir: &Path,
+) -> Result<std::collections::BTreeMap<String, InfobaseConfig>, ConfigLoadError> {
+    let mut declared = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
+    if regular_file_exists(&project_path)? {
+        let mut project = read_yaml_file(&project_path)?;
+        fold_infobase_synonym(&mut project, ConfigFile::Project(&project_path))?;
+        if let Some(infobases) = root_mapping_mut(&mut project)?.remove(yaml_key("infobases")) {
+            root_mapping_mut(&mut declared)?.insert(yaml_key("infobases"), infobases);
+        }
+    }
+    let local_path = project_dir.join(LOCAL_CONFIG_FILE_NAME);
+    if regular_file_exists(&local_path)? {
+        let mut overlay = read_yaml_file(&local_path)?;
+        reject_local_overlay_keys(&overlay)?;
+        validate_local_overlay_schema_boundary(overlay.clone())
+            .map_err(|error| ConfigLoadError::LocalOverlayUnsupportedShape(error.to_string()))?;
+        fold_infobase_synonym(&mut overlay, ConfigFile::Local)?;
+        if let Some(infobases) = root_mapping_mut(&mut overlay)?.remove(yaml_key("infobases")) {
+            let mut layer = serde_yaml::Mapping::new();
+            layer.insert(yaml_key("infobases"), infobases);
+            merge_yaml_values(&mut declared, serde_yaml::Value::Mapping(layer));
+        }
+    }
+    let mut infobases: std::collections::BTreeMap<String, InfobaseConfig> =
+        match root_mapping_mut(&mut declared)?.remove(yaml_key("infobases")) {
+            Some(value) if !value.is_null() => serde_yaml::from_value(value)?,
+            _ => std::collections::BTreeMap::new(),
+        };
+    for infobase in infobases.values_mut() {
+        normalize_infobase_paths(infobase, project_dir);
+    }
+    Ok(infobases)
+}
+
+/// Есть ли обычный файл по пути. Нет ничего — `false`; узнать нельзя или там не обычный
+/// файл (каталог, FIFO, на котором чтение повисло бы) — ошибка, а не «базу не объявляет».
+fn regular_file_exists(path: &Path) -> Result<bool, ConfigLoadError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(ConfigLoadError::ReadError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{}' is not a regular file", path.display()),
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn resolve_primary_config_path(config_path: Option<&str>) -> Result<PathBuf, ConfigLoadError> {
     let path = resolve_config_path(config_path)?;
     reject_local_overlay_as_primary_config(&path)?;
@@ -2331,5 +2388,41 @@ mod tests {
             config.tools.platform.path.as_deref(),
             Some(config_dir.join("platform/bin").as_path())
         );
+    }
+
+    /// Объявленные базы владельца читаются из обоих его файлов: карта местного слоя и
+    /// прежний ключ проектного файла, пути — от его каталога; без файлов — ничего, а слой,
+    /// который не разобрать, — ошибка, а не «ничего не объявляет».
+    #[test]
+    fn declared_infobases_come_from_both_files_with_paths_from_the_project() {
+        let dir = tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).expect("project");
+        assert!(super::load_declared_infobases(&project)
+            .expect("no files")
+            .is_empty());
+
+        std::fs::write(
+            project.join("v8project.yaml"),
+            "workPath: build\ninfobase:\n  connection: 'File=build/ib'\n",
+        )
+        .expect("project file");
+        std::fs::write(
+            project.join(LOCAL_CONFIG_FILE_NAME),
+            "infobases:\n  test:\n    connection: 'File=other/ib'\n",
+        )
+        .expect("local layer");
+        let declared = super::load_declared_infobases(&project).expect("declared");
+        assert_eq!(
+            declared.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["origin", "test"]
+        );
+        assert_eq!(
+            declared["origin"].connection,
+            format!("File={}", project.join("build/ib").display())
+        );
+
+        std::fs::write(project.join(LOCAL_CONFIG_FILE_NAME), "infobases: [\n").expect("broken");
+        assert!(super::load_declared_infobases(&project).is_err());
     }
 }

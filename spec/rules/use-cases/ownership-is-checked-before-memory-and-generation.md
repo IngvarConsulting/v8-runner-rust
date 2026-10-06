@@ -1,7 +1,9 @@
 ---
 id: INV.USE-CASES.OWNERSHIP-IS-CHECKED-BEFORE-MEMORY-AND-GENERATION
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::ownership_is_refused_before_foreign_memory
+  - src/use_cases/transport.rs::a_base_of_another_copy_stops_the_dispatch_before_the_scenario
+  - tests/architecture_guardrails.rs::the_owner_of_a_file_base_is_checked_in_one_place
 ---
 
 # Сначала владелец, затем память, затем поколение

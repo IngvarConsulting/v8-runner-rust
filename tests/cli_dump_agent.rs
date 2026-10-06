@@ -402,6 +402,60 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
     );
 }
 
+/// Токен, записанный другим инструментом или записью без имени инструмента (журнал
+/// прежних версий), — отсутствие ответа: выгрузка по изменившемуся не пропускается, и
+/// команда не падает.
+#[test]
+fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
+    let harness = harness(true, Some(true), false);
+    let (first, payload) = run_dump(&harness, &["--force"]);
+    assert_eq!(first, 0, "{payload}");
+    let ledger_file = fs::read_dir(harness.dir.path().join("work/infobases"))
+        .expect("base memory")
+        .map(|entry| entry.expect("entry").path().join("generation.json"))
+        .next()
+        .expect("one remembered base");
+    let ledger: Value =
+        serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
+    assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
+
+    let dumps = |harness: &Harness| {
+        commands(harness)
+            .iter()
+            .filter(|line| line.starts_with("config dump-config-to-files"))
+            .count()
+    };
+    fn another_tool(record: &mut Value) {
+        record["tool"] = Value::from("designer");
+    }
+    fn no_tool(record: &mut Value) {
+        record.as_object_mut().expect("record").remove("tool");
+    }
+    type Rewrite = fn(&mut Value);
+    let rewrites: [(Rewrite, usize); 2] = [(another_tool, 2), (no_tool, 3)];
+    for (rewrite, expected_dumps) in rewrites {
+        let mut ledger: Value =
+            serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
+        rewrite(&mut ledger["main"]);
+        fs::write(&ledger_file, ledger.to_string()).expect("rewrite ledger");
+
+        let (code, payload) = run_dump(&harness, &[]);
+
+        assert_eq!(code, 0, "{payload}");
+        assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
+        assert_eq!(dumps(&harness), expected_dumps, "{payload}");
+        let ledger: Value =
+            serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
+        assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
+    }
+
+    // Контроль: запись того же инструмента с тем же токеном выгрузку пропускает.
+    let (code, payload) = run_dump(&harness, &[]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
+    assert_eq!(dumps(&harness), 3, "{payload}");
+}
+
 /// Каталог без файла версий: выгрузка по изменившемуся идёт полной поверх каталога —
 /// агенту уходит команда без `--update`, ответ называет `FULL` и причину, а прежнее
 /// поколение не даёт её пропустить.

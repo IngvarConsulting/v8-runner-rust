@@ -1,7 +1,9 @@
 ---
 id: INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/327
+check:
+  - tests/cli_infobase_owner.rs::a_read_on_a_base_of_another_copy_passes_and_leaves_the_marker
+  - tests/cli_infobase_owner.rs::a_read_of_a_base_without_a_marker_makes_no_owner
+  - src/use_cases/infobase_owner.rs::only_a_run_of_a_write_on_a_declared_base_records_a_copy
 ---
 
 # Чтение базы владельцем не делает
