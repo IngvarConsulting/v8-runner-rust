@@ -9,6 +9,7 @@ check:
   - src/use_cases/convert_sources.rs::an_interrupted_preview_reports_no_work_for_the_edt_cli
   - tests/cli_build.rs::a_planned_edt_build_does_not_load_the_generated_designer_files
   - tests/cli_pull_memory.rs::a_preview_names_the_mode_the_pull_would_run
+  - tests/cli_pull_all.rs::a_pull_all_preview_reads_nothing_and_writes_nothing
 ---
 
 # Превью не запускает исполнителя

@@ -194,6 +194,13 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 6. После удачной полной выгрузки, выгрузки по изменившемуся или выборки `ibcmd` файл версий
    из каталога становится копией раннера; сбой её не меняет.
 
+`pull --all` ([`dump_config/all.rs`](../../src/use_cases/dump_config/all.rs)) — обход поверх
+этого сценария: тот же выбор исполнителя; превью называет превью наборов проекта и базу не
+спрашивает; иначе исполнитель отдаёт список расширений базы, и пакеты проекта в порядке
+`SourceSetInventory::configuration_packages` выгружаются как `pull <SET>`, а расширения без
+набора — полной выгрузкой в `src/ext/<Name>`. Набор дописывается в `v8project.yaml`
+(`config_init::declare_source_sets`) после своей выгрузки; отказ набора останавливает обход.
+
 `make` публикует тем же способом — файл пакета или каталог внешних обработок — и без
 вопроса к git; цель он сверяет при разрешении и заново перед публикацией.
 
@@ -207,7 +214,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [замена файла версий не оставляет следов](../rules/use-cases/a-version-file-replacement-leaves-no-trace.md),
 [`--force` называет уничтоженное](../rules/use-cases/force-names-what-it-destroyed.md),
 [каталог вне системы контроля версий не заменяют](../rules/use-cases/an-untracked-directory-is-refused-not-replaced.md),
-[выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md).
+[выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md),
+[`pull --all` объявляет набор каждому расширению базы](../rules/cli/pull-all-declares-a-set-for-each-installed-extension.md).
 
 ### 6.7 EDT-проверка по MCP
 

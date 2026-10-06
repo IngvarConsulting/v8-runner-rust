@@ -133,6 +133,12 @@ runtime snapshot commit только указанным source-set.
   Правка опубликованного дерева остаётся изменением.
 - Цель полной выгрузки не может содержать `workPath`: замена удалила бы состояние команды.
 - Для `format=EDT` использует internal Designer snapshot, затем EDT import.
+- `pull --all` (`dump_config::execute_all`) читает список расширений базы выбранным
+  исполнителем `pull`, обходит пакеты в порядке `SourceSetInventory::configuration_packages`
+  тем же сценарием `pull <SET>` и для расширения без набора выгружает его полностью в
+  `src/ext/<Name>`, а затем дописывает набор в `v8project.yaml` (`config_init::declare_source_sets`,
+  текстом, с повторным чтением). Объявление идёт после выгрузки: отказ посреди обхода не
+  оставляет в проекте набора без содержимого.
 
 ### `convert`
 
