@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::change_detection::analyzer::ContextAnalysis;
@@ -7,9 +7,12 @@ use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
 use crate::domain::infobase_export::TransferArtifactKind;
 use crate::domain::next_step::NextStep;
 use crate::domain::source_set::SourceSetContext;
+use crate::platform::extension_inventory::is_windows_device_name;
 use crate::support::error::AppError;
 use crate::use_cases::context::CommandName;
-use crate::use_cases::extension_identity::platform_extension_name;
+use crate::use_cases::extension_identity::{
+    extension_name_key, platform_extension_name, source_extension_name,
+};
 use crate::use_cases::result::UseCaseError;
 
 /// Наборы в порядке обработки: основная конфигурация, расширения, внешние обработки,
@@ -95,7 +98,8 @@ impl<'a> SourceSetInventory<'a> {
     /// файл, а `next` называет ту же команду с набором основной конфигурации и файлом `.cf`.
     ///
     /// `relative_to` — откуда команда считает относительный путь: `download` — от
-    /// `basePath`, `make` (`None`) — от текущего каталога.
+    /// `basePath`, `make` (`None`) — от текущего каталога. Ответ — каталог, разрешённый от
+    /// этой точки: его называет ответ команды и с ним сверяются цели пакетов.
     pub(crate) fn packages_directory(
         &self,
         command: CommandName,
@@ -113,7 +117,11 @@ impl<'a> SourceSetInventory<'a> {
         let directory = PathBuf::from(trimmed);
         let resolved = match relative_to {
             Some(base) => crate::support::path::resolve_from(base, &directory),
-            None => directory.clone(),
+            None => std::path::absolute(&directory).map_err(|error| {
+                AppError::Runtime(format!(
+                    "failed to resolve --output '{trimmed}' against the current directory: {error}"
+                ))
+            })?,
         };
         let names_a_file = if resolved.exists() {
             !resolved.is_dir()
@@ -121,7 +129,7 @@ impl<'a> SourceSetInventory<'a> {
             directory.extension().is_some()
         };
         if !names_a_file {
-            return Ok(directory);
+            return Ok(resolved);
         }
         let mut error = UseCaseError::from(AppError::Validation(format!(
             "{command} without <SET> writes a package for each source-set into the directory --output names, and '{trimmed}' names a file: name a directory, or name the source-set to write one package",
@@ -140,6 +148,108 @@ impl<'a> SourceSetInventory<'a> {
             );
         }
         Err(error)
+    }
+
+    /// Пакеты конфигурации проекта по составу базы: набор расширения есть в базе, когда в
+    /// `installed` есть его расширение ([`extension_name_key`]: 1С регистр в именах не
+    /// различает). Сопоставление одно на все обходы по составу базы — `pull --all` и
+    /// `download` без набора.
+    ///
+    /// Набор, исходники которого называют другое установленное расширение, — отказ: по
+    /// имени набора он взял бы не то расширение (#218).
+    pub(crate) fn installed_packages(
+        &self,
+        installed: &[String],
+    ) -> Result<InstalledPackages<'a>, AppError> {
+        let installed = installed
+            .iter()
+            .map(|name| extension_name_key(name))
+            .collect::<HashSet<_>>();
+        let mut packages = InstalledPackages {
+            present: Vec::new(),
+            not_installed: Vec::new(),
+        };
+        for (source_set, extension) in self.configuration_packages() {
+            let Some(extension) = extension else {
+                packages.present.push((source_set, None));
+                continue;
+            };
+            let key = extension_name_key(extension);
+            let root = source_set.root_in(&self.config.base_path);
+            if let Some(held) = source_extension_name(self.config.format, &root)?.filter(|held| {
+                let held = extension_name_key(held);
+                held != key && installed.contains(&held)
+            }) {
+                return Err(AppError::Validation(format!(
+                    "source-set '{}' holds extension '{held}' by the Name in its sources, but the runner takes an extension set by the set's name, '{extension}' (#218): rename the set to '{held}' in the project file; no second set is declared for '{held}'",
+                    source_set.name
+                )));
+            }
+            if installed.contains(&key) {
+                packages.present.push((source_set, Some(extension)));
+            } else {
+                packages.not_installed.push(source_set);
+            }
+        }
+        Ok(packages)
+    }
+
+    /// Цели пакетов обхода без набора проверяются до работы. Пакет не ложится на каталог
+    /// набора или `workPath`, внутрь них и вокруг них ([`paths_overlap`]): публикация
+    /// каталога внешнего набора заменила бы исходники. Два пакета не получают одно имя на
+    /// файловой системе без регистра, и имя пакета не бывает именем устройства Windows.
+    pub(crate) fn check_package_targets(
+        &self,
+        command: CommandName,
+        directory: &Path,
+        sets: &[&SourceSetConfig],
+    ) -> Result<(), AppError> {
+        let command = command.as_str();
+        let guarded = self
+            .config
+            .source_sets
+            .iter()
+            .map(|source_set| {
+                (
+                    format!("the directory of source-set '{}'", source_set.name),
+                    comparable_path(&source_set.root_in(&self.config.base_path)),
+                )
+            })
+            .chain(std::iter::once((
+                "workPath".to_owned(),
+                comparable_path(&self.config.work_path),
+            )))
+            .collect::<Vec<_>>();
+        let mut names = HashMap::new();
+        for source_set in sets {
+            if is_windows_device_name(&source_set.name) {
+                return Err(AppError::Validation(format!(
+                    "{command} without <SET> names the package of source-set '{0}' after the set, and '{0}' is a Windows device name: name the set to write its package to a file of your choice",
+                    source_set.name
+                )));
+            }
+            if let Some(other) =
+                names.insert(extension_name_key(&source_set.name), &source_set.name)
+            {
+                return Err(AppError::Validation(format!(
+                    "{command} without <SET> would give source-sets '{other}' and '{}' the same package name on a case-insensitive file system: name each set to write its package",
+                    source_set.name
+                )));
+            }
+            let target = package_in_directory(directory, source_set);
+            let comparable = comparable_path(&target);
+            if let Some((what, _)) = guarded
+                .iter()
+                .find(|(_, guarded)| paths_overlap(&comparable, guarded))
+            {
+                return Err(AppError::Validation(format!(
+                    "{command} without <SET> would write the package of source-set '{}' to '{}', which overlaps {what}: name a directory outside the project sources and workPath",
+                    source_set.name,
+                    target.display()
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn source_set(&self, name: &str) -> Option<&'a SourceSetConfig> {
@@ -233,6 +343,28 @@ pub(crate) fn package_in_directory(directory: &Path, source_set: &SourceSetConfi
     file.push(".");
     file.push(suffix);
     PathBuf::from(file)
+}
+
+/// Пакеты конфигурации проекта по составу базы ([`SourceSetInventory::installed_packages`]).
+#[derive(Debug)]
+pub(crate) struct InstalledPackages<'a> {
+    /// Пакеты в порядке обхода, которые в базе есть: основная конфигурация (`None`) и
+    /// расширения с именем расширения.
+    pub(crate) present: Vec<(&'a SourceSetConfig, Option<&'a str>)>,
+    /// Наборы расширений проекта, которых в базе нет.
+    pub(crate) not_installed: Vec<&'a SourceSetConfig>,
+}
+
+/// Путь, сравнимый с другими до своего появления: канонический путь ближайшего
+/// существующего предка с хвостом.
+pub(crate) fn comparable_path(path: &Path) -> PathBuf {
+    crate::support::path::nearest_existing_canonical_path(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// Пути пересекаются, когда совпадают или один лежит внутри другого: замена одного задела бы
+/// другой. Сравниваются пути [`comparable_path`].
+pub(crate) fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn index_contexts(contexts: &[SourceSetContext]) -> HashMap<String, SourceSetContext> {
@@ -406,7 +538,7 @@ mod tests {
 
         assert_eq!(
             inventory.packages_directory(CommandName::Artifacts, "dist", None),
-            Ok(std::path::PathBuf::from("dist"))
+            Ok(std::env::current_dir().expect("cwd").join("dist"))
         );
         let existing_dir = dir.path().join("dist.v2");
         std::fs::create_dir_all(&existing_dir).expect("dir");

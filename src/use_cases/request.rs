@@ -285,6 +285,10 @@ pub struct ArtifactsRequest {
     pub extension: Option<String>,
     /// Resolve the target and locate Designer without building or publishing anything.
     pub dry_run: bool,
+    /// The caller states that `output_path` names the publish directory of external files:
+    /// `make` without a set builds `<dir>/<SET>`, and a set named `tools.v2` is still a
+    /// directory. Otherwise a path with a suffix that is not a directory names a file.
+    pub output_is_directory: bool,
 }
 
 impl ArtifactsRequest {

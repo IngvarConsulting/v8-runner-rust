@@ -6,7 +6,6 @@
 //! что `download <SET>`, в [`package_in_directory`]; набор расширения, которого в базе нет,
 //! не выгружается и называется в `not_installed`. Отказ набора останавливает обход.
 
-use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::config::model::{AppConfig, SourceSetConfig};
@@ -16,10 +15,10 @@ use crate::domain::infobase_export::{
 };
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::use_cases::context::ExecutionContext;
-use crate::use_cases::extension_identity::extension_name_key;
+use crate::use_cases::context::{CommandName, ExecutionContext};
 use crate::use_cases::request::DownloadAllRequest;
-use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseResult};
+use crate::use_cases::set_walk;
 use crate::use_cases::source_inventory::{package_in_directory, SourceSetInventory};
 
 use super::{InfobaseTransferIntent, PreparedTransferProvider};
@@ -59,14 +58,26 @@ fn run_all(
         duration_ms: 0,
         message: None,
     };
-    let packages = SourceSetInventory::new(config).configuration_packages();
+    let inventory = SourceSetInventory::new(config);
+    let packages = inventory.configuration_packages();
     // Обойти нечего — отказ до выбора исполнителя: пустой обход ответил бы успехом, ничего
     // не выгрузив.
     if packages.is_empty() {
         let error = AppError::Validation(
             "download without <SET> takes the configuration and extension source-sets, and the project has none".to_owned(),
         );
-        return Err(fail(error.into(), result, started));
+        return Err(set_walk::fail(error, result, started));
+    }
+    let targets = packages
+        .iter()
+        .map(|(source_set, _)| *source_set)
+        .collect::<Vec<_>>();
+    if let Err(error) = inventory.check_package_targets(
+        CommandName::InfobaseConfigurationExport,
+        &request.output_directory,
+        &targets,
+    ) {
+        return Err(set_walk::fail(error, result, started));
     }
     let prepared = match super::select_provider(
         context,
@@ -78,7 +89,11 @@ fn run_all(
         Ok(prepared) => prepared,
         Err((error, receipt)) => {
             result.provider = Some(receipt);
-            return Err(fail(super::infobase_use_case_error(error), result, started));
+            return Err(set_walk::fail(
+                super::infobase_use_case_error(error),
+                result,
+                started,
+            ));
         }
     };
     result.provider = Some(prepared.receipt.clone());
@@ -93,7 +108,7 @@ fn run_all(
         return walker.preview(&packages, result, started);
     }
 
-    let installed = match crate::use_cases::dump_config::read_installed_extensions(
+    let installed = match crate::use_cases::installed_extensions::read_installed_extensions(
         context,
         config,
         Operation::ConfigurationExport,
@@ -101,49 +116,32 @@ fn run_all(
         prepared.executable.as_deref(),
         &PlatformUtilities::from_config(config),
     ) {
-        Ok(installed) => installed
-            .iter()
-            .map(|name| extension_name_key(name))
-            .collect::<HashSet<_>>(),
+        Ok(installed) => installed,
         Err(error) => {
-            result.message = Some(error.to_string());
-            return Err(UseCaseFailure::after_possible_work(
+            return Err(set_walk::fail_after_possible_work(
                 super::infobase_use_case_error(error),
+                result,
+                started,
                 context.work(),
-                || {
-                    result.duration_ms = started.elapsed().as_millis() as u64;
-                    result
-                },
             ));
         }
     };
-    let (walked, not_installed): (Vec<_>, Vec<_>) =
-        packages.into_iter().partition(|(_, extension)| {
-            extension.is_none_or(|name| installed.contains(&extension_name_key(name)))
-        });
-    result.not_installed = not_installed
-        .into_iter()
-        .map(|(source_set, _)| source_set.name.clone())
+    let packages = match inventory.installed_packages(&installed) {
+        Ok(packages) => packages,
+        Err(error) => return Err(set_walk::fail(error, result, started)),
+    };
+    result.not_installed = packages
+        .not_installed
+        .iter()
+        .map(|source_set| source_set.name.clone())
         .collect();
-    for (source_set, extension) in walked {
+    for (source_set, extension) in packages.present {
         if let Err(error) = walker.download(source_set, extension, &mut result) {
-            return Err(fail(error, result, started));
+            return Err(set_walk::fail(error, result, started));
         }
     }
     result.ok = true;
-    result.duration_ms = started.elapsed().as_millis() as u64;
-    Ok(result)
-}
-
-/// Отказ: ответ несёт выгруженное до него и называет причину.
-fn fail(
-    error: UseCaseError,
-    mut result: DownloadAllResult,
-    started: Instant,
-) -> UseCaseFailure<DownloadAllResult> {
-    result.duration_ms = started.elapsed().as_millis() as u64;
-    result.message = Some(error.to_string());
-    UseCaseFailure::with_payload(error, result)
+    Ok(set_walk::finish(result, started))
 }
 
 /// Общее для каждой выгрузки обхода: сценарий, запрос и выбранный исполнитель.
@@ -171,17 +169,16 @@ impl Walker<'_> {
                 continue;
             }
             let set_request = self.set_request(source_set, None);
-            match super::preview_configuration_export(
-                self.context,
-                self.config,
-                &set_request,
-                self.prepared,
+            if let Err(error) = set_walk::collect_set(
+                &mut result.sets,
+                super::preview_configuration_export(
+                    self.context,
+                    self.config,
+                    &set_request,
+                    self.prepared,
+                ),
             ) {
-                Ok(previewed) => result.sets.push(previewed),
-                Err(failure) => {
-                    result.sets.extend(failure.payload);
-                    return Err(fail(failure.error, result, started));
-                }
+                return Err(set_walk::fail(error, result, started));
             }
         }
         result.message = Some(format!(
@@ -190,8 +187,7 @@ impl Walker<'_> {
             self.request.output_directory.display()
         ));
         result.ok = true;
-        result.duration_ms = started.elapsed().as_millis() as u64;
-        Ok(result)
+        Ok(set_walk::finish(result, started))
     }
 
     /// Выгружает один пакет сценарием `download <SET>` и кладёт его ответ в обход.
@@ -202,21 +198,15 @@ impl Walker<'_> {
         result: &mut DownloadAllResult,
     ) -> Result<(), UseCaseError> {
         let set_request = self.set_request(source_set, extension);
-        match super::execute_configuration_export(
-            self.context,
-            self.config,
-            &set_request,
-            self.prepared,
-        ) {
-            Ok(downloaded) => {
-                result.sets.push(downloaded);
-                Ok(())
-            }
-            Err(failure) => {
-                result.sets.extend(failure.payload);
-                Err(failure.error)
-            }
-        }
+        set_walk::collect_set(
+            &mut result.sets,
+            super::execute_configuration_export(
+                self.context,
+                self.config,
+                &set_request,
+                self.prepared,
+            ),
+        )
     }
 
     fn set_request(

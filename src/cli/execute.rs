@@ -171,26 +171,14 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
-        Command::Infobase(args) => match &args.command {
-            InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
-                command: InfobaseConfigurationCommand::Export(export),
-            }) if downloads_every_package(args, config) => execute_download_all(
-                config,
-                export,
-                presenter,
-                clean_before_execution,
-                dry_run,
-                cancellation,
-            ),
-            _ => execute_infobase(
-                config,
-                args,
-                presenter,
-                clean_before_execution,
-                dry_run,
-                cancellation,
-            ),
-        },
+        Command::Infobase(args) => execute_infobase(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Convert(args) => execute_convert(
             config,
             args,
@@ -1104,7 +1092,6 @@ fn execute_dump(
                     presenter,
                     CommandName::Dump,
                     dump_config::execute_all(&context, config, &request),
-                    |result| result.duration_ms,
                     render_pull_all_text,
                 )
             },
@@ -1122,7 +1109,6 @@ fn execute_dump(
                 presenter,
                 CommandName::Dump,
                 dump_config::execute(&context, config, &request),
-                |result| result.duration_ms,
                 render_dump_text,
             )
         },
@@ -1132,11 +1118,10 @@ fn execute_dump(
 /// Исход `pull`, `pull --all` и `download` без набора: конверт с формой ответа в JSON,
 /// лента `render` в тексте. Отказ несёт то, что сценарий успел, — в JSON конвертом отказа с
 /// формой, в тексте лентой перед строкой ошибки.
-fn present_outcome<T: Serialize>(
+fn present_outcome<T: WireForm>(
     presenter: &Presenter,
     command: CommandName,
     outcome: Result<T, crate::use_cases::result::UseCaseFailure<T>>,
-    duration_ms: impl Fn(&T) -> u64,
     render: impl Fn(&T, &Presenter, bool),
 ) -> Result<(), UseCaseError> {
     match outcome {
@@ -1144,8 +1129,8 @@ fn present_outcome<T: Serialize>(
             if presenter.is_json() {
                 presenter.print_envelope(&Envelope::ok(
                     command.as_str(),
-                    duration_ms(&result),
-                    result,
+                    result.duration_ms(),
+                    result.wire(),
                 ));
             } else {
                 render(&result, presenter, true);
@@ -1158,8 +1143,8 @@ fn present_outcome<T: Serialize>(
                 if let Some(result) = failure.payload {
                     presenter.print_envelope(&failure_envelope(
                         command.as_str(),
-                        duration_ms(&result),
-                        result,
+                        result.duration_ms(),
+                        result.wire(),
                         &error,
                     ));
                 }
@@ -1171,6 +1156,39 @@ fn present_outcome<T: Serialize>(
             }
             Err(error)
         }
+    }
+}
+
+/// Ответ сценария, который [`present_outcome`] печатает: `data` конверта — его форма на
+/// проводе, у большинства — сам ответ.
+trait WireForm {
+    fn duration_ms(&self) -> u64;
+    fn wire(&self) -> impl Serialize + '_;
+}
+
+macro_rules! wire_form_is_itself {
+    ($($ty:ty),* $(,)?) => {
+        $(impl WireForm for $ty {
+            fn duration_ms(&self) -> u64 {
+                self.duration_ms
+            }
+
+            fn wire(&self) -> impl Serialize + '_ {
+                self
+            }
+        })*
+    };
+}
+
+wire_form_is_itself!(DumpResult, PullAllResult, DownloadAllResult);
+
+impl WireForm for MakeAllResult {
+    fn duration_ms(&self) -> u64 {
+        self.duration_ms
+    }
+
+    fn wire(&self) -> impl Serialize + '_ {
+        MakeAllJsonData::from_result(self)
     }
 }
 
@@ -2401,38 +2419,13 @@ fn execute_make_all(
         BaseAccess::Reads,
         clean_before_execution,
         dry_run,
-        || match artifacts::execute_all(&context, config, &request) {
-            Ok(result) => {
-                if presenter.is_json() {
-                    presenter.print_envelope(&Envelope::ok(
-                        command.as_str(),
-                        result.duration_ms,
-                        MakeAllJsonData::from_result(&result),
-                    ));
-                } else {
-                    render_make_all_text(&result, presenter, true);
-                }
-                Ok(())
-            }
-            Err(failure) => {
-                let error = failure.error;
-                if presenter.is_json() {
-                    if let Some(result) = failure.payload {
-                        presenter.print_envelope(&failure_envelope(
-                            command.as_str(),
-                            result.duration_ms,
-                            MakeAllJsonData::from_result(&result),
-                            &error,
-                        ));
-                    }
-                } else {
-                    if let Some(result) = failure.payload.as_ref() {
-                        render_make_all_text(result, presenter, false);
-                    }
-                    presenter.print_error(&error.to_string());
-                }
-                Err(error)
-            }
+        || {
+            present_outcome(
+                presenter,
+                command,
+                artifacts::execute_all(&context, config, &request),
+                render_make_all_text,
+            )
         },
     )
 }
@@ -2440,7 +2433,7 @@ fn execute_make_all(
 /// `download` без набора: пакет каждого набора конфигурации по составу базы в каталог
 /// `--output` (от `basePath`). Путь к файлу без набора — отказ до выбора исполнителя с шагом
 /// `download <основной набор> --output <файл>.cf`.
-pub fn execute_download_all(
+fn execute_download_all(
     config: &AppConfig,
     args: &InfobaseConfigurationExportArgs,
     presenter: &Presenter,
@@ -2470,10 +2463,36 @@ pub fn execute_download_all(
                 presenter,
                 command,
                 infobase_export::execute_configuration_export_all(&context, config, &request),
-                |result| result.duration_ms,
                 render_download_all_text,
             )
         },
+    )
+}
+
+/// Вход `download` без набора из `app::run`, которое уже решило
+/// [`downloads_every_package`]: обработчик прерывания и обход.
+pub fn execute_download_all_command(
+    config: &AppConfig,
+    args: &InfobaseArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+) -> Result<(), UseCaseError> {
+    let InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
+        command: InfobaseConfigurationCommand::Export(export),
+    }) = &args.command
+    else {
+        unreachable!("only a configuration export downloads every package");
+    };
+    let cancellation = CancellationToken::new();
+    let _signal_guard = CliSignalGuard::install(cancellation.clone());
+    execute_download_all(
+        config,
+        export,
+        presenter,
+        clean_before_execution,
+        dry_run,
+        cancellation,
     )
 }
 
@@ -3191,6 +3210,7 @@ fn map_artifacts_request_with_config(
         output_path: args.output.clone(),
         source_set: args.source_set.name().map(str::to_owned),
         extension: args.extension.clone(),
+        output_is_directory: false,
     })
 }
 

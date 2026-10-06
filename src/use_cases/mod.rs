@@ -45,6 +45,7 @@ pub mod infobase_lock;
 pub mod infobase_owner;
 /// Init orchestration use case.
 pub mod init_project;
+pub(crate) mod installed_extensions;
 /// Shared command interruption status, metadata and message vocabulary.
 pub(crate) mod interruption;
 /// Launch orchestration use case.
@@ -63,6 +64,7 @@ pub mod request;
 pub mod result;
 /// Test orchestration use case.
 pub mod run_tests;
+pub(crate) mod set_walk;
 /// Read-only source-set runtime indexes shared by orchestrating use cases.
 pub(crate) mod source_inventory;
 /// Shared staged publication mechanics for full-replacement use-case outputs.

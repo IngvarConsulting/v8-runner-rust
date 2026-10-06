@@ -276,10 +276,9 @@ pub fn run() -> i32 {
             cli.clean_before_execution,
             cli.dry_run,
         ),
-        Command::Infobase(_) if downloads_all => execute::execute_command(
+        Command::Infobase(args) if downloads_all => execute::execute_download_all_command(
             &config,
-            &cli.command,
-            &command_line_target(&cli, Some(primary_config_path), &config),
+            args,
             &presenter,
             cli.clean_before_execution,
             cli.dry_run,

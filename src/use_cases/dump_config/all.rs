@@ -10,22 +10,19 @@
 
 use std::collections::HashSet;
 
-use super::helpers::ensure_success_of;
 use super::*;
 use crate::config::model::SourceSetConfig;
-use crate::domain::capability::{Operation, Provider};
+use crate::domain::capability::Operation;
 use crate::domain::config_init::ConfigInitSourceSet;
 use crate::domain::dump::{NotDeclaredExtension, PullAllResult};
-use crate::platform::extension_inventory::{
-    is_extension_identifier, is_windows_device_name, parse_extension_inventory,
-    parse_extension_name_list,
-};
+use crate::platform::extension_inventory::is_windows_device_name;
 use crate::use_cases::config_init::{declare_source_sets, with_declared_source_sets};
-use crate::use_cases::extension_agent::ExtensionAgent;
-use crate::use_cases::extension_identity::{extension_name_key, source_extension_name};
+use crate::use_cases::extension_identity::extension_name_key;
 use crate::use_cases::provider_selection::SelectedProvider;
 use crate::use_cases::request::PullAllRequest;
 use crate::use_cases::result::UseCaseError;
+use crate::use_cases::set_walk;
+use crate::use_cases::source_inventory::{comparable_path, paths_overlap};
 
 /// Каталог, под которым `pull --all` заводит набор расширения: `src/ext/<Name>` от
 /// `basePath`, как пути всех наборов.
@@ -51,8 +48,6 @@ pub fn execute_all(
     )
 }
 
-type PullAllFailure = UseCaseFailure<PullAllResult>;
-
 fn run_all(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -73,7 +68,7 @@ fn run_all(
     };
 
     if let Some(error) = validate_supported_matrix(config) {
-        return Err(fail(error, result, started));
+        return Err(set_walk::fail(error, result, started));
     }
     let mut utilities = PlatformUtilities::from_config(config);
     let selected =
@@ -82,7 +77,7 @@ fn run_all(
             Ok(selected) => selected,
             Err((error, receipt)) => {
                 result.provider = Some(receipt);
-                return Err(fail(error, result, started));
+                return Err(set_walk::fail(error, result, started));
             }
         };
     result.provider = Some(selected.receipt.clone());
@@ -97,7 +92,7 @@ fn run_all(
     }
 
     let binary = selected.location.as_ref().map(|found| found.path.as_path());
-    let installed = match read_installed_extensions(
+    let installed = match crate::use_cases::installed_extensions::read_installed_extensions(
         context,
         config,
         Operation::Dump,
@@ -107,14 +102,11 @@ fn run_all(
     ) {
         Ok(installed) => installed,
         Err(error) => {
-            return Err(UseCaseFailure::after_possible_work(
+            return Err(set_walk::fail_after_possible_work(
                 error,
+                result,
+                started,
                 context.work(),
-                || {
-                    let mut result = result.clone();
-                    result.duration_ms = started.elapsed().as_millis() as u64;
-                    result
-                },
             ))
         }
     };
@@ -140,7 +132,7 @@ fn run_all(
         Ok(walk)
     }) {
         Ok(walk) => walk,
-        Err(error) => return Err(fail(error, result, started)),
+        Err(error) => return Err(set_walk::fail(error, result, started)),
     };
     result.not_installed = walk
         .not_installed
@@ -162,7 +154,7 @@ fn run_all(
     for name in &walk.existing {
         if let Err(error) = walker.pull(name, SetKind::Project, &mut result) {
             result.declared = Some(declared);
-            return Err(fail(error, result, started));
+            return Err(set_walk::fail(error, result, started));
         }
     }
     for set in &walk.declared {
@@ -174,26 +166,13 @@ fn run_all(
             });
         if let Err(error) = pulled {
             result.declared = Some(declared);
-            return Err(fail(error, result, started));
+            return Err(set_walk::fail(error, result, started));
         }
         declared.push(set.clone());
     }
     result.declared = Some(declared);
     result.ok = true;
-    result.duration_ms = started.elapsed().as_millis() as u64;
-    Ok(result)
-}
-
-/// Отказ: ответ несёт выгруженное до него и называет причину.
-fn fail(
-    error: impl Into<UseCaseError>,
-    mut result: PullAllResult,
-    started: Instant,
-) -> PullAllFailure {
-    let error = error.into();
-    result.duration_ms = started.elapsed().as_millis() as u64;
-    result.message = Some(error.to_string());
-    PullAllFailure::with_payload(error, result)
+    Ok(set_walk::finish(result, started))
 }
 
 /// Чем выгружается набор обхода.
@@ -231,7 +210,7 @@ impl Walker<'_> {
             if extension.is_some() {
                 result.if_installed.push(source_set.name.clone());
             } else if let Err(error) = self.pull(&source_set.name, SetKind::Project, &mut result) {
-                return Err(fail(error, result, started));
+                return Err(set_walk::fail(error, result, started));
             }
         }
         result.message = Some(format!(
@@ -240,8 +219,7 @@ impl Walker<'_> {
             self.request.project_file.display()
         ));
         result.ok = true;
-        result.duration_ms = started.elapsed().as_millis() as u64;
-        Ok(result)
+        Ok(set_walk::finish(result, started))
     }
 
     /// Выгружает один набор сценарием `pull <SET>` и кладёт его ответ в обход; отказ набора
@@ -268,16 +246,10 @@ impl Walker<'_> {
                 SetKind::Declared => ForceWayOut::Undeclared,
             },
         };
-        match super::execute(self.context, self.config, &set_request) {
-            Ok(pulled) => {
-                result.sets.push(pulled);
-                Ok(())
-            }
-            Err(failure) => {
-                result.sets.extend(failure.payload);
-                Err(failure.error)
-            }
-        }
+        set_walk::collect_set(
+            &mut result.sets,
+            super::execute(self.context, self.config, &set_request),
+        )
     }
 }
 
@@ -309,45 +281,30 @@ impl Walk<'_> {
     }
 }
 
-/// Сопоставляет состав базы с наборами проекта по имени расширения — тому, каким набор
-/// называет расширение платформе ([`SourceSetInventory::configuration_packages`]). Имена
-/// 1С регистр не различают, поэтому и сопоставление без регистра: `old` в проекте — то же
-/// расширение, что `Old` в базе.
-///
-/// Набор, исходники которого называют другое установленное расширение, — отказ: под
-/// своим именем он выгрузил бы не то расширение, а объявить второй набор для того же
-/// расширения значило бы раздвоить его. Расширение-инструмент клиентского MCP
-/// (`tools.client_mcp.extension`) раннер ставит сам, и набором оно не объявляется.
+/// Сопоставляет состав базы с наборами проекта ([`SourceSetInventory::installed_packages`]:
+/// по имени расширения, без регистра, со сторожем #218) и планирует наборы для расширений
+/// базы без набора: объявить второй набор для расширения, которое набор уже держит, значило
+/// бы раздвоить его. Расширение-инструмент клиентского MCP (`tools.client_mcp.extension`)
+/// раннер ставит сам, и набором оно не объявляется.
 fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>, AppError> {
     let key = extension_name_key;
-    let installed_keys = installed
+    let inventory = SourceSetInventory::new(config);
+    let packages = inventory.installed_packages(installed)?;
+    let existing = packages
+        .present
         .iter()
-        .map(|name| key(name))
+        .map(|(source_set, _)| source_set.name.as_str())
+        .collect::<Vec<_>>();
+    let not_installed = packages
+        .not_installed
+        .iter()
+        .map(|source_set| source_set.name.as_str())
+        .collect::<Vec<_>>();
+    let claimed = inventory
+        .configuration_packages()
+        .into_iter()
+        .filter_map(|(_, extension)| extension.map(key))
         .collect::<HashSet<_>>();
-    let mut existing = Vec::new();
-    let mut not_installed = Vec::new();
-    let mut claimed = HashSet::new();
-    for (source_set, extension) in SourceSetInventory::new(config).configuration_packages() {
-        let Some(extension) = extension else {
-            existing.push(source_set.name.as_str());
-            continue;
-        };
-        let root = source_set.root_in(&config.base_path);
-        if let Some(held) = source_extension_name(config.format, &root)?
-            .filter(|held| key(held) != key(extension) && installed_keys.contains(&key(held)))
-        {
-            return Err(AppError::Validation(format!(
-                "source-set '{}' holds extension '{held}' by the Name in its sources, but the runner pulls an extension set by the set's name, '{extension}' (#218): rename the set to '{held}' in the project file; no second set is declared for '{held}'",
-                source_set.name
-            )));
-        }
-        claimed.insert(key(extension));
-        if installed_keys.contains(&key(extension)) {
-            existing.push(source_set.name.as_str());
-        } else {
-            not_installed.push(source_set.name.as_str());
-        }
-    }
 
     let tool = config
         .tools
@@ -361,7 +318,7 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
         .map(|source_set| {
             (
                 source_set,
-                normalized_root(&source_set.root_in(&config.base_path)),
+                comparable_path(&source_set.root_in(&config.base_path)),
             )
         })
         .collect::<Vec<_>>();
@@ -397,12 +354,12 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
         // полная выгрузка внешнего каталога заменила бы вложенный целиком. Совпадающий
         // каталог — отказ проверки плана, а не пропуск, кто бы ни стоял в проекте раньше.
         let path = format!("{DECLARED_EXTENSION_ROOT}/{name}");
-        let root = normalized_root(&config.base_path.join(&path));
+        let root = comparable_path(&config.base_path.join(&path));
         let overlapping = (!set_roots.iter().any(|(_, other)| *other == root))
             .then(|| {
                 set_roots
                     .iter()
-                    .find(|(_, other)| root.starts_with(other) || other.starts_with(&root))
+                    .find(|(_, other)| paths_overlap(&root, other))
             })
             .flatten();
         if let Some((overlapping, _)) = overlapping {
@@ -431,111 +388,11 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
     })
 }
 
-/// Каталог набора, сравнимый с другими до его появления: канонический путь ближайшего
-/// существующего предка с хвостом.
-fn normalized_root(path: &std::path::Path) -> std::path::PathBuf {
-    crate::support::path::nearest_existing_canonical_path(path).unwrap_or_else(|_| path.to_owned())
-}
-
 fn provider_label(selected: &SelectedProvider) -> String {
     match &selected.location {
         Some(found) => found.path.display().to_string(),
         None => "the attached Designer agent".to_owned(),
     }
-}
-
-/// Имена расширений, установленных в базе, — вызовом исполнителя команды (замер #187).
-/// Читатель один: им спрашивают базу `pull --all` и `download` без набора.
-///
-/// Имя, которое не является идентификатором 1С, — неверный вывод: оно станет каталогом и
-/// доводом платформы, и угадывать его нельзя.
-pub(crate) fn read_installed_extensions(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    operation: Operation,
-    provider: Provider,
-    binary: Option<&std::path::Path>,
-    utilities: &PlatformUtilities,
-) -> Result<Vec<String>, AppError> {
-    let command = context.command().as_str();
-    log_live_stage(
-        &format!("{command}: extensions"),
-        &format!("[{command}] reading the extensions installed in the infobase"),
-    );
-    let names = match (provider, binary) {
-        (Provider::Designer, Some(binary)) => {
-            let dsl = build_designer_dsl(
-                context,
-                config,
-                binary,
-                utilities.runner_for(UtilityType::V8),
-                "extensions",
-                "list",
-            )?;
-            let listed = dsl
-                .dump_db_cfg_list_all_extensions()
-                .map_err(AppError::from)?;
-            ensure_success_of(
-                "list extensions of",
-                "infobase",
-                "the configured infobase",
-                &listed,
-            )?;
-            let Some(out) = listed.platform_log.as_deref() else {
-                return Err(AppError::InvalidOutput(format!(
-                    "the Designer extension list was not read: {}",
-                    listed
-                        .platform_log_read_error
-                        .as_deref()
-                        .unwrap_or("no /Out log")
-                )));
-            };
-            parse_extension_name_list(out).map_err(AppError::InvalidOutput)?
-        }
-        (Provider::Ibcmd, Some(binary)) => {
-            let dsl = build_ibcmd_dsl(
-                context,
-                config,
-                binary,
-                utilities.runner_for(UtilityType::Ibcmd),
-            )?;
-            let listed = dsl.infobase_extension_list().map_err(map_ibcmd_error)?;
-            ensure_success_of(
-                "list extensions of",
-                "infobase",
-                "the configured infobase",
-                &listed,
-            )?;
-            parse_extension_inventory(&listed.process.stdout)
-                .map_err(AppError::InvalidOutput)?
-                .into_iter()
-                .map(|extension| extension.name)
-                .collect()
-        }
-        (Provider::Agent, binary) => {
-            let mut agent = ExtensionAgent::open(context, config, binary)?;
-            let inventory = agent.inventory(None);
-            agent.close();
-            inventory?
-                .into_iter()
-                .map(|extension| extension.name)
-                .collect()
-        }
-        // Без утилиты исполнитель списка не прочтёт, а прочие исполнители выгрузку не
-        // делают: тот же отказ, что у выгрузки без адаптера.
-        (provider @ (Provider::Designer | Provider::Ibcmd), None)
-        | (provider @ (Provider::IbcmdRs | Provider::Webinst), _) => {
-            return Err(crate::use_cases::unimplemented_provider(
-                operation, provider,
-            ))
-        }
-    };
-    if let Some(name) = names.iter().find(|name| !is_extension_identifier(name)) {
-        return Err(AppError::InvalidOutput(format!(
-            "the infobase lists an extension whose name is not an identifier: {name:?}"
-        )));
-    }
-    Ok(names)
 }
 
 #[cfg(test)]
