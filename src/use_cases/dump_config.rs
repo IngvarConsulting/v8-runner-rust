@@ -2389,6 +2389,7 @@ exit 0"#,
         let prefix = match kind {
             TempDirKind::Stage => ".dump-stage",
             TempDirKind::Backup => DUMP_BACKUP_PREFIX,
+            TempDirKind::ThrowawayInfobase => unreachable!("a dump stages no infobase"),
         };
         let path = resolved
             .target_path

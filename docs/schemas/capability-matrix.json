@@ -154,27 +154,31 @@
       "cluster": [
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "ibcmd"
         },
         {
-          "implemented": false,
-          "provider": "agent"
+          "implemented": true,
+          "provider": "designer"
         }
       ],
       "file": [
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "ibcmd"
         },
         {
-          "implemented": false,
-          "provider": "agent"
+          "implemented": true,
+          "provider": "designer"
         }
       ],
       "standalone": [
         {
           "implemented": true,
-          "provider": "agent"
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": true,
+          "provider": "designer"
         }
       ]
     },

@@ -349,6 +349,15 @@ fn orphan_name_matches_contract(
                 .unwrap_or(false);
             named_backup || file_backup
         }
+        // Временная база раннера: каталог `<префикс>-<запуск>` под корнем временных баз.
+        // Публикация таких не заводит; их префикс называет `throwaway_infobase`, передавая
+        // его как префикс промежуточных копий.
+        TempDirKind::ThrowawayInfobase => {
+            stage_prefixes
+                .iter()
+                .any(|prefix| file_name.starts_with(prefix))
+                && file_name.contains(&metadata.run_id)
+        }
     }
 }
 
@@ -387,7 +396,7 @@ pub(super) fn interruption_before_publish(
     interruption::interruption_before_safe_point(context, safe_point.into())
 }
 
-fn make_run_id() -> String {
+pub(super) fn make_run_id() -> String {
     let timestamp = Utc::now().timestamp_nanos_opt().unwrap_or_default();
     format!("{}-{timestamp:x}", std::process::id())
 }

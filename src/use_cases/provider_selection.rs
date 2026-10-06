@@ -56,7 +56,22 @@ pub fn select(
     utilities: &mut PlatformUtilities,
     operation: Operation,
 ) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
-    let plan = config.provider_plan(operation);
+    select_from(
+        config,
+        utilities,
+        operation,
+        config.provider_plan(operation),
+    )
+}
+
+/// Первый готовый исполнитель из данного плана: так операция сужает план, когда часть её
+/// работы умеет только один исполнитель (`make` внешних обработок — Конфигуратор).
+pub fn select_from(
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    operation: Operation,
+    plan: ProviderPlan,
+) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
     if plan.candidates().is_empty() {
         return Err((
             no_executor(config, operation),

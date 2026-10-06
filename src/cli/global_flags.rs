@@ -190,10 +190,12 @@ const LEAVES: &[Leaf] = &[
         preview: Preview::Runs,
         base: Base::Resolves,
     },
+    // `make` собирает пакет из исходников во временной базе раннера: базу проекта он не
+    // выбирает и не открывает (#364).
     Leaf {
         path: "make",
         preview: Preview::Runs,
-        base: Base::Resolves,
+        base: Base::Ignores,
     },
     Leaf {
         path: "check",

@@ -1211,8 +1211,10 @@ pub(super) fn run_build_edt(
                         interactive_edt.as_ref().expect("interactive edt dsl"),
                         source_set,
                         &edt_context,
-                        &designer_context,
-                        index,
+                        // Снимок лежит под памятью выбранной базы: его путь называет
+                        // контекст `designer-`.
+                        designer_context.path(),
+                        &format!("build-{index:02}"),
                     )
                 } else {
                     let one_shot_edt = EdtDsl::new(
@@ -1227,8 +1229,10 @@ pub(super) fn run_build_edt(
                         &one_shot_edt,
                         source_set,
                         &edt_context,
-                        &designer_context,
-                        index,
+                        // Снимок лежит под памятью выбранной базы: его путь называет
+                        // контекст `designer-`.
+                        designer_context.path(),
+                        &format!("build-{index:02}"),
                     )
                 };
                 let export_warnings = match export_result {

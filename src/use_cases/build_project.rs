@@ -414,14 +414,17 @@ fn analyze_contexts_by_name(
         .collect()
 }
 
-fn execute_edt_export_step(
+/// Шаг EDT: проект набора переводится `1cedtcli` в файлы Конфигуратора в `export_target`.
+/// Один на `push` и `make`: `push` кладёт снимок под память выбранной базы (контекст
+/// `designer-`), `make` — в свою временную базу. `log_label` начинает имя журнала шага.
+pub(crate) fn execute_edt_export_step(
     context: &ExecutionContext,
     config: &AppConfig,
     dsl: &EdtDsl<'_>,
     source_set: &SourceSetConfig,
     edt_context: &SourceSetContext,
-    designer_context: &SourceSetContext,
-    step_index: usize,
+    export_target: &Path,
+    log_label: &str,
 ) -> Result<Vec<String>, AppError> {
     collecting_deferrals(|deferrals| {
         if let Some(error) = interruption_before_safe_point(
@@ -430,8 +433,6 @@ fn execute_edt_export_step(
         ) {
             return Err(error);
         }
-        // Снимок лежит под памятью выбранной базы: его путь называет контекст `designer-`.
-        let export_target = designer_context.path();
         let project_name = resolve_edt_project_name(source_set, edt_context)?;
         recreate_directory(export_target).map_err(|error| {
             AppError::Runtime(format!(
@@ -440,22 +441,22 @@ fn execute_edt_export_step(
             ))
         })?;
         let export_result = dsl
-            .export_project(&project_name, designer_context.path())
+            .export_project(&project_name, export_target)
             .map_err(AppError::from)?;
         deferrals.note_result("edt_export", &export_result);
         let export_log_path = write_edt_export_log(
             config,
             source_set,
-            step_index,
+            log_label,
             &project_name,
-            designer_context.path(),
+            export_target,
             &export_result,
         )?;
         ensure_edt_export_success(source_set, &export_result, &export_log_path)?;
         ensure_edt_export_output(
             source_set,
             &project_name,
-            designer_context.path(),
+            export_target,
             &export_result,
             &export_log_path,
         )
@@ -466,7 +467,7 @@ fn execute_edt_export_step(
 fn write_edt_export_log(
     config: &AppConfig,
     source_set: &SourceSetConfig,
-    step_index: usize,
+    log_label: &str,
     project_name: &str,
     export_target: &Path,
     result: &crate::platform::result::PlatformCommandResult,
@@ -474,10 +475,7 @@ fn write_edt_export_log(
     let log_dir = platform_logs_dir(&config.work_path).map_err(|error| {
         AppError::Runtime(format!("failed to create platform logs dir: {error}"))
     })?;
-    let log_path = log_dir.join(format!(
-        "build-{step_index:02}-{}-edt-export.log",
-        source_set.name
-    ));
+    let log_path = log_dir.join(format!("{log_label}-{}-edt-export.log", source_set.name));
     let contents = format!(
         "action: edt_export\nsource-set: {}\nproject-name: {project_name}\nexport-target: {}\nexit-code: {}\nstdout:\n{}\nstderr:\n{}\n",
         source_set.name,

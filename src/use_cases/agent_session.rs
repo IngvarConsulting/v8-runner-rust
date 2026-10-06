@@ -396,25 +396,6 @@ pub(crate) fn expose_file(
     Ok(relative.to_owned())
 }
 
-/// Копия чужого каталога внутри каталога пользователя агента: для команд с файловыми
-/// параметрами, которые через ссылку не разрешаются.
-pub(crate) fn copy_dir_in(
-    user_dir: &Path,
-    relative: &str,
-    target: &Path,
-) -> Result<String, AppError> {
-    let copy = user_dir.join(relative);
-    let _ = crate::support::fs::remove_path_if_exists(&copy);
-    crate::support::fs::copy_dir_recursively(target, &copy).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to copy '{}' into the agent dir '{}': {error}",
-            target.display(),
-            copy.display()
-        ))
-    })?;
-    Ok(relative.to_owned())
-}
-
 /// Каталог для файлов, которые агент должен *написать*: настоящий подкаталог
 /// каталога пользователя — через символическую ссылку агент файлы не пишет.
 pub(crate) fn output_dir(user_dir: &Path, relative: &str) -> Result<PathBuf, AppError> {
@@ -586,20 +567,6 @@ pub(crate) fn stage_dir_partially(
             .map_err(AppError::from)?;
     }
     Ok(relative.to_owned())
-}
-
-/// То же, но всегда копией: для команд с файловыми параметрами, которые через ссылку
-/// точка входа не разрешает.
-pub(crate) fn stage_copy_dir(
-    handle: &mut AgentHandle,
-    exchange: &Exchange,
-    relative: &str,
-    local: &Path,
-) -> Result<String, AppError> {
-    match exchange {
-        Exchange::Dir(user_dir) => copy_dir_in(user_dir, relative, local),
-        Exchange::Sftp => stage_dir(handle, exchange, relative, local),
-    }
 }
 
 /// Файл раннера — на сторону точки входа под относительным именем.
