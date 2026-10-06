@@ -524,8 +524,8 @@ mod tests {
         truncate_stack_trace, RunArtifacts,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolsConfig, VanessaProfileConfig,
+        AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolsConfig, VanessaProfileConfig,
     };
     use crate::domain::execution::{ExecutionStatus, ExecutionTimeouts};
     use crate::domain::runner::{
@@ -558,7 +558,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("main"),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig::default(),
                 ..ToolsConfig::default()

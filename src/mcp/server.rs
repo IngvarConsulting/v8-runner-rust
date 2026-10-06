@@ -1212,8 +1212,8 @@ mod tests {
     use axum::http::Request;
 
     use crate::config::model::{
-        AppConfig, BuildConfig, McpConfig, McpExecutionConfig, McpHttpConfig, PlatformToolConfig,
-        SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
+        AppConfig, McpConfig, McpExecutionConfig, McpHttpConfig, PlatformToolConfig, SourceFormat,
+        SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::mcp::context::McpCallContext;
     use crate::mcp::port::DefaultMcpUseCasePort;
@@ -1831,7 +1831,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("."),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig::default(),
                 enterprise: Default::default(),

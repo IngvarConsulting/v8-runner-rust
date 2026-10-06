@@ -128,7 +128,7 @@ artifact без привязки к release tag.
 
 - top-level app keys: `workPath`, `format`, `providers`, `source-set`, `push`, `tools`,
   `mcp`, `tests`; базы объявляет местный слой ключом `infobases`;
-- `push` использует `partialLoadThreshold` (ключ будет отвергаться валидацией — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379));
+- `push` ключей сегодня не принимает: прежний `partialLoadThreshold` отвергается по имени;
 - `mcp.*` и `tests.*` используют `snake_case`;
 - canonical key для EDT tool section: `tools.edt_cli`;
 - у `tools.edt_cli` literal child keys смешанные:
@@ -590,11 +590,11 @@ infobases:
     user: Admin                 # пользователь базы — первый уровень
     password: secret
     cluster:
-      ras: srv:1545             # сервер администрирования, host[:port]
+      ras: srv:1545             # сервер администрирования, host[:port]; имя или IPv4
       user: cluster-admin       # администратор кластера — второй уровень
       password: cluster-secret
       agent:
-        address: srv:1540       # агент центрального сервера, host[:port]; по умолчанию —
+        address: srv:1540       # агент центрального сервера, host[:port], имя или IPv4; по умолчанию —
                                 # хост из Srvr= и порт платформы
         user: agent-admin       # администратор центрального сервера — третий уровень
         password: agent-secret
@@ -602,13 +602,17 @@ infobases:
 
 Поддержанные поля:
 
-- `ras` — адрес сервера администрирования (`host` или `host:port`). Раннер по этому адресу сам не звонит: он уходит `rac` как есть, и порт
+- `ras` — адрес сервера администрирования (`host` или `host:port`, хост — имя или IPv4). Раннер по этому адресу сам не звонит: он уходит `rac` как есть, и порт
   по умолчанию (1545) остаётся за платформой; поэтому, в отличие от `standalone.gate`, порт
-  не обязателен. Адрес IPv6 сегодня принимается, но `rac` его не разбирает, а `ras` слушает
-  только IPv4; валидация будет отвергать IPv6 здесь и в `agent.address` и называть ключ —
-  [#378](https://github.com/IngvarConsulting/v8-runner-rust/issues/378).
+  не обязателен. Адрес IPv6, в скобках или без, валидация отвергает здесь и в
+  `agent.address`: отказ называет ключ и причину — `rac` его не разбирает, а `ras` слушает
+  только IPv4. Без `ras` раннер поднимет свой `ras` против `agent.address` или хоста
+  `Srvr=` с портом агента (1540) и отвергнет IPv6-хост, взятый из `Srvr=`; сегодня ни одна
+  команда этот адрес не выводит, и валидация `Srvr=` на IPv6 не проверяет —
+  [#213](https://github.com/IngvarConsulting/v8-runner-rust/issues/213). Шлюза
+  `standalone.gate` и `tools.designer_agent.attach` запрет не касается.
 - `user`, `password` — администратор кластера.
-- `agent.address` — адрес агента центрального сервера в той же форме; нужен, когда раннер
+- `agent.address` — адрес агента центрального сервера в той же форме, имя или IPv4; нужен, когда раннер
   поднимает `ras` сам, а агент отвечает не по хосту из `Srvr=` с портом платформы (1540).
 - `agent.user`, `agent.password` — администратор центрального сервера; ни одна операция
   раннера сама его не требует.
@@ -662,16 +666,16 @@ Validation rules:
 
 ### `push`
 
-#### `push.partialLoadThreshold`
+Секция ключей сегодня не принимает; пустая `push: {}` допустима.
 
-- Тип: integer
-- По умолчанию: `20`
-- Минимум: `1`
+#### `push.partialLoadThreshold` — отвергается
 
-Порог между partial и full load. Ключ необязательный; сегодня он принимается, но порог
-снимается: загрузка будет частичной всегда, когда у набора есть память, а ключ будет
-отвергаться валидацией с просьбой удалить строку — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379). Полную загрузку по желанию
-даёт `push --full`.
+Ключа порога больше нет. Строку `partialLoadThreshold` в секции `push` — и в прежней
+секции `build`, без цикла синонима, — не принимают ни проектный файл, ни местный слой:
+отказ называет ключ и просит удалить строку. Полную загрузку по желанию даёт
+`push --full`. `init` и `clone` ключ не пишут. Выбор между частичной и полной загрузкой
+пока прежний — частичная несёт не больше 20 файлов; частичная загрузка вместо полной
+придёт с [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379).
 
 Позиционный набор `v8-runner push <name>` использует `source-set[].name` как stable
 runtime identity и не добавляет отдельное поле конфигурации. Если набор не назван, `push`

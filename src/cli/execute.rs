@@ -4405,8 +4405,7 @@ mod tests {
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
-        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::domain::artifacts::ArtifactBuildMode;
     use crate::domain::execution::{
@@ -5150,7 +5149,6 @@ mod tests {
                     path: PathBuf::from("external-processors"),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),

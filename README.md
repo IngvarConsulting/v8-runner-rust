@@ -154,8 +154,9 @@ v8-runner push
 ```
 
 Команда выполняет incremental build (инкрементальную сборку) или full path (полную сборку) по
-текущим изменениям и настройкам проекта. Порог `push.partialLoadThreshold` снимается: загрузка
-станет частичной всегда, когда есть с чем сравнить, — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379).
+текущим изменениям и настройкам проекта. Ключ `push.partialLoadThreshold` отвергается — удалите
+строку; полную загрузку даёт `push --full`. Загрузка станет частичной всегда, когда есть с чем
+сравнить, — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379).
 
 ### Спланируйте или выгрузите состояние ИБ:
 
