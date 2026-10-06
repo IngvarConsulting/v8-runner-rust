@@ -1024,6 +1024,8 @@ fn convert_output_root_mirrors_source_set_layout_and_stabilizes_edt_project_name
     let stale_file = output_root.join("configuration").join("stale.txt");
     fs::create_dir_all(stale_file.parent().expect("stale parent")).expect("stale dir");
     fs::write(&stale_file, "stale").expect("stale");
+    // Каталог вывода, названный человеком, вне системы контроля версий заменить нельзя.
+    support::commit_sources(&output_root);
 
     let output = v8_runner_command()
         .args([

@@ -25,7 +25,7 @@ use crate::support::path::{
 };
 use crate::support::source_descriptor::{self, ExternalDescriptorParseError};
 use crate::use_cases::context::{CommandName, ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::destruction_guard::{DestructionConsent, WaysOut};
+use crate::use_cases::destruction_guard::{DestructionConsent, Losses, WaysOut};
 use crate::use_cases::external_artifacts::ExternalArtifactKind;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
@@ -120,6 +120,35 @@ impl ResolvedDumpTarget {
     }
 }
 
+/// Что выгрузка сообщает сверх ответа платформы.
+#[derive(Debug, Default)]
+struct DumpNotes {
+    /// Предупреждения и оговорки для ответа.
+    message: Option<String>,
+    /// Что публикация уничтожила по согласию.
+    discarded: Losses,
+}
+
+impl DumpNotes {
+    fn message(message: Option<String>) -> Self {
+        Self {
+            message,
+            discarded: Losses::default(),
+        }
+    }
+
+    /// Ставит более раннюю оговорку перед своими.
+    fn after(self, earlier: Option<String>) -> Self {
+        Self {
+            message: merge_optional_messages(earlier, self.message),
+            discarded: self.discarded,
+        }
+    }
+}
+
+/// Итог выгрузки до ответа: результат платформы и то, что о нём сказать.
+type DumpRun = Result<(PlatformCommandResult, DumpNotes), AppError>;
+
 #[cfg(test)]
 fn run_dump(config: &AppConfig, args: &DumpArgs) -> UseCaseResult<DumpResult> {
     let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
@@ -133,7 +162,7 @@ fn publish_full_dump(
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     publication: &StagedPublication,
-) -> Result<Option<String>, AppError> {
+) -> Result<DumpNotes, AppError> {
     use crate::change_detection::analyzer::{commit_full_snapshot, prepare_full_snapshot};
 
     validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
@@ -189,10 +218,13 @@ fn publish_full_dump(
                 resolved.source_set_name
             ))
     });
-    Ok(merge_optional_messages(
-        merge_optional_messages(published.cleanup_warning, memory_warning),
-        dump_publication_warning(context.command(), published.deferred_interruption),
-    ))
+    Ok(DumpNotes {
+        message: merge_optional_messages(
+            merge_optional_messages(published.cleanup_warning, memory_warning),
+            dump_publication_warning(context.command(), published.deferred_interruption),
+        ),
+        discarded: published.discarded,
+    })
 }
 
 fn validate_full_dump_work_path(
@@ -349,7 +381,7 @@ fn run_dump_over_directory_designer(
     binary: &Path,
     runner: &dyn ProcessRunner,
     how: &OverDirectory,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     debug!(
         source_set = resolved.source_set_name.as_str(),
         target = %resolved.platform_target_path.display(),
@@ -384,7 +416,7 @@ fn run_dump_over_directory_designer(
     }
     .map_err(AppError::from)?;
     ensure_platform_success("dump", resolved, &dump_result)?;
-    Ok((dump_result, None))
+    Ok((dump_result, DumpNotes::default()))
 }
 
 fn run_full_dump_designer(
@@ -393,7 +425,7 @@ fn run_full_dump_designer(
     resolved: &ResolvedDumpTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     debug!(
         source_set = resolved.source_set_name.as_str(),
         target = %resolved.platform_target_path.display(),
@@ -425,8 +457,8 @@ fn run_full_dump_designer(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
-    let warning = publish_full_dump(context, config, resolved, &publication)?;
-    Ok((dump_result, warning))
+    let notes = publish_full_dump(context, config, resolved, &publication)?;
+    Ok((dump_result, notes))
 }
 
 /// Выгрузка `ibcmd` прямо в каталог: с файлом версий — `--sync`, без него — полная
@@ -439,7 +471,7 @@ fn run_dump_over_directory_ibcmd(
     binary: &Path,
     runner: &dyn ProcessRunner,
     how: &OverDirectory,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     debug!(
         source_set = resolved.source_set_name.as_str(),
         target = %resolved.platform_target_path.display(),
@@ -468,7 +500,7 @@ fn run_dump_over_directory_ibcmd(
     }
     .map_err(map_ibcmd_error)?;
     ensure_platform_success("dump", resolved, &dump_result)?;
-    Ok((dump_result, None))
+    Ok((dump_result, DumpNotes::default()))
 }
 
 fn run_full_dump_ibcmd(
@@ -477,7 +509,7 @@ fn run_full_dump_ibcmd(
     resolved: &ResolvedDumpTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     debug!(
         source_set = resolved.source_set_name.as_str(),
         target = %resolved.platform_target_path.display(),
@@ -502,8 +534,8 @@ fn run_full_dump_ibcmd(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
-    let warning = publish_full_dump(context, config, resolved, &publication)?;
-    Ok((dump_result, warning))
+    let notes = publish_full_dump(context, config, resolved, &publication)?;
+    Ok((dump_result, notes))
 }
 
 fn run_partial_dump_designer(
@@ -513,7 +545,7 @@ fn run_partial_dump_designer(
     binary: &Path,
     runner: &dyn ProcessRunner,
     objects: &[PartialDumpSelector],
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     debug!(
         source_set = resolved.source_set_name.as_str(),
         target = %resolved.platform_target_path.display(),
@@ -543,7 +575,7 @@ fn run_partial_dump_designer(
     )
     .map_err(AppError::from)?;
     ensure_platform_success("dump", resolved, &dump_result)?;
-    Ok((dump_result, None))
+    Ok((dump_result, DumpNotes::default()))
 }
 
 fn run_partial_dump_ibcmd(
@@ -553,7 +585,7 @@ fn run_partial_dump_ibcmd(
     binary: &Path,
     runner: &dyn ProcessRunner,
     _objects: &[PartialDumpSelector],
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     let warning = ibcmd_partial_warning(resolved);
     match run_dump_over_directory_ibcmd(
         context,
@@ -563,7 +595,7 @@ fn run_partial_dump_ibcmd(
         runner,
         &OverDirectory::ByVersionFile,
     ) {
-        Ok((dump_result, _)) => Ok((dump_result, Some(warning))),
+        Ok((dump_result, _)) => Ok((dump_result, DumpNotes::message(Some(warning)))),
         Err(error) => Err(decorate_ibcmd_partial_error(error, &warning)),
     }
 }
@@ -580,7 +612,7 @@ fn run_incremental_dump_edt_designer(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
         config,
@@ -593,7 +625,7 @@ fn run_incremental_dump_edt_designer(
         context,
         "before starting EDT follow-up dump after bootstrap publication",
     )?;
-    let (dump_result, dump_message) = run_dump_over_directory_designer(
+    let (dump_result, dump_notes) = run_dump_over_directory_designer(
         context,
         config,
         resolved,
@@ -608,7 +640,8 @@ fn run_incremental_dump_edt_designer(
         edt_binary,
         edt_runner,
         dump_result,
-        merge_optional_messages(bootstrap_message, dump_message),
+        // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
+        merge_optional_messages(bootstrap_message, dump_notes.message),
     )
 }
 
@@ -620,8 +653,8 @@ fn run_full_dump_edt_designer(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
-    let (dump_result, dump_message) =
+) -> DumpRun {
+    let (dump_result, dump_notes) =
         run_full_dump_designer(context, config, resolved, binary, runner)?;
     finalize_edt_dump(
         context,
@@ -630,7 +663,7 @@ fn run_full_dump_edt_designer(
         edt_binary,
         edt_runner,
         dump_result,
-        dump_message,
+        dump_notes.message,
     )
 }
 
@@ -643,7 +676,7 @@ fn run_partial_dump_edt_designer(
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
     objects: &[PartialDumpSelector],
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
         config,
@@ -656,7 +689,7 @@ fn run_partial_dump_edt_designer(
         context,
         "before starting EDT follow-up dump after bootstrap publication",
     )?;
-    let (dump_result, dump_message) =
+    let (dump_result, dump_notes) =
         run_partial_dump_designer(context, config, resolved, binary, runner, objects)?;
     finalize_edt_dump(
         context,
@@ -665,7 +698,8 @@ fn run_partial_dump_edt_designer(
         edt_binary,
         edt_runner,
         dump_result,
-        merge_optional_messages(bootstrap_message, dump_message),
+        // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
+        merge_optional_messages(bootstrap_message, dump_notes.message),
     )
 }
 
@@ -677,7 +711,7 @@ fn run_incremental_dump_edt_ibcmd(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
         config,
@@ -690,7 +724,7 @@ fn run_incremental_dump_edt_ibcmd(
         context,
         "before starting EDT follow-up dump after bootstrap publication",
     )?;
-    let (dump_result, dump_message) = run_dump_over_directory_ibcmd(
+    let (dump_result, dump_notes) = run_dump_over_directory_ibcmd(
         context,
         config,
         resolved,
@@ -705,7 +739,8 @@ fn run_incremental_dump_edt_ibcmd(
         edt_binary,
         edt_runner,
         dump_result,
-        merge_optional_messages(bootstrap_message, dump_message),
+        // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
+        merge_optional_messages(bootstrap_message, dump_notes.message),
     )
 }
 
@@ -717,9 +752,8 @@ fn run_full_dump_edt_ibcmd(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
-    let (dump_result, dump_message) =
-        run_full_dump_ibcmd(context, config, resolved, binary, runner)?;
+) -> DumpRun {
+    let (dump_result, dump_notes) = run_full_dump_ibcmd(context, config, resolved, binary, runner)?;
     finalize_edt_dump(
         context,
         config,
@@ -727,7 +761,7 @@ fn run_full_dump_edt_ibcmd(
         edt_binary,
         edt_runner,
         dump_result,
-        dump_message,
+        dump_notes.message,
     )
 }
 
@@ -740,7 +774,7 @@ fn run_partial_dump_edt_ibcmd(
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
     objects: &[PartialDumpSelector],
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
         config,
@@ -753,7 +787,7 @@ fn run_partial_dump_edt_ibcmd(
         context,
         "before starting EDT follow-up dump after bootstrap publication",
     )?;
-    let (dump_result, dump_message) =
+    let (dump_result, dump_notes) =
         run_partial_dump_ibcmd(context, config, resolved, binary, runner, objects)?;
     finalize_edt_dump(
         context,
@@ -762,19 +796,15 @@ fn run_partial_dump_edt_ibcmd(
         edt_binary,
         edt_runner,
         dump_result,
-        merge_optional_messages(bootstrap_message, dump_message),
+        // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
+        merge_optional_messages(bootstrap_message, dump_notes.message),
     )
 }
 
 /// Полная выгрузка, переданная как значение: обратная синхронизация EDT сеет снимок
 /// Конфигуратора тем же кодом, которым идёт обычная выгрузка.
-type FullDumpRunner = fn(
-    &ExecutionContext,
-    &AppConfig,
-    &ResolvedDumpTarget,
-    &Path,
-    &dyn ProcessRunner,
-) -> Result<(PlatformCommandResult, Option<String>), AppError>;
+type FullDumpRunner =
+    fn(&ExecutionContext, &AppConfig, &ResolvedDumpTarget, &Path, &dyn ProcessRunner) -> DumpRun;
 
 fn ensure_edt_platform_target_seeded(
     context: &ExecutionContext,
@@ -793,8 +823,8 @@ fn ensure_edt_platform_target_seeded(
         target = %resolved.platform_target_path.display(),
         "bootstrapping missing designer dump snapshot for EDT reverse sync"
     );
-    let (_, message) = full_dump_runner(context, config, resolved, binary, runner)?;
-    Ok(message)
+    let (_, notes) = full_dump_runner(context, config, resolved, binary, runner)?;
+    Ok(notes.message)
 }
 
 fn designer_snapshot_is_ready(path: &Path) -> Result<bool, AppError> {
@@ -815,7 +845,7 @@ fn finalize_edt_dump(
     edt_runner: &dyn ProcessRunner,
     platform_result: PlatformCommandResult,
     inherited_message: Option<String>,
-) -> Result<(PlatformCommandResult, Option<String>), AppError> {
+) -> DumpRun {
     ensure_interruption_clear(
         context,
         "before starting EDT reverse-sync import after designer snapshot publication",
@@ -871,13 +901,14 @@ fn finalize_edt_dump(
 
     Ok((
         platform_result,
-        merge_optional_messages(
-            inherited_message,
-            merge_optional_messages(
+        DumpNotes {
+            message: merge_optional_messages(
                 publish_phase.cleanup_warning,
                 dump_publication_warning(context.command(), publish_phase.deferred_interruption),
             ),
-        ),
+            discarded: publish_phase.discarded,
+        }
+        .after(inherited_message),
     ))
 }
 
@@ -1342,6 +1373,7 @@ mod tests {
         assert!(
             super::publish_full_dump(&context, &config, &resolved, &retry)
                 .expect("retry")
+                .message
                 .is_none()
         );
         assert_eq!(
@@ -1370,6 +1402,7 @@ mod tests {
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
         let warning = super::publish_full_dump(&context, &config, &resolved, &publication)
             .expect("publication succeeds")
+            .message
             .expect("memory warning");
         assert!(warning.contains("sources published"), "{warning}");
         assert!(warning.contains("hash memory was not updated"), "{warning}");
@@ -1407,7 +1440,10 @@ mod tests {
             fs::Permissions::from_mode(0o600),
         )
         .expect("restore access");
-        let warning = result.expect("publication succeeds").expect("scan warning");
+        let warning = result
+            .expect("publication succeeds")
+            .message
+            .expect("scan warning");
         assert!(warning.contains("sources published"), "{warning}");
         assert_eq!(
             fs::read_to_string(source.path().join("Module.bsl")).expect("source"),
@@ -1810,6 +1846,16 @@ exit 0"#,
         config
     }
 
+    /// Фиксирует всё дерево исходников в репозитории под `base_path`: каталог набора без
+    /// незафиксированного сторож пропускает и без согласия.
+    fn commit_sources(base_path: &Path) {
+        if !base_path.join(".git").exists() {
+            crate::platform::test_git::init_git_repo(base_path);
+        }
+        crate::platform::test_git::run_git(base_path, &["add", "-A"]);
+        crate::platform::test_git::run_git(base_path, &["commit", "-qm", "sources"]);
+    }
+
     fn create_source_tree(base_path: &Path) {
         fs::create_dir_all(base_path.join("main").join("Catalogs.Items")).expect("main");
         fs::create_dir_all(base_path.join("ext").join("CommonModules")).expect("ext");
@@ -1829,6 +1875,7 @@ exit 0"#,
             "module",
         )
         .expect("ext bsl");
+        commit_sources(base_path);
     }
 
     fn write_native_edt_project(path: &Path, project_name: &str, nature: &str, base: Option<&str>) {
@@ -1876,6 +1923,7 @@ exit 0"#,
             crate::support::edt_project::V8_EXTENSION_NATURE,
             Some("BaseProject"),
         );
+        commit_sources(base_path);
     }
 
     fn assert_native_edt_project(path: &Path) {
@@ -2952,6 +3000,7 @@ exit 0"#,
         write_dump_script(&script, &calls, Some("/DumpConfigToFiles"), 0);
         let config = build_config(&base, &work, &script);
         fs::write(base.join("main").join("old.txt"), "keep me").expect("old");
+        commit_sources(&base);
 
         let failure = run_dump(
             &config,
@@ -2988,6 +3037,7 @@ exit 0"#,
         write_dump_script(&script, &calls, None, 0);
         let config = build_config(&base, &work, &script);
         fs::write(base.join("main").join("old.txt"), "old").expect("old");
+        commit_sources(&base);
 
         let result = run_dump(
             &config,
@@ -3023,6 +3073,7 @@ exit 0"#,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
         fs::write(base.join("main").join("old.txt"), "old").expect("old");
+        commit_sources(&base);
 
         let result = run_dump(
             &config,
@@ -3108,6 +3159,7 @@ exit 0"#,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
         fs::write(base.join("main").join("old.txt"), "keep me").expect("old");
+        commit_sources(&base);
 
         let failure = run_dump(
             &config,
@@ -3195,6 +3247,7 @@ exit 0"#,
         write_edt_import_script(&edt, &edt_calls);
         let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
         fs::write(base.join("main").join("stale.txt"), "stale").expect("stale");
+        commit_sources(&base);
 
         let result = run_dump(
             &config,
@@ -3377,9 +3430,6 @@ exit 0"#,
         let designer = dir.join("1cv8");
         let edt = dir.join("edt").join("1cedtcli");
         create_edt_source_tree(&base);
-        crate::platform::test_git::init_git_repo(&base);
-        crate::platform::test_git::run_git(&base, &["add", "-A"]);
-        crate::platform::test_git::run_git(&base, &["commit", "-qm", "sources"]);
         fs::write(base.join("ext").join("hand-written.xml"), "mine\n").expect("hand-written");
         write_designer_dump_script_for_edt(&designer, &dir.join("designer-calls.log"), None);
         write_edt_import_script(&edt, &dir.join("edt-calls.log"));
@@ -4125,6 +4175,7 @@ exit 0"#,
             platform_log_path: Some(PathBuf::from("/tmp/platform.log")),
             duration_ms: 5,
             message: Some("ok".to_owned()),
+            losses: Vec::new(),
         };
 
         let json = serde_json::to_value(result).expect("json");

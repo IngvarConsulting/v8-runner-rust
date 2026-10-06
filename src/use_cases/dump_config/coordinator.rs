@@ -2,7 +2,8 @@ use super::*;
 use crate::domain::capability::{Operation, Provider};
 use crate::platform::locator::{UtilityLocation, UtilityVersion};
 use crate::use_cases::destruction_guard::{
-    guard_replacement, Destruction, DestructionConsent, WaysOut,
+    discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
+    Losses, WaysOut,
 };
 use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 use std::fmt::Write as _;
@@ -222,11 +223,24 @@ fn run_dump_selected(
                 reason.describe(&resolved.platform_target_path),
                 whole_consequences(context, config, &resolved)
             );
-            if config.format == SourceFormat::Designer {
-                message.push_str(
-                    "; uncommitted work in the directory would stop it before the platform starts",
-                );
+        }
+        // Превью спрашивает сторожа о том же каталоге и так же, как выгрузка, но ничего не
+        // трогает: называет, на чём она остановится без согласия или что уничтожит с ним.
+        let (how, regenerated) = destruction_of(config, &plan);
+        let losses = match resolved.consent {
+            DestructionConsent::RunnerOwned => Losses::default(),
+            DestructionConsent::AskFirst(_) | DestructionConsent::Granted => {
+                losses_in(&resolved.target_path, regenerated)
             }
+        };
+        if let Some(note) = preview_note(
+            context,
+            &resolved.target_path,
+            &resolved.consent,
+            &losses,
+            how,
+        ) {
+            let _ = write!(message, "; {note}");
         }
         let mut preview = empty_result(
             planned,
@@ -238,6 +252,7 @@ fn run_dump_selected(
             Some(message),
         );
         preview.ok = true;
+        preview.losses = losses.into_paths();
         return Ok(preview);
     }
 
@@ -394,21 +409,24 @@ fn run_dump_selected(
         platform_of(location.as_ref()),
     )
     .and_then(|plan| {
-        // Полная выгрузка поверх каталога переписывает файлы человека, как и замена
-        // каталога: незафиксированное в нём останавливает её до платформы. Снимок EDT —
-        // собственный каталог раннера, а проект EDT публикуется ступенчато со своим сторожем.
-        if plan.whole_reason().is_some() {
-            guard_replacement(
+        // Каталог человека сторож спрашивает до платформы при любом плане: выгрузка поверх
+        // каталога переписывает его файлы на месте, замена — стирает лишнее. Без согласия
+        // безвозвратное останавливает работу здесь, пока ничего не тронуто. Замену с
+        // согласием сторож спрашивает при публикации: там он и называет уничтоженное.
+        let (how, regenerated) = destruction_of(config, &plan);
+        let discarded = match (how, &resolved.consent) {
+            (Destruction::Replace, DestructionConsent::Granted) => Losses::default(),
+            _ => guard_replacement(
                 context,
-                &resolved.platform_target_path,
-                resolved.platform_consent(),
-                &[VERSION_FILE_NAME],
-                Destruction::Overwrite,
-            )?;
-        }
-        Ok(plan)
+                &resolved.target_path,
+                &resolved.consent,
+                regenerated,
+                how,
+            )?,
+        };
+        Ok((plan, discarded))
     });
-    let plan = match plan {
+    let (plan, overwritten) = match plan {
         Ok(plan) => plan,
         Err(error) => {
             let message = error.to_string();
@@ -627,17 +645,28 @@ fn run_dump_selected(
         (result, false)
     };
     // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
-    let result = result.map(|(platform_result, message)| {
+    let result = result.map(|(platform_result, notes)| {
         let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
-        (
-            platform_result,
-            merge_optional_messages(whole_note, merge_optional_messages(message, copy_warning)),
-        )
+        // Уничтоженное называет тот вопрос к сторожу, который пропустил работу: перезапись —
+        // до платформы, замена — при публикации.
+        let discarded = if notes.discarded.is_empty() {
+            overwritten
+        } else {
+            notes.discarded
+        };
+        let message = merge_optional_messages(
+            whole_note,
+            merge_optional_messages(
+                discard_note(&resolved.target_path, &discarded),
+                merge_optional_messages(notes.message, copy_warning),
+            ),
+        );
+        (platform_result, message, discarded.into_paths())
     });
     drop(lock_guard);
 
     match result {
-        Ok((platform_result, cleanup_message)) => Ok(DumpResult {
+        Ok((platform_result, cleanup_message, losses)) => Ok(DumpResult {
             provider: None,
             provider_dispatched: false,
             up_to_date,
@@ -651,6 +680,7 @@ fn run_dump_selected(
             duration_ms: started.elapsed().as_millis() as u64,
             message: cleanup_message
                 .or_else(|| Some(crate::domain::dump::DUMP_SUCCESS_MESSAGE.to_owned())),
+            losses,
         }),
         Err(error) => {
             let message = error.to_string();
@@ -669,8 +699,23 @@ fn run_dump_selected(
                     platform_log_path: None,
                     duration_ms: started.elapsed().as_millis() as u64,
                     message: Some(message),
+                    losses: Vec::new(),
                 },
             ))
+        }
+    }
+}
+
+/// Как выгрузка по плану обходится с каталогом человека и какие файлы в его корне пишет
+/// заново. Проект EDT при любом плане заменяется целиком, и импорт описи версий не пишет;
+/// в формате Конфигуратора полная выгрузка заменяет каталог, остальные ложатся поверх, и
+/// опись версий платформа пишет сама.
+fn destruction_of(config: &AppConfig, plan: &DumpPlan) -> (Destruction, &'static [&'static str]) {
+    match (config.format, plan) {
+        (SourceFormat::Edt, _) => (Destruction::Replace, &[]),
+        (SourceFormat::Designer, DumpPlan::Full) => (Destruction::Replace, &[VERSION_FILE_NAME]),
+        (SourceFormat::Designer, DumpPlan::Partial | DumpPlan::OverDirectory(_)) => {
+            (Destruction::Overwrite, &[VERSION_FILE_NAME])
         }
     }
 }

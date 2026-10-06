@@ -237,6 +237,10 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
     let harness = harness();
     let (build, payload) = run(&harness, &["build"]);
     assert_eq!(build, 0, "{payload}");
+    // Выгрузка поверх каталога вне системы контроля версий отказывает: каталог зафиксирован.
+    let project = harness.sources.parent().expect("project dir");
+    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    support::commit_sources(project);
 
     let (dump, payload) = run(&harness, &["dump"]);
 

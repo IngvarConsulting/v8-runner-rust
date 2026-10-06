@@ -22,7 +22,8 @@ use crate::support::path::{
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::destruction_guard::{
-    guard_replacement, Destruction, DestructionConsent, WaysOut,
+    discard_note, guard_replacement, losses_in, preview_note, Destruction, DestructionConsent,
+    WaysOut,
 };
 use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, parse_external_descriptor, ExternalArtifactKind,
@@ -177,6 +178,25 @@ fn run_convert_with_context(
                 target_path: item.target_path.clone(),
             })
             .collect();
+        // Сторож спрашивается о каждом каталоге вывода так же, как перед заменой, но
+        // ничего не трогает: превью называет потери поимённо.
+        let mut message = format!(
+            "previewed conversion via {}; EDT CLI not dispatched",
+            location.path.display()
+        );
+        for item in &resolved.items {
+            let losses = losses_in(&item.target_path, &[]);
+            if let Some(note) = preview_note(
+                context,
+                &item.target_path,
+                &resolved.consent,
+                &losses,
+                Destruction::Replace,
+            ) {
+                message.push_str("; ");
+                message.push_str(&note);
+            }
+        }
         let preview = result_snapshot(
             true,
             resolved.direction,
@@ -185,10 +205,7 @@ fn run_convert_with_context(
             resolved.workspace_path.clone(),
             outputs,
             started,
-            Some(format!(
-                "previewed conversion via {}; EDT CLI not dispatched",
-                location.path.display()
-            )),
+            Some(message),
         );
         return Ok(preview);
     }
@@ -478,7 +495,7 @@ fn execute_with_dsl(
         }
 
         // Преобразование заменяет каталог исходников так же, как выгрузка.
-        guard_replacement(
+        let discarded = guard_replacement(
             context,
             &item.target_path,
             &resolved.consent,
@@ -539,6 +556,9 @@ fn execute_with_dsl(
             }
         }
 
+        if let Some(message) = discard_note(&item.target_path, &discarded) {
+            messages.push(message);
+        }
         if let Some(message) = publish_phase.value.cleanup_warning {
             messages.push(message);
         }
@@ -643,9 +663,13 @@ fn resolve_request(
         source_set,
         workspace_path: convert_workspace_path(config),
         items,
-        // Преобразование есть только в командной строке, а `--force` у него ни с чем не
-        // спорит: совет — тот же вызов с ключом, со всеми его аргументами.
-        consent: if request.discard_uncommitted {
+        // Вывод по умолчанию лежит под `workPath` — это место раннера для порождённого, и
+        // спрашивать о нём систему контроля версий не о чем. Каталог, названный `--output`,
+        // принадлежит человеку. Преобразование есть только в командной строке, а `--force`
+        // у него ни с чем не спорит: совет — тот же вызов с ключом, со всеми его аргументами.
+        consent: if explicit_output_root.is_none() {
+            DestructionConsent::RunnerOwned
+        } else if request.discard_uncommitted {
             DestructionConsent::Granted
         } else {
             DestructionConsent::AskFirst(WaysOut::SameCallWithForce)

@@ -35,6 +35,14 @@ struct Harness {
 
 /// Проект с версионной раскладкой платформы: строгий поиск не уходит за её пределы.
 /// `agent` — принимает ли двойник пароль; `None` — на порту никто не слушает.
+/// Фиксирует проект в гите с файлом версий в игноре: выгрузка поверх каталога без
+/// незафиксированного идёт без согласия.
+fn commit_project(harness: &Harness) {
+    let project = harness.target.parent().expect("project dir");
+    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    support::commit_sources(project);
+}
+
 fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
     harness_with(with_designer, agent, attach, random_host_key(), |_| {
         String::new()
@@ -326,6 +334,7 @@ fn incremental_mode_updates_the_target_in_place_through_a_link() {
         "<ConfigDumpInfo version=\"2.17\"/>",
     )
     .expect("version file");
+    commit_project(&harness);
 
     let (code, payload) = run_dump(&harness, &[]);
 
@@ -369,6 +378,7 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
         .filter(|line| line.starts_with("config dump-config-to-files"))
         .count();
     assert_eq!(dumps_after_first, 1);
+    commit_project(&harness);
 
     let (second, payload) = run_dump(&harness, &[]);
 
@@ -401,6 +411,7 @@ fn a_directory_without_a_version_file_is_dumped_full_without_the_generation_skip
     let (first, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(first, 0, "{payload}");
     let _ = fs::remove_file(harness.target.join("ConfigDumpInfo.xml"));
+    commit_project(&harness);
 
     let (second, payload) = run_dump(&harness, &[]);
 

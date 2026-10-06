@@ -214,6 +214,9 @@ pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork 
                 .iter()
                 .map(|name| format!(":(exclude,literal){name}")),
         )
+        // Вопрос ничего не пишет: без этого `status` обновляет индекс рабочей копии, а
+        // превью следа не оставляет.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .output()
     {

@@ -296,6 +296,7 @@ fn setup_designer_suite_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathB
         "procedure Test() endprocedure",
     )
     .expect("module");
+    support::commit_sources(&base_path);
 
     let designer_script = format!(
         "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> '{}'\nif [ -n \"$out\" ]; then\n  mkdir -p \"$(dirname \"$out\")\"\n  case \"$args\" in\n    *\"/CheckConfig\"*)\n      cat <<'LOG' > \"$out\"\n{{CommonModules.TestModule(4,2)}}: Ошибка компиляции\n{{1}}: context\nLOG\n      exit 101\n      ;;\n    *)\n      : > \"$out\"\n      ;;\n  esac\nfi\nexit 0",
@@ -372,6 +373,8 @@ fn setup_ibcmd_dump_project_with_infobase(
     fs::create_dir_all(base_path.join("main")).expect("main");
     fs::create_dir_all(&work_path).expect("work");
     fs::write(base_path.join("main").join("old.txt"), "old").expect("old");
+    // Каталог вне системы контроля версий с файлами выгрузка не трогает без согласия.
+    support::commit_sources(&base_path);
     write_ibcmd_script(&ibcmd_path, &calls_log, fail_pattern);
     write_ibcmd_config_with_infobase(
         &config_path,

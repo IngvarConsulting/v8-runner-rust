@@ -28,7 +28,7 @@ pub(super) fn run_dump_agent(
     objects: Option<&[PartialDumpSelector]>,
     location: Option<&UtilityLocation>,
     utilities: &mut PlatformUtilities,
-) -> Result<(PlatformCommandResult, Option<String>, bool), AppError> {
+) -> Result<(PlatformCommandResult, DumpNotes, bool), AppError> {
     let wait = wait_policy(context);
     let transcript = transcript_log(config, &format!("dump-{}", resolved.source_set_name))?;
 
@@ -43,7 +43,7 @@ pub(super) fn run_dump_agent(
     )?;
     let outcome = dump_through(context, config, resolved, plan, objects, &mut handle, &wait);
     handle.finish(&wait);
-    let (reply_transcript, message, up_to_date) = outcome?;
+    let (reply_transcript, notes, up_to_date) = outcome?;
 
     Ok((
         PlatformCommandResult {
@@ -57,7 +57,7 @@ pub(super) fn run_dump_agent(
             platform_log: None,
             platform_log_read_error: None,
         },
-        message,
+        notes,
         up_to_date,
     ))
 }
@@ -70,7 +70,7 @@ fn dump_through(
     objects: Option<&[PartialDumpSelector]>,
     handle: &mut AgentHandle,
     wait: &WaitPolicy,
-) -> Result<(String, Option<String>, bool), AppError> {
+) -> Result<(String, DumpNotes, bool), AppError> {
     let exchange = handle.exchange(config)?;
     let extension = resolved.extension.as_deref();
     let ledger = SourceSetInventory::new(config)
@@ -96,10 +96,10 @@ fn dump_through(
             if record.token == generation {
                 return Ok((
                     String::new(),
-                    Some(format!(
+                    DumpNotes::message(Some(format!(
                         "configuration generation {generation} is unchanged since the last {} ({}); nothing to dump",
                         record.after, record.recorded_at
-                    )),
+                    ))),
                     true,
                 ));
             }
@@ -164,7 +164,7 @@ fn dump_through(
                     log_live_stage(stage, "[агент] exporting configuration files");
                     let outcome = run_command(handle, &command, wait);
                     withdraw_dir(user_dir, &target);
-                    (outcome?, None)
+                    (outcome?, DumpNotes::default())
                 }
                 // По сети цель целиком не возится: точке входа хватает описи выгрузки
                 // (`ConfigDumpInfo.xml`), чтобы выгрузить только изменённое; обратно
@@ -200,7 +200,7 @@ fn dump_through(
                     tidy(handle, &exchange, &target_relative);
                     let transcript = outcome?;
                     collected.transpose()?;
-                    (transcript, None)
+                    (transcript, DumpNotes::default())
                 }
             }
         }
@@ -262,17 +262,13 @@ fn dump_through(
                 }
             };
             tidy(handle, &exchange, &list_relative);
-            (outcome?, None)
+            (outcome?, DumpNotes::default())
         }
     };
     if let Some(ledger) = &ledger {
         ledger.record(&generation, "dump")?;
     }
-    Ok((
-        transcript,
-        merge_optional_messages(foreign_note, cleanup),
-        false,
-    ))
+    Ok((transcript, cleanup.after(foreign_note), false))
 }
 
 fn with_extension(mut command: String, extension: Option<&str>) -> String {
@@ -301,7 +297,7 @@ fn publish_full(
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     produced: &Path,
-) -> Result<Option<String>, AppError> {
+) -> Result<DumpNotes, AppError> {
     let publication = StagedPublication::prepare_dir(
         &resolved.platform_target_path,
         &resolved.platform_target_identity,

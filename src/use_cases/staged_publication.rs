@@ -10,7 +10,9 @@ use crate::support::fs::{
     write_temp_dir_metadata, ReplaceFileFailureState, TempDirKind, TempDirMetadata,
 };
 use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
-use crate::use_cases::destruction_guard::{guard_replacement, Destruction, DestructionConsent};
+use crate::use_cases::destruction_guard::{
+    guard_replacement, Destruction, DestructionConsent, Losses,
+};
 use crate::use_cases::interruption;
 
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -27,6 +29,8 @@ pub(super) struct StagedPublication {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StagedPublicationOutcome {
     pub cleanup_warning: Option<String>,
+    /// Что замена уничтожила по согласию; пусто у каталога раннера и без согласия.
+    pub discarded: Losses,
     pub deferred_interruption: Option<ExecutionInterruption>,
     pub previous_target_present: bool,
 }
@@ -133,7 +137,7 @@ impl StagedPublication {
         regenerated: &[&str],
     ) -> Result<StagedPublicationOutcome, AppError> {
         // Сторож спрашивает до подмены: после неё прежнего содержимого уже нет.
-        guard_replacement(
+        let discarded = guard_replacement(
             context,
             &self.target_path,
             consent,
@@ -155,6 +159,7 @@ impl StagedPublication {
         })?;
         Ok(StagedPublicationOutcome {
             cleanup_warning: publish_phase.value.cleanup_warning,
+            discarded,
             deferred_interruption: publish_phase.deferred_interruption,
             previous_target_present: self.previous_target_present,
         })
@@ -199,6 +204,8 @@ impl StagedPublication {
         })?;
         Ok(StagedPublicationOutcome {
             cleanup_warning: publish_phase.value.cleanup_warning,
+            // Замена файла сторожа не спрашивает: уничтоженного по согласию у неё нет.
+            discarded: Losses::default(),
             deferred_interruption: publish_phase.deferred_interruption,
             previous_target_present: publish_phase.value.previous_target_present,
         })

@@ -37,6 +37,13 @@ pub struct DumpResult {
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Что в каталоге набора пропадает безвозвратно — каждый путь: после выгрузки с
+    /// согласием (`--force`) — уничтоженное, у превью — что выгрузка уничтожила бы или на
+    /// чём остановилась бы без согласия. Пути гит называет от корня рабочей копии; там, где
+    /// он не ответил, путь полный и потерей считается каждый файл каталога. Поля нет, когда
+    /// терять нечего.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub losses: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]

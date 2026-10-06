@@ -1146,6 +1146,8 @@ fn publication_message(
 ) -> PublicationOutcome {
     let StagedPublicationOutcome {
         cleanup_warning,
+        // Выход `make` — каталог раннера: сторож его не спрашивает, уничтоженного нет.
+        discarded: _,
         deferred_interruption,
         previous_target_present: _,
     } = published;
@@ -1927,6 +1929,7 @@ mod tests {
             &context,
             StagedPublicationOutcome {
                 cleanup_warning: Some("cleanup warning".to_owned()),
+                discarded: Default::default(),
                 deferred_interruption: Some(
                     crate::use_cases::context::ExecutionInterruption::Cancelled,
                 ),
