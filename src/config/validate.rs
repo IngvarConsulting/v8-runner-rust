@@ -3022,6 +3022,82 @@ mod tests {
         ));
     }
 
+    /// `providers.make` принимает только исполнителей сборки во временной базе: снятый агент
+    /// отказывает с выходом `download`, `ibcmd-rs` до замера #413 — как исполнитель без строки,
+    /// и ни тот ни другой отказ не говорит о виде базы — `make` её не выбирает. Отказывает и
+    /// сборка без базы проекта: `make` проверяет только свой ключ.
+    #[test]
+    fn make_accepts_only_the_executors_of_its_throwaway_base() {
+        use crate::domain::capability::{Operation, Provider};
+
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        std::fs::create_dir_all(base.path().join("src")).expect("src");
+        std::fs::write(
+            base.path().join("src/Configuration.xml"),
+            "<MetaDataObject/>",
+        )
+        .expect("marker");
+        let mut config = AppConfig {
+            base_path: base.path().to_path_buf(),
+            work_path: work.path().to_path_buf(),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            // `make` базу не выбирает: загрузчик кладёт пустую секцию.
+            infobase: serde_yaml::from_str("{}").expect("empty infobase"),
+            infobases: Default::default(),
+            infobase_name: None,
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: PathBuf::from("src"),
+            }],
+            tools: ToolsConfig::default(),
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+
+        super::validate_make(&config, true).expect("make needs no infobase");
+        for provider in [Provider::Ibcmd, Provider::Designer] {
+            config.providers = [(Operation::Make, provider)].into();
+            super::validate_make(&config, true).expect("a make executor");
+        }
+
+        config.providers = [(Operation::Make, Provider::Agent)].into();
+        let error = super::validate_make(&config, true).expect_err("the agent is removed");
+        assert!(
+            matches!(
+                error,
+                ConfigValidationError::ProviderRemoved {
+                    operation: "make",
+                    provider: "agent",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            error.next(),
+            Some(crate::domain::next_step::NextStep::command("download"))
+        );
+
+        config.providers = [(Operation::Make, Provider::IbcmdRs)].into();
+        let error = super::validate_make(&config, true).expect_err("ibcmd-rs is not measured");
+        assert!(
+            matches!(
+                error,
+                ConfigValidationError::ProviderDoesNotImplement {
+                    provider: "ibcmd-rs",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("infobase"), "{error}");
+        assert_eq!(error.next(), None);
+    }
+
     fn infobase(yaml: &str) -> crate::config::model::InfobaseConfig {
         serde_yaml::from_str(yaml).expect("infobase section")
     }

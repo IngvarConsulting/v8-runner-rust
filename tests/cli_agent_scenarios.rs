@@ -1,5 +1,6 @@
-//! Остальные сценарии через агентский shell Конфигуратора: `make`, экспортное
-//! семейство `infobase …`, расширения.
+//! Остальные сценарии через агентский shell Конфигуратора: экспортное семейство
+//! `infobase …`, расширения. `make` агентом не исполняется: он собирает пакет во временной
+//! базе раннера (#364).
 //!
 //! Двойник агента (`support::fake_agent`) отказывает файловым параметрам через
 //! символическую ссылку, как настоящий агент (замер 15.09.2026), и требует синоним в
@@ -122,7 +123,7 @@ fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>
 
 fn harness() -> Harness {
     harness_with(
-        "  make: agent\n  extensions: agent\n  infobase.configuration.export: agent\n  infobase.dump: agent\n  infobase.restore: agent\n",
+        "  extensions: agent\n  infobase.configuration.export: agent\n  infobase.dump: agent\n  infobase.restore: agent\n",
     )
 }
 
@@ -158,49 +159,6 @@ fn agent_user_dir(harness: &Harness) -> PathBuf {
     PathBuf::from(read_or_empty(&harness.base_dir_file)).join("0")
 }
 
-/// `make` cf: `dump-cfg` пишет прямо в каталог агента, файл публикуется, каталог
-/// агента после команды чист.
-#[test]
-fn make_cf_through_the_agent_publishes_the_package() {
-    let harness = harness();
-    let output = harness.dir.path().join("dist").join("release.cf");
-
-    let (code, payload) = run(
-        &harness,
-        &[
-            "artifacts",
-            "main",
-            "--output",
-            &output.display().to_string(),
-        ],
-    );
-
-    assert_eq!(code, 0, "{payload}");
-    assert_eq!(fs::read_to_string(&output).expect("package"), "CF:main");
-    let lines = commands(&harness);
-    assert_eq!(
-        lines.get(1).map(String::as_str),
-        Some("common connect-ib"),
-        "{lines:?}"
-    );
-    assert!(
-        lines
-            .get(2)
-            .is_some_and(|line| line.starts_with("config dump-cfg --file=make/")
-                && line.ends_with("/main.cf")),
-        "{lines:?}"
-    );
-    assert_eq!(lines.last().map(String::as_str), Some("common shutdown"));
-    assert_eq!(read_or_empty(&harness.designer_args_log).lines().count(), 1);
-    assert!(
-        !agent_user_dir(&harness).join("make").exists()
-            || fs::read_dir(agent_user_dir(&harness).join("make"))
-                .map(|entries| entries.count() == 0)
-                .unwrap_or(true),
-        "make dir left behind in the agent user dir"
-    );
-}
-
 /// Квитанция управляемого агента называет его точку входа: `127.0.0.1` и порт, который
 /// раннер ему отдал. Пароль базы в квитанцию не попадает.
 #[test]
@@ -211,8 +169,10 @@ fn a_managed_agent_session_is_named_in_the_receipt() {
     let (code, payload) = run(
         &harness,
         &[
-            "artifacts",
+            "download",
             "main",
+            "--state",
+            "working",
             "--output",
             &output.display().to_string(),
         ],
@@ -241,10 +201,16 @@ fn a_receipt_without_a_session_has_no_endpoint() {
     let output = harness.dir.path().join("dist").join("release.cf");
     let output = output.display().to_string();
 
-    let (code, preview) = run(
-        &harness,
-        &["artifacts", "main", "--output", &output, "--dry-run"],
-    );
+    let download = |dry_run: bool| {
+        let mut arguments = vec![
+            "download", "main", "--state", "working", "--output", &output,
+        ];
+        if dry_run {
+            arguments.push("--dry-run");
+        }
+        run(&harness, &arguments)
+    };
+    let (code, preview) = download(true);
     assert_eq!(code, 0, "{preview}");
     let receipt = &preview["data"]["provider"];
     assert_eq!(receipt["selected"], "agent", "{preview}");
@@ -258,96 +224,11 @@ fn a_receipt_without_a_session_has_no_endpoint() {
         commands(&harness)
     );
 
-    let (code, payload) = run(&harness, &["artifacts", "main", "--output", &output]);
+    let (code, payload) = download(false);
     assert_eq!(code, 0, "{payload}");
     assert_eq!(
         payload["data"]["provider"]["endpoint"]["mode"], "managed",
         "{payload}"
-    );
-}
-
-/// `make` cfe: имя расширения уходит в `--extension=`.
-#[test]
-fn make_cfe_through_the_agent_names_the_extension() {
-    let harness = harness();
-    let output = harness.dir.path().join("dist").join("probe.cfe");
-
-    let (code, payload) = run(
-        &harness,
-        &[
-            "artifacts",
-            "--output",
-            &output.display().to_string(),
-            "--extension",
-            "Зонд",
-        ],
-    );
-
-    assert_eq!(code, 0, "{payload}");
-    assert_eq!(fs::read_to_string(&output).expect("package"), "CFE:Зонд");
-    let lines = commands(&harness);
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("config dump-cfg --file=make/")
-                && line.ends_with(" --extension=Зонд")),
-        "{lines:?}"
-    );
-}
-
-/// `make` epf: исходники копируются в каталог агента (файловый параметр через ссылку
-/// агент не разрешает), каждый файл собирается и выгружается обратно для сверки.
-#[test]
-fn make_epf_through_the_agent_builds_and_verifies_each_external_file() {
-    let harness = harness();
-    let output = harness.dir.path().join("dist").join("tools");
-
-    let (code, payload) = run(
-        &harness,
-        &[
-            "artifacts",
-            "--output",
-            &output.display().to_string(),
-            "--source-set",
-            "tools",
-        ],
-    );
-
-    assert_eq!(code, 0, "{payload}");
-    assert_eq!(
-        fs::read_to_string(output.join("Alpha.epf")).expect("epf"),
-        "EPF:Alpha.xml"
-    );
-    let lines = commands(&harness);
-    let load = lines
-        .iter()
-        .find(|line| line.starts_with("config load-external-data-processor-or-report-from-files"))
-        .unwrap_or_else(|| panic!("{lines:?}"));
-    assert!(
-        load.contains("--file=make/") && load.contains("/src-0/Alpha.xml --ext-file=make/"),
-        "{load}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("config dump-external-data-processor-or-report-to-files")),
-        "{lines:?}"
-    );
-    let verified = harness
-        .dir
-        .path()
-        .join("work")
-        .join("external-dump")
-        .join("tools");
-    assert!(
-        verified.is_dir(),
-        "round-trip descriptor kept under workPath"
-    );
-    assert!(
-        !agent_user_dir(&harness).join("make").exists()
-            || fs::read_dir(agent_user_dir(&harness).join("make"))
-                .map(|entries| entries.count() == 0)
-                .unwrap_or(true)
     );
 }
 
@@ -791,7 +672,33 @@ fn load_through_the_agent_is_refused_without_a_session() {
     assert_eq!(read_or_empty(&harness.designer_args_log).lines().count(), 0);
 }
 
-const EVERY_AGENT_PROVIDER: &str = "  make: agent\n  extensions: agent\n  infobase.configuration.export: agent\n  infobase.dump: agent\n  infobase.restore: agent\n";
+/// `providers.make: agent` снят: `make` собирает пакет из исходников во временной базе
+/// раннера, а агент работает только с базой проекта. Отказ валидации называет выход —
+/// `download`, который выгружает пакет базы, — и до агента не доходит.
+#[test]
+fn make_through_the_agent_is_refused_with_the_download_step() {
+    let harness = harness_with("  make: agent\n");
+    let output = harness.dir.path().join("dist").join("release.cf");
+
+    let (code, payload) = run(
+        &harness,
+        &["make", "main", "--output", &output.display().to_string()],
+    );
+
+    assert_eq!(code, 2, "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(
+        payload["error"]["message"].as_str().is_some_and(
+            |message| message.contains("providers.make: 'agent' is no longer accepted")
+        ),
+        "{payload}"
+    );
+    assert_eq!(payload["error"]["next"]["command"], "download", "{payload}");
+    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+    assert!(!output.exists());
+}
+
+const EVERY_AGENT_PROVIDER: &str = "  extensions: agent\n  infobase.configuration.export: agent\n  infobase.dump: agent\n  infobase.restore: agent\n";
 
 /// Удержание команды `command` двойником: знаки лежат в `marks`.
 fn hold(marks: &tempfile::TempDir, command: &str, reply: HoldReply) -> Hold {
@@ -869,53 +776,6 @@ fn a_failed_restore_through_the_agent_still_names_the_deferred_cancellation() {
             "{payload}"
         );
     }
-}
-
-/// Загрузка внешней обработки через агента не критическая: она пишет только файл обработки.
-/// Отмена её обрывает, как на пути Конфигуратора, и `make` отвечает отменой оборванной работы
-/// (#317).
-#[test]
-fn an_interrupt_cuts_the_external_load_through_the_agent() {
-    let marks = temp_workspace();
-    let held = hold(
-        &marks,
-        "config load-external-data-processor-or-report-from-files",
-        HoldReply::Normal,
-    );
-    let (started, release) = (held.started.clone(), held.release.clone());
-    let harness = harness_holding(None, EVERY_AGENT_PROVIDER, Some(held));
-    let output = harness.dir.path().join("dist").join("tools");
-
-    let (code, payload) = interrupt_at_hold(
-        runner(
-            &harness,
-            &[
-                "artifacts",
-                "--output",
-                &output.display().to_string(),
-                "--source-set",
-                "tools",
-            ],
-        ),
-        &marks.path().join("actions.log"),
-        &started,
-        &release,
-        AGENT_COMMAND_ABANDONED,
-    );
-
-    assert_eq!(code, 4, "{payload}");
-    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
-    let execution = &payload["data"]["execution"];
-    assert_eq!(execution["status"], "cancelled", "{payload}");
-    assert_eq!(
-        execution["interruptions"][0]["deferred"], false,
-        "{payload}"
-    );
-    assert_eq!(
-        execution["interruptions"][0]["phase"], "provider_command",
-        "{payload}"
-    );
-    assert!(!output.join("Alpha.epf").exists(), "nothing was published");
 }
 
 /// Отключение безопасного режима через агента — критическая запись. Отмену, которую она

@@ -65,7 +65,7 @@ const UNSUPPORTED_PROFILE_ERROR: &str =
 const ARTIFACTS_BACKUP_PREFIX: &str = ".artifacts-backup";
 
 /// Прогон `make`: исполнители процессов и временная база, общая для всех его наборов.
-pub(super) struct MakeSession {
+pub struct MakeSession {
     utilities: PlatformUtilities,
     base: Option<ThrowawayInfobase>,
 }
@@ -98,30 +98,22 @@ pub fn execute(
     args: &ArtifactsRequest,
 ) -> UseCaseResult<ArtifactsResult> {
     let mut session = MakeSession::new(config);
-    let mut outcome = execute_in(context, config, args, &mut session);
+    let mut outcome = run_artifacts(context, config, args, &mut session);
     let warning = session.close();
     if let Some(payload) = crate::use_cases::result::payload_mut(&mut outcome) {
         note_cleanup_warning(payload, warning);
     }
-    outcome
+    stamp_dispatch(outcome, context.work())
 }
 
 /// Сборка одного набора в прогоне `session`: временную базу прогона она создаёт при первой
 /// нужде и оставляет следующему набору.
-pub(super) fn execute_in(
+pub fn execute_in(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &ArtifactsRequest,
     session: &mut MakeSession,
 ) -> UseCaseResult<ArtifactsResult> {
-    debug!(
-        command = context.command().as_str(),
-        transport = ?context.transport(),
-        mode = ?args.mode,
-        source_set = args.source_set.as_deref().unwrap_or("<auto>"),
-        extension = args.extension.as_deref().unwrap_or("<none>"),
-        "executing artifacts use case"
-    );
     stamp_dispatch(
         run_artifacts(context, config, args, session),
         context.work(),
@@ -160,6 +152,14 @@ fn run_artifacts(
     args: &ArtifactsRequest,
     session: &mut MakeSession,
 ) -> UseCaseResult<ArtifactsResult> {
+    debug!(
+        command = context.command().as_str(),
+        transport = ?context.transport(),
+        mode = ?args.mode,
+        source_set = args.source_set.as_deref().unwrap_or("<auto>"),
+        extension = args.extension.as_deref().unwrap_or("<none>"),
+        "executing artifacts use case"
+    );
     let started = Instant::now();
     let mode = map_mode(args.mode);
 
@@ -2509,6 +2509,61 @@ mod tests {
 
         assert!(error.to_string().contains("package dump"), "{error}");
         assert_eq!(runner.calls().len(), 2, "{:?}", runner.calls());
+    }
+
+    /// Формат EDT: исходники сперва переводит в XML `1cedtcli` — в каталог временной базы, —
+    /// и Конфигуратор загружает уже их; перевод убирается вместе с базой.
+    #[cfg(unix)]
+    #[test]
+    fn edt_sources_are_converted_to_xml_inside_the_throwaway_base_first() {
+        let dir = tempdir().expect("tempdir");
+        let (mut config, work) = project(dir.path());
+        config.format = SourceFormat::Edt;
+        fs::write(
+            config.base_path.join("configuration/.project"),
+            "<projectDescription><name>main-project</name></projectDescription>",
+        )
+        .expect("project");
+        let edt = dir.path().join("1cedtcli");
+        let edt_calls = dir.path().join("edt-calls");
+        write_script(
+            &edt,
+            &format!(
+                "target=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '--configuration-files' ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nmkdir -p \"$target\"\nprintf '<Configuration />' > \"$target/Configuration.xml\"\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0",
+                edt_calls.display()
+            ),
+        );
+        config.tools.edt_cli = crate::config::model::EdtCliConfig {
+            path: Some(edt.clone()),
+            auto_start: false,
+            ..Default::default()
+        };
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let runner = Recorder::new();
+        let mut base = None;
+
+        build_package_in(
+            &ExecutionContext::cli(CommandName::Artifacts),
+            &config,
+            &resolved,
+            fake_designer(),
+            &mut base,
+            &runner,
+        )
+        .expect("built");
+
+        let edt_calls = fs::read_to_string(&edt_calls).expect("edt calls");
+        assert!(edt_calls.contains("main-project"), "{edt_calls}");
+        let calls = runner.calls();
+        let loaded = after(&calls[1], "/LoadConfigFromFiles").expect("load");
+        assert!(
+            loaded.starts_with(&throwaway_root(&work).display().to_string()),
+            "{loaded}"
+        );
+        assert!(Path::new(loaded).join("Configuration.xml").is_file());
+        drop(base);
+        assert!(bases_left(&work).is_empty(), "{:?}", bases_left(&work));
     }
 
     /// `make <SET>` убирает свою временную базу и после успеха.

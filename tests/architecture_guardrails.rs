@@ -3101,10 +3101,8 @@ fn every_staged_publication_rechecks_its_target_first() {
     // Места публикации названы: вызов, ушедший туда, где страж его не видит, не пройдёт
     // молча, а новое место попадёт в перечень осознанно.
     const SITES: &[&str] = &[
-        "crate::use_cases::artifacts::agent::run_agent_export",
-        "crate::use_cases::artifacts::agent::run_external_agent_export",
-        "crate::use_cases::artifacts::run_designer_export",
-        "crate::use_cases::artifacts::run_external_designer_export",
+        "crate::use_cases::artifacts::build_package_in",
+        "crate::use_cases::artifacts::run_external_build",
         "crate::use_cases::dump_config::finalize_edt_dump",
         "crate::use_cases::dump_config::publish_full_dump",
         "crate::use_cases::infobase_export::run_configuration_export",

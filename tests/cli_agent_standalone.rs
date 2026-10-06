@@ -397,25 +397,11 @@ fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
     );
 }
 
-/// Шлюз, чей SFTP не принимает запись (живой `ibsrv` 8.3.27): выгрузка и `make`
-/// работают — они только забирают файлы; сборка отказывает типизированно, назвав
-/// канал, а не падает где-то посередине.
+/// Шлюз, чей SFTP не принимает запись (живой `ibsrv` 8.3.27): сборка отказывает
+/// типизированно, назвав канал, а не падает где-то посередине.
 #[test]
-fn a_read_only_sftp_gate_serves_downloads_and_refuses_uploads() {
+fn a_read_only_sftp_gate_refuses_uploads() {
     let harness = harness_with_channel(Channel::SftpReadOnly);
-    let output = harness.dir.path().join("dist").join("release.cf");
-
-    let (code, payload) = run(
-        &harness,
-        &[
-            "artifacts",
-            "main",
-            "--output",
-            &output.display().to_string(),
-        ],
-    );
-    assert_eq!(code, 0, "{payload}");
-    assert_eq!(fs::read_to_string(&output).expect("package"), "CF:main");
 
     let (code, payload) = run(&harness, &["build"]);
     assert_ne!(code, 0, "{payload}");
@@ -653,13 +639,14 @@ fn a_gate_session_is_named_in_the_receipt() {
     );
 }
 
-/// `make` и состав расширений идут той же сессией шлюза.
+/// Состав расширений идёт сессией шлюза, а `make` шлюза не касается: пакет он собирает из
+/// исходников во временной базе раннера, а не в базе сервера (#364).
 #[test]
-fn make_and_extensions_go_through_the_gate() {
+fn extensions_go_through_the_gate_and_make_never_does() {
     let harness = harness();
     let output = harness.dir.path().join("dist").join("release.cf");
 
-    let (code, payload) = run(
+    let _ = run(
         &harness,
         &[
             "artifacts",
@@ -668,8 +655,11 @@ fn make_and_extensions_go_through_the_gate() {
             &output.display().to_string(),
         ],
     );
-    assert_eq!(code, 0, "{payload}");
-    assert_eq!(fs::read_to_string(&output).expect("package"), "CF:main");
+    assert!(
+        commands(&harness).is_empty(),
+        "make opened the gate: {:?}",
+        commands(&harness)
+    );
 
     let (code, payload) = run(&harness, &["extensions", "list"]);
     assert_eq!(code, 0, "{payload}");

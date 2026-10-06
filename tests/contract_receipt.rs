@@ -85,9 +85,10 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
         (vec!["build", "--dry-run"], "designer"),
         (vec!["dump", "--force", "--dry-run"], "designer"),
         (vec!["infobase", "create", "--dry-run"], "designer"),
+        // `make` собирает во временной базе раннера: первым в цепочке стоит `ibcmd`.
         (
             vec!["make", "main", "--output", &artifact, "--dry-run"],
-            "designer",
+            "ibcmd",
         ),
         (vec!["load", "--path", &artifact, "--dry-run"], "designer"),
         (
