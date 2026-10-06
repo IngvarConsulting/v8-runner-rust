@@ -34,8 +34,11 @@ use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
 mod agent;
+mod all;
 mod coordinator;
 mod helpers;
+
+pub use self::all::execute_all;
 
 #[cfg(test)]
 use self::helpers::create_dump_object_list_file_with;

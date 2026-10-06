@@ -27,7 +27,7 @@ use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, Artifac
 use crate::domain::build::{BuildMode, BuildResult};
 use crate::domain::capability::ProviderReceipt;
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
-use crate::domain::dump::{DumpMode, DumpResult};
+use crate::domain::dump::{DumpMode, DumpResult, PullAllResult};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,
     ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStepStatus, StepResult,
@@ -81,8 +81,8 @@ use crate::use_cases::request::{
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
     DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, ForceWayOut, InitRequest,
-    LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest,
-    TestRequest, TestScopeRequest, ToolsDownloadRequest,
+    LaunchRequest, LoadRequest, PullAllRequest, SyntaxExtensionScope, SyntaxRequest,
+    SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -520,7 +520,7 @@ fn required_primary_config_path(
     primary_config_path.ok_or_else(|| {
         UseCaseError::new(
             UseCaseErrorKind::Validation,
-            "tools download requires a resolved primary config path",
+            "this command requires a resolved primary config path",
         )
     })
 }
@@ -1070,6 +1070,55 @@ fn execute_dump(
     // Совет отказа сторожа называет `pull <SET> --force` с глобальными ключами этого вызова.
     let context = cli_context(config, CommandName::Dump, cancellation)
         .with_command_line(command_line.clone());
+    if args.all {
+        let request = PullAllRequest {
+            project_file: required_primary_config_path(command_line.config.clone())
+                .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Dump, error))?,
+            dry_run,
+            discard_uncommitted: request.discard_uncommitted,
+        };
+        return with_cli_workspace_lock(
+            config,
+            presenter,
+            CommandName::Dump,
+            BaseAccess::Writes,
+            clean_before_execution,
+            dry_run,
+            || match dump_config::execute_all(&context, config, &request) {
+                Ok(result) => {
+                    if presenter.is_json() {
+                        presenter.print_envelope(&Envelope::ok(
+                            CommandName::Dump.as_str(),
+                            result.duration_ms,
+                            result,
+                        ));
+                    } else {
+                        render_pull_all_text(&result, presenter, true);
+                    }
+                    Ok(())
+                }
+                Err(failure) => {
+                    let error = failure.error;
+                    if presenter.is_json() {
+                        if let Some(result) = failure.payload {
+                            presenter.print_envelope(&failure_envelope(
+                                CommandName::Dump.as_str(),
+                                result.duration_ms,
+                                result,
+                                &error,
+                            ));
+                        }
+                    } else {
+                        if let Some(result) = failure.payload.as_ref() {
+                            render_pull_all_text(result, presenter, false);
+                        }
+                        presenter.print_error(&error.to_string());
+                    }
+                    Err(error)
+                }
+            },
+        );
+    }
     with_cli_workspace_lock(
         config,
         presenter,
@@ -4057,6 +4106,34 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
     }
 }
 
+/// `pull --all`: лента каждого набора, как у `pull <SET>`, и объявленные наборы.
+fn render_pull_all_text(result: &PullAllResult, presenter: &Presenter, succeeded: bool) {
+    let last = result.sets.len().saturating_sub(1);
+    for (index, set) in result.sets.iter().enumerate() {
+        // Отказ обхода — последний набор неудачной команды; остальные выгрузились.
+        render_dump_text(set, presenter, succeeded || index != last || set.ok);
+    }
+    let mut details = Vec::new();
+    match result.declared.as_deref() {
+        Some(declared) => {
+            details.extend(declared.iter().map(|declared| {
+                format!("declared source-set {}: {}", declared.name, declared.path)
+            }))
+        }
+        None => append_if_present(&mut details, result.message.clone()),
+    }
+    if !result.not_installed.is_empty() {
+        details.push(format!(
+            "not in the infobase, not pulled: {}",
+            result.not_installed.join(", ")
+        ));
+    }
+    if !details.is_empty() || result.sets.is_empty() {
+        details.extend(provider_receipt_details(result.provider.as_ref()));
+        single_timeline_outcome(presenter, timeline_status(succeeded), "Pull all", details);
+    }
+}
+
 fn render_convert_text(result: &ConvertResult, presenter: &Presenter, succeeded: bool) {
     let mut details = vec![
         format!("direction: {}", render_convert_direction(result.direction)),
@@ -4745,6 +4822,7 @@ mod tests {
                     mode: Some(PreviousDumpMode::Incremental),
                     source_set: SourceSetArg::named("main"),
                     extension: Some("Ext".to_owned()),
+                    all: false,
                     objects: vec!["Catalog.Item".to_owned()],
                 },
                 false,
@@ -4760,6 +4838,7 @@ mod tests {
                     mode: None,
                     source_set: SourceSetArg::named("main"),
                     extension: Some("Ext".to_owned()),
+                    all: false,
                     objects: vec!["Catalog.Item".to_owned()],
                 },
                 false,
@@ -4968,6 +5047,7 @@ mod tests {
             mode,
             source_set: SourceSetArg::named("main"),
             extension: None,
+            all: false,
             objects: objects.iter().map(|object| (*object).to_owned()).collect(),
             discard_uncommitted: force,
         };

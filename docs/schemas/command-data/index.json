@@ -39,7 +39,8 @@
       "publish"
     ],
     "pull": [
-      "pull"
+      "pull",
+      "pull-all"
     ],
     "push": [
       "push"

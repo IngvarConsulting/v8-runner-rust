@@ -260,6 +260,15 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
+    /// `/DumpDBCfgList -AllExtensions`: имена установленных расширений базы данных, по
+    /// одному на строку, в `/Out` (замер #187). Без расширений — пустой `/Out` и `rc=0`.
+    pub fn dump_db_cfg_list_all_extensions(&self) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/DumpDBCfgList".to_owned());
+        args.push("-AllExtensions".to_owned());
+        self.run(&args)
+    }
+
     /// `/DumpIB <file>`
     pub fn dump_infobase(
         &self,

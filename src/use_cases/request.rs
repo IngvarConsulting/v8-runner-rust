@@ -156,6 +156,18 @@ pub struct DumpRequest {
     pub force_way_out: ForceWayOut,
 }
 
+/// `pull --all`: every configuration package of the project, and a source set declared
+/// for each extension of the infobase that has none.
+#[derive(Debug, Clone)]
+pub struct PullAllRequest {
+    /// The project file (`v8project.yaml`) that receives the declared source sets.
+    pub project_file: std::path::PathBuf,
+    /// Plan without reading the infobase or writing anything.
+    pub dry_run: bool,
+    /// The command line's `--force` for every set: a full dump that replaces each directory.
+    pub discard_uncommitted: bool,
+}
+
 /// Whether a replacement refusal may send the caller to `pull <SET> --force`.
 ///
 /// Not a copy of `destruction_guard::WaysOut`: this is what a transport knows before the

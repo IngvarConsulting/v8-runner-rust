@@ -59,3 +59,32 @@ pub enum DumpMode {
     Incremental,
     Partial,
 }
+
+/// Ответ `pull --all`: наборы по составу базы.
+///
+/// Каждая выгрузка отчитывается формой `pull <SET>` в порядке обхода; объявленные этой
+/// командой наборы названы отдельно, теми же полями, какими их записал `init`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PullAllResult {
+    /// Квитанция о выборе исполнителя, который читал состав базы и выгружал наборы;
+    /// `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+    pub ok: bool,
+    /// Получил ли исполнитель работу этой команды — то же, что у `pull <SET>`.
+    pub provider_dispatched: bool,
+    /// Наборы, которые команда объявила в `v8project.yaml` для расширений базы без набора,
+    /// в порядке объявления. `null` — состав базы не читали: у превью и у отказа до чтения.
+    #[schemars(required, extend("type" = ["array", "null"]))]
+    pub declared: Option<Vec<crate::domain::config_init::ConfigInitSourceSet>>,
+    /// Наборы расширений проекта, которых в базе нет: их не выгружали. Поля нет, когда
+    /// таких нет или состав не читали.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_installed: Vec<String>,
+    /// Выгрузка каждого набора формой `pull <SET>` в порядке обхода: сперва наборы проекта,
+    /// затем объявленные. После первого отказа обход останавливается.
+    pub sets: Vec<DumpResult>,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}

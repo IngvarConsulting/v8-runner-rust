@@ -197,6 +197,37 @@ fn set_descriptor_field(
     Ok(())
 }
 
+/// Имя расширения — идентификатор 1С: буква или подчёркивание, затем буквы, цифры и
+/// подчёркивания. Такое имя годится и в аргумент платформы, и в имя каталога.
+pub fn is_extension_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
+}
+
+/// Разбирает `/Out` вызова `/DumpDBCfgList -AllExtensions`: одно имя на строку, BOM снят
+/// при чтении журнала, пустой вывод — расширений нет (замер #187). Строка, которая не
+/// является идентификатором, — неверный вывод, а не имя: текст сообщения платформы именем
+/// расширения не становится.
+pub fn parse_extension_name_list(output: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for line in output.lines() {
+        let name = line.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !is_extension_identifier(name) {
+            return Err(format!(
+                "extension list line is not an extension name: {name:?}"
+            ));
+        }
+        names.push(name.to_owned());
+    }
+    Ok(names)
+}
+
 /// Parses the inventory text into one record per extension.
 ///
 /// A record missing a required field is a refusal, not a record with a guessed value:
@@ -282,7 +313,23 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{parse_extension_inventory, read_applied_extension_descriptor};
+    use super::{
+        parse_extension_inventory, parse_extension_name_list, read_applied_extension_descriptor,
+    };
+
+    /// Список Конфигуратора — имена по строке; пустой вывод — пустой список, а строка,
+    /// не являющаяся идентификатором, — отказ, а не имя.
+    #[test]
+    fn the_designer_name_list_is_read_line_by_line_and_fail_closed() {
+        assert_eq!(
+            parse_extension_name_list("Расширение1\r\nРасширение2\r\n\r\n"),
+            Ok(vec!["Расширение1".to_owned(), "Расширение2".to_owned()])
+        );
+        assert_eq!(parse_extension_name_list(""), Ok(Vec::new()));
+        assert_eq!(parse_extension_name_list("\n  \n"), Ok(Vec::new()));
+        assert!(parse_extension_name_list("Ext\nОшибка в параметрах.\n").is_err());
+        assert!(parse_extension_name_list("1Ext\n").is_err());
+    }
 
     fn parse_descriptor(xml: &str) -> Result<super::AppliedExtensionDescriptor, String> {
         let dir = tempfile::tempdir().expect("tempdir");

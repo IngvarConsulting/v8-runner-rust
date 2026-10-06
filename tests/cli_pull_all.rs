@@ -58,7 +58,8 @@ printf '<ConfigDumpInfo version="2.17"/>\n' > "$target/ConfigDumpInfo.xml"
 exit 0"#;
 
 /// Проектный файл с комментариями: `pull --all` дописывает наборы, не трогая остального.
-const PROJECT: &str = "# yaml-language-server: $schema=https://example.invalid/v8project.schema.json
+const PROJECT: &str =
+    "# yaml-language-server: $schema=https://example.invalid/v8project.schema.json
 # Проект с расширением, объявленным не по соглашению.
 workPath: work
 format: DESIGNER
@@ -213,7 +214,22 @@ fn an_extension_without_a_set_is_declared_and_pulled() {
         ["main", "Old", "Second", "Новое"],
         "declared sets first in their order, then the new ones: {envelope}"
     );
-    assert_eq!(envelope["data"]["not_installed"], json!(["Gone"]), "{envelope}");
+    assert_eq!(
+        envelope["data"]["not_installed"],
+        json!(["Gone"]),
+        "{envelope}"
+    );
+    let modes = envelope["data"]["sets"]
+        .as_array()
+        .expect("sets")
+        .iter()
+        .map(|set| set["mode"].as_str().expect("mode").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modes,
+        ["INCREMENTAL", "INCREMENTAL", "FULL", "FULL"],
+        "project sets as `pull <SET>`, a declared set dumped whole: {envelope}"
+    );
     for name in ["Second", "Новое"] {
         assert!(
             project
@@ -236,11 +252,18 @@ fn an_extension_without_a_set_is_declared_and_pulled() {
         "the existing text stays as it was: {text}"
     );
     assert!(
-        text.contains("# Основная конфигурация.") && text.contains("# расширение со своим каталогом"),
+        text.contains("# Основная конфигурация.")
+            && text.contains("# расширение со своим каталогом"),
         "comments are kept: {text}"
     );
-    assert!(text.ends_with("tools:\n  platform:\n    path: platform\n"), "{text}");
-    assert!(text.contains("  - name: 'Новое'\n    type: EXTENSION\n    path: 'src/ext/Новое'\n"), "{text}");
+    assert!(
+        text.ends_with("tools:\n  platform:\n    path: platform\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  - name: 'Новое'\n    type: EXTENSION\n    path: 'src/ext/Новое'\n"),
+        "{text}"
+    );
 
     // Объявленный набор раннер знает: следующий `pull --all` его выгружает и не объявляет.
     commit_sources(&project.root);
@@ -306,14 +329,20 @@ fn a_pull_all_preview_reads_nothing_and_writes_nothing() {
     assert_eq!(project.calls(), "", "the platform is not started");
     assert_eq!(project.project_text(), PROJECT);
     assert!(!project.root.join("src/ext").exists());
-    assert!(!project.root.join("work").exists(), "a preview leaves no trace");
+    assert!(
+        !project.root.join("work").exists(),
+        "a preview leaves no trace"
+    );
 }
 
 /// Список у `ibcmd` — блоки «ключ : значение»; выключенное расширение объявляется так же.
 #[test]
 fn ibcmd_lists_the_installed_extensions() {
     let project = Project::new(&["Old", "Gone", "Fresh"]);
-    let text = PROJECT.replace("format: DESIGNER\n", "format: DESIGNER\nproviders:\n  pull: ibcmd\n");
+    let text = PROJECT.replace(
+        "format: DESIGNER\n",
+        "format: DESIGNER\nproviders:\n  pull: ibcmd\n",
+    );
     fs::write(project.project_file(), &text).expect("project file");
     commit_sources(&project.root);
 
@@ -325,9 +354,19 @@ fn ibcmd_lists_the_installed_extensions() {
         json!([{"name": "Fresh", "type": "EXTENSION", "path": "src/ext/Fresh"}]),
         "{envelope}"
     );
-    assert!(envelope["data"].get("not_installed").is_none(), "{envelope}");
-    assert!(project.calls().contains("config extension list"), "{}", project.calls());
-    assert!(project.root.join("src/ext/Fresh/Configuration.xml").is_file());
+    assert!(
+        envelope["data"].get("not_installed").is_none(),
+        "{envelope}"
+    );
+    assert!(
+        project.calls().contains("config extension list"),
+        "{}",
+        project.calls()
+    );
+    assert!(project
+        .root
+        .join("src/ext/Fresh/Configuration.xml")
+        .is_file());
 }
 
 /// `--all` называет все наборы сразу: рядом с набором, расширением или выборкой объектов
@@ -338,12 +377,20 @@ fn all_refuses_a_narrower_scope() {
 
     for args in [
         &["--all", "main"][..],
+        &["--all", "--source-set", "main"][..],
         &["--all", "--extension", "Old"][..],
         &["--all", "--object", "Catalog:Items"][..],
     ] {
-        let (output, envelope) = project.pull(args);
-        assert_eq!(output.status.code(), Some(2), "{args:?}: {envelope}");
-        assert_eq!(envelope["ok"], false, "{args:?}: {envelope}");
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(project.project_file())
+            .arg("pull")
+            .args(args)
+            .output()
+            .expect("run pull");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains("cannot be used with"), "{args:?}: {stderr}");
     }
     assert_eq!(project.calls(), "");
 }
@@ -359,6 +406,10 @@ fn an_extension_named_like_another_set_is_refused_before_any_dump() {
     assert!(!output.status.success(), "{envelope}");
     let message = envelope["error"]["message"].as_str().expect("message");
     assert!(message.contains("'main'"), "{message}");
-    assert!(!project.calls().contains("/DumpConfigToFiles"), "{}", project.calls());
+    assert!(
+        !project.calls().contains("/DumpConfigToFiles"),
+        "{}",
+        project.calls()
+    );
     assert_eq!(project.project_text(), PROJECT);
 }

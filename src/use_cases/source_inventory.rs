@@ -64,6 +64,27 @@ impl<'a> SourceSetInventory<'a> {
         configuration
     }
 
+    /// Пакеты конфигурации проекта в порядке обхода [`Self::ordered_source_sets`]: основная
+    /// конфигурация (`None`), затем расширения — каждое с именем расширения в базе. Наборы
+    /// внешних файлов пакета конфигурации не называют и в обход не входят.
+    ///
+    /// Один порядок на все команды, которые идут по пакетам без аргумента: так `pull --all`
+    /// выгружает, и тем же порядком идут `make` и `download` без набора (#364).
+    pub(crate) fn configuration_packages(&self) -> Vec<(&'a SourceSetConfig, Option<&'a str>)> {
+        self.ordered_source_sets()
+            .into_iter()
+            .filter_map(|source_set| match source_set.purpose {
+                SourceSetPurpose::Configuration => Some((source_set, None)),
+                SourceSetPurpose::Extension => {
+                    Some((source_set, Some(platform_extension_name(source_set))))
+                }
+                SourceSetPurpose::ExternalDataProcessors | SourceSetPurpose::ExternalReports => {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn source_set(&self, name: &str) -> Option<&'a SourceSetConfig> {
         self.source_sets_by_name.get(name).copied()
     }
@@ -208,6 +229,34 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["main", "ext", "processors", "reports"]);
+    }
+
+    /// Пакеты конфигурации обходятся в одном порядке: основная конфигурация, затем
+    /// расширения в порядке объявления; наборы внешних файлов в обход не входят.
+    #[test]
+    fn configuration_packages_are_walked_in_one_order() {
+        let mut config = config(SourceFormat::Designer);
+        config.source_sets.push(SourceSetConfig {
+            name: "later".to_owned(),
+            purpose: SourceSetPurpose::Extension,
+            path: "extensions/later".into(),
+        });
+        let inventory = SourceSetInventory::new(&config);
+
+        let packages = inventory
+            .configuration_packages()
+            .into_iter()
+            .map(|(source_set, extension)| (source_set.name.as_str(), extension))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            packages,
+            vec![
+                ("main", None),
+                ("ext", Some("ext")),
+                ("later", Some("later"))
+            ]
+        );
     }
 
     /// Набор называет пакет конфигурации: основную конфигурацию или расширение с именем
