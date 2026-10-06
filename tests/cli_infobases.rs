@@ -239,15 +239,17 @@ fn assert_refused_naming_the_key(connection: &str, key: &str) {
     assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
     assert!(message.contains(&format!("`{key}`")), "{message}");
     assert!(message.contains("local layer"), "{message}");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("secret"),
-        "the refusal must not echo the value: {stdout}"
-    );
-    assert!(
-        !stdout.contains(connection),
-        "the refusal must not echo the connection string: {stdout}"
-    );
+    for (stream, text) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        let text = String::from_utf8_lossy(text);
+        assert!(
+            !text.contains("secret"),
+            "the refusal must not echo the value in {stream}: {text}"
+        );
+        assert!(
+            !text.contains(connection),
+            "the refusal must not echo the connection string in {stream}: {text}"
+        );
+    }
 }
 
 #[test]
@@ -299,16 +301,37 @@ fn an_ad_hoc_connection_string_part_without_equals_is_checked() {
 }
 
 #[test]
+fn an_ad_hoc_connection_string_with_a_quoted_key_is_refused() {
+    // Платформа получает `"/N"` без кавычек, и проверка читает те же токены.
+    assert_refused_naming_the_key("/F /tmp/ad-hoc-ib \"/N\" secret-user \"/P\" secret", "/N");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_any_masked_key_is_refused() {
+    // Отвергается всё, что вывод маскирует, а не только учётные данные базы.
+    assert_refused_naming_the_key("/F /tmp/ad-hoc-ib /UC secret", "/UC");
+    assert_refused_naming_the_key("ws=http://host/ib;WspUser=secret-user", "WspUser");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_a_password_in_the_web_address_is_refused() {
+    assert_refused_naming_the_key("ws=http://alice:secret@host/ib", "ws");
+    assert_refused_naming_the_key("/WS http://alice:secret@host/ib", "/WS");
+}
+
+#[test]
 fn an_ad_hoc_path_that_starts_like_a_credential_key_is_not_refused() {
     let project = project();
 
-    let output = project.run_json(&["--infobase", "/F /pub/ad-hoc-ib"], LAUNCH_PREVIEW);
+    for connection in ["/F /pub/ad-hoc-ib", "/F \"/tmp/my /pub\""] {
+        let output = project.run_json(&["--infobase", connection], LAUNCH_PREVIEW);
 
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+        assert!(
+            output.status.success(),
+            "{connection}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
 
 #[test]

@@ -336,11 +336,11 @@ pub enum ConfigValidationError {
     )]
     OriginNotDeclared { declared: String },
 
-    /// `key` — ключ, как он записан в строке; значения отказ не несёт: оно секрет.
+    /// `found` называет ключ, но не значение: значение и есть секрет.
     #[error(
-        "--infobase connection string must not carry credentials, and it carries `{key}`: credentials belong to the local layer — declare the base under infobases.<name> in v8project.local.yaml with user and password"
+        "--infobase connection string must not carry credentials or any other key the output masks, and it carries {found}: an ad hoc base carries none — declare it in the local layer under infobases.<name> of v8project.local.yaml, where user and password belong, and pass its name"
     )]
-    AdHocConnectionCarriesCredentials { key: String },
+    AdHocConnectionCarriesCredentials { found: String },
 
     #[error("infobases.{name}: {source}")]
     InfobaseSectionInvalid {

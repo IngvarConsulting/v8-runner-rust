@@ -496,12 +496,12 @@ fn select_infobase(
                 }
             },
             InfobaseSelector::Connection(connection) => {
-                // Перечень ключей учётных данных — у `secrets.rs`: второй список здесь
-                // разошёлся бы с маскированием, и строка с ключом, которого он не знает,
-                // прошла бы в базу (#380).
-                if let Some(key) = crate::platform::secrets::connection_credential_key(connection) {
+                // Что строка не несёт, решает `secrets.rs` — тот же перечень, по которому
+                // вывод маскирует: второй список здесь разошёлся бы с маскированием, и
+                // строка с ключом, которого он не знает, прошла бы в базу (#380).
+                if let Some(found) = crate::platform::secrets::connection_masked_key(connection) {
                     return Err(ConfigValidationError::AdHocConnectionCarriesCredentials {
-                        key: key.to_owned(),
+                        found: found.to_string(),
                     });
                 }
                 let mut section = serde_yaml::Mapping::new();
@@ -788,7 +788,7 @@ fn normalize_connection_string(connection: &str, config_dir: &Path) -> String {
 }
 
 fn normalize_raw_connection_args(connection: &str, config_dir: &Path) -> String {
-    let mut args = split_arg_string(connection);
+    let mut args = crate::platform::connection::split_arg_string(connection);
     let mut changed = false;
     let mut index = 0;
     while index + 1 < args.len() {
@@ -829,30 +829,6 @@ fn strip_matching_quotes(value: &str) -> Option<&str> {
     } else {
         None
     }
-}
-
-fn split_arg_string(raw: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-
-    for ch in raw.chars() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            ch if ch.is_whitespace() && !in_quotes => {
-                if !current.is_empty() {
-                    args.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if !current.is_empty() {
-        args.push(current);
-    }
-
-    args
 }
 
 fn join_arg_string(args: &[String]) -> String {

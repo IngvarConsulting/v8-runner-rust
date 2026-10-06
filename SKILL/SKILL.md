@@ -40,7 +40,7 @@ Useful global flags:
 - `--config <CONFIG>` when the active config is not `./v8project.yaml`.
 - `--json-message` for machine-readable CLI envelopes.
 - `--workdir <WORKDIR>` to override `workPath`; it wins over `v8project.local.yaml`.
-- `--infobase <NAME|CONNECTION>` to work with another declared infobase or an ad hoc connection string; defaults to `origin`. An ad hoc string carries no credentials: `Usr=`, `Pwd=`, `Wsn=`, `Wsp=`, `Wsppwd=`, `Password=`, `/N`, `/P` anywhere in it is refused with `invalid_argument`; declare the base with `user`/`password` under `infobases.<name>` in `v8project.local.yaml` and pass its name.
+- `--infobase <NAME|CONNECTION>` to work with another declared infobase or an ad hoc connection string; defaults to `origin`. An ad hoc string carries nothing the output masks: `Usr=`, `Pwd=`, `Wsn=`, `Wsp=`, `Wsppwd=`, `Password=`, `WspUser=`, `/N`, `/P`, `/WSN`, `/WSP`, `/UC`, `/AccessToken`, a user or password in a `ws=`/`/WS` address — anywhere in it, glued forms included (so `/Proxy` is refused as `/P`) — is refused with `invalid_argument`; declare the base with `user`/`password` under `infobases.<name>` in `v8project.local.yaml` and pass its name.
 - `--clean-before-execution` to clear logs before execution.
 - `--log-level <error|warn|info|debug|trace>` for diagnostics.
 - `--no-color` for plain text output.
