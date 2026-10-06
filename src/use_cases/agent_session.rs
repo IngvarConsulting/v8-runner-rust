@@ -862,11 +862,28 @@ pub(crate) struct GenerationRecord {
     /// Инструмент, которым получен токен: токены разных инструментов несравнимы
     /// (`INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`).
     pub tool: Provider,
-    /// Что было сделано, когда токен записан: `build` или `dump`.
-    pub after: String,
+    /// Что было сделано, когда токен записан.
+    pub after: GenerationAfter,
     pub recorded_at: String,
     /// Привязка памяти набора (база, каталог, назначение, имя): запись другой пары чужая.
     pub identity: String,
+}
+
+/// Операция, после которой записан токен поколения.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GenerationAfter {
+    Build,
+    Dump,
+}
+
+impl std::fmt::Display for GenerationAfter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Build => "build",
+            Self::Dump => "dump",
+        })
+    }
 }
 
 /// Ответ записи на вопрос «менялась ли база с прошлого чтения».
@@ -934,19 +951,32 @@ impl GenerationLedger {
             .unwrap_or_default()
     }
 
-    /// Запись набора. Запись без имени инструмента (журнал прежних версий) или иначе
-    /// неразборчивая — отсутствие ответа: её как будто нет.
+    /// Запись набора. Привязка читается до полного разбора: запись другой пары называется
+    /// чужой, даже если разобрать её целиком нельзя. Запись своей пары без имени инструмента
+    /// или неразборчивая — отсутствие ответа: её как будто нет.
     pub(crate) fn read(&self) -> Recorded {
-        let record = self
-            .records()
-            .remove(&self.source_set)
-            .and_then(|value| serde_json::from_value::<GenerationRecord>(value).ok());
-        match record {
-            None => Recorded::Nothing,
-            Some(record) if record.identity == self.identity => Recorded::Ours(record),
-            Some(record) => Recorded::Foreign {
-                identity: record.identity,
-            },
+        let Some(value) = self.records().remove(&self.source_set) else {
+            return Recorded::Nothing;
+        };
+        if let Some(identity) = value.get("identity").and_then(serde_json::Value::as_str) {
+            if identity != self.identity {
+                return Recorded::Foreign {
+                    identity: identity.to_owned(),
+                };
+            }
+        }
+        match serde_json::from_value::<GenerationRecord>(value) {
+            Ok(record) if record.identity == self.identity => Recorded::Ours(record),
+            Ok(_) => Recorded::Nothing,
+            Err(error) => {
+                tracing::debug!(
+                    ledger = %self.file.display(),
+                    source_set = %self.source_set,
+                    %error,
+                    "generation record is not readable; treated as no answer"
+                );
+                Recorded::Nothing
+            }
         }
     }
 
@@ -957,7 +987,12 @@ impl GenerationLedger {
     /// (`INV.WIRE.A-BUSY-WORKSPACE-ANSWERS-WORKSPACE-BUSY`), и две команды в одном журнале
     /// не пишут. Если бы запись другого набора всё же потерялась, следующая выгрузка этого
     /// набора не пропустилась бы по поколению — лишняя выгрузка, а не потеря правок.
-    pub(crate) fn record(&self, tool: Provider, token: &str, after: &str) -> Result<(), AppError> {
+    pub(crate) fn record(
+        &self,
+        tool: Provider,
+        token: &str,
+        after: GenerationAfter,
+    ) -> Result<(), AppError> {
         let dir = self.file.parent().ok_or_else(|| {
             AppError::Runtime(format!(
                 "the generation ledger '{}' has no parent directory",
@@ -973,7 +1008,7 @@ impl GenerationLedger {
         let record = serde_json::to_value(GenerationRecord {
             token: token.to_owned(),
             tool,
-            after: after.to_owned(),
+            after,
             recorded_at: chrono::Utc::now().to_rfc3339(),
             identity: self.identity.clone(),
         })
@@ -1065,15 +1100,16 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let main = ledger(root.path(), "main", "base-a main");
         assert_eq!(main.read(), Recorded::Nothing);
-        main.record(Provider::Agent, "abc", "build")
+        main.record(Provider::Agent, "abc", GenerationAfter::Build)
             .expect("record");
         let ext = ledger(root.path(), "ext", "base-a ext");
-        ext.record(Provider::Agent, "def", "dump").expect("record");
+        ext.record(Provider::Agent, "def", GenerationAfter::Dump)
+            .expect("record");
         let Recorded::Ours(record) = main.read() else {
             panic!("the record of the same pair");
         };
         assert_eq!(record.token, "abc");
-        assert_eq!(record.after, "build");
+        assert_eq!(record.after, GenerationAfter::Build);
         assert!(matches!(ext.read(), Recorded::Ours(record) if record.token == "def"));
         assert!(root
             .path()
@@ -1092,7 +1128,7 @@ mod tests {
     fn the_same_tool_with_the_same_token_is_unchanged() {
         let root = tempfile::tempdir().expect("tempdir");
         let main = ledger(root.path(), "main", "base-a");
-        main.record(Provider::Agent, "abc", "build")
+        main.record(Provider::Agent, "abc", GenerationAfter::Build)
             .expect("record");
         let record = recorded(&main);
         assert_eq!(record.tool, Provider::Agent);
@@ -1106,7 +1142,8 @@ mod tests {
     fn the_same_tool_with_another_token_is_changed() {
         let root = tempfile::tempdir().expect("tempdir");
         let main = ledger(root.path(), "main", "base-a");
-        main.record(Provider::Ibcmd, "abc", "dump").expect("record");
+        main.record(Provider::Ibcmd, "abc", GenerationAfter::Dump)
+            .expect("record");
         assert_eq!(
             recorded(&main).compare(Provider::Ibcmd, "def"),
             GenerationComparison::Changed
@@ -1119,7 +1156,7 @@ mod tests {
     fn a_token_of_another_tool_is_no_answer() {
         let root = tempfile::tempdir().expect("tempdir");
         let main = ledger(root.path(), "main", "base-a");
-        main.record(Provider::Designer, "abc", "build")
+        main.record(Provider::Designer, "abc", GenerationAfter::Build)
             .expect("record");
         let record = recorded(&main);
         for (tool, token) in [
@@ -1135,13 +1172,66 @@ mod tests {
         }
     }
 
-    /// Запись журнала прежних версий не несёт имени инструмента: она читается как
-    /// отсутствие ответа, а записи других наборов остаются годными.
+    /// Токен пустой базы сравнивается как любой другой: сорок нулей (8.3.27) и постоянное
+    /// значение пустой базы на 8.5.4 у того же инструмента совпадают сами с собой.
+    #[test]
+    fn an_empty_base_token_is_compared_like_any_other() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let main = ledger(root.path(), "main", "base-a");
+        for token in [
+            "0000000000000000000000000000000000000000",
+            "2af84151e959af78eab1cb38d137eedf33543af5",
+        ] {
+            main.record(Provider::Ibcmd, token, GenerationAfter::Build)
+                .expect("record");
+            assert_eq!(
+                recorded(&main).compare(Provider::Ibcmd, token),
+                GenerationComparison::Unchanged,
+                "{token}"
+            );
+        }
+    }
+
+    /// Запись другой пары без имени инструмента всё равно называется чужой: привязка
+    /// читается до полного разбора.
+    #[test]
+    fn a_foreign_record_without_a_tool_is_still_named_foreign() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let file = root.path().join("work/infobases/origin/generation.json");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("dir");
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "main": {
+                    "token": "abc",
+                    "after": "dump",
+                    "recorded_at": "2026-10-01T00:00:00+00:00",
+                    "identity": "base-a",
+                }
+            })
+            .to_string(),
+        )
+        .expect("record without a tool");
+        assert_eq!(
+            ledger(root.path(), "main", "base-b").read(),
+            Recorded::Foreign {
+                identity: "base-a".to_owned()
+            }
+        );
+        assert_eq!(
+            ledger(root.path(), "main", "base-a").read(),
+            Recorded::Nothing
+        );
+    }
+
+    /// Запись без имени инструмента читается как отсутствие ответа, а записи других
+    /// наборов остаются годными.
     #[test]
     fn a_record_without_a_tool_is_no_answer_and_spares_the_other_sets() {
         let root = tempfile::tempdir().expect("tempdir");
         let ext = ledger(root.path(), "ext", "base-a ext");
-        ext.record(Provider::Agent, "def", "dump").expect("record");
+        ext.record(Provider::Agent, "def", GenerationAfter::Dump)
+            .expect("record");
         let file = root.path().join("work/infobases/origin/generation.json");
         let mut journal: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&file).expect("ledger"))
@@ -1157,7 +1247,8 @@ mod tests {
         let main = ledger(root.path(), "main", "base-a main");
         assert_eq!(main.read(), Recorded::Nothing);
         assert!(matches!(ext.read(), Recorded::Ours(record) if record.token == "def"));
-        main.record(Provider::Agent, "abc", "dump").expect("record");
+        main.record(Provider::Agent, "abc", GenerationAfter::Dump)
+            .expect("record");
         assert_eq!(recorded(&main).tool, Provider::Agent);
         assert!(matches!(ext.read(), Recorded::Ours(record) if record.token == "def"));
     }
@@ -1168,7 +1259,7 @@ mod tests {
     fn a_generation_recorded_for_another_pair_is_not_used() {
         let root = tempfile::tempdir().expect("tempdir");
         ledger(root.path(), "main", "base-a")
-            .record(Provider::Agent, "abc", "dump")
+            .record(Provider::Agent, "abc", GenerationAfter::Dump)
             .expect("record");
         let retargeted = ledger(root.path(), "main", "base-b");
         assert_eq!(

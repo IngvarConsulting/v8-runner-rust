@@ -415,19 +415,15 @@ fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
             .filter(|line| line.starts_with("config dump-config-to-files"))
             .count()
     };
-    for (rewrite, expected_dumps) in [
-        (
-            Box::new(|record: &mut Value| record["tool"] = Value::from("designer"))
-                as Box<dyn Fn(&mut Value)>,
-            2,
-        ),
-        (
-            Box::new(|record: &mut Value| {
-                record.as_object_mut().expect("record").remove("tool");
-            }),
-            3,
-        ),
-    ] {
+    fn another_tool(record: &mut Value) {
+        record["tool"] = Value::from("designer");
+    }
+    fn no_tool(record: &mut Value) {
+        record.as_object_mut().expect("record").remove("tool");
+    }
+    type Rewrite = fn(&mut Value);
+    let rewrites: [(Rewrite, usize); 2] = [(another_tool, 2), (no_tool, 3)];
+    for (rewrite, expected_dumps) in rewrites {
         let mut ledger: Value =
             serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
         rewrite(&mut ledger["main"]);
@@ -442,6 +438,12 @@ fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
             serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
         assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
     }
+
+    // Контроль: запись того же инструмента с тем же токеном выгрузку пропускает.
+    let (code, payload) = run_dump(&harness, &[]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
+    assert_eq!(dumps(&harness), 3, "{payload}");
 }
 
 /// Каталог без файла версий: выгрузка по изменившемуся идёт полной поверх каталога —

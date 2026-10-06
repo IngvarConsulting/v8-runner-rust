@@ -16,7 +16,7 @@ use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
     argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
     run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir, write_text, AgentHandle,
-    Exchange, GenerationComparison, GenerationLedger, Recorded,
+    Exchange, GenerationAfter, GenerationComparison, GenerationLedger, Recorded,
 };
 
 /// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
@@ -267,7 +267,7 @@ fn dump_through(
         }
     };
     if let Some(ledger) = &ledger {
-        ledger.record(Provider::Agent, &generation, "dump")?;
+        ledger.record(Provider::Agent, &generation, GenerationAfter::Dump)?;
     }
     Ok((
         transcript,
