@@ -4,6 +4,9 @@ check:
   - tests/cli_infobase_owner.rs::a_gone_owner_is_replaced_and_named
   - tests/cli_infobase_owner.rs::a_project_copied_whole_leaves_no_live_owner
   - tests/cli_infobase_owner.rs::an_unreadable_local_layer_of_the_owner_keeps_it_alive
+  - tests/cli_infobase_owner.rs::a_secret_in_the_unparsable_layer_of_the_owner_never_reaches_the_answer
+  - tests/cli_infobase_owner.rs::a_fifo_in_place_of_the_owner_project_file_does_not_hang_the_command
+  - src/use_cases/infobase_owner.rs::a_record_of_this_project_and_host_on_another_machine_is_named_as_maybe_this_one
   - tests/cli_infobase_owner.rs::an_owner_on_another_machine_is_never_replaced
   - src/use_cases/infobase_owner.rs::a_host_rename_keeps_the_machine
 ---
@@ -11,7 +14,8 @@ check:
 # Ушедшего владельца сменяют и называют
 
 На базе, названной в местном слое, владельца, чей каталог на этой машине исчез или больше не
-объявляет базу, команда записи сменяет сама, и ответ об этом говорит. Живого владельца
+объявляет базу, команда записи сменяет сама, и ответ команды командной строки об этом говорит; инструменту
+MCP это обещает `INV.MCP.A-BOUNDARY-NOTE-REACHES-THE-TOOL-ANSWER`. Живого владельца
 раннер не трогает: копию с другой машины, как и копию этой машины, чей местный слой нельзя
 прочитать, раннер считает живой и несогласной. Машину называет её идентификатор, который
 переживает смену имени хоста, а объявленный путь базы сравнивается канонически от каталога

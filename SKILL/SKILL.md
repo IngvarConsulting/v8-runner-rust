@@ -146,7 +146,8 @@ v8-runner infobase create
   another live copy answers `error.code: infobase_held` (kind `workspace`, step `infobase owner`,
   exit 3; MCP: `runtime_failure`) — retrying does not help. Give this copy its own base:
   `error.next` is `infobase create` after pointing `infobases.origin` in `v8project.local.yaml` at
-  a new path; to free the base, remove it from the other copy's local layer. A gone owner
+  a new path; to free the base, remove it from the other copy's local layer (a copy on another
+  machine: delete its record from the marker by hand). A gone owner
   (directory deleted or no longer declaring the base) is replaced automatically and named in
   `warnings`. `--infobase <connection string>` obeys the owner but never becomes one. An
   unreadable marker or one of an unknown version stops a write with `runtime_failure`.
