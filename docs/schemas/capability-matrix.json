@@ -1,0 +1,306 @@
+{
+  "_comment": "Матрица исполнителей из src/domain/capability.rs. Порождается тестом при UPDATE_CAPABILITY_MATRIX=1, руками не правится.",
+  "operations": {
+    "download": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        }
+      ]
+    },
+    "extensions": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        }
+      ]
+    },
+    "infobase.create": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        }
+      ],
+      "standalone": []
+    },
+    "infobase.dump": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": false,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": false,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "standalone": []
+    },
+    "infobase.restore": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": false,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": false,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "standalone": []
+    },
+    "make": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        }
+      ]
+    },
+    "publish": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "webinst"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "webinst"
+        }
+      ],
+      "standalone": []
+    },
+    "pull": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        }
+      ]
+    },
+    "push": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": false,
+          "provider": "agent"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        }
+      ]
+    },
+    "syntax": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ],
+      "standalone": []
+    },
+    "upload": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ],
+      "standalone": []
+    }
+  },
+  "providers": [
+    "designer",
+    "agent",
+    "ibcmd",
+    "ibcmd-rs",
+    "webinst"
+  ]
+}

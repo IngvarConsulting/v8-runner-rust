@@ -336,7 +336,13 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertEqual(2, len(step), "the site/matrix check must be one step of Happy Path")
         body = step[1].split("      - name: ")[0]
         self.assertIn("python3 scripts/site_matrix.py", body)
+        self.assertIn("python3 tests/site_matrix_cases.py", body)
         self.assertNotIn("continue-on-error", body)
+        # Шаг идёт на одной площадке, и она в джобе есть: иначе условие молча снимает
+        # шаг со всех прогонов.
+        conditions = re.findall(r"^\s*if:.*$", body, re.M)
+        self.assertEqual(["if: matrix.os == 'ubuntu-latest'"], [c.strip() for c in conditions])
+        self.assertIn("- os: ubuntu-latest", job.split("include:")[1].split("steps:")[0])
         self.assertTrue((ROOT / "scripts/site_matrix_known.txt").is_file())
 
     def test_all_actions_are_pinned_to_full_commit_sha(self) -> None:

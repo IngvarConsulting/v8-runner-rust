@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Сверка «сайт = матрица»: цепочки исполнителей сайта против матрицы кода.
+"""Сверка «сайт = матрица»: цепочки умолчаний сайта против матрицы кода.
 
 Сайт описывает целевое состояние, код — текущее. Пока они расходятся, каждое известное
 расхождение записано строкой в `scripts/site_matrix_known.txt` с номером задачи, которая
@@ -8,16 +8,28 @@
 - найдено расхождение, которого нет в списке;
 - строка списка больше не расходится или расходится иначе, чем записано;
 - таблица `architecture.html#d-ops` называет не тех исполнителей, что `target()` в `data.js`;
-- сценарий сайта не сопоставлен с операцией матрицы и не объявлен операцией без строки.
+- сценарий сайта или строка таблицы не сопоставлены, или у операции матрицы нет сценария.
 
 Источники:
-- матрица — `capabilities()` в `src/domain/capability.rs`, разбирается из исходника;
-  незнакомая форма записи — отказ разбора, а не молчаливый пропуск;
-- сайт — ветка `target()` из `docs/site/data.js`, вычисляется в `node` при всех
-  инструментах в наличии; исполнители вне матрицы (`rac`, клиент, EDT, браузер) не
-  сравниваются.
+- матрица — артефакт `docs/schemas/capability-matrix.json`, порождённый из
+  `src/domain/capability.rs` тестом `generated_capability_matrix_is_current`
+  (`UPDATE_CAPABILITY_MATRIX=1 cargo test --bin v8-runner generated_capability_matrix_is_current`);
+  тест держит артефакт равным коду, скрипт исходник Rust не читает;
+- сайт — ветка `target()` из `docs/site/data.js`, вычисляется в `node`.
+
+Что именно сверяется:
+- цепочка умолчаний: клетка сайта — порядок, в котором раннер пробует исполнителей,
+  поэтому с ней сравниваются только реализованные исполнители строки матрицы в её
+  порядке. Экспериментальный (только по ключу `providers.*`) в цепочку не входит; в
+  сообщении и в списке известных он показан с пометкой «~»;
+- только срез формата DESIGNER и типа CONFIGURATION при всех инструментах в наличии;
+- если `applies()` сценария отказывает для цели, цепочка сайта на ней пустая;
+- с матрицей сравниваются только её исполнители: `rac`, EDT, клиент и браузер нет. В
+  сверке таблицы с `target()` участвуют все исполнители `data.js`, кроме клиента и
+  браузера — таблица называет их прозой, а не меткой.
 
 Запуск: `python3 scripts/site_matrix.py` из любого каталога. Нужен `node`.
+Контрольные случаи сверки — `tests/site_matrix_cases.py`.
 """
 
 from __future__ import annotations
@@ -31,10 +43,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CAPABILITY_RS = ROOT / "src" / "domain" / "capability.rs"
+MATRIX_JSON = ROOT / "docs" / "schemas" / "capability-matrix.json"
 DATA_JS = ROOT / "docs" / "site" / "data.js"
 ARCHITECTURE_HTML = ROOT / "docs" / "site" / "architecture.html"
 KNOWN = ROOT / "scripts" / "site_matrix_known.txt"
+REGENERATE = "UPDATE_CAPABILITY_MATRIX=1 cargo test --bin v8-runner generated_capability_matrix_is_current"
 
 TARGETS = ("file", "cluster", "standalone")
 
@@ -68,19 +81,33 @@ SCENARIOS_WITHOUT_ROW = {
     "convert",
 }
 
-# Строка таблицы `#d-ops` → сценарий `data.js`.
+# Строка таблицы `#d-ops` → сценарий `data.js`. Новая строка таблицы обязана попасть сюда.
 TABLE_ROWS = {
     "infobase create": "infobase-create",
     "push": "push",
-    "pull": "pull",
+    "apply": "apply",
+    "reset": "reset",
     "upload": "upload",
-    "make": "make",
+    "pull": "pull",
     "download": "download",
-    "infobase dump · restore": "ib-dump",
+    "diff": "diff",
+    "make": "make",
+    "convert": "convert",
     "extensions": "extensions",
+    "infobase dump · restore": "ib-dump",
     "check": "check",
+    "sessions": "sessions",
+    "test": "test",
+    "launch": "launch",
     "publish": "publish",
 }
+
+# Исполнители, которых таблица называет прозой, а не меткой.
+TABLE_PROSE_PROVIDERS = {"client", "browser"}
+
+Row = list[tuple[str, bool]]
+Chains = dict[str, dict[str, list[str]]]
+Known = dict[tuple[str, str], tuple[str, str, str]]
 
 
 class Failure(Exception):
@@ -90,101 +117,20 @@ class Failure(Exception):
 # --- матрица кода -----------------------------------------------------------------
 
 
-def strip_comments(source: str) -> str:
-    return re.sub(r"//[^\n]*", "", source)
-
-
-def enum_names(source: str, enum: str) -> dict[str, str]:
-    """`Self::Variant => "name"` из `as_str` у `impl <enum>`."""
-    match = re.search(
-        r"impl " + enum + r" \{.*?pub const fn as_str\(self\) -> &'static str \{\s*match self \{(.*?)\}",
-        source,
-        re.S,
-    )
-    if not match:
-        raise Failure(f"{CAPABILITY_RS.name}: не найден `{enum}::as_str`")
-    names = dict(re.findall(r'Self::(\w+)\s*=>\s*"([^"]+)"', match.group(1)))
-    if not names:
-        raise Failure(f"{CAPABILITY_RS.name}: `{enum}::as_str` пуст")
-    return names
-
-
-def leftover(text: str, pattern: str) -> str:
-    return re.sub(pattern, "", text, flags=re.S).strip()
-
-
-def parse_matrix() -> dict[tuple[str, str], list[tuple[str, bool]]]:
-    """(операция, цель) → [(исполнитель, реализован)] в порядке строки."""
-    source = strip_comments(CAPABILITY_RS.read_text(encoding="utf-8"))
-    providers = enum_names(source, "Provider")
-    operations = enum_names(source, "Operation")
-    targets = enum_names(source, "TargetKind")
-
-    body = re.search(
-        r"pub fn capabilities\(operation: Operation, target: TargetKind\) -> &'static \[Capability\] \{(.*?)\n\}",
-        source,
-        re.S,
-    )
-    if not body:
-        raise Failure(f"{CAPABILITY_RS.name}: не найдена `capabilities()`")
-    body = body.group(1)
-
-    rows: dict[str, list[tuple[str, bool]]] = {"&[]": []}
-    const_pattern = r"const (\w+): &\[Capability\] = &\[(.*?)\];"
-    for name, items in re.findall(const_pattern, body, re.S):
-        entry = r"(implemented|experimental)\((\w+),\s*\w+\)"
-        if leftover(items, entry + r"\s*,?"):
-            raise Failure(f"{CAPABILITY_RS.name}: незнакомая запись в `{name}`: {items.strip()}")
-        row = []
-        for kind, provider in re.findall(entry, items):
-            if provider not in providers:
-                raise Failure(f"{CAPABILITY_RS.name}: `{name}` называет неизвестного `{provider}`")
-            row.append((providers[provider], kind == "implemented"))
-        rows[name] = row
-
-    match_body = re.search(r"match \(operation, target\) \{(.*)\}\s*$", body, re.S)
-    if not match_body:
-        raise Failure(f"{CAPABILITY_RS.name}: не найден `match (operation, target)`")
-    arm = re.compile(
-        r"\(\s*(?P<ops>[\w:|\s]+?)\s*,\s*(?P<targets>[\w:|\s]+?)\s*,?\s*\)\s*=>\s*"
-        r"(?:\{\s*(?P<block>\w+)\s*\}|(?P<value>\w+|&\[\]))\s*,?",
-        re.S,
-    )
-    arms_text = match_body.group(1)
-    if leftover(arms_text, arm.pattern):
-        raise Failure(
-            f"{CAPABILITY_RS.name}: незнакомая ветка в `match (operation, target)`: "
-            + leftover(arms_text, arm.pattern)[:200]
-        )
-
-    def alternatives(text: str, prefix: str, names: dict[str, str]) -> list[str]:
-        if text.strip() == "_":
-            return list(names.values())
-        out = []
-        for part in text.split("|"):
-            part = part.strip()
-            if not part.startswith(prefix + "::") or part[len(prefix) + 2 :] not in names:
-                raise Failure(f"{CAPABILITY_RS.name}: незнакомый образец `{part}`")
-            out.append(names[part[len(prefix) + 2 :]])
-        return out
-
-    matrix: dict[tuple[str, str], list[tuple[str, bool]]] = {}
-    for found in arm.finditer(arms_text):
-        value = found.group("block") or found.group("value")
-        if value not in rows:
-            raise Failure(f"{CAPABILITY_RS.name}: ветка ссылается на неизвестную строку `{value}`")
-        for operation in alternatives(found.group("ops"), "Operation", operations):
-            for target in alternatives(found.group("targets"), "TargetKind", targets):
-                matrix.setdefault((operation, target), rows[value])
-    missing = [
-        f"{operation} {target}"
-        for operation in operations.values()
-        for target in targets.values()
-        if (operation, target) not in matrix
-    ]
-    if missing:
-        raise Failure(f"{CAPABILITY_RS.name}: матрица не покрывает {', '.join(missing)}")
-    return matrix
+def load_matrix(text: str) -> tuple[dict[tuple[str, str], Row], set[str]]:
+    """(операция, цель) → [(исполнитель, реализован)] в порядке строки; все исполнители."""
+    try:
+        document = json.loads(text)
+        providers = set(document["providers"])
+        matrix: dict[tuple[str, str], Row] = {}
+        for operation, by_target in document["operations"].items():
+            for target in TARGETS:
+                matrix[(operation, target)] = [
+                    (entry["provider"], bool(entry["implemented"])) for entry in by_target[target]
+                ]
+    except (ValueError, KeyError, TypeError) as error:
+        raise Failure(f"{MATRIX_JSON.name} не разобран ({error}); перепородите: {REGENERATE}") from error
+    return matrix, providers
 
 
 # --- сайт -------------------------------------------------------------------------
@@ -199,9 +145,9 @@ const data = sandbox.window.RUNNER_DATA;
 const tools = {};
 for (const tool of data.AXES.tools) tools[tool.id] = true;
 tools.browser = true;
-const out = {};
+const chains = {};
 for (const s of data.SCENARIOS) {
-  out[s.id] = {};
+  chains[s.id] = {};
   for (const target of ['file', 'cluster', 'standalone']) {
     const ctx = { format: 'DESIGNER', type: 'CONFIGURATION', target: target, tools: tools, mode: 'target' };
     const blocked = s.applies(ctx);
@@ -210,14 +156,16 @@ for (const s of data.SCENARIOS) {
       const r = s.target.call(s, ctx);
       chain = (r && r.chain ? r.chain : []).map(function (p) { return p.key; });
     }
-    out[s.id][target] = chain;
+    chains[s.id][target] = chain;
   }
 }
-process.stdout.write(JSON.stringify(out));
+const providers = Object.keys(data.PROVIDERS).map(function (k) { return data.PROVIDERS[k].key; });
+process.stdout.write(JSON.stringify({ chains: chains, providers: providers }));
 """
 
 
-def site_chains() -> dict[str, dict[str, list[str]]]:
+def site_chains() -> tuple[Chains, set[str]]:
+    """Цепочки `target()` по сценариям и целям; ключи всех исполнителей `data.js`."""
     node = shutil.which("node")
     if not node:
         raise Failure("нужен node: ветку target() из docs/site/data.js вычисляет он")
@@ -230,28 +178,34 @@ def site_chains() -> dict[str, dict[str, list[str]]]:
     )
     if result.returncode != 0:
         raise Failure(f"node не вычислил {DATA_JS.name}:\n{result.stderr}")
-    return json.loads(result.stdout)
+    out = json.loads(result.stdout)
+    return out["chains"], set(out["providers"])
 
 
-def table_chains(known_providers: set[str]) -> dict[str, dict[str, list[str]]]:
-    """Исполнители матрицы в клетках таблицы `#d-ops`, по порядку."""
-    text = ARCHITECTURE_HTML.read_text(encoding="utf-8")
+def table_chains(text: str, comparable: set[str]) -> Chains:
+    """Метки исполнителей в клетках таблицы `#d-ops`, по порядку, по сценариям."""
     section = re.search(r'<h2 id="d-ops">.*?<tbody>(.*?)</tbody>', text, re.S)
     if not section:
         raise Failure(f"{ARCHITECTURE_HTML.name}: не найдена таблица #d-ops")
-    out: dict[str, dict[str, list[str]]] = {}
-    for row in re.findall(r"<tr>(.*?)</tr>", section.group(1), re.S):
-        cells = re.findall(r"<td([^>]*)>(.*?)</td>", row, re.S)
+    out: Chains = {}
+    rows = re.findall(r"<tr\b[^>]*>(.*?)</tr>", section.group(1), re.S)
+    for number, row in enumerate(rows, 1):
+        cells = re.findall(r"<td\b([^>]*)>(.*?)</td>", row, re.S)
+        if not cells:
+            raise Failure(f"{ARCHITECTURE_HTML.name}: строка {number} тела таблицы #d-ops без клеток <td>")
         name = html.unescape(re.sub(r"<[^>]+>", "", cells[0][1])).strip()
         if name not in TABLE_ROWS:
-            continue
+            raise Failure(
+                f"{ARCHITECTURE_HTML.name}: строка «{name}» таблицы #d-ops не сопоставлена "
+                "со сценарием: впишите её в TABLE_ROWS"
+            )
         values: list[list[str]] = []
         for attrs, cell in cells[1:]:
             pills = [
                 html.unescape(p).strip()
                 for p in re.findall(r'<span class="pill [^"]*">(.*?)</span>', cell)
             ]
-            chain = [p for p in pills if p in known_providers]
+            chain = [p for p in pills if p in comparable]
             span = re.search(r'colspan="(\d+)"', attrs)
             values.extend([chain] * (int(span.group(1)) if span else 1))
         if len(values) != len(TARGETS):
@@ -270,16 +224,22 @@ def render(chain: list[str]) -> str:
     return " ".join(chain) if chain else "-"
 
 
-def render_row(row: list[tuple[str, bool]]) -> str:
+def render_row(row: Row) -> str:
+    """Строка матрицы целиком; «~» — только по ключу `providers.*`."""
     return render([provider if implemented else provider + "~" for provider, implemented in row])
 
 
-def read_known() -> dict[tuple[str, str], tuple[str, str, str]]:
-    known: dict[tuple[str, str], tuple[str, str, str]] = {}
+def default_chain(row: Row) -> list[str]:
+    """Цепочка умолчаний: реализованные исполнители в порядке строки."""
+    return [provider for provider, implemented in row if implemented]
+
+
+def read_known(text: str) -> Known:
+    known: Known = {}
     line_pattern = re.compile(
         r"^(?P<op>\S+) (?P<target>\S+) \| сайт: (?P<site>[^|]+?) \| матрица: (?P<matrix>[^|]+?) \| (?P<issue>#\d+)$"
     )
-    for number, line in enumerate(KNOWN.read_text(encoding="utf-8").splitlines(), 1):
+    for number, line in enumerate(text.splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
         found = line_pattern.match(line)
@@ -292,28 +252,23 @@ def read_known() -> dict[tuple[str, str], tuple[str, str, str]]:
     return known
 
 
-def main() -> int:
-    try:
-        matrix = parse_matrix()
-        source = strip_comments(CAPABILITY_RS.read_text(encoding="utf-8"))
-        providers = set(enum_names(source, "Provider").values())
-        site = site_chains()
-        table = table_chains(providers)
-        known = read_known()
-    except Failure as error:
-        print(f"site_matrix: {error}", file=sys.stderr)
-        return 2
-
+def compare(
+    matrix: dict[tuple[str, str], Row],
+    providers: set[str],
+    site: Chains,
+    table: Chains,
+    known: Known,
+) -> list[str]:
+    """Перечень расхождений; пустой — сайт и матрица согласованы."""
     problems: list[str] = []
 
-    unmapped = sorted(set(site) - set(SCENARIO_OPERATIONS) - SCENARIOS_WITHOUT_ROW)
-    for scenario in unmapped:
+    for scenario in sorted(set(site) - set(SCENARIO_OPERATIONS) - SCENARIOS_WITHOUT_ROW):
         problems.append(
             f"сценарий `{scenario}` из data.js не сопоставлен с матрицей: "
             "впишите его в SCENARIO_OPERATIONS или SCENARIOS_WITHOUT_ROW"
         )
     for scenario in sorted((set(SCENARIO_OPERATIONS) | SCENARIOS_WITHOUT_ROW) - set(site)):
-        problems.append(f"сценария `{scenario}` в data.js нет: уберите его из {Path(__file__).name}")
+        problems.append(f"сценария `{scenario}` в data.js нет: уберите его из site_matrix.py")
 
     mapped_operations = {op for ops in SCENARIO_OPERATIONS.values() for op in ops}
     for operation in sorted({op for op, _ in matrix} - mapped_operations):
@@ -321,11 +276,13 @@ def main() -> int:
 
     for scenario, by_target in sorted(table.items()):
         for target in TARGETS:
-            expected = [p for p in site.get(scenario, {}).get(target, []) if p in providers]
+            expected = [
+                p for p in site.get(scenario, {}).get(target, []) if p not in TABLE_PROSE_PROVIDERS
+            ]
             if by_target[target] != expected:
                 problems.append(
-                    f"architecture.html#d-ops «{scenario}» {target}: таблица {render(by_target[target])}, "
-                    f"data.js target() {render(expected)}"
+                    f"architecture.html#d-ops «{scenario}» {target}: таблица "
+                    f"{render(by_target[target])}, data.js target() {render(expected)}"
                 )
 
     seen: set[tuple[str, str]] = set()
@@ -333,41 +290,61 @@ def main() -> int:
         for operation in operations:
             for target in TARGETS:
                 key = (operation, target)
-                site_chain = render([p for p in site.get(scenario, {}).get(target, []) if p in providers])
+                if key not in matrix:
+                    problems.append(f"в матрице нет пары {operation} {target}")
+                    continue
+                chain = [p for p in site.get(scenario, {}).get(target, []) if p in providers]
+                site_chain = render(chain)
                 row = matrix[key]
                 matrix_chain = render_row(row)
-                diverges = site_chain != render([provider for provider, _ in row])
                 entry = known.get(key)
                 if entry:
                     seen.add(key)
-                if not diverges:
+                if chain == default_chain(row):
                     if entry:
                         problems.append(
-                            f"{operation} {target}: сайт и матрица совпадают ({site_chain}) — "
-                            f"уберите строку {entry[2]} из {KNOWN.name}"
+                            f"{operation} {target}: сайт и цепочка умолчаний матрицы совпадают "
+                            f"({site_chain}) — уберите строку {entry[2]} из {KNOWN.name}"
                         )
                     continue
                 if not entry:
                     problems.append(
                         f"{operation} {target}: сайт {site_chain}, матрица {matrix_chain} — "
-                        f"новое расхождение; приведите сайт или код к одному, либо внесите строку "
+                        "новое расхождение; приведите сайт или код к одному, либо внесите строку "
                         f"с номером задачи в {KNOWN.name}"
                     )
                 elif (entry[0], entry[1]) != (site_chain, matrix_chain):
                     problems.append(
-                        f"{operation} {target}: записано «сайт: {entry[0]} | матрица: {entry[1]}» ({entry[2]}), "
-                        f"сейчас «сайт: {site_chain} | матрица: {matrix_chain}» — обновите строку"
+                        f"{operation} {target}: записано «сайт: {entry[0]} | матрица: {entry[1]}» "
+                        f"({entry[2]}), сейчас «сайт: {site_chain} | матрица: {matrix_chain}» — "
+                        "обновите строку"
                     )
     for key in sorted(set(known) - seen):
         problems.append(f"{KNOWN.name}: строка {key[0]} {key[1]} не называет пару операции и цели из сверки")
+    return problems
 
+
+def main() -> int:
+    try:
+        matrix, providers = load_matrix(MATRIX_JSON.read_text(encoding="utf-8"))
+        site, site_providers = site_chains()
+        table = table_chains(
+            ARCHITECTURE_HTML.read_text(encoding="utf-8"), site_providers - TABLE_PROSE_PROVIDERS
+        )
+        known = read_known(KNOWN.read_text(encoding="utf-8"))
+    except (Failure, OSError) as error:
+        print(f"site_matrix: {error}", file=sys.stderr)
+        return 2
+
+    problems = compare(matrix, providers, site, table, known)
     if problems:
         print("Сайт и матрица расходятся:", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         print(
-            "Матрица — src/domain/capability.rs, сайт — target() в docs/site/data.js и "
-            "таблица docs/site/architecture.html#d-ops; «~» — исполнитель только по ключу providers.*.",
+            "Матрица — docs/schemas/capability-matrix.json из src/domain/capability.rs, сайт — "
+            "target() в docs/site/data.js и таблица docs/site/architecture.html#d-ops; "
+            "сверяется цепочка умолчаний, «~» — исполнитель только по ключу providers.*.",
             file=sys.stderr,
         )
         return 1

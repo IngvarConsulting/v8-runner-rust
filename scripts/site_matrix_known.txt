@@ -1,9 +1,10 @@
 # Известные расхождения «сайт = матрица» для scripts/site_matrix.py.
 #
-# Сайт описывает целевое состояние, матрица src/domain/capability.rs — текущее. Строка —
-# одна пара операции и цели: исполнители по target() из docs/site/data.js, исполнители
-# строки матрицы в её порядке («~» — только по ключу providers.*, «-» — строки нет) и
-# задача, которая снимает расхождение. Задача удаляет свои строки; сверка падает и на
+# Сайт описывает целевое состояние, матрица src/domain/capability.rs — текущее; сверяется
+# цепочка умолчаний. Строка — одна пара операции и цели: исполнители по target() из
+# docs/site/data.js, исполнители строки матрицы в её порядке («~» — только по ключу
+# providers.*, в цепочку умолчаний не входит; «-» — строки нет) и задача, которая
+# снимает расхождение. Задача удаляет свои строки; сверка падает и на
 # новом расхождении, и на строке, которая больше не расходится или расходится иначе.
 # Список пуст — задача #225 закрыта.
 #
@@ -12,6 +13,7 @@
 download file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
 download cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
 download standalone | сайт: designer agent | матрица: agent | #205
+extensions file | сайт: ibcmd agent | матрица: ibcmd agent~ | #206
 extensions cluster | сайт: agent designer | матрица: ibcmd agent~ | #206
 extensions standalone | сайт: agent designer | матрица: agent | #205
 infobase.create file | сайт: ibcmd designer | матрица: designer ibcmd | #204

@@ -519,6 +519,66 @@ pub fn ibcmd_for_every_choice() -> std::collections::BTreeMap<Operation, Provide
 mod tests {
     use super::*;
 
+    const MATRIX_ARTIFACT: &str = "docs/schemas/capability-matrix.json";
+
+    /// Матрица как данные: операция → вид цели → исполнители строки по порядку с флагом
+    /// `implemented`. Читает её сверка сайта `scripts/site_matrix.py`.
+    fn matrix_document() -> serde_json::Value {
+        let operations: serde_json::Map<String, serde_json::Value> = Operation::ALL
+            .into_iter()
+            .map(|operation| {
+                let targets: serde_json::Map<String, serde_json::Value> = [
+                    TargetKind::File,
+                    TargetKind::Cluster,
+                    TargetKind::Standalone,
+                ]
+                .into_iter()
+                .map(|target| {
+                    let row = capabilities(operation, target)
+                        .iter()
+                        .map(|capability| {
+                            serde_json::json!({
+                                "provider": capability.provider.as_str(),
+                                "implemented":
+                                    capability.implementation == Implementation::Implemented,
+                            })
+                        })
+                        .collect();
+                    (target.as_str().to_owned(), serde_json::Value::Array(row))
+                })
+                .collect();
+                (
+                    operation.as_str().to_owned(),
+                    serde_json::Value::Object(targets),
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "_comment": "Матрица исполнителей из src/domain/capability.rs. Порождается тестом при UPDATE_CAPABILITY_MATRIX=1, руками не правится.",
+            "providers": Provider::ALL.map(Provider::as_str),
+            "operations": operations,
+        })
+    }
+
+    /// Артефакт матрицы совпадает с кодом. Обновление:
+    /// `UPDATE_CAPABILITY_MATRIX=1 cargo test --bin v8-runner generated_capability_matrix_is_current`.
+    #[test]
+    fn generated_capability_matrix_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MATRIX_ARTIFACT);
+        let generated = matrix_document();
+        if std::env::var_os("UPDATE_CAPABILITY_MATRIX").is_some() {
+            let text = serde_json::to_string_pretty(&generated).expect("matrix serializes");
+            std::fs::write(&path, format!("{text}\n")).expect("write capability matrix");
+        }
+        let text = std::fs::read_to_string(&path).expect("capability matrix artefact");
+        let pinned: serde_json::Value =
+            serde_json::from_str(&text).expect("capability matrix is valid json");
+        assert_eq!(
+            pinned, generated,
+            "{MATRIX_ARTIFACT} is stale; rerun UPDATE_CAPABILITY_MATRIX=1 cargo test --bin v8-runner generated_capability_matrix_is_current"
+        );
+    }
+
     /// Умолчание — первый реализованный; экспериментальный в цепочку не входит.
     #[test]
     fn an_experimental_provider_never_leads_a_default_chain() {

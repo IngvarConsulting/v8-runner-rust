@@ -194,13 +194,17 @@ jobs:
           python3 tests/release_governance.py
           python3 tests/release_assets.py
 
-      # Сверка «сайт = матрица» (#225): цепочки target() из docs/site/data.js и таблица
-      # architecture.html#d-ops против src/domain/capability.rs. Известные расхождения
-      # записаны с номерами задач в scripts/site_matrix_known.txt; новое роняет джобу.
-      # Сверяются тексты в репозитории, площадка не важна — хватает одной.
+      # Сверка «сайт = матрица» (#225): цепочки умолчаний target() из docs/site/data.js и
+      # таблица architecture.html#d-ops против docs/schemas/capability-matrix.json — его
+      # держит равным src/domain/capability.rs тест generated_capability_matrix_is_current
+      # джобы Contract. Известные расхождения записаны с номерами задач в
+      # scripts/site_matrix_known.txt; новое роняет джобу. Сверяются тексты в репозитории,
+      # площадка не важна — хватает одной. node для data.js берётся из образа раннера.
       - name: Verify site matches provider matrix
         if: matrix.os == 'ubuntu-latest'
-        run: python3 scripts/site_matrix.py
+        run: |
+          python3 tests/site_matrix_cases.py
+          python3 scripts/site_matrix.py
 
       - name: Resolve platform bundle live mode
         id: live

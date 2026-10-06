@@ -53,6 +53,7 @@ live-mcp-http.py
 | `live-cli-ibcmd.sh` | Live entrypoint | Удобный ручной запуск smoke для `builder=IBCMD` | Сгенерировать IBCMD-конфиг из designer fixture, убрать неподходящие source-set и передать управление в `live-cli-fixture.sh` |
 | `uat-cli-ibcmd.sh` | UAT wrapper | Полный запуск IBCMD smoke "с нуля" | Собрать бинарь, очистить старые артефакты и вызвать `live-cli-ibcmd.sh` |
 | `live-mcp-http.py` | MCP smoke | Live-проверка MCP HTTP сервера | Поднять `mcp serve http`, выполнить `initialize`, `tools/list` и `tools/call` smoke-последовательность |
+| `../site_matrix.py` | CI check | Сверка «сайт = матрица» (#225), шаг Happy Path | Сверить цепочки `docs/site/data.js` и таблицу `architecture.html#d-ops` с `docs/schemas/capability-matrix.json`; порядок работы и перепорождение артефакта (`UPDATE_CAPABILITY_MATRIX=1 cargo test --bin v8-runner generated_capability_matrix_is_current`) — [`docs/site/README.md`, раздел «Сверка с матрицей»](../../docs/site/README.md#сверка-с-матрицей) |
 
 ## Границы ответственности
 
