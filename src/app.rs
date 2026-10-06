@@ -590,8 +590,8 @@ fn run_config_init(args: &ConfigInitArgs, cli: &Cli, presenter: &Presenter) -> i
                 presenter.print_envelope(&Envelope {
                     ok: true,
                     command: CONFIG_INIT_COMMAND.to_owned(),
-                    duration_ms: result.duration_ms,
-                    warnings: result.warnings.clone(),
+                    duration_ms: result.duration_ms(),
+                    warnings: result.warnings().to_vec(),
                     steps: Vec::new(),
                     error: None,
                     data: result,
@@ -614,32 +614,65 @@ fn render_config_init_text(
     result: &crate::domain::config_init::ConfigInitResult,
     presenter: &Presenter,
 ) {
-    let mut details = vec![
-        format!("path: {}", result.path),
-        format!("local path: {}", result.local_path),
-        format!("gitignore: {}", result.gitignore_path),
-        format!("format: {}", result.format),
-    ];
-    if result.overwritten {
-        details.push("overwritten: yes".to_owned());
-    }
-    if let Some(platform_version) = result.platform_version.as_deref() {
-        details.push(format!("platform version: {platform_version}"));
-    }
-    for source_set in &result.source_sets {
-        details.push(format!(
-            "source-set {}: {} ({})",
-            source_set.name, source_set.path, source_set.source_type
-        ));
-    }
-    for warning in &result.warnings {
-        details.push(format!("[warning] {warning}"));
-    }
+    use crate::domain::config_init::{ConfigInitResult, OriginDeclaration};
 
-    let completion = if result.warnings.is_empty() {
-        "Config written successfully"
-    } else {
-        "Config written with warnings"
+    let origin_details = |origin: &OriginDeclaration| {
+        let mut lines = vec![format!(
+            "origin: {}{}",
+            origin.change.as_str(),
+            origin
+                .connection
+                .as_deref()
+                .map(|connection| format!(" ({connection})"))
+                .unwrap_or_default()
+        )];
+        if let Some(replaced) = origin.replaced.as_deref() {
+            lines.push(format!("upstream: {replaced} (replaced in origin)"));
+        }
+        lines
+    };
+    let (details, completion) = match result {
+        ConfigInitResult::Project(result) => {
+            let mut details = vec![
+                format!("path: {}", result.path),
+                format!("local path: {}", result.local_path),
+                format!("gitignore: {}", result.gitignore_path),
+                format!("format: {}", result.format),
+            ];
+            if result.overwritten {
+                details.push("overwritten: yes".to_owned());
+            }
+            if let Some(platform_version) = result.platform_version.as_deref() {
+                details.push(format!("platform version: {platform_version}"));
+            }
+            for source_set in &result.source_sets {
+                details.push(format!(
+                    "source-set {}: {} ({})",
+                    source_set.name, source_set.path, source_set.source_type
+                ));
+            }
+            details.extend(origin_details(&result.origin));
+            for warning in &result.warnings {
+                details.push(format!("[warning] {warning}"));
+            }
+            let completion = if result.warnings.is_empty() {
+                "Config written successfully"
+            } else {
+                "Config written with warnings"
+            };
+            (details, completion)
+        }
+        ConfigInitResult::Local(result) => {
+            let mut details = vec![
+                format!("local path: {}", result.local_path),
+                format!("gitignore: {}", result.gitignore_path),
+            ];
+            details.extend(origin_details(&result.origin));
+            (
+                details,
+                "Local layer written; the project file is left as it is",
+            )
+        }
     };
     let timeline = vec![
         TimelineItem::new(TimelineStatus::Succeeded, "config:").with_detail(details.join("\n")),

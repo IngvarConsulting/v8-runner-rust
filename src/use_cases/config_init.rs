@@ -4,7 +4,11 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use crate::config::schema::main_config_schema_url;
-use crate::domain::config_init::{ConfigInitResult, ConfigInitSourceSet};
+use crate::domain::config_init::{
+    ConfigInitResult, ConfigInitSourceSet, LocalLayerInitResult, OriginChange, OriginDeclaration,
+    ProjectInitResult,
+};
+use crate::platform::secrets::mask_preview_args;
 use crate::support::edt_project::{self, EdtProjectKind};
 use crate::support::error::AppError;
 use crate::support::path::{is_safe_path_segment, nearest_existing_canonical_path};
@@ -78,8 +82,10 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
             request.output_path.display()
         ))
     })?;
-    let overwritten = output_path.exists();
-    if overwritten {
+    // Проект объявлен, если проектный файл уже есть: тогда местный слой перенаправляет
+    // `origin`, а не отказывает, и без `--force` проектный файл остаётся как был.
+    let project_declared = output_path.is_file();
+    if project_declared {
         // `init` — единственное имя словаря, сменившее предмет: раньше под ним создавали
         // базу. Набравший его по старой памяти получает отказ с именем нужной команды,
         // а не совет перезаписать свой конфиг ключом `--force`.
@@ -89,15 +95,30 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
                 output_path.display()
             )));
         }
-        if !request.force {
-            return Err(AppError::Validation(format!(
-                "config file already exists: {} (use --force to overwrite)",
-                output_path.display()
-            )));
-        }
     }
+    let conflict = if project_declared {
+        OriginConflict::Redirect
+    } else {
+        OriginConflict::Refuse
+    };
 
     let output_dir = output_path.parent().unwrap_or(project_dir.as_path());
+    let local_path = output_dir.join(LOCAL_CONFIG_FILE_NAME);
+    let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
+
+    if project_declared && !request.force {
+        let local = plan_local_config(&local_path, request.connection.as_ref(), conflict)?;
+        write_local_config(&local_path, &local.content)?;
+        gitignore.ensure()?;
+        return Ok(ConfigInitResult::Local(LocalLayerInitResult {
+            ok: true,
+            local_path: local_path.display().to_string(),
+            gitignore_path: gitignore.path().display().to_string(),
+            origin: local.origin,
+            duration_ms: started.elapsed().as_millis() as u64,
+        }));
+    }
+
     std::fs::create_dir_all(output_dir).map_err(|error| {
         AppError::Runtime(format!(
             "failed to create config directory '{}': {error}",
@@ -114,9 +135,9 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let source_sets =
         source_sets_relative_to_config_dir(&project_dir, output_dir, &project_source_sets);
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
-
-    let local_path = output_dir.join(LOCAL_CONFIG_FILE_NAME);
-    let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
+    // Отказ местного слоя случается до записи проектного файла: иначе `--force` успел
+    // бы переписать проект, а команда ответила бы отказом.
+    let local = plan_local_config(&local_path, request.connection.as_ref(), conflict)?;
 
     std::fs::write(&output_path, yaml).map_err(|error| {
         AppError::Runtime(format!(
@@ -124,10 +145,10 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
             output_path.display()
         ))
     })?;
-    ensure_local_config(&local_path, request.connection.as_ref())?;
+    write_local_config(&local_path, &local.content)?;
     gitignore.ensure()?;
 
-    Ok(ConfigInitResult {
+    Ok(ConfigInitResult::Project(ProjectInitResult {
         ok: true,
         path: output_path.display().to_string(),
         local_path: local_path.display().to_string(),
@@ -136,18 +157,16 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
         platform_version,
         source_sets,
         warnings,
-        overwritten,
+        overwritten: project_declared,
+        origin: local.origin,
         duration_ms: started.elapsed().as_millis() as u64,
-    })
+    }))
 }
 
 /// Адрес базы по умолчанию, когда `--connection` не передан: файловая база внутри
 /// рабочего каталога.
 const DEFAULT_ORIGIN_CONNECTION: &str = "File=build/ib";
 
-/// Местный слой объявляет `origin`: к какой базе подключён каталог, знает эта машина.
-/// Существующий слой не переписывается — `origin` дописывается, если не объявлен, а
-/// объявленный с другим адресом, чем просили, — отказ, чтобы адрес не потерялся молча.
 /// Имя базы, объявленной в существующем конфиге, если она там есть. Читается тем же
 /// разбором YAML, что и остальной файл: отказ должен называть базу, а не догадываться.
 fn declared_infobase_name(path: &std::path::Path) -> Option<String> {
@@ -168,27 +187,66 @@ fn declared_infobase_name(path: &std::path::Path) -> Option<String> {
         .then(|| crate::config::model::DEFAULT_INFOBASE_NAME.to_owned())
 }
 
-fn ensure_local_config(path: &Path, origin: Option<&DeclaredOrigin>) -> Result<(), AppError> {
-    let content = if path.exists() {
-        let existing = std::fs::read_to_string(path).map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to read local config file '{}': {error}",
-                path.display()
-            ))
-        })?;
-        local_config_with_origin(&existing, origin, path)?
-    } else {
-        render_local_config_with_origin(
-            origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection),
-        )
-    };
+/// Как поступить с `origin`, который уже объявлен другим адресом, чем назван сейчас.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginConflict {
+    /// Каталог без проектного файла: отказ, чтобы адрес не потерялся молча.
+    Refuse,
+    /// Объявленный проект, например новый ворктри со скопированным слоем: `origin`
+    /// получает новый адрес, прежняя секция сохраняется под именем `upstream`.
+    Redirect,
+}
 
+/// Местный слой, каким его запишет `init`, и что стало с `origin`.
+struct LocalLayerPlan {
+    content: String,
+    origin: OriginDeclaration,
+}
+
+/// Местный слой объявляет `origin`: к какой базе подключён каталог, знает эта машина.
+/// Существующий слой не переписывается — `origin` дописывается, если не объявлен; другой
+/// адрес для объявленного решает `conflict`. Файл здесь только читается: записать план —
+/// дело вызывающего, когда все отказы позади.
+fn plan_local_config(
+    path: &Path,
+    origin: Option<&DeclaredOrigin>,
+    conflict: OriginConflict,
+) -> Result<LocalLayerPlan, AppError> {
+    if !path.exists() {
+        let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
+        return Ok(LocalLayerPlan {
+            content: render_local_config_with_origin(connection),
+            origin: OriginDeclaration {
+                change: OriginChange::Declared,
+                connection: Some(shown_address(connection)),
+                replaced: None,
+            },
+        });
+    }
+    let existing = std::fs::read_to_string(path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to read local config file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    local_config_with_origin(&existing, origin, conflict, path)
+}
+
+fn write_local_config(path: &Path, content: &str) -> Result<(), AppError> {
     std::fs::write(path, content).map_err(|error| {
         AppError::Runtime(format!(
             "failed to write local config file '{}': {error}",
             path.display()
         ))
     })
+}
+
+/// Адрес так, как его показывают ответ и отказ: пароль внутри строки соединения
+/// замаскирован тем же владельцем, что и в показе команд.
+fn shown_address(connection: &str) -> String {
+    mask_preview_args(std::slice::from_ref(&connection.to_owned()), &[])
+        .pop()
+        .unwrap_or_default()
 }
 
 fn with_local_schema_modeline(existing: &str) -> String {
@@ -245,8 +303,9 @@ fn render_local_config_with_origin(connection: &str) -> String {
 fn local_config_with_origin(
     existing: &str,
     origin: Option<&DeclaredOrigin>,
+    conflict: OriginConflict,
     path: &Path,
-) -> Result<String, AppError> {
+) -> Result<LocalLayerPlan, AppError> {
     let content = with_local_schema_modeline(existing);
     let document: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|error| {
         AppError::Validation(format!(
@@ -255,29 +314,58 @@ fn local_config_with_origin(
         ))
     })?;
     let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
-    match origin_state(&document) {
-        OriginState::Connection(declared) => match origin {
-            Some(requested) if requested.connection != declared => {
-                let (key, address) = (requested.key.flag(), &requested.connection);
-                Err(AppError::Validation(format!(
-                    "local config file '{}' already declares infobases.origin.connection = '{declared}'; it is not replaced by {key} '{address}'",
-                    path.display()
-                )))
-            }
-            _ => Ok(content),
+    let declared = |content: String| LocalLayerPlan {
+        content,
+        origin: OriginDeclaration {
+            change: OriginChange::Declared,
+            connection: Some(shown_address(connection)),
+            replaced: None,
         },
-        OriginState::Standalone => match origin {
-            Some(requested) => {
+    };
+    let unchanged = |content: String, connection: Option<&str>| LocalLayerPlan {
+        content,
+        origin: OriginDeclaration {
+            change: OriginChange::Unchanged,
+            connection: connection.map(shown_address),
+            replaced: None,
+        },
+    };
+    match origin_state(&document) {
+        OriginState::Connection(declared_address) => match origin {
+            Some(requested) if requested.connection != declared_address => match conflict {
+                OriginConflict::Refuse => {
+                    let (key, address) = (requested.key.flag(), &requested.connection);
+                    Err(AppError::Validation(format!(
+                        "local config file '{}' already declares infobases.origin.connection = '{}'; it is not replaced by {key} '{}'",
+                        path.display(),
+                        shown_address(&declared_address),
+                        shown_address(address),
+                    )))
+                }
+                OriginConflict::Redirect => {
+                    redirect_origin(document, requested, Some(&declared_address), path)
+                }
+            },
+            _ => Ok(unchanged(content, Some(&declared_address))),
+        },
+        OriginState::Standalone => match (origin, conflict) {
+            (Some(requested), OriginConflict::Refuse) => {
                 let (key, address) = (requested.key.flag(), &requested.connection);
                 Err(AppError::Validation(format!(
-                    "local config file '{}' already declares infobases.origin as a standalone server; it is not replaced by {key} '{address}'",
-                    path.display()
+                    "local config file '{}' already declares infobases.origin as a standalone server; it is not replaced by {key} '{}'",
+                    path.display(),
+                    shown_address(address),
                 )))
             }
-            None => Ok(content),
+            (Some(requested), OriginConflict::Redirect) => {
+                redirect_origin(document, requested, None, path)
+            }
+            (None, OriginConflict::Refuse | OriginConflict::Redirect) => {
+                Ok(unchanged(content, None))
+            }
         },
         OriginState::Absent if yaml_document_is_empty(&content) => {
-            Ok(render_local_config_with_origin(connection))
+            Ok(declared(render_local_config_with_origin(connection)))
         }
         OriginState::Absent if appendable(&content, &document) => {
             let mut content = content;
@@ -285,14 +373,57 @@ fn local_config_with_origin(
                 content.push('\n');
             }
             content.push_str(&render_origin_block(connection));
-            Ok(content)
+            Ok(declared(content))
         }
         // Секция без адреса, карта с другими базами или потоковая запись: дописать
         // текстом некуда, документ перезаписывается целиком.
-        OriginState::Absent | OriginState::WithoutAddress => {
-            rewrite_with_origin(document, connection, path)
-        }
+        OriginState::Absent | OriginState::WithoutAddress => Ok(declared(rewrite_with_origin(
+            document,
+            connection,
+            PreviousOrigin::StaysInOrigin,
+            path,
+        )?)),
     }
+}
+
+/// Имя, под которым перенаправленный `origin` сохраняет прежнюю секцию.
+const UPSTREAM_INFOBASE_NAME: &str = "upstream";
+
+/// `origin` получает названный адрес, прежняя секция целиком — с учётными данными —
+/// уходит под имя `upstream`. Занятое имя — отказ: прежний `upstream` тоже чья-то база,
+/// и молча терять его нельзя.
+fn redirect_origin(
+    document: serde_yaml::Value,
+    requested: &DeclaredOrigin,
+    replaced: Option<&str>,
+    path: &Path,
+) -> Result<LocalLayerPlan, AppError> {
+    let upstream_declared = document
+        .get("infobases")
+        .and_then(|infobases| infobases.get(UPSTREAM_INFOBASE_NAME))
+        .is_some_and(|section| !section.is_null());
+    if upstream_declared {
+        return Err(AppError::Validation(format!(
+            "local config file '{}' already declares infobases.{UPSTREAM_INFOBASE_NAME}; infobases.origin is not redirected to {} '{}', because its section would replace infobases.{UPSTREAM_INFOBASE_NAME}",
+            path.display(),
+            requested.key.flag(),
+            shown_address(&requested.connection),
+        )));
+    }
+    let content = rewrite_with_origin(
+        document,
+        &requested.connection,
+        PreviousOrigin::MovesToUpstream,
+        path,
+    )?;
+    Ok(LocalLayerPlan {
+        content,
+        origin: OriginDeclaration {
+            change: OriginChange::Redirected,
+            connection: Some(shown_address(&requested.connection)),
+            replaced: replaced.map(shown_address),
+        },
+    })
 }
 
 /// Что местный слой уже говорит об `origin`.
@@ -347,11 +478,22 @@ fn appendable(content: &str, document: &serde_yaml::Value) -> bool {
         && document.get("infobase").is_none()
 }
 
+/// Куда уходит прежняя секция `origin`, когда документ перезаписывается.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviousOrigin {
+    /// Остаётся в `origin` и получает адрес: так дополняется секция без адреса.
+    StaysInOrigin,
+    /// Уходит под имя `upstream`, а `origin` объявляется заново одним адресом.
+    MovesToUpstream,
+}
+
 /// Перезаписывает документ с `origin`, получившим адрес: прежний ключ `infobase`
-/// переезжает в `infobases.origin`, остальные поля секции сохраняются.
+/// переезжает в `infobases`, остальные поля прежней секции сохраняются там, куда её
+/// отправил `previous`.
 fn rewrite_with_origin(
     mut document: serde_yaml::Value,
     connection: &str,
+    previous: PreviousOrigin,
     path: &Path,
 ) -> Result<String, AppError> {
     let key = |name: &str| serde_yaml::Value::String(name.to_owned());
@@ -365,10 +507,12 @@ fn rewrite_with_origin(
         .get_mut(key("infobases"))
         .and_then(serde_yaml::Value::as_mapping_mut)
         .and_then(|infobases| infobases.remove(key("origin")))
-        .or_else(|| mapping.remove(key("infobase")));
-    let mut origin = existing
-        .and_then(|section| section.as_mapping().cloned())
-        .unwrap_or_default();
+        .or_else(|| mapping.remove(key("infobase")))
+        .and_then(|section| section.as_mapping().cloned());
+    let (mut origin, upstream) = match previous {
+        PreviousOrigin::StaysInOrigin => (existing.unwrap_or_default(), None),
+        PreviousOrigin::MovesToUpstream => (serde_yaml::Mapping::new(), existing),
+    };
     origin.insert(
         key("connection"),
         serde_yaml::Value::String(connection.to_owned()),
@@ -381,6 +525,12 @@ fn rewrite_with_origin(
     }
     if let Some(infobases) = infobases.as_mapping_mut() {
         infobases.insert(key("origin"), serde_yaml::Value::Mapping(origin));
+        if let Some(upstream) = upstream {
+            infobases.insert(
+                key(UPSTREAM_INFOBASE_NAME),
+                serde_yaml::Value::Mapping(upstream),
+            );
+        }
     }
     let rendered = serde_yaml::to_string(&document).map_err(|error| {
         AppError::Runtime(format!(
@@ -1116,9 +1266,21 @@ mod tests {
     };
     use crate::config::loader::load_config;
     use crate::config::model::InfobaseSelector;
+    use crate::domain::config_init::{
+        ConfigInitResult, LocalLayerInitResult, OriginChange, ProjectInitResult,
+    };
     use std::path::Path;
     use std::process::Command;
     use tempfile::tempdir;
+
+    fn project_result(result: ConfigInitResult) -> ProjectInitResult {
+        match result {
+            ConfigInitResult::Project(result) => result,
+            ConfigInitResult::Local(result) => {
+                panic!("a directory without a project file gets one: {result:?}")
+            }
+        }
+    }
 
     fn write_file(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
@@ -1225,14 +1387,16 @@ mod tests {
         )
         .expect("ext xml");
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Auto,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Auto,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.format, "DESIGNER");
         assert_eq!(result.source_sets.len(), 2);
@@ -1322,21 +1486,248 @@ mod tests {
         assert!(!dir.path().join("v8project.yaml").exists());
     }
 
+    fn local_result(result: ConfigInitResult) -> LocalLayerInitResult {
+        match result {
+            ConfigInitResult::Local(result) => result,
+            ConfigInitResult::Project(result) => {
+                panic!("a declared project keeps its project file: {result:?}")
+            }
+        }
+    }
+
+    fn redirect_to(connection: &str) -> Option<DeclaredOrigin> {
+        Some(DeclaredOrigin {
+            key: OriginKey::Infobase,
+            connection: connection.to_owned(),
+        })
+    }
+
+    fn read(path: &Path) -> String {
+        std::fs::read_to_string(path).expect("read file")
+    }
+
     #[test]
-    fn refuses_to_overwrite_without_force() {
+    fn a_declared_project_keeps_its_project_file_and_declares_the_default_origin() {
         let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("main xml");
         std::fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
 
-        let error = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Designer,
-        })
-        .expect_err("should fail");
+        let result = local_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init writes the local layer"),
+        );
 
-        assert!(error.to_string().contains("already exists"));
+        assert_eq!(read(&dir.path().join("v8project.yaml")), "existing");
+        assert_eq!(result.origin.change, OriginChange::Declared);
+        assert_eq!(result.origin.connection.as_deref(), Some("File=build/ib"));
+        assert_eq!(result.origin.replaced, None);
+        assert_eq!(
+            read(&dir.path().join("v8project.local.yaml")),
+            format!(
+                "{}\ninfobases:\n  origin:\n    connection: 'File=build/ib'\n",
+                super::LOCAL_CONFIG_SCHEMA_MODEL_LINE
+            )
+        );
+        assert!(read(&dir.path().join(".gitignore"))
+            .lines()
+            .any(|line| line == "v8project.local.yaml"));
+    }
+
+    #[test]
+    fn a_declared_project_redirects_origin_and_keeps_the_previous_section_as_upstream() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
+        std::fs::write(
+            dir.path().join("v8project.local.yaml"),
+            "workPath: build\ninfobases:\n  origin:\n    connection: 'Srvr=srv;Ref=erp;Pwd=conn-secret'\n    user: Admin\n    password: layer-secret\n    shared: true\n  test:\n    connection: 'File=/srv/test-ib'\n",
+        )
+        .expect("local config");
+
+        let result = local_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: redirect_to("File=build/ib"),
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init redirects origin"),
+        );
+
+        assert_eq!(read(&dir.path().join("v8project.yaml")), "existing");
+        assert_eq!(result.origin.change, OriginChange::Redirected);
+        assert_eq!(result.origin.connection.as_deref(), Some("File=build/ib"));
+        let replaced = result.origin.replaced.as_deref().expect("replaced address");
+        assert!(replaced.starts_with("Srvr=srv;Ref=erp;"), "{replaced}");
+        assert!(!replaced.contains("conn-secret"), "{replaced}");
+        let local_config = read(&dir.path().join("v8project.local.yaml"));
+        assert!(local_config.starts_with(super::LOCAL_CONFIG_SCHEMA_MODEL_LINE));
+        let document: serde_yaml::Value = serde_yaml::from_str(&local_config).expect("yaml");
+        let origin = document["infobases"]["origin"]
+            .as_mapping()
+            .expect("origin section");
+        assert_eq!(
+            origin.len(),
+            1,
+            "origin names only its new address: {origin:?}"
+        );
+        assert_eq!(
+            document["infobases"]["origin"]["connection"],
+            "File=build/ib"
+        );
+        let upstream = &document["infobases"]["upstream"];
+        assert_eq!(upstream["connection"], "Srvr=srv;Ref=erp;Pwd=conn-secret");
+        assert_eq!(upstream["user"], "Admin");
+        assert_eq!(upstream["password"], "layer-secret");
+        assert_eq!(upstream["shared"], true);
+        assert_eq!(
+            document["infobases"]["test"]["connection"],
+            "File=/srv/test-ib"
+        );
+        assert_eq!(document["workPath"], "build");
+    }
+
+    #[test]
+    fn a_declared_project_moves_a_legacy_origin_key_to_upstream() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
+        std::fs::write(
+            dir.path().join("v8project.local.yaml"),
+            "infobase:\n  connection: 'File=/srv/ib'\n  user: Admin\n",
+        )
+        .expect("local config");
+
+        let result = local_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: redirect_to("File=build/ib"),
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init redirects origin"),
+        );
+
+        assert_eq!(result.origin.replaced.as_deref(), Some("File=/srv/ib"));
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(&read(&dir.path().join("v8project.local.yaml"))).expect("yaml");
+        assert!(document.get("infobase").is_none(), "{document:?}");
+        assert_eq!(
+            document["infobases"]["origin"]["connection"],
+            "File=build/ib"
+        );
+        assert_eq!(
+            document["infobases"]["upstream"]["connection"],
+            "File=/srv/ib"
+        );
+        assert_eq!(document["infobases"]["upstream"]["user"], "Admin");
+    }
+
+    #[test]
+    fn the_address_already_in_origin_changes_nothing_in_a_declared_project() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
+        let existing = format!(
+            "{}\ninfobases:\n  origin:\n    connection: 'File=build/ib'\n    user: Admin\n",
+            super::LOCAL_CONFIG_SCHEMA_MODEL_LINE
+        );
+        std::fs::write(dir.path().join("v8project.local.yaml"), &existing).expect("local config");
+
+        let result = local_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: redirect_to("File=build/ib"),
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init with the declared address"),
+        );
+
+        assert_eq!(result.origin.change, OriginChange::Unchanged);
+        assert_eq!(result.origin.connection.as_deref(), Some("File=build/ib"));
+        assert_eq!(result.origin.replaced, None);
+        assert_eq!(read(&dir.path().join("v8project.local.yaml")), existing);
+        assert_eq!(read(&dir.path().join("v8project.yaml")), "existing");
+    }
+
+    #[test]
+    fn an_existing_upstream_refuses_the_redirect_and_names_origin_and_upstream() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("main xml");
+        std::fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
+        let existing = "infobases:\n  origin:\n    connection: 'File=/srv/ib'\n  upstream:\n    connection: 'File=/srv/older-ib'\n";
+        std::fs::write(dir.path().join("v8project.local.yaml"), existing).expect("local config");
+
+        for force in [false, true] {
+            let error = execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force,
+                connection: redirect_to("File=build/ib"),
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect_err("upstream is not overwritten");
+            let message = error.to_string();
+            assert!(message.contains("infobases.origin"), "{message}");
+            assert!(message.contains("infobases.upstream"), "{message}");
+            assert_eq!(read(&dir.path().join("v8project.local.yaml")), existing);
+            assert_eq!(
+                read(&dir.path().join("v8project.yaml")),
+                "existing",
+                "the refusal comes before the project file is written, --force = {force}"
+            );
+        }
+    }
+
+    #[test]
+    fn force_rewrites_the_project_file_and_redirects_origin_as_without_it() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("main xml");
+        std::fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
+        std::fs::write(
+            dir.path().join("v8project.local.yaml"),
+            "infobases:\n  origin:\n    connection: 'File=/srv/ib'\n    user: Admin\n",
+        )
+        .expect("local config");
+
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: true,
+                connection: redirect_to("File=build/ib"),
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init --force"),
+        );
+
+        assert!(result.overwritten);
+        assert_ne!(read(&dir.path().join("v8project.yaml")), "existing");
+        assert_eq!(result.origin.change, OriginChange::Redirected);
+        assert_eq!(result.origin.replaced.as_deref(), Some("File=/srv/ib"));
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(&read(&dir.path().join("v8project.local.yaml"))).expect("yaml");
+        assert_eq!(
+            document["infobases"]["origin"]["connection"],
+            "File=build/ib"
+        );
+        assert_eq!(document["infobases"]["upstream"]["user"], "Admin");
+        let config_path = dir.path().join("v8project.yaml");
+        let config_path = config_path.to_str().expect("config path");
+        for selector in [
+            InfobaseSelector::Default,
+            InfobaseSelector::Name("upstream".to_owned()),
+        ] {
+            load_config(Some(config_path), None, &selector)
+                .unwrap_or_else(|error| panic!("{selector:?} resolves: {error}"));
+        }
     }
 
     #[test]
@@ -1364,14 +1755,16 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("main xml");
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Designer,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(
             result.local_path,
@@ -1469,10 +1862,13 @@ mod tests {
             std::fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local config");
         assert_eq!(local_config, existing, "a declared origin is left as it is");
 
+        // Отказ держит каталог без проектного файла: в объявленном проекте `origin`
+        // перенаправляется, это проверяют свои тесты.
+        std::fs::remove_file(dir.path().join("v8project.yaml")).expect("remove project file");
         let error = execute(&ConfigInitRequest {
             project_dir: dir.path().to_path_buf(),
             output_path: "v8project.yaml".into(),
-            force: true,
+            force: false,
             connection: Some(DeclaredOrigin {
                 key: OriginKey::Connection,
                 connection: "File=/other/ib".to_owned(),
@@ -1674,14 +2070,16 @@ mod tests {
         )
         .expect("gitignore");
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "config/v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Designer,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "config/v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init config"),
+        );
 
         assert!(dir
             .path()
@@ -1733,14 +2131,16 @@ mod tests {
         )
         .expect("ext xml");
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Designer,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.source_sets.len(), 2);
         assert!(result
@@ -1773,14 +2173,16 @@ mod tests {
             Some("configuration"),
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Auto,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Auto,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.format, "EDT");
         assert_eq!(result.platform_version.as_deref(), Some("8.3.27"));
@@ -1812,14 +2214,16 @@ mod tests {
             None,
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Auto,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Auto,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.format, "EDT");
         assert_eq!(result.platform_version.as_deref(), Some("8.3.27"));
@@ -1854,14 +2258,16 @@ mod tests {
             "<ExternalReport><Properties><Name>Ignored</Name></Properties></ExternalReport>",
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Designer,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init config"),
+        );
 
         assert!(result.source_sets.iter().any(|source| {
             source.path == "tools" && source.source_type == "EXTERNAL_DATA_PROCESSORS"
@@ -1881,14 +2287,16 @@ mod tests {
             "<ExternalReport><Properties><Name>Beta</Name></Properties></ExternalReport>",
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Designer,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.source_sets.len(), 1);
         assert_eq!(result.source_sets[0].source_type, "CONFIGURATION");
@@ -1925,14 +2333,16 @@ mod tests {
             Some("configuration"),
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Auto,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Auto,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.format, "EDT");
         assert!(result.source_sets.iter().any(|source| {
@@ -2009,14 +2419,16 @@ mod tests {
             Some("configuration"),
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Edt,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Edt,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.source_sets.len(), 1);
         assert_eq!(result.source_sets[0].source_type, "CONFIGURATION");
@@ -2052,14 +2464,16 @@ mod tests {
         )
         .expect("move root descriptor");
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Edt,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Edt,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.source_sets.len(), 1);
         assert_eq!(result.source_sets[0].path, "workspace/cfg");
@@ -2085,14 +2499,16 @@ mod tests {
             None,
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Edt,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Edt,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.source_sets.len(), 1);
         assert_eq!(result.source_sets[0].path, "workspace/cfg");
@@ -2114,14 +2530,16 @@ mod tests {
             "<ExternalDataProcessor><Properties><Name>Alpha</Name></Properties></ExternalDataProcessor>",
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Auto,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Auto,
+            })
+            .expect("init config"),
+        );
 
         assert_eq!(result.format, "EDT");
         assert_eq!(result.source_sets.len(), 1);
@@ -2141,14 +2559,16 @@ mod tests {
             None,
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Edt,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Edt,
+            })
+            .expect("init config"),
+        );
 
         assert!(result.source_sets.iter().any(|source| {
             source.path == "workspace/cfg" && source.source_type == "CONFIGURATION"
@@ -2218,14 +2638,16 @@ mod tests {
             None,
         );
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Edt,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Edt,
+            })
+            .expect("init config"),
+        );
 
         assert!(result.source_sets.iter().any(|source| {
             source.path == "processors" && source.source_type == "EXTERNAL_DATA_PROCESSORS"
@@ -2241,14 +2663,16 @@ mod tests {
         let main = dir.path().join("Configuration.xml");
         std::fs::write(&main, "<Configuration/>").expect("main xml");
 
-        let result = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Designer,
-        })
-        .expect("init config");
+        let result = project_result(
+            execute(&ConfigInitRequest {
+                project_dir: dir.path().to_path_buf(),
+                output_path: "v8project.yaml".into(),
+                force: false,
+                connection: None,
+                format: ConfigFormatRequest::Designer,
+            })
+            .expect("init config"),
+        );
 
         let config = load_config(Some(&result.path), None, &InfobaseSelector::Default)
             .map(|loaded| loaded.config)

@@ -351,9 +351,12 @@ fn config_init_detects_edt_extension_without_base_project_and_warns() {
         .contains("Base-Project"));
 }
 
+/// В объявленном проекте `init` проектный файл не трогает и пишет местный слой; ответ —
+/// вариант `local`, без полей проектного файла.
 #[test]
-fn config_init_refuses_to_overwrite_without_force() {
+fn init_in_a_declared_project_leaves_the_project_file_and_writes_the_local_layer() {
     let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
     fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
 
     let output = v8_runner_command()
@@ -362,9 +365,26 @@ fn config_init_refuses_to_overwrite_without_force() {
         .output()
         .expect("run command");
 
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("already exists"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("origin: declared (File=build/ib)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Config written"), "{stdout}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.yaml")).expect("project file"),
+        "existing"
+    );
+    let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
+    assert!(
+        local.contains("infobases:\n  origin:\n    connection: 'File=build/ib'\n"),
+        "{local}"
+    );
 
     let json_output = v8_runner_command()
         .current_dir(dir.path())
@@ -372,16 +392,191 @@ fn config_init_refuses_to_overwrite_without_force() {
         .output()
         .expect("run json command");
 
-    assert!(!json_output.status.success());
-    assert_eq!(json_output.status.code(), Some(2));
+    assert!(json_output.status.success());
     let payload: Value = serde_json::from_slice(&json_output.stdout).expect("json");
-    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "init");
-    assert_eq!(payload["error"]["code"], "invalid_argument");
-    assert!(payload["data"]["message"]
-        .as_str()
-        .expect("message")
-        .contains("already exists"));
+    assert_data_matches_its_command_form(&payload, "`init` in a declared project");
+    let data = &payload["data"];
+    assert_eq!(data["kind"], "local", "{payload}");
+    for project_field in ["path", "format", "source_sets", "overwritten"] {
+        assert!(
+            data.get(project_field).is_none(),
+            "`{project_field}` describes only a written project file: {payload}"
+        );
+    }
+    assert_eq!(data["origin"]["change"], "unchanged", "{payload}");
+    assert_eq!(data["origin"]["connection"], "File=build/ib", "{payload}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.yaml")).expect("project file"),
+        "existing"
+    );
+}
+
+/// Сценарий «Задача в новой рабочей копии» до `infobase create`: проектный файл пришёл с
+/// веткой, местный слой скопирован у соседа. `init --infobase` отдаёт `origin` свой адрес,
+/// прежнюю секцию с учётными данными сохраняет как `upstream`, называет заменённый адрес
+/// и не печатает учётных данных ни текстом, ни в JSON.
+#[test]
+fn init_in_a_new_worktree_redirects_the_copied_origin_and_keeps_it_as_upstream() {
+    let neighbour = temp_workspace();
+    fs::write(
+        neighbour.path().join("Configuration.xml"),
+        "<Configuration/>",
+    )
+    .expect("xml");
+    let declared = v8_runner_command()
+        .current_dir(neighbour.path())
+        .args(["init"])
+        .output()
+        .expect("declare the neighbour project");
+    assert!(declared.status.success());
+    let project_file =
+        fs::read(neighbour.path().join("v8project.yaml")).expect("neighbour project file");
+    let copied_layer = "infobases:\n  origin:\n    connection: 'Srvr=srv;Ref=erp;Usr=Admin;Pwd=conn-secret'\n    user: Admin\n    password: layer-secret\n";
+
+    for json in [false, true] {
+        let worktree = temp_workspace();
+        fs::write(
+            worktree.path().join("Configuration.xml"),
+            "<Configuration/>",
+        )
+        .expect("xml");
+        fs::write(worktree.path().join("v8project.yaml"), &project_file).expect("project file");
+        fs::write(worktree.path().join("v8project.local.yaml"), copied_layer).expect("layer");
+
+        let mut command = v8_runner_command();
+        command.current_dir(worktree.path());
+        if json {
+            command.arg("--json-message");
+        }
+        let output = command
+            .args(["init", "--infobase", "File=build/ib"])
+            .output()
+            .expect("run init");
+
+        let printed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{printed}");
+        for secret in ["conn-secret", "layer-secret"] {
+            assert!(
+                !printed.contains(secret),
+                "credentials are printed: {printed}"
+            );
+        }
+        assert!(
+            printed.contains("Srvr=srv;Ref=erp"),
+            "the replaced address: {printed}"
+        );
+        if json {
+            let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+            assert_data_matches_its_command_form(&payload, "`init --infobase` in a worktree");
+            let data = &payload["data"];
+            assert_eq!(data["kind"], "local", "{payload}");
+            assert_eq!(data["origin"]["change"], "redirected", "{payload}");
+            assert_eq!(data["origin"]["connection"], "File=build/ib", "{payload}");
+            let replaced = data["origin"]["replaced"].as_str().expect("replaced");
+            assert!(replaced.starts_with("Srvr=srv;Ref=erp;"), "{payload}");
+        } else {
+            assert!(
+                printed.contains("origin: redirected (File=build/ib)"),
+                "{printed}"
+            );
+        }
+        assert_eq!(
+            fs::read(worktree.path().join("v8project.yaml")).expect("project file"),
+            project_file,
+            "the project file is left byte for byte"
+        );
+        let layer =
+            fs::read_to_string(worktree.path().join("v8project.local.yaml")).expect("layer");
+        let document: serde_yaml::Value = serde_yaml::from_str(&layer).expect("layer is YAML");
+        assert_eq!(
+            document["infobases"]["origin"]["connection"].as_str(),
+            Some("File=build/ib"),
+            "{layer}"
+        );
+        let upstream = &document["infobases"]["upstream"];
+        assert_eq!(
+            upstream["connection"].as_str(),
+            Some("Srvr=srv;Ref=erp;Usr=Admin;Pwd=conn-secret"),
+            "{layer}"
+        );
+        assert_eq!(upstream["user"].as_str(), Some("Admin"), "{layer}");
+        assert_eq!(
+            upstream["password"].as_str(),
+            Some("layer-secret"),
+            "{layer}"
+        );
+    }
+}
+
+/// Существующий `upstream` не перезаписывается: отказ называет `origin` и `upstream` и
+/// оставляет оба файла как были.
+#[test]
+fn init_refuses_to_redirect_origin_over_an_existing_upstream() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+    fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
+    let layer = "infobases:\n  origin:\n    connection: 'File=/srv/ib'\n  upstream:\n    connection: 'File=/srv/older-ib'\n    password: layer-secret\n";
+    fs::write(dir.path().join("v8project.local.yaml"), layer).expect("layer");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["--json-message", "init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("infobases.origin"), "{message}");
+    assert!(message.contains("infobases.upstream"), "{message}");
+    assert!(!message.contains("layer-secret"), "{message}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("layer"),
+        layer
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.yaml")).expect("project file"),
+        "existing"
+    );
+}
+
+/// Адрес, который уже стоит в `origin`, ничего не меняет и в объявленном проекте.
+#[test]
+fn init_with_the_address_already_in_origin_changes_nothing() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
+    let layer = format!(
+        "{LOCAL_CONFIG_SCHEMA_MODEL_LINE}\ninfobases:\n  origin:\n    connection: 'File=build/ib'\n"
+    );
+    fs::write(dir.path().join("v8project.local.yaml"), &layer).expect("layer");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["--json-message", "init", "--infobase", "File=build/ib"])
+        .output()
+        .expect("run init");
+
+    assert!(output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(
+        payload["data"]["origin"]["change"], "unchanged",
+        "{payload}"
+    );
+    assert!(
+        payload["data"]["origin"].get("replaced").is_none(),
+        "{payload}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("layer"),
+        layer
+    );
+    assert!(!dir.path().join("build").exists());
 }
 
 #[test]

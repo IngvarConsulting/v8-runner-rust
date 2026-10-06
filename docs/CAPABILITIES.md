@@ -271,9 +271,17 @@ v8-runner init [--force] [--output <FILE>] [--infobase <CONNECTION>] [--format <
 - Ищет supported `DESIGNER` / `EDT` `source-set` по marker files и их содержимому.
 - Для external roots создаёт aggregate `source-set` только при однородной классификации каталога.
 - Не пишет synthetic `CONFIGURATION`: отсутствие конфигурационного source-set это validation error.
-- В проекте, где `v8project.yaml` уже есть, сегодня без `--force` отказывает: писать только
-  местный слой и перенаправлять `origin`, сохраняя прежнюю секцию как `upstream`, он пока не
-  умеет ([#329](https://github.com/IngvarConsulting/v8-runner-rust/issues/329)).
+- В проекте, где `v8project.yaml` уже есть (например, в новом ворктри), без `--force`
+  проектный файл не трогает и пишет только местный слой: без `--infobase` объявляет `origin`
+  базой `File=build/ib`, если `origin` нет; с `--infobase <адрес>` отдаёт `origin` новый
+  адрес, а прежнюю секцию вместе с учётными данными сохраняет под именем `upstream`. Адрес,
+  который уже стоит в `origin`, ничего не меняет; если `upstream` уже есть — отказ, который
+  называет `infobases.origin` и `infobases.upstream`. Ответ — вариант `data.kind: "local"`
+  с `local_path`, `gitignore_path` и `origin` (`change`: `declared` | `unchanged` |
+  `redirected`, `connection`, `replaced` — заменённый адрес); пароль в адресах замаскирован,
+  учётные данные не печатаются. `--force` переписывает проектный файл (`data.kind:
+  "project"`), с местным слоем поступает так же. В каталоге без `v8project.yaml` другой
+  адрес для уже объявленного `origin` — по-прежнему отказ.
 
 ### `clone`
 
