@@ -507,6 +507,20 @@ mod tests {
 
     use super::*;
 
+    /// Срок ожидания, которому истекать не положено: сессия открывается задолго до него
+    /// даже на загруженной машине, а заканчивает ожидание сама проверка.
+    const IDLE_BUDGET: Duration = Duration::from_secs(30);
+
+    /// Срок, которому положено истечь уже после открытия сессии. Его тест платит целиком,
+    /// но он обязан с запасом покрыть `initialize` и `notifications/initialized`: каждый
+    /// запрос сам ограничен `MCP_READY_REQUEST_TIMEOUT`, а не успей сессия открыться до
+    /// срока, удалять было бы нечего.
+    const SESSION_OUTLIVING_BUDGET: Duration = Duration::from_secs(2);
+
+    /// Граница зависания поддельного сервера: не дождавшись DELETE, он падает, а не висит.
+    /// Она длиннее любого срока ожидания, иначе сервер сдался бы раньше клиента.
+    const FAKE_SERVER_HANG_BOUND: Duration = Duration::from_secs(60);
+
     #[test]
     fn the_operators_interrupt_ends_the_readiness_wait() {
         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -576,7 +590,7 @@ mod tests {
             listener
                 .set_nonblocking(true)
                 .expect("fake MCP nonblocking listener");
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + FAKE_SERVER_HANG_BOUND;
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -641,7 +655,7 @@ mod tests {
             &context,
             &endpoint_url(port),
             &["load_features"],
-            Duration::from_millis(120),
+            SESSION_OUTLIVING_BUDGET,
         );
 
         assert!(readiness.is_err());
@@ -658,12 +672,14 @@ mod tests {
         let port = listener.local_addr().expect("local addr").port();
         let deleted = Arc::new(AtomicBool::new(false));
         let server_deleted = Arc::clone(&deleted);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let server_cancellation = cancellation.clone();
 
         let server = thread::spawn(move || {
             listener
                 .set_nonblocking(true)
                 .expect("fake MCP nonblocking listener");
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + FAKE_SERVER_HANG_BOUND;
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -676,6 +692,9 @@ mod tests {
                             );
                             server_deleted.store(true, Ordering::SeqCst);
                             write_empty_response(&mut stream, "202 Accepted");
+                            // Сессия удалена — проверке больше нечего ждать: отмена
+                            // заканчивает ожидание, а не истечение срока.
+                            server_cancellation.cancel();
                             break;
                         }
                         if request.contains("\"method\":\"initialize\"")
@@ -713,17 +732,17 @@ mod tests {
             }
         });
 
-        let context = ExecutionContext::cli(CommandName::Launch);
+        let context = ExecutionContext::cli(CommandName::Launch).with_cancellation(cancellation);
 
-        let readiness = wait_for_readiness(
-            &context,
-            &endpoint_url(port),
-            &[],
-            Duration::from_millis(350),
-        );
+        // Срок ожидания здесь не предмет проверки, и истечь ему не положено: истеки он до
+        // того, как сессия открылась, удалять было бы нечего.
+        let readiness = wait_for_readiness(&context, &endpoint_url(port), &[], IDLE_BUDGET);
 
-        assert!(readiness.is_err());
         server.join().expect("fake MCP server exits");
+        assert!(
+            matches!(readiness, Err(NotReady::Cancelled(_))),
+            "the wait must end by the cancellation after DELETE, not by its budget"
+        );
         assert!(
             deleted.load(Ordering::SeqCst),
             "client should delete initialized session after notification failure"
