@@ -310,6 +310,11 @@ pub enum ConfigValidationError {
     InfobasesBelongToTheLocalLayer,
 
     #[error(
+        "`{key}` is declared only in v8project.local.yaml: each working copy gives it for itself, and it is not committed with the project — move `{key}` to infobases.<name> of v8project.local.yaml"
+    )]
+    InfobaseKeyBelongsToTheLocalLayer { key: &'static str },
+
+    #[error(
         "{file} declares both `infobase` and `infobases`: `infobase` is the one-cycle synonym for `infobases.origin`, keep one of them"
     )]
     InfobaseKeysMixed { file: String },
@@ -2728,6 +2733,7 @@ mod tests {
                 web: None,
                 standalone: None,
                 cluster: None,
+                shared: false,
             },
             infobases: Default::default(),
             infobase_name: None,

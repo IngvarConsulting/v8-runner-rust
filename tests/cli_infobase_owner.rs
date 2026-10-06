@@ -97,6 +97,19 @@ impl Copy {
         .expect("local layer");
     }
 
+    /// Объявляет `origin` местного слоя общей базой стенда: `shared` — согласие этой копии
+    /// делить её.
+    fn declare_shared(&self, stand: &Stand, shared: bool) {
+        fs::write(
+            self.root.join("v8project.local.yaml"),
+            format!(
+                "infobases:\n  origin:\n    connection: 'File={}'\n    shared: {shared}\n",
+                stand.base.display()
+            ),
+        )
+        .expect("local layer");
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         v8_runner_command()
             .arg("--config")
@@ -192,6 +205,15 @@ fn assert_infobase_held(output: &Output, command: &str, owner: &Copy, stand: &St
     assert!(
         message.contains("infobase create --from") && message.contains("shared: true"),
         "names the other ways out: {message}"
+    );
+    let shared_way = message
+        .split("a shared infobase")
+        .nth(1)
+        .and_then(|rest| rest.split(". ").next())
+        .expect("names a shared infobase as a way out");
+    assert!(
+        !shared_way.contains("not available yet"),
+        "a shared infobase is available: {message}"
     );
     message
 }
@@ -354,6 +376,10 @@ fn an_unreadable_local_layer_of_the_owner_keeps_it_alive() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
+    // Обе копии согласны делить базу: нечитаемый слой владельца — несогласие, и общая база
+    // команду записи всё равно не пропускает.
+    first.declare_shared(&stand, true);
+    second.declare_shared(&stand, true);
     succeeded(&first.run(&["push"]));
     fs::write(first.root.join("v8project.local.yaml"), "infobases: [\n").expect("break layer");
 
@@ -363,6 +389,10 @@ fn an_unreadable_local_layer_of_the_owner_keeps_it_alive() {
     assert!(
         message.contains("cannot be read"),
         "says the owner's layer is unreadable: {message}"
+    );
+    assert!(
+        message.contains("not sharing it"),
+        "an unreadable layer does not consent: {message}"
     );
     assert_eq!(stand.owners(), [first.canonical_root()]);
 }
@@ -755,4 +785,231 @@ fn a_fifo_in_place_of_the_owner_project_file_does_not_hang_the_command() {
     assert!(finished, "the command hung on the owner's FIFO");
     let message = assert_infobase_held(&output, "push", &first, &stand);
     assert!(message.contains("cannot be read"), "{message}");
+}
+
+/// Записанное в метке согласие каждой копии.
+fn consents_of(marker: &Path) -> Vec<(String, bool)> {
+    let text = fs::read_to_string(marker).expect("marker");
+    let marker: Value = serde_json::from_str(&text).expect("marker json");
+    marker["owners"]
+        .as_array()
+        .expect("owners")
+        .iter()
+        .map(|owner| {
+            (
+                owner["project"].as_str().expect("project").to_owned(),
+                owner["shared"].as_bool().expect("shared"),
+            )
+        })
+        .collect()
+}
+
+/// Общая база с согласием всех держателей: команды записи каждой копии идут, и метка
+/// называет обе копии с их согласием.
+#[test]
+fn a_base_shared_by_every_holder_takes_writes_of_each() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    first.declare_shared(&stand, true);
+    second.declare_shared(&stand, true);
+
+    succeeded(&first.run(&["push"]));
+    succeeded(&second.run(&["push"]));
+    succeeded(&first.run(&["push"]));
+
+    let mut consents = consents_of(&stand.marker());
+    consents.sort();
+    let mut expected = vec![
+        (first.canonical_root(), true),
+        (second.canonical_root(), true),
+    ];
+    expected.sort();
+    assert_eq!(consents, expected);
+}
+
+/// Без согласия одного из держателей команда записи отказывает и называет его — и тогда,
+/// когда несогласна сама эта копия.
+#[test]
+fn a_base_without_consent_of_one_holder_is_refused_and_names_it() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    succeeded(&first.run(&["push"]));
+    let marker = stand.marker_text();
+
+    second.declare_shared(&stand, true);
+    let refused = second.run(&["push"]);
+    let message = assert_infobase_held(&refused, "push", &first, &stand);
+    assert!(
+        message.contains(&format!(
+            "'{}' on this machine, which does not share it",
+            first.canonical_root()
+        )),
+        "names the holder without consent: {message}"
+    );
+    assert_eq!(stand.marker_text(), marker, "a refusal records no new copy");
+
+    first.declare_shared(&stand, true);
+    second.declare_shared(&stand, false);
+    let refused = second.run(&["push"]);
+    let message = assert_infobase_held(&refused, "push", &first, &stand);
+    assert!(
+        message.contains("this working copy does not share it"),
+        "names this copy as the one without consent: {message}"
+    );
+}
+
+/// Согласие копий этой машины читается из их местных слоёв в момент команды: отзыв одной
+/// копией останавливает команды записи обеих сразу, без её следующей команды, и отказы
+/// называют друг друга.
+#[test]
+fn a_consent_withdrawn_on_this_machine_stops_every_copy_at_once() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    first.declare_shared(&stand, true);
+    second.declare_shared(&stand, true);
+    succeeded(&first.run(&["push"]));
+    succeeded(&second.run(&["push"]));
+
+    first.declare_shared(&stand, false);
+
+    let refused = second.run(&["push"]);
+    assert_infobase_held(&refused, "push", &first, &stand);
+    let refused = first.run(&["push"]);
+    assert_infobase_held(&refused, "push", &second, &stand);
+}
+
+/// Копия с другой машины сообщает согласие меткой: с её записанным согласием команда
+/// записи идёт, после отзыва в метке — отказывает и называет её.
+#[test]
+fn a_remote_copy_consents_through_the_marker() {
+    let stand = Stand::new();
+    let copy = stand.copy("copy");
+    copy.declare_shared(&stand, true);
+    let remote = |shared: bool| {
+        json!({
+            "version": 1,
+            "owners": [{
+                "machine": "a".repeat(64),
+                "host": "build-agent",
+                "project": "/srv/elsewhere",
+                "shared": shared,
+                "since": "2026-10-01T00:00:00Z"
+            }]
+        })
+        .to_string()
+    };
+    fs::write(stand.marker(), remote(true)).expect("marker");
+
+    succeeded(&copy.run(&["push"]));
+    assert_eq!(
+        consents_of(&stand.marker()),
+        [
+            ("/srv/elsewhere".to_owned(), true),
+            (copy.canonical_root(), true)
+        ],
+        "the copy joins the remote one with its consent"
+    );
+
+    let mut withdrawn: Value =
+        serde_json::from_str(&stand.marker_text().expect("marker")).expect("json");
+    for owner in withdrawn["owners"].as_array_mut().expect("owners") {
+        if owner["project"] == "/srv/elsewhere" {
+            owner["shared"] = Value::Bool(false);
+        }
+    }
+    fs::write(stand.marker(), withdrawn.to_string()).expect("marker");
+
+    let refused = copy.run(&["push"]);
+    let payload = envelope(&refused);
+    assert_eq!(payload["error"]["code"], "infobase_held", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("'/srv/elsewhere' on machine 'build-agent', which does not share it"),
+        "{message}"
+    );
+}
+
+/// Отказ по владельцу на общей базе ведёт к своей базе (`infobase create`), а выгрузку не
+/// предлагает: ни следующим шагом, ни текстом.
+#[test]
+fn a_held_refusal_on_a_shared_base_leads_to_an_own_base() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    first.declare_shared(&stand, true);
+    second.declare_shared(&stand, true);
+    succeeded(&first.run(&["push"]));
+    succeeded(&second.run(&["push"]));
+    first.declare_shared(&stand, false);
+
+    for refused in [second.run(&["push"]), second.run(&["push", "--dry-run"])] {
+        let payload = envelope(&refused);
+        assert_eq!(payload["error"]["code"], "infobase_held", "{payload}");
+        assert_eq!(
+            payload["error"]["next"]["command"], "infobase create",
+            "{payload}"
+        );
+        let message = payload["error"]["message"].as_str().expect("message");
+        assert!(!message.contains("pull"), "{message}");
+    }
+}
+
+/// Согласие копии — у каждой её секции, которая объявляет базу: вторая секция той же базы
+/// без `shared: true` отзывает согласие копии, и команды записи обеих копий отказывают.
+#[test]
+fn a_second_section_of_the_base_without_consent_withdraws_it() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    first.declare_shared(&stand, true);
+    second.declare_shared(&stand, true);
+    succeeded(&first.run(&["push"]));
+    succeeded(&second.run(&["push"]));
+
+    fs::write(
+        first.root.join("v8project.local.yaml"),
+        format!(
+            "infobases:\n  origin:\n    connection: 'File={base}'\n    shared: true\n  alt:\n    connection: 'File={base}'\n",
+            base = stand.base.display()
+        ),
+    )
+    .expect("local layer");
+
+    let refused = first.run(&["push"]);
+    let message = assert_infobase_held(&refused, "push", &second, &stand);
+    assert!(
+        message.contains("this working copy does not share it"),
+        "{message}"
+    );
+    assert!(
+        consents_of(&stand.marker()).contains(&(first.canonical_root(), false)),
+        "the refused copy records its withdrawal"
+    );
+    let refused = second.run(&["push"]);
+    assert_infobase_held(&refused, "push", &first, &stand);
+}
+
+/// Строка соединения в `--infobase` согласия не даёт: на общей базе она отказывает и
+/// просит имя базы.
+#[test]
+fn a_connection_string_on_a_shared_base_is_refused() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    first.declare_shared(&stand, true);
+    succeeded(&first.run(&["push"]));
+    let marker = stand.marker_text();
+
+    let connection = format!("File={}", stand.base.display());
+    let refused = second.run(&["--infobase", &connection, "push"]);
+
+    let message = assert_infobase_held(&refused, "push", &first, &stand);
+    assert!(
+        message.contains("a connection string does not share an infobase — pass its name"),
+        "{message}"
+    );
+    assert_eq!(stand.marker_text(), marker);
 }

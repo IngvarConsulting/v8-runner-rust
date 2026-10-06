@@ -12,8 +12,8 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/215
 права база, и `push --force`, если прав каталог. В базе под хранилищем конфигурации полная
 загрузка невозможна, и выход `push --force` заменяет `pull --force`.
 
-Выходы сужают свои правила: на общей базе — `INV.USE-CASES.A-SHARED-BASE-REFUSAL-NEVER-OFFERS-PULL`
-(под хранилищем остаётся `pull --force`), у копии и у нового владельца до первой отправки —
+Выходы уточняют свои правила: на общей базе — `INV.USE-CASES.A-SHARED-BASE-REFUSAL-OFFERS-PULL-FIRST-AND-NAMES-PUSH`
+(под хранилищем вместо `push --force` — `pull --force`), у копии и у нового владельца до первой отправки —
 `INV.USE-CASES.A-COPIED-BASE-OFFERS-NO-PULL-BEFORE-ITS-FIRST-PUSH` и
 `INV.USE-CASES.A-NEW-OWNER-IS-OFFERED-NO-PULL-UNTIL-ITS-FIRST-PUSH`. Памяти, записанной для
 другой базы, отвечает `INV.USE-CASES.FOREIGN-MEMORY-IS-NOT-USED` со своими выходами. Базы,
