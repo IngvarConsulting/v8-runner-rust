@@ -223,7 +223,7 @@ fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
     fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
     let work = dir.path().join("work");
 
-    let (code, payload) = run(dir.path(), &["build".to_owned()]);
+    let (code, payload) = run(dir.path(), &["build".to_owned(), "--force".to_owned()]);
     assert_eq!(code, 0, "боевая сборка образца не прошла: {payload}");
     // Расширение меняется после засева: иначе переписывать нечего — утечка нашла бы
     // состояние свежим, пропустила подготовку, и страж промолчал бы.

@@ -171,6 +171,20 @@ fn write_config(
     write_local_origin(path, "File=ib", Some("secret"));
 }
 
+/// Память о базе `origin` проекта, как после её создания раннером: сборка перед тестами идёт
+/// не с первого знакомства.
+fn remember_origin(project: &Path, work: &Path) {
+    support::memory::remember_base(
+        work,
+        "origin",
+        support::memory::Base::File(&project.join("ib")),
+        &[support::memory::Set::configuration(
+            "main",
+            &project.join("main"),
+        )],
+    );
+}
+
 /// Адрес базы живёт в местном слое рядом с проектным файлом.
 fn write_local_origin(config_path: &Path, connection: &str, password: Option<&str>) {
     let mut local = format!("infobases:\n  origin:\n    connection: '{connection}'\n");
@@ -276,6 +290,7 @@ fn setup_project_with_additional_launch_keys(
         timeout_seconds,
         additional_launch_keys,
     );
+    remember_origin(&base_path, &work_path);
 
     (dir, config_path, build_calls, test_calls, captured_config)
 }
@@ -349,6 +364,7 @@ fn setup_va_project_with_work_name(
     );
     fs::write(&config_path, config).expect("config");
     write_local_origin(&config_path, "File=ib", Some("secret"));
+    remember_origin(&base_path, &work_path);
 
     (dir, config_path, build_calls, test_calls, captured_params)
 }
@@ -1406,7 +1422,12 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
     write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
 
     let first = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "build"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "--force",
+        ])
         .output()
         .expect("prime build");
     assert!(first.status.success());
@@ -1498,6 +1519,15 @@ fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
     );
     fs::write(&config_path, config).expect("config");
     write_local_origin(&config_path, &format!("File={tmp}/ib"), None);
+    support::memory::remember_base(
+        &work_path,
+        "origin",
+        support::memory::Base::File(&bases.path().join("ib")),
+        &[support::memory::Set::configuration(
+            "configuration",
+            &base_path.join("configuration"),
+        )],
+    );
 
     let first = v8_runner_command()
         .args([
@@ -1721,6 +1751,15 @@ fn vanessa_resolves_a_relative_epf_path_from_a_nested_config_directory() {
     )
     .expect("config");
     write_local_origin(&config_path, "File=./ib", None);
+    support::memory::remember_base(
+        &profile_dir.join("work"),
+        "origin",
+        support::memory::Base::File(&profile_dir.join("ib")),
+        &[support::memory::Set::configuration(
+            "main",
+            &profile_dir.join("main"),
+        )],
+    );
     let run_test_va = || {
         v8_runner_command()
             .args([

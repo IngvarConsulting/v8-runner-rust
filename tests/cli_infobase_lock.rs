@@ -81,6 +81,16 @@ impl Stand {
             ),
         )
         .expect("config");
+        // Память о базе, как после её создания раннером: тесты замка начинают не с первого
+        // знакомства.
+        let base = support::memory::Base::File(&self.base);
+        let key = support::memory::ad_hoc_key(&base);
+        support::memory::remember_base(
+            &work,
+            &key,
+            base,
+            &[support::memory::Set::configuration("main", &sources)],
+        );
         Copy {
             root,
             config,

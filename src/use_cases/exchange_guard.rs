@@ -200,6 +200,7 @@ pub(crate) fn require_memory(
         } else {
             message.push_str(&format!(". To load the sources run {overwrite}"));
         }
+        message.push('.');
         message.push_str(&standing.caveats());
     }
     let next = if offers_pull {
@@ -319,6 +320,7 @@ impl<'a> GenerationGate<'a> {
         } else {
             message.push_str(&format!("; to overwrite them run {push_force}"));
         }
+        message.push('.');
         message.push_str(&standing.caveats());
         AppError::NonFastForward(Box::new(NonFastForward {
             message,
@@ -464,4 +466,20 @@ pub(crate) fn remember_unknown_sets(config: &AppConfig) {
             }
         }
     }
+}
+
+/// Каталог памяти о базах `workPath/infobases`, в котором нет ничего, кроме признаков нового
+/// владельца. Так его оставляет граница `clone` до записи проекта: проверка пустоты каталога
+/// клона его не считает.
+pub(crate) fn holds_only_new_owner_marks(infobases: &Path) -> bool {
+    let Ok(bases) = std::fs::read_dir(infobases) else {
+        return false;
+    };
+    bases.flatten().all(|base| {
+        std::fs::read_dir(base.path()).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .all(|entry| entry.file_name() == NEW_OWNER_FILE_NAME)
+        })
+    })
 }

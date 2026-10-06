@@ -85,8 +85,10 @@ pub struct FakeAgent {
     pub base_dir: Option<PathBuf>,
     pub base_dir_file: PathBuf,
     pub designer_pid_file: PathBuf,
-    /// Поколение конфигурации: растёт с каждой удачной загрузкой.
+    /// Поколение основной конфигурации: растёт с каждой удачной её загрузкой.
     pub generation: Arc<AtomicU64>,
+    /// Поколения расширений по имени: у каждого своё, как у платформы.
+    pub extension_generations: Arc<Mutex<HashMap<String, u64>>>,
     /// Двойник шлюза автономного сервера: каталог пользователя задан прямо (у шлюза
     /// нет карты `agentbasedir.json`), логин — имя пользователя базы.
     pub gate: Option<(String, PathBuf)>,
@@ -157,6 +159,7 @@ impl FakeAgent {
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
+            extension_generations: Arc::new(Mutex::new(HashMap::new())),
             extensions: Arc::new(Mutex::new(vec![FakeExtension {
                 name: "Зонд".to_owned(),
                 active: true,
@@ -255,6 +258,34 @@ impl FakeAgent {
         format!("{:040x}", self.generation.load(Ordering::SeqCst))
     }
 
+    /// Токен поколения основной конфигурации или расширения `extension`.
+    fn token_of(&self, extension: Option<&str>) -> String {
+        match extension {
+            None => self.token(),
+            Some(name) => {
+                let generations = self.extension_generations.lock().expect("generations");
+                format!("e{:039x}", generations.get(name).copied().unwrap_or(1))
+            }
+        }
+    }
+
+    /// Загрузка меняет поколение того, во что грузит.
+    fn advance(&self, extension: Option<&str>) {
+        match extension {
+            None => {
+                self.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            Some(name) => {
+                *self
+                    .extension_generations
+                    .lock()
+                    .expect("generations")
+                    .entry(name.to_owned())
+                    .or_insert(1) += 1;
+            }
+        }
+    }
+
     /// Ответ на одну команду и признак «сессия завершается».
     fn respond(&self, line: &str) -> (String, bool) {
         self.log(line);
@@ -274,7 +305,10 @@ impl FakeAgent {
         }
         if line.starts_with("config generation-id") {
             return (
-                format!("[{{\"type\":\"success\",\"body\":\"{}\"}}]\n", self.token()),
+                format!(
+                    "[{{\"type\":\"success\",\"body\":\"{}\"}}]\n",
+                    self.token_of(option("extension").as_deref())
+                ),
                 false,
             );
         }
@@ -325,7 +359,7 @@ impl FakeAgent {
                         .join(";")
                 ));
             }
-            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.advance(option("extension").as_deref());
             // Как платформа: с `--update-config-dump-info` файл версий в каталоге загрузки
             // переписывается; рядом с журналом команд (`<журнал>.version-files`) записано,
             // какой файл загрузка там застала.

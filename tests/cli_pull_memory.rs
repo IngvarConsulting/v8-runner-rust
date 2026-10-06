@@ -175,7 +175,7 @@ fn first_full_pull_establishes_the_baseline_for_all_exporters() {
 fn full_pull_replaces_a_previous_push_baseline() {
     for provider in ["designer", "ibcmd", "agent"] {
         let project = project(provider, false);
-        succeeded(run(&project, &["push"]));
+        succeeded(run(&project, &["push", "--force"]));
         pull(&project);
         assert_push_skips(&project);
     }
@@ -458,7 +458,10 @@ fn an_ad_hoc_base_is_remembered_by_its_connection_string() {
         "File={}",
         project.config.parent().expect("root").join("ib").display()
     );
-    let first = succeeded(run(&project, &["--infobase", &connection, "push"]));
+    let first = succeeded(run(
+        &project,
+        &["--infobase", &connection, "push", "--force"],
+    ));
     assert_ne!(first["data"]["steps"][0]["mode"], "skipped", "{first}");
     assert_eq!(fs::read(snapshot(&project)).expect("named memory"), memory);
     let again = succeeded(run(&project, &["--infobase", &connection, "push"]));
@@ -816,7 +819,7 @@ fn an_ibcmd_partial_pull_dumps_from_the_runner_copy() {
 fn an_agent_push_loads_over_the_runner_copy_and_records_the_new_one() {
     let project = project("agent", false);
     let version_file = project.sources.join("ConfigDumpInfo.xml");
-    succeeded(run(&project, &["push"]));
+    succeeded(run(&project, &["push", "--force"]));
     let ours = read(&version_file);
     assert!(ours.contains("agent-load="), "{ours}");
     assert_eq!(read(&runner_copy(&project)), ours);

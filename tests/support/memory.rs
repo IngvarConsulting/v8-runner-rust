@@ -17,6 +17,8 @@ pub enum Base<'a> {
     File(&'a Path),
     /// База в кластере: сервер и имя базы, как в `Srvr=`/`Ref=`.
     Server { host: &'a str, reference: &'a str },
+    /// Автономный сервер за шлюзом `host:port`.
+    Standalone { host: &'a str, port: u16 },
 }
 
 /// Набор исходников: имя, назначение (`CONFIGURATION`, `EXTENSION`) и абсолютный корень.
@@ -44,9 +46,17 @@ impl<'a> Set<'a> {
     }
 }
 
-/// Пишет память о базе `key` (имя базы из местного слоя) под `work`.
-pub fn remember_base(work: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]) {
-    let address = match base {
+/// Ключ памяти базы, названной строкой соединения в `--infobase`: `@` и начало SHA-256
+/// её адреса, как у `connection_memory_key`.
+pub fn ad_hoc_key(base: &Base<'_>) -> String {
+    let digest = Sha256::digest(address(base).as_bytes());
+    std::iter::once("@".to_owned())
+        .chain(digest[..16].iter().map(|byte| format!("{byte:02x}")))
+        .collect()
+}
+
+fn address(base: &Base<'_>) -> String {
+    match base {
         Base::File(dir) => {
             let canonical = canonical(dir);
             format!("file:{} ({})", path_hash(&canonical), canonical.display())
@@ -56,7 +66,13 @@ pub fn remember_base(work: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]) {
             host.to_lowercase(),
             reference.to_lowercase()
         ),
-    };
+        Base::Standalone { host, port } => format!("standalone:{host}:{port}"),
+    }
+}
+
+/// Пишет память о базе `key` (имя базы из местного слоя или [`ad_hoc_key`]) под `work`.
+pub fn remember_base(work: &Path, key: &str, base: Base<'_>, sets: &[Set<'_>]) {
+    let address = address(&base);
     let records: serde_json::Map<String, serde_json::Value> = sets
         .iter()
         .map(|set| {
