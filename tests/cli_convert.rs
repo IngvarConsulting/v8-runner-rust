@@ -1457,4 +1457,9 @@ fn a_convert_refusal_does_not_offer_a_truncated_command() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!target.join("hand-written.xml").exists());
+    // Согласие называет уничтоженное.
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let message = payload["data"]["message"].as_str().expect("message");
+    assert!(message.contains("discarded on request"), "{message}");
+    assert!(message.contains("hand-written.xml"), "{message}");
 }
