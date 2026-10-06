@@ -1,5 +1,5 @@
 ---
-id: CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA
+id: CTR.WIRE.DOWNLOAD-DATA
 version: 7
 artifact: docs/schemas/command-data/download.schema.json
 check:
@@ -7,7 +7,7 @@ check:
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
 ---
 
-# `data` команды `infobase configuration export`
+# `data` команды `download`
 
 Выгрузка пакета конфигурации из базы отчитывается не только результатом, но и выбором
 исполнителя: квитанция `provider` называет выбранного, откуда взялся выбор (умолчание

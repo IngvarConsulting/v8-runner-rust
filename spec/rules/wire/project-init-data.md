@@ -1,5 +1,5 @@
 ---
-id: CTR.WIRE.CONFIG-INIT-DATA
+id: CTR.WIRE.PROJECT-INIT-DATA
 version: 3
 artifact: docs/schemas/command-data/init.schema.json
 check:

@@ -1,5 +1,5 @@
 ---
-id: CTR.WIRE.SYNTAX-DATA
+id: CTR.WIRE.CHECK-DATA
 version: 6
 artifact: docs/schemas/command-data/check.schema.json
 check:

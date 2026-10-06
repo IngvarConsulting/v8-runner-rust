@@ -1,5 +1,5 @@
 ---
-id: CTR.WIRE.DUMP-DATA
+id: CTR.WIRE.PULL-DATA
 version: 4
 artifact: docs/schemas/command-data/pull.schema.json
 check:
@@ -8,7 +8,7 @@ check:
   - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
 ---
 
-# `data` команды `dump`
+# `data` команды `pull`
 
 Выгрузка базы обратно в файлы проекта отчитывается тем, куда легли файлы и каким режимом:
 полным, инкрементальным или частичным. У частичного форма дополнительно называет
