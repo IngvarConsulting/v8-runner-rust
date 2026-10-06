@@ -36,7 +36,7 @@ const IDENTITY_FILE_NAME: &str = "identity";
 pub(crate) type Fingerprint = [u8; 32];
 
 /// Файл версий одного набора: экземпляр в каталоге исходников и копия раннера.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct RunnerVersionFile {
     source_set: String,
     in_directory: PathBuf,
@@ -71,7 +71,6 @@ impl RunnerVersionFile {
     /// Перед работой от файла версий: подменённый файл в каталоге заменяется копией
     /// раннера. Возвращает отпечаток того, что лежит в каталоге после сверки.
     pub(crate) fn restore(&self) -> Result<Option<Fingerprint>, AppError> {
-        self.remove_left_candidates()?;
         let Some(present) = fingerprint(&self.in_directory)? else {
             return Ok(None);
         };
@@ -137,11 +136,12 @@ impl RunnerVersionFile {
             .parent()
             .ok_or_else(|| AppError::Runtime(format!("'{}' has no parent", self.copy.display())))?;
         fs::create_dir_all(dir).map_err(|error| io_error("create", dir, &error))?;
+        remove_left_candidates(dir)?;
         let ours = self.copy_is_ours()?;
         if !ours {
             match fs::remove_file(&self.identity_file) {
                 Ok(()) => {
-                    let _ = best_effort_fsync_dir(dir);
+                    best_effort_fsync_dir(dir).map_err(|error| io_error("sync", dir, &error))?;
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => return Err(io_error("remove", &self.identity_file, &error)),
@@ -154,27 +154,33 @@ impl RunnerVersionFile {
         }
         Ok(())
     }
+}
 
-    /// Временные файлы прошлых замен, оставленные снятым процессом, убираются под тем же
-    /// замком, под которым пишется новый.
-    fn remove_left_candidates(&self) -> Result<(), AppError> {
-        let Some(dir) = self.in_directory.parent() else {
-            return Ok(());
-        };
-        let prefix = format!("{VERSION_FILE_NAME}{ATOMIC_WRITE_CANDIDATE_SUFFIX}");
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(io_error("list", dir, &error)),
-        };
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                let path = entry.path();
-                fs::remove_file(&path).map_err(|error| io_error("remove", &path, &error))?;
-            }
+/// Временные файлы замен файла версий и его копии (`<имя>.candidate-…`), оставленные
+/// снятым процессом, в каталоге `dir`. Убираются в начале каждой выгрузки и загрузки
+/// набора — под тем же замком, под которым пишутся новые, — и при записи копии: иначе
+/// их видит `git status` и сторож замены каталога.
+pub(crate) fn remove_left_candidates(dir: &Path) -> Result<(), AppError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error("list", dir, &error)),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let left = [VERSION_FILE_NAME, IDENTITY_FILE_NAME]
+            .iter()
+            .any(|target| {
+                name.strip_prefix(target)
+                    .is_some_and(|rest| rest.starts_with(ATOMIC_WRITE_CANDIDATE_SUFFIX))
+            });
+        if left {
+            let path = entry.path();
+            fs::remove_file(&path).map_err(|error| io_error("remove", &path, &error))?;
         }
-        Ok(())
     }
+    Ok(())
 }
 
 fn write_identity(path: &Path, identity: &str) -> io::Result<()> {
@@ -255,13 +261,27 @@ mod tests {
     }
 
     #[test]
-    fn a_restore_removes_temporary_files_left_by_a_killed_write() {
+    fn temporary_files_left_by_a_killed_write_are_removed() {
         let root = tempfile::tempdir().expect("root");
         let file = version_file(root.path(), "base-a");
         let left = root.path().join("sources/ConfigDumpInfo.xml.candidate-x1");
         fs::write(&left, "half").expect("left candidate");
-        file.restore().expect("restore");
+        let kept = root.path().join("sources/Module.bsl");
+        fs::write(&kept, "source").expect("source");
+        super::remove_left_candidates(&root.path().join("sources")).expect("sweep");
         assert!(!left.exists());
+        assert!(kept.exists());
+
+        let copy_dir = file.copy.parent().expect("copy dir").to_path_buf();
+        fs::create_dir_all(&copy_dir).expect("copy dir");
+        let left_copy = copy_dir.join("ConfigDumpInfo.xml.candidate-x2");
+        let left_identity = copy_dir.join("identity.candidate-x3");
+        fs::write(&left_copy, "half").expect("left copy");
+        fs::write(&left_identity, "half").expect("left identity");
+        fs::write(&file.in_directory, "ours").expect("platform wrote");
+        assert_eq!(file.record(), None);
+        assert!(!left_copy.exists());
+        assert!(!left_identity.exists());
     }
 
     #[test]

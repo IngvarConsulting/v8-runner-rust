@@ -3,6 +3,7 @@ id: INV.USE-CASES.THE-RUNNER-COPY-TAKES-THE-PLATFORM-FILE-AFTER-SUCCESS
 check:
   - tests/cli_pull_memory.rs::a_foreign_version_file_between_commands_does_not_reach_the_dump
   - tests/cli_pull_memory.rs::a_failed_pull_does_not_change_the_runner_copy
+  - tests/cli_pull_memory.rs::a_failed_push_does_not_change_the_runner_copy
   - tests/cli_pull_memory.rs::a_push_refreshes_the_runner_copy
   - tests/cli_pull_memory.rs::a_push_that_writes_no_version_file_keeps_the_runner_copy
   - tests/cli_pull_memory.rs::a_designer_partial_pull_leaves_the_runner_copy_alone
@@ -18,8 +19,8 @@ check:
 удачной полной выгрузки, удачной выгрузки по изменившемуся и удачной выборки `ibcmd`, а
 после удачной загрузки `push` — только если загрузка переписала файл в каталоге. Загрузка,
 которая файла в каталоге не переписала, копию не меняет: так у `ibcmd config import` и у
-агента, которому каталог передан копией (по SFTP или в общий каталог без ссылки). Выборочная выгрузка Конфигуратора копию не
-меняет. Сбой команды оставляет копию прежней.
+агента, которому каталог передан копией (по SFTP или в общий каталог без ссылки).
+Выборочная выгрузка Конфигуратора копию не меняет. Сбой команды оставляет копию прежней.
 
 Если копию не удалось записать после удачной команды, ответ остаётся удачным и несёт
 предупреждение: прежняя копия ведёт к выгрузке лишнего, а не к пропуску изменений.

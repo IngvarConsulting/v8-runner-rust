@@ -401,11 +401,7 @@ fn publish_advisory_lock_metadata(
 ) -> std::io::Result<()> {
     // The candidate is named after the lock, so one left by a killed process still
     // matches the lock's own name pattern (for a dump lock, `.dump-*.lock*`).
-    let mut prefix = path.file_name().unwrap_or_default().to_os_string();
-    prefix.push(".candidate-");
-    let mut candidate = tempfile::Builder::new()
-        .prefix(&prefix)
-        .tempfile_in(parent)?;
+    let mut candidate = candidate_next_to(path, None)?;
     write_advisory_lock_metadata(candidate.as_file_mut(), encoded)?;
     candidate.as_file().sync_all()?;
 
@@ -660,36 +656,69 @@ pub fn read_optional(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     }
 }
 
+/// Temporary file next to `path`, named `<имя цели>.candidate-<случайное>`: one left by a
+/// killed process keeps the target's name, and whoever owns the target can find and remove
+/// it. The only place that creates such files.
+fn candidate_next_to(
+    path: &Path,
+    permissions: Option<std::fs::Permissions>,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    let invalid = |what: &str| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("path has no {what}: {}", path.display()),
+        )
+    };
+    let parent = path.parent().ok_or_else(|| invalid("parent"))?;
+    let mut prefix = path
+        .file_name()
+        .ok_or_else(|| invalid("file name"))?
+        .to_os_string();
+    prefix.push(ATOMIC_WRITE_CANDIDATE_SUFFIX);
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix);
+    if let Some(permissions) = permissions {
+        builder.permissions(permissions);
+    }
+    builder.tempfile_in(parent)
+}
+
 /// Replace `path` with what `fill` writes, so a reader sees the previous file or the new
-/// one whole. The temporary file is named after the target
-/// ([`ATOMIC_WRITE_CANDIDATE_SUFFIX`]) and takes the permissions of the file it replaces.
+/// one whole. The replacement keeps the permissions of the file it replaces; a new file
+/// gets the ordinary mode of a created file (`0o666` less the umask).
 pub fn write_file_atomically(
     path: &Path,
     fill: impl FnOnce(&mut File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            ErrorKind::InvalidInput,
-            format!("path has no parent: {}", path.display()),
-        )
-    })?;
-    let mut prefix = path.file_name().unwrap_or_default().to_os_string();
-    prefix.push(ATOMIC_WRITE_CANDIDATE_SUFFIX);
-    let mut candidate = tempfile::Builder::new()
-        .prefix(&prefix)
-        .tempfile_in(parent)?;
+    let previous = match std::fs::metadata(path) {
+        Ok(previous) => Some(previous.permissions()),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let mut candidate = candidate_next_to(path, new_file_permissions())?;
+    if let Some(previous) = previous {
+        candidate.as_file().set_permissions(previous)?;
+    }
     fill(candidate.as_file_mut())?;
     candidate.as_file().sync_all()?;
-    match std::fs::metadata(path) {
-        Ok(previous) => candidate
-            .as_file()
-            .set_permissions(previous.permissions())?,
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
     candidate.persist(path).map_err(|error| error.error)?;
-    let _ = best_effort_fsync_dir(parent);
+    if let Some(parent) = path.parent() {
+        let _ = best_effort_fsync_dir(parent);
+    }
     Ok(())
+}
+
+/// The mode `File::create` would give, so the umask applies; other systems keep defaults.
+fn new_file_permissions() -> Option<std::fs::Permissions> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(std::fs::Permissions::from_mode(0o666))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 pub fn publish_file_atomically(temp_path: &Path, destination_path: &Path) -> std::io::Result<()> {
@@ -1109,43 +1138,6 @@ mod tests {
         ReplaceFileTestPoint, CP1251_HIGH, REPLACE_FILE_TEST_HOOK, TEST_SYSTEM_LOCK_OPENED_HOOK,
         TOOL_NAME,
     };
-    /// The temporary file keeps the target's name and the replaced file keeps its mode.
-    #[cfg(unix)]
-    #[test]
-    fn an_atomic_write_keeps_the_mode_and_leaves_no_candidate() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("dir");
-        let target = dir.path().join("ConfigDumpInfo.xml");
-        std::fs::write(&target, "old").expect("old");
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).expect("mode");
-        let mut seen = None;
-        super::write_file_atomically(&target, |file| {
-            seen = Some(
-                std::fs::read_dir(dir.path())
-                    .expect("list")
-                    .flatten()
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .find(|name| name != "ConfigDumpInfo.xml"),
-            );
-            file.write_all(b"new")
-        })
-        .expect("write");
-        let candidate = seen.flatten().expect("a candidate exists while writing");
-        assert!(
-            candidate.starts_with("ConfigDumpInfo.xml.candidate-"),
-            "{candidate}"
-        );
-        assert_eq!(std::fs::read(&target).expect("target"), b"new");
-        let mode = std::fs::metadata(&target)
-            .expect("meta")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o644);
-        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
-    }
-
     use crate::support::machine::host_name;
     use std::fs;
     use std::io::ErrorKind;
@@ -1942,5 +1934,57 @@ mod tests {
             "the cp1251 sample must not be valid utf-8, or the test proves nothing"
         );
         assert_eq!(decode_platform_log(&cp1251).expect("cp1251"), text);
+    }
+
+    /// The temporary file keeps the target's name and the replaced file keeps its mode.
+    #[cfg(unix)]
+    #[test]
+    fn an_atomic_write_keeps_the_mode_and_leaves_no_candidate() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("dir");
+        let target = dir.path().join("ConfigDumpInfo.xml");
+        fs::write(&target, "old").expect("old");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o664)).expect("mode");
+        let mut seen = None;
+        super::write_file_atomically(&target, |file| {
+            seen = fs::read_dir(dir.path())
+                .expect("list")
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .find(|name| name != "ConfigDumpInfo.xml");
+            file.write_all(b"new")
+        })
+        .expect("write");
+        let candidate = seen.expect("a candidate exists while writing");
+        assert!(
+            candidate.starts_with("ConfigDumpInfo.xml.candidate-"),
+            "{candidate}"
+        );
+        assert_eq!(fs::read(&target).expect("target"), b"new");
+        let mode = fs::metadata(&target).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o664);
+        assert_eq!(fs::read_dir(dir.path()).expect("list").count(), 1);
+    }
+
+    /// A new file gets the mode `File::create` gives under the same umask, not `0o600`.
+    #[cfg(unix)]
+    #[test]
+    fn an_atomic_write_of_a_new_file_follows_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("dir");
+        let reference = dir.path().join("reference");
+        fs::File::create(&reference).expect("reference");
+        let target = dir.path().join("identity");
+        super::write_file_atomically(&target, |_| Ok(())).expect("write");
+        let mode = |path: &Path| fs::metadata(path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&target), mode(&reference));
+    }
+
+    #[test]
+    fn an_atomic_write_refuses_a_path_without_a_file_name() {
+        let error =
+            super::write_file_atomically(Path::new("/"), |_| Ok(())).expect_err("no file name");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 }

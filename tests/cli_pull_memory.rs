@@ -829,3 +829,64 @@ fn an_agent_push_loads_over_the_runner_copy_and_records_the_new_one() {
     assert_eq!(read(&runner_copy(&project)), read(&version_file));
     assert_ne!(read(&version_file), ours);
 }
+
+/// Временный файл замены, брошенный снятым процессом, не числится незафиксированной
+/// работой: выгрузка убирает его раньше, чем сторож спрашивает гит.
+#[test]
+fn a_left_temporary_version_file_does_not_stop_a_full_pull() {
+    let project = version_project("designer");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let repository = project.sources.parent().expect("project root");
+    fs::write(repository.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    git(repository, &["init", "-q", "-b", "main"]);
+    git(repository, &["add", ".gitignore", "sources"]);
+    git(repository, &["commit", "-qm", "baseline"]);
+    let left = project.sources.join("ConfigDumpInfo.xml.candidate-x1");
+    fs::write(&left, "half written").expect("left candidate");
+
+    let response = support::mcp::call_tool(
+        &project.config,
+        "dump_config",
+        serde_json::json!({ "mode": "FULL" }),
+    );
+
+    assert_eq!(response.envelope["ok"], true, "{}", response.envelope);
+    assert!(!left.exists());
+}
+
+#[test]
+fn a_failed_push_does_not_change_the_runner_copy() {
+    let project = version_project("designer");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    let ours = read(&runner_copy(&project));
+    fs::write(
+        project.sources.join("Module.bsl"),
+        "Procedure Edited()\nEndProcedure\n",
+    )
+    .expect("edit");
+
+    fail_platform(&project, true);
+    assert!(!run(&project, &["push"]).status.success());
+
+    assert_ne!(read(&project.sources.join("ConfigDumpInfo.xml")), ours);
+    assert_eq!(read(&runner_copy(&project)), ours);
+}
+
+/// Сверяется только сам файл версий: правка исходников выгрузку полной не делает.
+#[test]
+fn a_source_edit_keeps_the_pull_incremental() {
+    let project = version_project("designer");
+    succeeded(run(&project, &["pull", "--force", "--source-set", "main"]));
+    fs::write(
+        project.sources.join("Module.bsl"),
+        "Procedure Edited()\nEndProcedure\n",
+    )
+    .expect("edit");
+
+    succeeded(run(&project, &["pull", "--source-set", "main"]));
+
+    let calls = read(&project.calls);
+    let last = calls.lines().next_back().expect("a dump ran");
+    assert!(last.contains("/DumpConfigToFiles"), "{last}");
+    assert!(last.contains("-update"), "{last}");
+}

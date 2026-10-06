@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
-use crate::use_cases::version_file::RunnerVersionFile;
+use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 
 pub(super) fn run_dump_with_context(
     context: &ExecutionContext,
@@ -297,6 +297,23 @@ fn run_dump_selected(
     // уступает место копии раннера до запуска платформы. Выборку `ibcmd` выгружает как
     // `--sync` по тому же файлу; что пишет в него выборочная выгрузка Конфигуратора,
     // раннер не знает и копию ею не меняет.
+    // Временные файлы прошлых замен файла версий убираются в начале любой выгрузки: их
+    // видит `git status` и сторож замены каталога.
+    if let Err(error) = remove_left_candidates(&resolved.platform_target_path) {
+        let message = error.to_string();
+        return Err(DumpExecutionFailure::with_payload(
+            error,
+            empty_result(
+                mode,
+                started,
+                Some(resolved.source_set_name.clone()),
+                resolved.extension.clone(),
+                selectors.clone(),
+                Some(resolved.target_path.clone()),
+                Some(message),
+            ),
+        ));
+    }
     let version_file_use = match mode {
         DumpMode::Incremental => VersionFileUse::RestoreAndRecord,
         DumpMode::Partial if provider == Provider::Ibcmd => VersionFileUse::RestoreAndRecord,
