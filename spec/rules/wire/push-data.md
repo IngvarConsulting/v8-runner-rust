@@ -1,5 +1,5 @@
 ---
-id: CTR.WIRE.BUILD-DATA
+id: CTR.WIRE.PUSH-DATA
 version: 3
 artifact: docs/schemas/command-data/push.schema.json
 check:
@@ -8,7 +8,7 @@ check:
   - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
 ---
 
-# `data` команды `build`
+# `data` команды `push`
 
 Сборка идёт по наборам исходников, и форма отчитывается по каждому: какой набор, каким
 режимом загружен и почему. Режим выбирают правила частичной загрузки, а не вызывающий,
