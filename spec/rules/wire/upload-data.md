@@ -1,5 +1,5 @@
 ---
-id: CTR.WIRE.LOAD-DATA
+id: CTR.WIRE.UPLOAD-DATA
 version: 6
 artifact: docs/schemas/command-data/upload.schema.json
 check:
@@ -13,7 +13,7 @@ check:
   - src/use_cases/load_artifact.rs::a_failed_load_after_a_deferred_cancellation_still_names_it
 ---
 
-# `data` команды `load`
+# `data` команды `upload`
 
 Применение готового артефакта к базе отчитывается тремя разными вещами сразу: что
 применяли (`artifact_type`, `target_kind`), чем кончилась проба совместимости

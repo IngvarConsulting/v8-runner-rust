@@ -688,7 +688,7 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ("wire/command-envelope.md", "два,четыре,обоими,два,два"),
     ("wire/infobase-restore-data.md", "двумя"),
     ("wire/launch-data.md", "двух"),
-    ("wire/load-data.md", "тремя"),
+    ("wire/upload-data.md", "тремя"),
 ];
 
 /// Новое число в нормативной части обязано быть названо здесь.
@@ -891,6 +891,80 @@ fn an_area_and_its_directory_name_each_other() {
         if area != directory {
             wrong.push(format!(
                 "{shown}: область имени `{area}` не совпадает с каталогом `{directory}`"
+            ));
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Каталог порождённых схем `data`: имя схемы — имя команды через дефис.
+const COMMAND_DATA_SCHEMAS: &str = "docs/schemas/command-data/";
+
+/// Формы, чьё имя расходится с именем схемы, и почему.
+///
+/// `PROJECT-INIT` — форма команды `init`. Прежнее имя `INIT-DATA` носила форма
+/// `infobase create`, и владелец решил его не переиспользовать (#224): пропущенная
+/// ссылка на прежний символ должна повиснуть, а не молча указать на другую команду.
+const FORMS_NAMED_APART: &[(&str, &str)] = &[("PROJECT-INIT", "init")];
+
+/// Форма `data` команды названа по команде — и в имени правила, и в имени файла.
+///
+/// Команды переименовывали, а символы форм оставались прежними: `CTR.WIRE.BUILD-DATA`
+/// закреплял схему `push`, `CTR.WIRE.SYNTAX-DATA` лежал в `check-data.md` (#224). Схемы
+/// порождаются из кода под именем команды, поэтому имя схемы — опора: от него выводятся
+/// имя правила и имя файла. Расхождение допускает только `FORMS_NAMED_APART`, и запись в
+/// нём, которой ни одна форма не пользуется, тоже ошибка.
+#[test]
+fn a_command_form_is_named_after_its_command() {
+    let mut wrong = Vec::new();
+    let mut used = BTreeSet::new();
+    for (shown, props) in read_rules() {
+        let Some(slug) = props
+            .get("artifact")
+            .and_then(|values| values.first())
+            .and_then(|artifact| artifact.strip_prefix(COMMAND_DATA_SCHEMAS))
+            .and_then(|file| file.strip_suffix(".schema.json"))
+        else {
+            continue;
+        };
+        let id = props
+            .get("id")
+            .and_then(|values| values.first())
+            .map(String::as_str)
+            .unwrap_or_default();
+        let Some(form) = id
+            .splitn(3, '.')
+            .nth(2)
+            .and_then(|name| name.strip_suffix("-DATA"))
+        else {
+            wrong.push(format!("{shown}: имя формы не кончается на `-DATA`: {id}"));
+            continue;
+        };
+        let expected_slug = match FORMS_NAMED_APART.iter().find(|(name, _)| *name == form) {
+            Some((name, slug)) => {
+                used.insert(*name);
+                (*slug).to_owned()
+            }
+            None => form.to_lowercase(),
+        };
+        if slug != expected_slug {
+            wrong.push(format!(
+                "{shown}: `{id}` закрепляет схему `{slug}`, а по имени ждёт `{expected_slug}`"
+            ));
+        }
+        let file = shown.rsplit('/').next().unwrap_or_default();
+        let expected_file = format!("{}-data.md", form.to_lowercase());
+        if file != expected_file {
+            wrong.push(format!(
+                "{shown}: файл формы `{id}` должен называться `{expected_file}`"
+            ));
+        }
+    }
+    for (name, slug) in FORMS_NAMED_APART {
+        if !used.contains(name) {
+            wrong.push(format!(
+                "FORMS_NAMED_APART: запись `{name}` → `{slug}` ни одной формой не используется"
             ));
         }
     }

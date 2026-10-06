@@ -1,5 +1,5 @@
 ---
-id: CTR.WIRE.INIT-DATA
+id: CTR.WIRE.INFOBASE-CREATE-DATA
 version: 3
 artifact: docs/schemas/command-data/infobase-create.schema.json
 check:
