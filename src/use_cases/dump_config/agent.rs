@@ -91,7 +91,7 @@ fn dump_through(
     };
     // Пропуск по поколению — только у выгрузки по изменившемуся от годного файла версий:
     // полная поверх каталога его пишет, и каталог без него не годится как «уже выгружено».
-    if *plan == DumpPlan::OverDirectory(OverDirectory::ByVersionFile) && objects.is_none() {
+    if matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile)) && objects.is_none() {
         if let Recorded::Ours(record) = &recorded {
             if record.token == generation {
                 return Ok((

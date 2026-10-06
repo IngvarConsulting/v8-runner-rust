@@ -1046,7 +1046,7 @@ fn validate_edt_runtime_paths(
         };
     let memory_root = crate::domain::source_set::infobases_dir(&canonical_work_path);
     for (source_set, source_path) in edt_source_paths {
-        if let Some(error) = overlap(source_set, source_path, source_set, &memory_root) {
+        if let Some(error) = overlap(source_set, source_path, "workPath/infobases", &memory_root) {
             return Err(error);
         }
     }
@@ -2656,7 +2656,7 @@ mod tests {
                     ref generated_path,
                     ..
                 } if source_set == "main"
-                    && generated_for == "main"
+                    && generated_for == "workPath/infobases"
                     && std::path::Path::new(generated_path).ends_with("infobases")
             ),
             "{err:?}"

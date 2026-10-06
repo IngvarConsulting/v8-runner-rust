@@ -23,7 +23,7 @@ use tracing::debug;
 
 use crate::config::model::AppConfig;
 use crate::domain::source_set::SourceSetContext;
-use crate::platform::dump_format::{read_recorded, written_by, FormatVersion, RecordedFormat};
+use crate::platform::dump_format::{known_format, read_recorded, FormatVersion, RecordedFormat};
 use crate::platform::locator::PlatformVersion;
 use crate::support::error::AppError;
 use crate::support::fs::{
@@ -186,16 +186,14 @@ impl RunnerVersionFile {
 /// Перед загрузкой: версия формата файла версий не новее той, что пишет платформа.
 ///
 /// Версию, которую пишет платформа, раннер берёт из таблицы замеров
-/// ([`written_by`]); для платформы вне таблицы сверки нет и примечания тоже — пока таблица
+/// ([`known_format`]); для платформы вне таблицы сверки нет и примечания тоже — пока таблица
 /// пуста (#403), сверки нет ни у одной платформы.
 pub(crate) fn check_load_format(
     work_path: &Path,
     context: &SourceSetContext,
     platform: Option<&PlatformVersion>,
 ) -> Result<Option<String>, AppError> {
-    let Some((platform, written)) =
-        platform.and_then(|platform| written_by(platform).map(|written| (platform, written)))
-    else {
+    let Some((platform, written)) = known_format(platform) else {
         return Ok(None);
     };
     check_load_format_against(work_path, context, platform, written)

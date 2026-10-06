@@ -993,3 +993,34 @@ fn a_preview_names_the_mode_the_pull_would_run() {
     let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
     assert_eq!(response["data"]["mode"], "FULL", "{response}");
 }
+
+/// Полная выгрузка поверх каталога без файла версий лишнего не удаляет и хеш-память не
+/// пишет: каталог с файлами, которых нет в базе, базу не описывает. Ответ называет это и
+/// совет `pull <SET> --force` для полного выравнивания.
+#[test]
+fn a_full_dump_over_the_directory_names_the_memory_it_does_not_write() {
+    let project = project("designer", false);
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+
+    let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
+
+    assert_eq!(response["data"]["mode"], "FULL", "{response}");
+    let message = response["data"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("files the base does not have stay in the directory")
+            && message.contains("hash memory is not updated")
+            && message.contains("pull main --force"),
+        "{response}"
+    );
+    assert_eq!(
+        read(&project.sources.join("old.txt")),
+        "local contents before pull"
+    );
+    assert!(
+        !project
+            .work
+            .join("infobases/origin/hashes/main.redb")
+            .exists(),
+        "a dump over the directory records no hashes"
+    );
+}

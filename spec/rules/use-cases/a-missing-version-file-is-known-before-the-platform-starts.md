@@ -7,8 +7,7 @@ check:
   - src/use_cases/dump_config.rs::an_unrecognized_format_turns_the_dump_full_and_a_version_is_foreign_only_by_measurement
   - src/platform/dump_format.rs::the_version_is_read_from_the_root_attribute_only
   - tests/cli_dump_agent.rs::a_directory_without_a_version_file_is_dumped_full_without_the_generation_skip
-  - tests/cli_pull_memory.rs::a_preview_names_the_mode_the_pull_would_run
-  - tests/cli_pull_memory.rs::a_full_dump_over_the_directory_asks_the_replacement_guard
+  - tests/cli_pull_memory.rs::a_full_dump_over_the_directory_names_the_memory_it_does_not_write
 ---
 
 # Отсутствие файла версий известно до запуска платформы
@@ -16,16 +15,15 @@ check:
 Выгрузка по изменившемуся при отсутствующем у раннера файле версий или при файле, в корне
 которого раннер не нашёл версии формата (атрибута `version`), переводится в полную до
 запуска платформы: `-update`, `--update` и `--sync` в аргументах не появляются, ответ
-называет режим `FULL` и причину, а превью называет тот же режим. Файл в каталоге при этом
-берётся таким, каким его оставит сверка с копией раннера. Исключение — восстановление файла
-версий по
+называет режим `FULL` и причину. Файл в каталоге при этом берётся таким, каким его оставит
+сверка с копией раннера; тот же режим называет превью
+(`INV.CLI.PREVIEW-DISPATCHES-NOTHING`). Исключение — восстановление файла версий по
 `INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE`.
 
 Полная выгрузка вместо выгрузки по изменившемуся ложится поверх каталога набора и лишнего
-в нём не удаляет (`INV.CLI.PULL-LAYS-THE-DUMP-OVER-THE-DIRECTORY`); снимок формата EDT
-заменяется целиком. Полная выгрузка поверх каталога спрашивает сторожа замены: незакоммиченная
-работа в каталоге набора останавливает её до запуска платформы отказом `refusing to
-overwrite` с теми же выходами, что у замены каталога. Как `ibcmd config export` без `--sync`
-и `--force` ведёт себя в непустом каталоге и пишет ли он файл версий, не замерено —
-[#403](https://github.com/IngvarConsulting/v8-runner-rust/issues/403). Чужую версию формата
-держит `INV.USE-CASES.A-FOREIGN-FORMAT-VERSION-TURNS-THE-DUMP-FULL`.
+в нём не удаляет (`INV.CLI.PULL-LAYS-THE-DUMP-OVER-THE-DIRECTORY`), хеш-память не пишет, и
+ответ это называет вместе с советом `pull <SET> --force`; снимок формата EDT заменяется
+целиком. Как `ibcmd config export` без `--sync` и `--force` ведёт себя в непустом каталоге и
+пишет ли он файл версий, не замерено; не замерена и выборка `ibcmd` (`--object`, идёт как
+`--sync`) без файла версий — [#403](https://github.com/IngvarConsulting/v8-runner-rust/issues/403).
+Чужую версию формата держит `INV.USE-CASES.A-FOREIGN-FORMAT-VERSION-TURNS-THE-DUMP-FULL`.

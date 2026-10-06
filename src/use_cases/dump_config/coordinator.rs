@@ -1,8 +1,11 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
 use crate::platform::locator::{UtilityLocation, UtilityVersion};
-use crate::use_cases::destruction_guard::{guard_replacement, Destruction};
+use crate::use_cases::destruction_guard::{
+    guard_replacement, Destruction, DestructionConsent, WaysOut,
+};
 use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
+use std::fmt::Write as _;
 
 pub(super) fn run_dump_with_context(
     context: &ExecutionContext,
@@ -213,10 +216,17 @@ fn run_dump_selected(
             }
         );
         if let Some(reason) = plan.whole_reason() {
-            message.push_str(&format!(
-                "; {}: the dump would run full instead of incremental",
-                reason.describe(&resolved.platform_target_path)
-            ));
+            let _ = write!(
+                message,
+                "; {}: the dump would run full instead of incremental{}",
+                reason.describe(&resolved.platform_target_path),
+                whole_consequences(context, config, &resolved)
+            );
+            if config.format == SourceFormat::Designer {
+                message.push_str(
+                    "; uncommitted work in the directory would stop it before the platform starts",
+                );
+            }
         }
         let mut preview = empty_result(
             planned,
@@ -418,8 +428,9 @@ fn run_dump_selected(
     };
     let whole_note = plan.whole_reason().map(|reason| {
         format!(
-            "{}: the dump ran full instead of incremental",
-            reason.describe(&resolved.platform_target_path)
+            "{}: the dump ran full instead of incremental{}",
+            reason.describe(&resolved.platform_target_path),
+            whole_consequences(context, config, &resolved)
         )
     });
     let mode = plan.mode();
@@ -672,6 +683,36 @@ fn runner_version_file(
     SourceSetInventory::new(config)
         .designer_context(&resolved.source_set_name)
         .and_then(|source| RunnerVersionFile::of(config, source))
+}
+
+/// Чего не делает полная выгрузка поверх каталога Конфигуратора: лишнего не удаляет и
+/// хеш-память не пишет — каталог с файлами, которых нет в базе, базу не описывает. Совет —
+/// полная выгрузка со ступенчатой публикацией, если вызывающего можно к ней отправить.
+/// Снимок EDT заменяется целиком, и оговорки у него нет.
+fn whole_consequences(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+) -> String {
+    match config.format {
+        SourceFormat::Edt => String::new(),
+        SourceFormat::Designer => {
+            let advice = match &resolved.consent {
+                DestructionConsent::AskFirst(WaysOut::SaveWork) => String::new(),
+                DestructionConsent::AskFirst(
+                    WaysOut::PullForce { .. } | WaysOut::SameCallWithForce,
+                )
+                | DestructionConsent::Granted
+                | DestructionConsent::RunnerOwned => format!(
+                    "; run {} to replace the directory with the base and record its hashes",
+                    context.advised_pull_force(&resolved.source_set_name)
+                ),
+            };
+            format!(
+                "; files the base does not have stay in the directory and hash memory is not updated{advice}"
+            )
+        }
+    }
 }
 
 /// Версия платформы выбранной утилиты, если раннер её знает.

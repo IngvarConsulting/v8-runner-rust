@@ -10,7 +10,7 @@ use crate::domain::partial_dump_selector::{
     PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
 };
 use crate::platform::designer::DesignerDsl;
-use crate::platform::dump_format::{read_recorded, written_by, FormatVersion, RecordedFormat};
+use crate::platform::dump_format::{known_format, read_recorded, FormatVersion, RecordedFormat};
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
 use crate::platform::locator::{PlatformVersion, UtilityType};
@@ -308,12 +308,12 @@ pub(super) fn plan_dump(
                     AppError::Runtime(format!("failed to read '{}': {error}", path.display()))
                 })?,
             };
-            let written = platform
-                .and_then(|platform| written_by(platform).map(|written| (platform, written)));
-            DumpPlan::OverDirectory(match unusable_version_file(recorded, written) {
-                None => OverDirectory::ByVersionFile,
-                Some(reason) => OverDirectory::Whole(reason),
-            })
+            DumpPlan::OverDirectory(
+                match unusable_version_file(recorded, known_format(platform)) {
+                    None => OverDirectory::ByVersionFile,
+                    Some(reason) => OverDirectory::Whole(reason),
+                },
+            )
         }
     })
 }

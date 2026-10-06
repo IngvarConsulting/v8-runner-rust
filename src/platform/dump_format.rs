@@ -56,9 +56,14 @@ impl fmt::Display for FormatVersion {
 /// версия по таблице чужой не считается, а загрузка по ней не отказывает.
 const WRITTEN_FORMATS: &[((u32, u32, u32), FormatVersion)] = &[];
 
-/// Версия формата, которую пишет платформа этой версии; `None`, если раннер её не знает.
-pub fn written_by(platform: &PlatformVersion) -> Option<FormatVersion> {
-    written_in(WRITTEN_FORMATS, platform)
+/// Платформа и версия формата, которую она пишет по таблице замеров; `None`, если версия
+/// платформы раннеру не видна или её нет в таблице.
+pub fn known_format(
+    platform: Option<&PlatformVersion>,
+) -> Option<(&PlatformVersion, FormatVersion)> {
+    platform.and_then(|platform| {
+        written_in(WRITTEN_FORMATS, platform).map(|written| (platform, written))
+    })
 }
 
 fn written_in(
