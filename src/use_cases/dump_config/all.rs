@@ -375,10 +375,29 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
                 taken.name
             )));
         }
+        // Каталог нового набора не должен лежать внутри каталога набора проекта или вмещать его:
+        // полная выгрузка внешнего каталога заменила бы вложенный целиком.
+        let path = format!("{DECLARED_EXTENSION_ROOT}/{name}");
+        let root = normalized_root(&config.base_path.join(&path));
+        if let Some(nesting) = config.source_sets.iter().find(|source_set| {
+            let other = normalized_root(&source_set.root_in(&config.base_path));
+            // Совпадающий каталог — отказ проверки плана, а не пропуск.
+            root != other && (root.starts_with(&other) || other.starts_with(&root))
+        }) {
+            not_declared.push(NotDeclaredExtension {
+                name: name.clone(),
+                reason: format!(
+                    "directory '{path}' overlaps the directory '{}' of source-set '{}', and a full pull of one would replace the other: declare the set by hand under another path",
+                    nesting.path.display(),
+                    nesting.name
+                ),
+            });
+            continue;
+        }
         declared.push(ConfigInitSourceSet {
             name: name.clone(),
             source_type: SourceSetPurpose::Extension.as_str().to_owned(),
-            path: format!("{DECLARED_EXTENSION_ROOT}/{name}"),
+            path,
         });
     }
     declared.sort_by(|left, right| left.name.cmp(&right.name));
@@ -388,6 +407,12 @@ fn plan_walk<'a>(config: &'a AppConfig, installed: &[String]) -> Result<Walk<'a>
         not_installed,
         not_declared,
     })
+}
+
+/// Каталог набора, сравнимый с другими до его появления: канонический путь ближайшего
+/// существующего предка с хвостом.
+fn normalized_root(path: &std::path::Path) -> std::path::PathBuf {
+    crate::support::path::nearest_existing_canonical_path(path).unwrap_or_else(|_| path.to_owned())
 }
 
 fn provider_label(selected: &SelectedProvider) -> String {
@@ -580,6 +605,37 @@ mod tests {
         assert_eq!(walk.not_declared[0].name, "Aux");
         assert!(
             walk.not_declared[0].reason.contains("device name"),
+            "{walk:?}"
+        );
+    }
+
+    /// Каталог `src/ext/<Name>`, вложенный в каталог набора проекта или вмещающий его, не
+    /// объявляется: полная выгрузка внешнего набора заменила бы вложенный.
+    #[test]
+    fn a_directory_overlapping_a_project_set_is_named_not_declared() {
+        let outer = config(vec![
+            set("main", SourceSetPurpose::Configuration, "src/cf"),
+            set("ext", SourceSetPurpose::Extension, "src/ext"),
+        ]);
+
+        let walk = plan_walk(&outer, &installed(&["Ext", "Sales"])).expect("walk");
+
+        assert!(walk.declared.is_empty(), "{walk:?}");
+        assert_eq!(walk.not_declared.len(), 1, "{walk:?}");
+        assert_eq!(walk.not_declared[0].name, "Sales");
+        assert!(
+            walk.not_declared[0].reason.contains("source-set 'ext'"),
+            "{walk:?}"
+        );
+
+        let inner = config(vec![
+            set("main", SourceSetPurpose::Configuration, "src/cf"),
+            set("deep", SourceSetPurpose::Extension, "src/ext/Sales/inner"),
+        ]);
+        let walk = plan_walk(&inner, &installed(&["Deep", "Sales"])).expect("walk");
+        assert_eq!(walk.not_declared.len(), 1, "{walk:?}");
+        assert!(
+            walk.not_declared[0].reason.contains("source-set 'deep'"),
             "{walk:?}"
         );
     }
