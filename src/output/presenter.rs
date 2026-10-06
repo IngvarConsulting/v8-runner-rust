@@ -1,6 +1,7 @@
 use crate::command_envelope::Envelope;
 use crate::output::text::{JsonPresenter, TextPresenter, TimelineItem, TimelineStatus};
 use serde::Serialize;
+use std::cell::RefCell;
 
 pub enum ColorMode {
     Enabled,
@@ -11,9 +12,11 @@ pub struct Presenter {
     format: String,
     text: TextPresenter,
     json: JsonPresenter,
-    /// Предупреждения загрузки конфига, которые JSON-конверт понесёт вместе с ответом
-    /// команды. В тексте они печатаются сразу, своим узлом, и здесь не копятся.
-    load_warnings: Vec<String>,
+    /// Предупреждения до ответа команды — загрузки конфига, замка базы, — которые
+    /// JSON-конверт понесёт вместе с ответом. В тексте они печатаются сразу, своим узлом,
+    /// и здесь не копятся. Их отмечает и граница команды, у которой ведущий только по
+    /// ссылке, поэтому список — за `RefCell`.
+    leading_warnings: RefCell<Vec<String>>,
 }
 
 impl Presenter {
@@ -23,7 +26,7 @@ impl Presenter {
             format,
             text: TextPresenter { no_color },
             json: JsonPresenter,
-            load_warnings: Vec::new(),
+            leading_warnings: RefCell::default(),
         }
     }
 
@@ -31,15 +34,18 @@ impl Presenter {
         self.format == "json"
     }
 
-    /// Предупреждения, с которыми загрузился конфиг: в тексте — узел `▲ config: …`
-    /// перед лентой команды, в JSON — хвост `warnings` любого конверта, который будет
-    /// напечатан после. Пустой список ничего не печатает и ничего не запоминает.
-    pub fn note_load_warnings(&mut self, config_path: &str, warnings: &[String]) {
+    /// Предупреждения до ответа команды — с чем загрузился конфиг или что замок базы не
+    /// взят: в тексте — узел `▲ <subject>` перед лентой команды, в JSON — хвост
+    /// `warnings` любого конверта, который будет напечатан после. Пустой список ничего не
+    /// печатает и ничего не запоминает.
+    pub fn note_leading_warnings(&self, subject: &str, warnings: &[String]) {
         if warnings.is_empty() {
             return;
         }
         if self.is_json() {
-            self.load_warnings.extend(warnings.iter().cloned());
+            self.leading_warnings
+                .borrow_mut()
+                .extend(warnings.iter().cloned());
             return;
         }
         let details = warnings
@@ -47,8 +53,8 @@ impl Presenter {
             .map(|warning| format!("[warning] {warning}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let node = TimelineItem::new(TimelineStatus::Succeeded, format!("config: {config_path}"))
-            .with_detail(details);
+        let node =
+            TimelineItem::new(TimelineStatus::Succeeded, subject.to_owned()).with_detail(details);
         self.text.print_leading_node(&node);
     }
 
@@ -80,15 +86,16 @@ impl Presenter {
             // text mode: callers render explicit timeline items.
             return;
         }
-        if self.load_warnings.is_empty() {
+        let leading = self.leading_warnings.borrow();
+        if leading.is_empty() {
             self.json.print(envelope);
             return;
         }
-        // Предупреждения загрузки идут после предупреждений команды: команда говорит о
+        // Ведущие предупреждения идут после предупреждений команды: команда говорит о
         // своём первой, а `config init` ждёт своё предупреждение первым. Конверт
         // собирается заново с теми же полями, чтобы порядок ключей не менялся.
         let mut warnings = envelope.warnings.clone();
-        warnings.extend(self.load_warnings.iter().cloned());
+        warnings.extend(leading.iter().cloned());
         let merged = Envelope {
             ok: envelope.ok,
             command: envelope.command.clone(),

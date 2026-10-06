@@ -40,7 +40,7 @@ Useful global flags:
 - `--config <CONFIG>` when the active config is not `./v8project.yaml`.
 - `--json-message` for machine-readable CLI envelopes.
 - `--workdir <WORKDIR>` to override `workPath`; it wins over `v8project.local.yaml`.
-- `--infobase <NAME|CONNECTION>` to work with another declared infobase or an ad hoc connection string; defaults to `origin`.
+- `--infobase <NAME|CONNECTION>` to work with another declared infobase or an ad hoc connection string; defaults to `origin`. An ad hoc string carries nothing the output masks: `Usr=`, `Pwd=`, `Wsn=`, `Wsp=`, `Wsppwd=`, `Password=`, `WspUser=`, `/N`, `/P`, `/WSN`, `/WSP`, `/UC`, `/AccessToken`, a user or password in a `ws=`/`/WS` address — anywhere in it, glued forms included (so `/Proxy` is refused as `/P`) — is refused with `invalid_argument`; declare the base with `user`/`password` under `infobases.<name>` in `v8project.local.yaml` and pass its name.
 - `--clean-before-execution` to clear logs before execution.
 - `--log-level <error|warn|info|debug|trace>` for diagnostics.
 - `--no-color` for plain text output.
@@ -135,6 +135,13 @@ v8-runner infobase create
 - A busy `workPath` (another run holds its lock) answers at once with `error.kind: workspace`,
   `error.code: workspace_busy`, step `workspace lock` and exit 3 for every CLI command; MCP
   answers `runtime_failure`. Wait for the other run and retry.
+- A file infobase is held for the whole command by a lock next to its directory, taken after the
+  `workPath` lock: a second command on the same base — even from another working copy — answers
+  at once `error.code: infobase_busy` (kind `workspace`, step `infobase lock`, exit 3) and names
+  the holding command and its `workPath`; MCP answers `runtime_failure`. Retry when it finishes.
+  If the lock cannot be taken for another reason (the directory next to the base is read-only),
+  a writing command refuses with the directory and the reason, and a reading one (`download`,
+  `infobase dump`, `make`, `extensions list`) goes on with an `infobase lock …` warning.
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
@@ -199,8 +206,8 @@ v8-runner infobase create
   so a missing one is refused before the plan is approved, and it takes no locks and creates
   nothing — not the target, not `workPath`, not the action log — so a preview also runs under a
   read-only sandbox. The record of the call is the envelope on stdout, not a log file. It
-  neither takes nor waits for the workspace lock, so a preview works while
-  another command holds it. `provider_dispatched: false` means no executor got the
+  neither takes nor waits for the workspace or infobase lock, so a preview works while
+  another command holds them. `provider_dispatched: false` means no executor got the
   command's work; export-shaped verbs also answer `mode: preview`. The flag is not a preview
   marker — refusals before any work and runs with nothing to do answer `false` too — so know
   the preview from your own `--dry-run`. `true` means an executor got the work: a failure

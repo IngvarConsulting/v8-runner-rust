@@ -803,9 +803,9 @@ mod tests {
     use crate::change_detection::hash_storage::{HashStorage, FILES_MTIME};
     use crate::change_detection::source_sets::SourceSetsService;
     use crate::config::model::{
-        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig,
-        ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
+        AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig, ToolExtensionInput,
+        ToolExtensionSourceConfig, ToolsConfig,
     };
     use crate::domain::build::BuildMode;
     #[cfg(unix)]
@@ -998,7 +998,6 @@ mod tests {
         base_path: &Path,
         work_path: &Path,
         platform_path: &Path,
-        threshold: usize,
         format: SourceFormat,
         providers: std::collections::BTreeMap<
             crate::domain::capability::Operation,
@@ -1026,9 +1025,6 @@ mod tests {
                     path: PathBuf::from("ext"),
                 },
             ],
-            build: BuildConfig {
-                partial_load_threshold: threshold,
-            },
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),
@@ -1069,9 +1065,6 @@ mod tests {
                     path: PathBuf::from("ext"),
                 },
             ],
-            build: BuildConfig {
-                partial_load_threshold: 20,
-            },
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),
@@ -1116,7 +1109,6 @@ mod tests {
             &base,
             &work,
             &platform,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -1163,7 +1155,6 @@ mod tests {
             &base,
             &work,
             &ibcmd,
-            20,
             SourceFormat::Designer,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
@@ -1209,7 +1200,6 @@ mod tests {
             &base,
             &work,
             &ibcmd,
-            20,
             SourceFormat::Designer,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
@@ -1251,7 +1241,6 @@ mod tests {
             &base,
             &work,
             &platform,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -1295,7 +1284,6 @@ mod tests {
             &base,
             &work,
             &platform,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -1398,7 +1386,6 @@ mod tests {
             &base,
             &root.join("work"),
             &root.join("platform"),
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -1435,7 +1422,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -1490,7 +1476,6 @@ mod tests {
             &base,
             &work,
             &ibcmd,
-            20,
             SourceFormat::Designer,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
@@ -1855,7 +1840,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
@@ -1883,7 +1867,6 @@ mod tests {
             &base,
             &work,
             &dir.path().join("platform"),
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -2429,7 +2412,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
@@ -2467,7 +2449,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
@@ -3147,7 +3128,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3178,7 +3158,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3228,7 +3207,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3281,7 +3259,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3423,7 +3400,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3459,7 +3435,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3518,7 +3493,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3570,7 +3544,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3604,7 +3577,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3643,7 +3615,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );
@@ -3682,7 +3653,6 @@ mod tests {
             &base,
             &work,
             &script,
-            20,
             SourceFormat::Designer,
             Default::default(),
         );

@@ -153,9 +153,11 @@ fn the_three_credential_levels_lie_in_the_local_layer_side_by_side() {
 /// режимах вывода (`INV.CONFIG.A-CLUSTER-SECTION-IS-REJECTED-OUTSIDE-A-CLUSTER-BASE`).
 #[test]
 fn a_cluster_section_next_to_a_file_base_is_refused() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n    cluster:\n      ras: srv:1545\n",
+        &format!("infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n    cluster:\n      ras: srv:1545\n"),
     );
 
     let message = refusal_message(&project.run_json(LAUNCH_PREVIEW));
@@ -177,7 +179,8 @@ fn a_cluster_section_next_to_a_file_base_is_refused() {
     );
 }
 
-/// Адрес сервера администрирования — `host[:port]`; отказ называет ключ и формы.
+/// Адрес сервера администрирования — `host[:port]` с именем или IPv4; отказ называет ключ и
+/// формы, а у IPv6 — причину.
 #[test]
 fn a_malformed_ras_address_is_refused_naming_the_key() {
     let project = project();
@@ -190,4 +193,22 @@ fn a_malformed_ras_address_is_refused_naming_the_key() {
     assert!(message.contains("infobase.cluster.ras"), "{message}");
     assert!(message.contains("`host:port`"), "{message}");
     assert!(message.contains("':1545'"), "{message}");
+
+    // IPv6 — в скобках или без — `rac` не разбирает, а `ras` не слушает: отказ называет
+    // ключ и причину (`INV.CONFIG.A-CLUSTER-ADDRESS-IS-A-NAME-OR-IPV4`). Адрес, который
+    // раннер выведет из `Srvr=`, валидация не проверяет — его отвергнет операция (#213).
+    for ras in ["'[::1]:1545'", "'::1'"] {
+        let ipv6 = crate::project();
+        ipv6.write_local(&format!(
+            "infobases:\n  origin:\n    connection: 'Srvr=srv:1541;Ref=demo'\n    cluster:\n      ras: {ras}\n"
+        ));
+
+        let message = refusal_message(&ipv6.run_json(LAUNCH_PREVIEW));
+
+        assert!(message.contains("infobase.cluster.ras"), "{message}");
+        assert!(
+            message.contains("rac and ras accept only a name or IPv4"),
+            "{message}"
+        );
+    }
 }

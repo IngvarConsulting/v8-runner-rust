@@ -70,7 +70,7 @@ flowchart TB
 
 | Файл | Что в нём |
 | --- | --- |
-| [`transport.rs`](../../src/use_cases/transport.rs), [`workspace_lock.rs`](../../src/use_cases/workspace_lock.rs) | Вызов сценария под замком `workPath` — общий для CLI и MCP |
+| [`transport.rs`](../../src/use_cases/transport.rs), [`command_lock.rs`](../../src/use_cases/command_lock.rs), [`workspace_lock.rs`](../../src/use_cases/workspace_lock.rs), [`infobase_lock.rs`](../../src/use_cases/infobase_lock.rs) | Вызов сценария под замком `workPath` и затем под замком файловой базы — общий для CLI и MCP; что команда делает с базой, называет адаптер |
 | [`provider_selection.rs`](../../src/use_cases/provider_selection.rs) | Выбор исполнителя и квитанция — [6.2](06-runtime-view.md) |
 | [`agent_session.rs`](../../src/use_cases/agent_session.rs) | Сессия агента на команду, обмен файлами, поколение — [6.4](06-runtime-view.md) |
 | [`staged_publication.rs`](../../src/use_cases/staged_publication.rs), [`destruction_guard.rs`](../../src/use_cases/destruction_guard.rs) | Публикация с заменой и вопрос к git — [8.8](08-cross-cutting-concepts.md) |

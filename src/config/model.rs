@@ -55,11 +55,6 @@ pub struct AppConfig {
     #[serde(rename = "source-set", default)]
     pub source_sets: Vec<SourceSetConfig>,
 
-    /// Settings of `push`: how sources reach the infobase
-    #[serde(default)]
-    #[serde(rename = "push", alias = "build")]
-    pub build: BuildConfig,
-
     /// Platform tools configuration
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -162,8 +157,8 @@ pub struct InfobaseConfig {
 /// only for the level it needs, and the refusal names the level that is missing.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct InfobaseClusterConfig {
-    /// Administration server (`ras`) address as `host[:port]`; it goes to `rac` as is,
-    /// so the port default (1545) stays with the platform.
+    /// Administration server (`ras`) address as `host[:port]`, the host a name or IPv4;
+    /// it goes to `rac` as is, so the port default (1545) stays with the platform.
     #[serde(default)]
     pub ras: Option<String>,
 
@@ -277,6 +272,56 @@ fn ssh_endpoint(value: &str) -> Result<(Host, u16), String> {
     }
 }
 
+/// Port the central server agent (`ragent`) listens on unless told otherwise; the runner's
+/// own `ras` (#213) is pointed at the host of `Srvr=` with this port.
+pub(crate) const DEFAULT_CLUSTER_AGENT_PORT: u16 = 1540;
+
+/// Where the cluster is administered from, as the runner derives it from the declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClusterAdministration {
+    /// `cluster.ras` as declared: `rac` goes to this administration server.
+    DeclaredRas(String),
+    /// No `cluster.ras`: the runner starts its own `ras` against this agent (#213) —
+    /// `cluster.agent.address`, or the first non-empty server of `Srvr=`; the port is
+    /// [`DEFAULT_CLUSTER_AGENT_PORT`] unless `agent.address` names one.
+    ManagedRasForAgent { host: Host, port: u16 },
+}
+
+/// Why no administration address follows from the declaration.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ClusterAdministrationError {
+    #[error(
+        "infobase.connection names no cluster server, and infobase.cluster declares neither ras nor agent.address"
+    )]
+    NoServer,
+
+    #[error(
+        "infobase.connection names the cluster server '{server}', which is not `host` or `host:port`: declare infobase.cluster.ras or infobase.cluster.agent.address"
+    )]
+    ServerUnreadable { server: String },
+
+    #[error(
+        "infobase.cluster.agent.address '{address}' is not `host` or `host:port`, the host a name or IPv4"
+    )]
+    AgentAddressUnreadable { address: String },
+
+    #[error(
+        "infobase.connection names the cluster by the IPv6 address '{server}', and with infobase.cluster.ras and infobase.cluster.agent.address empty the runner takes the agent address from Srvr=: rac and ras accept only a name or IPv4 — declare infobase.cluster.ras or infobase.cluster.agent.address as a name or IPv4"
+    )]
+    ServerIsIpv6 { server: String },
+}
+
+/// The record `host[:port]` names an IPv6 host: it parses to an IPv6 address, or it is a
+/// bare IPv6 address (which the authority reader does not take without brackets), or it
+/// opens a bracket the reader refused. `srv::1545` and `tcp://srv:1545` are malformed
+/// records, not IPv6.
+pub(crate) fn names_an_ipv6_host(address: &str) -> bool {
+    match host_and_port_of_authority(address) {
+        Some((host, _)) => matches!(host, Host::Address(std::net::IpAddr::V6(_))),
+        None => address.starts_with('[') || address.parse::<std::net::Ipv6Addr>().is_ok(),
+    }
+}
+
 /// Web server a publication is written to.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -344,6 +389,56 @@ impl InfobaseConfig {
             web: None,
             standalone: None,
             cluster: None,
+        }
+    }
+
+    /// The administration address for `rac`, in the order the declaration answers it:
+    /// `cluster.ras`; else `cluster.agent.address` for the runner's own `ras`; else the first
+    /// non-empty server of `Srvr=` (or `/S`) with [`DEFAULT_CLUSTER_AGENT_PORT`]. Ask it only
+    /// of a cluster target: a file base or a standalone server has no cluster to administer,
+    /// and the answer for them is [`ClusterAdministrationError::NoServer`] or meaningless.
+    /// The declared keys are
+    /// already a name or IPv4 after validation
+    /// (`INV.CONFIG.A-CLUSTER-ADDRESS-IS-A-NAME-OR-IPV4`); an IPv6 host taken from the
+    /// connection string is refused here, because `rac` and `ras` do not work over IPv6.
+    #[cfg_attr(not(test), allow(dead_code))] // called by `sessions` (#212) and the runner's `ras` (#213)
+    pub(crate) fn cluster_administration(
+        &self,
+    ) -> Result<ClusterAdministration, ClusterAdministrationError> {
+        let cluster = self.cluster.as_ref();
+        if let Some(ras) = cluster.and_then(|cluster| cluster.ras.as_deref()) {
+            return Ok(ClusterAdministration::DeclaredRas(ras.to_owned()));
+        }
+        if let Some(agent) = cluster
+            .and_then(|cluster| cluster.agent.as_ref())
+            .and_then(|agent| agent.address.as_deref())
+        {
+            return match host_and_port_of_authority(agent) {
+                Some((host, port)) if !names_an_ipv6_host(agent) => {
+                    Ok(ClusterAdministration::ManagedRasForAgent {
+                        host,
+                        port: port.unwrap_or(DEFAULT_CLUSTER_AGENT_PORT),
+                    })
+                }
+                _ => Err(ClusterAdministrationError::AgentAddressUnreadable {
+                    address: agent.to_owned(),
+                }),
+            };
+        }
+        let hosts = V8Connection::from_connection_string(&self.connection).cluster_hosts();
+        let server = hosts
+            .into_iter()
+            .find(|server| !server.is_empty())
+            .ok_or(ClusterAdministrationError::NoServer)?;
+        if names_an_ipv6_host(&server) {
+            return Err(ClusterAdministrationError::ServerIsIpv6 { server });
+        }
+        match host_and_port_of_authority(&server) {
+            Some((host, _)) => Ok(ClusterAdministration::ManagedRasForAgent {
+                host,
+                port: DEFAULT_CLUSTER_AGENT_PORT,
+            }),
+            None => Err(ClusterAdministrationError::ServerUnreadable { server }),
         }
     }
 
@@ -571,25 +666,6 @@ impl SourceSetPurpose {
             Self::ExternalReports => "EXTERNAL_REPORTS",
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuildConfig {
-    #[serde(default = "default_partial_load_threshold")]
-    pub partial_load_threshold: usize,
-}
-
-impl Default for BuildConfig {
-    fn default() -> Self {
-        Self {
-            partial_load_threshold: default_partial_load_threshold(),
-        }
-    }
-}
-
-fn default_partial_load_threshold() -> usize {
-    20
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -1124,7 +1200,8 @@ const fn default_edt_cli_command_timeout_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ssh_endpoint, DesignerAgentConfig, DesignerAgentMode, EdtCliConfig, Host,
+        names_an_ipv6_host, ssh_endpoint, ClusterAdministration, ClusterAdministrationError,
+        DesignerAgentConfig, DesignerAgentMode, EdtCliConfig, Host, InfobaseConfig,
         PlatformToolConfig, StandaloneConfig,
     };
 
@@ -1196,6 +1273,119 @@ mod tests {
                 error.contains(reason) && error.contains(&format!("'{record}'")),
                 "{record}: {error}"
             );
+        }
+    }
+
+    fn agent_at(host: &str, port: u16) -> ClusterAdministration {
+        ClusterAdministration::ManagedRasForAgent {
+            host: crate::support::authority::host_of_authority(host).expect("agent host"),
+            port,
+        }
+    }
+
+    fn cluster_base(connection: &str, cluster: &str) -> InfobaseConfig {
+        let mut base = InfobaseConfig::file(connection);
+        base.cluster = Some(serde_yaml::from_str(cluster).expect("cluster section"));
+        base
+    }
+
+    /// Адрес администрирования выводится по порядку: `cluster.ras`, иначе
+    /// `cluster.agent.address`, иначе первый непустой сервер `Srvr=` с портом агента; IPv6 из строки
+    /// подключения — отказ, а объявленный ключ строку не читает вовсе (#213).
+    #[test]
+    fn the_cluster_administration_address_is_derived_in_the_declared_order() {
+        let ipv6_server = "Srvr=[::1]:1541;Ref=demo";
+        assert_eq!(
+            cluster_base(
+                ipv6_server,
+                "{ras: 'ras-host:1545', agent: {address: agent-host}}"
+            )
+            .cluster_administration(),
+            Ok(ClusterAdministration::DeclaredRas(
+                "ras-host:1545".to_owned()
+            )),
+            "ras wins"
+        );
+        assert_eq!(
+            cluster_base(
+                "Srvr=srv:1541;Ref=demo",
+                "{agent: {address: 'agent-host:2540'}}"
+            )
+            .cluster_administration(),
+            Ok(agent_at("agent-host", 2540)),
+            "agent.address wins over Srvr="
+        );
+        assert_eq!(
+            cluster_base(ipv6_server, "{agent: {address: agent-host}}").cluster_administration(),
+            Ok(agent_at("agent-host", super::DEFAULT_CLUSTER_AGENT_PORT)),
+            "a declared agent name is not refused for an IPv6 Srvr="
+        );
+
+        for (connection, agent) in [
+            ("Srvr=SRV:1541;Ref=demo", "srv"),
+            ("Srvr=10.0.0.5;Ref=demo", "10.0.0.5"),
+            ("Srvr='tcp://srv1:1541,[::1]:1541';Ref=demo", "srv1"),
+            ("Srvr=' ,srv2';Ref=demo", "srv2"),
+            ("/S srv:1541\\demo", "srv"),
+        ] {
+            assert_eq!(
+                cluster_base(connection, "{}").cluster_administration(),
+                Ok(agent_at(agent, super::DEFAULT_CLUSTER_AGENT_PORT)),
+                "{connection}"
+            );
+        }
+
+        for connection in [
+            ipv6_server,
+            "Srvr=\"[::1]\";Ref=\"demo\"",
+            "Srvr=tcp://[fe80::1]:1541;Ref=demo",
+            "Srvr=::1;Ref=demo",
+            "/S [::1]:1541\\demo",
+        ] {
+            let error = cluster_base(connection, "{user: admin}")
+                .cluster_administration()
+                .expect_err(connection);
+            assert!(
+                matches!(error, ClusterAdministrationError::ServerIsIpv6 { .. }),
+                "{connection}: {error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("rac and ras accept only a name or IPv4"),
+                "{error}"
+            );
+        }
+
+        assert_eq!(
+            cluster_base("File=/tmp/ib", "{}").cluster_administration(),
+            Err(ClusterAdministrationError::NoServer)
+        );
+    }
+
+    /// IPv6 — то, что разбирается в адрес IPv6, голый адрес и запись со скобкой; опечатки
+    /// с двумя двоеточиями и префиксом протокола адресом IPv6 не названы.
+    #[test]
+    fn an_ipv6_host_is_told_from_a_malformed_record() {
+        for address in [
+            "[::1]:1545",
+            "[::1]",
+            "::1",
+            "fe80::1",
+            "[::ffff:10.0.0.5]",
+            "[::1",
+        ] {
+            assert!(names_an_ipv6_host(address), "{address}");
+        }
+        for address in [
+            "srv",
+            "srv:1545",
+            "10.0.0.5:1540",
+            "tcp://srv:1545",
+            "srv::1545",
+            "",
+        ] {
+            assert!(!names_an_ipv6_host(address), "{address}");
         }
     }
 }

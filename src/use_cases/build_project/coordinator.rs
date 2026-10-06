@@ -186,7 +186,6 @@ fn run_build_with(
             &source_context,
             args.full_rebuild,
             analysis_by_name.as_ref(),
-            config.build.partial_load_threshold,
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -392,7 +391,6 @@ pub(super) fn run_build_ibcmd(
             &source_context,
             args.full_rebuild,
             analysis_by_name.as_ref(),
-            config.build.partial_load_threshold,
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -1066,7 +1064,6 @@ pub(super) fn run_build_edt(
             &designer_context,
             args.full_rebuild,
             edt_stage_skipped,
-            config.build.partial_load_threshold,
             &config.work_path,
         ) {
             Ok(plan) => plan,

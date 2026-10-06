@@ -135,9 +135,11 @@ fn warnings(payload: &Value) -> Vec<String> {
 
 #[test]
 fn origin_is_selected_without_a_flag() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  test:\n    connection: 'File=/tmp/test-ib'\n",
+        &format!("infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n  test:\n    connection: 'File={tmp}/test-ib'\n"),
     );
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -151,11 +153,14 @@ fn origin_is_selected_without_a_flag() {
     assert_eq!(payload["ok"], true);
     let args = planned_args(&payload);
     assert!(
-        args.iter().any(|arg| arg.contains("/tmp/origin-ib")),
+        args.iter()
+            .any(|arg| arg.contains(&format!("{tmp}/origin-ib"))),
         "{args:?}"
     );
     assert!(
-        !args.iter().any(|arg| arg.contains("/tmp/test-ib")),
+        !args
+            .iter()
+            .any(|arg| arg.contains(&format!("{tmp}/test-ib"))),
         "{args:?}"
     );
     assert!(warnings(&payload).is_empty(), "{payload}");
@@ -163,9 +168,11 @@ fn origin_is_selected_without_a_flag() {
 
 #[test]
 fn a_declared_name_is_selected_with_the_flag() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  test:\n    connection: 'File=/tmp/test-ib'\n",
+        &format!("infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n  test:\n    connection: 'File={tmp}/test-ib'\n"),
     );
 
     let output = project.run_json(&["--infobase", "test"], LAUNCH_PREVIEW);
@@ -177,20 +184,28 @@ fn a_declared_name_is_selected_with_the_flag() {
     );
     let args = planned_args(&json(&output));
     assert!(
-        args.iter().any(|arg| arg.contains("/tmp/test-ib")),
+        args.iter()
+            .any(|arg| arg.contains(&format!("{tmp}/test-ib"))),
         "{args:?}"
     );
     assert!(
-        !args.iter().any(|arg| arg.contains("/tmp/origin-ib")),
+        !args
+            .iter()
+            .any(|arg| arg.contains(&format!("{tmp}/origin-ib"))),
         "{args:?}"
     );
 }
 
 #[test]
 fn a_connection_string_selects_an_ad_hoc_base_even_without_a_local_layer() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
 
-    let output = project.run_json(&["--infobase", "File=/tmp/ad-hoc-ib"], LAUNCH_PREVIEW);
+    let output = project.run_json(
+        &["--infobase", &format!("File={tmp}/ad-hoc-ib")],
+        LAUNCH_PREVIEW,
+    );
 
     assert!(
         output.status.success(),
@@ -199,7 +214,8 @@ fn a_connection_string_selects_an_ad_hoc_base_even_without_a_local_layer() {
     );
     let args = planned_args(&json(&output));
     assert!(
-        args.iter().any(|arg| arg.contains("/tmp/ad-hoc-ib")),
+        args.iter()
+            .any(|arg| arg.contains(&format!("{tmp}/ad-hoc-ib"))),
         "{args:?}"
     );
 }
@@ -227,11 +243,120 @@ fn an_ad_hoc_connection_string_must_not_carry_credentials() {
     }
 }
 
+/// Отказ строке с учётными данными: `invalid_argument`, ключ назван, место учётных данных —
+/// местный слой, а сама строка и значение рядом с ключом не повторяются (#380).
+fn assert_refused_naming_the_key(connection: &str, key: &str) {
+    let project = project();
+
+    let output = project.run_json(&["--infobase", connection], LAUNCH_PREVIEW);
+
+    let message = refusal_message(&output);
+    let payload = json(&output);
+    assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+    assert!(message.contains(&format!("`{key}`")), "{message}");
+    assert!(message.contains("local layer"), "{message}");
+    for (stream, text) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        let text = String::from_utf8_lossy(text);
+        assert!(
+            !text.contains("secret"),
+            "the refusal must not echo the value in {stream}: {text}"
+        );
+        assert!(
+            !text.contains(connection),
+            "the refusal must not echo the connection string in {stream}: {text}"
+        );
+    }
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_usr_is_refused() {
+    assert_refused_naming_the_key("Srvr=srv;Ref=erp;Usr=secret-user", "Usr");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_pwd_is_refused() {
+    assert_refused_naming_the_key("Srvr=srv;Ref=erp;Pwd=secret", "Pwd");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_wsn_is_refused() {
+    assert_refused_naming_the_key("ws=http://host/ib;Wsn=secret-user", "Wsn");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_wsp_is_refused() {
+    assert_refused_naming_the_key("ws=http://host/ib;Wsp=secret", "Wsp");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_wsppwd_is_refused() {
+    assert_refused_naming_the_key("ws=http://host/ib;Wsppwd=secret", "Wsppwd");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_password_is_refused() {
+    assert_refused_naming_the_key("File=/tmp/ad-hoc-ib;Password=secret", "Password");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_the_n_key_is_refused() {
+    assert_refused_naming_the_key("/F /tmp/ad-hoc-ib /N secret-user", "/N");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_the_p_key_is_refused() {
+    assert_refused_naming_the_key("/F /tmp/ad-hoc-ib /Psecret", "/P");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_part_without_equals_is_checked() {
+    // Часть без `=` раньше обрывала проверку всей строки: соседний `Wsp=` проходил.
+    assert_refused_naming_the_key("File=/tmp/ad-hoc-ib;garbage;Wsp=secret", "Wsp");
+    // И сама такая часть читается как ключи командной строки.
+    assert_refused_naming_the_key("File=/tmp/ad-hoc-ib;/N secret-user", "/N");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_a_quoted_key_is_refused() {
+    // Платформа получает `"/N"` без кавычек, и проверка читает те же токены.
+    assert_refused_naming_the_key("/F /tmp/ad-hoc-ib \"/N\" secret-user \"/P\" secret", "/N");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_any_masked_key_is_refused() {
+    // Отвергается всё, что вывод маскирует, а не только учётные данные базы.
+    assert_refused_naming_the_key("/F /tmp/ad-hoc-ib /UC secret", "/UC");
+    assert_refused_naming_the_key("ws=http://host/ib;WspUser=secret-user", "WspUser");
+}
+
+#[test]
+fn an_ad_hoc_connection_string_with_a_password_in_the_web_address_is_refused() {
+    assert_refused_naming_the_key("ws=http://alice:secret@host/ib", "ws");
+    assert_refused_naming_the_key("/WS http://alice:secret@host/ib", "/WS");
+}
+
+#[test]
+fn an_ad_hoc_path_that_starts_like_a_credential_key_is_not_refused() {
+    let project = project();
+
+    for connection in ["/F /pub/ad-hoc-ib", "/F \"/tmp/my /pub\""] {
+        let output = project.run_json(&["--infobase", connection], LAUNCH_PREVIEW);
+
+        assert!(
+            output.status.success(),
+            "{connection}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
 #[test]
 fn an_undeclared_name_is_refused_with_the_declared_names() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  test:\n    connection: 'File=/tmp/test-ib'\n",
+        &format!("infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n  test:\n    connection: 'File={tmp}/test-ib'\n"),
     );
 
     let output = project.run_json(&["--infobase", "prod"], LAUNCH_PREVIEW);
@@ -248,8 +373,12 @@ fn an_undeclared_name_is_refused_with_the_declared_names() {
 /// `--infobase` команда отказывает до платформы и называет шаг.
 #[test]
 fn a_command_without_origin_names_the_missing_step() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
-    project.write_local("infobases:\n  test:\n    connection: 'File=/tmp/test-ib'\n");
+    project.write_local(&format!(
+        "infobases:\n  test:\n    connection: 'File={tmp}/test-ib'\n"
+    ));
 
     let output = project.run_json(&[], &["build"]);
 
@@ -268,9 +397,11 @@ fn a_command_without_origin_names_the_missing_step() {
 /// сегмент пути, отвергается с указанием ключа.
 #[test]
 fn an_infobase_name_is_a_plain_identifier() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  '../escape':\n    connection: 'File=/tmp/other-ib'\n",
+        &format!("infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n  '../escape':\n    connection: 'File={tmp}/other-ib'\n"),
     );
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -284,9 +415,11 @@ fn an_infobase_name_is_a_plain_identifier() {
 /// проверяется у каждой объявленной секции, не только у выбранной.
 #[test]
 fn a_connection_without_a_supported_shape_is_refused_as_neither_file_nor_server() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     project.write_local(
-        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  prod:\n    connection: 'not a connection'\n",
+        &format!("infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n  prod:\n    connection: 'not a connection'\n"),
     );
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -302,9 +435,13 @@ fn a_connection_without_a_supported_shape_is_refused_as_neither_file_nor_server(
 
 #[test]
 fn the_map_is_refused_in_the_project_file() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str("infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n");
+    config.push_str(&format!(
+        "infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n"
+    ));
     fs::write(&project.config_path, config).expect("config");
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -318,9 +455,11 @@ fn the_map_is_refused_in_the_project_file() {
 
 #[test]
 fn both_keys_in_the_project_file_are_refused() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str("infobase:\n  connection: 'File=/tmp/old-ib'\ninfobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n");
+    config.push_str(&format!("infobase:\n  connection: 'File={tmp}/old-ib'\ninfobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n"));
     fs::write(&project.config_path, config).expect("config");
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -334,9 +473,11 @@ fn both_keys_in_the_project_file_are_refused() {
 
 #[test]
 fn both_keys_in_one_file_are_refused() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     project.write_local(
-        "infobase:\n  connection: 'File=/tmp/old-ib'\ninfobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n",
+        &format!("infobase:\n  connection: 'File={tmp}/old-ib'\ninfobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n"),
     );
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
@@ -353,9 +494,13 @@ fn both_keys_in_one_file_are_refused() {
 /// сливаются по полям, как сливались до переименования.
 #[test]
 fn the_project_synonym_merges_with_the_local_map_by_field() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str("infobase:\n  connection: 'File=/tmp/project-ib'\n");
+    config.push_str(&format!(
+        "infobase:\n  connection: 'File={tmp}/project-ib'\n"
+    ));
     fs::write(&project.config_path, config).expect("config");
     project.write_local("infobases:\n  origin:\n    user: 'Admin'\n");
 
@@ -369,7 +514,8 @@ fn the_project_synonym_merges_with_the_local_map_by_field() {
     let payload = json(&output);
     let args = planned_args(&payload);
     assert!(
-        args.iter().any(|arg| arg.contains("/tmp/project-ib")),
+        args.iter()
+            .any(|arg| arg.contains(&format!("{tmp}/project-ib"))),
         "{args:?}"
     );
     assert!(args.contains(&"Admin".to_owned()), "{args:?}");
@@ -384,8 +530,10 @@ fn the_project_synonym_merges_with_the_local_map_by_field() {
 
 #[test]
 fn the_synonym_in_the_local_layer_is_read_as_origin_and_warned_about() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
-    project.write_local("infobase:\n  connection: 'File=/tmp/local-ib'\n");
+    project.write_local(&format!("infobase:\n  connection: 'File={tmp}/local-ib'\n"));
 
     let output = project.run_json(&[], LAUNCH_PREVIEW);
 
@@ -397,7 +545,7 @@ fn the_synonym_in_the_local_layer_is_read_as_origin_and_warned_about() {
     let payload = json(&output);
     assert!(planned_args(&payload)
         .iter()
-        .any(|arg| arg.contains("/tmp/local-ib")));
+        .any(|arg| arg.contains(&format!("{tmp}/local-ib"))));
     let warnings = warnings(&payload);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(
@@ -410,9 +558,13 @@ fn the_synonym_in_the_local_layer_is_read_as_origin_and_warned_about() {
 /// лентой команды (`CTR.CLI.TEXT-OUTPUT`).
 #[test]
 fn the_synonym_warning_is_a_node_of_its_own_in_text_mode() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
     let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str("infobase:\n  connection: 'File=/tmp/project-ib'\n");
+    config.push_str(&format!(
+        "infobase:\n  connection: 'File={tmp}/project-ib'\n"
+    ));
     fs::write(&project.config_path, config).expect("config");
 
     let output = project.run_text(&[], LAUNCH_PREVIEW);
@@ -448,8 +600,12 @@ fn the_synonym_warning_is_a_node_of_its_own_in_text_mode() {
 /// Сервер MCP грузит конфиг тем же путём: ключ `--infobase` действует и на него.
 #[test]
 fn mcp_serve_selects_the_infobase_by_the_same_flag() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let project = project();
-    project.write_local("infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n");
+    project.write_local(&format!(
+        "infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n"
+    ));
 
     let output = v8_runner_command()
         .arg("--config")

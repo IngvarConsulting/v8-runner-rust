@@ -461,6 +461,7 @@ impl McpToolServer {
         )
         .map_err(|error| ErrorData::internal_error(error.message, None))?;
         let use_case_request = normalize_check_syntax_edt_request(&request);
+        let base = use_case_request.base_access();
         let config = self.config.clone();
         let session = self.edt_session.clone();
         // Замок `workPath` берётся после допуска, как у порта: ожидая слота, вызов его не
@@ -471,6 +472,7 @@ impl McpToolServer {
         let result = match dispatch_with_workspace_lock_async(
             self.config.as_ref(),
             CommandName::Syntax,
+            base,
             || {
                 tokio::task::spawn_blocking(move || {
                     check_syntax::execute_in_server_session(
@@ -1212,8 +1214,8 @@ mod tests {
     use axum::http::Request;
 
     use crate::config::model::{
-        AppConfig, BuildConfig, McpConfig, McpExecutionConfig, McpHttpConfig, PlatformToolConfig,
-        SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
+        AppConfig, McpConfig, McpExecutionConfig, McpHttpConfig, PlatformToolConfig, SourceFormat,
+        SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::mcp::context::McpCallContext;
     use crate::mcp::port::DefaultMcpUseCasePort;
@@ -1831,7 +1833,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("."),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig::default(),
                 enterprise: Default::default(),

@@ -880,7 +880,7 @@ mod tests {
     #[cfg(unix)]
     use crate::config::model::InfobaseConfig;
     use crate::config::model::{
-        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
         ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
     };
     #[cfg(unix)]
@@ -918,7 +918,6 @@ mod tests {
                     path: PathBuf::from("main"),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),

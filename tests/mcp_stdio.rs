@@ -99,7 +99,7 @@ fn run_cli_json_with_status(config_path: &Path, args: &[&str]) -> (bool, Value) 
 
 fn write_config(path: &Path, _base_path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -116,7 +116,7 @@ fn write_edt_config_with_options(
     max_concurrent_calls: usize,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  execution:\n    max_concurrent_calls: {}\n    admission_timeout_ms: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  execution:\n    max_concurrent_calls: {}\n    admission_timeout_ms: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
         work_path.display(),
         max_concurrent_calls,
         admission_timeout_ms,
@@ -135,7 +135,7 @@ fn write_designer_config_with_options(
     max_concurrent_calls: usize,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
         work_path.display(),
         max_concurrent_calls,
         platform_path.display(),
@@ -271,7 +271,7 @@ fn write_designer_suite_config(
     platform_path: &Path,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nmcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\ntests:\n  execution_timeout_seconds: 5\nmcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -355,7 +355,7 @@ fn write_ibcmd_script(path: &Path, calls_log: &Path, fail_pattern: Option<&str>)
 }
 
 fn setup_ibcmd_dump_project(fail_pattern: Option<&str>) -> (tempfile::TempDir, PathBuf, PathBuf) {
-    setup_ibcmd_dump_project_with_infobase(fail_pattern, "  connection: 'File=/tmp/ib'\n")
+    setup_ibcmd_dump_project_with_infobase(fail_pattern, "  connection: 'File=ib'\n")
 }
 
 fn setup_ibcmd_dump_project_with_infobase(
@@ -477,6 +477,8 @@ fn mcp_missing_config_reports_error_on_stderr() {
 
 #[test]
 fn mcp_legacy_top_level_connection_reports_error_on_stderr() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let base_path = dir.path().join("project");
@@ -486,7 +488,7 @@ fn mcp_legacy_top_level_connection_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\nconnection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\nconnection: 'File={tmp}/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -513,6 +515,8 @@ fn mcp_legacy_top_level_connection_reports_error_on_stderr() {
 
 #[test]
 fn mcp_legacy_top_level_credentials_reports_error_on_stderr() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let base_path = dir.path().join("project");
@@ -522,7 +526,7 @@ fn mcp_legacy_top_level_credentials_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -549,6 +553,8 @@ fn mcp_legacy_top_level_credentials_reports_error_on_stderr() {
 
 #[test]
 fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let base_path = dir.path().join("project");
@@ -558,7 +564,7 @@ fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -586,6 +592,8 @@ fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
 
 #[test]
 fn mcp_unsupported_main_config_shape_reports_error_on_stderr() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let dir = temp_workspace();
     let config_path = dir.path().join("v8project.yaml");
     let base_path = dir.path().join("project");
@@ -595,7 +603,7 @@ fn mcp_unsupported_main_config_shape_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    typo: value\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={tmp}/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    typo: value\n",
             work_path.display()
         ),
     )

@@ -118,7 +118,7 @@ fn write_config(path: &Path, base_path: &Path, work_path: &Path, platform_path: 
         base_path,
         work_path,
         platform_path,
-        "  connection: 'File=/tmp/ib'\n",
+        "  connection: 'File=ib'\n",
     );
 }
 
@@ -181,7 +181,7 @@ fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
 
 fn write_designer_config(path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -197,7 +197,7 @@ fn write_edt_dump_config(
     edt_path: &Path,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n    interactive-mode: false\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n    interactive-mode: false\n",
         work_path.display(),
         platform_path.display(),
         edt_path.display(),
@@ -1158,10 +1158,12 @@ fn an_edt_refusal_advises_a_full_replacement_that_runs_as_written() {
 /// каталога, она идёт в ту же базу и тот же рабочий каталог, а не в базу по умолчанию.
 #[test]
 fn an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (dir, config_path, _binary, _work, base_path, calls_log) = setup_project_in_a_repository();
     fs::write(
         config_path.with_file_name("v8project.local.yaml"),
-        "infobases:\n  staging:\n    connection: 'File=/tmp/staging-ib'\n",
+        format!("infobases:\n  staging:\n    connection: 'File={tmp}/staging-ib'\n"),
     )
     .expect("local config");
     let hand_written = base_path.join("main").join("hand-written.xml");
@@ -1225,13 +1227,16 @@ fn an_mcp_refusal_advises_the_command_line_of_the_same_base_and_workdir() {
     assert_ibcmd_data_path(&calls, &other_work);
 }
 
-/// Секрет в строке соединения, которого загрузчик не отвергает: `Wsp=`, а не `Pwd=`.
+/// Значение в строке соединения, которого загрузчик не отвергает: учётные данные строка
+/// нести не может (#380), но совет не повторяет и остальное — ни части строки.
 const CONNECTION_SECRET: &str = "SECRETPW";
 
 /// Строка соединения из `--infobase` может нести секрет, и совет её не повторяет: просит
 /// то же значение `--infobase` словами. Команда строки, отказавшая сторожем EDT.
 #[test]
 fn a_command_line_advice_never_repeats_the_connection_string() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (_dir, config_path, _platform, _edt, _work, base_path, _designer, _edt_calls) =
         setup_edt_project();
     git(&base_path, &["init", "-q", "-b", "main", "."]);
@@ -1242,7 +1247,7 @@ fn a_command_line_advice_never_repeats_the_connection_string() {
     fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
 
     let config = config_path.display().to_string();
-    let connection = format!("File=/tmp/staging-ib;Wsp={CONNECTION_SECRET}");
+    let connection = format!("File={tmp}/staging-ib;Locale={CONNECTION_SECRET}");
     let output = v8_runner_command()
         .args([
             "--config",
@@ -1277,12 +1282,14 @@ fn a_command_line_advice_never_repeats_the_connection_string() {
 /// повторяет её, а просит то же значение, с которым запущен сервер.
 #[test]
 fn an_mcp_advice_never_repeats_the_connection_string_of_the_server() {
+    let bases = support::temp_workspace();
+    let tmp = bases.path().display().to_string();
     let (_dir, config_path, _binary, _work, base_path, _calls_log) =
         setup_project_in_a_repository();
     fs::write(base_path.join("main").join("hand-written.xml"), "mine\n").expect("hand-written");
 
     let config = config_path.display().to_string();
-    let connection = format!("File=/tmp/staging-ib;Wsp={CONNECTION_SECRET}");
+    let connection = format!("File={tmp}/staging-ib;Locale={CONNECTION_SECRET}");
     let answer = support::mcp::call_tool_started_with(
         &[
             "--config",

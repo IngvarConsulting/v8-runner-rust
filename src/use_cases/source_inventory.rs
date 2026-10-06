@@ -151,8 +151,8 @@ fn index_contexts(contexts: &[SourceSetContext]) -> HashMap<String, SourceSetCon
 mod tests {
     use super::{CommandName, SourceSetInventory};
     use crate::config::model::{
-        AppConfig, BuildConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
 
     fn config(format: SourceFormat) -> AppConfig {
@@ -190,7 +190,6 @@ mod tests {
                     path: "external/reports".into(),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),

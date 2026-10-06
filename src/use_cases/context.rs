@@ -69,8 +69,9 @@ pub enum ExecutionTransport {
 /// is executed literally — from another directory, or for an MCP server started with
 /// `--infobase`. The transport knows how it was started; the use case only appends them.
 ///
-/// A connection string never gets here: it may carry a secret the loader does not refuse
-/// (`Wsp=`, a part without `=`), and an advice is shown, logged and pasted. With
+/// A connection string never gets here: the loader refuses credentials in it, yet the
+/// address of a foreign base and parameters the loader does not know stay in it, and an
+/// advice is shown, logged and pasted. With
 /// [`AdvisedInfobase::SameConnection`] the advice asks for "the same `--infobase` value"
 /// instead of repeating it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -435,7 +436,7 @@ mod tests {
         );
     }
 
-    /// Строка соединения может нести секрет, которого загрузчик не отвергает (`Wsp=`), и
+    /// Строка соединения несёт адрес чужой базы и параметры, которых загрузчик не знает, и
     /// совет её не повторяет ни в одном транспорте: просит то же значение `--infobase`
     /// словами.
     #[test]

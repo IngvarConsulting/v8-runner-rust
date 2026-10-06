@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.WITHOUT-ITS-LOCK-A-WRITE-IS-REFUSED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/326
+check:
+  - tests/cli_infobase_lock.rs::a_write_without_the_base_lock_is_refused_and_a_read_goes_on_with_a_warning
+  - src/use_cases/infobase_lock.rs::a_base_lock_that_cannot_be_taken_refuses_a_write_and_warns_a_read
 ---
 
 # Без замка базы команда записи отказывает
