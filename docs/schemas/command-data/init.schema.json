@@ -19,64 +19,161 @@
         "path"
       ],
       "type": "object"
+    },
+    "OriginChange": {
+      "oneOf": [
+        {
+          "const": "declared",
+          "description": "`origin` не было или у него не было адреса: адрес записан.",
+          "type": "string"
+        },
+        {
+          "const": "unchanged",
+          "description": "`origin` уже объявлен тем же адресом или адрес не назван: секция не менялась.",
+          "type": "string"
+        },
+        {
+          "const": "redirected",
+          "description": "`origin` получил новый адрес, прежняя секция сохранена под именем `upstream`.",
+          "type": "string"
+        }
+      ]
+    },
+    "OriginDeclaration": {
+      "additionalProperties": false,
+      "description": "Что `init` сделал с `infobases.origin` местного слоя. Пароль и имя пользователя\nв адресах замаскированы; учётные данные секций в ответ не попадают.",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/OriginChange"
+        },
+        "connection": {
+          "description": "Адрес, который стоит в `origin` после команды. Нет у автономного сервера.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replaced": {
+          "description": "Заменённый адрес: прежняя секция `origin` теперь лежит под именем `upstream`.\nЕсть только при `change: redirected` и только у прежней секции с адресом.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "change"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/init.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
-  "properties": {
-    "duration_ms": {
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "format": {
-      "type": "string"
-    },
-    "gitignore_path": {
-      "type": "string"
-    },
-    "local_path": {
-      "type": "string"
-    },
-    "ok": {
-      "type": "boolean"
-    },
-    "overwritten": {
-      "type": "boolean"
-    },
-    "path": {
-      "type": "string"
-    },
-    "platform_version": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "source_sets": {
-      "items": {
-        "$ref": "#/$defs/ConfigInitSourceSet"
+  "description": "Ответ `init`. Различитель `kind` говорит, что записано: проектный файл вместе с\nместным слоем или, в уже объявленном проекте, только местный слой. Поля проектного\nфайла есть только у первого варианта: у второго им нечего описывать.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "description": "Записан проектный файл: каталог был без него или его переписал `--force`.",
+      "properties": {
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "format": {
+          "type": "string"
+        },
+        "gitignore_path": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "project",
+          "type": "string"
+        },
+        "local_path": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "origin": {
+          "$ref": "#/$defs/OriginDeclaration"
+        },
+        "overwritten": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "platform_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_sets": {
+          "items": {
+            "$ref": "#/$defs/ConfigInitSourceSet"
+          },
+          "type": "array"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
       },
-      "type": "array"
+      "required": [
+        "kind",
+        "ok",
+        "path",
+        "local_path",
+        "gitignore_path",
+        "format",
+        "source_sets",
+        "overwritten",
+        "origin",
+        "duration_ms"
+      ],
+      "type": "object"
     },
-    "warnings": {
-      "items": {
-        "type": "string"
+    {
+      "additionalProperties": false,
+      "description": "Проектный файл уже был и остался нетронутым: записан только местный слой.",
+      "properties": {
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gitignore_path": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "local",
+          "type": "string"
+        },
+        "local_path": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "origin": {
+          "$ref": "#/$defs/OriginDeclaration"
+        }
       },
-      "type": "array"
+      "required": [
+        "kind",
+        "ok",
+        "local_path",
+        "gitignore_path",
+        "origin",
+        "duration_ms"
+      ],
+      "type": "object"
     }
-  },
-  "required": [
-    "ok",
-    "path",
-    "local_path",
-    "gitignore_path",
-    "format",
-    "source_sets",
-    "overwritten",
-    "duration_ms"
   ],
-  "title": "ConfigInitResult",
-  "type": "object"
+  "title": "ConfigInitResult"
 }

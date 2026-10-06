@@ -70,7 +70,11 @@ pub enum ChangeDetectionError {
 
     /// The stored snapshot describes another base or source directory. Its hashes say
     /// nothing about the selected pair, so they are neither used nor silently replaced.
-    #[error("hash memory for source-set '{source_set}' at '{storage_path}' belongs to {recorded}; the selected target is {selected}. If the infobase holds the right state, run a full pull (`pull --mode full`) to record it; if the source directory does, run `push --full` to load it")]
+    ///
+    /// The text names no way out: a command that replaces the memory must carry the global
+    /// keys of the run, and only the use case knows them. The use case appends the ways out
+    /// for `source_set` (`build_project::helpers::change_detection_failure`).
+    #[error("hash memory for source-set '{source_set}' at '{storage_path}' belongs to {recorded}; the selected target is {selected}")]
     ForeignMemory {
         source_set: String,
         storage_path: PathBuf,

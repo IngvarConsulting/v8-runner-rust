@@ -480,7 +480,7 @@ fn test_yaxunit_no_build_skips_build_for_prepared_file_infobase() {
             &config_path.display().to_string(),
             "--json-message",
             "test",
-            "--no-build",
+            "--no-push",
             "yaxunit",
             "all",
         ])
@@ -536,7 +536,7 @@ fn test_no_build_does_not_require_edt_source_tree() {
             &config_path.display().to_string(),
             "--json-message",
             "test",
-            "--no-build",
+            "--no-push",
             "yaxunit",
             "all",
         ])
@@ -566,7 +566,7 @@ fn test_yaxunit_no_build_runs_for_server_infobase() {
             &config_path.display().to_string(),
             "--json-message",
             "test",
-            "--no-build",
+            "--no-push",
             "yaxunit",
             "all",
         ])
@@ -594,7 +594,7 @@ fn test_no_build_rejects_missing_file_infobase_before_platform_launch() {
             &config_path.display().to_string(),
             "--json-message",
             "test",
-            "--no-build",
+            "--no-push",
             "yaxunit",
             "all",
         ])
@@ -1108,7 +1108,7 @@ fn test_va_no_build_skips_build_for_prepared_file_infobase() {
             &config_path.display().to_string(),
             "--json-message",
             "test",
-            "--no-build",
+            "--no-push",
             "va",
         ])
         .output()

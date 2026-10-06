@@ -76,12 +76,6 @@ pub fn normalize_required_string(
     })
 }
 
-/// Parses a required CLI dump mode.
-pub fn parse_required_dump_mode(raw: &str) -> Result<DumpModeRequest, RawValueError> {
-    let mode = normalize_required_string(raw, "dump mode")?;
-    parse_normalized_dump_mode(&mode)
-}
-
 /// Parses an optional dump mode while preserving the caller-selected default when omitted.
 pub fn parse_optional_dump_mode(
     raw: Option<&str>,
@@ -171,18 +165,14 @@ pub fn normalize_edt_projects(project_name: Option<&str>) -> Vec<String> {
 mod tests {
     use super::{
         normalize_edt_projects, normalize_extension_scope, parse_launch_target,
-        parse_optional_dump_mode, parse_required_dump_mode, LaunchModeAliases, RawValueProblem,
+        parse_optional_dump_mode, LaunchModeAliases, RawValueProblem,
     };
     use crate::use_cases::request::{DumpModeRequest, LaunchTargetRequest, SyntaxExtensionScope};
     use crate::use_cases::result::UseCaseError;
     use crate::use_cases::result::UseCaseErrorKind;
 
     #[test]
-    fn parses_dump_modes_for_cli_and_mcp_defaults() {
-        assert_eq!(
-            parse_required_dump_mode("incremental").expect("cli dump mode"),
-            DumpModeRequest::Incremental
-        );
+    fn parses_dump_modes_for_mcp_defaults() {
         assert_eq!(
             parse_optional_dump_mode(None, DumpModeRequest::Incremental).expect("default mode"),
             DumpModeRequest::Incremental

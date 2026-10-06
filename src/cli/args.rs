@@ -512,11 +512,15 @@ pub enum TestScope {
 }
 
 #[derive(Args, Debug)]
-#[command(next_help_heading = "Command options")]
+#[command(
+    next_help_heading = "Command options",
+    after_help = "Without keys: incremental dump - changed objects are written over the source tree; in a Designer-format project nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded.\nEDT-format project: every dump replaces the whole project directory, with or without keys. Without --force, uncommitted work there makes the dump refuse: commit or stash it and repeat, or run the full replacement the refusal names: `pull <SET> --force` for the same set with the same global options and without --object (it discards that work)."
+)]
 pub struct DumpArgs {
-    /// Dump mode
-    #[arg(long, value_parser = ["full", "incremental", "partial"])]
-    pub mode: String,
+    /// Previous mode key; hidden from help for one release cycle. `incremental` and
+    /// `partial` mean the same as no key; `full` is refused in favour of `--force`.
+    #[arg(long, hide = true, value_enum)]
+    pub mode: Option<PreviousDumpMode>,
 
     #[command(flatten)]
     pub source_set: SourceSetArg,
@@ -525,13 +529,37 @@ pub struct DumpArgs {
     #[arg(long)]
     pub extension: Option<String>,
 
-    /// Objects for partial dump. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
+    /// Partial dump of these objects only; cannot be combined with --force. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
     #[arg(long = "object")]
     pub objects: Vec<String>,
 
-    /// Replace the target directory even when it holds work version control cannot give back
+    /// Full dump that replaces the source tree with the infobase state: uncommitted changes and
+    /// untracked files there are discarded. Without it the dump is incremental; in an EDT-format
+    /// project it still replaces the project directory and refuses over uncommitted work
     #[arg(long = "force", alias = "discard-uncommitted")]
     pub discard_uncommitted: bool,
+}
+
+/// Значения прежнего ключа `pull --mode`; живут один цикл выпуска и в справке не печатаются.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviousDumpMode {
+    #[value(hide = true)]
+    Full,
+    #[value(hide = true)]
+    Incremental,
+    #[value(hide = true)]
+    Partial,
+}
+
+impl PreviousDumpMode {
+    /// Значение так, как его написали в командной строке.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Incremental => "incremental",
+            Self::Partial => "partial",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -1638,5 +1666,127 @@ mod tests {
         ]);
 
         assert!(result.is_err());
+    }
+
+    /// Скрытое имя дерева разбора: где живёт, что скрыто и чьё оно, если это псевдоним.
+    type Hidden = (Vec<String>, crate::cli::synonyms::Previous, Option<String>);
+
+    fn collect_hidden(command: &'static clap::Command, path: &[String], hidden: &mut Vec<Hidden>) {
+        use crate::cli::synonyms::Previous;
+        for argument in command.get_arguments() {
+            let Some(long) = argument.get_long() else {
+                assert!(
+                    !argument.is_hide_set(),
+                    "{path:?}: a hidden positional argument"
+                );
+                continue;
+            };
+            if argument.is_hide_set() {
+                hidden.push((path.to_vec(), Previous::Key(long), None));
+                continue;
+            }
+            let visible = argument.get_visible_aliases().unwrap_or_default();
+            for alias in argument.get_all_aliases().unwrap_or_default() {
+                if !visible.contains(&alias) {
+                    hidden.push((
+                        path.to_vec(),
+                        Previous::Key(alias),
+                        Some(format!("--{long}")),
+                    ));
+                }
+            }
+            for value in argument.get_possible_values() {
+                if value.is_hide_set() {
+                    hidden.push((
+                        path.to_vec(),
+                        Previous::Value {
+                            key: long,
+                            // Значения разборщик отдаёт собственными: имя живёт
+                            // столько же, сколько дерево, только после утечки.
+                            value: Box::leak(value.get_name().to_owned().into_boxed_str()),
+                        },
+                        None,
+                    ));
+                }
+            }
+        }
+        for subcommand in command.get_subcommands() {
+            let name = subcommand.get_name();
+            if subcommand.is_hide_set() {
+                hidden.push((path.to_vec(), Previous::Command(name), None));
+                continue;
+            }
+            let visible = subcommand.get_visible_aliases().collect::<Vec<_>>();
+            for alias in subcommand.get_all_aliases() {
+                if !visible.contains(&alias) {
+                    hidden.push((
+                        path.to_vec(),
+                        Previous::Command(alias),
+                        Some(name.to_owned()),
+                    ));
+                }
+            }
+            let mut inner = path.to_vec();
+            inner.push(name.to_owned());
+            collect_hidden(subcommand, &inner, hidden);
+        }
+    }
+
+    /// Перечень прежних имён и скрытое в разборе совпадают в обе стороны: скрытое имя без
+    /// строки перечня проскочило бы мимо стража справки, строка без скрытого имени — пустое
+    /// обещание. Скрытый псевдоним отвечает той записью словаря, которую называет перечень.
+    #[test]
+    fn the_synonym_table_names_every_hidden_name_of_the_parser() {
+        use crate::cli::synonyms::SYNONYMS;
+        use clap::CommandFactory;
+        use std::collections::BTreeSet;
+
+        // Имена перечня — `'static`, и дерево разбора живёт столько же.
+        let parser: &'static clap::Command = Box::leak(Box::new(Cli::command()));
+        let mut hidden = Vec::new();
+        collect_hidden(parser, &[], &mut hidden);
+
+        let in_parser = hidden
+            .iter()
+            .map(|(path, previous, _)| (path.clone(), *previous))
+            .collect::<BTreeSet<_>>();
+        let in_table = SYNONYMS
+            .iter()
+            .map(|synonym| {
+                (
+                    synonym
+                        .command
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect::<Vec<_>>(),
+                    synonym.previous,
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(in_table.len(), SYNONYMS.len(), "a synonym is listed twice");
+        assert_eq!(
+            in_parser.difference(&in_table).collect::<Vec<_>>(),
+            Vec::<&(Vec<String>, crate::cli::synonyms::Previous)>::new(),
+            "hidden in the parser but missing from src/cli/synonyms.rs"
+        );
+        assert_eq!(
+            in_table.difference(&in_parser).collect::<Vec<_>>(),
+            Vec::<&(Vec<String>, crate::cli::synonyms::Previous)>::new(),
+            "listed in src/cli/synonyms.rs but not hidden in the parser"
+        );
+
+        for (path, previous, owner) in &hidden {
+            let synonym = SYNONYMS
+                .iter()
+                .find(|synonym| synonym.command == path.as_slice() && synonym.previous == *previous)
+                .expect("matched above");
+            match owner {
+                Some(owner) => assert_eq!(
+                    synonym.current, owner,
+                    "{path:?} {previous:?} is an alias of {owner}"
+                ),
+                None => assert!(!synonym.current.is_empty(), "{path:?} {previous:?}"),
+            }
+        }
     }
 }

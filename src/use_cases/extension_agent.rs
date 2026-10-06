@@ -40,7 +40,7 @@ impl ExtensionAgent {
         let wait = wait_policy(context);
         let log = transcript_log(config, "extensions")?;
         let mut utilities = PlatformUtilities::from_config(config);
-        let handle = connect(config, &mut utilities, v8, log, &wait)?;
+        let handle = connect(context, config, &mut utilities, v8, log, &wait)?;
         Ok(Self { handle, wait })
     }
 

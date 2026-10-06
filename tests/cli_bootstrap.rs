@@ -1439,3 +1439,50 @@ fn clone_force_writes_the_project_into_a_non_empty_directory() {
         "user file"
     );
 }
+
+/// Клон в репозиторий, где в каталоге исходников лежит работа вне учёта: сторож отказывает,
+/// и выход у `clone` один — сохранить работу. Ключа согласия на уничтожение у него нет:
+/// `clone --force` касается непустого каталога, и совет повторить с ним зациклил бы агента.
+#[test]
+fn a_clone_refusal_does_not_offer_force() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let source_dir = project_dir.join("src").join("configuration");
+    fs::create_dir_all(&source_dir).expect("source dir");
+    let vcs = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&project_dir)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    vcs(&["init", "-q", "-b", "main", "."]);
+    vcs(&["config", "user.email", "test@example.com"]);
+    vcs(&["config", "user.name", "Test"]);
+    fs::write(project_dir.join("README.md"), "readme\n").expect("readme");
+    vcs(&["add", "-A"]);
+    vcs(&["commit", "-qm", "readme"]);
+    fs::write(source_dir.join("hand-written.xml"), "mine\n").expect("hand-written");
+
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    args.push("--force".to_owned());
+    let (code, payload) = run_clone_json(args);
+
+    assert_eq!(code, Some(2), "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("refusing to replace"), "{message}");
+    assert!(message.contains("hand-written.xml"), "{message}");
+    assert!(
+        message.contains("commit or stash them and run the same command again"),
+        "{message}"
+    );
+    assert!(!message.contains("--force"), "{message}");
+    assert!(source_dir.join("hand-written.xml").is_file());
+}

@@ -29,6 +29,7 @@ struct Harness {
     commands_log: PathBuf,
     designer_args_log: PathBuf,
     base_dir_file: PathBuf,
+    port: u16,
 }
 
 fn harness_with(providers: &str) -> Harness {
@@ -114,6 +115,7 @@ fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>
         commands_log,
         designer_args_log,
         base_dir_file,
+        port,
         dir,
     }
 }
@@ -191,6 +193,63 @@ fn make_cf_through_the_agent_publishes_the_package() {
                 .map(|entries| entries.count() == 0)
                 .unwrap_or(true),
         "make dir left behind in the agent user dir"
+    );
+}
+
+/// Квитанция управляемого агента называет его точку входа: `127.0.0.1` и порт, который
+/// раннер ему отдал. Пароль базы в квитанцию не попадает.
+#[test]
+fn a_managed_agent_session_is_named_in_the_receipt() {
+    let harness = harness();
+    let output = harness.dir.path().join("dist").join("release.cf");
+
+    let (code, payload) = run(
+        &harness,
+        &["artifacts", "--output", &output.display().to_string()],
+    );
+
+    assert_eq!(code, 0, "{payload}");
+    let receipt = &payload["data"]["provider"];
+    assert_eq!(receipt["selected"], "agent", "{payload}");
+    assert_eq!(
+        receipt["endpoint"],
+        serde_json::json!({"mode": "managed", "address": format!("127.0.0.1:{}", harness.port)}),
+        "{payload}"
+    );
+    assert!(
+        !receipt.to_string().contains(AGENT_PASSWORD),
+        "the receipt carries no credentials: {receipt}"
+    );
+}
+
+/// Без открытой сессии точки входа в квитанции нет: превью выбрало агента, но к нему не
+/// подключалось. Тот же стенд с настоящим прогоном её называет — значит, отсутствие
+/// говорит о сессии, а не о стенде.
+#[test]
+fn a_receipt_without_a_session_has_no_endpoint() {
+    let harness = harness();
+    let output = harness.dir.path().join("dist").join("release.cf");
+    let output = output.display().to_string();
+
+    let (code, preview) = run(&harness, &["artifacts", "--output", &output, "--dry-run"]);
+    assert_eq!(code, 0, "{preview}");
+    let receipt = &preview["data"]["provider"];
+    assert_eq!(receipt["selected"], "agent", "{preview}");
+    assert!(
+        receipt.get("endpoint").is_none(),
+        "a preview opened no session: {receipt}"
+    );
+    assert!(
+        commands(&harness).is_empty(),
+        "the preview reached the agent: {:?}",
+        commands(&harness)
+    );
+
+    let (code, payload) = run(&harness, &["artifacts", "--output", &output]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["provider"]["endpoint"]["mode"], "managed",
+        "{payload}"
     );
 }
 

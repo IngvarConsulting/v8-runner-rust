@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.EXTENSIONS-INVENTORY-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/extensions-inventory.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -24,9 +24,12 @@ check:
 с инвентаризацией; агент пока сообщает `null`. Подмена рабочей конфигурацией
 после `upload` до `apply` недопустима.
 
-**Что изменила версия 4.** Отказ после того, как исполнитель получил работу, отвечает
-этой формой: `ok: false`, `extensions` пуст — состав неизвестен, а не пуст, — и
-`provider_dispatched: true`. Прежде любой отказ чтения отвечал общей формой отказа.
+**Что изменила версия 5.** Квитанция `provider` получила необязательное поле
+`endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
+(`managed`, `attached` или `gate`) и `address` — `host:port` подключения без учётных
+данных. Поле есть, только когда команда открыла сессию агента; у процесса платформы,
+у превью и у отказа до подключения его нет ([правило](a-session-receipt-names-its-endpoint.md)). Прежде квитанция
+точку входа не называла.
 
 Предмет чтения назван полем `requested` — `{"kind": "all"}` или
 `{"kind": "named", "name": …}` — и в превью, и в ответе: вызывающий сверяет ответ со

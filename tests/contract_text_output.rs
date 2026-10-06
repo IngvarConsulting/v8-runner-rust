@@ -117,7 +117,7 @@ fn previews(artifact: &str, snapshot: &str) -> Vec<Vec<String>> {
     vec![
         owned(&["version"]),
         owned(&["build", "--dry-run"]),
-        owned(&["dump", "--mode", "full", "--dry-run"]),
+        owned(&["dump", "--force", "--dry-run"]),
         owned(&["convert", "--dry-run"]),
         owned(&["make", "--output", artifact, "--dry-run"]),
         owned(&["load", "--path", artifact, "--dry-run"]),

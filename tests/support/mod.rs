@@ -2,6 +2,8 @@
 
 pub mod command_data;
 #[cfg(unix)]
+pub mod mcp;
+#[cfg(unix)]
 pub mod previews;
 
 use std::fs;

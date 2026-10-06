@@ -63,7 +63,7 @@ matrix, and `providers.<operation>` names one explicitly.
   `--installed-name` selects an installed platform name without a matching source-set.
 - `check` picks its branch by `format`: `/CheckConfig` under DESIGNER, EDT validation under EDT.
 - IBCMD dump uses project-local standalone-server data under `workPath/ibcmd-data`.
-- `pull --mode partial` with IBCMD degrades to incremental and must be called out in user-facing summaries.
+- `pull --object` (partial) with IBCMD degrades to incremental and must be called out in user-facing summaries.
 - `convert` is CLI-only, repo-aware, uses configured `source-set`, takes no `providers` key, and does not require an infobase.
 - `upload` supports `.cf` and `.cfe` only for `format=DESIGNER`.
 - `tools.client_mcp.extension.source` is prepared during `push`, skipped when unchanged, and refreshed by `push --full`; `.artifact.path` must point to `.cfe` and currently needs the Designer executor.
@@ -81,7 +81,7 @@ Supported `source-set.type` values:
 - `EXTERNAL_DATA_PROCESSORS`
 - `EXTERNAL_REPORTS`
 
-Prefer `--source-set <NAME>` for narrow push, pull, convert, and artifact flows when the user's change is scoped to one configured source-set.
+Prefer a positional `<SET>` for narrow push, pull, convert, and artifact flows when the user's change is scoped to one configured source-set.
 
 ## Config Path
 

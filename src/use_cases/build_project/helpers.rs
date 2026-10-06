@@ -16,7 +16,7 @@ use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::build_progress::log_build_step_timeline;
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
-use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::context::{shell_word, ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption;
 use tracing::debug;
@@ -40,6 +40,28 @@ pub(super) enum StepPlan {
         partial_paths: Option<Vec<PathBuf>>,
         commit: StepCommit,
     },
+}
+
+/// Text of a change-detection failure for the response, with the ways out it has.
+///
+/// Foreign memory is left by a full pull or a full push of the same source set against the
+/// same base; the commands carry the global keys of this run, so the advice run as written
+/// does not dump or load another base or another project.
+pub(super) fn change_detection_failure(
+    error: &analyzer::ChangeDetectionError,
+    context: &ExecutionContext,
+) -> String {
+    match error {
+        analyzer::ChangeDetectionError::ForeignMemory { source_set, .. } => {
+            format!(
+                "{error}. If the infobase holds the right state, run a full pull {}, which replaces the directory of source-set '{source_set}' and discards its uncommitted changes, to record it; if the source directory does, run {} to load it",
+                context.advised_pull_force(source_set),
+                context.advised_command(&format!("push {} --full", shell_word(source_set))),
+            )
+        }
+        analyzer::ChangeDetectionError::StorageHard { .. }
+        | analyzer::ChangeDetectionError::ConcurrentStateModified { .. } => error.to_string(),
+    }
 }
 
 pub(super) fn plan_configurator_load_step(
@@ -80,7 +102,7 @@ pub(super) fn plan_edt_export_step(
     if full_rebuild {
         return Ok(StepPlan::Execute {
             mode: BuildMode::EdtExport,
-            message: "forced EDT export (--full-rebuild)".to_owned(),
+            message: "forced EDT export (--full)".to_owned(),
             partial_paths: None,
             commit: StepCommit::RescanFull {
                 recover_storage: true,
@@ -155,7 +177,7 @@ pub(super) fn plan_generated_designer_load_step(
     if full_rebuild {
         return Ok(StepPlan::Execute {
             mode: BuildMode::Full,
-            message: "full load from EDT export (--full-rebuild)".to_owned(),
+            message: "full load from EDT export (--full)".to_owned(),
             partial_paths: None,
             commit: StepCommit::RescanFull {
                 recover_storage: true,

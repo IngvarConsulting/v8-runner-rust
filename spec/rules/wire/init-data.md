@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.INIT-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/infobase-create.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -17,6 +17,11 @@ check:
 Под превью шаг, который был бы выполнен, отвечает `status: planned`, а `provider_dispatched` —
 `false`: план построен, платформа найдена, но ничего не создано. Что значит признак, говорит
 [общее правило](provider-dispatched-says-whether-an-executor-got-work.md).
+
+**Что изменила версия 3.** Схема квитанции `provider` допускает необязательное поле
+`endpoint` — точку входа сессии агента ([правило](a-session-receipt-names-its-endpoint.md)): тип квитанции
+общий у всех команд. `infobase create` через сессию агента не идёт, и в её ответе поля нет;
+значения на проводе прежние.
 
 ## Пример
 
