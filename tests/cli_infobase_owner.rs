@@ -374,18 +374,23 @@ fn a_project_copied_whole_leaves_no_live_owner() {
     let copied_marker = copied.root.join("build").join(MARKER_NAME);
     assert_eq!(owners_of(&copied_marker), [original.canonical_root()]);
 
-    // Память в скопированном `work/` описывает прежнюю базу; полная отправка — выход,
-    // который называет её отказ. Отказ по владельцу шёл бы раньше и выхода не дал бы.
-    let pushed = succeeded(&copied.run(&["push", "main", "--full"]));
+    // Память в скопированном `work/` описывает прежнюю базу, то есть памяти о новой нет:
+    // `--full` отказал бы `no_memory`, а выход каталога — перезапись `--force`. Отказ по
+    // владельцу шёл бы раньше и выхода не дал бы.
+    // Владельца сменяет граница команды, раньше проверки памяти: смену называет уже отказ.
+    let refused = envelope(&copied.run(&["push", "main", "--full"]));
+    assert_eq!(refused["error"]["code"], "no_memory", "{refused}");
+    assert!(
+        warnings(&refused)
+            .iter()
+            .any(|warning| warning.contains(&original.canonical_root())),
+        "names the replaced owner: {refused}"
+    );
+    assert_eq!(owners_of(&copied_marker), [copied.canonical_root()]);
+    succeeded(&copied.run(&["push", "main", "--force"]));
 
     assert_eq!(owners_of(&copied_marker), [copied.canonical_root()]);
     assert_eq!(owners_of(&original_marker), [original.canonical_root()]);
-    assert!(
-        warnings(&pushed)
-            .iter()
-            .any(|warning| warning.contains(&original.canonical_root())),
-        "names the replaced owner: {pushed}"
-    );
 }
 
 /// Местный слой владельца, который нельзя прочитать, делает его живым и несогласным.

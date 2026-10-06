@@ -27,7 +27,7 @@ use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
 use crate::use_cases::ignored_files::refuse_tracked_version_file;
-use crate::use_cases::request::BuildRequest as BuildArgs;
+use crate::use_cases::request::{BuildRequest as BuildArgs, PushMode};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tool_extension;
@@ -107,17 +107,6 @@ fn run_build_branch(
         Ok(selected) => (selected.provider, selected.receipt),
         Err((_error, receipt)) => (config.selected_provider(Operation::Build), receipt),
     };
-    // `--force` перезаписывает базу: каждый выбранный набор грузится целиком.
-    let forced;
-    let args = if args.force {
-        forced = BuildArgs {
-            full_rebuild: true,
-            ..args.clone()
-        };
-        &forced
-    } else {
-        args
-    };
     let outcome = match require_memory(context, config, args) {
         Ok(()) => run_build_selected(context, config, args, provider),
         Err(error) => Err(BuildExecutionFailure::with_payload(
@@ -136,15 +125,14 @@ fn run_build_branch(
 }
 
 /// Память о базе у каждого набора, который пойдёт в неё, — до анализа изменений и до
-/// платформы; у `--force` и у превью проверки нет. Неверно названный набор здесь пропускается: отказ о
-/// нём — дело плана сборки.
+/// платформы; у `--force` проверки нет. Превью называет тот же отказ: ему платформа не
+/// нужна. Неверно названный набор здесь пропускается: отказ о нём — дело плана сборки.
 fn require_memory(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
 ) -> Result<(), crate::use_cases::result::UseCaseError> {
-    // Превью ничего не грузит и памяти не требует: отказ называет прогон.
-    if args.force || args.dry_run {
+    if args.load == PushMode::Force {
         return Ok(());
     }
     let inventory = SourceSetInventory::new(config);
@@ -331,7 +319,7 @@ fn append_client_mcp_extension_step(
     match tool_extension::prepare_client_mcp_extension(
         context,
         config,
-        args.full_rebuild,
+        args.load.is_whole(),
         args.dry_run,
     ) {
         Ok(Some(step)) => {
@@ -893,7 +881,7 @@ mod tests {
     #[cfg(unix)]
     use crate::support::error::CancelledAt;
     use crate::use_cases::context::{CommandName, ExecutionContext};
-    use crate::use_cases::request::BuildRequest as BuildArgs;
+    use crate::use_cases::request::{BuildRequest as BuildArgs, PushMode};
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::io::ErrorKind;
@@ -1167,9 +1155,12 @@ mod tests {
     fn build_args(full_rebuild: bool) -> BuildArgs {
         BuildArgs {
             dry_run: false,
-            full_rebuild,
+            load: if full_rebuild {
+                PushMode::Full
+            } else {
+                PushMode::Changes
+            },
             source_set: None,
-            force: false,
         }
     }
 
@@ -1296,9 +1287,12 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("exit code 17"), "{message}");
-        assert_eq!(
-            failed_step_message(failure.payload.expect("payload")),
-            failure.error.to_string()
+        // Шаг называет ещё, что поколение после неудачной загрузки не записано.
+        let step = failed_step_message(failure.payload.expect("payload"));
+        assert!(step.starts_with(&failure.error.to_string()), "{step}");
+        assert!(
+            step.contains("is not recorded after the failed load"),
+            "{step}"
         );
     }
 
@@ -1336,9 +1330,12 @@ mod tests {
             message.starts_with("load ended after cancellation request during critical phase"),
             "{message}"
         );
-        assert_eq!(
-            failed_step_message(failure.payload.expect("payload")),
-            failure.error.to_string()
+        // Шаг называет ещё, что поколение после неудачной загрузки не записано.
+        let step = failed_step_message(failure.payload.expect("payload"));
+        assert!(step.starts_with(&failure.error.to_string()), "{step}");
+        assert!(
+            step.contains("is not recorded after the failed load"),
+            "{step}"
         );
         let calls = fs::read_to_string(&calls_log).expect("calls");
         assert!(calls.contains("/LoadConfigFromFiles"), "{calls}");
@@ -3546,9 +3543,8 @@ mod tests {
             &config,
             &BuildArgs {
                 dry_run: false,
-                full_rebuild: false,
+                load: PushMode::Changes,
                 source_set: Some("ext".to_owned()),
-                force: false,
             },
         )
         .expect("build");
@@ -3598,9 +3594,8 @@ mod tests {
             &config,
             &BuildArgs {
                 dry_run: false,
-                full_rebuild: false,
+                load: PushMode::Changes,
                 source_set: Some("ext".to_owned()),
-                force: false,
             },
         )
         .expect("build");
@@ -3637,9 +3632,8 @@ mod tests {
             &config,
             &BuildArgs {
                 dry_run: false,
-                full_rebuild: false,
+                load: PushMode::Changes,
                 source_set: Some("missing".to_owned()),
-                force: false,
             },
         )
         .expect_err("unknown source-set must fail");

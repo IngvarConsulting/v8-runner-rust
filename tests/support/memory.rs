@@ -134,3 +134,18 @@ fn path_hash(path: &Path) -> String {
     }
     format!("{:x}", hasher.finalize())
 }
+
+/// Память о базе образца контрактных тестов, как после её создания раннером: база `infobase:`
+/// (`origin`) — файловая `<dir>/ib`, набор `main` — `<dir>/project/configuration`,
+/// `workPath` — `<dir>/work`. Без неё `push` и его превью отказывают `no_memory`.
+pub fn remember_sample(dir: &Path) {
+    remember_base(
+        &dir.join("work"),
+        "origin",
+        Base::File(&dir.join("ib")),
+        &[Set::configuration(
+            "main",
+            &dir.join("project").join("configuration"),
+        )],
+    );
+}

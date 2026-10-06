@@ -16,6 +16,8 @@
 //! памяти базы под `workPath` и снимается первой удачной отправкой
 //! (`INV.USE-CASES.A-NEW-OWNER-IS-OFFERED-NO-PULL-UNTIL-ITS-FIRST-PUSH`).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -26,13 +28,14 @@ use crate::config::model::AppConfig;
 use crate::domain::capability::{Provider, TargetKind};
 use crate::domain::next_step::NextStep;
 use crate::domain::source_set::SourceSetContext;
-use crate::support::error::{AppError, NonFastForward};
+use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    GenerationAfter, GenerationComparison, GenerationLedger, Recorded,
+    GenerationAfter, GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
 };
 use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::ignored_files::VERSION_FILE_NAME;
-use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+use crate::use_cases::request::PushMode;
+use crate::use_cases::result::{Generations, UseCaseError, UseCaseErrorKind};
 
 /// Файл признака нового владельца под памятью базы.
 const NEW_OWNER_FILE_NAME: &str = "new-owner.json";
@@ -81,10 +84,20 @@ pub(crate) fn forget_new_owner(config: &AppConfig) -> Option<String> {
 }
 
 /// Когда копия взяла базу, если она — новый владелец до первой удачной отправки.
+///
+/// Признак, который не прочесть или не разобрать, всё равно признак: выгрузку не предлагаем.
+/// Так безопаснее — лишний раз не предложенный `pull` стоит меньше, чем предложенная
+/// выгрузка чужой работы в этот каталог.
 fn new_owner_since(config: &AppConfig) -> Option<String> {
     let file = new_owner_file(config)?;
-    let text = std::fs::read(&file).ok()?;
-    // Признак, который не разобрать, всё равно признак: выгрузку не предлагаем.
+    let text = match std::fs::read(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::debug!(file = %file.display(), %error, "the new owner mark is not readable; it stands");
+            return Some("at an unknown time".to_owned());
+        }
+    };
     Some(
         serde_json::from_slice::<NewOwnerMark>(&text)
             .map(|record| record.since)
@@ -144,10 +157,24 @@ impl Standing {
     }
 }
 
+/// Следующий шаг отказа обмена: `pull` набора, если выгрузку предлагать можно, иначе
+/// перезапись `push --force` — набора, если он назван. Отказы `no_memory` и
+/// `non_fast_forward` строят его только здесь.
+fn way_out(offers_pull: bool, pull_set: &str, push_set: Option<&str>) -> NextStep {
+    if offers_pull {
+        return NextStep::command("pull").for_source_set(pull_set);
+    }
+    let next = NextStep::command("push").with_key("--force", "");
+    match push_set {
+        Some(set) => next.for_source_set(set),
+        None => next,
+    }
+}
+
 /// Отказ `push` без памяти о базе. Наборы `contexts` — те, что пойдут в базу; каждому
-/// нужна своя память: запись журнала поколений или непустая хеш-память этой пары.
-/// Чужую хеш-память называет свой отказ анализа изменений
-/// (`INV.USE-CASES.FOREIGN-MEMORY-IS-NOT-USED`), поэтому здесь отсутствием памяти она не считается.
+/// нужна своя память: запись журнала поколений или своя хеш-память этой пары. Чужая и
+/// нечитаемая хеш-память — отсутствие памяти: она не доказывает, что каталог происходит от
+/// этой базы, а полная загрузка (`--full`) её и не читает.
 pub(crate) fn require_memory(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -175,55 +202,58 @@ pub(crate) fn require_memory(
     let overwrite = format!(
         "{push_force}, which loads the whole directory and replaces the configuration in the infobase, losing what was changed there"
     );
-    // Базу с нераспознанным адресом раннер не помнит никогда: выход у неё один.
-    let unrememberable = first.storage_identity().is_none();
-    let mut message = if unrememberable {
-        format!(
-            "cannot push: the runner keeps no memory of {target}, because it does not recognize its address, so nothing proves that the sources derive from its state; to load them anyway run {overwrite}"
-        )
-    } else {
-        format!(
-            "cannot push: this working copy has no memory of {target} for source-set {names}, so nothing proves that the sources derive from its state; an empty infobase is not told apart, because its generation depends on the platform version"
-        )
-    };
-    let offers_pull = standing.offers_pull() && !unrememberable;
-    if !unrememberable {
-        if offers_pull {
-            let pulls = forgotten
-                .iter()
-                .map(|set| context.advised_command(&format!("pull {}", shell_word(set.name()))))
-                .collect::<Vec<_>>()
-                .join(", ");
-            message.push_str(&format!(
-                ". If the infobase holds the right state, see what is there with {pulls}; if the source directory does, run {overwrite}"
-            ));
-        } else {
-            message.push_str(&format!(". To load the sources run {overwrite}"));
-        }
-        message.push('.');
-        message.push_str(&standing.caveats());
+    let mut message = format!(
+        "cannot push: this working copy has no memory of {target} for source-set {names}, so nothing proves that the sources derive from its state; an empty infobase is not told apart, because its generation depends on the platform version"
+    );
+    if forgotten
+        .iter()
+        .any(|set| keeps_other_memory(set, &config.work_path))
+    {
+        message.push_str(
+            "; the memory kept under its name was written for another infobase or source directory, or cannot be read, and is not used",
+        );
     }
-    let next = if offers_pull {
-        NextStep::command("pull").for_source_set(first.name())
+    let offers_pull = standing.offers_pull();
+    if offers_pull {
+        let pulls = forgotten
+            .iter()
+            .map(|set| context.advised_command(&format!("pull {}", shell_word(set.name()))))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(
+            ". If the infobase holds the right state, see what is there with {pulls}; if the source directory does, run {overwrite}"
+        ));
     } else {
-        let next = NextStep::command("push").with_key("--force", "");
-        match selected_set {
-            Some(set) => next.for_source_set(set),
-            None => next,
-        }
-    };
-    Err(UseCaseError::new(UseCaseErrorKind::NoMemory, message).with_next(next))
+        message.push_str(&format!(". To load the sources run {overwrite}"));
+    }
+    message.push('.');
+    message.push_str(&standing.caveats());
+    Err(
+        UseCaseError::new(UseCaseErrorKind::NoMemory, message).with_next(way_out(
+            offers_pull,
+            first.name(),
+            selected_set,
+        )),
+    )
 }
 
-/// Помнит ли рабочая копия базу для набора: своя запись поколения или своя непустая
-/// хеш-память. Чужая и нечитаемая хеш-память отвечают своими отказами дальше.
+/// Помнит ли рабочая копия базу для набора: своя запись поколения или своя хеш-память
+/// этой пары, в том числе пустая — её пишет создание базы раннером.
 fn remembers(set: &SourceSetContext, work_path: &Path) -> bool {
     let recorded = GenerationLedger::of(set, work_path)
         .is_some_and(|ledger| matches!(ledger.read(), Recorded::Ours(_)));
-    recorded
+    recorded || analyzer::snapshot_memory(set, work_path) == SnapshotMemory::Own
+}
+
+/// Лежит ли под именем базы память набора, которая не его: записанная для другой пары или
+/// нечитаемая. Её отказ называет, чтобы отсутствие памяти не выглядело чистым листом.
+fn keeps_other_memory(set: &SourceSetContext, work_path: &Path) -> bool {
+    let foreign_record = GenerationLedger::of(set, work_path)
+        .is_some_and(|ledger| matches!(ledger.read(), Recorded::Foreign { .. }));
+    foreign_record
         || matches!(
             analyzer::snapshot_memory(set, work_path),
-            SnapshotMemory::Own | SnapshotMemory::Foreign | SnapshotMemory::Unreadable
+            SnapshotMemory::Foreign | SnapshotMemory::Unreadable
         )
 }
 
@@ -240,29 +270,69 @@ pub(crate) enum BeforeLoad {
 pub(crate) struct GenerationGate<'a> {
     context: &'a ExecutionContext,
     config: &'a AppConfig,
-    force: bool,
+    mode: PushMode,
+    /// Сверки, сделанные заранее, до первой загрузки команды: по имени набора.
+    checked: RefCell<HashMap<String, BeforeLoad>>,
+    /// Что неудачная загрузка оставила для ответа о поколении.
+    failed_load: RefCell<Option<String>>,
 }
 
 impl<'a> GenerationGate<'a> {
-    pub(crate) fn new(context: &'a ExecutionContext, config: &'a AppConfig, force: bool) -> Self {
+    pub(crate) fn new(
+        context: &'a ExecutionContext,
+        config: &'a AppConfig,
+        mode: PushMode,
+    ) -> Self {
         Self {
             context,
             config,
-            force,
+            mode,
+            checked: RefCell::new(HashMap::new()),
+            failed_load: RefCell::new(None),
         }
+    }
+
+    /// Сверка набора заранее, до первой загрузки команды: отказ по набору, идущему не
+    /// первым, не должен приходить после того, как наборы перед ним уже легли в базу. Чтение
+    /// то же, что сделала бы сверка перед загрузкой набора, — только раньше: её ответ
+    /// [`Self::before_load`] берёт, а не спрашивает снова.
+    pub(crate) fn check_early(
+        &self,
+        set: &SourceSetContext,
+        tool: Provider,
+        read: impl FnOnce() -> Result<Option<String>, AppError>,
+    ) -> Result<(), AppError> {
+        let before = self.compare(set, tool, read)?;
+        self.checked
+            .borrow_mut()
+            .insert(set.name().to_owned(), before);
+        Ok(())
     }
 
     /// Перед загрузкой набора: поколение базы, прочитанное тем же инструментом, что записал
     /// прошлое, отличается от записанного — отказ `non_fast_forward` до загрузки. Без записи
-    /// того же инструмента поколение не читается: сравнивать не с чем.
+    /// того же инструмента поколение не читается: сравнивать не с чем. Набор, сверенный
+    /// заранее ([`Self::check_ahead`]), не спрашивается снова.
     pub(crate) fn before_load(
         &self,
         set: &SourceSetContext,
         tool: Provider,
         read: impl FnOnce() -> Result<Option<String>, AppError>,
     ) -> Result<BeforeLoad, AppError> {
+        if let Some(before) = self.checked.borrow_mut().remove(set.name()) {
+            return Ok(before);
+        }
+        self.compare(set, tool, read)
+    }
+
+    fn compare(
+        &self,
+        set: &SourceSetContext,
+        tool: Provider,
+        read: impl FnOnce() -> Result<Option<String>, AppError>,
+    ) -> Result<BeforeLoad, AppError> {
         // После отмены поколение не спрашивают: загрузку остановит её безопасная точка.
-        if self.force
+        if self.mode == PushMode::Force
             || crate::use_cases::interruption::pending_interruption_error(
                 self.context,
                 "the configuration generation",
@@ -271,12 +341,7 @@ impl<'a> GenerationGate<'a> {
         {
             return Ok(BeforeLoad::Unchecked);
         }
-        let Some(record) = GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| {
-            match ledger.read() {
-                Recorded::Ours(record) if record.tool == tool => Some(record),
-                Recorded::Ours(_) | Recorded::Nothing | Recorded::Foreign { .. } => None,
-            }
-        }) else {
+        let Some(record) = self.record_of(set, tool) else {
             return Ok(BeforeLoad::Unchecked);
         };
         let Some(token) = read()? else {
@@ -285,33 +350,37 @@ impl<'a> GenerationGate<'a> {
         match record.compare(tool, &token) {
             GenerationComparison::Unchanged => Ok(BeforeLoad::Matched),
             GenerationComparison::NoAnswer => Ok(BeforeLoad::Unchecked),
-            GenerationComparison::Changed => Err(self.moved_ahead(
-                set.name(),
-                &token,
-                &record.token,
-                &record.after.to_string(),
-                &record.recorded_at,
-            )),
+            GenerationComparison::Changed => Err(self.moved_ahead(set.name(), &token, &record)),
         }
     }
 
-    fn moved_ahead(
-        &self,
-        set: &str,
-        base: &str,
-        local: &str,
-        after: &str,
-        recorded_at: &str,
-    ) -> AppError {
+    /// Запись набора, сделанная тем же инструментом.
+    fn record_of(&self, set: &SourceSetContext, tool: Provider) -> Option<GenerationRecord> {
+        GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| match ledger.read() {
+            Recorded::Ours(record) if record.tool == tool => Some(record),
+            Recorded::Ours(_) | Recorded::Nothing | Recorded::Foreign { .. } => None,
+        })
+    }
+
+    fn moved_ahead(&self, set: &str, base: &str, record: &GenerationRecord) -> AppError {
         let standing = Standing::of(self.config);
         let target = self.config.v8_connection().describe_target();
         let push_force = self
             .context
             .advised_command(&format!("push {} --force", shell_word(set)));
-        let mut message = format!(
-            "cannot push source-set '{set}': {target} moved ahead since the last exchange of this working copy — its configuration generation is {base}, the one recorded after the last {after} ({recorded_at}) is {local}"
-        );
-        if standing.offers_pull() {
+        let local = &record.token;
+        let recorded_at = &record.recorded_at;
+        let mut message = match record.after {
+            GenerationAfter::FailedBuild => format!(
+                "cannot push source-set '{set}': the configuration generation of {target} is {base}, not {local} that was recorded before the last push of this working copy failed ({recorded_at}); that failed push or another working copy changed the infobase, and the runner cannot tell which"
+            ),
+            GenerationAfter::Build | GenerationAfter::Dump => format!(
+                "cannot push source-set '{set}': {target} moved ahead since the last exchange of this working copy — its configuration generation is {base}, the one recorded after the last {} ({recorded_at}) is {local}",
+                record.after
+            ),
+        };
+        let offers_pull = standing.offers_pull();
+        if offers_pull {
             message.push_str(&format!(
                 "; take its changes first with {}, or overwrite them with {push_force}",
                 self.context
@@ -322,19 +391,20 @@ impl<'a> GenerationGate<'a> {
         }
         message.push('.');
         message.push_str(&standing.caveats());
-        AppError::NonFastForward(Box::new(NonFastForward {
-            message,
-            source_set: set.to_owned(),
-            base_generation: base.to_owned(),
-            local_generation: local.to_owned(),
-            offers_pull: standing.offers_pull(),
-        }))
+        AppError::Refused(Box::new(
+            UseCaseError::new(UseCaseErrorKind::NonFastForward, message)
+                .with_next(way_out(offers_pull, set, Some(set)))
+                .with_generations(Generations {
+                    base: base.to_owned(),
+                    local: local.clone(),
+                }),
+        ))
     }
 
     /// После удачной загрузки набора: поколение записывается с инструментом. Без ответа
     /// запись набора стирается — прежний токен описывает уже не ту базу, и следующая
-    /// отправка не должна принять свою же загрузку за чужую правку. Загрузка уже прошла,
-    /// поэтому сбой записи — предупреждение, а не отказ.
+    /// отправка не должна принять свою же загрузку за чужую правку; стёртую запись ответ
+    /// называет. Загрузка уже прошла, поэтому сбой записи — предупреждение, а не отказ.
     #[must_use]
     pub(crate) fn after_load(
         &self,
@@ -343,17 +413,61 @@ impl<'a> GenerationGate<'a> {
         token: Option<&str>,
     ) -> Option<String> {
         let ledger = GenerationLedger::of(set, &self.config.work_path)?;
-        let written = match token {
-            Some(token) => ledger.record(tool, token, GenerationAfter::Build),
-            None => ledger.forget(),
+        let name = set.name();
+        match token {
+            Some(token) => match ledger.record(tool, token, GenerationAfter::Build) {
+                Ok(()) => None,
+                Err(error) => Some(match ledger.forget() {
+                    Ok(_) => format!(
+                        "the configuration generation of source-set '{name}' was not recorded: {error}; its previous record is erased, so the next push does not check whether the infobase moved ahead"
+                    ),
+                    Err(forget) => format!(
+                        "the configuration generation of source-set '{name}' was not recorded: {error}; its previous record was not erased either ({forget}), so the next push may take this load for a change made elsewhere"
+                    ),
+                }),
+            },
+            None => match ledger.forget() {
+                Ok(false) => None,
+                Ok(true) => Some(format!(
+                    "the configuration generation of source-set '{name}' is not known after the load: its previous record is erased, so the next push does not check whether the infobase moved ahead"
+                )),
+                Err(error) => Some(format!(
+                    "the configuration generation of source-set '{name}' is not known after the load, and its previous record was not erased: {error}; the next push may take this load for a change made elsewhere"
+                )),
+            },
+        }
+    }
+
+    /// После неудачной загрузки набора: поколение не записывается — неизвестно, что
+    /// неудачная загрузка успела сделать с базой. Запись того же инструмента помечается как
+    /// сделанная перед неудачной загрузкой: если поколение с ней разойдётся, следующая
+    /// отправка откажет `non_fast_forward` и скажет, что базу изменила либо эта загрузка,
+    /// либо другая копия, а не выдаст своё за чужое; совпадёт — загрузка базу не тронула.
+    /// Строку для шага неудачной загрузки отдаёт [`Self::failed_load_note`].
+    pub(crate) fn after_failed_load(&self, set: &SourceSetContext, tool: Provider) {
+        let name = set.name();
+        let not_recorded = format!(
+            "the configuration generation of source-set '{name}' is not recorded after the failed load"
+        );
+        let marked = GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| {
+            self.record_of(set, tool)
+                .map(|record| ledger.record(tool, &record.token, GenerationAfter::FailedBuild))
+        });
+        let note = match marked {
+            None => not_recorded,
+            Some(Ok(())) => format!(
+                "{not_recorded}: if the infobase no longer has the generation recorded before it, the next push is refused until the infobase is pulled or overwritten"
+            ),
+            Some(Err(error)) => format!(
+                "{not_recorded}, and the record made before it was not marked as preceding a failed load: {error}"
+            ),
         };
-        written.err().map(|error| {
-            let _ = ledger.forget();
-            format!(
-                "the configuration generation of source-set '{}' was not recorded: {error}; the next push does not check whether the infobase moved ahead",
-                set.name()
-            )
-        })
+        *self.failed_load.borrow_mut() = Some(note);
+    }
+
+    /// Что ответ неудачной загрузки говорит о поколении: строка [`Self::after_failed_load`].
+    pub(crate) fn failed_load_note(&self) -> Vec<String> {
+        self.failed_load.borrow_mut().take().into_iter().collect()
     }
 
     /// Восстановление потерянного файла версий без полной выгрузки
@@ -402,30 +516,55 @@ impl<'a> GenerationGate<'a> {
     }
 }
 
-/// Поколение у выгрузки: до и после. Совпало — запись после выгрузки; изменилось —
-/// ответ называет это, а память не обновляется, и следующая отправка снова увидит
-/// расхождение. Без ответа до или после памяти нечего записать.
+/// Пропуск выгрузки по изменившемуся: поколение до неё совпало с записанным тем же
+/// инструментом — в базе нечего брать с прошлого обмена. Строка — ответ «всё актуально»;
+/// `None` — выгружать (`INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED`).
+pub(crate) fn unchanged_since_the_record(
+    set: &SourceSetContext,
+    work_path: &Path,
+    tool: Provider,
+    token: &str,
+) -> Option<String> {
+    let Recorded::Ours(record) = GenerationLedger::of(set, work_path)?.read() else {
+        return None;
+    };
+    (record.compare(tool, token) == GenerationComparison::Unchanged).then(|| {
+        format!(
+            "configuration generation {token} is unchanged since the last {} ({}); nothing to dump",
+            record.after, record.recorded_at
+        )
+    })
+}
+
+/// Поколение у выгрузки: до и после. Совпало — запись после выгрузки. Изменилось — базу
+/// правили во время выгрузки: ответ это называет, а записывается поколение, которое было
+/// до выгрузки, — и следующая отправка, увидев другое, откажет `non_fast_forward`, даже
+/// если памяти о базе до этой выгрузки не было. Без ответа до или после запись не меняется.
+/// Выгрузка уже прошла, поэтому сбой записи — строка для ответа, а не отказ.
 pub(crate) fn record_after_dump(
     set: &SourceSetContext,
     work_path: &Path,
     tool: Provider,
     before: Option<&str>,
     after: Option<&str>,
-) -> Result<Option<String>, AppError> {
+) -> Option<String> {
     let (Some(before), Some(after)) = (before, after) else {
-        return Ok(None);
+        return None;
     };
-    let Some(ledger) = GenerationLedger::of(set, work_path) else {
-        return Ok(None);
-    };
-    if before == after {
-        ledger.record(tool, after, GenerationAfter::Dump)?;
-        return Ok(None);
+    let ledger = GenerationLedger::of(set, work_path)?;
+    if let Err(error) = ledger.record(tool, before, GenerationAfter::Dump) {
+        return Some(format!(
+            "the configuration generation of source-set '{}' was not recorded: {error}",
+            set.name()
+        ));
     }
-    Ok(Some(format!(
-        "the infobase was changed while source-set '{}' was being dumped: its configuration generation was {before} before the dump and {after} after it; the memory of the infobase is not updated, so the next push sees the difference — pull again",
+    if before == after {
+        return None;
+    }
+    Some(format!(
+        "the infobase was changed while source-set '{}' was being dumped: its configuration generation was {before} before the dump and {after} after it; the generation from before the dump is remembered, so the next push is refused as non-fast-forward — pull again",
         set.name()
-    )))
+    ))
 }
 
 /// Память о базе, которую раннер только что создал пустой: у каждого набора, который в неё
@@ -539,6 +678,24 @@ mod tests {
 
         require(&config).expect("the created base is remembered");
         assert_eq!(new_owner_since(&config), None);
+    }
+
+    /// Признак нового владельца, который не прочесть, стоит: выгрузку отказ не предлагает.
+    #[test]
+    fn an_unreadable_new_owner_mark_stands() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let file = new_owner_file(&config).expect("remembered base");
+        // Каталог на месте файла: прочесть его как файл нельзя и под root.
+        std::fs::create_dir_all(&file).expect("unreadable mark");
+
+        assert!(new_owner_since(&config).is_some());
+        assert!(!Standing::of(&config).offers_pull());
+        let refused = require(&config).expect_err("no memory");
+        assert_eq!(
+            refused.next().map(|next| next.command.as_str()),
+            Some("push")
+        );
     }
 
     /// Признак нового владельца не считается содержимым каталога клона.

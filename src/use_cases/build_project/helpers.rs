@@ -54,9 +54,9 @@ pub(super) fn change_detection_failure(
     match error {
         analyzer::ChangeDetectionError::ForeignMemory { source_set, .. } => {
             format!(
-                "{error}. If the infobase holds the right state, run a full pull {}, which replaces the directory of source-set '{source_set}' and discards its uncommitted changes, to record it; if the source directory does, run {} to load it",
+                "{error}. If the infobase holds the right state, run a full pull {}, which replaces the directory of source-set '{source_set}' and discards its uncommitted changes, to record it; if the source directory does, run {}, which loads it whole and replaces the configuration in the infobase",
                 context.advised_pull_force(source_set),
-                context.advised_command(&format!("push {} --full", shell_word(source_set))),
+                context.advised_command(&format!("push {} --force", shell_word(source_set))),
             )
         }
         analyzer::ChangeDetectionError::StorageHard { .. }

@@ -16,7 +16,7 @@ use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
     argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
     run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir, write_text, AgentHandle,
-    Exchange, GenerationComparison, GenerationLedger, Recorded,
+    Exchange, GenerationLedger, Recorded,
 };
 
 /// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
@@ -93,17 +93,15 @@ fn dump_through(
     // Пропуск по поколению — только у выгрузки по изменившемуся от годного файла версий:
     // полная поверх каталога его пишет, и каталог без него не годится как «уже выгружено».
     if matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile)) && objects.is_none() {
-        if let Recorded::Ours(record) = &recorded {
-            if record.compare(Provider::Agent, &generation) == GenerationComparison::Unchanged {
-                return Ok((
-                    String::new(),
-                    DumpNotes::message(Some(format!(
-                        "configuration generation {generation} is unchanged since the last {} ({}); nothing to dump",
-                        record.after, record.recorded_at
-                    ))),
-                    true,
-                ));
-            }
+        if let Some(unchanged) = set.and_then(|set| {
+            crate::use_cases::exchange_guard::unchanged_since_the_record(
+                set,
+                &config.work_path,
+                Provider::Agent,
+                &generation,
+            )
+        }) {
+            return Ok((String::new(), DumpNotes::message(Some(unchanged)), true));
         }
     }
 
@@ -284,7 +282,7 @@ fn dump_through(
                 Provider::Agent,
                 Some(&generation),
                 after.as_deref(),
-            )?
+            )
         }
         _ => None,
     };

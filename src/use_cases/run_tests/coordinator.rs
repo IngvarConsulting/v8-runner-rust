@@ -80,18 +80,25 @@ pub(super) fn run_tests(
                 config,
                 &BuildArgs {
                     dry_run: false,
-                    full_rebuild: false,
+                    load: PushMode::Changes,
                     source_set: None,
-                    force: false,
                 },
             ) {
                 Ok(result) => result,
                 Err(failure) => {
-                    let summary = failure
-                        .payload
-                        .as_ref()
-                        .map(build_summary)
-                        .unwrap_or_else(|| failure.error.to_string());
+                    // Отказ обмена с базой шаг называет сам, как отказала бы отправка: это не
+                    // сбой сборки, а остановка до неё.
+                    let summary = match failure.error.kind() {
+                        crate::use_cases::result::UseCaseErrorKind::NoMemory
+                        | crate::use_cases::result::UseCaseErrorKind::NonFastForward => {
+                            failure.error.message().to_owned()
+                        }
+                        _ => failure
+                            .payload
+                            .as_ref()
+                            .map(build_summary)
+                            .unwrap_or_else(|| failure.error.to_string()),
+                    };
                     let step = failed_step(
                         "build",
                         ExecutionStepKind::PlatformCommand,

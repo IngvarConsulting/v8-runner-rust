@@ -1,8 +1,9 @@
 //! Память о базе и её поколение перед обменом (#215).
 //!
 //! Поддельный Конфигуратор отвечает `/GetConfigGenerationID` токеном из файла `token` рядом
-//! с собой; тест меняет его, как меняла бы базу правка в Конфигураторе. Загрузка файла версий
-//! не пишет — так видно восстановление `-configDumpInfoOnly`.
+//! с собой (у расширения `ext` — из `token-ext`, если он есть); тест меняет его, как меняла
+//! бы базу правка в Конфигураторе. Загрузка файла версий не пишет — так видно восстановление
+//! `-configDumpInfoOnly`; при файле `fail` она падает, сдвинув поколение на `drift`.
 #![cfg(unix)]
 
 mod support;
@@ -11,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use support::{temp_workspace, v8_runner_command, write_shell_script};
 
 const FIRST: &str = "1111111111111111111111111111111111111111";
@@ -31,8 +32,19 @@ for arg in "$@"; do
 done
 case "$*" in
   *'/GetConfigGenerationID'*)
-    if [ -f '{token}' ]; then cat '{token}' > "$out"; fi
+    file='{token}'
+    case "$*" in *'-Extension ext'*) if [ -f '{token}-ext' ]; then file='{token}-ext'; fi ;; esac
+    if [ -f "$file" ]; then cat "$file" > "$out"; fi
     exit 0 ;;
+  *'CREATEINFOBASE'*)
+    mkdir -p '{base}'
+    : > '{base}/1Cv8.1CD'
+    exit 0 ;;
+  *'/LoadConfigFromFiles'*)
+    if [ -f '{fail}' ]; then
+      if [ -f '{drift}' ]; then cp '{drift}' '{token}'; fi
+      exit 1
+    fi ;;
   *'-configDumpInfoOnly'*)
     printf '<ConfigDumpInfo version="2.17" info-only="1"/>\n' > "$target/ConfigDumpInfo.xml"
     if [ -f '{drift}' ]; then cp '{drift}' '{token}'; fi
@@ -49,6 +61,8 @@ exit 0"#,
         calls = root.join("calls.log").display(),
         token = root.join("token").display(),
         drift = root.join("drift").display(),
+        fail = root.join("fail").display(),
+        base = root.join("ib").display(),
     )
 }
 
@@ -124,15 +138,51 @@ impl Project {
         .expect("edit");
     }
 
-    fn ledger(&self) -> Value {
-        let text = fs::read_to_string(
-            self.root()
-                .join("work")
-                .join("infobases")
-                .join("origin")
-                .join("generation.json"),
+    /// Второй набор — расширение `ext` в каталоге `ext`.
+    fn with_extension(self) -> Self {
+        let ext = self.root().join("ext");
+        fs::create_dir_all(&ext).expect("extension sources");
+        fs::write(ext.join("Configuration.xml"), "<Configuration/>\n").expect("extension");
+        fs::write(ext.join("Module.bsl"), "Procedure B()\nEndProcedure\n").expect("module");
+        fs::write(
+            &self.config,
+            fs::read_to_string(&self.config).expect("config").replace(
+                "    path: sources\n",
+                "    path: sources\n  - name: ext\n    type: EXTENSION\n    path: ext\n",
+            ),
         )
-        .expect("generation ledger");
+        .expect("config");
+        self
+    }
+
+    /// Поколение, которым ответит расширение `ext`.
+    fn extension_generation(&self, token: &str) {
+        fs::write(self.root().join("token-ext"), format!("{token}\r\n")).expect("token");
+    }
+
+    fn edit_extension(&self) {
+        fs::write(
+            self.root().join("ext").join("Module.bsl"),
+            "Procedure B()\n// edited\nEndProcedure\n",
+        )
+        .expect("edit");
+    }
+
+    /// Файл версий принадлежит базе и в git не хранится.
+    fn ignore_version_files(&self) {
+        fs::write(self.root().join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    }
+
+    fn ledger_file(&self) -> PathBuf {
+        self.root()
+            .join("work")
+            .join("infobases")
+            .join("origin")
+            .join("generation.json")
+    }
+
+    fn ledger(&self) -> Value {
+        let text = fs::read_to_string(self.ledger_file()).expect("generation ledger");
         serde_json::from_str(&text).expect("ledger json")
     }
 }
@@ -452,4 +502,328 @@ fn a_generation_of_another_tool_does_not_refuse_a_push() {
 
     succeeded(&project.run(&["push"]));
     assert_eq!(project.ledger()["main"]["tool"], "ibcmd");
+}
+
+/// Первый `pull` без памяти о базе, во время которого базу правили: ответ это называет, а
+/// записывается поколение до выгрузки — и следующий `push` отказывает `non_fast_forward`,
+/// а не проходит молча по хеш-памяти, которую эта выгрузка записала.
+#[test]
+fn a_first_pull_that_saw_the_base_change_leaves_the_next_push_refused() {
+    let project = Project::new("File=ib");
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    fs::write(project.root().join("drift"), format!("{SECOND}\n")).expect("drift");
+
+    let pulled = succeeded(&project.run(&["pull", "main", "--force"]));
+
+    let message = pulled["data"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("was being dumped"), "{pulled}");
+    assert!(message.contains("non-fast-forward"), "{pulled}");
+    assert_eq!(project.ledger()["main"]["token"], FIRST);
+    fs::remove_file(project.root().join("drift")).expect("drift");
+    project.edit();
+    project.forget_calls();
+
+    let payload = envelope(&project.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(payload["error"]["base_generation"], SECOND, "{payload}");
+    assert_eq!(payload["error"]["local_generation"], FIRST, "{payload}");
+    assert!(!project.calls().contains("/LoadConfigFromFiles"));
+}
+
+/// Память, записанная для другой базы под тем же именем, памятью не считается и у полной
+/// загрузки: `push --full` и `build_project` с `full_rebuild` отказывают `no_memory`, а не
+/// грузят молча; выходы называют CLI-команду `push --force`, в том числе у MCP.
+#[test]
+fn a_full_push_with_memory_of_another_base_is_refused_as_no_memory() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    let local = project.root().join("v8project.local.yaml");
+    fs::write(
+        &local,
+        fs::read_to_string(&local)
+            .expect("local layer")
+            .replace("File=ib", "File=replacement-ib"),
+    )
+    .expect("retarget");
+    project.forget_calls();
+
+    let refused = project.run(&["push", "--full"]);
+    let payload = envelope(&refused);
+
+    assert_eq!(refused.status.code(), Some(3), "{payload}");
+    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("push --force`"), "{message}");
+    assert!(
+        project.calls().is_empty(),
+        "nothing is loaded: {}",
+        project.calls()
+    );
+
+    let answer = support::mcp::call_tool(
+        &project.config,
+        "build_project",
+        json!({"full_rebuild": true}),
+    );
+
+    assert!(answer.is_error, "{}", answer.envelope);
+    let payload = &answer.envelope;
+    assert_eq!(payload["error"]["code"], "runtime_failure", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("`v8-runner"), "{message}");
+    assert!(message.contains("push --force`"), "{message}");
+    assert!(project.calls().is_empty(), "{}", project.calls());
+}
+
+/// `push --full` проходит сверку поколения, как обычная отправка: база ушла вперёд —
+/// отказ `non_fast_forward` до загрузки. Обходит её только `--force`.
+#[test]
+fn a_full_push_into_a_base_that_moved_ahead_is_refused() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    project.base_generation(SECOND);
+    project.forget_calls();
+
+    let payload = envelope(&project.run(&["push", "--full"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(payload["error"]["base_generation"], SECOND, "{payload}");
+    assert!(!project.calls().contains("/LoadConfigFromFiles"));
+}
+
+/// Превью отправки без памяти о базе называет тот же отказ `no_memory`, что и прогон, и
+/// платформу для этого не запускает; с памятью превью проходит.
+#[test]
+fn a_preview_of_a_push_without_memory_names_the_refusal() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+
+    let refused = project.run(&["push", "--dry-run"]);
+    let payload = envelope(&refused);
+
+    assert_eq!(refused.status.code(), Some(3), "{payload}");
+    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    assert!(project.calls().is_empty(), "{}", project.calls());
+    assert!(
+        !project.root().join("work").exists(),
+        "a preview leaves no trace"
+    );
+
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    succeeded(&project.run(&["push", "--dry-run"]));
+}
+
+/// Выгрузка Конфигуратором по изменившемуся, перед которой поколение совпало с записанным
+/// тем же инструментом, не запускает выгрузку: ответ «всё актуально».
+#[test]
+fn a_designer_pull_with_an_unchanged_generation_dumps_nothing() {
+    let project = Project::new("File=ib");
+    project.ignore_version_files();
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    assert!(project.sources.join("ConfigDumpInfo.xml").is_file());
+    support::commit_sources(project.root());
+    project.forget_calls();
+
+    let pulled = succeeded(&project.run(&["pull", "main"]));
+
+    assert_eq!(pulled["data"]["up_to_date"], true, "{pulled}");
+    assert!(
+        pulled["data"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("nothing to dump"),
+        "{pulled}"
+    );
+    assert!(
+        !project.calls().contains("/DumpConfigToFiles"),
+        "{}",
+        project.calls()
+    );
+
+    project.base_generation(SECOND);
+    let pulled = succeeded(&project.run(&["pull", "main"]));
+    assert_eq!(pulled["data"]["up_to_date"], false, "{pulled}");
+    assert!(project.calls().contains("/DumpConfigToFiles"));
+}
+
+/// Выгрузка `ibcmd` по изменившемуся пропускается так же: поколение до неё совпало с
+/// записанным `ibcmd`.
+#[test]
+fn an_ibcmd_pull_with_an_unchanged_generation_dumps_nothing() {
+    let project = Project::new("File=ib");
+    let root = project.root().to_path_buf();
+    write_shell_script(
+        &root.join("ibcmd"),
+        &format!(
+            r#"printf '%s\n' "$*" >> '{calls}'
+case "$*" in
+  *'generation-id'*) cat '{token}'; exit 0 ;;
+esac
+exit 0"#,
+            calls = root.join("calls.log").display(),
+            token = root.join("token").display(),
+        ),
+    );
+    fs::write(
+        &project.config,
+        format!(
+            "workPath: work\nformat: DESIGNER\nproviders:\n  build: ibcmd\n  dump: ibcmd\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
+            root.join("ibcmd").display()
+        ),
+    )
+    .expect("config");
+    fs::write(
+        project.sources.join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.17\"/>\n",
+    )
+    .expect("version file");
+    project.ignore_version_files();
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    assert_eq!(project.ledger()["main"]["tool"], "ibcmd");
+    project.forget_calls();
+
+    let pulled = succeeded(&project.run(&["pull", "main"]));
+
+    assert_eq!(pulled["data"]["up_to_date"], true, "{pulled}");
+    assert!(
+        !project.calls().contains("dump"),
+        "only the generation is asked: {}",
+        project.calls()
+    );
+}
+
+/// Загрузка упала, успев сдвинуть поколение: ответ говорит, что поколение не записано, а
+/// следующая отправка отказывает `non_fast_forward` и называет неудачную загрузку, а не
+/// «ушла вперёд с прошлого обмена». Не проходит она и без сверки.
+#[test]
+fn after_a_failed_load_the_next_push_names_it_and_is_not_let_through() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    fs::write(project.root().join("fail"), "").expect("fail");
+    fs::write(project.root().join("drift"), format!("{SECOND}\n")).expect("drift");
+    project.edit();
+
+    let failed = envelope(&project.run(&["push"]));
+
+    assert_eq!(failed["ok"], false, "{failed}");
+    let message = failed["data"]["steps"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(message.contains("is not recorded"), "{message}");
+    assert_eq!(project.ledger()["main"]["after"], "failed_build");
+    assert_eq!(project.ledger()["main"]["token"], FIRST);
+    fs::remove_file(project.root().join("fail")).expect("fail");
+    fs::remove_file(project.root().join("drift")).expect("drift");
+    project.forget_calls();
+
+    let payload = envelope(&project.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("failed"), "{message}");
+    assert!(!message.contains("since the last exchange"), "{message}");
+    assert!(!project.calls().contains("/LoadConfigFromFiles"));
+}
+
+/// Загрузка удалась, а поколения после неё нет: запись набора стирается, и ответ это
+/// называет.
+#[test]
+fn without_an_answer_after_the_load_the_record_is_erased_and_named() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    fs::remove_file(project.root().join("token")).expect("token");
+    project.edit();
+
+    let pushed = succeeded(&project.run(&["push", "--force"]));
+
+    let message = pushed["data"]["steps"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(message.contains("previous record is erased"), "{message}");
+    assert!(
+        project.ledger().get("main").is_none(),
+        "{}",
+        project.ledger()
+    );
+}
+
+/// Выгрузка, о которой инструмент не ответил поколением, запись не меняет; выборка объектов
+/// поколения не пишет вовсе.
+#[test]
+fn a_pull_without_an_answer_or_of_objects_leaves_the_record_as_it_was() {
+    let project = Project::new("File=ib");
+    project.ignore_version_files();
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    let recorded = project.ledger();
+    support::commit_sources(project.root());
+
+    project.base_generation(SECOND);
+    succeeded(&project.run(&["pull", "main", "--object", "Catalog.Items"]));
+    assert_eq!(project.ledger(), recorded);
+
+    fs::remove_file(project.root().join("token")).expect("token");
+    succeeded(&project.run(&["pull", "main", "--force"]));
+    assert_eq!(project.ledger(), recorded);
+}
+
+/// База, созданная раннером, помнится: первая отправка в неё проходит без отказа первого
+/// знакомства.
+#[test]
+fn a_base_created_by_the_runner_takes_the_first_push() {
+    let project = Project::new("File=ib");
+
+    succeeded(&project.run(&["infobase", "create"]));
+    let pushed = succeeded(&project.run(&["push"]));
+
+    assert_eq!(pushed["data"]["steps"][0]["mode"], "full", "{pushed}");
+}
+
+/// Поколение всех наборов сверяется до первой загрузки: отказ по расширению приходит раньше,
+/// чем основная конфигурация легла в базу.
+#[test]
+fn every_set_is_checked_before_the_first_load() {
+    let project = Project::new("File=ib").with_extension();
+    project.base_generation(FIRST);
+    project.extension_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    assert_eq!(project.ledger()["ext"]["token"], FIRST);
+    project.extension_generation(SECOND);
+    project.edit();
+    project.edit_extension();
+    project.forget_calls();
+
+    let refused = envelope(&project.run(&["push"]));
+
+    assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
+    assert_eq!(refused["error"]["next"]["source_set"], "ext", "{refused}");
+    assert!(
+        !project.calls().contains("/LoadConfigFromFiles"),
+        "nothing is loaded before the refusal: {}",
+        project.calls()
+    );
+    let steps = refused["data"]["steps"].as_array().expect("steps");
+    assert_eq!(steps[0]["source_set"], "ext", "{refused}");
+    assert!(
+        !steps[0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("non-fast-forward"),
+        "the step names the refusal once: {refused}"
+    );
 }

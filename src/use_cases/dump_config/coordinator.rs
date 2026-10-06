@@ -495,7 +495,11 @@ fn run_dump_selected(
         // каталог с базой не сводит, поэтому поколения не пишет.
         let tool_runner = match provider {
             Provider::Ibcmd => utilities.runner_for(UtilityType::Ibcmd),
-            _ => utilities.runner_for(UtilityType::V8),
+            // Поколение здесь читают только Конфигуратор и `ibcmd` (`read_dump_generation`):
+            // остальным бегун не понадобится.
+            Provider::Designer | Provider::Agent | Provider::IbcmdRs | Provider::Webinst => {
+                utilities.runner_for(UtilityType::V8)
+            }
         };
         let reads_generation = location.is_some() && !matches!(plan, DumpPlan::Partial);
         let generation_before = reads_generation
@@ -503,197 +507,242 @@ fn run_dump_selected(
                 read_dump_generation(context, config, provider, &binary, tool_runner, &resolved)
             })
             .flatten();
-        let result = match (config.format, &plan, provider, partial_objects, edt_binary) {
-            (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
-                crate::use_cases::unimplemented_provider(Operation::Dump, other),
-            ),
-            // Выгрузка по изменившемуся без годного файла версий — полная поверх каталога:
-            // каталог человека она не заменяет, лишнего в нём не удаляет.
-            (SourceFormat::Designer, DumpPlan::OverDirectory(how), Provider::Designer, _, _) => {
-                run_dump_over_directory_designer(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    utilities.runner_for(UtilityType::V8),
-                    how,
-                )
-            }
-            (SourceFormat::Designer, DumpPlan::OverDirectory(how), Provider::Ibcmd, _, _) => {
-                run_dump_over_directory_ibcmd(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    utilities.runner_for(UtilityType::Ibcmd),
-                    how,
-                )
-            }
-            (SourceFormat::Designer, DumpPlan::Full, Provider::Designer, _, _) => {
-                run_full_dump_designer(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    utilities.runner_for(UtilityType::V8),
-                )
-            }
-            (SourceFormat::Designer, DumpPlan::Full, Provider::Ibcmd, _, _) => run_full_dump_ibcmd(
-                context,
-                config,
-                &resolved,
-                binary.as_path(),
-                utilities.runner_for(UtilityType::Ibcmd),
-            ),
-            (SourceFormat::Designer, DumpPlan::Partial, Provider::Designer, Some(objects), _) => {
-                run_partial_dump_designer(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    utilities.runner_for(UtilityType::V8),
-                    objects,
-                )
-            }
-            (SourceFormat::Designer, DumpPlan::Partial, Provider::Ibcmd, Some(objects), _) => {
-                run_partial_dump_ibcmd(
-                    context,
-                    config,
-                    &resolved,
-                    binary.as_path(),
-                    utilities.runner_for(UtilityType::Ibcmd),
-                    objects,
-                )
-            }
-            (
-                SourceFormat::Edt,
-                DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
-                Provider::Designer,
-                _,
-                Some(edt_binary),
-            ) => run_incremental_dump_edt_designer(
-                context,
-                config,
-                &resolved,
-                binary.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::V8),
-                utilities.runner_for(UtilityType::EdtCli),
-            ),
-            (
-                SourceFormat::Edt,
-                DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
-                Provider::Ibcmd,
-                _,
-                Some(edt_binary),
-            ) => run_incremental_dump_edt_ibcmd(
-                context,
-                config,
-                &resolved,
-                binary.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::Ibcmd),
-                utilities.runner_for(UtilityType::EdtCli),
-            ),
-            (
-                SourceFormat::Edt,
-                DumpPlan::Full | DumpPlan::OverDirectory(OverDirectory::Whole(_)),
-                Provider::Designer,
-                _,
-                Some(edt_binary),
-            ) => run_full_dump_edt_designer(
-                context,
-                config,
-                &resolved,
-                binary.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::V8),
-                utilities.runner_for(UtilityType::EdtCli),
-            ),
-            (
-                SourceFormat::Edt,
-                DumpPlan::Full | DumpPlan::OverDirectory(OverDirectory::Whole(_)),
-                Provider::Ibcmd,
-                _,
-                Some(edt_binary),
-            ) => run_full_dump_edt_ibcmd(
-                context,
-                config,
-                &resolved,
-                binary.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::Ibcmd),
-                utilities.runner_for(UtilityType::EdtCli),
-            ),
-            (
-                SourceFormat::Edt,
-                DumpPlan::Partial,
-                Provider::Designer,
-                Some(objects),
-                Some(edt_binary),
-            ) => run_partial_dump_edt_designer(
-                context,
-                config,
-                &resolved,
-                binary.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::V8),
-                utilities.runner_for(UtilityType::EdtCli),
-                objects,
-            ),
-            (
-                SourceFormat::Edt,
-                DumpPlan::Partial,
-                Provider::Ibcmd,
-                Some(objects),
-                Some(edt_binary),
-            ) => run_partial_dump_edt_ibcmd(
-                context,
-                config,
-                &resolved,
-                binary.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::Ibcmd),
-                utilities.runner_for(UtilityType::EdtCli),
-                objects,
-            ),
-            (_, DumpPlan::Partial, _, None, _) => Err(AppError::Runtime(
-                "partial dump objects were not validated before execution".to_owned(),
-            )),
-            (SourceFormat::Edt, _, _, _, None) => Err(AppError::Runtime(
-                "EDT binary must be resolved before executing format=EDT dump".to_owned(),
-            )),
-            // Исполнитель без адаптера выгрузки: до сюда его не пускает поиск утилиты выше,
-            // но матрица может опередить код, и тогда это отказ, а не паника.
-            (_, _, other, _, _) => Err(crate::use_cases::unimplemented_provider(
-                Operation::Dump,
-                other,
-            )),
-        };
-        let result = result.map(|(platform_result, mut notes)| {
-            let generation_after = generation_before.as_ref().and_then(|_| {
-                read_dump_generation(context, config, provider, &binary, tool_runner, &resolved)
-            });
-            let note = SourceSetInventory::new(config)
-                .designer_context(&resolved.source_set_name)
-                .and_then(|set| {
-                    crate::use_cases::exchange_guard::record_after_dump(
-                        set,
-                        &config.work_path,
-                        provider,
-                        generation_before.as_deref(),
-                        generation_after.as_deref(),
-                    )
-                    .unwrap_or_else(|error| {
-                        Some(format!(
-                            "the configuration generation was not recorded: {error}"
-                        ))
+        // Как у агента: поколение до выгрузки по изменившемуся совпало с записанным тем же
+        // инструментом — выгружать нечего, и платформа больше не запускается.
+        let unchanged = generation_before
+            .as_deref()
+            .filter(|_| {
+                matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
+                    && partial_objects.is_none()
+            })
+            .and_then(|token| {
+                SourceSetInventory::new(config)
+                    .designer_context(&resolved.source_set_name)
+                    .and_then(|set| {
+                        crate::use_cases::exchange_guard::unchanged_since_the_record(
+                            set,
+                            &config.work_path,
+                            provider,
+                            token,
+                        )
                     })
+            });
+        if let Some(unchanged) = unchanged {
+            (
+                Ok((
+                    PlatformCommandResult {
+                        process: crate::platform::process::ProcessResult {
+                            exit_code: 0,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            interruption: None,
+                        },
+                        platform_log_path: None,
+                        platform_log: None,
+                        platform_log_read_error: None,
+                    },
+                    DumpNotes::message(Some(unchanged)),
+                )),
+                true,
+            )
+        } else {
+            let result = match (config.format, &plan, provider, partial_objects, edt_binary) {
+                (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
+                    crate::use_cases::unimplemented_provider(Operation::Dump, other),
+                ),
+                // Выгрузка по изменившемуся без годного файла версий — полная поверх каталога:
+                // каталог человека она не заменяет, лишнего в нём не удаляет.
+                (
+                    SourceFormat::Designer,
+                    DumpPlan::OverDirectory(how),
+                    Provider::Designer,
+                    _,
+                    _,
+                ) => run_dump_over_directory_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::V8),
+                    how,
+                ),
+                (SourceFormat::Designer, DumpPlan::OverDirectory(how), Provider::Ibcmd, _, _) => {
+                    run_dump_over_directory_ibcmd(
+                        context,
+                        config,
+                        &resolved,
+                        binary.as_path(),
+                        utilities.runner_for(UtilityType::Ibcmd),
+                        how,
+                    )
+                }
+                (SourceFormat::Designer, DumpPlan::Full, Provider::Designer, _, _) => {
+                    run_full_dump_designer(
+                        context,
+                        config,
+                        &resolved,
+                        binary.as_path(),
+                        utilities.runner_for(UtilityType::V8),
+                    )
+                }
+                (SourceFormat::Designer, DumpPlan::Full, Provider::Ibcmd, _, _) => {
+                    run_full_dump_ibcmd(
+                        context,
+                        config,
+                        &resolved,
+                        binary.as_path(),
+                        utilities.runner_for(UtilityType::Ibcmd),
+                    )
+                }
+                (
+                    SourceFormat::Designer,
+                    DumpPlan::Partial,
+                    Provider::Designer,
+                    Some(objects),
+                    _,
+                ) => run_partial_dump_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::V8),
+                    objects,
+                ),
+                (SourceFormat::Designer, DumpPlan::Partial, Provider::Ibcmd, Some(objects), _) => {
+                    run_partial_dump_ibcmd(
+                        context,
+                        config,
+                        &resolved,
+                        binary.as_path(),
+                        utilities.runner_for(UtilityType::Ibcmd),
+                        objects,
+                    )
+                }
+                (
+                    SourceFormat::Edt,
+                    DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
+                    Provider::Designer,
+                    _,
+                    Some(edt_binary),
+                ) => run_incremental_dump_edt_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::V8),
+                    utilities.runner_for(UtilityType::EdtCli),
+                ),
+                (
+                    SourceFormat::Edt,
+                    DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
+                    Provider::Ibcmd,
+                    _,
+                    Some(edt_binary),
+                ) => run_incremental_dump_edt_ibcmd(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::Ibcmd),
+                    utilities.runner_for(UtilityType::EdtCli),
+                ),
+                (
+                    SourceFormat::Edt,
+                    DumpPlan::Full | DumpPlan::OverDirectory(OverDirectory::Whole(_)),
+                    Provider::Designer,
+                    _,
+                    Some(edt_binary),
+                ) => run_full_dump_edt_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::V8),
+                    utilities.runner_for(UtilityType::EdtCli),
+                ),
+                (
+                    SourceFormat::Edt,
+                    DumpPlan::Full | DumpPlan::OverDirectory(OverDirectory::Whole(_)),
+                    Provider::Ibcmd,
+                    _,
+                    Some(edt_binary),
+                ) => run_full_dump_edt_ibcmd(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::Ibcmd),
+                    utilities.runner_for(UtilityType::EdtCli),
+                ),
+                (
+                    SourceFormat::Edt,
+                    DumpPlan::Partial,
+                    Provider::Designer,
+                    Some(objects),
+                    Some(edt_binary),
+                ) => run_partial_dump_edt_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::V8),
+                    utilities.runner_for(UtilityType::EdtCli),
+                    objects,
+                ),
+                (
+                    SourceFormat::Edt,
+                    DumpPlan::Partial,
+                    Provider::Ibcmd,
+                    Some(objects),
+                    Some(edt_binary),
+                ) => run_partial_dump_edt_ibcmd(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::Ibcmd),
+                    utilities.runner_for(UtilityType::EdtCli),
+                    objects,
+                ),
+                (_, DumpPlan::Partial, _, None, _) => Err(AppError::Runtime(
+                    "partial dump objects were not validated before execution".to_owned(),
+                )),
+                (SourceFormat::Edt, _, _, _, None) => Err(AppError::Runtime(
+                    "EDT binary must be resolved before executing format=EDT dump".to_owned(),
+                )),
+                // Исполнитель без адаптера выгрузки: до сюда его не пускает поиск утилиты выше,
+                // но матрица может опередить код, и тогда это отказ, а не паника.
+                (_, _, other, _, _) => Err(crate::use_cases::unimplemented_provider(
+                    Operation::Dump,
+                    other,
+                )),
+            };
+            let result = result.map(|(platform_result, mut notes)| {
+                let generation_after = generation_before.as_ref().and_then(|_| {
+                    read_dump_generation(context, config, provider, &binary, tool_runner, &resolved)
                 });
-            notes.message = merge_optional_messages(notes.message, note);
-            (platform_result, notes)
-        });
-        (result, false)
+                let note = SourceSetInventory::new(config)
+                    .designer_context(&resolved.source_set_name)
+                    .and_then(|set| {
+                        crate::use_cases::exchange_guard::record_after_dump(
+                            set,
+                            &config.work_path,
+                            provider,
+                            generation_before.as_deref(),
+                            generation_after.as_deref(),
+                        )
+                    });
+                notes.message = merge_optional_messages(notes.message, note);
+                (platform_result, notes)
+            });
+            (result, false)
+        }
     };
     // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
     let result = result.map(|(platform_result, notes)| {

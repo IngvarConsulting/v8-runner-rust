@@ -61,7 +61,7 @@ impl UseCaseErrorKind {
             | AppError::PlatformLocatorContext { .. } => Self::Environment,
             AppError::WorkspaceBusy(_) => Self::WorkspaceBusy,
             AppError::InfobaseBusy(_) => Self::InfobaseBusy,
-            AppError::NonFastForward(_) => Self::NonFastForward,
+            AppError::Refused(refusal) => refusal.kind(),
             AppError::Cancelled { at, .. } => Self::Cancelled(*at),
             AppError::TimedOut(_) => Self::TimedOut,
             AppError::InvalidOutput(_) => Self::InvalidOutput,
@@ -181,6 +181,20 @@ impl UseCaseError {
         self.generations.as_deref()
     }
 
+    /// Называет оба поколения отказа «база ушла вперёд».
+    #[must_use]
+    pub fn with_generations(mut self, generations: Generations) -> Self {
+        self.generations = Some(Box::new(generations));
+        self
+    }
+
+    /// Уточняет текст отказа тем, что было до него; род, шаг и поколения остаются.
+    #[must_use]
+    pub fn with_context(mut self, context: impl AsRef<str>) -> Self {
+        self.message = format!("{}; {}", context.as_ref(), self.message);
+        self
+    }
+
     /// Называет шаг, которым вызывающий выходит из отказа.
     #[must_use]
     pub fn with_next(mut self, next: NextStep) -> Self {
@@ -229,8 +243,8 @@ impl From<AppError> for UseCaseError {
         // Отмена одна для всех: где бы её ни заметили — на безопасной точке, в снятом
         // процессе, в брошенной команде агента, — род отказа у неё `cancelled`.
         let cancelled_at = value.cancellation();
-        if let AppError::NonFastForward(refusal) = value {
-            return Self::non_fast_forward(*refusal);
+        if let AppError::Refused(refusal) = value {
+            return *refusal;
         }
         let error = Self::classified(value);
         match cancelled_at {
@@ -244,31 +258,13 @@ impl From<AppError> for UseCaseError {
 }
 
 impl UseCaseError {
-    /// Отказ «база ушла вперёд»: оба поколения и следующий шаг — `pull` набора или, когда
-    /// выгрузку предлагать нельзя, `push` набора с `--force`.
-    fn non_fast_forward(refusal: crate::support::error::NonFastForward) -> Self {
-        let next = if refusal.offers_pull {
-            NextStep::command("pull")
-        } else {
-            NextStep::command("push").with_key("--force", "")
-        }
-        .for_source_set(&refusal.source_set);
-        Self {
-            generations: Some(Box::new(Generations {
-                base: refusal.base_generation,
-                local: refusal.local_generation,
-            })),
-            ..Self::new(UseCaseErrorKind::NonFastForward, refusal.message).with_next(next)
-        }
-    }
-
     /// Отказ по ошибке: род — от [`UseCaseErrorKind::of`], текст — без метки рода; отмену
     /// поверх него узнаёт `From`.
     fn classified(value: AppError) -> Self {
         let kind = UseCaseErrorKind::of(&value);
         let message = match value {
             AppError::CapabilityUnavailable(refusal) => refusal.message,
-            AppError::NonFastForward(refusal) => refusal.message,
+            AppError::Refused(refusal) => refusal.message,
             AppError::EnvironmentUnavailable(message)
             | AppError::WorkspaceBusy(message)
             | AppError::InfobaseBusy(message)

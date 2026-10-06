@@ -15,15 +15,32 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 /// Transport-neutral request for the `build` use case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildRequest {
-    /// Forces a full rebuild instead of change-based execution.
-    pub full_rebuild: bool,
+    /// Как грузятся выбранные наборы: по изменившемуся, целиком или с перезаписью.
+    pub load: PushMode,
     /// Optional source-set selector. When absent, all configured source-sets are built.
     pub source_set: Option<String>,
     /// Plan every step and locate the platform without dispatching it.
     pub dry_run: bool,
-    /// `push --force`: load every selected set in full without the checks of memory and
-    /// generation; the configuration in the infobase is overwritten.
-    pub force: bool,
+}
+
+/// Как `push` грузит выбранные наборы.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PushMode {
+    /// По изменившемуся, после проверок памяти о базе и её поколения.
+    #[default]
+    Changes,
+    /// Целиком (`--full`), после тех же проверок памяти и поколения.
+    Full,
+    /// Целиком и без проверок памяти и поколения (`push --force`): конфигурация в базе
+    /// заменяется каталогом. Ключ только командной строки.
+    Force,
+}
+
+impl PushMode {
+    /// Каждый выбранный набор грузится целиком, без анализа изменений.
+    pub const fn is_whole(self) -> bool {
+        !matches!(self, Self::Changes)
+    }
 }
 
 /// Transport-neutral request for the `tools download` use case.

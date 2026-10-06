@@ -1,3 +1,4 @@
+use super::helpers::{fail_with_remaining_steps, AnalysisByName};
 use super::*;
 use crate::domain::capability::{Operation, Provider};
 use crate::use_cases::exchange_guard::GenerationGate;
@@ -177,7 +178,7 @@ fn run_build_with(
     loader: &mut dyn SourceSetLoader,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
-        full_rebuild = args.full_rebuild,
+        load = ?args.load,
         source_set = args.source_set.as_deref(),
         "preparing build plan"
     );
@@ -203,7 +204,7 @@ fn run_build_with(
     let selected_designer_contexts =
         designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
-    let analysis_by_name = if args.full_rebuild {
+    let analysis_by_name = if args.load.is_whole() {
         None
     } else {
         Some(analyze_contexts_by_name(
@@ -213,7 +214,24 @@ fn run_build_with(
     };
 
     let mut steps = Vec::new();
-    let gate = GenerationGate::new(context, config, args.force);
+    let gate = GenerationGate::new(context, config, args.load);
+    let tool = loader.tool();
+    check_generations_early(
+        &gate,
+        &inventory,
+        &ordered_source_sets,
+        args,
+        analysis_by_name.as_ref(),
+        tool,
+        started,
+        |source_set, index| {
+            // Исполнителя, которого не найти, назовёт загрузка первого набора.
+            if loader.locate().is_err() {
+                return Ok(None);
+            }
+            loader.read_generation(context, config, source_set, index)
+        },
+    )?;
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
         let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
@@ -258,7 +276,7 @@ fn run_build_with(
         let plan = match plan_configurator_load_step(
             source_set,
             &source_context,
-            args.full_rebuild,
+            args.load.is_whole(),
             analysis_by_name.as_ref(),
         ) {
             Ok(plan) => plan,
@@ -354,15 +372,16 @@ fn run_build_with(
                             index,
                             source_set,
                             mode,
-                            error.to_string(),
+                            append_warnings(error.to_string(), &gate.failed_load_note()),
                         );
                         return Err(BuildExecutionFailure::with_payload(error, result));
                     }
                     Ok(version_file) => version_file,
                 };
                 let full = partial_paths.is_none();
+                let tool = loader.tool();
                 let loaded = gate
-                    .before_load(&source_context, loader.tool(), || {
+                    .before_load(&source_context, tool, || {
                         loader.read_generation(context, config, source_set, index)
                     })
                     .and_then(|before| {
@@ -377,6 +396,7 @@ fn run_build_with(
                                 &commit,
                             )
                             .map(|warnings| (before, warnings))
+                            .inspect_err(|_| gate.after_failed_load(&source_context, tool))
                     })
                     .and_then(|(before, warnings)| {
                         // Поколение после загрузки. Отмена, отложенная загрузкой, останавливает
@@ -385,7 +405,12 @@ fn run_build_with(
                         match loader.read_generation(context, config, source_set, index) {
                             Ok(token) => Ok((before, warnings, token)),
                             Err(error) if error.cancellation().is_some() => {
-                                let _ = gate.after_load(&source_context, loader.tool(), None);
+                                let mut warnings = warnings;
+                                warnings.extend(gate.after_load(
+                                    &source_context,
+                                    loader.tool(),
+                                    None,
+                                ));
                                 Err(if warnings.is_empty() {
                                     error
                                 } else {
@@ -449,7 +474,7 @@ fn run_build_with(
                             index,
                             source_set,
                             mode,
-                            error.to_string(),
+                            append_warnings(error.to_string(), &gate.failed_load_note()),
                         );
                         return Err(BuildExecutionFailure::with_payload(error, result));
                     }
@@ -473,7 +498,7 @@ pub(super) fn run_build_ibcmd(
     args: &BuildArgs,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
-        full_rebuild = args.full_rebuild,
+        load = ?args.load,
         source_set = args.source_set.as_deref(),
         "preparing ibcmd build plan"
     );
@@ -499,7 +524,7 @@ pub(super) fn run_build_ibcmd(
     let selected_designer_contexts =
         designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
-    let analysis_by_name = if args.full_rebuild {
+    let analysis_by_name = if args.load.is_whole() {
         None
     } else {
         Some(analyze_contexts_by_name(
@@ -511,7 +536,34 @@ pub(super) fn run_build_ibcmd(
     let mut utilities = PlatformUtilities::from_config(config);
     let mut ibcmd_binary: Option<PathBuf> = None;
     let mut steps = Vec::new();
-    let gate = GenerationGate::new(context, config, args.force);
+    let gate = GenerationGate::new(context, config, args.load);
+    check_generations_early(
+        &gate,
+        &inventory,
+        &ordered_source_sets,
+        args,
+        analysis_by_name.as_ref(),
+        Provider::Ibcmd,
+        started,
+        |source_set, _| {
+            // `ibcmd`, которого не найти, назовёт загрузка первого набора.
+            let Ok(binary) = locate_designer_loader(
+                Provider::Ibcmd,
+                &mut utilities,
+                &mut None,
+                &mut ibcmd_binary,
+            ) else {
+                return Ok(None);
+            };
+            read_ibcmd_generation(
+                context,
+                config,
+                &binary,
+                utilities.runner_for(UtilityType::Ibcmd),
+                source_set,
+            )
+        },
+    )?;
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
         let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
@@ -521,7 +573,7 @@ pub(super) fn run_build_ibcmd(
         let plan = match plan_configurator_load_step(
             source_set,
             &source_context,
-            args.full_rebuild,
+            args.load.is_whole(),
             analysis_by_name.as_ref(),
         ) {
             Ok(plan) => plan,
@@ -645,7 +697,7 @@ pub(super) fn run_build_ibcmd(
                             index,
                             source_set,
                             mode,
-                            error.to_string(),
+                            append_warnings(error.to_string(), &gate.failed_load_note()),
                         );
                         return Err(BuildExecutionFailure::with_payload(error, result));
                     }
@@ -707,7 +759,7 @@ pub(super) fn run_build_edt(
     provider: Provider,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
-        full_rebuild = args.full_rebuild,
+        load = ?args.load,
         source_set = args.source_set.as_deref(),
         "preparing edt build plan"
     );
@@ -744,7 +796,7 @@ pub(super) fn run_build_edt(
         };
     let selected_edt_contexts = edt_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
-    let edt_analysis_by_name = if args.full_rebuild {
+    let edt_analysis_by_name = if args.load.is_whole() {
         None
     } else {
         Some(analyze_contexts_by_name(&inventory, &selected_edt_contexts))
@@ -756,7 +808,49 @@ pub(super) fn run_build_edt(
     let mut edt_binary: Option<PathBuf> = None;
     let mut interactive_edt = None;
     let mut steps = Vec::new();
-    let gate = GenerationGate::new(context, config, args.force);
+    let gate = GenerationGate::new(context, config, args.load);
+    // Пойдёт ли набор в базу, здесь видно по анализу исходников EDT: набор, чей этап EDT
+    // пропущен, а копия Конфигуратора всё же грузится, сверит его загрузка.
+    if matches!(provider, Provider::Designer | Provider::Ibcmd) {
+        check_generations_early(
+            &gate,
+            &inventory,
+            &ordered_source_sets,
+            args,
+            edt_analysis_by_name.as_ref(),
+            provider,
+            started,
+            |source_set, index| {
+                // Исполнителя, которого не найти, назовёт загрузка первого набора.
+                let Ok(binary) = locate_designer_loader(
+                    provider,
+                    &mut utilities,
+                    &mut designer_binary,
+                    &mut ibcmd_binary,
+                ) else {
+                    return Ok(None);
+                };
+                match provider {
+                    Provider::Ibcmd => read_ibcmd_generation(
+                        context,
+                        config,
+                        &binary,
+                        utilities.runner_for(UtilityType::Ibcmd),
+                        source_set,
+                    ),
+                    Provider::Designer => read_designer_generation(
+                        context,
+                        config,
+                        &binary,
+                        utilities.runner_for(UtilityType::V8),
+                        source_set,
+                        index,
+                    ),
+                    Provider::Agent | Provider::IbcmdRs | Provider::Webinst => Ok(None),
+                }
+            },
+        )?;
+    }
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
         let Some(edt_context) = inventory.edt_context(&source_set.name).cloned() else {
@@ -768,7 +862,7 @@ pub(super) fn run_build_edt(
 
         let edt_stage = match plan_edt_export_step(
             source_set,
-            args.full_rebuild,
+            args.load.is_whole(),
             edt_analysis_by_name.as_ref(),
         ) {
             Ok(plan) => plan,
@@ -1199,7 +1293,7 @@ pub(super) fn run_build_edt(
         let designer_stage = match plan_generated_designer_load_step(
             source_set,
             &designer_context,
-            args.full_rebuild,
+            args.load.is_whole(),
             edt_stage_skipped,
             &config.work_path,
         ) {
@@ -1352,7 +1446,7 @@ pub(super) fn run_build_edt(
                             index,
                             source_set,
                             mode,
-                            error.to_string(),
+                            append_warnings(error.to_string(), &gate.failed_load_note()),
                         );
                         return Err(BuildExecutionFailure::with_payload(error, result));
                     }
@@ -1381,11 +1475,80 @@ fn guarded_load(
     load: impl FnOnce() -> Result<Vec<String>, AppError>,
 ) -> Result<Vec<String>, AppError> {
     gate.before_load(set, tool, &read)?;
-    let mut warnings = load()?;
+    let mut warnings = load().inspect_err(|_| gate.after_failed_load(set, tool))?;
     let token = read().unwrap_or_else(|error| {
         debug!(%error, "the generation after the load is not known");
         None
     });
     warnings.extend(gate.after_load(set, tool, token.as_deref()));
     Ok(warnings)
+}
+
+/// Пойдёт ли набор в базу по плану команды: внешние обработки не грузятся, полная загрузка
+/// грузит всё, а по изменившемуся — всё, кроме набора без изменений.
+fn loads_into_the_base(
+    source_set: &SourceSetConfig,
+    load: PushMode,
+    analysis_by_name: Option<&AnalysisByName>,
+) -> bool {
+    !source_set.purpose.is_external()
+        && (load.is_whole()
+            || !matches!(
+                analysis_by_name.and_then(|analysis| analysis.get(&source_set.name)),
+                Some(Ok(analyzer::AnalysisOutcome::NoChanges))
+            ))
+}
+
+/// Сверка поколения всех наборов, которые пойдут в базу, до первой загрузки
+/// (`GenerationGate::check_early`). Одному набору она не нужна: его сверит загрузка.
+/// Отказ — ответ команды: набор назван отказавшим, остальные не тронуты.
+#[allow(clippy::too_many_arguments)]
+fn check_generations_early(
+    gate: &GenerationGate<'_>,
+    inventory: &SourceSetInventory,
+    ordered_source_sets: &[&SourceSetConfig],
+    args: &BuildArgs,
+    analysis_by_name: Option<&AnalysisByName>,
+    tool: Provider,
+    started: Instant,
+    mut read: impl FnMut(&SourceSetConfig, usize) -> Result<Option<String>, AppError>,
+) -> Result<(), BuildExecutionFailure> {
+    if args.dry_run {
+        return Ok(());
+    }
+    let loading: Vec<(usize, &SourceSetConfig, &SourceSetContext)> = ordered_source_sets
+        .iter()
+        .enumerate()
+        .filter(|(_, set)| loads_into_the_base(set, args.load, analysis_by_name))
+        .filter_map(|(index, set)| {
+            inventory
+                .designer_context(&set.name)
+                .map(|context| (index, *set, context))
+        })
+        .collect();
+    if loading.len() < 2 {
+        return Ok(());
+    }
+    for (index, source_set, source_context) in loading {
+        if let Err(error) = gate.check_early(source_context, tool, || read(source_set, index)) {
+            let remaining = std::iter::once(source_set)
+                .chain(
+                    ordered_source_sets
+                        .iter()
+                        .copied()
+                        .filter(|other| other.name != source_set.name),
+                )
+                .collect();
+            let result = fail_with_remaining_steps(
+                started,
+                Vec::new(),
+                remaining,
+                source_set,
+                BuildMode::Skipped,
+                error.to_string(),
+            );
+            return Err(BuildExecutionFailure::with_payload(error, result));
+        }
+    }
+    Ok(())
 }

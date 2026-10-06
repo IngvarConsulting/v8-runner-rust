@@ -47,6 +47,16 @@ fn previews(dir: &Path) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Память о базе образца перед превью `push`: без неё оно называет отказ `no_memory`
+/// (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`). Возвращает содержимое
+/// следа после записи памяти — превью его менять не вправе; у прочих листьев — `None`.
+fn remember_for(leaf: &str, dir: &Path, trace: &Path) -> Option<Vec<(String, Vec<u8>)>> {
+    matches!(leaf, "push" | "build").then(|| {
+        support::memory::remember_sample(dir);
+        contents_under(trace)
+    })
+}
+
 /// Пути внутри `root`, относительно него, в устойчивом порядке.
 fn entries_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
     let Ok(read) = fs::read_dir(dir) else {
@@ -146,19 +156,30 @@ fn no_leaf_with_a_preview_creates_the_work_path() {
 
     for previewed in with_preview(dir.path()) {
         let _ = fs::remove_dir_all(&previewed.trace);
+        let leaf = previewed.leaf;
+        // Превью `push` без памяти о базе называет отказ `no_memory`; память лежит в рабочем
+        // каталоге, поэтому у него след — всё, чего не было до превью.
+        let remembered = remember_for(leaf, dir.path(), &previewed.trace);
         let mut arguments = previewed.arguments;
         arguments.push("--dry-run".to_owned());
 
         let (code, payload) = run(dir.path(), &arguments);
-        let leaf = previewed.leaf;
         if SUCCEEDS_HERE.contains(&leaf) {
             assert_eq!(code, 0, "`{leaf}` did not preview: {payload}");
         }
-        assert!(
-            !previewed.trace.exists(),
-            "`{leaf}` left {}",
-            previewed.trace.display()
-        );
+        match remembered {
+            Some(before) => assert_eq!(
+                contents_under(&previewed.trace),
+                before,
+                "`{leaf}` changed {}",
+                previewed.trace.display()
+            ),
+            None => assert!(
+                !previewed.trace.exists(),
+                "`{leaf}` left {}",
+                previewed.trace.display()
+            ),
+        }
     }
 }
 
@@ -174,6 +195,11 @@ fn no_preview_creates_anything_in_the_work_path() {
         // другого. Каталог именно удаляется, а не опустошается — превью не должно
         // создавать и его самого.
         let _ = fs::remove_dir_all(&work);
+        let remembered = remember_for(
+            preview.first().map(String::as_str).unwrap_or_default(),
+            dir.path(),
+            &work,
+        );
 
         let (code, payload) = run(dir.path(), &preview);
         assert_eq!(
@@ -183,6 +209,15 @@ fn no_preview_creates_anything_in_the_work_path() {
             preview.join(" ")
         );
 
+        if let Some(before) = remembered {
+            assert_eq!(
+                contents_under(&work),
+                before,
+                "`{}` changed the work path",
+                preview.join(" ")
+            );
+            continue;
+        }
         assert!(
             !work.exists(),
             "`{}` created the work path: {:?}",
@@ -295,6 +330,8 @@ fn no_preview_claims_that_an_executor_got_work() {
     for with_platform in [true, false] {
         let dir = temp_workspace();
         write_project(dir.path(), with_platform);
+        // Память о базе — чтобы превью `push` доходило до плана, а не до отказа `no_memory`.
+        support::memory::remember_sample(dir.path());
         // Артефакт на месте, чтобы превью `upload` доходило до плана, а не до отказа.
         fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
         for previewed in with_preview(dir.path()) {

@@ -32,7 +32,7 @@ use crate::use_cases::request::{
     effective_test_timeouts, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
     ClientMcpOptionsRequest, DesignerClientScope, DesignerClientScopes, DesignerConfigCheck,
     DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest, DumpRequest, ForceWayOut,
-    LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestBuildPolicy, TestRequest,
+    LaunchRequest, PushMode, SyntaxRequest, SyntaxTargetRequest, TestBuildPolicy, TestRequest,
     TestScopeRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
@@ -66,10 +66,14 @@ where
         let use_case_request = BuildRequest {
             // The MCP surface exposes no preview input, as for `infobase --dry-run`.
             dry_run: false,
-            full_rebuild: request.full_rebuild.unwrap_or(false),
+            // `push --force` — ключ командной строки: отказы MCP называют его командой, а
+            // `full_rebuild` проходит проверки памяти и поколения, как `push --full`.
+            load: if request.full_rebuild.unwrap_or(false) {
+                PushMode::Full
+            } else {
+                PushMode::Changes
+            },
             source_set: request.source_set.clone(),
-            // `push --force` — ключ командной строки: отказы MCP называют его командой.
-            force: false,
         };
 
         match self
@@ -1144,8 +1148,8 @@ mod tests {
     use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
     use crate::use_cases::request::{
         BuildRequest, ClientMcpAddonRequest, ClientMcpMode, DesignerClientScope, DumpModeRequest,
-        DumpRequest, LaunchRequest, LaunchTargetRequest, SyntaxExtensionScope, SyntaxRequest,
-        SyntaxTargetRequest, TestRequest, TestScopeRequest,
+        DumpRequest, LaunchRequest, LaunchTargetRequest, PushMode, SyntaxExtensionScope,
+        SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
     };
     use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
@@ -1316,7 +1320,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].0.command(), CommandName::Build);
         assert_eq!(requests[0].0.transport(), ExecutionTransport::McpStdio);
-        assert!(requests[0].1.full_rebuild);
+        assert_eq!(requests[0].1.load, PushMode::Full);
         assert_eq!(requests[0].1.source_set.as_deref(), Some("main"));
     }
 

@@ -43,21 +43,6 @@ impl std::fmt::Display for CapabilityRefusal {
     }
 }
 
-/// Отказ отправки в базу, ушедшую вперёд записанного поколения: текст, набор и оба токена.
-/// Следующий шаг из него строит сценарий: `pull` набора или, когда выгрузку предлагать
-/// нельзя, `push` набора с `--force`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NonFastForward {
-    pub message: String,
-    pub source_set: String,
-    /// Поколение базы сейчас.
-    pub base_generation: String,
-    /// Поколение, записанное после прошлого обмена.
-    pub local_generation: String,
-    /// Можно ли предложить выгрузку следующим шагом.
-    pub offers_pull: bool,
-}
-
 /// Где команду остановила отмена. Код и род отказа от этого не зависят — отмена одна, — а
 /// ответ, который пишет прерывание, называет по нему фазу.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,9 +85,12 @@ pub enum AppError {
     #[error("cancelled: {message}")]
     Cancelled { message: String, at: CancelledAt },
 
-    /// База ушла вперёд записанного поколения: отправка отказывает до загрузки.
-    #[error("non-fast-forward: {}", .0.message)]
-    NonFastForward(Box<NonFastForward>),
+    /// Отказ, который сценарий собрал целиком — род, текст, следующий шаг, поколения, — и
+    /// который проходит сквозь исполнителя, отвечающего `AppError`. Производитель — сверка
+    /// поколения перед загрузкой (`use_cases::exchange_guard`): отказ `non_fast_forward`
+    /// и его следующий шаг строит только он. Текст без метки рода: её ставит транспорт.
+    #[error("{}", .0.message())]
+    Refused(Box<crate::use_cases::result::UseCaseError>),
 
     #[error("timed out: {0}")]
     TimedOut(String),
@@ -238,7 +226,7 @@ impl AppError {
                 session_cancellation(source)
             }
             Self::CapabilityUnavailable(_)
-            | Self::NonFastForward(_)
+            | Self::Refused(_)
             | Self::EnvironmentUnavailable(_)
             | Self::WorkspaceBusy(_)
             | Self::InfobaseBusy(_)
@@ -269,10 +257,7 @@ impl AppError {
             }
             Self::WorkspaceBusy(message) => Self::WorkspaceBusy(format!("{context}; {message}")),
             Self::InfobaseBusy(message) => Self::InfobaseBusy(format!("{context}; {message}")),
-            Self::NonFastForward(mut refusal) => {
-                refusal.message = format!("{context}; {}", refusal.message);
-                Self::NonFastForward(refusal)
-            }
+            Self::Refused(refusal) => Self::Refused(Box::new(refusal.with_context(context))),
             Self::Cancelled { message, at } => Self::Cancelled {
                 message: format!("{context}; {message}"),
                 at,

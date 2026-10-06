@@ -2,6 +2,7 @@
 id: INV.USE-CASES.A-NEW-OWNER-IS-OFFERED-NO-PULL-UNTIL-ITS-FIRST-PUSH
 check:
   - tests/cli_push_generation.rs::a_new_owner_is_offered_no_pull_until_its_first_push
+  - src/use_cases/exchange_guard.rs::an_unreadable_new_owner_mark_stands
 ---
 
 # Новому владельцу выгрузку не предлагают до первой отправки
@@ -12,7 +13,7 @@ check:
 
 Признак нового владельца лежит в памяти копии о базе под `workPath`, а не в метке: его пишет
 граница команды вместе со взятием базы, снимают первая удачная загрузка набора и создание
-базы раннером. Общей базе выгрузку предлагают всегда
+базы раннером. Признак, который не прочесть или не разобрать, стоит. Общей базе выгрузку предлагают всегда
 (`INV.USE-CASES.A-SHARED-BASE-REFUSAL-OFFERS-PULL-FIRST-AND-NAMES-PUSH`).
 
 Источник: [`sources.html#copies`](../../../docs/site/sources.html#copies).

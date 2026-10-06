@@ -427,6 +427,40 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
 
 /// Всё, что лежит в рабочем каталоге после превью. Пусто оно быть обязано целиком:
 /// `DEC.2026-09-23.A-PREVIEW-LEAVES-NO-TRACE` не оставляет превью и журнала.
+/// Память о базе `File=<tmp>/ib` (`infobase:` — база `origin`) у набора EDT `configuration`.
+fn remember_edt_configuration(work_path: &Path, tmp: &str, base_path: &Path) {
+    support::memory::remember_base(
+        work_path,
+        "origin",
+        support::memory::Base::File(&Path::new(tmp).join("ib")),
+        &[support::memory::Set::configuration(
+            "configuration",
+            &base_path.join("configuration"),
+        )],
+    );
+}
+
+/// Память о базе публичным путём — перезаписью `push --force`: тест дальше проверяет полную
+/// загрузку `--full`, которая проверки памяти проходит.
+fn force_push(config_path: &Path, current_dir: &Path) {
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "build",
+            "--force",
+        ])
+        .current_dir(current_dir)
+        .output()
+        .expect("run command");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn left_in_work_path(work_path: &Path) -> Vec<String> {
     fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) {
         let Ok(read) = fs::read_dir(dir) else {
@@ -516,6 +550,8 @@ fn a_planned_edt_build_refuses_when_the_utility_that_would_load_it_is_missing() 
             ),
         )
         .expect("config");
+        // Превью без памяти о базе отказало бы `no_memory` раньше поиска утилит.
+        remember_edt_configuration(&work_path, &tmp, &base_path);
 
         let output = v8_runner_command()
             .args([
@@ -630,6 +666,9 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
         .join("configuration.redb");
     fs::remove_file(&designer_state).expect("drop designer state");
     fs::remove_file(&v8_calls_log).expect("drop calls log");
+    // Без хеш-памяти и без ответа о поколении превью отказало бы `no_memory`: база здесь
+    // помнится записью поколения, как после её создания раннером.
+    remember_edt_configuration(&work_path, &tmp, &base_path);
 
     let output = v8_runner_command()
         .args([
@@ -716,6 +755,9 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
         ),
     )
     .expect("config");
+    // Превью без памяти о базе отказало бы `no_memory`; сама память — не след превью.
+    remember_edt_configuration(&work_path, &tmp, &base_path);
+    let remembered = left_in_work_path(&work_path);
 
     let output = v8_runner_command()
         .args([
@@ -737,7 +779,10 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
     );
     // Подметается весь рабочий каталог, а не три имени: перечень пропустил бы и журнал
     // платформы, и staging, и всякий новый каталог.
-    let left = left_in_work_path(&work_path);
+    let left: Vec<String> = left_in_work_path(&work_path)
+        .into_iter()
+        .filter(|path| !remembered.contains(path))
+        .collect();
     assert!(
         left.is_empty(),
         "превью оставило в рабочем каталоге: {left:?}"
@@ -1217,6 +1262,7 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
         tool_source.display(),
     );
     fs::write(&config_path, config).expect("config");
+    force_push(&config_path, dir.path());
 
     let output = v8_runner_command()
         .args([
@@ -1224,7 +1270,7 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--force",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1548,13 +1594,15 @@ fn build_ibcmd_passes_credentials_to_import_and_apply() {
         binary_path.display(),
     );
     fs::write(&config_path, config).expect("config");
+    force_push(&config_path, dir.path());
+    fs::remove_file(&calls_log).expect("calls of the forced push");
 
     let output = v8_runner_command()
         .args([
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--force",
+            "--full",
         ])
         .current_dir(dir.path())
         .output()
@@ -1643,13 +1691,15 @@ fn build_ibcmd_server_connection_passes_dbms_and_infobase_credentials() {
         "IBCMD",
         "  connection: 'Srvr=server;Ref=main'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: maindb\n    user: postgres\n    password: pg-secret\n",
     );
+    force_push(&config_path, dir.path());
+    fs::remove_file(&calls_log).expect("calls of the forced push");
 
     let output = v8_runner_command()
         .args([
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--force",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1676,13 +1726,15 @@ fn build_ibcmd_accepts_raw_f_connection() {
         "IBCMD",
         &format!("/F {tmp}/ib"),
     );
+    force_push(&config_path, dir.path());
+    fs::remove_file(&calls_log).expect("calls of the forced push");
 
     let output = v8_runner_command()
         .args([
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--force",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1737,6 +1789,7 @@ fn ibcmd_push_receives_config_relative_paths_resolved_from_the_config_directory(
         );
     };
     push(&["--force"]);
+    push(&["--full"]);
     fs::write(&module, "procedure Test() // changed endprocedure").expect("change");
     push(&[]);
 

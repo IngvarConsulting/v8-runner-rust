@@ -470,6 +470,52 @@ fn test_all_full_json_runs_build_first_and_returns_report() {
     assert_eq!(payload["data"]["retained_paths"], Value::Null);
 }
 
+/// `test` на базе без памяти о ней отказывает так же, как `push`: род `no_memory`, те же
+/// выходы, платформа не запускается, а шаг сборки называет отказ, а не «build failed».
+#[test]
+fn a_test_on_a_base_without_memory_is_refused_like_a_push() {
+    let (dir, config_path, build_calls, test_calls, _captured_config) = setup_project(
+        "work",
+        JUNIT_SMOKE_REPORT_FIXTURE,
+        "12:00:00.000 [INF] ok",
+        0,
+        false,
+        5,
+        None,
+    );
+    fs::remove_dir_all(dir.path().join("work").join("infobases")).expect("forget the base");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "yaxunit",
+            "all",
+        ])
+        .output()
+        .expect("run");
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(output.status.code(), Some(3), "{payload}");
+    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("push --force`"), "{message}");
+    let build_step = payload["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["name"] == "build")
+        .expect("build step");
+    let step = build_step["message"].as_str().expect("step message");
+    assert!(step.contains("no memory of"), "{payload}");
+    assert!(!step.contains("build failed"), "{payload}");
+    assert!(!build_calls.exists(), "the platform does not start");
+    assert!(!test_calls.exists(), "no test runs");
+}
+
 #[test]
 fn test_yaxunit_no_build_skips_build_for_prepared_file_infobase() {
     let (dir, config_path, build_calls, test_calls, _captured_config) = setup_project(
