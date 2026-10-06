@@ -14,5 +14,5 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/166
 выгрузкой может изменить тот, кого замок раннера не держит ([замер](../../../references/1c/confirmed-runtime-measurements.md)). Без файла версий
 прогноз не нужен: выгрузка полная по
 `INV.USE-CASES.A-MISSING-VERSION-FILE-IS-KNOWN-BEFORE-THE-PLATFORM-STARTS`. Пара «запрошенный и
-случившийся режим» и значение «неизвестен» меняют форму `CTR.WIRE.DUMP-DATA`, и её версия
+случившийся режим» и значение «неизвестен» меняют форму `CTR.WIRE.PULL-DATA`, и её версия
 растёт вместе с этой работой.
