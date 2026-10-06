@@ -242,6 +242,28 @@ fn a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner() {
     );
 }
 
+/// `pull --all` пишет в проект и в каталоги наборов, а базу берёт как любая выгрузка: на
+/// базе другой копии он отказывает до чтения состава и называет владельца.
+#[test]
+fn pull_all_on_a_base_of_another_copy_is_refused_and_names_the_owner() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    succeeded(&first.run(&["push"]));
+    let marker = stand.marker_text();
+    let project = fs::read_to_string(&second.config).expect("project file");
+
+    let refused = second.run(&["pull", "--all"]);
+
+    assert_infobase_held(&refused, "pull", &first, &stand);
+    assert_eq!(stand.marker_text(), marker, "a refusal leaves the marker");
+    assert_eq!(
+        fs::read_to_string(&second.config).expect("project file"),
+        project,
+        "nothing is declared"
+    );
+}
+
 /// Команда чтения на базе другой копии проходит и метку не трогает.
 #[test]
 fn a_read_on_a_base_of_another_copy_passes_and_leaves_the_marker() {
