@@ -9,6 +9,24 @@ use crate::support::error::AppError;
 use crate::use_cases::context::CommandName;
 use crate::use_cases::extension_identity::platform_extension_name;
 
+/// Наборы в порядке обработки: основная конфигурация, расширения, внешние обработки,
+/// внешние отчёты, а внутри назначения — в порядке объявления.
+///
+/// Порядок по назначению решается здесь: обходы наборов берут его отсюда, а не собирают
+/// свои корзины (страж — `tests/architecture_guardrails.rs::the_order_of_source_sets_is_decided_in_one_place`).
+pub(crate) fn ordered_by_purpose(source_sets: &[SourceSetConfig]) -> Vec<&SourceSetConfig> {
+    let rank = |purpose: SourceSetPurpose| match purpose {
+        SourceSetPurpose::Configuration => 0,
+        SourceSetPurpose::Extension => 1,
+        SourceSetPurpose::ExternalDataProcessors => 2,
+        SourceSetPurpose::ExternalReports => 3,
+    };
+    let mut ordered = source_sets.iter().collect::<Vec<_>>();
+    // Сортировка устойчивая: внутри назначения остаётся порядок объявления.
+    ordered.sort_by_key(|source_set| rank(source_set.purpose));
+    ordered
+}
+
 /// Read-only runtime index for source-set orchestration.
 pub(crate) struct SourceSetInventory<'a> {
     config: &'a AppConfig,
@@ -44,24 +62,7 @@ impl<'a> SourceSetInventory<'a> {
     }
 
     pub(crate) fn ordered_source_sets(&self) -> Vec<&'a SourceSetConfig> {
-        let mut configuration = Vec::new();
-        let mut extensions = Vec::new();
-        let mut external_processors = Vec::new();
-        let mut external_reports = Vec::new();
-
-        for source_set in &self.config.source_sets {
-            match source_set.purpose {
-                SourceSetPurpose::Configuration => configuration.push(source_set),
-                SourceSetPurpose::Extension => extensions.push(source_set),
-                SourceSetPurpose::ExternalDataProcessors => external_processors.push(source_set),
-                SourceSetPurpose::ExternalReports => external_reports.push(source_set),
-            }
-        }
-
-        configuration.extend(extensions);
-        configuration.extend(external_processors);
-        configuration.extend(external_reports);
-        configuration
+        ordered_by_purpose(&self.config.source_sets)
     }
 
     /// Пакеты конфигурации проекта в порядке обхода [`Self::ordered_source_sets`]: основная
