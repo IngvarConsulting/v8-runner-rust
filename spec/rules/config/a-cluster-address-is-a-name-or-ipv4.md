@@ -1,7 +1,10 @@
 ---
 id: INV.CONFIG.A-CLUSTER-ADDRESS-IS-A-NAME-OR-IPV4
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/378
+check:
+  - src/config/validate.rs::a_cluster_address_is_a_host_with_an_optional_port
+  - src/config/validate.rs::an_ipv6_cluster_address_is_refused_naming_the_key_and_the_reason
+  - src/config/validate.rs::a_ras_address_derived_from_an_ipv6_server_is_refused
+  - tests/cli_cluster_section.rs::a_malformed_ras_address_is_refused_naming_the_key
 ---
 
 # Адрес кластера — имя или IPv4

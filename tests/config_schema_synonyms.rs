@@ -179,12 +179,14 @@ fn property_maps<'a>(value: &'a Value, maps: &mut Vec<&'a serde_json::Map<String
 fn every_key_synonym_of_the_model_is_deprecated_in_the_schema() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let synonyms = model_synonyms(root);
-    // Модель сегодня принимает прежние имена секции `push:` и ключей `providers.*`; пустой
-    // список значил бы, что обход потерял модель, а не что синонимов не стало.
+    // Модель сегодня принимает прежние имена ключей `providers.*`, и до них обход доходит
+    // только от корня через `providers`; без них список значил бы, что обход потерял
+    // модель, а не что синонимов не стало. Секция `push:` в модели полей не держит —
+    // её прежнее имя сворачивает загрузчик, а схема помечает `build` сама.
     assert!(
         synonyms
             .iter()
-            .any(|synonym| synonym.owner == MODEL_ROOT && synonym.alias == "build"),
+            .any(|synonym| synonym.canonical == "push" && synonym.alias == "build"),
         "{synonyms:?}"
     );
 

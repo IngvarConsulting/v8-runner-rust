@@ -667,7 +667,6 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
         "двух,оба",
     ),
     ("config/target-declarations-are-exclusive.md", "три"),
-    ("config/v8project-schema.md", "двумя,обеих,два"),
     ("mcp/admission-is-shared-by-both-transports.md", "обоих"),
     ("mcp/published-tool-surface.md", "восемь,три"),
     ("mcp/surface-stays-explicit.md", "оба"),

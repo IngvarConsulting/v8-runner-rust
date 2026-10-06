@@ -1203,7 +1203,7 @@ fn with_platform_log_artifact(
 mod tests {
     use super::{execute, resolve_request, ResolvedLoadRequest};
     use crate::config::model::{
-        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
+        AppConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
     use crate::domain::artifacts::ArtifactBuildMode;
     use crate::domain::execution::{
@@ -1492,7 +1492,6 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             source_sets: vec![],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(binary.to_path_buf()),

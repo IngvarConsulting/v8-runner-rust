@@ -124,9 +124,19 @@ pub enum ConfigValidationError {
     ClusterNotAllowedForStandalone,
 
     #[error(
-        "{key} must be a host with an optional port 1–65535 — `host`, `host:port` or `[v6]:port`: '{value}'"
+        "{key} must be a host with an optional port 1–65535 — `host` or `host:port`, the host a name or IPv4: '{value}'"
     )]
     ClusterAddressInvalid { key: &'static str, value: String },
+
+    #[error(
+        "{key} '{value}' is an IPv6 address: rac and ras accept only a name or IPv4 — `host` or `host:port`"
+    )]
+    ClusterAddressIsIpv6 { key: &'static str, value: String },
+
+    #[error(
+        "infobase.connection names the cluster by the IPv6 address '{server}', and with infobase.cluster.ras empty the runner takes the ras address from Srvr=: rac and ras accept only a name or IPv4 — declare infobase.cluster.ras as a name or IPv4"
+    )]
+    DerivedClusterAddressIsIpv6 { server: String },
 
     #[error(
         "infobase.connection 'ws=…' is a web-client address, not an administrative channel: put it into infobase.web.url and declare the target with File=… or Srvr=…;Ref=…"
@@ -205,8 +215,10 @@ pub enum ConfigValidationError {
     #[error("platform version must use format major.minor, major.minor.patch or major.minor.patch.build: {0}")]
     InvalidPlatformVersion(String),
 
-    #[error("push.partialLoadThreshold must be greater than or equal to 1")]
-    InvalidPartialLoadThreshold,
+    #[error(
+        "{section}.partialLoadThreshold is not supported: there is no partial-load threshold any more — delete the line; a full load on demand is `push <SET> --full`"
+    )]
+    PartialLoadThresholdKeyRemoved { section: &'static str },
 
     #[error("mcp.execution.admission_timeout_ms must be between 1 and 86400000 milliseconds")]
     InvalidMcpAdmissionTimeout,
@@ -412,7 +424,6 @@ fn validate_project_checks(config: &AppConfig) -> Result<(), ConfigValidationErr
     validate_connection_contract(config)?;
     validate_web_publication(config)?;
     validate_platform_version(config)?;
-    validate_build_config(config)?;
     validate_mcp_admission_timeout(config)?;
     validate_test_config(config)?;
     validate_mcp_config(config)?;
@@ -432,7 +443,6 @@ pub fn validate_tools_download_bootstrap(config: &AppConfig) -> Result<(), Confi
     validate_providers(config, &Operation::ALL)?;
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
-    validate_build_config(config)?;
     validate_mcp_admission_timeout(config)?;
     validate_mcp_config(config)?;
     validate_edt_cli_config(config)?;
@@ -890,14 +900,23 @@ fn validate_infobase_form(
     if let Some(cluster) = infobase.cluster.as_ref() {
         validate_cluster_section(cluster)?;
     }
+    if infobase
+        .cluster
+        .as_ref()
+        .and_then(|cluster| cluster.ras.as_deref())
+        .is_none()
+    {
+        validate_derived_cluster_address(&parsed)?;
+    }
 
     Ok(())
 }
 
 /// Секция `cluster` держит то, что есть только у кластера
 /// (`DEC.2026-09-21.THE-CLUSTER-SECTION-HOLDS-RAS-AND-TWO-ADMIN-LEVELS`): адреса —
-/// `host[:port]`, как их примут `rac` и `ras`; учётные данные здесь не проверяются —
-/// какого уровня не хватает, скажет операция, которой он нужен.
+/// `host[:port]` с именем или IPv4, как их примут `rac` и `ras`
+/// (`INV.CONFIG.A-CLUSTER-ADDRESS-IS-A-NAME-OR-IPV4`); учётные данные здесь не
+/// проверяются — какого уровня не хватает, скажет операция, которой он нужен.
 fn validate_cluster_section(
     cluster: &crate::config::model::InfobaseClusterConfig,
 ) -> Result<(), ConfigValidationError> {
@@ -918,6 +937,15 @@ fn validate_cluster_address(
     let Some(value) = value else {
         return Ok(());
     };
+    // Общий разборщик адресов IPv6 принимает — шлюзу автономного сервера и агенту
+    // Конфигуратора он нужен. `rac` же скобки не разбирает, а `ras` слушает только IPv4,
+    // поэтому отказ здесь, а не в разборщике.
+    if is_ipv6_literal(value) {
+        return Err(ConfigValidationError::ClusterAddressIsIpv6 {
+            key,
+            value: value.to_owned(),
+        });
+    }
     // Проверяется ровно та запись, что уйдёт утилите: пробелы по краям — не адрес.
     if host_and_port_of_authority(value).is_none() {
         return Err(ConfigValidationError::ClusterAddressInvalid {
@@ -926,6 +954,33 @@ fn validate_cluster_address(
         });
     }
     Ok(())
+}
+
+/// Без `cluster.ras` адрес сервера администрирования раннер берёт из хоста `Srvr=`, и к
+/// нему относится тот же запрет IPv6, что к объявленному адресу. В `Srvr=` бывает
+/// список серверов через запятую и префикс протокола (`tcp://`); проверяется каждый.
+fn validate_derived_cluster_address(
+    connection: &V8Connection,
+) -> Result<(), ConfigValidationError> {
+    let Some(server) = connection.server_address() else {
+        return Ok(());
+    };
+    let names_ipv6 = server.split(',').map(str::trim).any(|address| {
+        let address = address.split_once("://").map_or(address, |(_, rest)| rest);
+        is_ipv6_literal(address)
+    });
+    if names_ipv6 {
+        return Err(ConfigValidationError::DerivedClusterAddressIsIpv6 {
+            server: server.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Запись `host[:port]` называет адрес IPv6: в скобках или голым. У имени и у IPv4
+/// двоеточие бывает только одно — перед портом.
+fn is_ipv6_literal(address: &str) -> bool {
+    address.starts_with('[') || address.matches(':').count() >= 2
 }
 
 /// Каталог обмена автономного сервера лежит на той стороне; `workPath` — на этой.
@@ -1136,14 +1191,6 @@ fn validate_platform_version(config: &AppConfig) -> Result<(), ConfigValidationE
                 version.to_owned(),
             ));
         }
-    }
-
-    Ok(())
-}
-
-fn validate_build_config(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    if config.build.partial_load_threshold == 0 {
-        return Err(ConfigValidationError::InvalidPartialLoadThreshold);
     }
 
     Ok(())
@@ -1528,9 +1575,9 @@ fn validate_tool_extension_edt_runtime_path(
 mod tests {
     use super::{validate, ConfigValidationError};
     use crate::config::model::{
-        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig,
-        ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig, VanessaProfileConfig,
+        AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig, ToolExtensionInput,
+        ToolExtensionSourceConfig, ToolsConfig, VanessaProfileConfig,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -1567,7 +1614,6 @@ mod tests {
                 purpose,
                 path: relative_path(base, path),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -1675,7 +1721,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: None,
@@ -1715,7 +1760,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: None,
@@ -1755,7 +1799,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: None,
@@ -1799,7 +1842,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -1836,7 +1878,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -1873,52 +1914,12 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
         };
 
         validate(&config).expect("safe source-set name should pass");
-    }
-
-    #[test]
-    fn rejects_zero_partial_load_threshold() {
-        let base = tempdir().expect("base");
-        let work = tempdir().expect("work");
-        let source_dir = base.path().join("src");
-        std::fs::create_dir_all(&source_dir).expect("source dir");
-
-        let config = AppConfig {
-            base_path: base.path().to_path_buf(),
-            work_path: work.path().to_path_buf(),
-            format: SourceFormat::Designer,
-            providers: Default::default(),
-            provider_origins: Default::default(),
-            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
-            infobases: Default::default(),
-            infobase_name: None,
-            source_sets: vec![SourceSetConfig {
-                name: "main".to_owned(),
-                purpose: SourceSetPurpose::Configuration,
-                path: source_dir
-                    .strip_prefix(base.path())
-                    .expect("relative")
-                    .to_path_buf(),
-            }],
-            build: BuildConfig {
-                partial_load_threshold: 0,
-            },
-            tools: ToolsConfig::default(),
-            mcp: Default::default(),
-            tests: TestsConfig::default(),
-        };
-
-        let err = validate(&config).expect_err("expected invalid partial load threshold");
-        assert!(matches!(
-            err,
-            ConfigValidationError::InvalidPartialLoadThreshold
-        ));
     }
 
     #[test]
@@ -1945,7 +1946,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -1983,7 +1983,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2246,7 +2245,6 @@ mod tests {
                         .to_path_buf(),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2506,7 +2504,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2538,7 +2535,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2571,7 +2567,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2603,7 +2598,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2632,7 +2626,6 @@ mod tests {
             infobases: Default::default(),
             infobase_name: None,
             source_sets: vec![],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2667,7 +2660,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: std::path::PathBuf::from("designer/main"),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2708,7 +2700,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2761,7 +2752,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2798,7 +2788,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("src"),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -2858,25 +2847,17 @@ mod tests {
             .expect("a cluster base carries its cluster section");
     }
 
-    /// Адреса секции — `host[:port]`, как их примут `rac` и `ras`: IPv6 в скобках, порт
-    /// не обязателен и не равен нулю, пробелы по краям — не адрес; отказ называет ключ.
+    /// Адреса секции — `host[:port]`, как их примут `rac` и `ras`: хост — имя или IPv4,
+    /// порт не обязателен и не равен нулю, пробелы по краям — не адрес; отказ называет ключ.
     #[test]
     fn a_cluster_address_is_a_host_with_an_optional_port() {
-        for address in ["srv", "srv:1545", "10.0.0.5:1540", "[::1]:1545"] {
+        for address in ["srv", "srv:1545", "10.0.0.5:1540"] {
             let section = infobase(&format!(
                 "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: '{address}'\n  agent:\n    address: '{address}'\n"
             ));
             assert!(super::validate_infobase_form(&section).is_ok(), "{address}");
         }
-        for address in [
-            "",
-            ":1545",
-            "srv:0",
-            "srv:x",
-            "::1",
-            " srv:1545",
-            "srv:1545 ",
-        ] {
+        for address in ["", ":1545", "srv:0", "srv:x", " srv:1545", "srv:1545 "] {
             let section = infobase(&format!(
                 "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: '{address}'\n"
             ));
@@ -2906,6 +2887,95 @@ mod tests {
                 ),
                 "{address}: {error}"
             );
+        }
+    }
+
+    /// IPv6 — в скобках или без — `rac` не разбирает, а `ras` не слушает: отказ называет
+    /// ключ и причину (`INV.CONFIG.A-CLUSTER-ADDRESS-IS-A-NAME-OR-IPV4`).
+    #[test]
+    fn an_ipv6_cluster_address_is_refused_naming_the_key_and_the_reason() {
+        for address in [
+            "[::1]:1545",
+            "[::1]",
+            "::1",
+            "fe80::1",
+            "[0:0:0:0:0:0:0:1]:1545",
+            "[::ffff:10.0.0.5]:1545",
+        ] {
+            for (key, cluster) in [
+                ("infobase.cluster.ras", format!("  ras: '{address}'\n")),
+                (
+                    "infobase.cluster.agent.address",
+                    format!("  ras: srv:1545\n  agent:\n    address: '{address}'\n"),
+                ),
+            ] {
+                let section = infobase(&format!(
+                    "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n{cluster}"
+                ));
+                let error = super::validate_infobase_form(&section).expect_err(address);
+                assert!(
+                    matches!(
+                        &error,
+                        ConfigValidationError::ClusterAddressIsIpv6 { key: named, .. }
+                            if *named == key
+                    ),
+                    "{key} = {address}: {error}"
+                );
+                let message = error.to_string();
+                assert!(message.contains(key), "{message}");
+                assert!(
+                    message.contains("rac and ras accept only a name or IPv4"),
+                    "{message}"
+                );
+            }
+        }
+    }
+
+    /// Без `cluster.ras` адрес берётся из `Srvr=`, и IPv6-хост там даёт тот же отказ;
+    /// объявленный `cluster.ras` его снимает, а имя и IPv4 в `Srvr=` проходят.
+    #[test]
+    fn a_ras_address_derived_from_an_ipv6_server_is_refused() {
+        for connection in [
+            "Srvr=[::1]:1541;Ref=demo",
+            "Srvr=\"[::1]\";Ref=\"demo\"",
+            "Srvr=tcp://[fe80::1]:1541;Ref=demo",
+            "Srvr=srv1,[::1]:1541;Ref=demo",
+            "/S [::1]:1541\\demo",
+        ] {
+            for cluster in ["", "cluster:\n  user: cluster-admin\n"] {
+                let section = infobase(&format!("connection: '{connection}'\n{cluster}"));
+                let error = super::validate_infobase_form(&section).expect_err(connection);
+                assert!(
+                    matches!(
+                        &error,
+                        ConfigValidationError::DerivedClusterAddressIsIpv6 { .. }
+                    ),
+                    "{connection}: {error}"
+                );
+                let message = error.to_string();
+                assert!(message.contains("infobase.cluster.ras"), "{message}");
+                assert!(
+                    message.contains("rac and ras accept only a name or IPv4"),
+                    "{message}"
+                );
+            }
+
+            let declared = infobase(&format!(
+                "connection: '{connection}'\ncluster:\n  ras: 10.0.0.5:1545\n"
+            ));
+            super::validate_infobase_form(&declared)
+                .expect("a declared ras address is not derived from Srvr=");
+        }
+
+        for connection in [
+            "Srvr=srv:1541;Ref=demo",
+            "Srvr=10.0.0.5;Ref=demo",
+            "Srvr=tcp://srv:1541;Ref=demo",
+            "Srvr=srv1:1541,srv2:1541;Ref=demo",
+            "/S srv:1541\\demo",
+        ] {
+            let section = infobase(&format!("connection: '{connection}'\n"));
+            super::validate_infobase_form(&section).expect(connection);
         }
     }
 
@@ -3017,7 +3087,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -3054,7 +3123,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -3086,7 +3154,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: std::path::PathBuf::from("missing-path"),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -3123,7 +3190,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -3161,7 +3227,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: crate::config::model::McpConfig {
                 http: crate::config::model::McpHttpConfig {
@@ -3211,7 +3276,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 designer_agent: crate::config::model::DesignerAgentConfig {
                     attach: Some("127.0.0.1:1543".to_owned()),
@@ -3267,7 +3331,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -3586,7 +3649,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -3636,7 +3698,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -3682,7 +3743,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
@@ -3735,7 +3795,6 @@ mod tests {
                     .expect("relative")
                     .to_path_buf(),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),

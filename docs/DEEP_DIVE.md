@@ -54,8 +54,9 @@ runtime snapshot commit только указанным source-set.
 
 1. Анализ изменений по выбранным `source-set`.
 2. Выбор partial/full path по изменённым файлам. Сегодня удаление, правка `Configuration.xml`,
-   изменённый каталог и превышение `push.partialLoadThreshold` дают full; порог и эти переходы
-   снимаются — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379).
+   изменённый каталог и больше 20 изменённых файлов дают full; порог не настраивается
+   (ключ `push.partialLoadThreshold` отвергается), а эти переходы снимаются —
+   [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379).
 3. Загрузка через выбранный backend.
 4. Commit runtime snapshot только после успешного шага.
 

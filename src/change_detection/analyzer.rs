@@ -451,11 +451,7 @@ mod tests {
             path: module,
             kind: ChangeKind::Modified,
         }];
-        let decision = decide(
-            &changes,
-            &root,
-            crate::change_detection::partial_load::DEFAULT_PARTIAL_LOAD_THRESHOLD,
-        );
+        let decision = decide(&changes, &root);
         assert!(matches!(
             decision,
             crate::change_detection::partial_load::LoadDecision::Partial(_)

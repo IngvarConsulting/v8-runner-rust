@@ -65,8 +65,7 @@ where
 mod tests {
     use super::{dispatch_with_workspace_lock, map_failure_response};
     use crate::config::model::{
-        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::support::fs::acquire_advisory_lock;
     use crate::use_cases::context::CommandName;
@@ -92,7 +91,6 @@ mod tests {
                 purpose: SourceSetPurpose::Configuration,
                 path: PathBuf::from("main"),
             }],
-            build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),

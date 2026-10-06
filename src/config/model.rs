@@ -55,11 +55,6 @@ pub struct AppConfig {
     #[serde(rename = "source-set", default)]
     pub source_sets: Vec<SourceSetConfig>,
 
-    /// Settings of `push`: how sources reach the infobase
-    #[serde(default)]
-    #[serde(rename = "push", alias = "build")]
-    pub build: BuildConfig,
-
     /// Platform tools configuration
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -162,8 +157,8 @@ pub struct InfobaseConfig {
 /// only for the level it needs, and the refusal names the level that is missing.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct InfobaseClusterConfig {
-    /// Administration server (`ras`) address as `host[:port]`; it goes to `rac` as is,
-    /// so the port default (1545) stays with the platform.
+    /// Administration server (`ras`) address as `host[:port]`, the host a name or IPv4;
+    /// it goes to `rac` as is, so the port default (1545) stays with the platform.
     #[serde(default)]
     pub ras: Option<String>,
 
@@ -571,25 +566,6 @@ impl SourceSetPurpose {
             Self::ExternalReports => "EXTERNAL_REPORTS",
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuildConfig {
-    #[serde(default = "default_partial_load_threshold")]
-    pub partial_load_threshold: usize,
-}
-
-impl Default for BuildConfig {
-    fn default() -> Self {
-        Self {
-            partial_load_threshold: default_partial_load_threshold(),
-        }
-    }
-}
-
-fn default_partial_load_threshold() -> usize {
-    20
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

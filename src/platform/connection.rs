@@ -102,10 +102,27 @@ impl V8Connection {
                 address.reference.to_lowercase()
             ));
         }
+        self.server_arg()
+            .map(|server| format!("server:{}", server.to_lowercase()))
+    }
+
+    /// The value of the `/S` switch in the raw argument form.
+    fn server_arg(&self) -> Option<&str> {
         self.connection_args
             .windows(2)
             .find(|pair| pair[0].eq_ignore_ascii_case("/s") || pair[0].eq_ignore_ascii_case("-s"))
-            .map(|pair| format!("server:{}", pair[1].to_lowercase()))
+            .map(|pair| pair[1].as_str())
+    }
+
+    /// The server part of a server connection, as declared: the value of `Srvr=`, or the
+    /// part of `/S <server>\<base>` before the backslash. `None` for any other form.
+    pub fn server_address(&self) -> Option<String> {
+        if let Some(address) = declared_server_address(&self.raw) {
+            return Some(address.server);
+        }
+        self.server_arg()
+            .and_then(|server| server.split_once('\\'))
+            .map(|(server, _)| server.trim().to_owned())
     }
 
     /// Returns whether the raw value has a supported file or server connection shape.

@@ -58,7 +58,11 @@ matrix, and `providers.<operation>` names one explicitly.
 - `infobase.cluster` (`ras`, `user`/`password`, `agent.address`/`user`/`password`) declares the
   administration server and the two administrator levels above the infobase user; it is refused
   next to `File=` or `standalone`, and no command reads it yet (`sessions`, the runner's own `ras`
-  and `infobase create` in a cluster arrive later).
+  and `infobase create` in a cluster arrive later). `ras` and `agent.address` take a name or IPv4
+  with an optional port: `rac` and `ras` do not work over IPv6, so an IPv6 address is refused; with
+  `ras` empty, an IPv6 host in `Srvr=` is refused the same way — declare `ras` as a name or IPv4.
+- `push.partialLoadThreshold` (and under the old `build:` section) is refused at config load:
+  delete the line; a full load on demand is `push --full`.
 - `extensions` supports Designer and EDT projects: `--name` selects an extension `source-set`,
   `--installed-name` selects an installed platform name without a matching source-set.
 - `check` picks its branch by `format`: `/CheckConfig` under DESIGNER, EDT validation under EDT.

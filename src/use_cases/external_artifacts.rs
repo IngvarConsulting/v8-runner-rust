@@ -298,8 +298,7 @@ mod tests {
         source_set_external_kind, ExternalArtifactKind,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::platform::edt::EdtDsl;
     use crate::platform::process::ProcessExecutor;
@@ -329,7 +328,6 @@ mod tests {
                     path: PathBuf::from("designer/reports"),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: crate::config::model::PlatformToolConfig {
                     path: Some(platform.to_path_buf()),

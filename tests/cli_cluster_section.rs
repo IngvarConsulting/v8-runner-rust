@@ -177,7 +177,8 @@ fn a_cluster_section_next_to_a_file_base_is_refused() {
     );
 }
 
-/// Адрес сервера администрирования — `host[:port]`; отказ называет ключ и формы.
+/// Адрес сервера администрирования — `host[:port]` с именем или IPv4; отказ называет ключ и
+/// формы, а у IPv6 — причину.
 #[test]
 fn a_malformed_ras_address_is_refused_naming_the_key() {
     let project = project();
@@ -190,4 +191,34 @@ fn a_malformed_ras_address_is_refused_naming_the_key() {
     assert!(message.contains("infobase.cluster.ras"), "{message}");
     assert!(message.contains("`host:port`"), "{message}");
     assert!(message.contains("':1545'"), "{message}");
+
+    // IPv6 — в скобках или без — `rac` не разбирает, а `ras` не слушает: отказ называет
+    // ключ и причину. Без `cluster.ras` то же касается адреса, взятого из `Srvr=`
+    // (`INV.CONFIG.A-CLUSTER-ADDRESS-IS-A-NAME-OR-IPV4`).
+    for ras in ["'[::1]:1545'", "'::1'"] {
+        let ipv6 = crate::project();
+        ipv6.write_local(&format!(
+            "infobases:\n  origin:\n    connection: 'Srvr=srv:1541;Ref=demo'\n    cluster:\n      ras: {ras}\n"
+        ));
+
+        let message = refusal_message(&ipv6.run_json(LAUNCH_PREVIEW));
+
+        assert!(message.contains("infobase.cluster.ras"), "{message}");
+        assert!(
+            message.contains("rac and ras accept only a name or IPv4"),
+            "{message}"
+        );
+    }
+
+    let derived = crate::project();
+    derived.write_local("infobases:\n  origin:\n    connection: 'Srvr=[::1]:1541;Ref=demo'\n");
+
+    let message = refusal_message(&derived.run_json(LAUNCH_PREVIEW));
+
+    assert!(message.contains("infobase.connection"), "{message}");
+    assert!(message.contains("infobase.cluster.ras"), "{message}");
+    assert!(
+        message.contains("rac and ras accept only a name or IPv4"),
+        "{message}"
+    );
 }

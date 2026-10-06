@@ -1057,8 +1057,8 @@ mod tests {
         PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolsConfig,
+        AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolsConfig,
     };
     use crate::domain::dump::{DumpMode, DumpSelectorResult};
     use crate::domain::partial_dump_selector::PartialDumpSelector;
@@ -1595,7 +1595,6 @@ exit 0"#,
                     path: PathBuf::from("ext"),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),

@@ -382,8 +382,8 @@ pub(crate) fn resolve_targets(
 mod tests {
     use super::{execute, map_extension_update_error, resolve_targets};
     use crate::config::model::{
-        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolsConfig,
+        AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolsConfig,
     };
     use crate::platform::ibcmd::IbcmdError;
     #[cfg(unix)]
@@ -437,7 +437,6 @@ mod tests {
                     path: PathBuf::from("exts/client-mcp"),
                 },
             ],
-            build: BuildConfig::default(),
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(ibcmd_path.to_path_buf()),
