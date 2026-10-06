@@ -349,6 +349,26 @@ pub fn capability_of(
         .find(|capability| capability.provider == provider)
 }
 
+/// Выгружает ли исполнитель конфигурацию базы данных (`download --state db`).
+///
+/// Строка `download` матрицы говорит, кто выгружает пакет вообще; состояние конфигурации
+/// сужает её. Конфигуратор делает это `/DumpDBCfg`, `ibcmd` — `config save --db`; у
+/// агентского shell команды для конфигурации базы данных нет, только `config dump-cfg`
+/// рабочей.
+pub const fn exports_database_configuration(provider: Provider) -> bool {
+    match provider {
+        Provider::Designer | Provider::Ibcmd => true,
+        Provider::Agent | Provider::IbcmdRs | Provider::Webinst => false,
+    }
+}
+
+/// Исполнители конфигурации базы данных в порядке словаря — для текста отказа.
+pub fn database_configuration_exporters() -> impl Iterator<Item = Provider> {
+    Provider::ALL
+        .into_iter()
+        .filter(|provider| exports_database_configuration(*provider))
+}
+
 /// Откуда взялся выбранный исполнитель.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]

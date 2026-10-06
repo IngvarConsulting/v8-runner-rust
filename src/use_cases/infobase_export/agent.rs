@@ -8,9 +8,7 @@
 use std::path::Path;
 
 use crate::config::model::AppConfig;
-use crate::domain::infobase_export::ConfigurationState;
 use crate::platform::result::PlatformCommandResult;
-use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
     argument, collect_file, make_output_dir, run_command, run_id, stage_file, tidy, tidy_run_path,
     transcript_log, with_session, Exchange,
@@ -19,21 +17,16 @@ use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::CommandFailure;
 use crate::use_cases::progress::log_live_stage;
 
-/// `config dump-cfg --file=… [--extension=…]` — только рабочая конфигурация: у агента
-/// нет команды для конфигурации базы данных.
+/// `config dump-cfg --file=… [--extension=…]` — только рабочая конфигурация: команды для
+/// конфигурации базы данных у агента нет, и `--state db` до него не доходит — выбор
+/// исполнителя отказывает раньше (`domain::capability::exports_database_configuration`).
 pub(super) fn export_configuration(
     context: &ExecutionContext,
     config: &AppConfig,
     v8: Option<&Path>,
-    state: ConfigurationState,
     extension: Option<&str>,
     staging_path: &Path,
 ) -> Result<PlatformCommandResult, CommandFailure> {
-    if state == ConfigurationState::Database {
-        return Err(CommandFailure::without_deferral(AppError::capability(
-            "the agent exports only the working configuration: it has no command for the database configuration; use providers.infobase.configuration.export: designer or ibcmd".to_owned(),
-        )));
-    }
     let name = match extension {
         Some(extension) => format!("{extension}.cfe"),
         None => "main.cf".to_owned(),

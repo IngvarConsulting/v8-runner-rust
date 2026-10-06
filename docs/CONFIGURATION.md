@@ -505,7 +505,8 @@ infobases:
 `ras` им не управляет.
 
 У автономного сервера один исполнитель — `agent` через шлюз — для `push`, `pull`,
-`make`, `extensions` и `download`. `infobase dump` и `infobase restore`
+`make`, `extensions` и `download` — у `download` только рабочая конфигурация: `--state db`
+отказывает до сессии, команды для конфигурации базы данных у агента нет. `infobase dump` и `infobase restore`
 через шлюз не выполняются намеренно: `infobase-tools dump-ib` роняет `ibsrv` 8.3.27
 (замер 15.09.2026), а `restore-ib` по документации завершает сеанс сервера — снимок
 автономного сервера снимают его собственными средствами. `upload` (у шлюза нет
