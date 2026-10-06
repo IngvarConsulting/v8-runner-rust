@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
+use crate::config::loader::{layered_origin, INFOBASE_SECTION_SYNONYM};
 use crate::config::schema::main_config_schema_url;
 use crate::domain::config_init::{
     ConfigInitResult, ConfigInitSourceSet, LocalLayerInitResult, OriginChange, OriginDeclaration,
@@ -85,17 +86,14 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     // Проект объявлен, если проектный файл уже есть: тогда местный слой перенаправляет
     // `origin`, а не отказывает, и без `--force` проектный файл остаётся как был.
     let project_declared = output_path.is_file();
-    if project_declared {
-        // `init` — единственное имя словаря, сменившее предмет: раньше под ним создавали
-        // базу. Набравший его по старой памяти получает отказ с именем нужной команды,
-        // а не совет перезаписать свой конфиг ключом `--force`.
-        if let Some(declared) = declared_infobase_name(&output_path) {
-            return Err(AppError::Validation(format!(
-                "{} already declares the infobase {declared}: `init` prepares the project, and the infobase is created by `infobase create`",
-                output_path.display()
-            )));
-        }
-    }
+    let fate = if request.force {
+        ProjectFileFate::Rewritten
+    } else {
+        ProjectFileFate::Kept
+    };
+    let project = project_declared
+        .then(|| project_layer(&output_path, fate))
+        .flatten();
     // Объявленный адрес читается обрезанным, и названный сравнивается с ним так же:
     // `--infobase " File=x"` — тот же адрес, что `File=x`.
     let requested = request.connection.as_ref().map(|origin| DeclaredOrigin {
@@ -113,7 +111,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
 
     if project_declared && !request.force {
-        let local = plan_local_config(&local_path, requested.as_ref(), conflict)?;
+        let local = plan_local_config(&local_path, requested.as_ref(), conflict, project.as_ref())?;
         write_local_config(&local_path, &local)?;
         gitignore.ensure()?;
         return Ok(ConfigInitResult::Local(LocalLayerInitResult {
@@ -121,6 +119,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
             local_path: local_path.display().to_string(),
             gitignore_path: gitignore.path().display().to_string(),
             origin: local.origin,
+            warnings: local.warnings,
             duration_ms: started.elapsed().as_millis() as u64,
         }));
     }
@@ -143,15 +142,26 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
     // Отказ местного слоя случается до записи проектного файла: иначе `--force` успел
     // бы переписать проект, а команда ответила бы отказом.
-    let local = plan_local_config(&local_path, requested.as_ref(), conflict)?;
+    let local = plan_local_config(&local_path, requested.as_ref(), conflict, project.as_ref())?;
 
-    std::fs::write(&output_path, yaml).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to write config file '{}': {error}",
-            output_path.display()
-        ))
-    })?;
-    write_local_config(&local_path, &local)?;
+    let write_project_file = || {
+        std::fs::write(&output_path, &yaml).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to write config file '{}': {error}",
+                output_path.display()
+            ))
+        })
+    };
+    if project.is_some() {
+        // Секция `infobase:` переезжает из проектного файла в местный слой: слой пишется
+        // первым, чтобы сбой записи не потерял единственную копию адреса и учётных данных.
+        write_local_config(&local_path, &local)?;
+        write_project_file()?;
+    } else {
+        // Без переезда первым пишется проектный файл: его сбой не оставляет следов.
+        write_project_file()?;
+        write_local_config(&local_path, &local)?;
+    }
     gitignore.ensure()?;
 
     Ok(ConfigInitResult::Project(ProjectInitResult {
@@ -173,24 +183,40 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
 /// рабочего каталога.
 const DEFAULT_ORIGIN_CONNECTION: &str = "File=build/ib";
 
-/// Имя базы, объявленной в существующем конфиге, если она там есть. Читается тем же
-/// разбором YAML, что и остальной файл: отказ должен называть базу, а не догадываться.
-fn declared_infobase_name(path: &std::path::Path) -> Option<String> {
+/// Проектный файл объявленного проекта, когда он говорит о базах: прежний ключ
+/// `infobase:` объявляет `origin` и сливается с местным слоем по полям, как у загрузчика,
+/// а карта `infobases` в нём — отказ загрузчика.
+struct ProjectLayer {
+    path: PathBuf,
+    document: serde_yaml::Value,
+    fate: ProjectFileFate,
+}
+
+/// Что `init` сделает с проектным файлом объявленного проекта.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectFileFate {
+    /// Файл остаётся как был: его секция `infobase:` продолжает действовать.
+    Kept,
+    /// `--force` перепишет файл, и секция `infobase:` пропала бы вместе с адресом базы:
+    /// она переезжает в местный слой, и `origin` остаётся тем же.
+    Rewritten,
+}
+
+/// Проектный файл читается снисходительно: файл, который не разбирается как карта YAML,
+/// о базах ничего не говорит, и `init` в нём ведёт себя как в любом объявленном проекте.
+fn project_layer(path: &Path, fate: ProjectFileFate) -> Option<ProjectLayer> {
     let text = std::fs::read_to_string(path).ok()?;
-    let root: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
-    let mapping = root.as_mapping()?;
-    if let Some(name) = mapping
-        .get(serde_yaml::Value::String("infobases".to_owned()))
-        .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|infobases| infobases.keys().next())
-        .and_then(serde_yaml::Value::as_str)
-    {
-        return Some(name.to_owned());
-    }
-    mapping
-        .get(serde_yaml::Value::String("infobase".to_owned()))
-        .is_some()
-        .then(|| crate::config::model::DEFAULT_INFOBASE_NAME.to_owned())
+    let document: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
+    let mapping = document.as_mapping()?;
+    let (synonym, map) = INFOBASE_SECTION_SYNONYM;
+    let speaks_of_infobases = [synonym, map]
+        .into_iter()
+        .any(|key| mapping.contains_key(key));
+    speaks_of_infobases.then(|| ProjectLayer {
+        path: path.to_path_buf(),
+        document,
+        fate,
+    })
 }
 
 /// Как поступить с `origin`, который уже объявлен другим адресом, чем назван сейчас.
@@ -208,6 +234,8 @@ struct LocalLayerPlan {
     /// Новое содержимое слоя; `None` — на диске уже лежит ровно это.
     content: Option<String>,
     origin: OriginDeclaration,
+    /// Предупреждение о синониме `infobase:` в проектном файле, который остаётся как был.
+    warnings: Vec<String>,
 }
 
 /// Местный слой объявляет `origin`: к какой базе подключён каталог, знает эта машина.
@@ -218,8 +246,19 @@ fn plan_local_config(
     path: &Path,
     origin: Option<&DeclaredOrigin>,
     conflict: OriginConflict,
+    project: Option<&ProjectLayer>,
 ) -> Result<LocalLayerPlan, AppError> {
-    if !path.exists() {
+    let exists = path.exists();
+    let existing = if exists {
+        std::fs::read_to_string(path).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to read local config file '{}': {error}",
+                path.display()
+            ))
+        })?
+    } else if project.is_some() {
+        String::new()
+    } else {
         let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
         return Ok(LocalLayerPlan {
             content: Some(render_local_config_with_origin(connection)),
@@ -228,16 +267,17 @@ fn plan_local_config(
                 connection: Some(mask_connection_string(connection)),
                 replaced: None,
             },
+            warnings: Vec::new(),
         });
-    }
-    let existing = std::fs::read_to_string(path).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to read local config file '{}': {error}",
-            path.display()
-        ))
-    })?;
-    let mut plan = local_config_with_origin(&existing, origin, conflict, path)?;
-    if plan.content.as_deref() == Some(existing.as_str()) {
+    };
+    let mut plan = local_config_with_origin(&existing, origin, conflict, project, path)?;
+    // Пустой слой не создаётся: `origin` уже объявлен проектным файлом.
+    let nothing_new = if exists {
+        existing
+    } else {
+        render_empty_local_config()
+    };
+    if plan.content.as_deref() == Some(nothing_new.as_str()) {
         plan.content = None;
     }
     Ok(plan)
@@ -310,15 +350,41 @@ fn local_config_with_origin(
     existing: &str,
     origin: Option<&DeclaredOrigin>,
     conflict: OriginConflict,
+    project: Option<&ProjectLayer>,
     path: &Path,
 ) -> Result<LocalLayerPlan, AppError> {
-    let content = with_local_schema_modeline(existing);
-    let document: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|error| {
+    let mut content = with_local_schema_modeline(existing);
+    let mut document: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|error| {
         AppError::Validation(format!(
             "local config file '{}' is not valid YAML: {error}",
             path.display()
         ))
     })?;
+    // Действующий `origin` — секция, какой её сольёт загрузчик из обоих слоёв. По ней
+    // решается, объявлен ли адрес, и она целиком уходит в `upstream`. Дописывается же
+    // только местный слой: поля проектного файла в него не копируются, пока файл остаётся.
+    let mut warnings = Vec::new();
+    let mut layered = None;
+    // Поля проектной секции, кроме адреса, загрузчик подмешает и в перенаправленный
+    // `origin`: их имена называет предупреждение, если перенаправление случится.
+    let mut inherited_fields = Vec::new();
+    if let Some(project) = project {
+        let merged = layered_origin(&project.path, &project.document, &document)
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        let view = with_origin_section(document.clone(), merged.section, path)?;
+        match project.fate {
+            ProjectFileFate::Rewritten => {
+                content = render_local_document(&view, path)?;
+                document = view;
+            }
+            ProjectFileFate::Kept => {
+                warnings.extend(merged.project_synonym_warning);
+                inherited_fields = merged.project_fields_besides_address;
+                layered = Some(view);
+            }
+        }
+    }
+    let effective = layered.as_ref().unwrap_or(&document);
     let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
     let declared = |content: String| LocalLayerPlan {
         content: Some(content),
@@ -327,6 +393,7 @@ fn local_config_with_origin(
             connection: Some(mask_connection_string(connection)),
             replaced: None,
         },
+        warnings: Vec::new(),
     };
     let unchanged = |content: String, connection: Option<&str>| LocalLayerPlan {
         content: Some(content),
@@ -335,8 +402,9 @@ fn local_config_with_origin(
             connection: connection.map(mask_connection_string),
             replaced: None,
         },
+        warnings: Vec::new(),
     };
-    match origin_state(&document) {
+    let plan = match origin_state(effective) {
         OriginState::Connection(declared_address) => match origin {
             Some(requested) if requested.connection != declared_address => match conflict {
                 OriginConflict::Refuse => {
@@ -349,7 +417,7 @@ fn local_config_with_origin(
                     )))
                 }
                 OriginConflict::Redirect => {
-                    redirect_origin(document, requested, Some(&declared_address), path)
+                    redirect_origin(effective.clone(), requested, Some(&declared_address), path)
                 }
             },
             _ => Ok(unchanged(content, Some(&declared_address))),
@@ -364,7 +432,7 @@ fn local_config_with_origin(
                 )))
             }
             (Some(requested), OriginConflict::Redirect) => {
-                redirect_origin(document, requested, None, path)
+                redirect_origin(effective.clone(), requested, None, path)
             }
             (None, OriginConflict::Refuse | OriginConflict::Redirect) => {
                 Ok(unchanged(content, None))
@@ -389,7 +457,65 @@ fn local_config_with_origin(
             PreviousOrigin::StaysInOrigin,
             path,
         )?)),
+    };
+    let mut plan = plan?;
+    if plan.origin.change == OriginChange::Redirected && !inherited_fields.is_empty() {
+        warnings.push(inherited_fields_warning(&inherited_fields));
     }
+    plan.warnings = warnings;
+    Ok(plan)
+}
+
+/// Предупреждение называет только имена полей: значения — учётные данные и адреса.
+fn inherited_fields_warning(fields: &[String]) -> String {
+    let fields = fields
+        .iter()
+        .map(|field| format!("`{field}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{fields} of `infobase:` in the project file still apply to the redirected infobases.origin: the loader merges that section field by field; move `infobase:` to {LOCAL_CONFIG_FILE_NAME}"
+    )
+}
+
+/// Местный документ, в котором `origin` — данная секция: так местный слой выглядит для
+/// решения об `origin`, а при `--force` таким он и записывается.
+fn with_origin_section(
+    mut document: serde_yaml::Value,
+    section: Option<serde_yaml::Mapping>,
+    path: &Path,
+) -> Result<serde_yaml::Value, AppError> {
+    let key = |name: &str| serde_yaml::Value::String(name.to_owned());
+    let mapping = local_mapping_mut(&mut document, path)?;
+    mapping.remove(key("infobase"));
+    if let Some(section) = section {
+        fill_infobases(mapping, |infobases| {
+            infobases.insert(key("origin"), serde_yaml::Value::Mapping(section));
+        });
+    }
+    Ok(document)
+}
+
+fn local_mapping_mut<'a>(
+    document: &'a mut serde_yaml::Value,
+    path: &Path,
+) -> Result<&'a mut serde_yaml::Mapping, AppError> {
+    document.as_mapping_mut().ok_or_else(|| {
+        AppError::Validation(format!(
+            "local config file '{}' must be a YAML mapping",
+            path.display()
+        ))
+    })
+}
+
+fn render_local_document(document: &serde_yaml::Value, path: &Path) -> Result<String, AppError> {
+    let rendered = serde_yaml::to_string(document).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to render local config file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    Ok(format!("{LOCAL_CONFIG_SCHEMA_MODEL_LINE}\n{rendered}"))
 }
 
 /// Имя, под которым перенаправленный `origin` сохраняет прежнюю секцию.
@@ -429,6 +555,7 @@ fn redirect_origin(
             connection: Some(mask_connection_string(&requested.connection)),
             replaced: replaced.map(mask_connection_string),
         },
+        warnings: Vec::new(),
     })
 }
 
@@ -503,12 +630,7 @@ fn rewrite_with_origin(
     path: &Path,
 ) -> Result<String, AppError> {
     let key = |name: &str| serde_yaml::Value::String(name.to_owned());
-    let mapping = document.as_mapping_mut().ok_or_else(|| {
-        AppError::Validation(format!(
-            "local config file '{}' must be a YAML mapping",
-            path.display()
-        ))
-    })?;
+    let mapping = local_mapping_mut(&mut document, path)?;
     let existing = mapping
         .get_mut(key("infobases"))
         .and_then(serde_yaml::Value::as_mapping_mut)
@@ -523,13 +645,7 @@ fn rewrite_with_origin(
         key("connection"),
         serde_yaml::Value::String(connection.to_owned()),
     );
-    let infobases = mapping
-        .entry(key("infobases"))
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !infobases.is_mapping() {
-        *infobases = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    if let Some(infobases) = infobases.as_mapping_mut() {
+    fill_infobases(mapping, |infobases| {
         infobases.insert(key("origin"), serde_yaml::Value::Mapping(origin));
         if let Some(upstream) = upstream {
             infobases.insert(
@@ -537,14 +653,21 @@ fn rewrite_with_origin(
                 serde_yaml::Value::Mapping(upstream),
             );
         }
+    });
+    render_local_document(&document, path)
+}
+
+/// Карта `infobases` документа, заведённая, если её не было или она не карта.
+fn fill_infobases(mapping: &mut serde_yaml::Mapping, fill: impl FnOnce(&mut serde_yaml::Mapping)) {
+    let infobases = mapping
+        .entry(serde_yaml::Value::String("infobases".to_owned()))
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if !infobases.is_mapping() {
+        *infobases = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
     }
-    let rendered = serde_yaml::to_string(&document).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to render local config file '{}': {error}",
-            path.display()
-        ))
-    })?;
-    Ok(format!("{LOCAL_CONFIG_SCHEMA_MODEL_LINE}\n{rendered}"))
+    if let Some(infobases) = infobases.as_mapping_mut() {
+        fill(infobases);
+    }
 }
 
 fn yaml_document_is_empty(content: &str) -> bool {
@@ -1732,6 +1855,101 @@ mod tests {
             load_config(Some(config_path), None, &selector)
                 .unwrap_or_else(|error| panic!("{selector:?} resolves: {error}"));
         }
+    }
+
+    /// `--force` переписывает проектный файл, и старый ключ `infobase:` из него исчез бы
+    /// вместе с адресом базы. Секция переезжает в местный слой — слитая с полями слоя, как
+    /// у загрузчика, — и `origin` после команды тот же, что до неё.
+    #[test]
+    fn force_carries_the_infobase_synonym_of_the_project_file_into_the_local_layer() {
+        let project = "workPath: build\ninfobase:\n  connection: 'File=/srv/ib'\n  user: Admin\n  password: proj-secret\n";
+        for (requested, change) in [
+            (None, OriginChange::Unchanged),
+            (redirect_to("File=build/ib"), OriginChange::Redirected),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>")
+                .expect("main xml");
+            std::fs::write(dir.path().join("v8project.yaml"), project).expect("project file");
+            std::fs::write(
+                dir.path().join("v8project.local.yaml"),
+                "infobases:\n  origin:\n    password: layer-secret\n",
+            )
+            .expect("local config");
+
+            let result = project_result(
+                execute(&ConfigInitRequest {
+                    project_dir: dir.path().to_path_buf(),
+                    output_path: "v8project.yaml".into(),
+                    force: true,
+                    connection: requested.clone(),
+                    format: ConfigFormatRequest::Designer,
+                })
+                .expect("init --force"),
+            );
+
+            assert!(result.overwritten);
+            let rewritten = read(&dir.path().join("v8project.yaml"));
+            assert!(!rewritten.contains("infobase:"), "{rewritten}");
+            assert_eq!(result.origin.change, change, "{requested:?}");
+            let document: serde_yaml::Value =
+                serde_yaml::from_str(&read(&dir.path().join("v8project.local.yaml")))
+                    .expect("yaml");
+            let previous = if change == OriginChange::Redirected {
+                assert_eq!(result.origin.replaced.as_deref(), Some("File=/srv/ib"));
+                assert_eq!(
+                    document["infobases"]["origin"]["connection"],
+                    "File=build/ib"
+                );
+                &document["infobases"]["upstream"]
+            } else {
+                assert_eq!(result.origin.connection.as_deref(), Some("File=/srv/ib"));
+                &document["infobases"]["origin"]
+            };
+            assert_eq!(previous["connection"], "File=/srv/ib", "{document:?}");
+            assert_eq!(previous["user"], "Admin");
+            assert_eq!(previous["password"], "layer-secret");
+            let config_path = dir.path().join("v8project.yaml");
+            let config_path = config_path.to_str().expect("config path");
+            for selector in [
+                InfobaseSelector::Default,
+                InfobaseSelector::Name("upstream".to_owned()),
+            ] {
+                if selector != InfobaseSelector::Default && change != OriginChange::Redirected {
+                    continue;
+                }
+                load_config(Some(config_path), None, &selector)
+                    .unwrap_or_else(|error| panic!("{selector:?} resolves: {error}"));
+            }
+        }
+    }
+
+    /// `origin`, объявленный старым ключом проектного файла, не требует местного слоя:
+    /// пустой слой не создаётся, а синоним назван в предупреждении.
+    #[test]
+    fn the_infobase_synonym_of_the_project_file_needs_no_local_layer() {
+        let dir = tempdir().expect("tempdir");
+        let project = "workPath: build\ninfobase:\n  connection: 'File=/srv/ib'\n";
+        std::fs::write(dir.path().join("v8project.yaml"), project).expect("project file");
+
+        let result = execute(&ConfigInitRequest {
+            project_dir: dir.path().to_path_buf(),
+            output_path: "v8project.yaml".into(),
+            force: false,
+            connection: redirect_to("  File=/srv/ib "),
+            format: ConfigFormatRequest::Designer,
+        })
+        .expect("init over the synonym");
+
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("`infobase:`")));
+        let result = local_result(result);
+        assert_eq!(result.origin.change, OriginChange::Unchanged);
+        assert_eq!(result.origin.connection.as_deref(), Some("File=/srv/ib"));
+        assert!(!dir.path().join("v8project.local.yaml").exists());
+        assert_eq!(read(&dir.path().join("v8project.yaml")), project);
     }
 
     #[test]
