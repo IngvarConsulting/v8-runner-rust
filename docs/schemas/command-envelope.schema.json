@@ -162,6 +162,11 @@
           "type": "string"
         },
         {
+          "const": "infobase_held",
+          "description": "Файловую базу держит другая рабочая копия; повтор не поможет.",
+          "type": "string"
+        },
+        {
           "const": "non_fast_forward",
           "description": "Пара к роду `non_fast_forward`; производителя пока нет.",
           "type": "string"

@@ -17,7 +17,7 @@ use crate::use_cases::request::{
 };
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::run_tests;
-use crate::use_cases::transport::dispatch_with_workspace_lock;
+use crate::use_cases::transport::{dispatch_with_workspace_lock, BoundaryNote};
 use tracing::warn;
 
 /// Thin indirection layer used by the MCP service to call use cases.
@@ -119,9 +119,10 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
     }
 }
 
-/// Граница порта: замок `workPath`, затем замок базы. Инструменты MCP — команды записи
-/// или базу не открывают, поэтому предупреждения команды чтения здесь не бывает; если оно
-/// всё же придёт, оно уходит в журнал.
+/// Граница порта: замок `workPath`, затем замок базы и проверка владельца — та же, что у
+/// командной строки. Инструменты MCP — команды записи или базу не открывают; то, что
+/// граница говорит сверх ответа (взятие базы без метки, смена ушедшего владельца), уходит в
+/// журнал сервера.
 fn with_workspace_lock<T>(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -129,9 +130,9 @@ fn with_workspace_lock<T>(
     run: impl FnOnce() -> UseCaseResult<T>,
 ) -> UseCaseResult<T> {
     let command = context.command();
-    let before_dispatch = |warning: Option<&str>| {
-        if let Some(warning) = warning {
-            warn!(command = command.as_str(), "{warning}");
+    let before_dispatch = |notes: &[BoundaryNote]| {
+        for note in notes {
+            warn!(command = command.as_str(), "{}", note.message);
         }
         Ok(())
     };

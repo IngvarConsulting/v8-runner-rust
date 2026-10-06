@@ -1,5 +1,5 @@
-//! What this machine can tell about itself: its host name and whether one of its
-//! processes still runs.
+//! What this machine can tell about itself: its identifier, its host name and whether one
+//! of its processes still runs.
 
 /// Whether a process with `pid` exists on this machine. A process that exists but may not
 /// be inspected counts as alive; on Unix an unreaped zombie counts as alive too, so a
@@ -142,9 +142,78 @@ pub fn host_name() -> Option<String> {
     None
 }
 
+/// Identifier of this machine that the system keeps across a host rename: `machine-id` on
+/// Linux, the hardware UUID on macOS, `MachineGuid` on Windows. `None` when the system
+/// gives none.
+pub fn machine_id() -> Option<String> {
+    system_machine_id()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn system_machine_id() -> Option<String> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+}
+
+#[cfg(target_vendor = "apple")]
+fn system_machine_id() -> Option<String> {
+    let mut uuid = [0u8; 16];
+    let timeout = libc::timespec {
+        tv_sec: 1,
+        tv_nsec: 0,
+    };
+    // SAFETY: `uuid` is the 16-byte buffer the call fills and `timeout` a valid timespec;
+    // both outlive the call.
+    if unsafe { libc::gethostuuid(uuid.as_mut_ptr(), &timeout) } != 0 {
+        return None;
+    }
+    Some(uuid.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(windows)]
+fn system_machine_id() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY,
+    };
+
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let key = wide("SOFTWARE\\Microsoft\\Cryptography");
+    let value = wide("MachineGuid");
+    let mut buffer = [0u16; 64];
+    let mut size = u32::try_from(std::mem::size_of_val(&buffer)).ok()?;
+    // SAFETY: the key and value names are null-terminated UTF-16 strings, and `buffer`
+    // with `size` in bytes describes writable memory; all outlive the call.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let written = usize::try_from(size).ok()? / std::mem::size_of::<u16>();
+    let text = &buffer[..written.min(buffer.len())];
+    let end = text.iter().position(|unit| *unit == 0).unwrap_or(text.len());
+    Some(String::from_utf16_lossy(&text[..end]))
+}
+
+#[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
+fn system_machine_id() -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{host_name, is_process_alive, is_process_running, process_state};
+    use super::{host_name, machine_id, is_process_alive, is_process_running, process_state};
 
     #[test]
     fn this_process_is_alive() {
@@ -202,6 +271,16 @@ mod tests {
     #[test]
     fn a_pid_beyond_any_process_is_not_alive() {
         assert!(!is_process_alive(i32::MAX as u32));
+    }
+
+    #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+    #[test]
+    fn this_machine_keeps_one_identifier() {
+        if std::path::Path::new("/etc/machine-id").exists() || !cfg!(target_os = "linux") {
+            let id = machine_id().expect("machine id");
+            assert_eq!(machine_id().as_deref(), Some(id.as_str()));
+            assert_eq!(id, id.trim().to_ascii_lowercase());
+        }
     }
 
     #[cfg(any(unix, windows))]

@@ -534,6 +534,49 @@ fn select_infobase(
     Ok(())
 }
 
+/// Базы, которые объявляет проект в каталоге `project_dir`: карта `infobases` его местного
+/// слоя и прежний ключ `infobase:` в обоих файлах, с путями от этого каталога.
+///
+/// Так владельца базы спрашивают, держит ли он её ещё. Местный слой проходит ту же границу,
+/// что у загрузки проекта, а от проектного файла берётся только прежний ключ: остальное
+/// проекта к объявлению баз не относится. Нет ни одного из файлов — пустая карта; файл,
+/// который не прочитать или не разобрать, — ошибка.
+pub fn load_declared_infobases(
+    project_dir: &Path,
+) -> Result<std::collections::BTreeMap<String, InfobaseConfig>, ConfigLoadError> {
+    let mut declared = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
+    if project_path.exists() {
+        let mut project = read_yaml_file(&project_path)?;
+        fold_infobase_synonym(&mut project, ConfigFile::Project(&project_path))?;
+        if let Some(infobases) = root_mapping_mut(&mut project)?.remove(yaml_key("infobases")) {
+            root_mapping_mut(&mut declared)?.insert(yaml_key("infobases"), infobases);
+        }
+    }
+    let local_path = project_dir.join(LOCAL_CONFIG_FILE_NAME);
+    if local_path.exists() {
+        let mut overlay = read_yaml_file(&local_path)?;
+        reject_local_overlay_keys(&overlay)?;
+        validate_local_overlay_schema_boundary(overlay.clone())
+            .map_err(|error| ConfigLoadError::LocalOverlayUnsupportedShape(error.to_string()))?;
+        fold_infobase_synonym(&mut overlay, ConfigFile::Local)?;
+        if let Some(infobases) = root_mapping_mut(&mut overlay)?.remove(yaml_key("infobases")) {
+            let mut layer = serde_yaml::Mapping::new();
+            layer.insert(yaml_key("infobases"), infobases);
+            merge_yaml_values(&mut declared, serde_yaml::Value::Mapping(layer));
+        }
+    }
+    let mut infobases: std::collections::BTreeMap<String, InfobaseConfig> =
+        match root_mapping_mut(&mut declared)?.remove(yaml_key("infobases")) {
+            Some(value) if !value.is_null() => serde_yaml::from_value(value)?,
+            _ => std::collections::BTreeMap::new(),
+        };
+    for infobase in infobases.values_mut() {
+        normalize_infobase_paths(infobase, project_dir);
+    }
+    Ok(infobases)
+}
+
 pub fn resolve_primary_config_path(config_path: Option<&str>) -> Result<PathBuf, ConfigLoadError> {
     let path = resolve_config_path(config_path)?;
     reject_local_overlay_as_primary_config(&path)?;

@@ -7,6 +7,7 @@ use crate::domain::infobase_export::InfobaseTransferPhase;
 use crate::use_cases::command_lock::CommandLockGuard;
 use crate::use_cases::context::CommandName;
 use crate::use_cases::infobase_lock::{acquire_infobase_lock, BaseAccess, InfobaseLock};
+use crate::use_cases::infobase_owner::{check_infobase_owner, OwnerCheck};
 use crate::use_cases::result::UseCaseError;
 #[cfg(test)]
 use crate::use_cases::result::UseCaseFailure;
@@ -14,30 +15,40 @@ use crate::use_cases::workspace_lock::acquire_workspace_lock;
 
 /// Отказ границы команды: шаг и ошибка. Сценарий не запускался.
 ///
-/// Шаг — `workspace lock`, `infobase lock` или `workspace preparation` из словаря фаз
-/// домена: адаптер печатает его тем же шагом, что и отказы своих сценариев.
+/// Шаг — `workspace lock`, `infobase lock`, `infobase owner` или `workspace preparation`
+/// из словаря фаз домена: адаптер печатает его тем же шагом, что и отказы своих сценариев.
 #[derive(Debug)]
 pub struct BoundaryRefusal {
     pub phase: InfobaseTransferPhase,
     pub error: UseCaseError,
 }
 
+/// Что граница говорит сверх ответа команды: шаг, на котором это замечено, и текст.
+///
+/// Замок базы, который команде чтения не достался; взятие базы без метки и смена ушедшего
+/// владельца; метка, которую команда чтения не прочитала.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryNote {
+    pub phase: InfobaseTransferPhase,
+    pub message: String,
+}
+
 /// Runs an adapter dispatch under the shared workspace lock and, for a command that opens a
-/// file infobase, under the infobase lock taken after it.
+/// file infobase, under the infobase lock taken after it and past the owner check.
 ///
 /// Занятый каталог отказывает здесь своим родом `WorkspaceBusy`, занятая база —
-/// `InfobaseBusy` для всякой команды: словарь провода выбирает транспорт, а не граница
-/// замка. `before_dispatch` идёт под обоими замками и получает предупреждение команды
-/// чтения, которой замок базы не достался.
+/// `InfobaseBusy`, база другой рабочей копии — `InfobaseHeld` для всякой команды: словарь
+/// провода выбирает транспорт, а не граница замка. `before_dispatch` идёт под обоими
+/// замками и получает то, что граница говорит сверх ответа команды.
 pub fn dispatch_with_workspace_lock<TResult>(
     config: &AppConfig,
     command: CommandName,
     base: BaseAccess,
-    before_dispatch: impl FnOnce(Option<&str>) -> Result<(), UseCaseError>,
+    before_dispatch: impl FnOnce(&[BoundaryNote]) -> Result<(), UseCaseError>,
     run: impl FnOnce() -> TResult,
 ) -> Result<TResult, BoundaryRefusal> {
-    let (_workspace_lock, infobase_lock) = acquire(config, command, base)?;
-    before_dispatch(infobase_lock.warning()).map_err(|error| BoundaryRefusal {
+    let (_workspace_lock, _infobase_lock, notes) = acquire(config, command, base)?;
+    before_dispatch(&notes).map_err(|error| BoundaryRefusal {
         phase: InfobaseTransferPhase::WorkspacePreparation,
         error,
     })?;
@@ -46,8 +57,8 @@ pub fn dispatch_with_workspace_lock<TResult>(
 
 /// Та же граница для асинхронного сценария: замки держатся, пока сценарий не дошёл до
 /// конечного состояния, и снимаются вместе с его будущим — раньше, чем вызывающий
-/// отпустит что-то своё. Сценарий создаётся уже под замками; предупреждение команды
-/// чтения без замка базы уходит в журнал.
+/// отпустит что-то своё. Сценарий создаётся уже под замками; то, что граница говорит
+/// сверх ответа, уходит в журнал.
 pub(crate) async fn dispatch_with_workspace_lock_async<TFuture>(
     config: &AppConfig,
     command: CommandName,
@@ -57,21 +68,38 @@ pub(crate) async fn dispatch_with_workspace_lock_async<TFuture>(
 where
     TFuture: Future,
 {
-    let (_workspace_lock, infobase_lock) =
+    let (_workspace_lock, _infobase_lock, notes) =
         acquire(config, command, base).map_err(|refusal| refusal.error)?;
-    if let Some(warning) = infobase_lock.warning() {
-        warn!(command = command.as_str(), "{warning}");
+    for note in &notes {
+        warn!(command = command.as_str(), "{}", note.message);
     }
     Ok(run().await)
 }
 
-/// Замок `workPath`, затем замок базы. Порядок сброса обратный: база отпускается раньше
+/// Граница превью: замков нет, метку владельца читают без замка и ничего не пишут. Превью
+/// команды записи на базе другой рабочей копии отказывает так же, как отказал бы прогон.
+pub fn preview_boundary(
+    config: &AppConfig,
+    command: CommandName,
+    base: BaseAccess,
+) -> Result<(), BoundaryRefusal> {
+    check_infobase_owner(config, command.as_str(), base, OwnerCheck::Preview)
+        .map(drop)
+        .map_err(|error| BoundaryRefusal {
+            phase: InfobaseTransferPhase::InfobaseOwner,
+            error,
+        })
+}
+
+/// Замок `workPath`, затем замок базы и под ним — чья база. Это единственная точка
+/// проверки владельца у команды, которая открывает файловую базу: проверки памяти и
+/// поколения идут позже, в сценарии. Порядок сброса обратный: база отпускается раньше
 /// каталога.
 fn acquire(
     config: &AppConfig,
     command: CommandName,
     base: BaseAccess,
-) -> Result<(CommandLockGuard, InfobaseLock), BoundaryRefusal> {
+) -> Result<(CommandLockGuard, InfobaseLock, Vec<BoundaryNote>), BoundaryRefusal> {
     let workspace_lock =
         acquire_workspace_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
             phase: InfobaseTransferPhase::WorkspaceLock,
@@ -82,7 +110,24 @@ fn acquire(
             phase: InfobaseTransferPhase::InfobaseLock,
             error: error.into(),
         })?;
-    Ok((workspace_lock, infobase_lock))
+    let mut notes: Vec<BoundaryNote> = infobase_lock
+        .warning()
+        .map(|message| BoundaryNote {
+            phase: InfobaseTransferPhase::InfobaseLock,
+            message: message.to_owned(),
+        })
+        .into_iter()
+        .collect();
+    let owner_notes = check_infobase_owner(config, command.as_str(), base, OwnerCheck::Run)
+        .map_err(|error| BoundaryRefusal {
+            phase: InfobaseTransferPhase::InfobaseOwner,
+            error,
+        })?;
+    notes.extend(owner_notes.into_iter().map(|message| BoundaryNote {
+        phase: InfobaseTransferPhase::InfobaseOwner,
+        message,
+    }));
+    Ok((workspace_lock, infobase_lock, notes))
 }
 
 /// Maps a use-case failure payload into a transport-specific response while preserving the
@@ -230,5 +275,64 @@ mod tests {
         assert_eq!(refusal.phase, InfobaseTransferPhase::InfobaseLock);
         assert_eq!(refusal.error.kind(), UseCaseErrorKind::InfobaseBusy);
         assert!(!ran.get());
+    }
+
+    /// Чья база — проверка границы: на базе другой рабочей копии команда записи отказывает
+    /// на шаге `infobase owner` после обоих замков и раньше сценария, а значит раньше
+    /// проверок памяти и поколения, которые идут в нём.
+    #[test]
+    fn a_base_of_another_copy_stops_the_dispatch_before_the_scenario() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("ib");
+        fs::create_dir_all(&base).expect("base");
+        let copy = |name: &str| {
+            let root = dir.path().join(name);
+            fs::create_dir_all(&root).expect("root");
+            fs::write(
+                root.join("v8project.local.yaml"),
+                format!("infobases:\n  origin:\n    connection: 'File={}'\n", base.display()),
+            )
+            .expect("local layer");
+            let mut config = sample_config(&root.join("work"));
+            config.base_path = fs::canonicalize(&root).expect("canonical root");
+            config.infobase =
+                crate::config::model::InfobaseConfig::file(format!("File={}", base.display()));
+            config.infobase_name = Some("origin".to_owned());
+            config
+        };
+        let first = copy("first");
+        let second = copy("second");
+        dispatch_with_workspace_lock(&first, CommandName::Build, BaseAccess::Writes, |_| Ok(()), || ())
+            .expect("the first copy takes the base");
+        let ran = Cell::new(false);
+
+        let refusal = dispatch_with_workspace_lock(
+            &second,
+            CommandName::Build,
+            BaseAccess::Writes,
+            |_| Ok(()),
+            || ran.set(true),
+        )
+        .expect_err("a base of another copy");
+
+        assert_eq!(refusal.phase, InfobaseTransferPhase::InfobaseOwner);
+        assert_eq!(refusal.error.kind(), UseCaseErrorKind::InfobaseHeld);
+        assert_eq!(
+            refusal.error.next().map(|next| next.command.as_str()),
+            Some("infobase create")
+        );
+        assert!(!ran.get());
+        dispatch_with_workspace_lock(
+            &second,
+            CommandName::InfobaseDump,
+            BaseAccess::Reads,
+            |notes| {
+                assert!(notes.is_empty(), "{notes:?}");
+                Ok(())
+            },
+            || ran.set(true),
+        )
+        .expect("a read passes");
+        assert!(ran.get());
     }
 }

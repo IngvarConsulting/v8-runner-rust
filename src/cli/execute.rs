@@ -88,7 +88,7 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
-use crate::use_cases::transport::{dispatch_with_workspace_lock, BoundaryRefusal};
+use crate::use_cases::transport::{dispatch_with_workspace_lock, preview_boundary, BoundaryRefusal};
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
 /// rendering the resulting command output.
@@ -1556,6 +1556,14 @@ pub fn preview_prepared_infobase_command(
             }
         }
         PreparedInfobaseCommand::Restore { request, provider } => {
+            // Восстановление — команда записи: его превью называет отказ по владельцу так
+            // же, как прогон.
+            if let Err(refusal) =
+                preview_boundary(config, CommandName::InfobaseRestore, BaseAccess::Writes)
+            {
+                print_workspace_refusal(presenter, CommandName::InfobaseRestore, &refusal);
+                return Err(refusal.error);
+            }
             match infobase_export::preview_infobase_restore(&context, config, &request, &provider) {
                 Ok(result) => {
                     if presenter.is_json() {
@@ -2436,6 +2444,12 @@ pub(crate) fn with_cli_workspace_lock<T>(
             !clean_before_execution,
             "очистка с превью отклонена на запуске"
         );
+        // Превью замков не берёт, но отказ по владельцу называет заранее: метку оно читает
+        // без замка и ничего в неё не пишет.
+        if let Err(refusal) = preview_boundary(config, command, base) {
+            print_workspace_refusal(presenter, command, &refusal);
+            return Err(refusal.error);
+        }
         return run();
     }
     match dispatch_under_cli_workspace_lock(
@@ -2470,9 +2484,9 @@ fn dispatch_under_cli_workspace_lock<T>(
         config,
         command,
         base,
-        |warning| {
-            if let Some(warning) = warning {
-                presenter.note_leading_warnings("infobase lock", &[warning.to_owned()]);
+        |notes| {
+            for note in notes {
+                presenter.note_leading_warnings(note.phase.as_str(), &[note.message.clone()]);
             }
             if clean_before_execution {
                 clean_platform_logs_under_lock(config)

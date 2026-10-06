@@ -1,0 +1,67 @@
+{
+  "$defs": {
+    "OwnerRecord": {
+      "additionalProperties": false,
+      "description": "Рабочая копия, которая держит базу.",
+      "properties": {
+        "host": {
+          "description": "Имя хоста на момент записи — для людей; машину называет `machine`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "machine": {
+          "description": "Идентификатор машины, который переживает смену имени хоста: `machine-id` у Linux,\nаппаратный UUID у macOS, `MachineGuid` у Windows; без него — `host:<имя хоста>`.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Канонический каталог проекта копии: там лежит её местный слой.",
+          "type": "string"
+        },
+        "shared": {
+          "description": "Согласие копии делить базу.",
+          "type": "boolean"
+        },
+        "since": {
+          "description": "Когда копия записана в метку.",
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "project",
+        "shared",
+        "since"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/infobase-owner-marker.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Кто держит файловую базу: метка лежит рядом с каталогом базы как `.<имя каталога>.v8-runner.owners.json`.",
+  "properties": {
+    "owners": {
+      "description": "Рабочие копии, которые держат базу.",
+      "items": {
+        "$ref": "#/$defs/OwnerRecord"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Версия формы. Метку другой версии раннер не переписывает.",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "owners"
+  ],
+  "title": "v8-runner infobase owner marker",
+  "type": "object"
+}
