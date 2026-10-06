@@ -272,12 +272,12 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'экспорт конфигурации'); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, ctx.target === 'file' || ctx.target === 'cluster');
-        return { chain: chain, config: ['connection'].concat(ctx.target === 'cluster' ? ['dbms.* — для ibcmd'] : []), note: 'раннер берёт первого готового из цепочки; квитанция называет пропущенных' };
+        return { chain: chain, config: ['connection'].concat(ctx.target === 'cluster' ? ['dbms.* — для ibcmd'] : []), note: 'раннер берёт первого готового из цепочки; квитанция называет пропущенных; --state db — Конфигуратор или ibcmd, агент её не выгружает: ключ providers.download: agent и автономный сервер отказывают до запуска' };
       },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['connection'], note: '--state db — только Конфигуратор по прямому шлюзу; dump-cfg по SSH отдаёт основную' };
-        if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection'], note: '' };
-        return { chain: [P.agent, P.designer, P.ibcmd], config: ['connection'], note: '' };
+        if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection'], note: '--state db — Конфигуратор: у агента команды для конфигурации базы данных нет' };
+        return { chain: [P.agent, P.designer, P.ibcmd], config: ['connection'], note: '--state db — Конфигуратор или ibcmd: у агента команды для конфигурации базы данных нет' };
       }
     },
     {

@@ -98,7 +98,7 @@ v8-runner infobase create
 
 - Source files changed and infobase may be stale: run `v8-runner push`.
 - Only one source-set changed: name it positionally (`push <SET>`, `pull <SET>`, `make <SET>`, `download <SET>`, `convert <SET>`) instead of rebuilding or materializing everything. A positional value is always a source set, never a base: name the base with `--infobase`.
-- Package vs whole base: `.cf`/`.cfe` is `download`/`upload <FILE>`, `.dt` is `infobase dump`/`infobase restore`; `infobase dump --output *.cf|*.cfe` is refused before the platform starts and names `download`; `upload *.dt` names `infobase restore`. `download --state db` takes the database configuration.
+- Package vs whole base: `.cf`/`.cfe` is `download`/`upload <FILE>`, `.dt` is `infobase dump`/`infobase restore`; `infobase dump --output *.cf|*.cfe` is refused before the platform starts and names `download`; `upload *.dt` names `infobase restore`. `download --state db` takes the database configuration through Designer or `ibcmd` (chain order); `providers.download: agent` and a standalone server (agent only) refuse it with `capability_unavailable` before the platform starts.
 - After successful full `pull` in `DESIGNER` format, the next unchanged `push` skips loading for the same named base/source set. If the response says sources were published without updating hash memory, repeat full `pull`; do not repair a failed pull by pushing old sources.
 - Hash memory is separate per named base; ad hoc connection strings do not reuse it. Foreign memory is named in the refusal: full `pull` if the base is right, `push --full` if the sources are right. Memory from older runner versions is not migrated: first `pull --force` before an ordinary `push`, or the push loads the whole tree.
 - Full `pull` refuses a target containing `workPath`, including symlink aliases. EDT export cache stays shared; per-base agent generation/version-file memory remains pending in #214.
@@ -120,7 +120,7 @@ v8-runner infobase create
   Append `--dry-run` to preview without platform calls. Apply disables safe mode and unsafe action protection.
 - Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner pull ...` command.
 - Need a CF/CFE package of the state currently stored in the infobase: use
-  `v8-runner download --state <working|database> --output <file.cf>`;
+  `v8-runner download [--state db] --output <file.cf>` (without `--state` the working configuration, `db` the database one);
   add `--extension <name>` and use `.cfe` for an extension. This is not `make`, which builds
   artifacts from project sources.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.

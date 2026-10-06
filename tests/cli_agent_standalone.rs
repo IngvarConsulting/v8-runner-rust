@@ -519,6 +519,86 @@ fn build_through_the_gate_loads_from_the_declared_dir() {
     );
 }
 
+/// `download` через шлюз автономного сервера отдаёт основную конфигурацию: шлюзу уходит
+/// одна команда `config dump-cfg` с путём на стороне цели и без `--extension`, ответ
+/// называет предметом основную конфигурацию, а пакет — то, что выгрузил шлюз.
+#[test]
+fn a_download_through_the_gate_exports_the_main_configuration() {
+    let harness = harness();
+    let output = harness.dir.path().join("dist").join("main.cf");
+
+    let (code, payload) = run(
+        &harness,
+        &["download", "--output", &output.display().to_string()],
+    );
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    assert_eq!(payload["data"]["subject"]["kind"], "main", "{payload}");
+    assert_eq!(payload["data"]["state"], "working", "{payload}");
+    assert_eq!(payload["data"]["artifact_kind"], "cf", "{payload}");
+    assert_eq!(payload["data"]["published"], true, "{payload}");
+    assert_eq!(fs::read_to_string(&output).expect("package"), "CF:main");
+    let lines = commands(&harness);
+    let exports = lines
+        .iter()
+        .filter(|line| line.starts_with("config dump-cfg"))
+        .collect::<Vec<_>>();
+    assert_eq!(exports.len(), 1, "{lines:?}");
+    let file = exports[0]
+        .strip_prefix("config dump-cfg --file=")
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(
+        file.starts_with("export/") && file.ends_with("/main.cf") && !file.contains(' '),
+        "a target-side path of the main configuration package: {lines:?}"
+    );
+}
+
+/// `download --state db` шлюзу не адресуется: конфигурацию базы данных выгружают
+/// Конфигуратор и `ibcmd`, а в цепочке `download` автономного сервера только агент. Отказ
+/// приходит до сессии и называет это.
+#[test]
+fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
+    let harness = harness();
+    let output = harness.dir.path().join("dist").join("main.cf");
+
+    for extra in [&[][..], &["--dry-run"][..]] {
+        let mut arguments = vec![
+            "download".to_owned(),
+            "--state".to_owned(),
+            "db".to_owned(),
+            "--output".to_owned(),
+            output.display().to_string(),
+        ];
+        arguments.extend(extra.iter().map(|argument| (*argument).to_owned()));
+        let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let (code, payload) = run(&harness, &arguments);
+
+        assert_ne!(code, 0, "{extra:?}: {payload}");
+        assert_eq!(
+            payload["error"]["code"], "capability_unavailable",
+            "{payload}"
+        );
+        assert_eq!(
+            error_message(&payload),
+            "download --state db takes the database configuration, which only designer or ibcmd exports: agent has no command for it; a standalone target serves download only through the agent: omit --state db to export the working configuration",
+            "{payload}"
+        );
+        assert_eq!(payload["data"]["provider"]["selected"], Value::Null);
+        assert_eq!(
+            payload["data"]["provider"]["skipped"],
+            serde_json::json!([{"provider": "agent", "reason": "agent has no command for the database configuration that download --state db takes"}]),
+            "{payload}"
+        );
+        assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+        assert!(!output.exists());
+    }
+}
+
 /// Квитанция шлюза автономного сервера называет адрес шлюза. Ни логина шлюза, ни
 /// пароля в адресе нет: он печатается из хоста и порта, а не из записи с учётными данными.
 #[test]
