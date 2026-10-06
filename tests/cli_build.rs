@@ -1868,3 +1868,81 @@ fn a_push_refuses_when_the_version_file_is_tracked_by_git() {
     }
     assert!(!marker.exists(), "the platform must not start");
 }
+
+/// Набор EDT, чей этап EDT пропущен, а копия Конфигуратора изменилась и потому грузится,
+/// сверяется до первой загрузки команды вместе с остальными: отказ по нему приходит раньше,
+/// чем основная конфигурация легла в базу.
+#[test]
+fn an_edt_set_with_a_skipped_export_is_checked_before_the_first_load() {
+    let (dir, config_path, work_path) = setup_edt_extension_project();
+    let platform_path = dir.path().join("platform").join("bin").join("1cv8");
+    let calls_log = dir.path().join("v8-calls.log");
+    let extension_token = dir.path().join("extension-token");
+    write_script(
+        &platform_path,
+        &format!(
+            r#"printf '%s\n' "$*" >> '{calls}'
+out=''
+previous=''
+for arg in "$@"; do
+  if [ "$previous" = '/Out' ]; then out="$arg"; fi
+  previous="$arg"
+done
+case "$*" in
+  *'/GetConfigGenerationID'*'-Extension client_mcp'*)
+    if [ -f '{extension}' ]; then cat '{extension}' > "$out"; else printf '{zero}\n' > "$out"; fi
+    exit 0 ;;
+  *'/GetConfigGenerationID'*) printf '{zero}\n' > "$out"; exit 0 ;;
+esac
+if [ -n "$out" ]; then : > "$out"; fi
+exit 0"#,
+            calls = calls_log.display(),
+            extension = extension_token.display(),
+            zero = "0".repeat(40),
+        ),
+    );
+    let push = || {
+        v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "push",
+            ])
+            .output()
+            .expect("run command")
+    };
+    let first = push();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    // Копии Конфигуратора обоих наборов изменились сами (оборванный прогон), исходники
+    // EDT — нет: этапы EDT пропускаются, а копии грузятся.
+    for set in ["configuration", "client_mcp"] {
+        let copy = work_path
+            .join("infobases")
+            .join("origin")
+            .join("designer")
+            .join(set);
+        assert!(copy.is_dir(), "the Designer copy of {set}");
+        fs::write(copy.join("Changed.bsl"), "procedure Changed() endprocedure").expect("copy");
+    }
+    fs::write(&extension_token, format!("{}\n", "1".repeat(40))).expect("token");
+    fs::remove_file(&calls_log).expect("calls of the first push");
+
+    let refused = push();
+
+    let payload: Value = serde_json::from_slice(&refused.stdout).expect("json");
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(
+        payload["error"]["next"]["source_set"], "client_mcp",
+        "{payload}"
+    );
+    let calls = fs::read_to_string(&calls_log).unwrap_or_default();
+    assert!(
+        !calls.contains("/LoadConfigFromFiles"),
+        "nothing is loaded before the refusal: {calls}"
+    );
+}

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::change_detection::analyzer::{self, SnapshotMemory};
 use crate::change_detection::source_sets::SourceSetsService;
 use crate::config::model::AppConfig;
-use crate::domain::capability::{Provider, TargetKind};
+use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::next_step::NextStep;
 use crate::domain::source_set::SourceSetContext;
 use crate::support::error::AppError;
@@ -161,17 +161,33 @@ impl Standing {
     }
 }
 
-/// Следующий шаг отказа обмена: `pull` набора, если выгрузку предлагать можно, иначе
-/// перезапись `push --force` — набора, если он назван. Отказы `no_memory` и
-/// `non_fast_forward` строят его только здесь.
-fn way_out(offers_pull: bool, pull_set: &str, push_set: Option<&str>) -> NextStep {
-    if offers_pull {
-        return NextStep::command("pull").for_source_set(pull_set);
-    }
-    let next = NextStep::command("push").with_key("--force", "");
-    match push_set {
-        Some(set) => next.for_source_set(set),
-        None => next,
+/// Выход из отказа обмена, который стоит следующим шагом.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WayOut {
+    /// `pull <SET>`: выгрузка поверх каталога; память запишет ответ о поколении.
+    Pull,
+    /// `pull <SET> --force`: полная выгрузка, которая и без ответа о поколении пишет память.
+    PullForce,
+    /// `push [<SET>] --force`: перезапись базы.
+    PushForce,
+}
+
+impl WayOut {
+    /// Следующий шаг отказа. Отказы `no_memory` и `non_fast_forward` строят его только здесь.
+    fn step(self, pull_set: &str, push_set: Option<&str>) -> NextStep {
+        match self {
+            Self::Pull => NextStep::command("pull").for_source_set(pull_set),
+            Self::PullForce => NextStep::command("pull")
+                .with_key("--force", "")
+                .for_source_set(pull_set),
+            Self::PushForce => {
+                let next = NextStep::command("push").with_key("--force", "");
+                match push_set {
+                    Some(set) => next.for_source_set(set),
+                    None => next,
+                }
+            }
+        }
     }
 }
 
@@ -217,36 +233,60 @@ pub(crate) fn require_memory(
             "; the memory kept under its name was written for another infobase or source directory, or cannot be read, and is not used",
         );
     }
-    let offers_pull = standing.offers_pull();
-    if offers_pull {
-        let pulls = forgotten
-            .iter()
-            .map(|set| context.advised_command(&format!("pull {}", shell_word(set.name()))))
-            .collect::<Vec<_>>()
-            .join(", ");
-        message.push_str(&format!(
-            ". If the infobase holds the right state, see what is there with {pulls}; if the source directory does, run {overwrite}"
-        ));
-    } else {
-        message.push_str(&format!(". To load the sources run {overwrite}"));
+    // Выгрузка поверх каталога пишет память только через ответ о поколении; инструмент,
+    // который его заведомо не даёт, оставил бы копию без памяти, и отказ повторился бы.
+    let way_out = match (
+        standing.offers_pull(),
+        crate::platform::generation::answers_generation(
+            config.selected_provider(Operation::Dump),
+            config.target_kind(),
+        ),
+    ) {
+        (false, _) => WayOut::PushForce,
+        (true, true) => WayOut::Pull,
+        (true, false) => WayOut::PullForce,
+    };
+    match way_out {
+        WayOut::Pull | WayOut::PullForce => {
+            let pulls = forgotten
+                .iter()
+                .map(|set| match way_out {
+                    WayOut::PullForce => context.advised_pull_force(set.name()),
+                    WayOut::Pull | WayOut::PushForce => {
+                        context.advised_command(&format!("pull {}", shell_word(set.name())))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let pull = match way_out {
+                WayOut::PullForce => format!(
+                    "take its state with a full dump {pulls}, which replaces the source directory and discards its uncommitted changes (the dump over the directory would leave no memory: this tool gives no configuration generation for this infobase)"
+                ),
+                WayOut::Pull | WayOut::PushForce => format!("see what is there with {pulls}"),
+            };
+            message.push_str(&format!(
+                ". If the infobase holds the right state, {pull}; if the source directory does, run {overwrite}"
+            ));
+        }
+        WayOut::PushForce => message.push_str(&format!(". To load the sources run {overwrite}")),
     }
     message.push('.');
     message.push_str(&standing.caveats());
-    Err(
-        UseCaseError::new(UseCaseErrorKind::NoMemory, message).with_next(way_out(
-            offers_pull,
-            first.name(),
-            selected_set,
-        )),
-    )
+    Err(UseCaseError::new(UseCaseErrorKind::NoMemory, message)
+        .with_next(way_out.step(first.name(), selected_set)))
 }
 
 /// Помнит ли рабочая копия базу для набора: своя запись поколения или своя хеш-память
-/// этой пары, в том числе пустая — её пишет создание базы раннером.
+/// этой пары, в том числе пустая — её пишет создание базы раннером. Хеш-память другой пары
+/// или нечитаемая отменяет и свою запись поколения: каталог от этой базы она не выводит
+/// (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
 fn remembers(set: &SourceSetContext, work_path: &Path) -> bool {
-    let recorded = GenerationLedger::of(set, work_path)
-        .is_some_and(|ledger| matches!(ledger.read(), Recorded::Ours(_)));
-    recorded || analyzer::snapshot_memory(set, work_path) == SnapshotMemory::Own
+    match analyzer::snapshot_memory(set, work_path) {
+        SnapshotMemory::Own => true,
+        SnapshotMemory::Foreign | SnapshotMemory::Unreadable => false,
+        SnapshotMemory::Nothing => GenerationLedger::of(set, work_path)
+            .is_some_and(|ledger| matches!(ledger.read(), Recorded::Ours(_))),
+    }
 }
 
 /// Лежит ли под именем базы память набора, которая не его: записанная для другой пары или
@@ -259,6 +299,15 @@ fn keeps_other_memory(set: &SourceSetContext, work_path: &Path) -> bool {
             analyzer::snapshot_memory(set, work_path),
             SnapshotMemory::Foreign | SnapshotMemory::Unreadable
         )
+}
+
+/// Сколько набора загружено: от этого зависит, доказано ли совпадение каталога и базы.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadExtent {
+    /// Набор загружен целиком.
+    Whole,
+    /// Загружены изменившиеся файлы.
+    Partial,
 }
 
 /// Что показало поколение перед загрузкой.
@@ -296,27 +345,36 @@ impl<'a> GenerationGate<'a> {
         }
     }
 
-    /// Сверка набора заранее, до первой загрузки команды: отказ по набору, идущему не
-    /// первым, не должен приходить после того, как наборы перед ним уже легли в базу. Чтение
-    /// то же, что сделала бы сверка перед загрузкой набора, — только раньше: её ответ
-    /// [`Self::before_load`] берёт, а не спрашивает снова.
+    /// Сверка заранее всех наборов, которые команда загрузит, до первой загрузки
+    /// (`INV.USE-CASES.EVERY-SET-IS-CHECKED-BEFORE-THE-FIRST-LOAD`): отказ по набору, идущему не
+    /// первым, не должен приходить после того, как наборы перед ним уже легли в базу. Чтения
+    /// те же, что сделала бы сверка перед загрузкой каждого набора, — только раньше: их ответы
+    /// [`Self::before_load`] берёт, а не спрашивает снова. Одному набору сверка заранее не
+    /// нужна: его сверит загрузка. Отказ — с именем набора.
     pub(crate) fn check_early(
         &self,
-        set: &SourceSetContext,
+        sets: &[&SourceSetContext],
         tool: Provider,
-        read: impl FnOnce() -> Result<Option<String>, AppError>,
-    ) -> Result<(), AppError> {
-        let before = self.compare(set, tool, read)?;
-        self.checked
-            .borrow_mut()
-            .insert(set.name().to_owned(), before);
+        mut read: impl FnMut(&SourceSetContext) -> Result<Option<String>, AppError>,
+    ) -> Result<(), (String, AppError)> {
+        if sets.len() < 2 {
+            return Ok(());
+        }
+        for set in sets {
+            let before = self
+                .compare(set, tool, || read(set))
+                .map_err(|error| (set.name().to_owned(), error))?;
+            self.checked
+                .borrow_mut()
+                .insert(set.name().to_owned(), before);
+        }
         Ok(())
     }
 
     /// Перед загрузкой набора: поколение базы, прочитанное тем же инструментом, что записал
     /// прошлое, отличается от записанного — отказ `non_fast_forward` до загрузки. Без записи
     /// того же инструмента поколение не читается: сравнивать не с чем. Набор, сверенный
-    /// заранее ([`Self::check_ahead`]), не спрашивается снова.
+    /// заранее ([`Self::check_early`]), не спрашивается снова.
     pub(crate) fn before_load(
         &self,
         set: &SourceSetContext,
@@ -383,21 +441,32 @@ impl<'a> GenerationGate<'a> {
                 record.after
             ),
         };
-        let offers_pull = standing.offers_pull();
-        if offers_pull {
-            message.push_str(&format!(
-                "; take its changes first with {}, or overwrite them with {push_force}",
-                self.context
-                    .advised_command(&format!("pull {}", shell_word(set)))
-            ));
+        let pull = self
+            .context
+            .advised_command(&format!("pull {}", shell_word(set)));
+        let way_out = if standing.offers_pull() {
+            WayOut::Pull
         } else {
-            message.push_str(&format!("; to overwrite them run {push_force}"));
+            WayOut::PushForce
+        };
+        match (way_out, record.after) {
+            // Расхождение после своей неудачной загрузки чаще всего её же след: естественный
+            // выход — повторить загрузку перезаписью; выгрузка — если базу правил кто-то ещё.
+            (WayOut::Pull, GenerationAfter::FailedBuild) => message.push_str(&format!(
+                "; if the change is that failed push, load the directory again with {push_force}; if someone else changed the infobase, take their changes first with {pull}"
+            )),
+            (WayOut::Pull, GenerationAfter::Build | GenerationAfter::Dump) => message.push_str(
+                &format!("; take its changes first with {pull}, or overwrite them with {push_force}"),
+            ),
+            (WayOut::PullForce | WayOut::PushForce, _) => {
+                message.push_str(&format!("; to overwrite them run {push_force}"));
+            }
         }
         message.push('.');
         message.push_str(&standing.caveats());
         AppError::Refused(Box::new(
             UseCaseError::new(UseCaseErrorKind::NonFastForward, message)
-                .with_next(way_out(offers_pull, set, Some(set)))
+                .with_next(way_out.step(set, Some(set)))
                 .with_generations(Generations {
                     base: base.to_owned(),
                     local: local.clone(),
@@ -486,13 +555,13 @@ impl<'a> GenerationGate<'a> {
     pub(crate) fn restore_version_file(
         &self,
         set: &SourceSetContext,
-        full: bool,
+        extent: LoadExtent,
         before: &BeforeLoad,
         token: Option<&str>,
         dump_and_reread: impl FnOnce() -> Option<Result<Option<String>, AppError>>,
     ) -> Option<String> {
         let file = set.path().join(VERSION_FILE_NAME);
-        let proven = full || *before == BeforeLoad::Matched;
+        let proven = extent == LoadExtent::Whole || *before == BeforeLoad::Matched;
         let token = token?;
         if file.exists()
             || !proven
@@ -509,13 +578,23 @@ impl<'a> GenerationGate<'a> {
                 "{VERSION_FILE_NAME} was missing from source-set '{}' and was dumped alone, without a full dump: the directory matches the infobase",
                 set.name()
             )),
-            Ok(_) | Err(_) => {
-                let _ = std::fs::remove_file(&file);
-                Some(format!(
+            Ok(_) | Err(_) => Some(match std::fs::remove_file(&file) {
+                Ok(()) => format!(
                     "{VERSION_FILE_NAME} is missing from source-set '{}' and was not restored: the configuration generation did not confirm that the infobase stayed unchanged while it was dumped; the next pull runs full",
                     set.name()
-                ))
-            }
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => format!(
+                    "{VERSION_FILE_NAME} is missing from source-set '{}' and was not restored: the configuration generation did not confirm that the infobase stayed unchanged; the next pull runs full",
+                    set.name()
+                ),
+                // Оставшийся файл объявил бы каталог совпадающим с базой: его называют, чтобы
+                // его убрали до следующей выгрузки по изменившемуся.
+                Err(error) => format!(
+                    "{VERSION_FILE_NAME} was dumped alone into source-set '{}' while the configuration generation did not confirm that the infobase stayed unchanged, and it could not be removed: {error}; delete '{}' before the next pull, otherwise it claims that the directory matches the infobase",
+                    set.name(),
+                    file.display()
+                ),
+            }),
         }
     }
 }

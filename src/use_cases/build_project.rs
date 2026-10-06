@@ -889,6 +889,59 @@ mod tests {
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
+    /// Отмена, замеченная при чтении поколения после загрузки, останавливает шаг у всех
+    /// исполнителей одинаково: и у `ibcmd` и EDT (`guarded_load`), не только у Конфигуратора
+    /// и агента. Запись поколения стирается, и ответ это называет.
+    #[test]
+    fn a_cancellation_while_reading_the_generation_after_a_load_stops_the_step() {
+        use crate::domain::capability::Provider;
+        use crate::use_cases::agent_session::{GenerationAfter, GenerationLedger, Recorded};
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        create_source_tree(&base);
+        let config = build_config(
+            &base,
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        let set = SourceSetsService::new(&config)
+            .designer_contexts()
+            .into_iter()
+            .find(|set| set.name() == "main")
+            .expect("main");
+        let ledger = GenerationLedger::of(&set, &config.work_path).expect("ledger");
+        ledger
+            .record(Provider::Ibcmd, &"1".repeat(40), GenerationAfter::Build)
+            .expect("record");
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = crate::use_cases::exchange_guard::GenerationGate::new(
+            &context,
+            &config,
+            PushMode::Changes,
+        );
+
+        let error = super::coordinator::generation_after_load(
+            &gate,
+            &set,
+            Provider::Ibcmd,
+            vec!["loaded".to_owned()],
+            Err(crate::support::error::AppError::Cancelled {
+                message: "stopped".to_owned(),
+                at: crate::support::error::CancelledAt::Work,
+            }),
+        )
+        .expect_err("a cancellation stops the step");
+
+        assert!(error.cancellation().is_some(), "{error}");
+        assert!(
+            error.to_string().contains("previous record is erased"),
+            "{error}"
+        );
+        assert_eq!(ledger.read(), Recorded::Nothing);
+    }
+
     #[cfg(unix)]
     fn make_executable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
