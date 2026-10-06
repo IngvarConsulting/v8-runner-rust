@@ -257,12 +257,15 @@ window.RUNNER_DATA = (function () {
       cmd: function (ctx) { return (ctx.type === 'EXTERNAL' ? 'v8-runner make my-epf --output build/epf' : ctx.type === 'EXTENSION' ? 'v8-runner make my-ext --output build/ext.cfe' : 'v8-runner make main --output build/main.cf'); },
       applies: function (ctx) { return null; },
       today: function (ctx) {
-        if (ctx.type === 'EXTERNAL') return { chain: ctx.tools.designer ? [P.designer] : [], config: ['source-set[] с type EXTERNAL_*'], note: 'внешние собираются Конфигуратором из XML; базы не касается' };
-        return { chain: ctx.tools.designer ? [P.designer] : [], config: ['connection'], note: 'только Конфигуратор' };
+        if (ctx.type === 'EXTERNAL') return { chain: ctx.tools.designer ? [P.designer] : [], config: ['source-set[] с type EXTERNAL_*'], note: 'внешние собирает Конфигуратор из XML во временной базе раннера; база проекта не нужна' };
+        var chain = [];
+        if (ctx.tools.ibcmd) chain.push(P.ibcmd);
+        if (ctx.tools.designer) chain.push(P.designer);
+        return { chain: chain, config: ['source-set[]'], note: 'база проекта не нужна: пакет собирается во временной базе раннера под workPath — ibcmd с --out и своим --data, иначе Конфигуратор; ibcmd-rs — только ключом providers.make после замера (#413)' };
       },
       target: function (ctx) {
-        // Пакет собирается без базы проекта: ibcmd config import --out во временной базе раннера, ibcmd-rs — без базы. Конфигуратор — запасной путь через временную базу.
-        return { chain: [P.ibcmd, P.rs, P.designer], config: ['source-set[]'], note: 'база проекта не нужна: ibcmd собирает пакет во временной базе раннера, всегда с --out; ibcmd-rs — без платформы; Конфигуратор — тоже через временную базу' };
+        // Пакет собирается без базы проекта во временной базе раннера: ibcmd config import --out, запасной путь — Конфигуратор. ibcmd-rs в умолчания не входит: только ключом providers.make.
+        return { chain: [P.ibcmd, P.designer], config: ['source-set[]'], note: 'база проекта не нужна: ibcmd собирает пакет во временной базе раннера, всегда с --out; Конфигуратор — тоже через временную базу; ibcmd-rs — только ключом providers.make' };
       }
     },
     {

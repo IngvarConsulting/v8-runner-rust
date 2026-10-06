@@ -19,11 +19,13 @@ check:
 `published: false` при успешном исполнении означает превью: артефакт спланирован, но не
 выложен.
 
-Прерывание называет, что прервано. Остановка на безопасной точке — перед экспортом или перед
-публикацией — даёт запись `command_boundary`, выгрузка, снятая после запуска Конфигуратора, —
-`provider_command`. Рядом с записью стоят `status: cancelled` и ошибка `cancelled` в
+Прерывание называет, что прервано. Остановка на безопасной точке — перед сборкой, перед
+созданием временной базы, загрузкой, выгрузкой или публикацией — даёт запись
+`command_boundary`, работа исполнителя, снятая после его запуска, — `provider_command`.
+Рядом с записью стоят `status: cancelled` и ошибка `cancelled` в
 `execution.errors[]` с тем же текстом. Отказ, пришедший, когда прерывание уже запрошено,
-остаётся отказом: `status: failed` и ошибка `designer_export_failed`, без записи о прерывании.
+остаётся отказом: `status: failed` и ошибка `designer_export_failed` — так код называется у
+любого исполнителя, — без записи о прерывании.
 
 **Что изменила версия 6.** Квитанция `provider` получила необязательное поле
 `endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
@@ -36,14 +38,14 @@ check:
 
 ```json
 {
-  "provider": {"selected": "designer", "origin": {"kind": "default"}},
+  "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
   "ok": true,
   "provider_dispatched": false,
   "mode": "configuration_cf",
   "source_set": "main",
   "output_path": "build/main.cf",
   "duration_ms": 0,
-  "message": "would build ConfigurationCf into 'build/main.cf' via /opt/1cv8/bin/1cv8; nothing published",
+  "message": "would build ConfigurationCf into 'build/main.cf' via /opt/1cv8/bin/ibcmd in a throwaway infobase; nothing published",
   "execution": {
     "status": "succeeded",
     "diagnostics": [
