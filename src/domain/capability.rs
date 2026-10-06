@@ -174,6 +174,11 @@ pub enum TargetKind {
 }
 
 impl TargetKind {
+    // Полный перечень держат тесты матрицы и её артефакт; продуктовый путь получает вид
+    // цели из конфигурации и в перечень не ходит.
+    #[allow(dead_code)]
+    pub const ALL: [Self; 3] = [Self::File, Self::Cluster, Self::Standalone];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -519,6 +524,62 @@ pub fn ibcmd_for_every_choice() -> std::collections::BTreeMap<Operation, Provide
 mod tests {
     use super::*;
 
+    const MATRIX_ARTIFACT: &str = "docs/schemas/capability-matrix.json";
+
+    /// Матрица как данные: операция → вид цели → исполнители строки по порядку с флагом
+    /// `implemented`. Читает её сверка сайта `scripts/site_matrix.py`.
+    fn matrix_document() -> serde_json::Value {
+        let operations: serde_json::Map<String, serde_json::Value> = Operation::ALL
+            .into_iter()
+            .map(|operation| {
+                let targets: serde_json::Map<String, serde_json::Value> = TargetKind::ALL
+                    .into_iter()
+                    .map(|target| {
+                        let row = capabilities(operation, target)
+                            .iter()
+                            .map(|capability| {
+                                serde_json::json!({
+                                    "provider": capability.provider.as_str(),
+                                    "implemented":
+                                        capability.implementation == Implementation::Implemented,
+                                })
+                            })
+                            .collect();
+                        (target.as_str().to_owned(), serde_json::Value::Array(row))
+                    })
+                    .collect();
+                (
+                    operation.as_str().to_owned(),
+                    serde_json::Value::Object(targets),
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "_comment": "Матрица исполнителей из src/domain/capability.rs. Порождается тестом при UPDATE_CAPABILITY_MATRIX=1, руками не правится.",
+            "providers": Provider::ALL.map(Provider::as_str),
+            "operations": operations,
+        })
+    }
+
+    /// Артефакт матрицы совпадает с кодом. Обновление:
+    /// `UPDATE_CAPABILITY_MATRIX=1 cargo test --bin v8-runner generated_capability_matrix_is_current`.
+    #[test]
+    fn generated_capability_matrix_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MATRIX_ARTIFACT);
+        let generated = matrix_document();
+        if std::env::var_os("UPDATE_CAPABILITY_MATRIX").is_some() {
+            let text = serde_json::to_string_pretty(&generated).expect("matrix serializes");
+            std::fs::write(&path, format!("{text}\n")).expect("write capability matrix");
+        }
+        let text = std::fs::read_to_string(&path).expect("capability matrix artefact");
+        let pinned: serde_json::Value =
+            serde_json::from_str(&text).expect("capability matrix is valid json");
+        assert_eq!(
+            pinned, generated,
+            "{MATRIX_ARTIFACT} is stale; rerun UPDATE_CAPABILITY_MATRIX=1 cargo test --bin v8-runner generated_capability_matrix_is_current"
+        );
+    }
+
     /// Умолчание — первый реализованный; экспериментальный в цепочку не входит.
     #[test]
     fn an_experimental_provider_never_leads_a_default_chain() {
@@ -545,11 +606,7 @@ mod tests {
     #[test]
     fn no_row_names_a_provider_twice() {
         for operation in Operation::ALL {
-            for target in [
-                TargetKind::File,
-                TargetKind::Cluster,
-                TargetKind::Standalone,
-            ] {
+            for target in TargetKind::ALL {
                 let row = capabilities(operation, target);
                 let mut seen = std::collections::BTreeSet::new();
                 for capability in row {
@@ -573,6 +630,20 @@ mod tests {
             assert_eq!(Operation::parse(operation.as_str()), Some(operation));
         }
         assert_eq!(Provider::parse("designer-batch"), None);
+    }
+
+    /// Перечень видов цели полон: новый вид ломает сборку этого сопоставления, и автор
+    /// видит рядом `TargetKind::ALL`, который надо дополнить.
+    #[test]
+    fn every_target_kind_is_listed() {
+        for (position, target) in TargetKind::ALL.into_iter().enumerate() {
+            let expected = match target {
+                TargetKind::File => 0,
+                TargetKind::Cluster => 1,
+                TargetKind::Standalone => 2,
+            };
+            assert_eq!(position, expected, "{} out of place", target.as_str());
+        }
     }
 
     #[test]
