@@ -299,6 +299,14 @@ impl<'a> SourceSetInventory<'a> {
             .collect()
     }
 
+    /// Набор основной конфигурации — первый набор конфигурации в порядке объявления: на
+    /// него расширение собирается у `make`, из него собирается созданная файловая база.
+    pub(crate) fn main_configuration(&self) -> Option<&'a SourceSetConfig> {
+        self.source_sets_with_purpose(SourceSetPurpose::Configuration)
+            .into_iter()
+            .next()
+    }
+
     pub(crate) fn source_path(&self, source_set: &SourceSetConfig) -> PathBuf {
         source_set.root_in(&self.config.base_path)
     }

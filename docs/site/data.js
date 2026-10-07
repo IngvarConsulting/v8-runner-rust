@@ -138,11 +138,11 @@ window.RUNNER_DATA = (function () {
       cmd: function (ctx) { return 'v8-runner infobase create'; },
       applies: function (ctx) { return standaloneRefuses(ctx, 'базу автономного сервера создают ibcmd до запуска сервера, на его машине; раннер к нему подключается, ничего не запуская') || needEdt(ctx); },
       today: function (ctx) {
-        var chain = builderChoice(ctx, ctx.target === 'file', true);
-        var cfg = ['connection'];
-        if (ctx.target === 'cluster') cfg.push('dbms — чтобы создать базу');
-        var note = ctx.target === 'cluster' ? 'создаёт ibcmd по данным СУБД; Designer серверную базу не создаёт' : 'файловую базу создаёт любой из двух';
-        return { chain: chain, config: cfg, note: note };
+        if (ctx.target === 'cluster') return { chain: builderChoice(ctx, true, false), config: ['connection', 'dbms.* с locale', 'cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой; SchJobDn=Y — с запретом регламентных заданий; запасного rac нет, «уже есть» до создания не различается (#213)' };
+        var chain = [];
+        if (ctx.tools.ibcmd) chain.push(P.ibcmd);
+        if (ctx.tools.designer) chain.push(P.designer);
+        return { chain: chain, config: ['connection'], note: 'ibcmd создаёт файловую базу сразу с основной конфигурацией из исходников (--import); исходники EDT сперва переводятся в XML' };
       },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { kind: 'target', why: 'базу автономного сервера создают до его запуска, на его машине', fix: 'ibcmd server config init, затем ibcmd infobase create --load|--import|--restore; раннер подключается к уже работающему шлюзу' };

@@ -698,20 +698,93 @@ pub(crate) fn record_after_dump(
     ))
 }
 
-/// Память о базе, которую раннер только что создал пустой: у каждого набора, который в неё
-/// пойдёт, — пустая хеш-память этой пары, и первая отправка грузит набор целиком без отказа
+/// Память о наборе, из которого раннер собирает созданную базу: дерево набора в формате
+/// Конфигуратора, а у формата EDT ещё и дерево его исходников EDT. Дерево исходников
+/// снимается до сборки: правка, сделанная во время неё, остаётся изменением для первой
+/// отправки.
+pub(crate) struct AssembledMemory {
+    source_set: String,
+    designer: analyzer::FullSnapshot,
+    edt: Option<analyzer::FullSnapshot>,
+}
+
+/// Дерево исходников EDT набора, снятое до их перевода в XML.
+pub(crate) struct EdtSourceMemory(analyzer::FullSnapshot);
+
+impl EdtSourceMemory {
+    /// Снимает дерево исходников EDT набора `source_set` по его контексту памяти.
+    pub(crate) fn prepare(
+        config: &AppConfig,
+        source_set: &crate::config::model::SourceSetConfig,
+    ) -> Result<Self, AppError> {
+        let contexts = SourceSetsService::new(config).edt_contexts();
+        snapshot_of(&contexts, &source_set.name).map(Self)
+    }
+}
+
+impl AssembledMemory {
+    /// Снимает дерево набора `source_set` в формате Конфигуратора по его контексту памяти: у
+    /// формата Конфигуратора — сами исходники, у формата EDT — их перевод в XML.
+    pub(crate) fn prepare(
+        config: &AppConfig,
+        source_set: &crate::config::model::SourceSetConfig,
+    ) -> Result<Self, AppError> {
+        let contexts = SourceSetsService::new(config).designer_contexts();
+        Ok(Self {
+            source_set: source_set.name.clone(),
+            designer: snapshot_of(&contexts, &source_set.name)?,
+            edt: None,
+        })
+    }
+
+    /// Дерево исходников EDT, из которых переведён набор.
+    pub(crate) fn with_edt_source(mut self, edt: EdtSourceMemory) -> Self {
+        self.edt = Some(edt.0);
+        self
+    }
+}
+
+fn snapshot_of(
+    contexts: &[SourceSetContext],
+    source_set: &str,
+) -> Result<analyzer::FullSnapshot, AppError> {
+    let context = contexts
+        .iter()
+        .find(|context| context.name() == source_set)
+        .ok_or_else(|| {
+            AppError::Runtime(format!(
+                "missing change-detection context for source-set '{source_set}'"
+            ))
+        })?;
+    analyzer::prepare_full_snapshot(context, context.path())
+        .map_err(|error| AppError::Runtime(error.to_string()))
+}
+
+/// Память о базе, которую раннер только что создал: у набора, из которого база собрана
+/// (`assembled`), — его дерево, снятое до сборки, у каждого другого набора, который в неё
+/// пойдёт, — пустая хеш-память этой пары, и первая отправка грузит его целиком без отказа
 /// первого знакомства. Признак нового владельца снимается: база своя с рождения. Сбой —
 /// строка для ответа: база создана, а первая отправка без памяти откажет и назовёт выходы.
-pub(crate) fn remember_created_base(config: &AppConfig) -> Option<String> {
+pub(crate) fn remember_created_base(
+    config: &AppConfig,
+    assembled: Option<&AssembledMemory>,
+) -> Option<String> {
     let failures: Vec<String> = SourceSetsService::new(config)
         .designer_contexts()
         .iter()
         .filter(|set| set.storage_identity().is_some())
         .filter_map(|set| {
-            analyzer::commit_empty_snapshot(set, &config.work_path)
+            let committed = match assembled {
+                Some(memory) if memory.source_set == set.name() => {
+                    analyzer::commit_full_snapshot(set, &config.work_path, &memory.designer)
+                }
+                _ => analyzer::commit_empty_snapshot(set, &config.work_path),
+            };
+            committed
                 .err()
                 .map(|error| format!("source-set '{}': {error}", set.name()))
         })
+        .chain(assembled.and_then(|memory| remember_edt_source(config, memory)))
         .chain(forget_new_owner(config))
         .collect();
     (!failures.is_empty()).then(|| {
@@ -720,6 +793,18 @@ pub(crate) fn remember_created_base(config: &AppConfig) -> Option<String> {
             failures.join("; ")
         )
     })
+}
+
+/// Память об исходниках EDT собранного набора: первая отправка не переводит его заново.
+fn remember_edt_source(config: &AppConfig, memory: &AssembledMemory) -> Option<String> {
+    let edt = memory.edt.as_ref()?;
+    let contexts = SourceSetsService::new(config).edt_contexts();
+    let context = contexts
+        .iter()
+        .find(|context| context.name() == memory.source_set)?;
+    analyzer::commit_full_snapshot(context, &config.work_path, edt)
+        .err()
+        .map(|error| format!("EDT sources of source-set '{}': {error}", memory.source_set))
 }
 
 /// Для тестов сценариев: память о базе у каждого набора, о котором её ещё нет, — запись
@@ -805,10 +890,48 @@ mod tests {
             UseCaseErrorKind::NoMemory
         );
 
-        assert_eq!(remember_created_base(&config), None);
+        assert_eq!(remember_created_base(&config, None), None);
 
         require(&config).expect("the created base is remembered");
         assert_eq!(new_owner_since(&config), None);
+    }
+
+    /// Набор, из которого раннер собрал созданную базу, память помнит его деревом, снятым
+    /// до сборки: неизменный набор первая отправка не грузит, а правка, сделанная после
+    /// снятия, остаётся изменением.
+    #[test]
+    fn a_created_base_remembers_the_set_it_was_assembled_from() {
+        use crate::change_detection::analyzer::{analyze_context, AnalysisOutcome};
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let main = config.source_sets[0].clone();
+        std::fs::write(
+            main.root_in(&config.base_path).join("Configuration.xml"),
+            "<Configuration/>",
+        )
+        .expect("source");
+        let memory = AssembledMemory::prepare(&config, &main).expect("assembled memory");
+
+        assert_eq!(remember_created_base(&config, Some(&memory)), None);
+
+        let contexts = SourceSetsService::new(&config).designer_contexts();
+        let analysis = analyze_context(&contexts[0], &config.work_path);
+        assert!(
+            matches!(analysis.outcome, Ok(AnalysisOutcome::NoChanges)),
+            "{:?}",
+            analysis.outcome
+        );
+        std::fs::write(
+            main.root_in(&config.base_path).join("Module.bsl"),
+            "changed",
+        )
+        .expect("edit");
+        let analysis = analyze_context(&contexts[0], &config.work_path);
+        assert!(
+            matches!(analysis.outcome, Ok(AnalysisOutcome::Changes { .. })),
+            "{:?}",
+            analysis.outcome
+        );
     }
 
     /// Признак нового владельца, который не прочесть, стоит: выгрузку отказ не предлагает.
@@ -839,7 +962,7 @@ mod tests {
         assert!(holds_only_new_owner_marks(
             &root.path().join("work/infobases")
         ));
-        remember_created_base(&config);
+        remember_created_base(&config, None);
         assert!(!holds_only_new_owner_marks(
             &root.path().join("work/infobases")
         ));

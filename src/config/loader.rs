@@ -1965,7 +1965,7 @@ mod tests {
         let config_path = config_dir.join("v8project.yaml");
         std::fs::write(
             &config_path,
-            "workPath: build\nformat: DESIGNER\nproviders:\n  init: ibcmd\ninfobase:\n  connection: \"Srvr=cluster:1541;Ref=demo\"\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: demo\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\n",
+            "workPath: build\nformat: DESIGNER\ninfobase:\n  connection: \"Srvr=cluster:1541;Ref=demo\"\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: demo\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\n",
         )
         .expect("write config");
 

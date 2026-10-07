@@ -86,20 +86,16 @@
         {
           "implemented": true,
           "provider": "designer"
-        },
-        {
-          "implemented": true,
-          "provider": "ibcmd"
         }
       ],
       "file": [
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "ibcmd"
         },
         {
           "implemented": true,
-          "provider": "ibcmd"
+          "provider": "designer"
         }
       ],
       "standalone": []

@@ -209,7 +209,7 @@ impl AppError {
             Self::PlatformDesigner(source) | Self::PlatformDesignerContext { source, .. } => {
                 match source {
                     DesignerError::Spawn(error) => process_cancellation(error),
-                    DesignerError::UtilityNotFound(_) | DesignerError::StaleLogCleanup { .. } => {
+                    DesignerError::ConnectionForm(_) | DesignerError::StaleLogCleanup { .. } => {
                         None
                     }
                 }
@@ -393,9 +393,8 @@ impl From<IbcmdError> for AppError {
 impl From<DesignerError> for AppError {
     fn from(error: DesignerError) -> Self {
         match error {
-            DesignerError::UtilityNotFound(_) | DesignerError::StaleLogCleanup { .. } => {
-                Self::PlatformDesigner(error)
-            }
+            DesignerError::StaleLogCleanup { .. } => Self::PlatformDesigner(error),
+            DesignerError::ConnectionForm(_) => Self::Validation(error.to_string()),
             DesignerError::Spawn(error) => Self::PlatformProcess(error),
         }
     }

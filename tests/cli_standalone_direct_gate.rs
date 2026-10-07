@@ -421,14 +421,12 @@ fn infobase_create_is_still_refused_by_the_direct_gate() {
 
     let payload = envelope(&project.run(&["infobase", "create"]));
 
-    assert_eq!(
-        payload["data"]["steps"][0]["status"], "skipped",
-        "{payload}"
-    );
+    assert_eq!(payload["error"]["kind"], "capability", "{payload}");
+    assert_eq!(payload["error"]["code"], "target", "{payload}");
     assert!(
-        payload["data"]["steps"][0]["message"]
+        payload["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("never created by the runner")),
+            .is_some_and(|message| message.contains("ibcmd server config init")),
         "{payload}"
     );
     assert!(project.calls().is_empty(), "{:?}", project.calls());

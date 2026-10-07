@@ -27,7 +27,7 @@ check:
 
 ```json
 {
-  "provider": {"selected": "designer", "origin": {"kind": "default"}},
+  "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
   "ok": true,
   "provider_dispatched": false,
   "duration_ms": 0,
@@ -36,7 +36,7 @@ check:
       "target": "infobase",
       "action": "create",
       "status": "planned",
-      "message": "would create a file infobase at 'build/ib' via /opt/1cv8/bin/1cv8",
+      "message": "would create a file infobase at 'build/ib' with the main configuration of source-set 'main' via /opt/1cv8/bin/ibcmd",
       "duration_ms": 0
     },
     {

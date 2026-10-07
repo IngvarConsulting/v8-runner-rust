@@ -138,6 +138,9 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
     let cloned = dir.join("cloned");
     let platform = dir.join("platform").display().to_string();
     let source = format!("File={}", dir.join("ib").display());
+    // Существующую базу `infobase create` отказывается создавать: его превью смотрит на
+    // базу, которой ещё нет.
+    let new_base = format!("File={}", dir.join("new-ib").display());
     vec![
         // `clone` проектного файла не читает и глобальный ключ настроек отвергает: адрес,
         // версию и подсказку платформы он называет своими ключами, а писать будет в свой
@@ -226,7 +229,7 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             work.clone(),
         ),
         row(
-            &["infobase", "create"],
+            &["infobase", "create", "--infobase", &new_base],
             "infobase create",
             "infobase create",
             work.clone(),

@@ -5,27 +5,30 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
-use crate::domain::capability::{Operation, Provider};
+use crate::config::model::{
+    declared_name, AppConfig, MissingDbmsField, SourceFormat, SourceSetConfig,
+};
+use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
+use crate::platform::connection::ClusterInfobaseCreation;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
-use crate::platform::ibcmd::{
-    IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateOutcome, IbcmdInfobaseCreateStatus,
-};
+use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
-use crate::platform::process::ProcessError;
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::secrets::mask_text;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, CapabilityReason};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::exchange_guard::remember_created_base;
+use crate::use_cases::exchange_guard::{remember_created_base, AssembledMemory, EdtSourceMemory};
 use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
-use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals};
+use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
 use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStageStatus};
 use crate::use_cases::request::InitRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::source_inventory::SourceSetInventory;
+use crate::use_cases::throwaway_infobase::{edt_sources_to_xml, EdtConversion};
 use crate::use_cases::tool_extension;
 
 pub fn execute(
@@ -72,17 +75,53 @@ fn run_init(
         };
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
+    // Общая сессия EDT одна на команду: импорт рабочей области и перевод исходников в XML
+    // идут через неё, как у `push`, и одноразовый `1cedtcli` не упирается в рабочую область,
+    // которую держит сессия. Сессия закрывается вместе с командой.
+    let mut shared_edt: Option<EdtDsl<'static>> = None;
 
-    record_step(
-        &mut steps,
-        &mut first_error,
-        ensure_infobase(context, config, &mut utilities, provider, dry_run),
-    );
-    record_step(
-        &mut steps,
-        &mut first_error,
-        ensure_edt_workspace(context, config, &mut utilities, dry_run),
-    );
+    // Исходники EDT переводятся в XML из рабочей области: у формата EDT она заводится до базы.
+    if config.format == SourceFormat::Edt {
+        record_step(
+            &mut steps,
+            &mut first_error,
+            ensure_edt_workspace(context, config, &mut utilities, &mut shared_edt, dry_run),
+        );
+    }
+    // Файловую базу проекта EDT собирают из перевода, а перевод — из рабочей области: без
+    // неё база не создаётся, и повтор команды начинает с чистого места.
+    let workspace_failed = steps
+        .last()
+        .is_some_and(|step: &InitStep| step.status == InitStepStatus::Failed);
+    let infobase = if workspace_failed && config.target_kind() == TargetKind::File {
+        StepOutcome::failed(
+            "infobase",
+            "create",
+            Instant::now(),
+            AppError::Runtime(if dry_run {
+                "the infobase of an EDT project is assembled from its sources converted to XML in the EDT workspace, and the workspace step above cannot run: the infobase would not be created".to_owned()
+            } else {
+                "the infobase of an EDT project is assembled from its sources converted to XML in the EDT workspace, and the workspace was not initialized: the infobase is not created; run infobase create again once the workspace import succeeds".to_owned()
+            }),
+        )
+    } else {
+        ensure_infobase(
+            context,
+            config,
+            &mut utilities,
+            provider,
+            shared_edt.as_ref(),
+            dry_run,
+        )
+    };
+    record_step(&mut steps, &mut first_error, infobase);
+    if config.format != SourceFormat::Edt {
+        record_step(
+            &mut steps,
+            &mut first_error,
+            ensure_edt_workspace(context, config, &mut utilities, &mut shared_edt, dry_run),
+        );
+    }
 
     let mut result = init_result(started, steps, first_error.is_none());
     if dry_run {
@@ -233,36 +272,52 @@ fn ensure_infobase(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     provider: Provider,
+    shared_edt: Option<&EdtDsl<'static>>,
     dry_run: bool,
 ) -> StepOutcome {
-    // Автономный сервер поднимает человек: раннер его не создаёт и не запускает.
-    if config.infobase.standalone.is_some() {
-        return StepOutcome::skipped(
-            "infobase",
-            "create",
-            Instant::now(),
-            "a standalone server is started by hand and is never created by the runner: infobase.standalone names an existing server".to_owned(),
-        );
-    }
-    let Some(infobase_dir) = config.v8_connection().file_path().map(PathBuf::from) else {
-        return match provider {
-            Provider::Ibcmd => {
-                ensure_server_infobase(context, config, utilities, provider, dry_run)
-            }
-            // Конфигуратор серверную базу не создаёт: шаг пропускается, как и раньше,
-            // а выбрать ibcmd можно ключом providers.init.
-            other => StepOutcome::skipped(
+    let started = Instant::now();
+    match config.target_kind() {
+        // Базу автономного сервера создают до его запуска, на его машине: раннер к серверу
+        // только подключается (`INV.CLI.INFOBASE-CREATE-FOLLOWS-THE-TARGET-KIND`).
+        TargetKind::Standalone => {
+            StepOutcome::failed("infobase", "create", started, standalone_refusal())
+        }
+        TargetKind::Cluster => ensure_cluster_infobase(context, config, utilities, dry_run),
+        TargetKind::File => match config.v8_connection().file_path().map(PathBuf::from) {
+            Some(infobase_dir) => ensure_file_infobase(
+                context,
+                config,
+                utilities,
+                provider,
+                &infobase_dir,
+                shared_edt,
+                dry_run,
+            ),
+            None => StepOutcome::failed(
                 "infobase",
                 "create",
-                Instant::now(),
-                format!(
-                    "server infobase connection detected; automatic creation is not supported by the {other} provider, set providers.init: ibcmd"
-                ),
+                started,
+                AppError::Runtime("a file target names no infobase path".to_owned()),
             ),
-        };
-    };
+        },
+    }
+}
 
-    ensure_file_infobase(context, config, utilities, provider, &infobase_dir, dry_run)
+/// Отказ автономной цели с рецептом создания базы на машине сервера.
+fn standalone_refusal() -> AppError {
+    AppError::capability_for(
+        CapabilityReason::Target,
+        "infobase create does not create the infobase of a standalone server: it is created on the server machine before the server starts — `ibcmd server config init`, then `ibcmd infobase create` (with --import, --load or --restore for the configuration); the runner attaches to the running gate named by infobase.standalone",
+    )
+}
+
+/// Существующая файловая база — отказ, как у подъёма из снимка с созданием: команда
+/// создаёт новую базу и чужую не трогает.
+fn existing_file_infobase(infobase_dir: &Path) -> AppError {
+    AppError::Validation(format!(
+        "the file infobase '{}' already exists: infobase create creates a new infobase and leaves an existing one untouched; push loads the sources into it (push --force when the runner has no memory of it), or remove the directory and run infobase create again",
+        infobase_dir.display()
+    ))
 }
 
 fn ensure_file_infobase(
@@ -271,30 +326,51 @@ fn ensure_file_infobase(
     utilities: &mut PlatformUtilities,
     provider: Provider,
     infobase_dir: &Path,
+    shared_edt: Option<&EdtDsl<'static>>,
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
     let marker = infobase_marker_path(infobase_dir);
     debug!("[Инфобаза] Подготовка: {}", infobase_dir.display());
     if marker.exists() {
-        return StepOutcome::skipped(
+        return StepOutcome::failed(
             "infobase",
             "create",
             started,
-            format!("infobase already exists: {}", marker.display()),
+            existing_file_infobase(infobase_dir),
         );
     }
+    let assembled = assembled_configuration(config);
+    let contents = match assembled {
+        Some(set) => format!(" with the main configuration of source-set '{}'", set.name),
+        None => " empty".to_owned(),
+    };
 
     if dry_run {
         // The platform is located here so an absent one refuses during the preview; the
-        // parent directory below is the first thing this step would create.
+        // parent directory below is the first thing this step would create. A set of an EDT
+        // project is converted to XML first, so EDT CLI is located as well.
+        let converter = match assembled.filter(|_| config.format == SourceFormat::Edt) {
+            Some(_) => match utilities.locate(UtilityType::EdtCli) {
+                Ok(location) => format!(" converted to XML by {}", location.path.display()),
+                Err(error) => {
+                    return StepOutcome::failed(
+                        "infobase",
+                        "create",
+                        started,
+                        AppError::from(error),
+                    )
+                }
+            },
+            None => String::new(),
+        };
         return match locate_infobase_creator(provider, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",
                 "create",
                 started,
                 format!(
-                    "would create a file infobase at '{}' via {}",
+                    "would create a file infobase at '{}'{contents}{converter} via {}",
                     infobase_dir.display(),
                     binary.display()
                 ),
@@ -313,72 +389,285 @@ fn ensure_file_infobase(
         return outcome;
     }
 
+    let assembly = match assembled.map(|set| prepare_assembly(context, config, set, shared_edt)) {
+        None => None,
+        Some(Ok(assembly)) => Some(assembly),
+        Some(Err(error)) => return StepOutcome::failed("infobase", "create", started, error),
+    };
+    let import = assembly.as_ref().map(|assembly| assembly.import.as_path());
+    let memory = assembly.as_ref().map(|assembly| &assembly.memory);
+    let export_warnings: &[String] = assembly
+        .as_ref()
+        .map_or(&[], |assembly| assembly.warnings.as_slice());
+
     log_live_stage("init: infobase create", "[Platform] creating infobase");
-    infobase_create_step(
-        context,
-        config,
-        utilities,
-        provider,
-        started,
-        |created| match created.status {
-            IbcmdInfobaseCreateStatus::Created if marker.exists() => Ok(StepOutcome::ok(
-                "infobase",
-                "create",
-                started,
-                format!("infobase created: {}", marker.display()),
-            )
-            // Созданную раннером базу он помнит с рождения
-            // (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`).
-            .with_warnings(&Vec::from_iter(remember_created_base(config)))),
-            IbcmdInfobaseCreateStatus::Created => Err(missing_infobase_marker_error(
+    let settled = collecting_deferrals(|deferrals| {
+        let created = create_file_infobase(
+            context, config, utilities, provider, import, &marker, deferrals,
+        )?;
+        if !marker.exists() {
+            return Err(missing_infobase_marker_error(
                 "infobase creation did not produce marker file",
                 &marker,
-                &created.result,
-            )),
-            IbcmdInfobaseCreateStatus::AlreadyExists if marker.exists() => {
-                Ok(StepOutcome::skipped(
-                    "infobase",
-                    "create",
-                    started,
-                    format!("infobase already exists: {}", marker.display()),
-                ))
-            }
-            IbcmdInfobaseCreateStatus::AlreadyExists => Err(missing_infobase_marker_error(
-                "infobase create reported an existing file infobase but marker file is missing",
-                &marker,
-                &created.result,
-            )),
-            IbcmdInfobaseCreateStatus::Failed => Err(failed_create(&created.result)),
-            IbcmdInfobaseCreateStatus::Unconfirmed(error) => {
-                Err(unconfirmed_create(error, &created.result))
-            }
-        },
-    )
+                &created,
+            ));
+        }
+        // Созданную раннером базу он помнит с рождения: собранный набор — его деревом,
+        // остальные — пустой памятью (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
+        Ok(StepOutcome::ok(
+            "infobase",
+            "create",
+            started,
+            format!("infobase created{contents}: {}", marker.display()),
+        )
+        .with_warnings(export_warnings)
+        .with_warnings(remember_created_base(config, memory).as_slice()))
+    });
+    match settled {
+        Ok((step, warnings)) => step.with_warnings(&warnings),
+        Err(error) => StepOutcome::failed("infobase", "create", started, error),
+    }
 }
 
-fn ensure_server_infobase(
+/// Набор, из которого файловая база собирается при создании: основная конфигурация проекта.
+fn assembled_configuration(config: &AppConfig) -> Option<&SourceSetConfig> {
+    SourceSetInventory::new(config).main_configuration()
+}
+
+/// Сборка файловой базы: каталог XML для `--import`, память о наборе и предупреждения
+/// перевода.
+struct Assembly {
+    memory: AssembledMemory,
+    import: PathBuf,
+    warnings: Vec<String>,
+}
+
+/// Общая сессия EDT команды над её рабочей областью.
+fn shared_edt_session(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: PathBuf,
+) -> Result<EdtDsl<'static>, AppError> {
+    let manager =
+        EdtSessionManager::for_config(config, EdtSessionHostOptions::for_cli_command(config))
+            .map_err(AppError::from)?;
+    EdtDsl::new_shared_session(
+        binary,
+        config.work_path.join("edt-workspace"),
+        Arc::new(manager),
+        Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
+        Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    )
+    .map_err(AppError::from)
+}
+
+/// Готовит сборку файловой базы из набора `set`: каталог XML для `--import`, память о
+/// наборе и предупреждения перевода. Дерево исходников снимается до сборки: правка,
+/// сделанная во время неё, останется изменением для первой отправки. Исходники EDT
+/// переводит в XML единственный перевод ([`edt_sources_to_xml`]) в тот же каталог, куда их
+/// переводит `push`, — и память о переводе у первой отправки та же, что после неё
+/// (`INV.CLI.A-FILE-BASE-OF-AN-EDT-PROJECT-IS-ASSEMBLED-FROM-ITS-SOURCES`).
+fn prepare_assembly(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    set: &SourceSetConfig,
+    shared_edt: Option<&EdtDsl<'static>>,
+) -> Result<Assembly, AppError> {
+    match config.format {
+        SourceFormat::Designer => Ok(Assembly {
+            memory: AssembledMemory::prepare(config, set)?,
+            import: set.root_in(&config.base_path),
+            warnings: Vec::new(),
+        }),
+        SourceFormat::Edt => {
+            let source = EdtSourceMemory::prepare(config, set)?;
+            let target = SourceSetInventory::new(config)
+                .designer_context(&set.name)
+                .map(|designer| designer.path().to_path_buf())
+                .ok_or_else(|| {
+                    AppError::Runtime(format!(
+                        "missing change-detection context for source-set '{}'",
+                        set.name
+                    ))
+                })?;
+            let warnings = edt_sources_to_xml(
+                context,
+                config,
+                set,
+                &target,
+                shared_edt.map_or(
+                    EdtConversion::OneShot { timeout: None },
+                    EdtConversion::Session,
+                ),
+            )?;
+            Ok(Assembly {
+                memory: AssembledMemory::prepare(config, set)?.with_edt_source(source),
+                import: target,
+                warnings,
+            })
+        }
+    }
+}
+
+/// Создаёт файловую базу исполнителем; с `import` — сразу с конфигурацией из этого
+/// каталога. Возвращает итог создания самой базы.
+fn create_file_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     provider: Provider,
+    import: Option<&Path>,
+    marker: &Path,
+    deferrals: &mut Deferrals,
+) -> Result<PlatformCommandResult, AppError> {
+    let policy = context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
+    match provider {
+        Provider::Ibcmd => {
+            let binary = utilities
+                .locate(UtilityType::Ibcmd)
+                .map_err(AppError::from)?
+                .path;
+            let connection =
+                IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
+            let created = IbcmdDsl::new(
+                binary,
+                connection,
+                utilities.runner_for(UtilityType::Ibcmd),
+                policy,
+            )
+            .infobase_create(import)
+            .map_err(AppError::from)?;
+            deferrals.note_result(INFOBASE_CREATE, &created);
+            ensure_created(&created, marker)?;
+            Ok(created)
+        }
+        Provider::Designer => {
+            let binary = utilities
+                .locate(UtilityType::V8)
+                .map_err(AppError::from)?
+                .path;
+            let runner = utilities.runner_for(UtilityType::V8);
+            let created = DesignerDsl::new(
+                binary.clone(),
+                config.v8_connection(),
+                runner,
+                None,
+                policy.clone(),
+            )
+            .create_infobase()
+            .map_err(AppError::from)?;
+            deferrals.note_result(INFOBASE_CREATE, &created);
+            ensure_created(&created, marker)?;
+            let Some(import) = import else {
+                return Ok(created);
+            };
+            // Запасной исполнитель собирает базу теми же шагами, что отправка: загрузка
+            // исходников без записи файла версий в каталог, затем обновление базы данных.
+            // Сборка, которая не дошла до конца — отказ, отмена, — оставляет базу созданной
+            // пустой: память говорит это, и первая отправка полная.
+            let assembled = assemble_with_designer(
+                DesignerDsl::new(
+                    binary,
+                    config.v8_connection(),
+                    runner,
+                    Some(designer_log_file(config)?),
+                    policy,
+                ),
+                import,
+                deferrals,
+            );
+            match assembled {
+                Ok(()) => Ok(created),
+                Err(error) => {
+                    let memory = remember_created_base(config, None)
+                        .map(|failure| format!(" ({failure})"))
+                        .unwrap_or_default();
+                    Err(error.with_context(format!(
+                        "the infobase was created empty and its main configuration was not loaded{memory}; the first push loads every source-set in full"
+                    )))
+                }
+            }
+        }
+        other => Err(crate::use_cases::unimplemented_provider(
+            Operation::Init,
+            other,
+        )),
+    }
+}
+
+/// Сборка созданной Конфигуратором базы: загрузка основной конфигурации без записи файла
+/// версий в каталог исходников, затем обновление базы данных.
+fn assemble_with_designer(
+    designer: DesignerDsl<'_>,
+    import: &Path,
+    deferrals: &mut Deferrals,
+) -> Result<(), AppError> {
+    let loaded = designer
+        .load_config_from_files_untouched(import, None)
+        .map_err(AppError::from)?;
+    deferrals.note_result(INFOBASE_CREATE, &loaded);
+    ensure_platform_success("load the main configuration", "infobase", &loaded)?;
+    let updated = designer.update_db_cfg(None).map_err(AppError::from)?;
+    deferrals.note_result(INFOBASE_CREATE, &updated);
+    ensure_platform_success("update the database configuration", "infobase", &updated)
+}
+
+/// Исход создания по коду выхода. Неудача, после которой файл базы всё же появился, оставила
+/// каталог с базой неизвестного вида: повтор `infobase create` на ней отказывает, а память о
+/// ней не записана, — отказ называет оба выхода.
+fn ensure_created(result: &PlatformCommandResult, marker: &Path) -> Result<(), AppError> {
+    result.process.outcome().map_err(|_code| {
+        let error = failed_create(result);
+        if !marker.exists() {
+            return error;
+        }
+        let dir = marker.parent().unwrap_or(marker);
+        error.with_context(format!(
+            "the directory '{}' is left with a partly created infobase that infobase create refuses as existing and the runner has no memory of: remove the directory and run infobase create again, or load the sources over it with push --force",
+            dir.display()
+        ))
+    })
+}
+
+/// Журнал `/Out` Конфигуратора, собирающего созданную базу.
+fn designer_log_file(config: &AppConfig) -> Result<PathBuf, AppError> {
+    crate::support::temp::platform_logs_dir(&config.work_path)
+        .map(|dir| dir.join("infobase-create-designer.log"))
+        .map_err(|error| AppError::Runtime(format!("failed to create platform logs dir: {error}")))
+}
+
+/// Базу в кластере Конфигуратор создаёт одной командой — регистрация в кластере и база
+/// данных в СУБД, — пустой: память знает только, что база есть, и первая отправка полная.
+fn ensure_cluster_infobase(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
     // Строка подключения из конфигурации бывает с `Usr=`/`Pwd=`: базу называет
     // `describe_target`, а не строка как есть (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
     let target = config.v8_connection().describe_target();
+    let creation = match cluster_creation(config) {
+        Ok(creation) => creation,
+        Err(error) => return StepOutcome::failed("infobase", "create", started, error),
+    };
+    let database = format!(
+        "the database '{}' on '{}'",
+        creation.database_name, creation.database_server
+    );
     if dry_run {
-        // A server infobase cannot be observed without acting: `ibcmd infobase create`
-        // is what distinguishes created from already-present. The preview therefore names
-        // the target and the binary and stops short of that distinction.
-        return match locate_infobase_creator(provider, utilities) {
+        // Есть ли база уже, без действия не узнать: CREATEINFOBASE отвечает на это кодом,
+        // которым отвечает и на любой другой отказ, а вопроса `rac` к кластеру ещё нет (#213).
+        return match locate_infobase_creator(Provider::Designer, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",
                 "create",
                 started,
                 format!(
-                    "would ensure {target} via {binary}; whether it already exists is not observable without creating it",
-                    binary = binary.display()
+                    "would create {target} in the cluster with {database} via {}; whether it already exists is not observable before the creation; CrSQLDB=Y silently takes an existing database of that name, even one holding another infobase, and a failed creation may leave the database abandoned in the DBMS",
+                    binary.display()
                 ),
             ),
             Err(error) => StepOutcome::failed("infobase", "create", started, error),
@@ -389,52 +678,35 @@ fn ensure_server_infobase(
     {
         return outcome;
     }
-    log_live_stage("init: infobase create", "[ibcmd] ensuring server infobase");
-    infobase_create_step(
-        context,
-        config,
-        utilities,
-        provider,
-        started,
-        |created| match created.status {
-            IbcmdInfobaseCreateStatus::Created => Ok(StepOutcome::ok(
-                "infobase",
-                "create",
-                started,
-                format!("{target} ensured via ibcmd"),
-            )
-            // Созданную раннером базу он помнит с рождения
-            // (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`).
-            .with_warnings(&Vec::from_iter(remember_created_base(config)))),
-            IbcmdInfobaseCreateStatus::AlreadyExists => Ok(StepOutcome::skipped(
-                "infobase",
-                "create",
-                started,
-                format!("{target} already exists"),
-            )),
-            IbcmdInfobaseCreateStatus::Failed => Err(failed_create(&created.result)),
-            IbcmdInfobaseCreateStatus::Unconfirmed(error) => {
-                Err(unconfirmed_create(error, &created.result))
-            }
-        },
-    )
-}
-
-/// Шаг создания базы. Создание и учёт отмены, которую оно отложило, у любой базы идут
-/// здесь; `settle` решает, что исход создания значит для этой базы. Удача несёт отложенную
-/// отмену в сообщении шага, отказ открывает ею свой текст.
-fn infobase_create_step(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    utilities: &mut PlatformUtilities,
-    provider: Provider,
-    started: Instant,
-    settle: impl FnOnce(IbcmdInfobaseCreateOutcome) -> Result<StepOutcome, AppError>,
-) -> StepOutcome {
+    log_live_stage(
+        "init: infobase create",
+        "[Конфигуратор] creating the infobase in the cluster",
+    );
     let settled = collecting_deferrals(|deferrals| {
-        let created = create_infobase(context, config, utilities, provider)?;
-        deferrals.note_result(INFOBASE_CREATE, &created.result);
-        settle(created)
+        let binary = utilities
+            .locate(UtilityType::V8)
+            .map_err(AppError::from)?
+            .path;
+        let created = DesignerDsl::new(
+            binary,
+            config.v8_connection(),
+            utilities.runner_for(UtilityType::V8),
+            None,
+            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+        )
+        .create_cluster_infobase(&creation)
+        .map_err(AppError::from)?;
+        deferrals.note_result(INFOBASE_CREATE, &created);
+        if created.process.outcome().is_err() {
+            return Err(cluster_create_failure(&creation, &created, &database));
+        }
+        Ok(StepOutcome::ok(
+            "infobase",
+            "create",
+            started,
+            format!("{target} created in the cluster with {database}; the first push loads every source-set in full"),
+        )
+        .with_warnings(remember_created_base(config, None).as_slice()))
     });
     match settled {
         Ok((step, warnings)) => step.with_warnings(&warnings),
@@ -442,10 +714,70 @@ fn infobase_create_step(
     }
 }
 
+/// Реквизиты создания базы в кластере: доступ к СУБД и национальные настройки читает
+/// единственный владелец контракта `infobase.dbms` (`InfobaseConfig::dbms_access`,
+/// `dbms_locale`), администратора кластера — секция `cluster`. Нехватка обязательного поля —
+/// отказ до запуска платформы с именем ключа.
+fn cluster_creation(config: &AppConfig) -> Result<ClusterInfobaseCreation<'_>, AppError> {
+    let refused = |missing: MissingDbmsField| {
+        AppError::Validation(format!("infobase create in a cluster: {missing}"))
+    };
+    let access = config.infobase.dbms_access().map_err(refused)?;
+    let locale = config.infobase.dbms_locale().map_err(refused)?;
+    let cluster = config.infobase.cluster.as_ref();
+    Ok(ClusterInfobaseCreation {
+        dbms: access.kind,
+        database_server: access.server,
+        database_name: access.name,
+        database_user: access.user,
+        database_password: access.password,
+        locale,
+        cluster_user: declared_name(cluster.and_then(|cluster| cluster.user.as_deref())),
+        cluster_password: cluster
+            .and_then(|cluster| cluster.password.as_deref())
+            .filter(|password| !password.is_empty()),
+    })
+}
+
+/// Отказ создания базы в кластере. Причину по прозе платформы раннер не угадывает
+/// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно без неё:
+/// без администратора кластера — этот уровень и его ключи; и что неудача может оставить базу
+/// данных в СУБД. Пароли в выводе платформы скрыты.
+fn cluster_create_failure(
+    creation: &ClusterInfobaseCreation<'_>,
+    result: &PlatformCommandResult,
+    database: &str,
+) -> AppError {
+    let secrets: Vec<&str> = [creation.database_password, creation.cluster_password]
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut message = format_failure_evidence(
+        format!(
+            "create infobase failed for 'infobase' with exit code {}",
+            result.process.exit_code
+        ),
+        &mask_text(&result.process.stdout, &secrets),
+        &mask_text(&result.process.stderr, &secrets),
+        None,
+        None,
+    );
+    if creation.cluster_user.is_none() {
+        message.push_str(
+            "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
+        );
+    }
+    message.push_str(&format!(
+        "; a failed creation may leave {database} in the DBMS, and a retry over it registers the infobase on that database — check the DBMS before retrying"
+    ));
+    AppError::Platform(message)
+}
+
 fn ensure_edt_workspace(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    shared_edt: &mut Option<EdtDsl<'static>>,
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
@@ -535,43 +867,25 @@ fn ensure_edt_workspace(
         }
     };
 
-    let dsl = if config.tools.edt_cli.interactive_mode {
-        match EdtSessionManager::for_config(config, EdtSessionHostOptions::for_cli_command(config))
-        {
-            Ok(manager) => match EdtDsl::new_shared_session(
-                binary,
-                workspace.clone(),
-                Arc::new(manager),
-                Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
-                Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-            ) {
-                Ok(dsl) => dsl,
+    let one_shot;
+    let dsl: &EdtDsl<'_> = if config.tools.edt_cli.interactive_mode {
+        match shared_edt {
+            Some(session) => session,
+            None => match shared_edt_session(context, config, binary) {
+                Ok(session) => shared_edt.insert(session),
                 Err(error) => {
-                    return StepOutcome::failed(
-                        "edt_workspace",
-                        "import",
-                        started,
-                        AppError::from(error),
-                    )
+                    return StepOutcome::failed("edt_workspace", "import", started, error)
                 }
             },
-            Err(error) => {
-                return StepOutcome::failed(
-                    "edt_workspace",
-                    "import",
-                    started,
-                    AppError::from(error),
-                )
-            }
         }
     } else {
-        EdtDsl::new(
+        one_shot = EdtDsl::new(
             binary,
             workspace.clone(),
             utilities.runner_for(UtilityType::EdtCli),
             context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        )
+        );
+        &one_shot
     };
     debug!("[EDT] Инициализация workspace: {}", workspace.display());
     let mut imported_projects = Vec::new();
@@ -642,56 +956,9 @@ fn edt_workspace_initialized_message(workspace: &Path, imported_projects: &[Stri
     message
 }
 
-fn create_infobase_via_designer(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    utilities: &mut PlatformUtilities,
-) -> Result<IbcmdInfobaseCreateOutcome, AppError> {
-    let binary = utilities
-        .locate(UtilityType::V8)
-        .map_err(AppError::from)?
-        .path;
-    DesignerDsl::new(
-        binary,
-        config.v8_connection(),
-        utilities.runner_for(UtilityType::V8),
-        None,
-        context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-    )
-    .create_infobase()
-    .map(|result| IbcmdInfobaseCreateOutcome {
-        status: match result.process.outcome() {
-            Ok(()) => IbcmdInfobaseCreateStatus::Created,
-            Err(_code) => IbcmdInfobaseCreateStatus::Failed,
-        },
-        result,
-    })
-    .map_err(AppError::from)
-}
-
-fn create_infobase_via_ibcmd(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    utilities: &mut PlatformUtilities,
-) -> Result<IbcmdInfobaseCreateOutcome, AppError> {
-    let binary = utilities
-        .locate(UtilityType::Ibcmd)
-        .map_err(AppError::from)?
-        .path;
-    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-    IbcmdDsl::new(
-        binary,
-        connection,
-        utilities.runner_for(UtilityType::Ibcmd),
-        context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-    )
-    .ensure_infobase_create()
-    .map_err(AppError::from)
-}
-
 /// Locates the utility that would create the infobase, without creating it.
 ///
-/// Mirrors the `builder` dispatch of [`create_infobase`] so a preview refuses on the same
+/// Mirrors the dispatch of [`create_file_infobase`] so a preview refuses on the same
 /// missing platform the apply would.
 fn locate_infobase_creator(
     provider: Provider,
@@ -711,22 +978,6 @@ fn locate_infobase_creator(
         .locate(utility)
         .map(|location| location.path)
         .map_err(AppError::from)
-}
-
-fn create_infobase(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    utilities: &mut PlatformUtilities,
-    provider: Provider,
-) -> Result<IbcmdInfobaseCreateOutcome, AppError> {
-    match provider {
-        Provider::Designer => create_infobase_via_designer(context, config, utilities),
-        Provider::Ibcmd => create_infobase_via_ibcmd(context, config, utilities),
-        other => Err(crate::use_cases::unimplemented_provider(
-            Operation::Init,
-            other,
-        )),
-    }
 }
 
 fn interruption_step_outcome(
@@ -824,15 +1075,6 @@ fn failed_create(result: &PlatformCommandResult) -> AppError {
     AppError::Platform(failure_details("create infobase", "infobase", result))
 }
 
-/// Создание не удалось, а вопрос, есть ли база уже, остался без ответа. Род ответа — у
-/// вопроса: отмена остаётся отменой; улики создания идут рядом.
-fn unconfirmed_create(error: ProcessError, result: &PlatformCommandResult) -> AppError {
-    AppError::from(error).with_context(format!(
-        "{}; whether the infobase already existed went unanswered",
-        failure_details("create infobase", "infobase", result)
-    ))
-}
-
 /// Что не удалось и с каким кодом; вывод и журнал за ним пишет владелец улик.
 fn failure_details(action: &str, target: &str, result: &PlatformCommandResult) -> String {
     format_failure_evidence(
@@ -879,12 +1121,30 @@ mod tests {
     use crate::support::error::CancelledAt;
     #[cfg(unix)]
     use crate::use_cases::context::{CommandName, ExecutionContext};
-    #[cfg(unix)]
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    /// Рабочая область — шаг за шагом базы: тесты рабочей области берут ответ команды и тогда,
+    /// когда шаг базы на серверной цели без реквизитов СУБД отказывает.
+    fn workspace_step_result(
+        result: crate::use_cases::result::UseCaseResult<crate::domain::init::InitResult>,
+    ) -> crate::domain::init::InitResult {
+        match result {
+            Ok(result) => result,
+            Err(failure) => failure.payload.expect("payload"),
+        }
+    }
+
+    fn workspace_step(result: &crate::domain::init::InitResult) -> &crate::domain::init::InitStep {
+        result
+            .steps
+            .iter()
+            .find(|step| step.target == "edt_workspace")
+            .expect("workspace step")
+    }
 
     fn sample_config() -> AppConfig {
         AppConfig {
@@ -956,7 +1216,7 @@ mod tests {
         fs::write(
             path,
             format!(
-                "#!/bin/sh\nset -eu\nprompt() {{ printf '1C:EDT>'; }}\ncurrent_dir=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-data\" ]; then current_dir=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nsleep {}\nprintf 'START\\n' >> '{}'\ntrap 'printf \"EXIT\\\\n\" >> \"{}\"' EXIT\nprompt\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  eval \"set -- $line\"\n  cmd=\"${{1:-}}\"\n  if [ \"$#\" -gt 0 ]; then shift; fi\n  case \"$cmd\" in\n    cd)\n      if [ \"$#\" -eq 0 ]; then\n        printf '%s\\n' \"$current_dir\"\n      else\n        current_dir=\"$1\"\n      fi\n      prompt\n      ;;\n    import)\n      prompt\n      ;;\n    *)\n      prompt\n      ;;\n  esac\ndone\n",
+                "#!/bin/sh\nset -eu\nprompt() {{ printf '1C:EDT>'; }}\ncurrent_dir=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-data\" ]; then current_dir=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nsleep {}\nprintf 'START\\n' >> '{}'\ntrap 'printf \"EXIT\\\\n\" >> \"{}\"' EXIT\nprompt\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  eval \"set -- $line\"\n  cmd=\"${{1:-}}\"\n  if [ \"$#\" -gt 0 ]; then shift; fi\n  case \"$cmd\" in\n    cd)\n      if [ \"$#\" -eq 0 ]; then\n        printf '%s\\n' \"$current_dir\"\n      else\n        current_dir=\"$1\"\n      fi\n      prompt\n      ;;\n    import)\n      prompt\n      ;;\n    export)\n      target=\"\"\n      while [ \"$#\" -gt 0 ]; do\n        if [ \"$1\" = \"--configuration-files\" ]; then shift; target=\"$1\"; fi\n        shift\n      done\n      mkdir -p \"$target\"\n      printf '<Configuration />\\n' > \"$target/Configuration.xml\"\n      prompt\n      ;;\n    *)\n      prompt\n      ;;\n  esac\ndone\n",
                 startup_delay_ms as f64 / 1000.0,
                 calls_log.display(),
                 calls_log.display(),
@@ -991,32 +1251,28 @@ mod tests {
         assert_eq!(ordered[1].name, "ext");
     }
 
+    /// База в кластере без реквизитов СУБД — отказ шага базы до запуска платформы; рабочая
+    /// область формата Конфигуратора пропускается.
     #[test]
-    fn init_skips_infobase_creation_for_server_connection() {
+    fn init_refuses_a_cluster_base_without_the_dbms_section() {
         let mut config = sample_config();
         config.format = SourceFormat::Designer;
         config.infobase.connection = "Srvr=server;Ref=demo".to_owned();
 
-        let result = super::run_init(
+        let failure = super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
         )
-        .expect("server init should skip infobase create");
+        .expect_err("a cluster base needs the dbms section");
 
-        assert!(result.ok);
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
+        assert!(failure.error.message().contains("infobase.dbms.kind"));
+        let result = failure.payload.expect("payload");
         assert_eq!(result.steps.len(), 2);
-        assert_eq!(result.steps[0].target, "infobase");
-        assert_eq!(result.steps[0].action, "create");
-        assert_eq!(result.steps[0].status, InitStepStatus::Skipped);
-        assert_eq!(
-            result.steps[0].message.as_deref(),
-            Some(
-                "server infobase connection detected; automatic creation is not supported by the designer provider, set providers.init: ibcmd"
-            )
-        );
+        assert_eq!(result.steps[0].status, InitStepStatus::Failed);
         assert_eq!(result.steps[1].target, "edt_workspace");
         assert_eq!(result.steps[1].status, InitStepStatus::Skipped);
     }
@@ -1065,6 +1321,9 @@ mod tests {
         config.base_path = root.join("base");
         config.work_path = root.join("work");
         config.format = SourceFormat::Designer;
+        for set in ["main", "ext"] {
+            fs::create_dir_all(config.base_path.join(set)).expect("sources");
+        }
         config.infobase = infobase;
         config.providers = providers;
         config.tools.platform.path = Some(platform.to_path_buf());
@@ -1123,12 +1382,16 @@ mod tests {
                 .as_deref(),
             &held.script_branch("CREATEINFOBASE", exit_code),
         );
-        let config = config_with_platform(
+        let mut config = config_with_platform(
             root,
             InfobaseConfig::file(format!("File={}", infobase.display())),
             &platform,
             Default::default(),
         );
+        // Без набора основной конфигурации создание — один процесс: отсрочку называет он.
+        config
+            .source_sets
+            .retain(|set| set.purpose != SourceSetPurpose::Configuration);
         (config, held)
     }
 
@@ -1163,7 +1426,7 @@ mod tests {
         assert!(result.provider_dispatched);
         assert_eq!(result.steps[0].status, InitStepStatus::Ok);
         let message = result.steps[0].message.as_deref().expect("message");
-        assert!(message.starts_with("infobase created:"), "{message}");
+        assert!(message.starts_with("infobase created empty:"), "{message}");
         assert!(
             message.contains(
                 "infobase create completed successfully after cancellation request during critical phase"
@@ -1179,7 +1442,17 @@ mod tests {
     fn a_stop_after_the_creation_leaves_its_deferred_cancellation_in_the_step() {
         let dir = tempdir().expect("tempdir");
         let (mut config, held) = held_designer_create(dir.path(), 0, InfobaseFile::Laid);
-        config.format = SourceFormat::Edt;
+        // Рабочая область после базы — у проекта формата Конфигуратора с расширением-
+        // инструментом формата EDT: безопасная точка её импорта идёт за созданием.
+        let tool_dir = dir.path().join("tool-client-mcp");
+        fs::create_dir_all(&tool_dir).expect("tool dir");
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Source(ToolExtensionSourceConfig {
+                path: tool_dir,
+                format: Some(SourceFormat::Edt),
+            }),
+        });
 
         let failure =
             create_interrupted_while_held(&config, &held).expect_err("stopped at the safe point");
@@ -1255,66 +1528,93 @@ mod tests {
         );
     }
 
-    /// ibcmd: создание, отложившее отмену и вернувшее 255, оставляет вопрос о базе без
-    /// ответа — после отмены его уже не запускают. Ответ — отмена, и он называет и отсрочку,
-    /// и код создания.
+    /// ibcmd: создание файловой базы, отложившее отмену и вернувшее 255, — отказ по коду
+    /// выхода; второго вопроса к базе нет, а текст называет отсрочку первой.
     #[cfg(unix)]
     #[test]
-    fn an_ibcmd_creation_whose_question_went_unanswered_names_the_deferred_cancellation() {
-        for (case, infobase) in [
-            ("file", None),
-            (
-                "server",
-                Some(InfobaseConfig::server(
-                    "Srvr=srv;Ref=demo",
-                    crate::config::model::InfobaseDbmsConfig::new(
-                        "PostgreSQL",
-                        "localhost",
-                        "demo",
-                    ),
-                )),
+    fn an_ibcmd_creation_that_failed_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let ibcmd = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        let held = HeldCommand::in_dir(dir.path());
+        write_utility(&ibcmd, &calls, None, &held.script_branch("create", 255));
+        let config = config_with_platform(
+            dir.path(),
+            InfobaseConfig::file(format!("File={}", dir.path().join("ib").display())),
+            &ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+
+        let failure =
+            create_interrupted_while_held(&config, &held).expect_err("the creation failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message.starts_with(
+                "infobase create ended after cancellation request during critical phase"
             ),
-        ] {
-            let dir = tempdir().expect("tempdir");
-            let ibcmd = dir.path().join("ibcmd");
-            let calls = dir.path().join("calls.log");
-            let held = HeldCommand::in_dir(dir.path());
-            write_utility(&ibcmd, &calls, None, &held.script_branch("create", 255));
-            let infobase = infobase.unwrap_or_else(|| {
-                InfobaseConfig::file(format!("File={}", dir.path().join("ib").display()))
-            });
-            let config = config_with_platform(
-                dir.path(),
-                infobase,
-                &ibcmd,
-                crate::domain::capability::ibcmd_for_every_choice(),
-            );
+            "{message}"
+        );
+        assert!(message.contains("with exit code 255"), "{message}");
+        let payload = failure.payload.expect("payload");
+        assert!(payload.provider_dispatched);
+        let calls = fs::read_to_string(&calls).expect("calls");
+        assert!(calls.contains("--import="), "{calls}");
+        assert!(!calls.contains("generation-id"), "{calls}");
+    }
 
-            let failure = create_interrupted_while_held(&config, &held)
-                .expect_err("the command is cancelled");
+    /// Конфигуратор создал базу, отложив отмену: сборку основной конфигурации отмена
+    /// останавливает, база остаётся пустой, и память говорит это — первая отправка полная.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancellation_deferred_by_the_creation_leaves_an_empty_remembered_base() {
+        let dir = tempdir().expect("tempdir");
+        let (mut config, held) = held_designer_create(dir.path(), 0, InfobaseFile::Laid);
+        config.source_sets = sample_config().source_sets;
+        fs::write(
+            config.base_path.join("main").join("Configuration.xml"),
+            "<Configuration/>",
+        )
+        .expect("main source");
 
-            assert_eq!(
-                failure.error.kind(),
-                UseCaseErrorKind::Cancelled(CancelledAt::Boundary),
-                "{case}"
-            );
-            let message = failure.error.message();
-            assert!(
-                message.starts_with(
-                    "infobase create ended after cancellation request during critical phase"
-                ),
-                "{case}: {message}"
-            );
-            assert!(message.contains("with exit code 255"), "{case}: {message}");
-            assert!(
-                message.contains("whether the infobase already existed went unanswered"),
-                "{case}: {message}"
-            );
-            let payload = failure.payload.expect("payload");
-            assert!(payload.provider_dispatched, "{case}");
-            let calls = fs::read_to_string(&calls).expect("calls");
-            assert!(!calls.contains("generation-id"), "{case}: {calls}");
-        }
+        let failure =
+            create_interrupted_while_held(&config, &held).expect_err("the assembly is stopped");
+
+        assert!(matches!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(_)
+        ));
+        let message = failure.error.message();
+        assert!(
+            message.contains("the infobase was created empty")
+                && message.contains("the first push loads every source-set in full"),
+            "{message}"
+        );
+        let calls = fs::read_to_string(dir.path().join("calls.log")).expect("calls");
+        assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
+        let contexts = crate::change_detection::source_sets::SourceSetsService::new(&config)
+            .designer_contexts();
+        crate::use_cases::exchange_guard::require_memory(
+            &ExecutionContext::cli(CommandName::Build),
+            &config,
+            &contexts,
+            None,
+        )
+        .expect("the empty base is remembered");
+        let main = contexts
+            .iter()
+            .find(|context| context.name() == "main")
+            .expect("main");
+        let analysis = crate::change_detection::analyzer::analyze_context(main, &config.work_path);
+        assert!(
+            matches!(
+                analysis.outcome,
+                Ok(crate::change_detection::analyzer::AnalysisOutcome::Changes { .. })
+            ),
+            "the main configuration is not remembered as loaded: {:?}",
+            analysis.outcome
+        );
     }
 
     #[cfg(unix)]
@@ -1338,17 +1638,16 @@ mod tests {
         config.tools.edt_cli.path = Some(edt_script);
         config.tools.edt_cli.interactive_mode = false;
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert!(edt_calls_text.contains("-command import --project"));
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
@@ -1391,17 +1690,16 @@ mod tests {
             }),
         });
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             2
@@ -1445,17 +1743,16 @@ mod tests {
             }),
         });
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             1
@@ -1501,17 +1798,16 @@ mod tests {
             }),
         });
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             1
@@ -1541,16 +1837,15 @@ mod tests {
         config.tools.edt_cli.interactive_mode = true;
         config.tools.edt_cli.auto_start = true;
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
-        assert!(result.ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert!(
             !edt_calls.exists()
                 || fs::read_to_string(&edt_calls)
@@ -1559,6 +1854,66 @@ mod tests {
                     .is_empty()
         );
         assert!(edt_workspace_marker_path(&work.join("edt-workspace")).exists());
+    }
+
+    /// Проект EDT при `interactive_mode`: импорт рабочей области и перевод основного набора
+    /// в XML идут через одну общую сессию EDT команды — второй процесс `1cedtcli` не
+    /// стартует и в рабочую область, которую держит сессия, не упирается; `ibcmd` собирает
+    /// базу из перевода.
+    #[cfg(unix)]
+    #[test]
+    fn an_edt_file_base_is_converted_through_the_shared_session_of_the_command() {
+        let dir = tempdir().expect("tempdir");
+        let edt_script = dir.path().join("edt").join("1cedtcli");
+        let edt_calls = dir.path().join("edt-calls.log");
+        write_interactive_edt_script(&edt_script, &edt_calls);
+        let ibcmd = dir.path().join("platform").join("ibcmd");
+        fs::create_dir_all(ibcmd.parent().expect("platform dir")).expect("platform dir");
+        let ibcmd_calls = dir.path().join("ibcmd-calls.log");
+        let infobase = dir.path().join("ib");
+        write_utility(
+            &ibcmd,
+            &ibcmd_calls,
+            None,
+            &format!(
+                "case \"$args\" in *create*) mkdir -p '{0}' && : > '{0}/1Cv8.1CD';; esac\n",
+                infobase.display()
+            ),
+        );
+        let mut config = config_with_platform(
+            dir.path(),
+            InfobaseConfig::file(format!("File={}", infobase.display())),
+            &ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+        config.format = SourceFormat::Edt;
+        for set in ["main", "ext"] {
+            fs::write(
+                config.base_path.join(set).join(".project"),
+                format!("<projectDescription><name>{set}</name></projectDescription>"),
+            )
+            .expect("source");
+        }
+        config.tools.edt_cli.path = Some(edt_script);
+        config.tools.edt_cli.interactive_mode = true;
+
+        let result = super::run_init(&ExecutionContext::cli(CommandName::Init), &config, false);
+
+        let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
+        let result = result.unwrap_or_else(|failure| panic!("{failure:?}\nEDT: {edt_calls_text}"));
+        assert_eq!(result.steps[0].target, "edt_workspace");
+        assert_eq!(result.steps[1].status, InitStepStatus::Ok, "{result:?}");
+        assert_eq!(
+            edt_calls_text.matches("START").count(),
+            1,
+            "{edt_calls_text}"
+        );
+        assert!(
+            edt_calls_text.contains("export --project-name main"),
+            "{edt_calls_text}"
+        );
+        let ibcmd_calls = fs::read_to_string(&ibcmd_calls).expect("ibcmd calls");
+        assert!(ibcmd_calls.contains("--import="), "{ibcmd_calls}");
     }
 
     #[cfg(unix)]
@@ -1584,17 +1939,16 @@ mod tests {
         config.tools.edt_cli.startup_timeout_ms = 30_000;
         config.tools.edt_cli.command_timeout_ms = 2_000;
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(edt_calls_text.matches("START").count(), 1);
         assert_eq!(edt_calls_text.matches("import --project").count(), 2);
     }

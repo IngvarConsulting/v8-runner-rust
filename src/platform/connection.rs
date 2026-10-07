@@ -168,6 +168,60 @@ impl V8Connection {
             .map(|path| format!("File='{}'", path.replace('\'', "''")))
     }
 
+    /// Строка `CREATEINFOBASE` базы в кластере: адрес из этой строки подключения
+    /// (`Srvr`, `Ref`) и реквизиты СУБД и администратора кластера из `creation`. Порядок
+    /// и состав — как в замере #181 (8.5.4.1878): `Srvr;Ref;DBMS;DBSrvr;DB[;DBUID][;DBPwd];
+    /// CrSQLDB=Y;Locale;SchJobDn=Y[;SUsr][;SPwd]`. `SchJobDn=Y` стоит всегда: созданная раннером
+    /// база в кластере — с запретом регламентных заданий (решение владельца, #204). `None` — строка подключения не называет сервер и
+    /// базу.
+    pub fn create_cluster_infobase_arg(
+        &self,
+        creation: &ClusterInfobaseCreation<'_>,
+    ) -> Option<String> {
+        let (server, reference) = self.cluster_address()?;
+        let mut parts = vec![
+            connection_segment("Srvr", &server),
+            connection_segment("Ref", &reference),
+            connection_segment("DBMS", creation.dbms),
+            connection_segment("DBSrvr", creation.database_server),
+            connection_segment("DB", creation.database_name),
+        ];
+        let optional = [
+            ("DBUID", creation.database_user),
+            ("DBPwd", creation.database_password),
+        ];
+        parts.extend(
+            optional
+                .into_iter()
+                .filter_map(|(key, value)| Some(connection_segment(key, value?))),
+        );
+        parts.push("CrSQLDB=Y".to_owned());
+        parts.push(connection_segment("Locale", creation.locale));
+        parts.push("SchJobDn=Y".to_owned());
+        let administrator = [
+            ("SUsr", creation.cluster_user),
+            ("SPwd", creation.cluster_password),
+        ];
+        parts.extend(
+            administrator
+                .into_iter()
+                .filter_map(|(key, value)| Some(connection_segment(key, value?))),
+        );
+        Some(parts.join(";"))
+    }
+
+    /// Сервер и имя базы в кластере: `Srvr` и `Ref` объявленной строки или части `/S
+    /// <сервер>\<база>`.
+    fn cluster_address(&self) -> Option<(String, String)> {
+        if let Some(address) = declared_server_address(&self.raw) {
+            return Some((address.server, address.reference));
+        }
+        let (server, reference) = self.server_arg()?.split_once('\\')?;
+        let (server, reference) = (server.trim(), reference.trim());
+        (!server.is_empty() && !reference.is_empty())
+            .then(|| (server.to_owned(), reference.to_owned()))
+    }
+
     /// Базу и учётную запись называет без секретов: сырая строка бывает с `Pwd=`, поэтому
     /// файловая база названа путём, серверная — именем в кластере и сервером, иная форма
     /// строки — общим словом.
@@ -183,6 +237,32 @@ impl V8Connection {
             "the infobase".to_owned()
         };
         name_the_account(&target, self.user.as_deref())
+    }
+}
+
+/// Реквизиты создания базы в кластере, которых нет в строке подключения: СУБД, её
+/// учётная запись, национальные настройки и администратор кластера.
+/// Без `Debug`: в структуре пароли СУБД и администратора кластера.
+#[derive(Clone, Copy)]
+pub struct ClusterInfobaseCreation<'a> {
+    pub dbms: &'a str,
+    pub database_server: &'a str,
+    pub database_name: &'a str,
+    pub database_user: Option<&'a str>,
+    pub database_password: Option<&'a str>,
+    pub locale: &'a str,
+    pub cluster_user: Option<&'a str>,
+    pub cluster_password: Option<&'a str>,
+}
+
+/// Часть `ключ=значение` строки подключения. Значение с `;`, кавычкой или пробелом по
+/// краям берётся в двойные кавычки, внутренняя кавычка удваивается; остальное идёт как есть.
+fn connection_segment(key: &str, value: &str) -> String {
+    let needs_quotes = value.contains([';', '"']) || value.trim() != value;
+    if needs_quotes {
+        format!("{key}=\"{}\"", value.replace('"', "\"\""))
+    } else {
+        format!("{key}={value}")
     }
 }
 
@@ -340,7 +420,57 @@ pub(crate) fn split_arg_string(raw: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::V8Connection;
+    use super::{ClusterInfobaseCreation, V8Connection};
+
+    fn creation<'a>(
+        cluster_user: Option<&'a str>,
+        cluster_password: Option<&'a str>,
+    ) -> ClusterInfobaseCreation<'a> {
+        ClusterInfobaseCreation {
+            dbms: "PostgreSQL",
+            database_server: "db",
+            database_name: "demo_db",
+            database_user: Some("postgres"),
+            database_password: Some("pg;pass\"word"),
+            locale: "ru",
+            cluster_user,
+            cluster_password,
+        }
+    }
+
+    /// Строка `CREATEINFOBASE` кластера — порядок и состав замера #181; значение с `;` или
+    /// кавычкой берётся в кавычки, внутренняя кавычка удваивается.
+    #[test]
+    fn a_cluster_creation_string_follows_the_measured_form() {
+        let connection = V8Connection::from_connection_string("Srvr=srv:1541;Ref=demo;");
+
+        assert_eq!(
+            connection
+                .create_cluster_infobase_arg(&creation(Some("cadm"), Some("c")))
+                .as_deref(),
+            Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru;SchJobDn=Y;SUsr=cadm;SPwd=c")
+        );
+        assert_eq!(
+            connection
+                .create_cluster_infobase_arg(&creation(None, None))
+                .as_deref(),
+            Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru;SchJobDn=Y")
+        );
+    }
+
+    /// Адрес берётся и из ключа `/S`, а у файловой базы строки кластера нет.
+    #[test]
+    fn a_cluster_creation_string_reads_the_s_form_and_refuses_a_file_base() {
+        let s_form = V8Connection::from_connection_string("/S srv\\demo");
+        assert!(s_form
+            .create_cluster_infobase_arg(&creation(None, None))
+            .is_some_and(|arg| arg.starts_with("Srvr=srv;Ref=demo;DBMS=")));
+        let file = V8Connection::from_connection_string("File=/tmp/ib");
+        assert_eq!(
+            file.create_cluster_infobase_arg(&creation(None, None)),
+            None
+        );
+    }
 
     #[test]
     fn snapshot_address_identity_ignores_credentials_and_canonicalizes_file_paths() {

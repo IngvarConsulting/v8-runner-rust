@@ -16,7 +16,7 @@ const EDT_RUNTIME_VERSION: &str = "8.3.27";
 /// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
 fn providers_yaml(builder: &str) -> &'static str {
     if builder == "IBCMD" {
-        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
+        "providers:\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
     } else {
         support::DESIGNER_LEADS
     }

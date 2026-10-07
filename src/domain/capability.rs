@@ -247,10 +247,19 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     // Публикация на веб-сервере: у операции нет развилки, только `webinst`.
     const WEBINST_ONLY: &[Capability] = &[implemented(Webinst, Documented)];
 
-    const DESIGNER_THEN_IBCMD: &[Capability] = &[
-        implemented(Designer, LiveVerified),
+    // Создание файловой базы: `ibcmd infobase create --import --apply --force` собирает
+    // базу сразу с основной конфигурацией (замер 8.3.27.2074 у прямого шлюза #205);
+    // Конфигуратор — запасной: `CREATEINFOBASE`, затем `/LoadConfigFromFiles` и
+    // `/UpdateDBCfg`. Порядок назначил владелец (#204).
+    const CREATE_FILE: &[Capability] = &[
         implemented(Ibcmd, ArgvTested),
+        implemented(Designer, LiveVerified),
     ];
+    // Создание базы в кластере: Конфигуратор `CREATEINFOBASE` с клиент-серверной строкой
+    // регистрирует базу и создаёт базу данных одной командой (замер #181, 06.10.2026,
+    // 8.5.4.1878). `ibcmd` о кластере не знает и строки не имеет; запасной путь `rac` — не
+    // исполнитель матрицы и ещё не реализован (#213).
+    const CREATE_CLUSTER: &[Capability] = &[implemented(Designer, ArgvTested)];
     // Агент стоит первым у файловой базы и у кластера: порядок назначил владелец (#206).
     // Путь раннера через агента прогнан вживую 15.09.2026 на 8.3.27.2074: полная и
     // частичная загрузка с `update-db-cfg` в одной сессии, полная выгрузка через staging,
@@ -332,8 +341,8 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     ];
 
     match (operation, target) {
-        // Создание базы под кластером держит `ibcmd` до #204.
-        (Operation::Init, TargetKind::File | TargetKind::Cluster) => DESIGNER_THEN_IBCMD,
+        (Operation::Init, TargetKind::File) => CREATE_FILE,
+        (Operation::Init, TargetKind::Cluster) => CREATE_CLUSTER,
         (Operation::Build | Operation::Dump, TargetKind::File) => AGENT_DESIGNER_IBCMD,
         (Operation::Build | Operation::Dump, TargetKind::Cluster) => AGENT_DESIGNER,
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
@@ -785,12 +794,12 @@ mod tests {
         }
     }
 
-    /// У кластера `ibcmd` нет ни в одной строке, кроме создания базы (до #204) и операций,
-    /// которым база проекта не нужна (`make`, `convert`).
+    /// У кластера `ibcmd` нет ни в одной строке, кроме операций, которым база проекта не
+    /// нужна (`make`, `convert`).
     #[test]
     fn a_cluster_row_names_ibcmd_only_where_it_does_not_reach_the_cluster_infobase() {
         for operation in Operation::ALL {
-            if operation == Operation::Init || needs_no_target(operation) {
+            if needs_no_target(operation) {
                 continue;
             }
             assert_eq!(

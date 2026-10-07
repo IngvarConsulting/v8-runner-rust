@@ -168,7 +168,7 @@ fn write_http_ibcmd_config_with_infobase(
     infobase_yaml: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: {}\n    idle_ttl_secs: {}\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: {}\n    idle_ttl_secs: {}\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         infobase_yaml,
         bind_address,
