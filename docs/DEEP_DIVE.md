@@ -212,8 +212,8 @@ runtime snapshot commit только указанным source-set.
   Конфигуратор (`CREATEINFOBASE`, `/LoadConfigFromFiles` без файла версий, `/DumpCfg`;
   расширение — поверх основной конфигурации). Исходники EDT сперва переводит в XML
   `ThrowawayInfobase::xml_from_edt` — один владелец у `make` и `convert`: шаг сборки
-  `build_project::execute_edt_export_step` в рабочей области `workPath/edt-workspace` с
-  пределом EDT команды. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
+  `build_project::execute_edt_export_step` в рабочей области `workPath/edt-workspace`; у
+  `make` шаг без предела, как у `push`, у `convert` — с пределом EDT команды. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
   `make <SET>` — своя, обход без набора — общая на все наборы; внешние обработки Конфигуратор
   собирает поверх основной конфигурации в своей базе; после прогона она убирается, а
   брошенную описание `TempDirKind::ThrowawayInfobase` выдаёт уборке как свою. Замка базы и

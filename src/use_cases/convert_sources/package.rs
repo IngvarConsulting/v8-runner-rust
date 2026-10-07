@@ -513,7 +513,12 @@ impl Run<'_> {
             Input::SourceSet { name, extension } => {
                 let (source_dir, mut notes) = if needs_edt(self.direction) {
                     let source_set = SourceSetInventory::new(self.config).named(name)?;
-                    base.xml_from_edt(self.context, self.config, source_set)?
+                    base.xml_from_edt(
+                        self.context,
+                        self.config,
+                        source_set,
+                        self.context.edt_timeout(),
+                    )?
                 } else {
                     (item.source_path.clone(), Vec::new())
                 };

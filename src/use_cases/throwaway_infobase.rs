@@ -20,6 +20,7 @@
 //!   получает один раз.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::config::model::{AppConfig, SourceSetConfig};
 use crate::domain::capability::Provider;
@@ -209,7 +210,8 @@ impl ThrowawayInfobase {
 
     /// Переводит исходники набора формата EDT в XML каталога [`Self::xml_dir`] — один
     /// владелец перевода для `make` и `convert`: `1cedtcli` шагом сборки `push`
-    /// (`build_project::execute_edt_export_step`) в рабочей области [`edt_workspace`] с
+    /// (`build_project::execute_edt_export_step`) в рабочей области [`edt_workspace`].
+    /// Предел шага задаёт вызывающий: `make` идёт без предела, как `push`, `convert` — с
     /// пределом EDT команды (`ExecutionContext::edt_timeout`). Ответ — каталог XML и
     /// предупреждения шага.
     pub(crate) fn xml_from_edt(
@@ -217,6 +219,7 @@ impl ThrowawayInfobase {
         context: &ExecutionContext,
         config: &AppConfig,
         source_set: &SourceSetConfig,
+        timeout: Option<Duration>,
     ) -> Result<(PathBuf, Vec<String>), AppError> {
         let inventory = SourceSetInventory::new(config);
         let edt_context = inventory.edt_context(&source_set.name).ok_or_else(|| {
@@ -235,7 +238,7 @@ impl ThrowawayInfobase {
             utilities.runner_for(UtilityType::EdtCli),
             context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
         )
-        .with_timeout(context.edt_timeout());
+        .with_timeout(timeout);
         let target = self.xml_dir(&source_set.name);
         log_live_stage("edt export", "[EDT] converting the sources to XML");
         let warnings = crate::use_cases::build_project::execute_edt_export_step(

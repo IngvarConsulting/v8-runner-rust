@@ -1376,8 +1376,11 @@ v8-runner mcp serve http
   адреса памяти нет (например, веб-клиента `ws=…`), отвергает проверка конфигурации.
 - `workPath/infobases/<база>/new-owner.json`: признак, что копия взяла базу без метки или
   сменила ушедшего владельца; снимает его первая удачная загрузка набора.
-- `workPath/edt-workspace/`: общий EDT workspace всех EDT-сценариев, кроме `convert`.
-- `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert`.
+- `workPath/edt-workspace/`: общий EDT workspace всех EDT-сценариев, кроме `convert`
+  между форматами исходников; `convert --to package` из набора EDT переводит его в XML здесь
+  же и называет этот каталог в `data.workspace_path`.
+- `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert` между форматами
+  исходников.
 - `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD dump; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/logs/platform/`: platform logs.
 - `workPath/logs/mcp/actions.log`: журнал действий; пишется при выводе JSON — у MCP-сервера и

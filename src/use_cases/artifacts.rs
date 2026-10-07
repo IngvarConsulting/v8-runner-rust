@@ -589,8 +589,9 @@ fn sources_in_xml(
             Ok(xml[&source_set.name].clone())
         }
         SourceFormat::Edt => {
-            // Предупреждения шага `make` прежде не возвращал и не возвращает.
-            let (target, _warnings) = base.xml_from_edt(context, config, source_set)?;
+            // Предупреждения шага `make` прежде не возвращал и не возвращает; предела у
+            // шага нет, как у перевода EDT в `push`.
+            let (target, _warnings) = base.xml_from_edt(context, config, source_set, None)?;
             xml.insert(source_set.name.clone(), target.clone());
             Ok(target)
         }

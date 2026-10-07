@@ -1887,6 +1887,14 @@ fn convert_a_failed_ibcmd_step_removes_the_base_and_keeps_the_receipt() {
         "{envelope}"
     );
     assert_eq!(envelope["data"]["provider_dispatched"], true, "{envelope}");
+    assert!(
+        project
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("infobase ") && call.ends_with(" create")),
+        "the throwaway base was created before the step: {:?}",
+        project.calls()
+    );
     assert_eq!(project.bases_left(), 0, "the throwaway base is removed");
     assert!(!project
         .root
@@ -1904,6 +1912,14 @@ fn convert_a_cancelled_run_removes_the_throwaway_base() {
 
     assert!(!output.status.success(), "{envelope}");
     assert_eq!(envelope["error"]["code"], "cancelled", "{envelope}");
+    assert!(
+        project
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("infobase ") && call.ends_with(" create")),
+        "the throwaway base was created before the step: {:?}",
+        project.calls()
+    );
     assert_eq!(project.bases_left(), 0, "the throwaway base is removed");
     assert!(!project
         .root
