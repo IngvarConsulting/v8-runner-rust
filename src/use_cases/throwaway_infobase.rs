@@ -218,7 +218,13 @@ impl ThrowawayInfobase {
         timeout: Option<Duration>,
     ) -> Result<(PathBuf, Vec<String>), AppError> {
         let target = self.xml_dir(&source_set.name);
-        let warnings = edt_sources_to_xml(context, config, source_set, &target, None, timeout)?;
+        let warnings = edt_sources_to_xml(
+            context,
+            config,
+            source_set,
+            &target,
+            EdtConversion::OneShot { timeout },
+        )?;
         Ok((target, warnings))
     }
 
@@ -452,22 +458,30 @@ impl Drop for ThrowawayInfobase {
     }
 }
 
+/// Чем [`edt_sources_to_xml`] переводит исходники EDT.
+pub(crate) enum EdtConversion<'s> {
+    /// Общая сессия EDT, которую команда уже держит: одноразовый `1cedtcli` упёрся бы в
+    /// рабочую область сессии. Предел — у самой сессии (`command_timeout_ms`).
+    Session(&'s EdtDsl<'s>),
+    /// Одноразовый `1cedtcli` с пределом шага: `None` — без предела, как у `push`.
+    OneShot { timeout: Option<Duration> },
+}
+
 /// Единственный перевод исходников набора формата EDT в XML каталога `target`: `1cedtcli`
 /// шагом сборки `push` (`build_project::execute_edt_export_step`) в рабочей области
 /// [`edt_workspace`]. Его зовут временная база `make` и `convert`
 /// ([`ThrowawayInfobase::xml_from_edt`]) и сборка файловой базы проекта EDT у
-/// `infobase create`. Предел шага задаёт вызывающий: `make` и `infobase create` идут без
-/// предела, как `push`, `convert` — с пределом EDT команды (`ExecutionContext::edt_timeout`).
-/// Общая сессия EDT команды (`session`) переводит, когда команда её уже держит: одноразовый
-/// `1cedtcli` упёрся бы в рабочую область, которую держит сессия; её предел — свой.
+/// `infobase create`. Чем переводить, задаёт вызывающий ([`EdtConversion`]): `make` и
+/// `infobase create` без общей сессии — одноразовым процессом без предела, как `push`,
+/// `convert` — с пределом EDT команды (`ExecutionContext::edt_timeout`), `infobase create` при
+/// общей сессии — через неё, с её пределом.
 /// Ответ — предупреждения шага.
 pub(crate) fn edt_sources_to_xml(
     context: &ExecutionContext,
     config: &AppConfig,
     source_set: &SourceSetConfig,
     target: &Path,
-    session: Option<&EdtDsl<'_>>,
-    timeout: Option<Duration>,
+    runner: EdtConversion<'_>,
 ) -> Result<Vec<String>, AppError> {
     let inventory = SourceSetInventory::new(config);
     let edt_context = inventory.edt_context(&source_set.name).ok_or_else(|| {
@@ -478,9 +492,9 @@ pub(crate) fn edt_sources_to_xml(
     })?;
     let mut utilities = PlatformUtilities::from_config(config);
     let one_shot;
-    let edt = match session {
-        Some(session) => session,
-        None => {
+    let edt = match runner {
+        EdtConversion::Session(session) => session,
+        EdtConversion::OneShot { timeout } => {
             let location = utilities
                 .locate(UtilityType::EdtCli)
                 .map_err(AppError::from)?;

@@ -1098,7 +1098,7 @@ fn server_infobase_create_never_echoes_the_connection_string_credentials() {
 /// оставленный каталог и оба выхода: удалить и создать заново или загрузить поверх.
 #[test]
 fn a_failed_ibcmd_create_that_left_a_base_names_the_directory_and_the_ways_out() {
-    let (_dir, config_path, _work_path, base_path, platform_path, _edt_calls_log) =
+    let (dir, config_path, _work_path, base_path, platform_path, _edt_calls_log) =
         setup_edt_init_project("DESIGNER", "IBCMD", "__AUTO_FILE__");
     fs::write(
         base_path.join("main").join("Configuration.xml"),
@@ -1119,8 +1119,10 @@ fn a_failed_ibcmd_create_that_left_a_base_names_the_directory_and_the_ways_out()
     let payload = json_of(&output);
     let message = payload["error"]["message"].as_str().expect("message");
     assert!(
-        message.contains("is left with a partly created infobase")
-            && message.contains("remove the directory and run infobase create again")
+        message.contains(&format!(
+            "the directory '{}' is left with a partly created infobase",
+            dir.path().join("ib").display()
+        )) && message.contains("remove the directory and run infobase create again")
             && message.contains("push --force"),
         "{message}"
     );

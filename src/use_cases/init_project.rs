@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use crate::config::model::{AppConfig, MissingDbmsField, SourceFormat, SourceSetConfig};
+use crate::config::model::{
+    declared_name, AppConfig, MissingDbmsField, SourceFormat, SourceSetConfig,
+};
 use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::platform::connection::ClusterInfobaseCreation;
@@ -26,7 +28,7 @@ use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStag
 use crate::use_cases::request::InitRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
-use crate::use_cases::throwaway_infobase::edt_sources_to_xml;
+use crate::use_cases::throwaway_infobase::{edt_sources_to_xml, EdtConversion};
 use crate::use_cases::tool_extension;
 
 pub fn execute(
@@ -96,9 +98,11 @@ fn run_init(
             "infobase",
             "create",
             Instant::now(),
-            AppError::Runtime(
-                "the infobase of an EDT project is assembled from its sources converted to XML in the EDT workspace, and the workspace was not initialized: the infobase is not created; run infobase create again once the workspace import succeeds".to_owned(),
-            ),
+            AppError::Runtime(if dry_run {
+                "the infobase of an EDT project is assembled from its sources converted to XML in the EDT workspace, and the workspace step above cannot run: the infobase would not be created".to_owned()
+            } else {
+                "the infobase of an EDT project is assembled from its sources converted to XML in the EDT workspace, and the workspace was not initialized: the infobase is not created; run infobase create again once the workspace import succeeds".to_owned()
+            }),
         )
     } else {
         ensure_infobase(
@@ -487,7 +491,16 @@ fn prepare_assembly(
                         set.name
                     ))
                 })?;
-            let warnings = edt_sources_to_xml(context, config, set, &target, shared_edt, None)?;
+            let warnings = edt_sources_to_xml(
+                context,
+                config,
+                set,
+                &target,
+                shared_edt.map_or(
+                    EdtConversion::OneShot { timeout: None },
+                    EdtConversion::Session,
+                ),
+            )?;
             Ok(Assembly {
                 memory: AssembledMemory::prepare(config, set)?.with_edt_source(source),
                 import: target,
@@ -719,9 +732,7 @@ fn cluster_creation(config: &AppConfig) -> Result<ClusterInfobaseCreation<'_>, A
         database_user: access.user,
         database_password: access.password,
         locale,
-        cluster_user: cluster
-            .and_then(|cluster| cluster.user.as_deref())
-            .filter(|user| !user.is_empty()),
+        cluster_user: declared_name(cluster.and_then(|cluster| cluster.user.as_deref())),
         cluster_password: cluster
             .and_then(|cluster| cluster.password.as_deref())
             .filter(|password| !password.is_empty()),
@@ -858,15 +869,15 @@ fn ensure_edt_workspace(
 
     let one_shot;
     let dsl: &EdtDsl<'_> = if config.tools.edt_cli.interactive_mode {
-        if shared_edt.is_none() {
-            match shared_edt_session(context, config, binary) {
-                Ok(dsl) => *shared_edt = Some(dsl),
+        match shared_edt {
+            Some(session) => session,
+            None => match shared_edt_session(context, config, binary) {
+                Ok(session) => shared_edt.insert(session),
                 Err(error) => {
                     return StepOutcome::failed("edt_workspace", "import", started, error)
                 }
-            }
+            },
         }
-        shared_edt.as_ref().expect("shared EDT session")
     } else {
         one_shot = EdtDsl::new(
             binary,

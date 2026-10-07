@@ -583,30 +583,55 @@ pub struct InfobaseDbmsConfig {
 /// Обязательное поле секции `infobase.dbms`, которого нет: раннер идёт в СУБД сам и берёт
 /// его из секции. Текст один у всех, кто читает контракт.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("infobase.dbms.{field} is not declared: the runner goes to the DBMS itself and takes {what} from the dbms section{consequence}")]
+#[error("infobase.dbms.{} is not declared: the runner goes to the DBMS itself and takes {} from the dbms section{}", .field.key(), .field.meaning(), .field.consequence())]
 pub struct MissingDbmsField {
-    pub field: &'static str,
-    what: &'static str,
-    consequence: &'static str,
+    pub field: DbmsField,
 }
 
-impl MissingDbmsField {
-    const fn of(field: &'static str) -> Self {
-        let (what, consequence) = match field.as_bytes() {
-            b"kind" => ("the DBMS kind", ""),
-            b"server" => ("the DBMS server", ""),
-            b"name" => ("the database name", ""),
-            _ => (
-                "the locale of a new cluster infobase",
-                " — without Locale CREATEINFOBASE leaves an abandoned database in the DBMS",
-            ),
-        };
-        Self {
-            field,
-            what,
-            consequence,
+/// Обязательное поле секции `infobase.dbms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbmsField {
+    Kind,
+    Server,
+    Name,
+    /// Нужно только созданию базы в кластере.
+    Locale,
+}
+
+impl DbmsField {
+    /// Ключ поля в секции.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Kind => "kind",
+            Self::Server => "server",
+            Self::Name => "name",
+            Self::Locale => "locale",
         }
     }
+
+    const fn meaning(self) -> &'static str {
+        match self {
+            Self::Kind => "the DBMS kind",
+            Self::Server => "the DBMS server",
+            Self::Name => "the database name",
+            Self::Locale => "the locale of a new cluster infobase",
+        }
+    }
+
+    const fn consequence(self) -> &'static str {
+        match self {
+            Self::Kind | Self::Server | Self::Name => "",
+            Self::Locale => {
+                " — without Locale CREATEINFOBASE leaves an abandoned database in the DBMS"
+            }
+        }
+    }
+}
+
+/// Непустое имя или пароль: имя из одних пробелов — не имя. Одно правило для учётных
+/// записей СУБД и кластера.
+pub(crate) fn declared_name(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 /// Проверенный доступ к СУБД — единственное чтение контракта `infobase.dbms`: обязательные
@@ -623,12 +648,14 @@ pub struct DbmsAccess<'a> {
 impl InfobaseConfig {
     /// Доступ к СУБД из секции `dbms`; без секции не хватает первого поля — `kind`.
     pub fn dbms_access(&self) -> Result<DbmsAccess<'_>, MissingDbmsField> {
-        let dbms = self.dbms.as_ref().ok_or(MissingDbmsField::of("kind"))?;
+        let dbms = self.dbms.as_ref().ok_or(MissingDbmsField {
+            field: DbmsField::Kind,
+        })?;
         Ok(DbmsAccess {
-            kind: required_dbms_field("kind", dbms.kind.as_deref())?,
-            server: required_dbms_field("server", dbms.server.as_deref())?,
-            name: required_dbms_field("name", dbms.name.as_deref())?,
-            user: dbms.user.as_deref().filter(|user| !user.trim().is_empty()),
+            kind: required_dbms_field(DbmsField::Kind, dbms.kind.as_deref())?,
+            server: required_dbms_field(DbmsField::Server, dbms.server.as_deref())?,
+            name: required_dbms_field(DbmsField::Name, dbms.name.as_deref())?,
+            user: declared_name(dbms.user.as_deref()),
             password: dbms
                 .password
                 .as_deref()
@@ -639,20 +666,17 @@ impl InfobaseConfig {
     /// Национальные настройки новой базы в кластере (`dbms.locale`).
     pub fn dbms_locale(&self) -> Result<&str, MissingDbmsField> {
         required_dbms_field(
-            "locale",
+            DbmsField::Locale,
             self.dbms.as_ref().and_then(|dbms| dbms.locale.as_deref()),
         )
     }
 }
 
-fn required_dbms_field<'a>(
-    field: &'static str,
-    value: Option<&'a str>,
-) -> Result<&'a str, MissingDbmsField> {
+fn required_dbms_field(field: DbmsField, value: Option<&str>) -> Result<&str, MissingDbmsField> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or(MissingDbmsField::of(field))
+        .ok_or(MissingDbmsField { field })
 }
 
 impl InfobaseDbmsConfig {

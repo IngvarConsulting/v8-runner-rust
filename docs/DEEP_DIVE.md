@@ -214,8 +214,9 @@ runtime snapshot commit только указанным source-set.
   `throwaway_infobase::edt_sources_to_xml` — единственный перевод у `make`, `convert` и
   `infobase create` (временная база зовёт его через `ThrowawayInfobase::xml_from_edt`): шаг
   сборки `build_project::execute_edt_export_step` в рабочей области `workPath/edt-workspace`,
-  общей сессией EDT команды, если она её держит; у `make` и `infobase create` шаг без предела,
-  как у `push`, у `convert` — с пределом EDT команды. Других вызывающих шага, кроме сборки
+  общей сессией EDT команды, если она её держит, — тогда действует предел команды сессии
+  (`tools.edt_cli.command_timeout_ms`); одноразовым процессом у `make` и `infobase create` шаг
+  без предела, как у `push`, у `convert` — с пределом EDT команды. Других вызывающих шага, кроме сборки
   `push`, нет — это держит проверка `the_edt_export_step_has_one_converter_besides_push`. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
   `make <SET>` — своя, обход без набора — общая на все наборы; внешние обработки Конфигуратор
   собирает поверх основной конфигурации в своей базе; после прогона она убирается, а

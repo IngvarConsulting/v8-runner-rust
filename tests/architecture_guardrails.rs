@@ -508,13 +508,7 @@ fn edt_check_modules(index: &SourceIndex) -> std::collections::BTreeSet<String> 
             syn::visit::visit_block(&mut call, body.block);
             call.0
                 || markers.iter().any(|marker| {
-                    let mut finder = PathFinder {
-                        index,
-                        module: &body.module,
-                        local_uses: body.local_uses(index),
-                        target: marker,
-                        found: false,
-                    };
+                    let mut finder = body.path_finder(index, marker);
                     syn::visit::visit_block(&mut finder, body.block);
                     finder.found
                 })
@@ -537,13 +531,7 @@ fn path_sites(index: &SourceIndex, target: &str) -> std::collections::BTreeSet<S
     production_bodies(index)
         .into_iter()
         .filter(|body| {
-            let mut finder = PathFinder {
-                index,
-                module: &body.module,
-                local_uses: body.local_uses(index),
-                target: &constructor,
-                found: false,
-            };
+            let mut finder = body.path_finder(index, &constructor);
             syn::visit::visit_block(&mut finder, body.block);
             finder.found
         })
@@ -556,8 +544,8 @@ fn path_sites(index: &SourceIndex, target: &str) -> std::collections::BTreeSet<S
 /// второй — со своим пределом, своей рабочей областью и своей сессией. Шаг
 /// `execute_edt_export_step` зовут только сборка `push` (`build_project::coordinator`) и
 /// единственный перевод `throwaway_infobase::edt_sources_to_xml`, через который идут `make`,
-/// `convert` и `infobase create`. Новый вызывающий под любым местным именем роняет проверку;
-/// не видит она вызова через глобальный импорт `use super::*`, каким шаг берёт сама сборка.
+/// `convert` и `infobase create`. Новый вызывающий под любым местным именем или за звёздочным
+/// `use` — так шаг берёт сама сборка, `use super::*`, — роняет проверку.
 #[test]
 fn the_edt_export_step_has_one_converter_besides_push() {
     const CONVERTER: &str = "crate::use_cases::throwaway_infobase::edt_sources_to_xml";
@@ -575,8 +563,44 @@ fn the_edt_export_step_has_one_converter_besides_push() {
         "execute_edt_export_step is called outside push and edt_sources_to_xml: {outside:?}; convert EDT sources through throwaway_infobase::edt_sources_to_xml"
     );
     assert!(
-        found.contains(CONVERTER),
+        found.contains(CONVERTER) && found.iter().any(|site| site.starts_with(PUSH)),
         "the guard no longer sees the single converter: {found:?}"
+    );
+}
+
+/// Самопроверка поиска пути: вызов находится под полным путём, под местным именем и за
+/// звёздочным `use` модуля и тела, а одноимённая функция другого модуля — нет.
+#[test]
+fn path_sites_see_a_call_behind_a_glob_import() {
+    let index = SourceIndex::from_sources(&[
+        ("crate::use_cases::build", "pub(crate) fn export_step() {}"),
+        ("crate::use_cases::other", "pub(crate) fn export_step() {}"),
+        (
+            "crate::use_cases::build::coordinator",
+            "use super::*;\n\
+             fn module_glob() { export_step(); }",
+        ),
+        (
+            "crate::use_cases::caller",
+            "use crate::use_cases::build::export_step as step;\n\
+             fn full() { crate::use_cases::build::export_step(); }\n\
+             fn renamed() { step(); }\n\
+             fn body_glob() { use crate::use_cases::build::*; export_step(); }\n\
+             fn foreign() { use crate::use_cases::other::*; export_step(); }",
+        ),
+    ]);
+
+    assert_eq!(
+        path_sites(&index, "crate::use_cases::build::export_step"),
+        [
+            "crate::use_cases::build::coordinator::module_glob",
+            "crate::use_cases::caller::body_glob",
+            "crate::use_cases::caller::full",
+            "crate::use_cases::caller::renamed",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     );
 }
 
@@ -1157,6 +1181,7 @@ impl SourceIndex {
             index: self,
             module: &function.module,
             local_uses: block_local_uses(self, &function.module, &function.item.block),
+            globs: Vec::new(),
             target,
             found: false,
         };
@@ -1188,6 +1213,23 @@ struct Body<'a> {
 
 impl Body<'_> {
     /// `use` тела и `Self` метода.
+    /// Поиск пути `target` в теле: под местными именами и за звёздочными `use` тела и модуля.
+    fn path_finder<'f>(&'f self, index: &'f SourceIndex, target: &'f [String]) -> PathFinder<'f> {
+        PathFinder {
+            index,
+            module: &self.module,
+            local_uses: self.local_uses(index),
+            globs: self
+                .globs
+                .iter()
+                .cloned()
+                .chain(block_uses(index, &self.module, self.block).globs)
+                .collect(),
+            target,
+            found: false,
+        }
+    }
+
     fn local_uses(&self, index: &SourceIndex) -> std::collections::HashMap<String, Vec<String>> {
         let mut uses = block_local_uses(index, &self.module, self.block);
         if let Some(owner) = &self.owner {
@@ -1516,18 +1558,34 @@ struct PathFinder<'a> {
     index: &'a SourceIndex,
     module: &'a [String],
     local_uses: std::collections::HashMap<String, Vec<String>>,
+    /// Звёздочные `use` тела и его модуля: одно имя пути ищется и за ними.
+    globs: Vec<Vec<String>>,
     target: &'a [String],
     found: bool,
 }
 
 impl<'ast> syn::visit::Visit<'ast> for PathFinder<'_> {
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        if self
+        match self
             .index
             .resolve_target(self.module, &self.local_uses, &node.path)
-            .is_some_and(|path| path == self.target)
         {
-            self.found = true;
+            Some(path) => {
+                if path == self.target {
+                    self.found = true;
+                }
+            }
+            None if node.path.segments.len() == 1 => {
+                let name = node.path.segments[0].ident.to_string();
+                if self.globs.iter().any(|glob| {
+                    self.index
+                        .function_at([glob.as_slice(), std::slice::from_ref(&name)].concat())
+                        .is_some_and(|path| path == self.target)
+                }) {
+                    self.found = true;
+                }
+            }
+            None => {}
         }
         syn::visit::visit_expr_path(self, node);
     }
@@ -1679,13 +1737,7 @@ fn relocks_in_the_scenario_layer(index: &SourceIndex) -> Vec<String> {
             continue;
         }
         for target in lock.acquirers.iter().chain(&lock.helpers) {
-            let mut finder = PathFinder {
-                index,
-                module: &body.module,
-                local_uses: body.local_uses(index),
-                target,
-                found: false,
-            };
+            let mut finder = body.path_finder(index, target);
             syn::visit::visit_block(&mut finder, body.block);
             if finder.found {
                 relocks.push(format!(
