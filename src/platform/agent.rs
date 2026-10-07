@@ -785,6 +785,7 @@ impl AgentSession {
     /// блокировку Конфигуратора и после разрыва SSH — и саму сессию. Ответ не важен, работы
     /// команды это не отмечает.
     pub fn release(mut self, policy: &WaitPolicy) {
+        self.discard_stale();
         let _ = self.run(DISCONNECT_COMMAND, &policy.cleanup().without_work());
         self.disconnect();
     }
@@ -1074,17 +1075,22 @@ impl AgentSession {
         // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
         // дольше короткого срока незачем, даже если бюджет команды не ограничен.
         let capped = policy.cleanup().without_work();
-        // Недочитанное от прежней команды — например, неверный ответ, на котором она
-        // кончилась, — ответом на завершение не является: без сброса разбор упал бы на нём
-        // сразу (`InvalidReply`), не дождавшись ответа агента на `shutdown`.
-        let stale = std::mem::take(&mut self.pending);
-        if let Some(log) = self.transcript.as_mut() {
-            let _ = log.write_all(&stale);
-        }
+        self.discard_stale();
         // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
         self.disconnect();
         reply
+    }
+
+    /// Недочитанное от прежней команды — например, неверный ответ, на котором она
+    /// кончилась, — ответом на служебную команду (`disconnect-ib`, `shutdown`) не является:
+    /// без сброса разбор упал бы на нём сразу (`InvalidReply`), не дождавшись ответа агента.
+    /// Сброшенное остаётся в журнале сессии.
+    fn discard_stale(&mut self) {
+        let stale = std::mem::take(&mut self.pending);
+        if let Some(log) = self.transcript.as_mut() {
+            let _ = log.write_all(&stale);
+        }
     }
 
     fn disconnect(&mut self) {
