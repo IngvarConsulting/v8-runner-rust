@@ -185,6 +185,10 @@ pub(crate) fn connect(
     Ok(handle)
 }
 
+/// Отказ агенту, выбранному рядом с объявленной строкой прямого шлюза, когда канала нет:
+/// строка уже объявлена, и не хватает только канала.
+const GATE_WITHOUT_A_CHANNEL: &str = "the agent works with a standalone server through its SSH gate, and files travel there only by a declared channel: set infobase.standalone.exchange to `sftp` (through the gate) or to `{ dir: … }` — the gate user's directory as the runner sees it";
+
 fn open_handle(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
@@ -209,12 +213,7 @@ fn open_handle(
             Exchange::Dir(
                 standalone
                     .exchange_dir()
-                    .ok_or_else(|| {
-                        AppError::Validation(
-                            crate::config::validate::ConfigValidationError::StandaloneExchangeMissing
-                                .to_string(),
-                        )
-                    })?
+                    .ok_or_else(|| AppError::Validation(GATE_WITHOUT_A_CHANNEL.to_owned()))?
                     .to_path_buf(),
             )
         };

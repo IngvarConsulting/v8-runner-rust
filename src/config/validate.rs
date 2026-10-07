@@ -178,14 +178,11 @@ pub enum ConfigValidationError {
         implemented: String,
     },
 
-    #[error(
-        "providers.{operation}: '{provider}' reaches a standalone server by {way}, which is not declared: declare {key}, or remove the key"
-    )]
+    #[error("providers.{operation}: {}, or remove the key", .way.undeclared(*.provider))]
     ProviderWithoutAWay {
         operation: &'static str,
-        provider: &'static str,
-        way: &'static str,
-        key: &'static str,
+        provider: crate::domain::capability::Provider,
+        way: crate::config::model::StandaloneWay,
     },
 
     #[error(
@@ -1309,9 +1306,8 @@ fn validate_providers(
         if let Some(way) = config.missing_way(*operation, *provider) {
             return Err(ConfigValidationError::ProviderWithoutAWay {
                 operation: operation.as_str(),
-                provider: provider.as_str(),
-                way: way.name(),
-                key: way.key(),
+                provider: *provider,
+                way,
             });
         }
     }

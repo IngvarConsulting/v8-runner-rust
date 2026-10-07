@@ -497,14 +497,15 @@ impl Executor {
     pub(crate) fn target_label(&self, config: &AppConfig) -> String {
         match self {
             Self::Ibcmd { connection, .. } => connection.describe_target(),
-            Self::Agent { .. } => match config.infobase.standalone.as_ref() {
-                Some(standalone) => format!(
-                    "standalone server at {}",
-                    standalone
-                        .gate
-                        .as_deref()
-                        .unwrap_or("its undeclared SSH gate")
-                ),
+            // Агента автономному серверу назначают только при объявленном SSH-шлюзе
+            // (`AppConfig::missing_way`), так что шлюз есть всегда, когда есть секция.
+            Self::Agent { .. } => match config
+                .infobase
+                .standalone
+                .as_ref()
+                .and_then(|standalone| standalone.gate.as_deref())
+            {
+                Some(gate) => format!("standalone server at {gate}"),
                 None => config.v8_connection().describe_target(),
             },
         }

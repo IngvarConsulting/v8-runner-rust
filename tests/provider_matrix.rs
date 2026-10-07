@@ -301,7 +301,7 @@ fn a_foreign_operation_key_does_not_block_the_transfer_family() {
     assert_ne!(code, 0, "{payload}");
     assert_eq!(
         payload["error"]["message"],
-        "infobase.dump reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "infobase.dump has no executor with a declared way to the standalone server: designer reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
         "provider selection refuses the snapshot, not the build key: {payload}"
     );
     assert!(

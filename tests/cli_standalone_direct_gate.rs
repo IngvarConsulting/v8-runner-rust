@@ -157,7 +157,9 @@ fn assert_every_call_goes_to_the_direct_gate(calls: &[String]) {
     assert!(!calls.is_empty(), "the Designer was not started");
     for call in calls {
         assert!(
-            call.contains(&format!("/S {DIRECT_GATE_SWITCH}")) && call.contains("/N Admin"),
+            call.contains(&format!("/S {DIRECT_GATE_SWITCH}"))
+                && call.contains("/N Admin")
+                && call.contains("/P s3cret"),
             "{call}"
         );
     }
@@ -219,23 +221,45 @@ fn a_standalone_server_with_only_the_direct_gate_is_served_by_the_designer() {
     }
 }
 
-/// При обоих шлюзах первым стоит Конфигуратор: команда идёт в прямой шлюз, а SSH-шлюз,
-/// на порту которого никто не слушает, не тронут.
+/// При обоих шлюзах первым стоит Конфигуратор у `push`, `pull` и `download` рабочей
+/// конфигурации: команда идёт в прямой шлюз, а SSH-шлюз, на порту которого никто не
+/// слушает, не тронут.
 #[test]
 fn the_designer_leads_the_chain_when_both_gates_are_declared() {
     let project = Project::both_gates();
+    let package = project.root().join("dist").join("main.cf");
 
-    let payload = succeeded(&project.run(&["pull", "--force"]));
+    let push = succeeded(&project.run(&["push", "--force"]));
+    let pull = succeeded(&project.run(&["pull", "--force"]));
+    let download = succeeded(&project.run(&[
+        "download",
+        "main",
+        "--state",
+        "working",
+        "--output",
+        &package.display().to_string(),
+    ]));
 
-    assert_eq!(
-        payload["data"]["provider"]["selected"], "designer",
-        "{payload}"
-    );
-    assert_eq!(
-        payload["data"]["provider"]["origin"]["kind"], "default",
-        "{payload}"
-    );
-    assert_every_call_goes_to_the_direct_gate(&project.calls());
+    for payload in [&push, &pull, &download] {
+        assert_eq!(
+            payload["data"]["provider"]["selected"], "designer",
+            "{payload}"
+        );
+        assert_eq!(
+            payload["data"]["provider"]["origin"]["kind"], "default",
+            "{payload}"
+        );
+    }
+    assert_eq!(download["data"]["state"], "working", "{download}");
+    assert_eq!(fs::read(&package).expect("package"), b"payload");
+    let calls = project.calls();
+    assert_every_call_goes_to_the_direct_gate(&calls);
+    for switch in ["/LoadConfigFromFiles", "/DumpConfigToFiles", "/DumpCfg "] {
+        assert!(
+            calls.iter().any(|call| call.contains(switch)),
+            "{switch}: {calls:?}"
+        );
+    }
 }
 
 /// По прямому шлюзу файлы остаются у раннера: Конфигуратор получает пути машины раннера —
@@ -370,7 +394,7 @@ fn without_the_ssh_gate_the_agent_is_not_offered() {
     assert_eq!(extensions["error"]["kind"], "validation", "{extensions}");
     assert_eq!(
         extensions["error"]["message"],
-        "extensions reaches a standalone server only through agent by the SSH gate — declare infobase.standalone.gate",
+        "extensions has no executor with a declared way to the standalone server: agent reaches a standalone server by the SSH gate, which is not declared: declare infobase.standalone.gate",
         "{extensions}"
     );
 
@@ -383,7 +407,7 @@ fn without_the_ssh_gate_the_agent_is_not_offered() {
     assert_eq!(pull["error"]["kind"], "validation", "{pull}");
     assert_eq!(
         pull["error"]["message"],
-        "config validation failed: providers.pull: 'agent' reaches a standalone server by the SSH gate, which is not declared: declare infobase.standalone.gate, or remove the key",
+        "config validation failed: providers.pull: agent reaches a standalone server by the SSH gate, which is not declared: declare infobase.standalone.gate, or remove the key",
         "{pull}"
     );
     assert!(project.calls().is_empty(), "{:?}", project.calls());

@@ -292,7 +292,7 @@ impl StandaloneWay {
     }
 
     /// The way as the refusal names it.
-    pub const fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::DirectGate => "the direct gate",
             Self::SshGate => "the SSH gate",
@@ -300,14 +300,15 @@ impl StandaloneWay {
     }
 
     /// What the configuration declares for this way.
-    pub const fn key(self) -> &'static str {
+    const fn key(self) -> &'static str {
         match self {
             Self::DirectGate => "infobase.connection as Srvr=<host>:<port>;Ref=<name>",
             Self::SshGate => "infobase.standalone.gate",
         }
     }
 
-    /// The reason a provider without its way is skipped.
+    /// The one wording of a missing way: whom it lacks, which way and what to declare.
+    /// Every refusal and skip reason about an undeclared way is built from it.
     pub fn undeclared(self, provider: Provider) -> String {
         format!(
             "{provider} reaches a standalone server by {}, which is not declared: declare {}",
@@ -660,12 +661,12 @@ impl AppConfig {
             .iter()
             .filter_map(|provider| {
                 self.missing_way(operation, *provider)
-                    .map(|way| format!("{provider} by {} — declare {}", way.name(), way.key()))
+                    .map(|way| way.undeclared(*provider))
             })
             .collect::<Vec<_>>()
             .join("; ");
         Some(format!(
-            "{operation} reaches a standalone server only through {ways}"
+            "{operation} has no executor with a declared way to the standalone server: {ways}"
         ))
     }
 

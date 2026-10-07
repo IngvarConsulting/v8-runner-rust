@@ -612,7 +612,7 @@ fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
         );
         assert_eq!(
             error_message(&payload),
-            "download --state db takes the database configuration, which only designer or ibcmd exports: agent has no command for it; a standalone target as declared serves download only through the agent: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>, or omit --state db to export the working configuration",
+            "download --state db takes the database configuration, which only designer or ibcmd exports: agent has no command for it; a standalone target as declared serves download only through the agent: designer reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>, or omit --state db to export the working configuration",
             "{payload}"
         );
         assert_eq!(payload["data"]["provider"]["selected"], Value::Null);
@@ -732,8 +732,9 @@ fn an_agent_chosen_next_to_the_direct_gate_without_a_channel_is_refused_before_a
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert!(
-        error_message(&payload).contains("infobase.standalone.exchange"),
-        "{payload}"
+        error_message(&payload).contains("infobase.standalone.exchange")
+            && !error_message(&payload).contains("infobase.connection"),
+        "the string is declared already, only the channel is missing: {payload}"
     );
     assert_eq!(
         payload["data"]["provider"]["selected"], "agent",
@@ -881,7 +882,7 @@ fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert_eq!(
         error_message(&payload),
-        "config validation failed: providers.pull: 'designer' reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>, or remove the key",
+        "config validation failed: providers.pull: designer reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>, or remove the key",
         "{payload}"
     );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
@@ -910,7 +911,7 @@ fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert_eq!(
         error_message(&payload),
-        "upload reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "upload has no executor with a declared way to the standalone server: designer reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
         "{payload}"
     );
     assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
@@ -920,7 +921,7 @@ fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert_eq!(
         error_message(&payload),
-        "syntax reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "syntax has no executor with a declared way to the standalone server: designer reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
         "{payload}"
     );
     assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
@@ -957,7 +958,7 @@ fn a_standalone_snapshot_without_the_direct_gate_is_refused_before_any_session()
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert_eq!(
         error_message(&payload),
-        "infobase.dump reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "infobase.dump has no executor with a declared way to the standalone server: designer reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
         "{payload}"
     );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));

@@ -1100,10 +1100,11 @@ fn database_configuration_plan(
         // не объявлен: выход — объявить его или выгрузить рабочую конфигурацию.
         ProviderPlan::Default { .. } => {
             let declare = database_configuration_exporters()
-                .filter_map(|provider| config.missing_way(Operation::ConfigurationExport, provider))
-                .map(|way| format!("declare {}", way.key()))
-                .next()
-                .map(|declare| format!("{declare}, or "))
+                .find_map(|provider| {
+                    config
+                        .missing_way(Operation::ConfigurationExport, provider)
+                        .map(|way| format!("{}, or ", way.undeclared(provider)))
+                })
                 .unwrap_or_default();
             format!(
                 "{reason}; a {} target as declared serves {operation} only through the agent: {declare}omit --state db to export the working configuration",
