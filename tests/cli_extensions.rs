@@ -157,24 +157,22 @@ fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
     )
     .expect("server config");
 
-    for arguments in [vec!["infobase", "create"]] {
-        let output = v8_runner_command()
-            .args(["--config", config_path.to_str().expect("utf-8 path")])
-            .arg("--json-message")
-            .args(&arguments)
-            .output()
-            .expect("run command");
+    let output = v8_runner_command()
+        .args(["--config", config_path.to_str().expect("utf-8 path")])
+        .arg("--json-message")
+        .args(["infobase", "create"])
+        .output()
+        .expect("run command");
 
-        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
-        let envelope: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("json envelope");
-        assert!(
-            envelope["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("infobase.dbms")),
-            "{arguments:?}: {envelope}"
-        );
-    }
+    assert_eq!(output.status.code(), Some(2));
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("infobase.dbms")),
+        "{envelope}"
+    );
     assert!(!calls_log.exists(), "ibcmd must not be started");
 }
 
