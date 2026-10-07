@@ -16,10 +16,11 @@ use support::{temp_workspace, v8_runner_command};
 /// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — Конфигуратор первым,
 /// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
 fn providers_yaml(builder: &str) -> &'static str {
-    if builder == "IBCMD" {
-        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
-    } else {
-        support::DESIGNER_LEADS
+    match builder {
+        "IBCMD" => "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n",
+        "AGENT" => "providers:\n  push: agent\n",
+        "DEFAULT" => "",
+        _ => support::DESIGNER_LEADS,
     }
 }
 
@@ -1091,4 +1092,43 @@ fn tools_download_sources_rejects_conflicting_tests_source_set() {
     );
     assert!(combined.contains("source-set 'tests' already exists"));
     assert!(!dir.path().join("tests").exists());
+}
+
+/// `client_mcp.cfe` регистрируется расширением-инструментом, а его ставит только
+/// Конфигуратор: без ключа `providers.push` агент из цепочки `push` при таком расширении
+/// выпадает, и скачивание артефакта проходит; ключ, назначивший агента, — отказ.
+#[test]
+fn tools_download_client_mcp_artifact_follows_the_push_chain_shaped_by_the_tool_extension() {
+    for (builder, accepted) in [("DEFAULT", true), ("AGENT", false)] {
+        let dir = temp_workspace();
+        let config_path = write_minimal_config_with_builder(dir.path(), builder);
+        let server_root = dir.path().join("server");
+        let (_server, port) = FixtureServer::start(&server_root);
+        write_http_fixture(&server_root, port);
+
+        let output = v8_runner_command()
+            .env(
+                "V8TR_GITHUB_API_BASE_URL",
+                format!("http://127.0.0.1:{port}"),
+            )
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "tools",
+                "download",
+                "client-mcp",
+            ])
+            .output()
+            .expect("run client-mcp command");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), accepted, "{builder}: {stdout}");
+        if !accepted {
+            assert!(
+                stdout.contains("needs the Designer as the push provider"),
+                "{builder}: {stdout}"
+            );
+        }
+    }
 }

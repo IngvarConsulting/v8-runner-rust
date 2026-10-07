@@ -121,6 +121,13 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(read_or_empty(&agent.commands_log).contains("config dump-config-to-files"));
     assert!(calls.contains(&format!("/F {tmp}/source ib")));
+    // Порт агента не объявлен: раннер берёт свободный на этот запуск, а не `1543`.
+    let port = calls
+        .split("/AgentPort ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("agent port");
+    assert_ne!(port, "1543", "{calls}");
 }
 
 /// `--source-dir ./src`: `v8project.yaml` хранит написание пользователя, а argv платформы,

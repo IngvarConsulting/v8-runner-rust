@@ -204,6 +204,33 @@ fn a_managed_agent_is_pinned_by_the_host_key_file_it_was_given() {
     assert!(message.contains("host key"), "{message}");
 }
 
+/// Ключ хоста не объявлен, а на порту агента ответил SSH-сервер с другим ключом: раннер
+/// закрепил сессию на одноразовом ключе, который отдал агенту, и к чужому не подключается.
+#[test]
+fn a_managed_agent_without_a_declared_key_refuses_a_foreign_key_on_its_port() {
+    let harness = harness_with(true, Some(true), false, Some(random_host_key()), |_| {
+        String::new()
+    });
+
+    let (code, payload) = run_dump(&harness, &["--force"]);
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(
+        payload["error"]["code"], "environment_unavailable",
+        "{payload}"
+    );
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("not with the key the runner handed to the agent it launched"),
+        "{message}"
+    );
+    assert!(
+        commands(&harness).is_empty(),
+        "no command reaches a foreign agent: {:?}",
+        commands(&harness)
+    );
+}
+
 fn run_dump(harness: &Harness, extra: &[&str]) -> (i32, Value) {
     let output = v8_runner_command()
         .args([

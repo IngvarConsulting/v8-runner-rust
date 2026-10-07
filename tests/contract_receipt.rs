@@ -176,3 +176,49 @@ fn a_local_override_is_attributed_to_the_local_file() {
     assert_eq!(receipt["selected"], "ibcmd");
     assert_eq!(receipt["origin"]["file"], "v8project.local.yaml");
 }
+
+/// Проект EDT: у агента нет адаптера исходников EDT, и без ключа `push` первым берёт
+/// Конфигуратор; ключ `providers.push: agent` форма проекта не переписывает.
+#[test]
+fn an_edt_project_pushes_through_the_designer_unless_a_key_names_the_agent() {
+    for (providers, expected, origin) in [
+        ("", "designer", "default"),
+        ("providers:\n  push: agent\n", "agent", "override"),
+    ] {
+        let dir = temp_workspace();
+        let config_path = write_project(dir.path(), &["1cv8", "ibcmd"], providers);
+        let text = fs::read_to_string(&config_path).expect("config");
+        fs::write(
+            &config_path,
+            text.replace("format: DESIGNER", "format: EDT"),
+        )
+        .expect("edt");
+        let project = dir.path().join("project").join("configuration");
+        fs::create_dir_all(project.join("DT-INF")).expect("dt-inf");
+        fs::create_dir_all(project.join("src").join("Configuration")).expect("src");
+        fs::write(
+            project
+                .join("src")
+                .join("Configuration")
+                .join("Configuration.mdo"),
+            "<mdclass:Configuration/>",
+        )
+        .expect("edt configuration");
+        fs::write(
+            project.join(".project"),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<projectDescription>\n  <name>main</name>\n  <natures>\n    <nature>com._1c.g5.v8.dt.core.V8ConfigurationNature</nature>\n  </natures>\n</projectDescription>\n",
+        )
+        .expect("edt project");
+        fs::write(
+            project.join("DT-INF").join("PROJECT.PMF"),
+            "Manifest-Version: 1.0\nRuntime-Version: 8.3.27\n",
+        )
+        .expect("edt manifest");
+
+        let (_code, payload) = run(&config_path, &["push", "--dry-run"]);
+
+        let receipt = &payload["data"]["provider"];
+        assert_eq!(receipt["selected"], expected, "{payload}");
+        assert_eq!(receipt["origin"]["kind"], origin, "{payload}");
+    }
+}

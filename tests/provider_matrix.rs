@@ -379,3 +379,89 @@ fn no_default_chain_names_the_publication_provider() {
         );
     }
 }
+
+/// У кластера `ibcmd` в строках операций нет (#206): ключ `providers.<операция>: ibcmd`
+/// отказывает при проверке настроек у каждой операции, которую он прежде исполнял, называет
+/// исполнителей строки и не запускает платформу.
+#[test]
+fn a_cluster_base_refuses_ibcmd_for_every_operation_it_left() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), "");
+    let started = dir.path().join("platform-started");
+    for utility in ["1cv8", "ibcmd"] {
+        write_shell_script(
+            &dir.path().join("platform").join("bin").join(utility),
+            &format!("touch '{}'\nexit 0", started.display()),
+        );
+    }
+    let cluster = fs::read_to_string(&config_path)
+        .expect("config")
+        .replace(
+            &format!("connection: 'File={}'", dir.path().join("ib").display()),
+            "connection: 'Srvr=srv;Ref=demo'\n  dbms:\n    kind: PostgreSQL\n    server: db\n    name: demo",
+        );
+    let output = dir.path().join("out").display().to_string();
+    let snapshot = dir.path().join("main.dt");
+    fs::write(&snapshot, "dt").expect("snapshot");
+    let snapshot = snapshot.display().to_string();
+    let cf = format!("{output}.cf");
+    let dt = format!("{output}.dt");
+    let rows: [(&str, &str, Vec<&str>); 6] = [
+        ("push", "agent, designer", vec!["push", "--dry-run"]),
+        (
+            "pull",
+            "agent, designer",
+            vec!["pull", "--force", "--dry-run"],
+        ),
+        (
+            "download",
+            "agent, designer",
+            vec!["download", "main", "--output", &cf, "--dry-run"],
+        ),
+        (
+            "extensions",
+            "agent",
+            vec!["extensions", "list", "--dry-run"],
+        ),
+        (
+            "infobase.dump",
+            "agent, designer",
+            vec!["infobase", "dump", "--output", &dt, "--dry-run"],
+        ),
+        (
+            "infobase.restore",
+            "agent, designer",
+            vec![
+                "infobase",
+                "restore",
+                "--input",
+                &snapshot,
+                "--replace",
+                "--dry-run",
+            ],
+        ),
+    ];
+    for (key, implemented, arguments) in rows {
+        fs::write(
+            &config_path,
+            cluster.replace(
+                "format: DESIGNER\n",
+                &format!("format: DESIGNER\nproviders:\n  {key}: ibcmd\n"),
+            ),
+        )
+        .expect("cluster config");
+        let (code, payload) = run(&config_path, &arguments);
+        let shown = arguments.join(" ");
+        assert_eq!(code, 2, "`{shown}`: {payload}");
+        let message = payload["error"]["message"].as_str().unwrap_or_default();
+        let expected = if implemented.contains(',') {
+            format!(
+                "providers.{key}: 'ibcmd' does not implement this operation on a cluster infobase; implemented: {implemented}"
+            )
+        } else {
+            format!("providers.{key}")
+        };
+        assert!(message.contains(&expected), "`{shown}`: {message}");
+        assert!(!started.exists(), "`{shown}` started the platform");
+    }
+}

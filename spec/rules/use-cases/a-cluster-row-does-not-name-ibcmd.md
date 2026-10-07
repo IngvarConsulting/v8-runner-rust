@@ -5,6 +5,7 @@ check:
   - tests/cli_build.rs::a_cluster_infobase_refuses_providers_push_ibcmd_before_the_platform
   - tests/cli_infobase.rs::a_complete_server_dbms_contract_does_not_bring_ibcmd_into_a_cluster_download
   - src/use_cases/configure_extensions.rs::extensions_on_a_cluster_target_go_to_the_agent_not_to_ibcmd
+  - tests/provider_matrix.rs::a_cluster_base_refuses_ibcmd_for_every_operation_it_left
 ---
 
 # В строках кластера нет `ibcmd`
@@ -18,3 +19,7 @@ check:
 Ключ `providers.<операция>: ibcmd` у кластерной базы отказывает при проверке настроек и
 называет исполнителей строки. Полная секция `dbms` и готовый `ibcmd` на машине раннера в
 цепочку кластера его не вводят.
+
+Строка матрицы — это исполнитель операции. Вспомогательный вызов вне строки остаётся один:
+`upload` расширения, которое исполняет Конфигуратор, читает список установленных расширений
+через `ibcmd` (`load_artifact.rs`), и у кластерной базы для этого нужна секция `dbms`.

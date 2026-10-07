@@ -2084,3 +2084,44 @@ fn infobase_dump_into_a_package_names_download() {
         assert!(!output.exists());
     }
 }
+
+/// Управляемый агент не поднялся — `1cv8` в агентском режиме сразу вышел. Выбор исполнителя
+/// закончился до запуска: команда отказывает, квитанция называет агента, и Конфигуратор
+/// пакетным процессом не вызывается — отката по цепочке после запуска нет.
+#[test]
+fn a_managed_agent_that_did_not_start_fails_the_command_without_the_designer() {
+    let (_dir, config, base, calls) = setup("DEFAULT");
+    let output = base.join("dist/main.cf");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "download",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .output()
+        .expect("run download");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(
+        envelope["error"]["code"], "environment_unavailable",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["data"]["provider"]["selected"], "agent",
+        "{envelope}"
+    );
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
+    let argv = fs::read_to_string(&calls).expect("calls");
+    assert!(argv.contains("/AgentMode"), "{argv}");
+    assert!(
+        argv.lines().all(|line| line.contains("/AgentMode")),
+        "the Designer ran as a batch process after the agent: {argv}"
+    );
+    assert!(!output.exists());
+}

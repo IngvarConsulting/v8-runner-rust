@@ -2,7 +2,8 @@
 id: INV.USE-CASES.A-PROJECT-SHAPE-NARROWS-A-DEFAULT-CHAIN
 check:
   - src/domain/capability.rs::the_project_shape_drops_the_agent_where_it_has_no_adapter
-  - src/config/validate.rs::validates_client_mcp_extension_source_and_artifact_contract
+  - tests/cli_tools_download.rs::tools_download_client_mcp_artifact_follows_the_push_chain_shaped_by_the_tool_extension
+  - tests/contract_receipt.rs::an_edt_project_pushes_through_the_designer_unless_a_key_names_the_agent
 ---
 
 # Форма проекта сужает цепочку умолчаний
