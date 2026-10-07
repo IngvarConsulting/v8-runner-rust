@@ -885,8 +885,9 @@ fn the_awaited_log_lines_are_the_runners_own() {
     }
 }
 
-/// Ответ агента — только его JSON: проза об успехе, сообщение неизвестного типа и проза,
-/// после которой сессия кончилась, дают отказ команды, а не успех. Двойник при этом
+/// Ответ агента — только его JSON: проза об успехе, сообщение неизвестного типа, проза,
+/// после которой сессия кончилась, и массив, оборванный концом сессии, дают отказ
+/// `invalid_output`, а не успех. Двойник при этом
 /// выгрузку сделал — файл у него лежит, — но без итогового сообщения раннер его не
 /// переносит в цель.
 #[test]
@@ -898,6 +899,7 @@ fn a_prose_reply_of_the_agent_fails_the_command_instead_of_succeeding() {
             false,
         ),
         ("Выгрузка информационной базы успешно завершена\n", true),
+        ("[{\"type\":\"progress\",\"message\":\"Выгрузка\"},{\"type\":\"succ", true),
     ] {
         let marks = temp_workspace();
         let held = hold(
@@ -922,7 +924,11 @@ fn a_prose_reply_of_the_agent_fails_the_command_instead_of_succeeding() {
         assert_eq!(code, 4, "{text:?}: {payload}");
         assert_eq!(payload["ok"], false, "{text:?}: {payload}");
         assert_eq!(
-            payload["error"]["code"], "platform_failure",
+            payload["error"]["code"], "invalid_output",
+            "{text:?}: {payload}"
+        );
+        assert_eq!(
+            payload["error"]["kind"], "invalid_output",
             "{text:?}: {payload}"
         );
         assert_eq!(payload["data"]["published"], false, "{text:?}: {payload}");
@@ -933,6 +939,14 @@ fn a_prose_reply_of_the_agent_fails_the_command_instead_of_succeeding() {
         assert!(
             !output.exists(),
             "{text:?}: a prose reply published the dump: {payload}"
+        );
+        // Двойник действительно получил выгрузку и сделал её: файл лежит у него.
+        assert!(
+            commands(&harness)
+                .iter()
+                .any(|line| line.starts_with("infobase-tools dump-ib --file=export/")),
+            "{text:?}: {:?}",
+            commands(&harness)
         );
     }
 }

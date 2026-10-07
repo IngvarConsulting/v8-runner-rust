@@ -1071,8 +1071,8 @@ impl AgentSession {
         // дольше короткого срока незачем, даже если бюджет команды не ограничен.
         let capped = policy.cleanup().without_work();
         // Недочитанное от прежней команды — например, неверный ответ, на котором она
-        // кончилась, — ответом на завершение не является: иначе агент не услышал бы
-        // `shutdown` и его пришлось бы снимать по сроку.
+        // кончилась, — ответом на завершение не является: без сброса разбор упал бы на нём
+        // сразу (`InvalidReply`), не дождавшись ответа агента на `shutdown`.
         let stale = std::mem::take(&mut self.pending);
         if let Some(log) = self.transcript.as_mut() {
             let _ = log.write_all(&stale);
@@ -1160,10 +1160,7 @@ impl AgentSession {
                 return Ok(reply);
             }
             if self.ended {
-                return Err(AgentError::SessionClosed {
-                    endpoint: self.endpoint.to_string(),
-                    stderr: self.stderr_text(),
-                });
+                return Err(self.ended_without_reply());
             }
             if policy.cancellation.is_cancelled() {
                 if !critical {
@@ -1223,6 +1220,21 @@ impl AgentSession {
         take_array(&mut self.pending)
     }
 
+    /// Канал кончился, а полного массива нет. Недочитанные байты — проза вместо массива или
+    /// оборванный массив — неверный ответ; без них сессия просто закрылась.
+    fn ended_without_reply(&self) -> AgentError {
+        match unread_reply(&self.pending) {
+            Some(detail) => AgentError::InvalidReply {
+                detail: detail.to_owned(),
+                head: head_of(&self.pending),
+            },
+            None => AgentError::SessionClosed {
+                endpoint: self.endpoint.to_string(),
+                stderr: self.stderr_text(),
+            },
+        }
+    }
+
     fn stderr_text(&self) -> String {
         String::from_utf8_lossy(&self.stderr).trim().to_owned()
     }
@@ -1263,6 +1275,18 @@ fn take_array(pending: &mut Vec<u8>) -> Result<Option<Vec<u8>>, AgentError> {
             head: head_of(pending),
         }),
         None => Ok(None),
+    }
+}
+
+/// Что осталось в буфере, когда канал кончился: оборванный массив или проза — неверный
+/// ответ; пустота и пробельные байты ответом не были.
+fn unread_reply(pending: &[u8]) -> Option<&'static str> {
+    if pending.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else if pending.first() == Some(&b'[') {
+        Some("the reply was cut off when the session ended")
+    } else {
+        Some("the session ended after text that is not a message array")
     }
 }
 
@@ -1645,6 +1669,16 @@ mod tests {
             matches!(reply.outcome(), Err(AgentError::Command { .. })),
             "the prose before the array decides nothing"
         );
+    }
+
+    /// Конец канала после прозы или посреди массива — неверный ответ; пустой конец —
+    /// закрытая сессия.
+    #[test]
+    fn a_reply_cut_off_or_left_as_prose_at_the_end_of_the_session_is_an_invalid_reply() {
+        assert_eq!(unread_reply(b""), None);
+        assert_eq!(unread_reply(b" \r\n"), None);
+        assert!(unread_reply(br#"[{"type":"progress"},{"type":"succ"#).is_some());
+        assert!(unread_reply("Выгрузка успешно завершена\n".as_bytes()).is_some());
     }
 
     /// Сообщение неизвестного типа или без типа и массив не из сообщений — неверный ответ.
