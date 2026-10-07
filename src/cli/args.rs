@@ -979,8 +979,8 @@ pub struct DesignerModulesSyntaxArgs {
 mod tests {
     use super::{
         ArtifactsArgs, Cli, Command, DirectLaunchOptionsArgs, ExtensionsArgs, InfobaseArgs,
-        InfobaseCommand, InfobaseCreateArgs, LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget,
-        TestLaunchOptionsArgs, TestRunner, TestScope,
+        InfobaseCommand, InfobaseCreateArgs, LaunchArgs, LoadArgs, McpCommand, McpServeTransport,
+        SyntaxTarget, TestLaunchOptionsArgs, TestRunner, TestScope,
     };
     use clap::Parser;
 

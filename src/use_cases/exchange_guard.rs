@@ -1104,6 +1104,38 @@ mod tests {
         );
     }
 
+    /// Признак копии — память каждого набора: отказа первого знакомства нет. Признак, который
+    /// не прочесть, стоит так же, и выгрузку не предлагают; созданная из исходников база его
+    /// снимает.
+    #[test]
+    fn a_copy_mark_is_memory_and_offers_no_pull() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let file = copied_from_file(&config).expect("remembered base");
+        assert_eq!(require(&config).map_err(|_| ()), Err(()));
+        let copied = CopiedFrom {
+            source: "upstream".to_owned(),
+            snapshot: root.path().join("work/copies/upstream.dt"),
+            since: "now".to_owned(),
+            generation: None,
+        };
+
+        assert_eq!(remember_copied_base(&config, &copied), None);
+        require(&config).expect("the copy mark is memory");
+        assert!(!Standing::of(&config).offers_pull());
+        assert!(Standing::of(&config).caveats().contains("'upstream'"));
+
+        std::fs::remove_file(&file).expect("mark");
+        std::fs::create_dir_all(&file).expect("unreadable mark");
+        require(&config).expect("an unreadable mark stands");
+        assert!(!Standing::of(&config).offers_pull());
+
+        std::fs::remove_dir(&file).expect("mark");
+        assert_eq!(remember_copied_base(&config, &copied), None);
+        assert_eq!(remember_created_base(&config, None), None);
+        assert!(!file.exists(), "a base assembled anew is no copy");
+    }
+
     /// Признак нового владельца не считается содержимым каталога клона.
     #[test]
     fn a_new_owner_mark_alone_leaves_the_memory_empty_for_a_clone() {

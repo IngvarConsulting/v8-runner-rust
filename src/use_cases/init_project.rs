@@ -97,7 +97,10 @@ fn run_init(
     let workspace_failed = steps
         .last()
         .is_some_and(|step: &InitStep| step.status == InitStepStatus::Failed);
-    let infobase = if workspace_failed && config.target_kind() == TargetKind::File && args.from.is_none() {
+    let infobase = if workspace_failed
+        && config.target_kind() == TargetKind::File
+        && args.from.is_none()
+    {
         StepOutcome::failed(
             "infobase",
             "create",
@@ -1118,7 +1121,8 @@ fn missing_infobase_marker_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        edt_workspace_marker_path, infobase_marker_path, ordered_source_sets, InitStepStatus,
+        edt_workspace_marker_path, infobase_marker_path, ordered_source_sets, InitRequest,
+        InitStepStatus,
     };
     #[cfg(unix)]
     use crate::config::model::InfobaseConfig;
@@ -1275,7 +1279,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         )
         .expect_err("a cluster base needs the dbms section");
 
@@ -1304,7 +1308,7 @@ mod tests {
             )
             .with_cancellation(cancellation),
             &config,
-            false,
+            &InitRequest::default(),
         )
         .expect_err("interrupted init");
         let payload = failure.payload.expect("payload");
@@ -1657,7 +1661,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
@@ -1709,7 +1713,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
@@ -1762,7 +1766,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
@@ -1817,7 +1821,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
@@ -1856,7 +1860,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
@@ -1911,7 +1915,11 @@ mod tests {
         config.tools.edt_cli.path = Some(edt_script);
         config.tools.edt_cli.interactive_mode = true;
 
-        let result = super::run_init(&ExecutionContext::cli(CommandName::Init), &config, false);
+        let result = super::run_init(
+            &ExecutionContext::cli(CommandName::Init),
+            &config,
+            &InitRequest::default(),
+        );
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
         let result = result.unwrap_or_else(|failure| panic!("{failure:?}\nEDT: {edt_calls_text}"));
@@ -1958,7 +1966,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");

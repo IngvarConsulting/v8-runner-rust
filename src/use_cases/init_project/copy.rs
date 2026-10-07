@@ -34,8 +34,8 @@ use crate::use_cases::progress::log_live_stage;
 
 use super::{
     cluster_create_failure, cluster_creation, ensure_created, existing_file_infobase,
-    infobase_marker_path, interruption_step_outcome, prepare_infobase_parent,
-    standalone_refusal, StepOutcome, INFOBASE_CREATE,
+    infobase_marker_path, interruption_step_outcome, prepare_infobase_parent, standalone_refusal,
+    StepOutcome, INFOBASE_CREATE,
 };
 
 /// Каталог снимков источников под `workPath`.
@@ -90,7 +90,11 @@ fn source_config(config: &AppConfig, from: &str) -> Result<AppConfig, AppError> 
             .join(", ");
         return Err(AppError::Validation(format!(
             "--from: the infobase '{from}' is not declared in v8project.local.yaml (declared: {})",
-            if declared.is_empty() { "none" } else { &declared }
+            if declared.is_empty() {
+                "none"
+            } else {
+                &declared
+            }
         )));
     };
     let source = AppConfig {

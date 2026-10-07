@@ -334,6 +334,54 @@ fn a_new_owner_is_offered_no_pull_until_its_first_push() {
     assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
 }
 
+/// Копии базы (`infobase create --from`) до первой отправки ни один ответ не предлагает
+/// `pull`: отказ называет только `push --force` и то, что база — копия; первая отправка
+/// снимает признак, и выгрузка снова становится выходом.
+#[test]
+fn a_copied_base_offers_no_pull_before_its_first_push() {
+    let project = Project::new("File=ib");
+    let base = project.root().join("ib");
+    fs::create_dir_all(&base).expect("base");
+    fs::write(base.join("1Cv8.1CD"), "database").expect("base file");
+    let memory = project.root().join("work").join("infobases").join("origin");
+    support::memory::remember_base(
+        &project.root().join("work"),
+        "origin",
+        support::memory::Base::File(&base),
+        &[support::memory::Set::configuration(
+            "main",
+            &project.sources,
+        )],
+    );
+    // Запись поколения сделана выгрузкой после копии, признак копии остался: база ответит
+    // другим токеном.
+    fs::write(
+        memory.join("copied-from.json"),
+        r#"{"source":"upstream","snapshot":"/work/copies/upstream.dt","since":"2026-10-07T00:00:00Z","generation":null}"#,
+    )
+    .expect("copy mark");
+    project.base_generation(FIRST);
+
+    let payload = envelope(&project.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "push", "{payload}");
+    assert_eq!(payload["error"]["next"]["keys"]["--force"], "", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(!message.contains("pull"), "{message}");
+    assert!(
+        message.contains("is a copy of the infobase 'upstream'"),
+        "{message}"
+    );
+
+    succeeded(&project.run(&["push", "--force"]));
+    assert!(!memory.join("copied-from.json").exists());
+    project.base_generation(SECOND);
+    project.edit();
+    let payload = envelope(&project.run(&["push"]));
+    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
+}
+
 /// Базу правили во время выгрузки: ответ это называет, а память о поколении не обновляется,
 /// и следующая отправка видит расхождение.
 #[test]
