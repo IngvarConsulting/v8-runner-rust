@@ -185,10 +185,12 @@ const LEAVES: &[Leaf] = &[
         preview: Preview::Runs,
         base: Base::Resolves,
     },
+    // `convert` переводит исходники и пакеты без базы проекта: с пакетом — во временной базе
+    // раннера (#236).
     Leaf {
         path: "convert",
         preview: Preview::Runs,
-        base: Base::Resolves,
+        base: Base::Ignores,
     },
     // `make` собирает пакет из исходников во временной базе раннера: базу проекта он не
     // выбирает и не открывает (#364).

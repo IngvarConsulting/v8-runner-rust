@@ -69,8 +69,9 @@ impl fmt::Display for Provider {
 /// Операция, у которой есть строка в матрице.
 ///
 /// Здесь только то, что идёт к платформе и может идти к ней разными исполнителями.
-/// `convert`, `launch`, прогон тестов клиентом и `bootstrap` строк не имеют: у них один
-/// инструмент, и назначать им исполнителя нечего.
+/// `launch`, прогон тестов клиентом и `bootstrap` строк не имеют: у них один инструмент, и
+/// назначать им исполнителя нечего. У `convert` строка — у направлений с пакетом; перевод
+/// между EDT и XML делает `1cedtcli`, и строки у него нет.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -95,12 +96,14 @@ pub enum Operation {
     Syntax,
     #[serde(rename = "make")]
     Make,
+    #[serde(rename = "convert")]
+    Convert,
     #[serde(rename = "publish")]
     Publish,
 }
 
 impl Operation {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Init,
         Self::Build,
         Self::Load,
@@ -111,6 +114,7 @@ impl Operation {
         Self::InfobaseRestore,
         Self::Syntax,
         Self::Make,
+        Self::Convert,
         Self::Publish,
     ];
 
@@ -127,6 +131,7 @@ impl Operation {
             Self::InfobaseRestore => "infobase.restore",
             Self::Syntax => "syntax",
             Self::Make => "make",
+            Self::Convert => "convert",
             Self::Publish => "publish",
         }
     }
@@ -285,6 +290,12 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Ibcmd, ArgvTested),
         implemented(Designer, ArgvTested),
     ];
+    // `convert` с пакетом базы проекта не открывает: `ibcmd` работает во временной базе
+    // раннера, поэтому строка от вида цели не зависит. XML → пакет — `config import --out`
+    // (замер #182); пакет → XML — `config export --file` (вызов взят у `extensions`, живой
+    // замер во временной базе — #416). `ibcmd-rs` идёт за `ibcmd` после замера #413, до него
+    // строки не имеет.
+    const CONVERT: &[Capability] = &[implemented(Ibcmd, ArgvTested)];
     // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
     // прогнаны раннером на 8.3.27 15.09.2026.
     const EXTENSIONS: &[Capability] = &[
@@ -313,6 +324,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
             DESIGNER_ONLY
         }
         (Operation::Make, _) => MAKE,
+        (Operation::Convert, _) => CONVERT,
         (Operation::Extensions, TargetKind::File | TargetKind::Cluster) => EXTENSIONS,
         (Operation::ConfigurationExport, TargetKind::File | TargetKind::Cluster) => EXPORT,
         (
@@ -360,7 +372,7 @@ pub fn has_a_choice(operation: Operation, target: TargetKind) -> bool {
 }
 
 /// Не зависит ли строка операции от вида цели: такой операции база проекта не нужна
-/// (`make` собирает пакет во временной базе раннера), и вид цели её не касается.
+/// (`make` и `convert` работают во временной базе раннера), и вид цели её не касается.
 pub fn needs_no_target(operation: Operation) -> bool {
     TargetKind::ALL
         .into_iter()

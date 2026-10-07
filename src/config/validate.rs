@@ -161,11 +161,11 @@ pub enum ConfigValidationError {
     BuilderKeyRemoved,
 
     #[error(
-        "providers.{operation} is not allowed: on a {target} infobase this operation has exactly one executor and nothing to choose from"
+        "providers.{operation} is not allowed: this operation has exactly one executor{scope} and nothing to choose from"
     )]
     ProviderKeyWithoutChoice {
         operation: &'static str,
-        target: &'static str,
+        scope: ProviderScope,
     },
 
     #[error(
@@ -385,8 +385,8 @@ pub enum ConfigValidationError {
     },
 }
 
-/// Где исполнитель не реализует операцию: на базе этого вида или, у операции, которой база
-/// проекта не нужна (`make`), вообще.
+/// Где исполнитель не реализует операцию или где у неё один исполнитель: на базе этого вида
+/// или, у операции, которой база проекта не нужна (`make`, `convert`), вообще.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderScope {
     Target(&'static str),
@@ -584,17 +584,21 @@ pub fn validate_infobase_export(
     Ok(())
 }
 
-/// `make`: сборка из исходников во временной базе раннера. База проекта ей не вход, поэтому
-/// ни адрес базы, ни что-то, что от него зависит, здесь не проверяется; из `providers.*`
-/// читается только ключ `make`. Превью рабочего каталога не создаёт.
-pub fn validate_make(config: &AppConfig, preview: bool) -> Result<(), ConfigValidationError> {
+/// `make` и `convert`: работа с исходниками во временной базе раннера. База проекта им не
+/// вход, поэтому ни адрес базы, ни что-то, что от него зависит, здесь не проверяется; из
+/// `providers.*` читается только ключ `operation`. Превью рабочего каталога не создаёт.
+pub fn validate_without_infobase(
+    config: &AppConfig,
+    operation: Operation,
+    preview: bool,
+) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     if preview {
         validate_planned_work_path(config)?;
     } else {
         validate_work_path(&config.work_path)?;
     }
-    validate_providers(config, &[Operation::Make])?;
+    validate_providers(config, &[operation])?;
     validate_source_sets(config, Pending::NONE)?;
     validate_platform_version(config)?;
     validate_edt_cli_config(config)?;
@@ -1271,10 +1275,15 @@ fn validate_providers(
         .iter()
         .filter(|(operation, _)| operations.contains(operation));
     for (operation, provider) in checked {
+        let scope = if needs_no_target(*operation) {
+            ProviderScope::AnyTarget
+        } else {
+            ProviderScope::Target(target.as_str())
+        };
         if !has_a_choice(*operation, target) {
             return Err(ConfigValidationError::ProviderKeyWithoutChoice {
                 operation: operation.as_str(),
-                target: target.as_str(),
+                scope,
             });
         }
         if capability_of(*operation, target, *provider).is_none() {
@@ -1295,11 +1304,7 @@ fn validate_providers(
             return Err(ConfigValidationError::ProviderDoesNotImplement {
                 operation: operation.as_str(),
                 provider: provider.as_str(),
-                scope: if needs_no_target(*operation) {
-                    ProviderScope::AnyTarget
-                } else {
-                    ProviderScope::Target(target.as_str())
-                },
+                scope,
                 implemented,
             });
         }
@@ -1703,7 +1708,7 @@ fn validate_tool_extension_edt_runtime_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate, ConfigValidationError};
+    use super::{validate, ConfigValidationError, ProviderScope};
     use crate::config::model::{
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
         TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig, ToolExtensionInput,
@@ -3099,14 +3104,17 @@ mod tests {
             tests: TestsConfig::default(),
         };
 
-        super::validate_make(&config, true).expect("make needs no infobase");
+        super::validate_without_infobase(&config, Operation::Make, true)
+            .expect("make needs no infobase");
         for provider in [Provider::Ibcmd, Provider::Designer] {
             config.providers = [(Operation::Make, provider)].into();
-            super::validate_make(&config, true).expect("a make executor");
+            super::validate_without_infobase(&config, Operation::Make, true)
+                .expect("a make executor");
         }
 
         config.providers = [(Operation::Make, Provider::Agent)].into();
-        let error = super::validate_make(&config, true).expect_err("the agent is removed");
+        let error = super::validate_without_infobase(&config, Operation::Make, true)
+            .expect_err("the agent is removed");
         assert!(
             matches!(
                 error,
@@ -3124,7 +3132,8 @@ mod tests {
         );
 
         config.providers = [(Operation::Make, Provider::IbcmdRs)].into();
-        let error = super::validate_make(&config, true).expect_err("ibcmd-rs is not measured");
+        let error = super::validate_without_infobase(&config, Operation::Make, true)
+            .expect_err("ibcmd-rs is not measured");
         assert!(
             matches!(
                 error,
@@ -3137,6 +3146,61 @@ mod tests {
         );
         assert!(!error.to_string().contains("infobase"), "{error}");
         assert_eq!(error.next(), None);
+    }
+
+    /// У `convert` строка из одного `ibcmd`, пока `ibcmd-rs` не замерен (#413): ключ
+    /// `providers.convert` выбирать не из чего, и отказ о виде базы не говорит — `convert` её
+    /// не выбирает. Ключ другой операции `convert` не читает.
+    #[test]
+    fn convert_has_no_executor_choice_until_ibcmd_rs_is_measured() {
+        use crate::domain::capability::{Operation, Provider};
+
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        std::fs::create_dir_all(base.path().join("src")).expect("src");
+        std::fs::write(
+            base.path().join("src/Configuration.xml"),
+            "<MetaDataObject/>",
+        )
+        .expect("marker");
+        let mut config = AppConfig {
+            base_path: base.path().to_path_buf(),
+            work_path: work.path().to_path_buf(),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: serde_yaml::from_str("{}").expect("empty infobase"),
+            infobases: Default::default(),
+            infobase_name: None,
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: PathBuf::from("src"),
+            }],
+            tools: ToolsConfig::default(),
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+        config.providers = [(Operation::Make, Provider::Designer)].into();
+        super::validate_without_infobase(&config, Operation::Convert, true)
+            .expect("convert reads only its own key");
+
+        for provider in [Provider::Ibcmd, Provider::IbcmdRs] {
+            config.providers = [(Operation::Convert, provider)].into();
+            let error = super::validate_without_infobase(&config, Operation::Convert, true)
+                .expect_err("convert has one executor");
+            assert!(
+                matches!(
+                    error,
+                    ConfigValidationError::ProviderKeyWithoutChoice {
+                        operation: "convert",
+                        scope: ProviderScope::AnyTarget,
+                    }
+                ),
+                "{error}"
+            );
+            assert!(!error.to_string().contains("infobase"), "{error}");
+        }
     }
 
     fn infobase(yaml: &str) -> crate::config::model::InfobaseConfig {

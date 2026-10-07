@@ -58,6 +58,7 @@ SCENARIO_OPERATIONS = {
     "pull": ("pull",),
     "upload": ("upload",),
     "make": ("make",),
+    "convert": ("convert",),
     "download": ("download",),
     "ib-dump": ("infobase.dump", "infobase.restore"),
     "extensions": ("extensions",),
@@ -78,7 +79,6 @@ SCENARIOS_WITHOUT_ROW = {
     "test",
     "launch",
     "launch-web",
-    "convert",
 }
 
 # Строка таблицы `#d-ops` → сценарий `data.js`. Новая строка таблицы обязана попасть сюда.

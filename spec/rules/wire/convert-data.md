@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.CONVERT-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/convert.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -9,11 +9,15 @@ check:
 
 # `data` команды `convert`
 
-Перевод исходников между форматами EDT и Designer отчитывается направлением, охватом и
-списком того, что получилось на выходе. Направление в ответе обязательно: команда
-выбирает его из формата проекта, и вызывающий узнаёт выбор отсюда, а не из своих
-предположений. Направление из `--to` добавит
-`INV.CLI.CONVERT-DIRECTION-IS-SET-BY-TO`.
+Перевод между XML платформы, проектом EDT и пакетом отчитывается направлением, охватом и
+списком того, что получилось на выходе. Направление в ответе обязательно: команда выбирает
+его из `--to`, формата проекта и вида входа (`INV.CLI.CONVERT-DIRECTION-IS-SET-BY-TO`), и
+вызывающий узнаёт выбор отсюда, а не из своих предположений.
+
+У направления с пакетом ответ несёт квитанцию `provider` — кто исполнял и кого пропустили
+(`INV.CLI.A-PACKAGE-DIRECTION-OF-CONVERT-HAS-AN-EXECUTOR-CHAIN`). Охват `PACKAGE` значит,
+что на входе был файл пакета: у записи `outputs[]` тогда нет `source_set`. `workspace_path`
+— рабочая область EDT, и его нет у направления, которое обходится без `1cedtcli`.
 
 ## Пример
 
@@ -21,16 +25,20 @@ check:
 {
   "ok": true,
   "provider_dispatched": true,
-  "direction": "DESIGNER_TO_EDT",
-  "scope": "ALL",
-  "workspace_path": "build/convert/edt-workspace",
+  "direction": "DESIGNER_TO_PACKAGE",
+  "scope": "SINGLE",
+  "source_set": "Sales",
   "outputs": [
     {
-      "source_set": "main",
-      "source_path": "src/cf",
-      "target_path": "build/convert/out/main/edt"
+      "source_set": "Sales",
+      "source_path": "src/sales",
+      "target_path": "build/convert/out/packages/Sales.cfe"
     }
   ],
-  "duration_ms": 4210
+  "provider": {
+    "selected": "ibcmd",
+    "origin": { "kind": "default" }
+  },
+  "duration_ms": 10420
 }
 ```
