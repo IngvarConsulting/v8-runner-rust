@@ -392,8 +392,9 @@ pub const fn serves_project(operation: Operation, provider: Provider, shape: Pro
 }
 
 /// Цепочка умолчаний проекта: цепочка строки без исполнителей, которые такой проект не
-/// обслуживают (`serves_project`). У автономного сервера цепочка не сужается: шлюз —
-/// единственная точка входа, и отказ о форме проекта даёт сам исполнитель.
+/// обслуживают (`serves_project`). У автономного сервера цепочка не сужается: её уже сужает
+/// объявленный путь к серверу (`AppConfig::missing_way`), и без агента у SSH-шлюза строка
+/// осталась бы пустой — отказ о форме проекта там даёт сам исполнитель.
 pub fn default_chain_for(
     operation: Operation,
     target: TargetKind,
@@ -813,7 +814,7 @@ mod tests {
         );
         assert_eq!(
             default_chain_for(Operation::Build, TargetKind::Standalone, edt),
-            [Agent]
+            [Designer, Agent]
         );
         for operation in Operation::ALL {
             for target in TargetKind::ALL {
