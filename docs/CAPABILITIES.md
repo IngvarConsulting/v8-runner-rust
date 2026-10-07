@@ -1245,9 +1245,10 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
   отвергается. Клиент `test` выбирает адрес тем же правилом без ключа.
 - У автономного сервера строка подключения — строка прямого шлюза: `designer`, `thin` и
   `mcp` идут по ней ключом `/S <host>:<port>\<name>` с `/N`/`/P` из
-  `infobase.user`/`infobase.password`; `thick`, `ordinary` и `mcp --mode thick|ordinary`
-  отказывают (`capability`, код `target`, `next` — `launch thin` или `launch mcp`). Приём
-  реквизитов клиентом автономного сервера не замерен (#184). Что изменилось с #208 —
+  `infobase.user`/`infobase.password`; по `infobase.web.url` автономного сервера реквизиты
+  не передаются, пока их приём по `/WS` не замерен (#184); `thick`, `ordinary` и
+  `mcp --mode thick|ordinary` отказывают (`capability`, код `target`, `next` —
+  `launch thin` или `launch mcp`). Что изменилось с #208 —
   [`CONFIGURATION.md`](CONFIGURATION.md#infobasestandalone).
 - Пользовательский `/IBConnectionString` из `tools.enterprise.additional-launch-keys`
   встаёт после адреса раннера (`/S` или `/IBConnectionString`), хотя справка платформы

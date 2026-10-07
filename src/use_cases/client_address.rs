@@ -2,30 +2,33 @@
 //! объявленная строка подключения, а без неё — клиентский адрес `infobase.web.url`.
 //!
 //! Автономная цель здесь не особый случай адреса: её строка подключения — строка прямого
-//! шлюза, и клиент идёт по ней, как в кластер, с реквизитами базы. Особая у неё только
-//! граница режимов: толстый клиент и обычное приложение против неё не запускаются.
+//! шлюза, и клиент идёт по ней, как в кластер, с реквизитами базы. Особое у неё другое:
+//! толстый клиент и обычное приложение против неё не запускаются, а клиентский адрес идёт
+//! без реквизитов, пока их приём по `/WS` не замерен (#184). Здесь и только здесь решается,
+//! идут ли реквизиты при клиентском адресе.
 
 use crate::config::model::{AppConfig, StandaloneWay};
 use crate::domain::capability::{Provider, TargetKind};
 use crate::domain::launch::LaunchVia;
-use crate::platform::enterprise::LaunchClientMode;
+use crate::platform::connection::V8Connection;
+use crate::platform::enterprise::{LaunchAddress, LaunchClientMode, WebAddress};
 use crate::support::error::{AppError, CapabilityReason};
 
 /// Кто идёт к автономной цели без объявленного прямого шлюза — так его называет отказ.
 const THIN_CLIENT: &str = "the thin client";
 
 /// Адрес, выбранный для клиента.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClientAddress<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClientAddress {
     /// `infobase.connection` с реквизитами базы.
     Connection,
-    /// `infobase.web.url` как ws-соединение.
-    Web(&'a str),
+    /// `infobase.web.url` как ws-соединение; реквизиты — по решению [`web`].
+    Web(WebAddress),
 }
 
-impl<'a> ClientAddress<'a> {
+impl ClientAddress {
     /// Каким адресом открыта база — так его называет ответ.
-    pub(crate) const fn via(self) -> LaunchVia {
+    pub(crate) const fn via(&self) -> LaunchVia {
         match self {
             Self::Connection => LaunchVia::Connection,
             Self::Web(_) => LaunchVia::Web,
@@ -33,10 +36,23 @@ impl<'a> ClientAddress<'a> {
     }
 
     /// Клиентский адрес, если выбран он.
-    pub(crate) const fn web_url(self) -> Option<&'a str> {
+    pub(crate) fn web_url(&self) -> Option<&str> {
+        self.web().map(|web| web.url.as_str())
+    }
+
+    /// Клиентский адрес с решением о реквизитах, если выбран он.
+    pub(crate) const fn web(&self) -> Option<&WebAddress> {
         match self {
             Self::Connection => None,
-            Self::Web(url) => Some(url),
+            Self::Web(web) => Some(web),
+        }
+    }
+
+    /// Адрес командной строки клиента с реквизитами из `connection`.
+    pub(crate) fn launch_address<'a>(&'a self, connection: &'a V8Connection) -> LaunchAddress<'a> {
+        match self {
+            Self::Connection => LaunchAddress::Connection(connection),
+            Self::Web(web) => web.launch_address(connection),
         }
     }
 }
@@ -64,7 +80,7 @@ pub(crate) fn resolve(
     config: &AppConfig,
     mode: LaunchClientMode,
     requested: Option<LaunchVia>,
-) -> Result<ClientAddress<'_>, AppError> {
+) -> Result<ClientAddress, AppError> {
     let thin = matches!(mode, LaunchClientMode::Thin);
     if requested.is_some() && !thin {
         return Err(AppError::Validation(
@@ -73,12 +89,12 @@ pub(crate) fn resolve(
     }
     let connection_declared = config.connection_declared();
     match requested {
-        Some(LaunchVia::Web) => web_address(config).map(ClientAddress::Web),
+        Some(LaunchVia::Web) => web_address(config).map(|url| web(config, url)),
         Some(LaunchVia::Connection) if connection_declared => Ok(ClientAddress::Connection),
         Some(LaunchVia::Connection) => Err(direct_gate_undeclared(THIN_CLIENT)),
         None if connection_declared => Ok(ClientAddress::Connection),
         None if thin => match web_address(config) {
-            Ok(url) => Ok(ClientAddress::Web(url)),
+            Ok(url) => Ok(web(config, url)),
             Err(_) => Err(AppError::Validation(format!(
                 "{}; or declare infobase.web.url, the client address",
                 StandaloneWay::DirectGate.undeclared(THIN_CLIENT)
@@ -86,6 +102,16 @@ pub(crate) fn resolve(
         },
         None => Err(direct_gate_undeclared(who(mode))),
     }
+}
+
+/// Клиентский адрес и решение о реквизитах при нём. Файловой и кластерной цели они идут;
+/// автономной — нет: приём `/N` и `/P` клиентом по `/WS` автономного сервера не замерен
+/// (#184), а по строке прямого шлюза реквизиты идут, как в кластер.
+fn web(config: &AppConfig, url: &str) -> ClientAddress {
+    ClientAddress::Web(WebAddress {
+        url: url.to_owned(),
+        carries_credentials: config.target_kind() != TargetKind::Standalone,
+    })
 }
 
 /// Кто идёт по строке подключения — так его называет отказ.

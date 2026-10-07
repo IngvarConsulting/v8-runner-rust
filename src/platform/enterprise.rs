@@ -28,7 +28,7 @@ pub struct EnterpriseDsl<'a> {
     binary: PathBuf,
     connection: V8Connection,
     /// Клиентский адрес, когда клиент идёт по нему, а не по строке подключения.
-    web_url: Option<String>,
+    web: Option<WebAddress>,
     additional_launch_keys: Vec<String>,
     client_mode: LaunchClientMode,
     runner: &'a dyn ProcessRunner,
@@ -40,7 +40,7 @@ impl<'a> EnterpriseDsl<'a> {
     pub fn new(
         binary: PathBuf,
         connection: V8Connection,
-        web_url: Option<String>,
+        web: Option<WebAddress>,
         additional_launch_keys: Vec<String>,
         client_mode: LaunchClientMode,
         runner: &'a dyn ProcessRunner,
@@ -50,7 +50,7 @@ impl<'a> EnterpriseDsl<'a> {
         Self {
             binary,
             connection,
-            web_url,
+            web,
             additional_launch_keys,
             client_mode,
             runner,
@@ -103,12 +103,9 @@ impl<'a> EnterpriseDsl<'a> {
     fn build_args(&self, launch: &LaunchOptions) -> Vec<String> {
         let mut launch = launch.clone();
         launch.internal_out = Some(self.log_file.display().to_string());
-        let address = match self.web_url.as_deref() {
+        let address = match &self.web {
             None => LaunchAddress::Connection(&self.connection),
-            Some(url) => LaunchAddress::Web {
-                url,
-                credentials: &self.connection,
-            },
+            Some(web) => web.launch_address(&self.connection),
         };
         build_launch_args(
             self.client_mode,
@@ -132,17 +129,17 @@ impl From<LaunchClientModeRequest> for LaunchClientMode {
 
 /// Чем клиент открывает базу в командной строке.
 ///
-/// Реквизиты базы идут при любом адресе: `infobase.user`/`password` — пользователь базы у
-/// файловой, у кластерной и у автономной цели. Клиентский адрес строки подключения не
-/// несёт, поэтому реквизиты при нём — отдельное поле.
+/// Строка подключения несёт реквизиты базы рядом с собой; клиентский адрес — не всегда.
+/// Давать ли их при нём, решает выбор адреса клиента в `use_cases`, а здесь это
+/// необязательное поле.
 #[derive(Debug, Clone, Copy)]
 pub enum LaunchAddress<'a> {
     /// `infobase.connection` вместе с `/N` и `/P`.
     Connection(&'a V8Connection),
-    /// `infobase.web.url` как ws-соединение с `/N` и `/P` из `credentials`.
+    /// `infobase.web.url` как ws-соединение; `/N` и `/P` — только из `credentials`.
     Web {
         url: &'a str,
-        credentials: &'a V8Connection,
+        credentials: Option<&'a V8Connection>,
     },
 }
 
@@ -152,9 +149,30 @@ impl LaunchAddress<'_> {
             Self::Connection(connection) => connection.args(),
             Self::Web { url, credentials } => {
                 let mut args = vec!["/WS".to_owned(), url.to_string()];
-                args.extend(credentials.credential_args());
+                if let Some(connection) = credentials {
+                    args.extend(connection.credential_args());
+                }
                 args
             }
+        }
+    }
+}
+
+/// Выбранный клиентский адрес и решение, идут ли при нём реквизиты базы.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebAddress {
+    /// `infobase.web.url`.
+    pub url: String,
+    /// Прилагать ли `/N` и `/P` из строки подключения.
+    pub carries_credentials: bool,
+}
+
+impl WebAddress {
+    /// Адрес командной строки: реквизиты `connection` идут, только если так решено.
+    pub fn launch_address<'a>(&'a self, connection: &'a V8Connection) -> LaunchAddress<'a> {
+        LaunchAddress::Web {
+            url: &self.url,
+            credentials: self.carries_credentials.then_some(connection),
         }
     }
 }
@@ -258,7 +276,7 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 mod tests {
     use super::{
         build_launch_args, normalize_launch_payload_path, EnterpriseDsl, LaunchAddress,
-        LaunchClientMode,
+        LaunchClientMode, WebAddress,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -282,7 +300,7 @@ mod tests {
             LaunchClientMode::Thin,
             LaunchAddress::Web {
                 url: "http://localhost/base",
-                credentials: &connection,
+                credentials: Some(&connection),
             },
             &[],
             &LaunchOptions::default(),
@@ -299,25 +317,31 @@ mod tests {
         );
     }
 
-    /// Реквизиты базы идут и при клиентском адресе: `/N` и `/P` следуют за `/WS`.
+    /// Реквизиты при клиентском адресе идут, только если так решено: тогда `/N` и `/P`
+    /// следуют за `/WS`, иначе в командной строке их нет вовсе.
     #[test]
-    fn a_web_address_carries_the_infobase_credentials() {
+    fn a_web_address_carries_the_credentials_only_when_decided() {
         let mut connection = V8Connection::from_connection_string("Srvr=h:1541;Ref=demo");
         connection.user = Some("Admin".to_owned());
         connection.password = Some("s3cret".to_owned());
+        let args = |carries_credentials| {
+            let web = WebAddress {
+                url: "http://localhost/base".to_owned(),
+                carries_credentials,
+            };
+            build_launch_args(
+                LaunchClientMode::Thin,
+                web.launch_address(&connection),
+                &[],
+                &LaunchOptions::default(),
+            )
+        };
 
-        let args = build_launch_args(
-            LaunchClientMode::Thin,
-            LaunchAddress::Web {
-                url: "http://localhost/base",
-                credentials: &connection,
-            },
-            &[],
-            &LaunchOptions::default(),
-        );
+        let with = args(true);
+        let without = args(false);
 
         assert_eq!(
-            &args[2..],
+            &with[2..],
             [
                 "/WS",
                 "http://localhost/base",
@@ -327,10 +351,8 @@ mod tests {
                 "s3cret"
             ]
         );
-        assert!(
-            !args.iter().any(|arg| arg == "/S"),
-            "клиентский адрес заменяет строку подключения: {args:?}"
-        );
+        assert_eq!(&without[2..], ["/WS", "http://localhost/base"]);
+        assert!(!with.iter().chain(&without).any(|arg| arg == "/S"));
     }
 
     #[test]

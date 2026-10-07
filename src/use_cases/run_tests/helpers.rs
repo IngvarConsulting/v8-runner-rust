@@ -239,7 +239,7 @@ pub(super) fn build_enterprise_dsl<'a>(
     client_mode: LaunchClientModeRequest,
     timeout_override_ms: Option<u64>,
 ) -> Result<EnterpriseDsl<'a>, AppError> {
-    let web_url = client_web_url(config, client_mode.into())?;
+    let web = client_web_address(config, client_mode.into())?;
     let mut utilities = PlatformUtilities::from_config(config);
     let utility = match client_mode {
         LaunchClientModeRequest::Designer => UtilityType::V8,
@@ -255,7 +255,7 @@ pub(super) fn build_enterprise_dsl<'a>(
     Ok(EnterpriseDsl::new(
         location.path,
         config.v8_connection(),
-        web_url,
+        web,
         additional_launch_keys,
         client_mode.into(),
         runner,
@@ -274,13 +274,13 @@ pub(super) fn build_enterprise_dsl<'a>(
 /// Адрес клиента тестов — по тому же правилу, что у `launch` без `--via`: строка
 /// подключения, а без неё — `infobase.web.url`; толстый клиент и обычное приложение против
 /// автономной цели отказывают. `None` — клиент идёт по строке подключения.
-pub(super) fn client_web_url(
+pub(super) fn client_web_address(
     config: &AppConfig,
     mode: crate::platform::enterprise::LaunchClientMode,
-) -> Result<Option<String>, AppError> {
+) -> Result<Option<crate::platform::enterprise::WebAddress>, AppError> {
     crate::use_cases::client_address::refuse_a_thick_client_on_a_standalone_target(config, mode)?;
     let address = crate::use_cases::client_address::resolve(config, mode, None)?;
-    Ok(address.web_url().map(str::to_owned))
+    Ok(address.web().cloned())
 }
 
 fn effective_enterprise_launch_keys(

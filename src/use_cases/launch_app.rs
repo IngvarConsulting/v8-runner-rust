@@ -9,7 +9,7 @@ use crate::domain::launch::{
 use crate::domain::next_step::NextStep;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
-    build_launch_args, normalize_launch_payload_path, LaunchAddress, LaunchClientMode,
+    build_launch_args, normalize_launch_payload_path, LaunchClientMode,
 };
 use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
@@ -142,16 +142,15 @@ fn run_launch(
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     let platform_resolution = Some(platform_resolution(&location));
     let connection = config.v8_connection();
-    let address = match web_url {
-        None => LaunchAddress::Connection(&connection),
-        Some(url) => LaunchAddress::Web {
-            url,
-            credentials: &connection,
-        },
-    };
+    let launch_address = address.launch_address(&connection);
     let process_request = ProcessRequest {
         program: location.path.clone(),
-        args: build_launch_args(client_mode, address, &additional_launch_keys, &launch),
+        args: build_launch_args(
+            client_mode,
+            launch_address,
+            &additional_launch_keys,
+            &launch,
+        ),
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: external_epf_wait

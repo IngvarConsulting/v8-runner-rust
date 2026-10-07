@@ -72,7 +72,7 @@ pub(super) fn run_tests(
         .execution
         .client_mode
         .unwrap_or(LaunchClientModeRequest::Thin);
-    if let Err(error) = super::helpers::client_web_url(config, client_mode.into()) {
+    if let Err(error) = super::helpers::client_web_address(config, client_mode.into()) {
         let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
             .with_diagnostics(vec![error.to_string()])
             .with_errors(vec![test_execution_error(

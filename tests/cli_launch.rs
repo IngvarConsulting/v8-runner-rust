@@ -2596,11 +2596,11 @@ fn a_standalone_thin_client_without_the_direct_gate_goes_by_the_web_address() {
         "{payload}"
     );
     let args = planned_args(&payload);
-    assert_eq!(
-        address_window(&args, "/WS")[..2],
-        ["/WS", "http://localhost/standalone"],
-        "{args:?}"
-    );
+    let at = args
+        .iter()
+        .position(|arg| arg == "/WS")
+        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+    assert_eq!(args[at + 1], "http://localhost/standalone", "{args:?}");
     assert!(!args.iter().any(|arg| arg == "/S"), "{args:?}");
 }
 
@@ -2622,46 +2622,25 @@ fn a_standalone_designer_goes_by_the_direct_gate() {
     );
 }
 
-/// `infobase.user` и `infobase.password` автономной цели — пользователь базы, и клиент
-/// получает их при любом адресе: Конфигуратор и тонкий клиент по прямому шлюзу, тонкий
-/// клиент по клиентскому адресу. В плане пароль скрыт.
+/// `infobase.user` и `infobase.password` автономной цели — пользователь базы, и по строке
+/// прямого шлюза Конфигуратор и тонкий клиент получают их ключами `/N` и `/P` сразу за
+/// адресом. В плане пароль скрыт.
 #[test]
-fn a_standalone_client_carries_the_infobase_credentials_with_a_masked_password() {
-    for (infobase, arguments, switch, address) in [
-        (
-            STANDALONE_WITH_THE_DIRECT_GATE,
-            vec!["launch", "thin", "--dry-run"],
-            "/S",
-            DIRECT_GATE_SWITCH,
-        ),
-        (
-            STANDALONE_WITH_THE_DIRECT_GATE,
-            vec!["launch", "designer", "--dry-run"],
-            "/S",
-            DIRECT_GATE_SWITCH,
-        ),
-        (
-            STANDALONE_WITH_THE_DIRECT_GATE,
-            vec!["launch", "thin", "--via", "web", "--dry-run"],
-            "/WS",
-            "http://localhost/standalone",
-        ),
-        (
-            STANDALONE_WITHOUT_THE_DIRECT_GATE,
-            vec!["launch", "thin", "--dry-run"],
-            "/WS",
-            "http://localhost/standalone",
-        ),
+fn a_standalone_client_carries_the_infobase_credentials_by_the_direct_gate() {
+    for arguments in [
+        vec!["launch", "thin", "--dry-run"],
+        vec!["launch", "designer", "--dry-run"],
     ] {
-        let (_dir, config_path, _log) = setup_standalone_project(infobase, "");
+        let (_dir, config_path, _log) =
+            setup_standalone_project(STANDALONE_WITH_THE_DIRECT_GATE, "");
 
         let payload = launch_json(&config_path, &arguments);
 
         assert_eq!(payload["ok"], true, "{arguments:?}: {payload}");
         let args = planned_args(&payload);
         assert_eq!(
-            address_window(&args, switch),
-            [switch, address, "/N", "Admin", "/P", "***"],
+            address_window(&args, "/S"),
+            ["/S", DIRECT_GATE_SWITCH, "/N", "Admin", "/P", "***"],
             "{arguments:?}: {args:?}"
         );
         assert!(
@@ -2669,6 +2648,64 @@ fn a_standalone_client_carries_the_infobase_credentials_with_a_masked_password()
             "{arguments:?} показал пароль: {payload}"
         );
     }
+}
+
+/// По клиентскому адресу автономной цели реквизиты не идут: их приём по `/WS` не замерен
+/// (#184). Ни `/N`, ни `/P`, ни пароля в командной строке нет — и при `--via web`, и когда
+/// строки прямого шлюза нет.
+#[test]
+fn a_standalone_web_address_carries_no_credentials() {
+    for (infobase, arguments) in [
+        (
+            STANDALONE_WITH_THE_DIRECT_GATE,
+            vec!["launch", "thin", "--via", "web", "--dry-run"],
+        ),
+        (
+            STANDALONE_WITHOUT_THE_DIRECT_GATE,
+            vec!["launch", "thin", "--dry-run"],
+        ),
+    ] {
+        let (_dir, config_path, _log) = setup_standalone_project(infobase, "");
+
+        let payload = launch_json(&config_path, &arguments);
+
+        assert_eq!(payload["ok"], true, "{arguments:?}: {payload}");
+        assert_eq!(payload["data"]["via"], "web", "{arguments:?}: {payload}");
+        let args = planned_args(&payload);
+        let at = args
+            .iter()
+            .position(|arg| arg == "/WS")
+            .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+        assert_eq!(args[at + 1], "http://localhost/standalone", "{args:?}");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "/N" || arg == "/P" || arg.contains("s3cret")),
+            "{arguments:?}: {args:?}"
+        );
+    }
+}
+
+/// У файловой цели клиентский адрес, как и прежде, несёт реквизиты базы.
+#[test]
+fn a_file_web_address_keeps_the_infobase_credentials() {
+    let (_dir, config_path, _log) = setup_standalone_project(
+        "  connection: 'File=ib'\n  user: Admin\n  password: s3cret\n  web:\n    url: 'http://localhost/base'\n",
+        "",
+    );
+
+    let payload = launch_json(
+        &config_path,
+        &["launch", "thin", "--via", "web", "--dry-run"],
+    );
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    let args = planned_args(&payload);
+    assert_eq!(
+        address_window(&args, "/WS"),
+        ["/WS", "http://localhost/base", "/N", "Admin", "/P", "***"],
+        "{args:?}"
+    );
 }
 
 /// Маскируется отчёт, а не запуск: тонкий клиент автономной цели получает настоящий пароль
