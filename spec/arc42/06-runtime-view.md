@@ -244,8 +244,9 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    `workPath/temp/throwaway-infobases/base-<запуск>` с описанием, затем `ibcmd infobase
    create` со своим `--data` или `CREATEINFOBASE`.
 3. Исходники формата EDT переводит в XML шаг `push` (`build_project::execute_edt_export_step`)
-   в каталог временной базы — через `ThrowawayInfobase::xml_from_edt`, общий у `make` и
-   `convert`.
+   в каталог временной базы — через единственный перевод `throwaway_infobase::edt_sources_to_xml`
+   (у временной базы — `ThrowawayInfobase::xml_from_edt`); его же зовут `convert` и
+   `infobase create` для файловой базы проекта EDT.
 4. Конфигуратор загружает исходники без файла версий (безопасная точка перед загрузкой),
    расширение — поверх основной конфигурации, которую база получает один раз за прогон, и
    выгружает пакет (безопасная точка перед выгрузкой); `ibcmd` собирает пакет `config import

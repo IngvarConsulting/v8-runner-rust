@@ -524,7 +524,16 @@ fn edt_check_modules(index: &SourceIndex) -> std::collections::BTreeSet<String> 
 }
 
 fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<String> {
-    let constructor = path_of("crate::platform::ibcmd::IbcmdConnection::from_infobase");
+    path_sites(
+        index,
+        "crate::platform::ibcmd::IbcmdConnection::from_infobase",
+    )
+}
+
+/// Функции продукта, тело которых называет путь `target` — вызовом или ссылкой, под любым
+/// местным именем.
+fn path_sites(index: &SourceIndex, target: &str) -> std::collections::BTreeSet<String> {
+    let constructor = path_of(target);
     production_bodies(index)
         .into_iter()
         .filter(|body| {
@@ -540,6 +549,35 @@ fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<Str
         })
         .map(|body| format!("{}::{}", body.module.join("::"), body.context))
         .collect()
+}
+
+/// Reintroduction guard перевода EDT→XML (#204, #236). Корень: перевод исходников EDT в XML
+/// каждый сценарий собирал сам вокруг шага сборки `push`, и рядом с одним владельцем вырос бы
+/// второй — со своим пределом, своей рабочей областью и своей сессией. Шаг
+/// `execute_edt_export_step` зовут только сборка `push` (`build_project::coordinator`) и
+/// единственный перевод `throwaway_infobase::edt_sources_to_xml`, через который идут `make`,
+/// `convert` и `infobase create`. Новый вызывающий под любым местным именем роняет проверку;
+/// не видит она вызова через глобальный импорт `use super::*`, каким шаг берёт сама сборка.
+#[test]
+fn the_edt_export_step_has_one_converter_besides_push() {
+    const CONVERTER: &str = "crate::use_cases::throwaway_infobase::edt_sources_to_xml";
+    const PUSH: &str = "crate::use_cases::build_project::coordinator::";
+    let found = path_sites(
+        &SourceIndex::of_src(),
+        "crate::use_cases::build_project::execute_edt_export_step",
+    );
+    let outside: Vec<&String> = found
+        .iter()
+        .filter(|site| site.as_str() != CONVERTER && !site.starts_with(PUSH))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "execute_edt_export_step is called outside push and edt_sources_to_xml: {outside:?}; convert EDT sources through throwaway_infobase::edt_sources_to_xml"
+    );
+    assert!(
+        found.contains(CONVERTER),
+        "the guard no longer sees the single converter: {found:?}"
+    );
 }
 
 /// Корень #285: сценарии сами сравнивали код выхода утилиты с нулём, и знание о том, что

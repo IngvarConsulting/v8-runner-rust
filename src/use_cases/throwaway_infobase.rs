@@ -218,7 +218,7 @@ impl ThrowawayInfobase {
         timeout: Option<Duration>,
     ) -> Result<(PathBuf, Vec<String>), AppError> {
         let target = self.xml_dir(&source_set.name);
-        let warnings = edt_sources_to_xml(context, config, source_set, &target, timeout)?;
+        let warnings = edt_sources_to_xml(context, config, source_set, &target, None, timeout)?;
         Ok((target, warnings))
     }
 
@@ -458,12 +458,15 @@ impl Drop for ThrowawayInfobase {
 /// ([`ThrowawayInfobase::xml_from_edt`]) и сборка файловой базы проекта EDT у
 /// `infobase create`. Предел шага задаёт вызывающий: `make` и `infobase create` идут без
 /// предела, как `push`, `convert` — с пределом EDT команды (`ExecutionContext::edt_timeout`).
+/// Общая сессия EDT команды (`session`) переводит, когда команда её уже держит: одноразовый
+/// `1cedtcli` упёрся бы в рабочую область, которую держит сессия; её предел — свой.
 /// Ответ — предупреждения шага.
 pub(crate) fn edt_sources_to_xml(
     context: &ExecutionContext,
     config: &AppConfig,
     source_set: &SourceSetConfig,
     target: &Path,
+    session: Option<&EdtDsl<'_>>,
     timeout: Option<Duration>,
 ) -> Result<Vec<String>, AppError> {
     let inventory = SourceSetInventory::new(config);
@@ -474,21 +477,28 @@ pub(crate) fn edt_sources_to_xml(
         ))
     })?;
     let mut utilities = PlatformUtilities::from_config(config);
-    let location = utilities
-        .locate(UtilityType::EdtCli)
-        .map_err(AppError::from)?;
-    let edt = EdtDsl::new(
-        location.path,
-        edt_workspace(&config.work_path),
-        utilities.runner_for(UtilityType::EdtCli),
-        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-    )
-    .with_timeout(timeout);
+    let one_shot;
+    let edt = match session {
+        Some(session) => session,
+        None => {
+            let location = utilities
+                .locate(UtilityType::EdtCli)
+                .map_err(AppError::from)?;
+            one_shot = EdtDsl::new(
+                location.path,
+                edt_workspace(&config.work_path),
+                utilities.runner_for(UtilityType::EdtCli),
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+            )
+            .with_timeout(timeout);
+            &one_shot
+        }
+    };
     log_live_stage("edt export", "[EDT] converting the sources to XML");
     crate::use_cases::build_project::execute_edt_export_step(
         context,
         config,
-        &edt,
+        edt,
         source_set,
         edt_context,
         target,

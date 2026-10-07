@@ -11,8 +11,10 @@ use crate::platform::result::PlatformCommandResult;
 
 #[derive(Debug, Error)]
 pub enum DesignerError {
-    #[error("designer utility not found: {0}")]
-    UtilityNotFound(String),
+    /// Строка подключения не той формы, что нужна команде: `CREATEINFOBASE` файловой базы
+    /// ждёт `File=`, базы в кластере — `Srvr=…;Ref=…`.
+    #[error("CREATEINFOBASE requires {0}")]
+    ConnectionForm(&'static str),
 
     #[error("failed to execute designer process: {0}")]
     Spawn(ProcessError),
@@ -210,9 +212,12 @@ impl<'a> DesignerDsl<'a> {
     /// `CREATEINFOBASE <connection-string>`
     pub fn create_infobase(&self) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = vec!["CREATEINFOBASE".to_owned()];
-        let connection = self.connection.create_infobase_arg().ok_or_else(|| {
-            DesignerError::UtilityNotFound("file-based connection is required".to_owned())
-        })?;
+        let connection =
+            self.connection
+                .create_infobase_arg()
+                .ok_or(DesignerError::ConnectionForm(
+                    "a file-based connection File=…",
+                ))?;
         args.push(connection);
         self.run(&args)
     }
@@ -229,11 +234,9 @@ impl<'a> DesignerDsl<'a> {
         let connection = self
             .connection
             .create_cluster_infobase_arg(creation)
-            .ok_or_else(|| {
-                DesignerError::UtilityNotFound(
-                    "a cluster connection Srvr=…;Ref=… is required".to_owned(),
-                )
-            })?;
+            .ok_or(DesignerError::ConnectionForm(
+                "a cluster connection Srvr=…;Ref=…",
+            ))?;
         self.run(&[
             "CREATEINFOBASE".to_owned(),
             connection,

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::config::model::InfobaseConfig;
+use crate::config::model::{InfobaseConfig, MissingDbmsField};
 use crate::platform::connection::{file_infobase, name_the_account, V8Connection};
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
@@ -11,8 +11,8 @@ use crate::platform::result::PlatformCommandResult;
 
 #[derive(Debug, Error)]
 pub enum IbcmdError {
-    #[error("server-based IBCMD connection requires infobase.dbms.{0}")]
-    MissingServerDbmsField(&'static str),
+    #[error(transparent)]
+    MissingServerDbmsField(#[from] MissingDbmsField),
 
     #[error("failed to execute ibcmd process: {0}")]
     Spawn(ProcessError),
@@ -42,18 +42,15 @@ impl IbcmdConnection {
     pub fn from_infobase(infobase: &InfobaseConfig) -> Result<Self, IbcmdError> {
         let conn = V8Connection::from_connection_string(&infobase.connection);
         let Some(database_path) = conn.file_path() else {
-            let Some(dbms) = infobase.dbms.as_ref() else {
-                return Err(IbcmdError::MissingServerDbmsField("kind"));
-            };
-
+            let access = infobase.dbms_access()?;
             return Ok(Self::Server {
-                dbms_kind: required_dbms_field("kind", dbms.kind.as_deref())?,
-                database_server: required_dbms_field("server", dbms.server.as_deref())?,
-                database_name: required_dbms_field("name", dbms.name.as_deref())?,
+                dbms_kind: access.kind.to_owned(),
+                database_server: access.server.to_owned(),
+                database_name: access.name.to_owned(),
                 user: infobase.user.clone(),
                 password: infobase.password.clone(),
-                database_user: dbms.user.clone(),
-                database_password: dbms.password.clone(),
+                database_user: access.user.map(str::to_owned),
+                database_password: access.password.map(str::to_owned),
             });
         };
 
@@ -602,13 +599,6 @@ impl<'a> IbcmdDsl<'a> {
 fn push_option_value(args: &mut Vec<String>, key: &str, value: impl ToString) {
     args.push(key.to_owned());
     args.push(value.to_string());
-}
-
-fn required_dbms_field(field: &'static str, value: Option<&str>) -> Result<String, IbcmdError> {
-    match value.map(str::trim) {
-        Some(value) if !value.is_empty() => Ok(value.to_owned()),
-        _ => Err(IbcmdError::MissingServerDbmsField(field)),
-    }
 }
 
 #[cfg(test)]

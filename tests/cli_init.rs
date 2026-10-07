@@ -813,8 +813,13 @@ fn init_retries_edt_import_when_previous_run_left_incomplete_workspace() {
     assert!(!first.status.success());
     let first_payload: Value = serde_json::from_slice(&first.stdout).expect("json");
     assert_eq!(first_payload["command"], "infobase create");
-    assert_eq!(first_payload["data"]["steps"][1]["status"], "ok");
+    // Без рабочей области исходники EDT не перевести: база не создаётся.
     assert_eq!(first_payload["data"]["steps"][0]["status"], "failed");
+    assert_eq!(first_payload["data"]["steps"][1]["status"], "failed");
+    assert!(first_payload["data"]["steps"][1]["message"]
+        .as_str()
+        .expect("message")
+        .contains("the workspace was not initialized"));
     assert!(work_path.join("edt-workspace").exists());
     assert!(!work_path
         .join("edt-workspace")
@@ -838,11 +843,11 @@ fn init_retries_edt_import_when_previous_run_left_incomplete_workspace() {
         .output()
         .expect("second run");
 
-    // База уже создана первым прогоном: шаг базы отказывает, рабочая область доимпортируется.
-    assert!(!second.status.success());
+    // Повтор доимпортирует рабочую область и создаёт базу.
+    assert!(second.status.success());
     let payload: Value = serde_json::from_slice(&second.stdout).expect("json");
-    assert_eq!(payload["data"]["steps"][1]["status"], "failed");
     assert_eq!(payload["data"]["steps"][0]["status"], "ok");
+    assert_eq!(payload["data"]["steps"][1]["status"], "ok");
     assert!(work_path
         .join("edt-workspace")
         .join(".v8tr-initialized")
@@ -934,24 +939,38 @@ fn a_cluster_base_is_created_by_the_designer_with_the_client_server_string() {
     assert_eq!(push["data"]["steps"][0]["mode"], "full", "{push}");
 }
 
-/// Без `dbms.locale` платформа оставила бы в СУБД брошенную базу данных: отказ до запуска
-/// называет ключ.
+/// Без обязательного реквизита `dbms` — вида СУБД, сервера, имени базы данных, `locale` —
+/// отказ до запуска платформы называет ключ; без `locale` — и почему: платформа оставила бы в
+/// СУБД брошенную базу данных.
 #[test]
-fn a_cluster_base_without_a_locale_is_refused_before_the_platform_starts() {
-    let dbms = FULL_DBMS.replace("    locale: ru\n", "");
-    let (_dir, config_path, _work_path, calls_log) =
-        setup_cluster_init_project("exit 0", &dbms, CLUSTER_ADMIN);
+fn a_cluster_base_without_a_required_dbms_field_is_refused_before_the_platform_starts() {
+    for (field, line) in [
+        ("kind", "    kind: PostgreSQL\n"),
+        ("server", "    server: db\n"),
+        ("name", "    name: demo_db\n"),
+        ("locale", "    locale: ru\n"),
+    ] {
+        let dbms = FULL_DBMS.replace(line, "");
+        let (_dir, config_path, _work_path, calls_log) =
+            setup_cluster_init_project("exit 0", &dbms, CLUSTER_ADMIN);
 
-    for extra in [&["--dry-run"][..], &[][..]] {
-        let output = run_infobase_create(&config_path, extra);
+        for extra in [&["--dry-run"][..], &[][..]] {
+            let output = run_infobase_create(&config_path, extra);
 
-        assert!(!output.status.success(), "{extra:?}");
-        let payload = json_of(&output);
-        assert_eq!(payload["error"]["kind"], "validation", "{payload}");
-        let message = payload["error"]["message"].as_str().expect("message");
-        assert!(message.contains("infobase.dbms.locale"), "{message}");
+            assert!(!output.status.success(), "{field} {extra:?}");
+            let payload = json_of(&output);
+            assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+            let message = payload["error"]["message"].as_str().expect("message");
+            assert!(
+                message.contains(&format!("infobase.dbms.{field} is not declared")),
+                "{message}"
+            );
+            if field == "locale" {
+                assert!(message.contains("abandoned database"), "{message}");
+            }
+        }
+        assert!(!calls_log.exists(), "{field}");
     }
-    assert!(!calls_log.exists());
 }
 
 /// Превью базы в кластере называет цель и утилиту и честно говорит, что «уже есть» до
@@ -971,7 +990,10 @@ fn a_cluster_preview_names_the_target_and_starts_nothing() {
     assert!(
         message.contains("server infobase 'demo' on 'cluster:1541'")
             && message.contains("the database 'demo_db' on 'db'")
-            && message.contains("not observable"),
+            && message.contains("not observable")
+            && message.contains("silently takes an existing database")
+            && message.contains("even one holding another infobase")
+            && message.contains("abandoned in the DBMS"),
         "{message}"
     );
     assert!(!calls_log.exists());
@@ -1070,4 +1092,36 @@ fn server_infobase_create_never_echoes_the_connection_string_credentials() {
             );
         }
     }
+}
+
+/// Неудачное создание `ibcmd`, после которого файл базы всё же появился, называет
+/// оставленный каталог и оба выхода: удалить и создать заново или загрузить поверх.
+#[test]
+fn a_failed_ibcmd_create_that_left_a_base_names_the_directory_and_the_ways_out() {
+    let (_dir, config_path, _work_path, base_path, platform_path, _edt_calls_log) =
+        setup_edt_init_project("DESIGNER", "IBCMD", "__AUTO_FILE__");
+    fs::write(
+        base_path.join("main").join("Configuration.xml"),
+        "<Configuration/>\n",
+    )
+    .expect("main source");
+    let body = fs::read_to_string(&platform_path).expect("platform");
+    write_script(
+        &platform_path,
+        &body
+            .replace("\nexit 0", "\nexit 255")
+            .replace("#!/bin/sh\n", ""),
+    );
+
+    let output = run_infobase_create(&config_path, &[]);
+
+    assert!(!output.status.success());
+    let payload = json_of(&output);
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("is left with a partly created infobase")
+            && message.contains("remove the directory and run infobase create again")
+            && message.contains("push --force"),
+        "{message}"
+    );
 }

@@ -242,7 +242,8 @@ impl V8Connection {
 
 /// Реквизиты создания базы в кластере, которых нет в строке подключения: СУБД, её
 /// учётная запись, национальные настройки и администратор кластера.
-#[derive(Debug, Clone, Copy)]
+/// Без `Debug`: в структуре пароли СУБД и администратора кластера.
+#[derive(Clone, Copy)]
 pub struct ClusterInfobaseCreation<'a> {
     pub dbms: &'a str,
     pub database_server: &'a str,

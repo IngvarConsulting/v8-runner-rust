@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
+use crate::config::model::{AppConfig, MissingDbmsField, SourceFormat, SourceSetConfig};
 use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::platform::connection::ClusterInfobaseCreation;
@@ -73,25 +73,49 @@ fn run_init(
         };
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
+    // Общая сессия EDT одна на команду: импорт рабочей области и перевод исходников в XML
+    // идут через неё, как у `push`, и одноразовый `1cedtcli` не упирается в рабочую область,
+    // которую держит сессия. Сессия закрывается вместе с командой.
+    let mut shared_edt: Option<EdtDsl<'static>> = None;
 
     // Исходники EDT переводятся в XML из рабочей области: у формата EDT она заводится до базы.
     if config.format == SourceFormat::Edt {
         record_step(
             &mut steps,
             &mut first_error,
-            ensure_edt_workspace(context, config, &mut utilities, dry_run),
+            ensure_edt_workspace(context, config, &mut utilities, &mut shared_edt, dry_run),
         );
     }
-    record_step(
-        &mut steps,
-        &mut first_error,
-        ensure_infobase(context, config, &mut utilities, provider, dry_run),
-    );
+    // Файловую базу проекта EDT собирают из перевода, а перевод — из рабочей области: без
+    // неё база не создаётся, и повтор команды начинает с чистого места.
+    let workspace_failed = steps
+        .last()
+        .is_some_and(|step: &InitStep| step.status == InitStepStatus::Failed);
+    let infobase = if workspace_failed && config.target_kind() == TargetKind::File {
+        StepOutcome::failed(
+            "infobase",
+            "create",
+            Instant::now(),
+            AppError::Runtime(
+                "the infobase of an EDT project is assembled from its sources converted to XML in the EDT workspace, and the workspace was not initialized: the infobase is not created; run infobase create again once the workspace import succeeds".to_owned(),
+            ),
+        )
+    } else {
+        ensure_infobase(
+            context,
+            config,
+            &mut utilities,
+            provider,
+            shared_edt.as_ref(),
+            dry_run,
+        )
+    };
+    record_step(&mut steps, &mut first_error, infobase);
     if config.format != SourceFormat::Edt {
         record_step(
             &mut steps,
             &mut first_error,
-            ensure_edt_workspace(context, config, &mut utilities, dry_run),
+            ensure_edt_workspace(context, config, &mut utilities, &mut shared_edt, dry_run),
         );
     }
 
@@ -244,6 +268,7 @@ fn ensure_infobase(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     provider: Provider,
+    shared_edt: Option<&EdtDsl<'static>>,
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
@@ -255,9 +280,15 @@ fn ensure_infobase(
         }
         TargetKind::Cluster => ensure_cluster_infobase(context, config, utilities, dry_run),
         TargetKind::File => match config.v8_connection().file_path().map(PathBuf::from) {
-            Some(infobase_dir) => {
-                ensure_file_infobase(context, config, utilities, provider, &infobase_dir, dry_run)
-            }
+            Some(infobase_dir) => ensure_file_infobase(
+                context,
+                config,
+                utilities,
+                provider,
+                &infobase_dir,
+                shared_edt,
+                dry_run,
+            ),
             None => StepOutcome::failed(
                 "infobase",
                 "create",
@@ -280,7 +311,7 @@ fn standalone_refusal() -> AppError {
 /// создаёт новую базу и чужую не трогает.
 fn existing_file_infobase(infobase_dir: &Path) -> AppError {
     AppError::Validation(format!(
-        "the file infobase '{}' already exists: infobase create creates a new infobase and leaves an existing one untouched; push loads the sources into it",
+        "the file infobase '{}' already exists: infobase create creates a new infobase and leaves an existing one untouched; push loads the sources into it (push --force when the runner has no memory of it), or remove the directory and run infobase create again",
         infobase_dir.display()
     ))
 }
@@ -291,6 +322,7 @@ fn ensure_file_infobase(
     utilities: &mut PlatformUtilities,
     provider: Provider,
     infobase_dir: &Path,
+    shared_edt: Option<&EdtDsl<'static>>,
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
@@ -353,22 +385,21 @@ fn ensure_file_infobase(
         return outcome;
     }
 
-    let (memory, import, export_warnings) =
-        match assembled.map(|set| prepare_assembly(context, config, set)) {
-            None => (None, None, Vec::new()),
-            Some(Ok((memory, import, warnings))) => (Some(memory), Some(import), warnings),
-            Some(Err(error)) => return StepOutcome::failed("infobase", "create", started, error),
-        };
+    let assembly = match assembled.map(|set| prepare_assembly(context, config, set, shared_edt)) {
+        None => None,
+        Some(Ok(assembly)) => Some(assembly),
+        Some(Err(error)) => return StepOutcome::failed("infobase", "create", started, error),
+    };
+    let import = assembly.as_ref().map(|assembly| assembly.import.as_path());
+    let memory = assembly.as_ref().map(|assembly| &assembly.memory);
+    let export_warnings: &[String] = assembly
+        .as_ref()
+        .map_or(&[], |assembly| assembly.warnings.as_slice());
 
     log_live_stage("init: infobase create", "[Platform] creating infobase");
     let settled = collecting_deferrals(|deferrals| {
         let created = create_file_infobase(
-            context,
-            config,
-            utilities,
-            provider,
-            import.as_deref(),
-            deferrals,
+            context, config, utilities, provider, import, &marker, deferrals,
         )?;
         if !marker.exists() {
             return Err(missing_infobase_marker_error(
@@ -385,11 +416,8 @@ fn ensure_file_infobase(
             started,
             format!("infobase created{contents}: {}", marker.display()),
         )
-        .with_warnings(&export_warnings)
-        .with_warnings(&Vec::from_iter(remember_created_base(
-            config,
-            memory.as_ref(),
-        ))))
+        .with_warnings(export_warnings)
+        .with_warnings(remember_created_base(config, memory).as_slice()))
     });
     match settled {
         Ok((step, warnings)) => step.with_warnings(&warnings),
@@ -402,6 +430,34 @@ fn assembled_configuration(config: &AppConfig) -> Option<&SourceSetConfig> {
     SourceSetInventory::new(config).main_configuration()
 }
 
+/// Сборка файловой базы: каталог XML для `--import`, память о наборе и предупреждения
+/// перевода.
+struct Assembly {
+    memory: AssembledMemory,
+    import: PathBuf,
+    warnings: Vec<String>,
+}
+
+/// Общая сессия EDT команды над её рабочей областью.
+fn shared_edt_session(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: PathBuf,
+) -> Result<EdtDsl<'static>, AppError> {
+    let manager =
+        EdtSessionManager::for_config(config, EdtSessionHostOptions::for_cli_command(config))
+            .map_err(AppError::from)?;
+    EdtDsl::new_shared_session(
+        binary,
+        config.work_path.join("edt-workspace"),
+        Arc::new(manager),
+        Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
+        Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    )
+    .map_err(AppError::from)
+}
+
 /// Готовит сборку файловой базы из набора `set`: каталог XML для `--import`, память о
 /// наборе и предупреждения перевода. Дерево исходников снимается до сборки: правка,
 /// сделанная во время неё, останется изменением для первой отправки. Исходники EDT
@@ -412,13 +468,14 @@ fn prepare_assembly(
     context: &ExecutionContext,
     config: &AppConfig,
     set: &SourceSetConfig,
-) -> Result<(AssembledMemory, PathBuf, Vec<String>), AppError> {
+    shared_edt: Option<&EdtDsl<'static>>,
+) -> Result<Assembly, AppError> {
     match config.format {
-        SourceFormat::Designer => Ok((
-            AssembledMemory::prepare(config, set)?,
-            set.root_in(&config.base_path),
-            Vec::new(),
-        )),
+        SourceFormat::Designer => Ok(Assembly {
+            memory: AssembledMemory::prepare(config, set)?,
+            import: set.root_in(&config.base_path),
+            warnings: Vec::new(),
+        }),
         SourceFormat::Edt => {
             let source = EdtSourceMemory::prepare(config, set)?;
             let target = SourceSetInventory::new(config)
@@ -430,9 +487,12 @@ fn prepare_assembly(
                         set.name
                     ))
                 })?;
-            let warnings = edt_sources_to_xml(context, config, set, &target, None)?;
-            let memory = AssembledMemory::prepare(config, set)?.with_edt_source(source);
-            Ok((memory, target, warnings))
+            let warnings = edt_sources_to_xml(context, config, set, &target, shared_edt, None)?;
+            Ok(Assembly {
+                memory: AssembledMemory::prepare(config, set)?.with_edt_source(source),
+                import: target,
+                warnings,
+            })
         }
     }
 }
@@ -445,6 +505,7 @@ fn create_file_infobase(
     utilities: &mut PlatformUtilities,
     provider: Provider,
     import: Option<&Path>,
+    marker: &Path,
     deferrals: &mut Deferrals,
 ) -> Result<PlatformCommandResult, AppError> {
     let policy = context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
@@ -465,7 +526,7 @@ fn create_file_infobase(
             .infobase_create(import)
             .map_err(AppError::from)?;
             deferrals.note_result(INFOBASE_CREATE, &created);
-            ensure_created(&created)?;
+            ensure_created(&created, marker)?;
             Ok(created)
         }
         Provider::Designer => {
@@ -484,7 +545,7 @@ fn create_file_infobase(
             .create_infobase()
             .map_err(AppError::from)?;
             deferrals.note_result(INFOBASE_CREATE, &created);
-            ensure_created(&created)?;
+            ensure_created(&created, marker)?;
             let Some(import) = import else {
                 return Ok(created);
             };
@@ -539,11 +600,21 @@ fn assemble_with_designer(
     ensure_platform_success("update the database configuration", "infobase", &updated)
 }
 
-fn ensure_created(result: &PlatformCommandResult) -> Result<(), AppError> {
-    result
-        .process
-        .outcome()
-        .map_err(|_code| failed_create(result))
+/// Исход создания по коду выхода. Неудача, после которой файл базы всё же появился, оставила
+/// каталог с базой неизвестного вида: повтор `infobase create` на ней отказывает, а память о
+/// ней не записана, — отказ называет оба выхода.
+fn ensure_created(result: &PlatformCommandResult, marker: &Path) -> Result<(), AppError> {
+    result.process.outcome().map_err(|_code| {
+        let error = failed_create(result);
+        if !marker.exists() {
+            return error;
+        }
+        let dir = marker.parent().unwrap_or(marker);
+        error.with_context(format!(
+            "the directory '{}' is left with a partly created infobase that infobase create refuses as existing and the runner has no memory of: remove the directory and run infobase create again, or load the sources over it with push --force",
+            dir.display()
+        ))
+    })
 }
 
 /// Журнал `/Out` Конфигуратора, собирающего созданную базу.
@@ -582,7 +653,7 @@ fn ensure_cluster_infobase(
                 "create",
                 started,
                 format!(
-                    "would create {target} in the cluster with {database} via {}; whether it already exists is not observable before the creation",
+                    "would create {target} in the cluster with {database} via {}; whether it already exists is not observable before the creation; CrSQLDB=Y silently takes an existing database of that name, even one holding another infobase, and a failed creation may leave the database abandoned in the DBMS",
                     binary.display()
                 ),
             ),
@@ -622,7 +693,7 @@ fn ensure_cluster_infobase(
             started,
             format!("{target} created in the cluster with {database}; the first push loads every source-set in full"),
         )
-        .with_warnings(&Vec::from_iter(remember_created_base(config, None))))
+        .with_warnings(remember_created_base(config, None).as_slice()))
     });
     match settled {
         Ok((step, warnings)) => step.with_warnings(&warnings),
@@ -630,40 +701,30 @@ fn ensure_cluster_infobase(
     }
 }
 
-/// Реквизиты создания базы в кластере из секций `dbms` и `cluster`. Обязательные — вид
-/// СУБД, сервер, имя базы данных и национальные настройки: без `Locale` платформа оставляет
-/// в СУБД брошенную базу данных (замер #181). Нехватка — отказ до запуска платформы с
-/// ключом, которого нет.
-fn cluster_creation<'a>(config: &'a AppConfig) -> Result<ClusterInfobaseCreation<'a>, AppError> {
-    let dbms = config.infobase.dbms.as_ref();
-    let required = |field: &'static str, value: Option<&'a String>| -> Result<&'a str, AppError> {
-        value
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                AppError::Validation(format!(
-                    "infobase create in a cluster requires infobase.dbms.{field}: the CREATEINFOBASE string takes the DBMS, its server, the database name and the locale from the dbms section{}",
-                    if field == "locale" {
-                        " — without Locale the platform leaves an abandoned database in the DBMS"
-                    } else {
-                        ""
-                    }
-                ))
-            })
+/// Реквизиты создания базы в кластере: доступ к СУБД и национальные настройки читает
+/// единственный владелец контракта `infobase.dbms` (`InfobaseConfig::dbms_access`,
+/// `dbms_locale`), администратора кластера — секция `cluster`. Нехватка обязательного поля —
+/// отказ до запуска платформы с именем ключа.
+fn cluster_creation(config: &AppConfig) -> Result<ClusterInfobaseCreation<'_>, AppError> {
+    let refused = |missing: MissingDbmsField| {
+        AppError::Validation(format!("infobase create in a cluster: {missing}"))
     };
-    let optional = |value: Option<&'a String>| -> Option<&'a str> {
-        value.map(String::as_str).filter(|value| !value.is_empty())
-    };
+    let access = config.infobase.dbms_access().map_err(refused)?;
+    let locale = config.infobase.dbms_locale().map_err(refused)?;
     let cluster = config.infobase.cluster.as_ref();
     Ok(ClusterInfobaseCreation {
-        dbms: required("kind", dbms.and_then(|dbms| dbms.kind.as_ref()))?,
-        database_server: required("server", dbms.and_then(|dbms| dbms.server.as_ref()))?,
-        database_name: required("name", dbms.and_then(|dbms| dbms.name.as_ref()))?,
-        locale: required("locale", dbms.and_then(|dbms| dbms.locale.as_ref()))?,
-        database_user: optional(dbms.and_then(|dbms| dbms.user.as_ref())),
-        database_password: optional(dbms.and_then(|dbms| dbms.password.as_ref())),
-        cluster_user: optional(cluster.and_then(|cluster| cluster.user.as_ref())),
-        cluster_password: optional(cluster.and_then(|cluster| cluster.password.as_ref())),
+        dbms: access.kind,
+        database_server: access.server,
+        database_name: access.name,
+        database_user: access.user,
+        database_password: access.password,
+        locale,
+        cluster_user: cluster
+            .and_then(|cluster| cluster.user.as_deref())
+            .filter(|user| !user.is_empty()),
+        cluster_password: cluster
+            .and_then(|cluster| cluster.password.as_deref())
+            .filter(|password| !password.is_empty()),
     })
 }
 
@@ -705,6 +766,7 @@ fn ensure_edt_workspace(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    shared_edt: &mut Option<EdtDsl<'static>>,
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
@@ -794,43 +856,25 @@ fn ensure_edt_workspace(
         }
     };
 
-    let dsl = if config.tools.edt_cli.interactive_mode {
-        match EdtSessionManager::for_config(config, EdtSessionHostOptions::for_cli_command(config))
-        {
-            Ok(manager) => match EdtDsl::new_shared_session(
-                binary,
-                workspace.clone(),
-                Arc::new(manager),
-                Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
-                Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-            ) {
-                Ok(dsl) => dsl,
+    let one_shot;
+    let dsl: &EdtDsl<'_> = if config.tools.edt_cli.interactive_mode {
+        if shared_edt.is_none() {
+            match shared_edt_session(context, config, binary) {
+                Ok(dsl) => *shared_edt = Some(dsl),
                 Err(error) => {
-                    return StepOutcome::failed(
-                        "edt_workspace",
-                        "import",
-                        started,
-                        AppError::from(error),
-                    )
+                    return StepOutcome::failed("edt_workspace", "import", started, error)
                 }
-            },
-            Err(error) => {
-                return StepOutcome::failed(
-                    "edt_workspace",
-                    "import",
-                    started,
-                    AppError::from(error),
-                )
             }
         }
+        shared_edt.as_ref().expect("shared EDT session")
     } else {
-        EdtDsl::new(
+        one_shot = EdtDsl::new(
             binary,
             workspace.clone(),
             utilities.runner_for(UtilityType::EdtCli),
             context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        )
+        );
+        &one_shot
     };
     debug!("[EDT] Инициализация workspace: {}", workspace.display());
     let mut imported_projects = Vec::new();
@@ -1162,7 +1206,7 @@ mod tests {
         fs::write(
             path,
             format!(
-                "#!/bin/sh\nset -eu\nprompt() {{ printf '1C:EDT>'; }}\ncurrent_dir=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-data\" ]; then current_dir=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nsleep {}\nprintf 'START\\n' >> '{}'\ntrap 'printf \"EXIT\\\\n\" >> \"{}\"' EXIT\nprompt\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  eval \"set -- $line\"\n  cmd=\"${{1:-}}\"\n  if [ \"$#\" -gt 0 ]; then shift; fi\n  case \"$cmd\" in\n    cd)\n      if [ \"$#\" -eq 0 ]; then\n        printf '%s\\n' \"$current_dir\"\n      else\n        current_dir=\"$1\"\n      fi\n      prompt\n      ;;\n    import)\n      prompt\n      ;;\n    *)\n      prompt\n      ;;\n  esac\ndone\n",
+                "#!/bin/sh\nset -eu\nprompt() {{ printf '1C:EDT>'; }}\ncurrent_dir=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-data\" ]; then current_dir=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nsleep {}\nprintf 'START\\n' >> '{}'\ntrap 'printf \"EXIT\\\\n\" >> \"{}\"' EXIT\nprompt\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  eval \"set -- $line\"\n  cmd=\"${{1:-}}\"\n  if [ \"$#\" -gt 0 ]; then shift; fi\n  case \"$cmd\" in\n    cd)\n      if [ \"$#\" -eq 0 ]; then\n        printf '%s\\n' \"$current_dir\"\n      else\n        current_dir=\"$1\"\n      fi\n      prompt\n      ;;\n    import)\n      prompt\n      ;;\n    export)\n      target=\"\"\n      while [ \"$#\" -gt 0 ]; do\n        if [ \"$1\" = \"--configuration-files\" ]; then shift; target=\"$1\"; fi\n        shift\n      done\n      mkdir -p \"$target\"\n      printf '<Configuration />\\n' > \"$target/Configuration.xml\"\n      prompt\n      ;;\n    *)\n      prompt\n      ;;\n  esac\ndone\n",
                 startup_delay_ms as f64 / 1000.0,
                 calls_log.display(),
                 calls_log.display(),
@@ -1800,6 +1844,66 @@ mod tests {
                     .is_empty()
         );
         assert!(edt_workspace_marker_path(&work.join("edt-workspace")).exists());
+    }
+
+    /// Проект EDT при `interactive_mode`: импорт рабочей области и перевод основного набора
+    /// в XML идут через одну общую сессию EDT команды — второй процесс `1cedtcli` не
+    /// стартует и в рабочую область, которую держит сессия, не упирается; `ibcmd` собирает
+    /// базу из перевода.
+    #[cfg(unix)]
+    #[test]
+    fn an_edt_file_base_is_converted_through_the_shared_session_of_the_command() {
+        let dir = tempdir().expect("tempdir");
+        let edt_script = dir.path().join("edt").join("1cedtcli");
+        let edt_calls = dir.path().join("edt-calls.log");
+        write_interactive_edt_script(&edt_script, &edt_calls);
+        let ibcmd = dir.path().join("platform").join("ibcmd");
+        fs::create_dir_all(ibcmd.parent().expect("platform dir")).expect("platform dir");
+        let ibcmd_calls = dir.path().join("ibcmd-calls.log");
+        let infobase = dir.path().join("ib");
+        write_utility(
+            &ibcmd,
+            &ibcmd_calls,
+            None,
+            &format!(
+                "case \"$args\" in *create*) mkdir -p '{0}' && : > '{0}/1Cv8.1CD';; esac\n",
+                infobase.display()
+            ),
+        );
+        let mut config = config_with_platform(
+            dir.path(),
+            InfobaseConfig::file(format!("File={}", infobase.display())),
+            &ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+        config.format = SourceFormat::Edt;
+        for set in ["main", "ext"] {
+            fs::write(
+                config.base_path.join(set).join(".project"),
+                format!("<projectDescription><name>{set}</name></projectDescription>"),
+            )
+            .expect("source");
+        }
+        config.tools.edt_cli.path = Some(edt_script);
+        config.tools.edt_cli.interactive_mode = true;
+
+        let result = super::run_init(&ExecutionContext::cli(CommandName::Init), &config, false);
+
+        let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
+        let result = result.unwrap_or_else(|failure| panic!("{failure:?}\nEDT: {edt_calls_text}"));
+        assert_eq!(result.steps[0].target, "edt_workspace");
+        assert_eq!(result.steps[1].status, InitStepStatus::Ok, "{result:?}");
+        assert_eq!(
+            edt_calls_text.matches("START").count(),
+            1,
+            "{edt_calls_text}"
+        );
+        assert!(
+            edt_calls_text.contains("export --project-name main"),
+            "{edt_calls_text}"
+        );
+        let ibcmd_calls = fs::read_to_string(&ibcmd_calls).expect("ibcmd calls");
+        assert!(ibcmd_calls.contains("--import="), "{ibcmd_calls}");
     }
 
     #[cfg(unix)]

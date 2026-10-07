@@ -4,9 +4,11 @@ check:
   - tests/cli_init.rs::a_file_base_is_created_by_ibcmd_with_the_main_configuration_and_remembers_it
   - tests/cli_init.rs::init_designer_creates_infobase_and_skips_edt_workspace
   - tests/cli_init.rs::a_cluster_base_is_created_by_the_designer_with_the_client_server_string
-  - tests/cli_init.rs::a_cluster_base_without_a_locale_is_refused_before_the_platform_starts
+  - tests/cli_init.rs::a_cluster_base_without_a_required_dbms_field_is_refused_before_the_platform_starts
   - tests/cli_init.rs::a_standalone_target_is_refused_with_the_recipe
   - tests/cli_init.rs::an_existing_file_base_is_refused_and_the_preview_names_it
+  - tests/cli_init.rs::a_failed_ibcmd_create_that_left_a_base_names_the_directory_and_the_ways_out
+  - tests/cli_init.rs::a_cluster_preview_names_the_target_and_starts_nothing
   - tests/cli_init.rs::init_edt_imports_projects_in_configuration_then_extension_order
   - tests/cli_init.rs::a_file_base_of_an_edt_project_is_assembled_by_ibcmd_from_its_sources
   - tests/cli_push_generation.rs::a_base_created_by_the_runner_takes_the_first_push
@@ -24,13 +26,17 @@ check:
 из секции `dbms`, включая `locale`, и из `cluster.user` и `cluster.password`. Без
 обязательного реквизита `dbms` — отказ до запуска платформы с именем ключа. Автономный сервер
 получает отказ рода подбора с рецептом `ibcmd server config init` и `ibcmd infobase create`.
+Превью базы в кластере предупреждает, что `CrSQLDB=Y` молча берёт существующую базу данных
+с тем же именем, даже с чужой базой, и что неудача может оставить базу данных брошенной.
 
 Для формата EDT команда создаёт ещё и рабочую область. Созданная база сразу записывается в
 память: у файловой — набор, из которого она собрана, и первая отправка досылает остальное;
 у базы в кластере, которую Конфигуратор создаёт пустой, и у файловой, чью сборку остановили
 после создания, — только то, что база есть, и первая отправка полная. Созданную файловую
 базу команда записывает в метку за своей копией. Существующая файловая база — отказ на тех
-же правах, что у подъёма из снимка с созданием. Копию другой базы делает `--from`
+же правах, что у подъёма из снимка с созданием. Неудачное создание, после которого файл базы
+всё же появился, называет оставленный каталог и выходы: удалить его и создать базу заново или
+загрузить исходники поверх `push --force`. Копию другой базы делает `--from`
 (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
 
 Исходники проекта EDT сперва переводятся в XML
