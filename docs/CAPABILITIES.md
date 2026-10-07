@@ -34,7 +34,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent`; у автономного сервера (`infobase.standalone`) строки нет | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
 | `upload` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
-| `make` / `artifacts` | цепочка `ibcmd` → `designer` при любом виде базы и без неё; любой `format`; `.epf`/`.erf` — только `designer`; `ibcmd-rs` и `agent` не принимаются | Собирает `.cf` / `.cfe` из исходников во временной базе раннера под `workPath` и публикует `.epf` / `.erf`; база проекта не открывается и не нужна; `ibcmd` — `infobase create` со своим `--data`, затем `config import --out`; Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles` (без `-updateConfigDumpInfo` и `/UpdateDBCfg`), `/DumpCfg`, расширение — поверх основной конфигурации; исходники EDT сперва переводит в XML `1cedtcli` |
+| `make` / `artifacts` | цепочка `ibcmd` → `designer` при любом виде базы и без неё; любой `format`; `.epf`/`.erf` — только `designer`; `ibcmd-rs` и `agent` не принимаются; живой замер последовательностей — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416) | Собирает `.cf` / `.cfe` из исходников во временной базе раннера под `workPath` и публикует `.epf` / `.erf`; база проекта не открывается и не нужна; `ibcmd` — `infobase create` со своим `--data`, затем `config import --out`; Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles` (без `-updateConfigDumpInfo` и `/UpdateDBCfg`), `/DumpCfg`, расширение — поверх основной конфигурации; исходники EDT сперва переводит в XML `1cedtcli` |
 | `check` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore`; `agent` только по `providers.infobase.restore: agent`; у автономного сервера (`infobase.standalone`) строки нет — снимок снимают средствами сервера | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
@@ -1127,8 +1127,16 @@ v8-runner artifacts [<SET>] --output <TARGET> [--extension <NAME>] [--dry-run]
   - Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles` без `-updateConfigDumpInfo`
     (файл версий в исходниках не пишется) и без `/UpdateDBCfg`, затем `/DumpCfg`; расширение
     он загружает с `-Extension` поверх основной конфигурации;
-  - внешние `.epf` / `.erf` собирает Конфигуратор в той же временной базе; ключ
-    `providers.make` их не касается.
+  - внешние `.epf` / `.erf` собирает всегда Конфигуратор в своей временной базе: сперва
+    загружает в неё основную конфигурацию проекта (без `-updateConfigDumpInfo` и
+    `/UpdateDBCfg`), затем `/LoadExternalDataProcessorOrReportFromFiles`. В обходе
+    Конфигуратором это та же база, в обходе `ibcmd` — своя: базу `ibcmd` Конфигуратор не
+    открывает. Ключ `providers.make` внешних наборов не касается, и их квитанция называет
+    `designer` с `origin: default` и при назначенном ключе.
+- Последовательности сборки пока проверены на поддельной платформе; живой замер
+  Конфигуратора на свежей базе `CREATEINFOBASE` с `/IBConnectionString`, формы `ibcmd` с
+  `--data` и `--out` и внешних обработок в базе с загруженной, но не применённой
+  конфигурацией — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416).
 - Формат EDT: исходники сперва переводит в XML `1cedtcli` — тем же шагом, что у `push`, — в
   каталог временной базы.
 - Отмена останавливает сборку на безопасной точке: перед созданием базы, перед загрузкой,

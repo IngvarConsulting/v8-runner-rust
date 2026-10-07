@@ -325,7 +325,9 @@ fn orphan_name_matches_contract(
     backup_prefixes: &[&str],
 ) -> bool {
     match metadata.kind {
-        TempDirKind::Stage => {
+        // Временная база раннера — каталог `<префикс>-<запуск>` под корнем временных баз:
+        // её префикс `throwaway_infobase` передаёт как префикс промежуточных копий.
+        TempDirKind::Stage | TempDirKind::ThrowawayInfobase => {
             stage_prefixes
                 .iter()
                 .any(|prefix| file_name.starts_with(prefix))
@@ -348,15 +350,6 @@ fn orphan_name_matches_contract(
                 })
                 .unwrap_or(false);
             named_backup || file_backup
-        }
-        // Временная база раннера: каталог `<префикс>-<запуск>` под корнем временных баз.
-        // Публикация таких не заводит; их префикс называет `throwaway_infobase`, передавая
-        // его как префикс промежуточных копий.
-        TempDirKind::ThrowawayInfobase => {
-            stage_prefixes
-                .iter()
-                .any(|prefix| file_name.starts_with(prefix))
-                && file_name.contains(&metadata.run_id)
         }
     }
 }

@@ -4,8 +4,10 @@
 //! (`INV.USE-CASES.MAKE-BUILDS-PACKAGES-FROM-SOURCES-IN-A-THROWAWAY-BASE`): исходники набора
 //! — для формата EDT сперва переведённые `1cedtcli` в XML — собирает исполнитель цепочки
 //! `make` (`ibcmd`, иначе Конфигуратор) в [`ThrowawayInfobase`]. Внешние обработки и отчёты
-//! собирает Конфигуратор в той же базе. Одна база служит одному прогону: `make <SET>` создаёт
-//! свою, обход без набора ([`execute_all`]) — одну на все наборы, и прогон её убирает.
+//! собирает Конфигуратор в своей базе, куда сперва загружена основная конфигурация. База
+//! служит одному прогону — у каждого исполнителя своя ([`MakeSession`]): `make <SET>`
+//! создаёт свою, обход без набора ([`execute_all`]) — общую на все наборы, и прогон её
+//! убирает.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -64,32 +66,37 @@ const UNSUPPORTED_PROFILE_ERROR: &str =
     "make supports only the cf, cfe, epf and erf runner profiles of the designer backend";
 const ARTIFACTS_BACKUP_PREFIX: &str = ".artifacts-backup";
 
-/// Прогон `make`: исполнители процессов и временная база, общая для всех его наборов.
+/// Прогон `make`: исполнители процессов и временные базы, общие для всех его наборов.
+///
+/// База у прогона одна на исполнителя: её создаёт тот, кто в ней собирает. Пакеты собирает
+/// исполнитель цепочки `make`, внешние обработки — всегда Конфигуратор; если пакеты собирал
+/// `ibcmd`, у внешних своя база Конфигуратора — базу `ibcmd` Конфигуратор не открывает.
 pub struct MakeSession {
     utilities: PlatformUtilities,
-    base: Option<ThrowawayInfobase>,
+    bases: Vec<ThrowawayInfobase>,
 }
 
 impl MakeSession {
     pub(super) fn new(config: &AppConfig) -> Self {
         Self {
             utilities: PlatformUtilities::from_config(config),
-            base: None,
+            bases: Vec::new(),
         }
     }
 
-    /// Убирает временную базу прогона. Неудача — предупреждение для ответа.
-    pub(super) fn close(self) -> Option<String> {
-        self.base.and_then(ThrowawayInfobase::close)
+    /// Убирает временные базы прогона. Неудачи — предупреждения для ответа.
+    pub(super) fn close(self) -> Vec<String> {
+        self.bases
+            .into_iter()
+            .flat_map(ThrowawayInfobase::close)
+            .collect()
     }
 }
 
-/// Предупреждение уборки временной базы ложится в диагностику ответа набора, на котором
+/// Предупреждения уборки временных баз ложатся в диагностику ответа набора, на котором
 /// прогон кончился, — удачного или нет (`INV.MAKE-NAMES-A-FAILED-CLEANUP`).
-pub(super) fn note_cleanup_warning(result: &mut ArtifactsResult, warning: Option<String>) {
-    if let Some(warning) = warning {
-        result.execution.diagnostics.push(warning);
-    }
+pub(super) fn note_cleanup_warning(result: &mut ArtifactsResult, warnings: Vec<String>) {
+    result.execution.diagnostics.extend(warnings);
 }
 
 pub fn execute(
@@ -266,6 +273,25 @@ fn run_artifacts_selected(
     };
 
     if args.dry_run {
+        // Исходники EDT сборка сперва переводит `1cedtcli`: без него превью отказывает так
+        // же, как отказал бы прогон.
+        if config.format == SourceFormat::Edt {
+            if let Err(error) = session.utilities.locate(UtilityType::EdtCli) {
+                let error = AppError::from(error);
+                let message = error.to_string();
+                return Err(ArtifactsExecutionFailure::with_payload(
+                    error,
+                    empty_result(
+                        resolved.mode,
+                        started,
+                        Some(resolved.source_set_name.clone()),
+                        resolved.extension.clone(),
+                        resolved.output_path.clone(),
+                        Some(message),
+                    ),
+                ));
+            }
+        }
         crate::use_cases::progress::log_live_stage(
             "make: preview",
             "[Artifacts] preview only, nothing built or published",
@@ -449,26 +475,70 @@ type PublicationAttempt = Result<
     (AppError, ArtifactSet, Option<PathBuf>),
 >;
 
-/// Временная база прогона: созданная раньше в этом прогоне или новая — тем исполнителем,
-/// который выбран для набора.
+/// Временная база прогона того исполнителя, что собирает: созданная им раньше в этом прогоне
+/// или новая. База другого исполнителя не берётся никогда.
 fn session_base<'s>(
     context: &ExecutionContext,
     config: &AppConfig,
-    base: &'s mut Option<ThrowawayInfobase>,
+    bases: &'s mut Vec<ThrowawayInfobase>,
     builder: Builder,
     runner: &dyn ProcessRunner,
 ) -> Result<&'s mut ThrowawayInfobase, AppError> {
-    if base.is_none() {
-        *base = Some(ThrowawayInfobase::create(
-            context,
-            &config.work_path,
-            builder,
-            runner,
-        )?);
+    let index = match bases
+        .iter()
+        .position(|base| base.provider() == builder.provider)
+    {
+        Some(index) => index,
+        None => {
+            bases.push(ThrowawayInfobase::create(
+                context,
+                &config.work_path,
+                builder,
+                runner,
+            )?);
+            bases.len() - 1
+        }
+    };
+    Ok(&mut bases[index])
+}
+
+/// Основная конфигурация во временной базе Конфигуратора: расширения и внешние обработки
+/// он собирает поверх неё. База её получает один раз за прогон; `ibcmd` её не загружает.
+fn ensure_configuration_in(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    base: &mut ThrowawayInfobase,
+    runner: &dyn ProcessRunner,
+    log_file: Option<PathBuf>,
+) -> Result<(), (AppError, Option<PathBuf>)> {
+    let inventory = SourceSetInventory::new(config);
+    let configuration = configuration_source_set(&inventory).map_err(|error| (error, None))?;
+    if !base.needs_configuration(&configuration.name) {
+        return Ok(());
     }
-    Ok(base
-        .as_mut()
-        .expect("the throwaway infobase was just created"))
+    let parent_dir =
+        sources_in_xml(context, config, base, configuration).map_err(|error| (error, None))?;
+    if let Some(loaded) = base
+        .ensure_configuration(context, runner, &configuration.name, &parent_dir, log_file)
+        .map_err(|error| (error, None))?
+    {
+        ensure_platform_success(&configuration.name, &loaded)
+            .map_err(|error| (error, loaded.platform_log_path.clone()))?;
+    }
+    Ok(())
+}
+
+/// Исполнитель процессов для утилиты исполнителя; исполнителю без утилиты `make` нечего
+/// делать.
+fn runner_of<'u>(
+    config: &AppConfig,
+    utilities: &'u PlatformUtilities,
+    provider: Provider,
+) -> Result<&'u dyn ProcessRunner, AppError> {
+    crate::use_cases::provider_selection::utilities_of(provider, config)
+        .and_then(|needed| needed.into_iter().next())
+        .map(|utility| utilities.runner_for(utility))
+        .ok_or_else(|| crate::use_cases::unimplemented_provider(Operation::Make, provider))
 }
 
 /// Каталог XML набора: у формата Конфигуратора — сами исходники, у формата EDT — их перевод
@@ -534,16 +604,14 @@ fn run_package_build(
     ) {
         return Err((error, ArtifactSet::default(), None));
     }
-    let runner = session.utilities.runner_for(match builder.provider {
-        Provider::Ibcmd => UtilityType::Ibcmd,
-        _ => UtilityType::V8,
-    });
+    let runner = runner_of(config, &session.utilities, builder.provider)
+        .map_err(|error| (error, ArtifactSet::default(), None))?;
     build_package_in(
         context,
         config,
         resolved,
         builder,
-        &mut session.base,
+        &mut session.bases,
         runner,
     )
 }
@@ -554,11 +622,11 @@ fn build_package_in(
     config: &AppConfig,
     resolved: &ResolvedArtifactsTarget,
     builder: Builder,
-    base: &mut Option<ThrowawayInfobase>,
+    bases: &mut Vec<ThrowawayInfobase>,
     runner: &dyn ProcessRunner,
 ) -> PublicationAttempt {
     let fail = |error: AppError| (error, ArtifactSet::default(), None);
-    let base = session_base(context, config, base, builder, runner).map_err(fail)?;
+    let base = session_base(context, config, bases, builder, runner).map_err(fail)?;
     let inventory = SourceSetInventory::new(config);
     let source_set = inventory.named(&resolved.source_set_name).map_err(fail)?;
     let configuration = configuration_source_set(&inventory).map_err(fail)?;
@@ -574,28 +642,10 @@ fn build_package_in(
         None => Package::Configuration,
     };
 
-    // Конфигуратор загружает расширение поверх основной конфигурации: её база получает
-    // один раз за прогон.
-    if matches!(package, Package::Extension(_)) && base.needs_configuration(&configuration.name) {
-        let parent_dir = sources_in_xml(context, config, base, configuration).map_err(fail)?;
-        if let Some(loaded) = base
-            .ensure_configuration(
-                context,
-                runner,
-                &configuration.name,
-                &parent_dir,
-                log_file.clone(),
-            )
-            .map_err(fail)?
-        {
-            if let Err(error) = ensure_platform_success(&configuration.name, &loaded) {
-                return Err((
-                    error,
-                    ArtifactSet::default(),
-                    loaded.platform_log_path.clone(),
-                ));
-            }
-        }
+    // Конфигуратор загружает расширение поверх основной конфигурации.
+    if matches!(package, Package::Extension(_)) {
+        ensure_configuration_in(context, config, base, runner, log_file.clone())
+            .map_err(|(error, log)| (error, ArtifactSet::default(), log))?;
     }
     let source_dir = sources_in_xml(context, config, base, source_set).map_err(fail)?;
 
@@ -703,7 +753,7 @@ fn build_package_in(
     ))
 }
 
-/// Внешние обработки и отчёты: Конфигуратор собирает их во временной базе прогона.
+/// Внешние обработки и отчёты: Конфигуратор собирает их в своей временной базе прогона.
 fn run_external_build(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -722,10 +772,42 @@ fn run_external_build(
         return Err((error, ArtifactSet::default(), None));
     }
 
+    let runner = match runner_of(config, &session.utilities, builder.provider) {
+        Ok(runner) => runner,
+        Err(error) => return Err((error, ArtifactSet::default(), None)),
+    };
+    build_external_in(
+        context,
+        config,
+        resolved,
+        builder,
+        &mut session.bases,
+        runner,
+    )
+}
+
+/// Внешние обработки в базе Конфигуратора прогона: сперва основная конфигурация проекта —
+/// как в базе проекта, на которой их собирали прежде, — затем каждая обработка.
+fn build_external_in(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedArtifactsTarget,
+    builder: Builder,
+    bases: &mut Vec<ThrowawayInfobase>,
+    runner: &dyn ProcessRunner,
+) -> PublicationAttempt {
     let binary = builder.binary.clone();
-    let runner = session.utilities.runner_for(UtilityType::V8);
-    let base = session_base(context, config, &mut session.base, builder, runner)
+    let base = session_base(context, config, bases, builder, runner)
         .map_err(|error| (error, ArtifactSet::default(), None))?;
+    let configuration_log = designer_log_file(
+        config,
+        Provider::Designer,
+        &resolved.source_set_name,
+        resolved.mode,
+    )
+    .map_err(|error| (error, ArtifactSet::default(), None))?;
+    ensure_configuration_in(context, config, base, runner, configuration_log)
+        .map_err(|(error, log)| (error, ArtifactSet::default(), log))?;
 
     let publication = StagedPublication::prepare_dir(
         &resolved.output_path,
@@ -1458,10 +1540,10 @@ fn published_file_names(artifacts: &ArtifactSet) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_package_in, cleanup_orphan_files, export_refusal, publication_message,
-        publication_warning, published_execution, resolve_target, run_artifacts,
-        validate_supported_matrix, MakeSession, ResolvedArtifactsTarget, StagedPublicationOutcome,
-        ThrowawayInfobase,
+        build_external_in, build_package_in, cleanup_orphan_files, export_refusal,
+        publication_message, publication_warning, published_execution, resolve_target,
+        run_artifacts, validate_supported_matrix, MakeSession, ResolvedArtifactsTarget,
+        StagedPublicationOutcome, ThrowawayInfobase,
     };
     use crate::config::model::{
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
@@ -1934,7 +2016,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut None,
+            &mut Vec::new(),
             &DumpThen::new(|policy: &ProcessExecutionPolicy| policy.cancellation.cancel()),
         )
         .expect_err("interrupted before publish");
@@ -1983,7 +2065,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut None,
+            &mut Vec::new(),
             &runner,
         )
         .expect_err("a moved target must stop the publication");
@@ -2035,7 +2117,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut None,
+            &mut Vec::new(),
             &runner,
         )
         .expect_err("the export failed");
@@ -2170,6 +2252,25 @@ mod tests {
         ) -> Result<ProcessResult, ProcessError> {
             policy.mark_started_for_test();
             self.calls.lock().expect("calls").push(request.args.clone());
+            let external_load = after(&request.args, "/LoadExternalDataProcessorOrReportFromFiles")
+                .and_then(|_| request.args.last());
+            if let Some(binary) = external_load {
+                fs::write(binary, "epf").expect("external package");
+            }
+            if let Some(xml) = after(&request.args, "/DumpExternalDataProcessorOrReportToFiles") {
+                let name = Path::new(xml)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                fs::create_dir_all(Path::new(xml).parent().expect("parent")).expect("dump dir");
+                fs::write(
+                    xml,
+                    format!(
+                        "<ExternalDataProcessor><Properties><Name>{name}</Name></Properties></ExternalDataProcessor>"
+                    ),
+                )
+                .expect("external descriptor");
+            }
             let mut previous = "";
             for arg in &request.args {
                 let package = if previous == "/DumpCfg" {
@@ -2245,7 +2346,7 @@ mod tests {
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
         let resolved = resolve_target(&config, &request).expect("resolved");
         let runner = Recorder::new();
-        let mut base = None;
+        let mut base = Vec::new();
 
         build_package_in(
             &ExecutionContext::cli(CommandName::Artifacts),
@@ -2293,8 +2394,11 @@ mod tests {
         assert!(after(&calls[2], "/DumpCfg").is_some(), "{calls:?}");
         assert!(resolved.output_path.is_file());
 
-        let warning = base.take().and_then(ThrowawayInfobase::close);
-        assert_eq!(warning, None);
+        let warnings = base
+            .into_iter()
+            .flat_map(ThrowawayInfobase::close)
+            .collect::<Vec<_>>();
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert!(bases_left(&work).is_empty(), "{:?}", bases_left(&work));
     }
 
@@ -2317,7 +2421,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut None,
+            &mut Vec::new(),
             &runner,
         )
         .expect("built");
@@ -2360,7 +2464,7 @@ mod tests {
         let (config, _work) = project(dir.path());
         let runner = Recorder::new();
         let context = ExecutionContext::cli(CommandName::Artifacts);
-        let mut base = None;
+        let mut base = Vec::new();
         let cf = resolve_target(
             &config,
             &cf_request(&dir.path().join("dist/main.cf").display().to_string()),
@@ -2416,7 +2520,7 @@ mod tests {
             &config,
             &resolved,
             ibcmd,
-            &mut None,
+            &mut Vec::new(),
             &runner,
         )
         .expect("built");
@@ -2466,7 +2570,7 @@ mod tests {
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
         let resolved = resolve_target(&config, &request).expect("resolved");
         let runner = Recorder::cancelling_on("CREATEINFOBASE");
-        let mut base = None;
+        let mut base = Vec::new();
 
         let (error, _, _) = build_package_in(
             &ExecutionContext::cli(CommandName::Artifacts)
@@ -2502,7 +2606,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut None,
+            &mut Vec::new(),
             &runner,
         )
         .expect_err("cancelled");
@@ -2541,7 +2645,7 @@ mod tests {
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
         let resolved = resolve_target(&config, &request).expect("resolved");
         let runner = Recorder::new();
-        let mut base = None;
+        let mut base = Vec::new();
 
         build_package_in(
             &ExecutionContext::cli(CommandName::Artifacts),
@@ -2564,6 +2668,276 @@ mod tests {
         assert!(Path::new(loaded).join("Configuration.xml").is_file());
         drop(base);
         assert!(bases_left(&work).is_empty(), "{:?}", bases_left(&work));
+    }
+
+    fn external_project(dir: &Path) -> (AppConfig, PathBuf, ResolvedArtifactsTarget) {
+        let (mut config, work) = project(dir);
+        fs::create_dir_all(config.base_path.join("tools")).expect("tools");
+        fs::write(
+            config.base_path.join("tools/Tool.xml"),
+            "<ExternalDataProcessor><Properties><Name>Tool</Name></Properties></ExternalDataProcessor>",
+        )
+        .expect("descriptor");
+        add_external_source_set(
+            &mut config,
+            "tools",
+            SourceSetPurpose::ExternalDataProcessors,
+        );
+        let request = external_request(
+            ArtifactsModeRequest::ExternalDataProcessorEpf,
+            &dir.join("dist/tools").display().to_string(),
+            "tools",
+        );
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        (config, work, resolved)
+    }
+
+    fn position(calls: &[Vec<String>], step: &str) -> Vec<usize> {
+        calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.iter().any(|arg| arg == step))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// `make <EPF_SET>` собирает обработку в базе Конфигуратора, куда сперва загружена
+    /// основная конфигурация проекта — без файла версий и без `/UpdateDBCfg`.
+    #[test]
+    fn an_external_set_is_built_on_top_of_the_configuration() {
+        let dir = tempdir().expect("tempdir");
+        let (config, _work, resolved) = external_project(dir.path());
+        let runner = Recorder::new();
+
+        build_external_in(
+            &ExecutionContext::cli(CommandName::Artifacts),
+            &config,
+            &resolved,
+            fake_designer(),
+            &mut Vec::new(),
+            &runner,
+        )
+        .expect("built");
+
+        let calls = runner.calls();
+        assert_eq!(position(&calls, "CREATEINFOBASE"), [0], "{calls:?}");
+        assert_eq!(position(&calls, "/LoadConfigFromFiles"), [1], "{calls:?}");
+        assert_eq!(
+            after(&calls[1], "/LoadConfigFromFiles"),
+            Some(
+                config
+                    .base_path
+                    .join("configuration")
+                    .display()
+                    .to_string()
+                    .as_str()
+            )
+        );
+        for flag in ["-updateConfigDumpInfo", "/UpdateDBCfg", "-Extension"] {
+            assert!(!calls[1].iter().any(|arg| arg == flag), "{calls:?}");
+        }
+        assert_eq!(
+            position(&calls, "/LoadExternalDataProcessorOrReportFromFiles"),
+            [2],
+            "{calls:?}"
+        );
+        assert!(resolved.output_path.join("Tool.epf").is_file());
+    }
+
+    /// Обход Конфигуратором собирает внешние обработки в той же базе: основная конфигурация в
+    /// ней уже есть, и второй раз она не загружается.
+    #[test]
+    fn a_designer_walk_builds_externals_in_its_own_base() {
+        let dir = tempdir().expect("tempdir");
+        let (config, _work, external) = external_project(dir.path());
+        let runner = Recorder::new();
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        let mut bases = Vec::new();
+        let cf = resolve_target(
+            &config,
+            &cf_request(&dir.path().join("dist/main.cf").display().to_string()),
+        )
+        .expect("cf");
+        build_package_in(&context, &config, &cf, fake_designer(), &mut bases, &runner)
+            .expect("cf built");
+        build_external_in(
+            &context,
+            &config,
+            &external,
+            fake_designer(),
+            &mut bases,
+            &runner,
+        )
+        .expect("external built");
+
+        let calls = runner.calls();
+        assert_eq!(bases.len(), 1);
+        assert_eq!(position(&calls, "CREATEINFOBASE").len(), 1, "{calls:?}");
+        assert_eq!(
+            position(&calls, "/LoadConfigFromFiles").len(),
+            1,
+            "{calls:?}"
+        );
+    }
+
+    /// Обход, где пакеты собирал `ibcmd`, даёт внешним обработкам свою базу Конфигуратора:
+    /// базу `ibcmd` Конфигуратор не открывает, а основную конфигурацию загружает в свою.
+    #[test]
+    fn an_ibcmd_walk_gives_externals_a_designer_base_of_their_own() {
+        let dir = tempdir().expect("tempdir");
+        let (config, _work, external) = external_project(dir.path());
+        let runner = Recorder::new();
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        let mut bases = Vec::new();
+        let cf = resolve_target(
+            &config,
+            &cf_request(&dir.path().join("dist/main.cf").display().to_string()),
+        )
+        .expect("cf");
+        let ibcmd = crate::use_cases::throwaway_infobase::Builder {
+            provider: crate::domain::capability::Provider::Ibcmd,
+            binary: PathBuf::from("/tmp/fake-ibcmd"),
+        };
+        build_package_in(&context, &config, &cf, ibcmd, &mut bases, &runner).expect("cf built");
+        build_external_in(
+            &context,
+            &config,
+            &external,
+            fake_designer(),
+            &mut bases,
+            &runner,
+        )
+        .expect("external built");
+
+        let calls = runner.calls();
+        assert_eq!(bases.len(), 2);
+        let ibcmd_base = after(&calls[0], "--db-path")
+            .expect("ibcmd base")
+            .to_owned();
+        let designer_calls = calls
+            .iter()
+            .filter(|call| {
+                call.iter()
+                    .any(|arg| arg == "CREATEINFOBASE" || arg == "/IBConnectionString")
+            })
+            .collect::<Vec<_>>();
+        assert!(!designer_calls.is_empty(), "{calls:?}");
+        for call in designer_calls {
+            assert!(
+                !call.iter().any(|arg| arg.contains(&ibcmd_base)),
+                "Designer opened the ibcmd base: {call:?}"
+            );
+        }
+        let created = position(&calls, "CREATEINFOBASE");
+        let loaded = position(&calls, "/LoadConfigFromFiles");
+        let external_load = position(&calls, "/LoadExternalDataProcessorOrReportFromFiles");
+        assert_eq!(created.len(), 1, "{calls:?}");
+        assert_eq!(loaded.len(), 1, "{calls:?}");
+        assert!(
+            created[0] < loaded[0] && loaded[0] < external_load[0],
+            "{calls:?}"
+        );
+    }
+
+    /// Прогон, у которого выгрузка отказала, свою временную базу тоже убирает.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_run_removes_its_throwaway_base() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        write_script(
+            &script,
+            "case \" $* \" in *' /DumpCfg '*) exit 12 ;; esac\nexit 0",
+        );
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir_all(base.join("configuration")).expect("base config");
+        fs::create_dir_all(&work).expect("work");
+        let config = sample_config(&base, &work, &script, SourceFormat::Designer);
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+
+        super::execute(
+            &ExecutionContext::cli(CommandName::Artifacts),
+            &config,
+            &request,
+        )
+        .expect_err("the dump failed");
+
+        assert!(bases_left(&work).is_empty(), "{:?}", bases_left(&work));
+    }
+
+    /// Превью проекта EDT ищет `1cedtcli`: без него превью отказывает, как отказал бы прогон.
+    #[cfg(unix)]
+    #[test]
+    fn an_edt_preview_without_the_edt_cli_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        write_script(&script, "exit 0");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir_all(base.join("configuration")).expect("base config");
+        fs::create_dir_all(&work).expect("work");
+        let mut config = sample_config(&base, &work, &script, SourceFormat::Edt);
+        config.tools.edt_cli = crate::config::model::EdtCliConfig {
+            path: Some(dir.path().join("missing-1cedtcli")),
+            auto_start: false,
+            ..Default::default()
+        };
+        let mut request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        request.dry_run = true;
+
+        let failure = run_artifacts(
+            &ExecutionContext::cli(CommandName::Artifacts),
+            &config,
+            &request,
+            &mut MakeSession::new(&config),
+        )
+        .expect_err("no EDT CLI");
+
+        let payload = failure.payload.expect("payload");
+        assert!(!payload.execution.is_ok());
+        assert!(!dir.path().join("dist").exists());
+    }
+
+    /// Ключ `providers.make` внешних наборов не касается: их собирает Конфигуратор, и
+    /// квитанция называет его умолчанием и при назначенном `ibcmd`.
+    #[cfg(unix)]
+    #[test]
+    fn the_make_key_does_not_apply_to_an_external_set() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        write_script(&script, "exit 0");
+        let (mut config, _work, _) = external_project(dir.path());
+        config.tools.platform.path = Some(script);
+        config.providers = [(
+            crate::domain::capability::Operation::Make,
+            crate::domain::capability::Provider::Ibcmd,
+        )]
+        .into();
+        let mut request = external_request(
+            ArtifactsModeRequest::ExternalDataProcessorEpf,
+            &dir.path().join("dist/tools").display().to_string(),
+            "tools",
+        );
+        request.dry_run = true;
+
+        let result = run_artifacts(
+            &ExecutionContext::cli(CommandName::Artifacts),
+            &config,
+            &request,
+            &mut MakeSession::new(&config),
+        )
+        .expect("preview");
+
+        let receipt = result.provider.expect("receipt");
+        assert_eq!(
+            receipt.selected,
+            Some(crate::domain::capability::Provider::Designer)
+        );
+        assert_eq!(
+            receipt.origin,
+            crate::domain::capability::ProviderOrigin::Default
+        );
     }
 
     /// `make <SET>` убирает свою временную базу и после успеха.

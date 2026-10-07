@@ -52,11 +52,11 @@ pub(crate) enum Package<'n> {
     Extension(&'n str),
 }
 
-impl Package<'_> {
-    fn extension(self) -> Option<String> {
+impl<'n> Package<'n> {
+    fn extension(self) -> Option<&'n str> {
         match self {
             Self::Configuration => None,
-            Self::Extension(name) => Some(name.to_owned()),
+            Self::Extension(name) => Some(name),
         }
     }
 }
@@ -76,6 +76,8 @@ pub(crate) struct ThrowawayInfobase {
     builder: Builder,
     /// Набор основной конфигурации, уже загруженный Конфигуратором.
     configuration_loaded: Option<String>,
+    /// Что прогону стоит услышать: уборка брошенных баз, которая не удалась.
+    warnings: Vec<String>,
     removed: bool,
 }
 
@@ -90,12 +92,34 @@ impl ThrowawayInfobase {
         builder: Builder,
         runner: &dyn ProcessRunner,
     ) -> Result<Self, AppError> {
+        Self::create_after(context, work_path, builder, runner, cleanup_orphans)
+    }
+
+    /// [`Self::create`] с уборкой брошенных баз `cleanup`: так проверяется, что неудачная
+    /// уборка прогон не останавливает.
+    fn create_after(
+        context: &ExecutionContext,
+        work_path: &Path,
+        builder: Builder,
+        runner: &dyn ProcessRunner,
+        cleanup: impl FnOnce(&Path) -> Result<(), AppError>,
+    ) -> Result<Self, AppError> {
         let root = throwaway_root(work_path).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to prepare the throwaway infobase root: {error}"
             ))
         })?;
-        cleanup_orphans(&root)?;
+        // Уборка брошенных баз прогон не останавливает: базу, которую держит зависший
+        // процесс или антивирус, уберёт следующий прогон, а своя база ляжет в свой каталог.
+        let warnings = cleanup(&root)
+            .err()
+            .map(|error| {
+                format!(
+                    "stale throwaway infobases were not removed: {error}; the next make retries"
+                )
+            })
+            .into_iter()
+            .collect();
         if let Some(error) = interruption_before_safe_point(context, "throwaway infobase creation")
         {
             return Err(error);
@@ -118,6 +142,7 @@ impl ThrowawayInfobase {
             dir,
             builder,
             configuration_loaded: None,
+            warnings,
             removed: false,
         };
         write_temp_dir_metadata(
@@ -144,7 +169,9 @@ impl ThrowawayInfobase {
         };
         if let Err(error) = created {
             // Убрать сразу: база, которую не создали, не нужна ни этому прогону, ни уборке.
-            let _ = base.close();
+            for warning in base.close() {
+                tracing::debug!("{warning}");
+            }
             return Err(error);
         }
         Ok(base)
@@ -242,16 +269,19 @@ impl ThrowawayInfobase {
                 }
                 log_live_stage("make: dump", "[Конфигуратор] dumping the package");
                 self.designer(context, runner, log_file)
-                    .dump_cfg(out, package.extension().as_deref())
+                    .dump_cfg(out, package.extension())
                     .map_err(AppError::from)
             }
             other => Err(unsupported(other)),
         }
     }
 
-    /// Убирает базу. Неудача — предупреждение: пакет уже собран, а след узнает уборка.
-    pub(crate) fn close(mut self) -> Option<String> {
-        self.remove()
+    /// Убирает базу. Неудача — предупреждение: пакет уже собран, а след узнает уборка. К
+    /// нему добавляется неудачная уборка брошенных баз при создании.
+    pub(crate) fn close(mut self) -> Vec<String> {
+        let mut warnings = std::mem::take(&mut self.warnings);
+        warnings.extend(self.remove());
+        warnings
     }
 
     fn remove(&mut self) -> Option<String> {
@@ -356,7 +386,7 @@ impl ThrowawayInfobase {
             "[Конфигуратор] loading the sources into the throwaway infobase",
         );
         self.designer(context, runner, log_file)
-            .load_config_from_files_untouched(source_dir, package.extension().as_deref())
+            .load_config_from_files_untouched(source_dir, package.extension())
             .map_err(AppError::from)
     }
 }
@@ -407,6 +437,48 @@ mod tests {
         let mut metadata = read_temp_dir_metadata(dir).expect("read");
         metadata.created_at -= chrono::Duration::days(2);
         std::fs::write(&sidecar, serde_json::to_vec(&metadata).expect("json")).expect("write");
+    }
+
+    /// Брошенную базу, которую не убрать (её держит процесс), уборка не превращает в отказ:
+    /// своя база создаётся в своём каталоге, а неудача становится предупреждением.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_base_that_cannot_be_removed_does_not_stop_the_build() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().expect("work");
+        let designer = work.path().join("1cv8");
+        std::fs::write(&designer, "#!/bin/sh\nexit 0\n").expect("script");
+        std::fs::set_permissions(&designer, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let runner = crate::platform::process::ProcessExecutor;
+
+        let base = super::ThrowawayInfobase::create_after(
+            &crate::use_cases::context::ExecutionContext::cli(
+                crate::use_cases::context::CommandName::Artifacts,
+            ),
+            work.path(),
+            super::Builder {
+                provider: crate::domain::capability::Provider::Designer,
+                binary: designer,
+            },
+            &runner,
+            |_| {
+                Err(crate::support::error::AppError::Runtime(
+                    "failed to remove stale publication temp: locked".to_owned(),
+                ))
+            },
+        )
+        .expect("created despite the stale base");
+
+        let dir = base.dir.clone();
+        assert!(dir.is_dir());
+        let warnings = base.close();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("stale throwaway infobases were not removed")),
+            "{warnings:?}"
+        );
+        assert!(!dir.exists());
     }
 
     /// Уборка узнаёт брошенную базу по описанию и имени и убирает её; свежую, чужую и

@@ -169,9 +169,7 @@ pub enum ConfigValidationError {
     ProviderDoesNotImplement {
         operation: &'static str,
         provider: &'static str,
-        /// ` on a file infobase` — у строки, зависящей от вида цели; пусто — у операции,
-        /// которой база проекта не нужна.
-        scope: String,
+        scope: ProviderScope,
         implemented: String,
     },
 
@@ -373,6 +371,23 @@ pub enum ConfigValidationError {
         #[source]
         source: Box<ConfigValidationError>,
     },
+}
+
+/// Где исполнитель не реализует операцию: на базе этого вида или, у операции, которой база
+/// проекта не нужна (`make`), вообще.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderScope {
+    Target(&'static str),
+    AnyTarget,
+}
+
+impl std::fmt::Display for ProviderScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Target(target) => write!(f, " on a {target} infobase"),
+            Self::AnyTarget => Ok(()),
+        }
+    }
 }
 
 impl ConfigValidationError {
@@ -1262,9 +1277,9 @@ fn validate_providers(
                 operation: operation.as_str(),
                 provider: provider.as_str(),
                 scope: if needs_no_target(*operation) {
-                    String::new()
+                    ProviderScope::AnyTarget
                 } else {
-                    format!(" on a {} infobase", target.as_str())
+                    ProviderScope::Target(target.as_str())
                 },
                 implemented,
             });

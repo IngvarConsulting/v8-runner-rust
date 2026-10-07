@@ -200,8 +200,9 @@ runtime snapshot commit только указанным source-set.
   — `ibcmd` (`infobase create` со своим `--data`, затем `config import --out`) или
   Конфигуратор (`CREATEINFOBASE`, `/LoadConfigFromFiles` без файла версий, `/DumpCfg`;
   расширение — поверх основной конфигурации). Исходники EDT сперва переводит в XML шаг
-  `build_project::execute_edt_export_step`. Одна база служит прогону (`artifacts::MakeSession`):
-  `make <SET>` — своя, обход без набора — одна на все наборы; после прогона она убирается, а
+  `build_project::execute_edt_export_step`. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
+  `make <SET>` — своя, обход без набора — общая на все наборы; внешние обработки Конфигуратор
+  собирает поверх основной конфигурации в своей базе; после прогона она убирается, а
   брошенную описание `TempDirKind::ThrowawayInfobase` выдаёт уборке как свою. Замка базы и
   метки владельца у `make` нет.
 - Full replacement target publication идёт через staged publication model.

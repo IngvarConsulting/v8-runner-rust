@@ -251,6 +251,30 @@ fn make_needs_no_infobase_and_refuses_the_infobase_key() {
     assert_eq!(refused["error"]["kind"], "validation", "{refused}");
 }
 
+/// `make` базу проекта не читает и о синониме её секции `infobase:` в проектном файле не
+/// предупреждает; `download`, который базу читает, предупреждает.
+#[test]
+fn make_does_not_warn_about_the_infobase_synonym() {
+    let project = Project::new(&[]);
+    fs::remove_file(project.root.join("v8project.local.yaml")).expect("local layer");
+    let file = project.root.join("v8project.yaml");
+    let text = fs::read_to_string(&file).expect("project file");
+    fs::write(&file, format!("{text}infobase:\n  connection: 'File=ib'\n")).expect("synonym");
+
+    let made = envelope(&project.run(&["make", "main", "--output", "out/main.cf", "--dry-run"]));
+    assert_eq!(made["ok"], true, "{made}");
+    assert!(
+        made["warnings"].as_array().is_none_or(Vec::is_empty),
+        "{made}"
+    );
+    let downloaded =
+        envelope(&project.run(&["download", "main", "--output", "out/main.cf", "--dry-run"]));
+    assert!(
+        downloaded["warnings"].to_string().contains("infobase"),
+        "{downloaded}"
+    );
+}
+
 /// Превью `make` без набора планирует каждый набор и ничего не собирает.
 #[test]
 fn make_without_a_set_preview_builds_nothing() {

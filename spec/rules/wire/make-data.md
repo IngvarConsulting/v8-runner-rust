@@ -8,6 +8,7 @@ check:
   - src/use_cases/artifacts.rs::run_artifacts_honors_interruption_before_export_safe_point
   - src/use_cases/artifacts.rs::a_designer_export_cancelled_after_its_start_is_a_cut_provider_command
   - src/use_cases/artifacts.rs::an_unrelated_failure_while_an_interruption_is_pending_stays_a_failure
+  - src/use_cases/artifacts.rs::the_make_key_does_not_apply_to_an_external_set
 ---
 
 # `data` команды `make`
@@ -26,6 +27,10 @@ check:
 `execution.errors[]` с тем же текстом. Отказ, пришедший, когда прерывание уже запрошено,
 остаётся отказом: `status: failed` и ошибка `designer_export_failed` — так код называется у
 любого исполнителя, — без записи о прерывании.
+
+Квитанция `provider` внешнего набора (`.epf`, `.erf`) называет `designer` с
+`origin: default` и тогда, когда `providers.make` назначен: внешние наборы собирает только
+Конфигуратор, и ключ их не касается.
 
 **Что изменила версия 6.** Квитанция `provider` получила необязательное поле
 `endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
@@ -49,7 +54,7 @@ check:
   "execution": {
     "status": "succeeded",
     "diagnostics": [
-      "would build ConfigurationCf into 'build/main.cf'; nothing published"
+      "would build ConfigurationCf into 'build/main.cf' via /opt/1cv8/bin/ibcmd in a throwaway infobase; nothing published"
     ],
     "payload": {
       "artifact_type": "configuration_cf",

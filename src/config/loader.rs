@@ -258,8 +258,12 @@ fn build_config(
     reject_local_keys_in_project_file(&root)?;
     let mut warnings = Vec::new();
     reject_mixed_provider_keys(&root, ConfigFile::Project(path))?;
+    // `make` базу проекта не выбирает: о синониме её секции ему говорить нечего.
+    let reads_the_base = !matches!(validation_mode, ConfigValidationMode::Make { .. });
     warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(path))?);
-    warnings.extend(fold_infobase_synonym(&mut root, ConfigFile::Project(path))?);
+    warnings.extend(
+        fold_infobase_synonym(&mut root, ConfigFile::Project(path))?.filter(|_| reads_the_base),
+    );
 
     // Переопределение провайдера попадает в квитанцию вместе с именем файла, который
     // его поставил: отличать проектный выбор от машинно-локального эксперимента нужно
@@ -273,7 +277,9 @@ fn build_config(
             .map_err(|error| ConfigLoadError::LocalOverlayUnsupportedShape(error.to_string()))?;
         reject_mixed_provider_keys(&overlay, ConfigFile::Local)?;
         warnings.extend(fold_push_synonym(&mut overlay, ConfigFile::Local)?);
-        warnings.extend(fold_infobase_synonym(&mut overlay, ConfigFile::Local)?);
+        warnings.extend(
+            fold_infobase_synonym(&mut overlay, ConfigFile::Local)?.filter(|_| reads_the_base),
+        );
         provider_origins.extend(provider_override_keys(&overlay, LOCAL_CONFIG_FILE_NAME));
         merge_yaml_values(&mut root, overlay);
     }
