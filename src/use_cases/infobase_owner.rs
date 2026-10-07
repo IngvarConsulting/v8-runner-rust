@@ -639,7 +639,7 @@ impl HeldRefusal<'_> {
             "cannot start {command_name}: the infobase '{}' is held by {holders}; {this_copy}. A command that writes a development infobase runs only in the working copy that holds it, or on a shared infobase when every working copy that holds it and this one share it, and repeating it does not help. \
              Ways out for this working copy: its own clean infobase — `v8-runner init --infobase <connection string>` points infobases.origin at an infobase of its own (the previous section stays as upstream), then `v8-runner infobase create`; \
              a copy of the infobase with its data — the same `init --infobase <connection string>`, then `v8-runner infobase create --from upstream`, which snapshots this infobase while it is free and creates the new one from the image; \
-             a shared infobase — `shared: true` at the infobase in v8project.local.yaml of every working copy that holds it and of this one: a working copy on another machine reports its consent through the owner marker at its next write command. \
+             an infobase deployed from a reference image — the same `init --infobase <connection string>`, then `v8-runner infobase restore --input <reference>.dt --create`. \
              To free the infobase: {release}. Owner marker: '{}'{unrecorded}",
             base_dir.display(),
             marker_path.display()

@@ -114,7 +114,7 @@ pub(crate) fn new_owner_since(config: &AppConfig) -> Option<String> {
 const COPIED_FROM_FILE_NAME: &str = "copied-from.json";
 
 /// Признак копии: содержимое базы пришло из другой базы (`infobase create --from`), и в
-/// неё ещё не отправляли. Вместе с поколением новой базы это вся память о ней
+/// неё ещё не отправляли. Это вся память о ней
 /// (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CopiedFrom {
@@ -123,30 +123,40 @@ pub(crate) struct CopiedFrom {
     /// Образ DT, из которого создана база.
     pub(crate) snapshot: PathBuf,
     /// Когда база создана.
-    pub(crate) since: String,
-    /// Поколение основной конфигурации новой базы сразу после копии; `None` — инструмент
-    /// ответа не дал.
-    pub(crate) generation: Option<CopiedGeneration>,
+    pub(crate) since: chrono::DateTime<chrono::Utc>,
 }
 
-/// Поколение новой базы и инструмент, которым оно прочитано: токены разных инструментов
-/// несравнимы (`INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CopiedGeneration {
-    pub(crate) tool: Provider,
-    pub(crate) token: String,
+/// Признак копии, как его прочла команда. Признак, который не прочесть или не разобрать,
+/// всё равно признак: выгрузку не предлагаем, отправка полная.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CopyMark {
+    Read(CopiedFrom),
+    Unreadable,
+}
+
+impl std::fmt::Display for CopyMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(copied) => write!(
+                f,
+                "the infobase '{}' ({})",
+                copied.source,
+                copied.since.to_rfc3339()
+            ),
+            Self::Unreadable => f.write_str("another infobase"),
+        }
+    }
+}
+
+/// Признак копии в каталоге памяти базы — единственное место, где складывается его путь.
+fn copy_mark_in(base_memory_dir: &Path) -> PathBuf {
+    base_memory_dir.join(COPIED_FROM_FILE_NAME)
 }
 
 fn copied_from_file(config: &AppConfig) -> Option<PathBuf> {
     SourceSetsService::new(config)
         .base_memory_dir()
-        .map(|dir| dir.join(COPIED_FROM_FILE_NAME))
-}
-
-/// Признак копии рядом с журналом поколений набора: оба лежат под памятью его базы.
-fn copied_from_file_of(set: &SourceSetContext, work_path: &Path) -> Option<PathBuf> {
-    set.generation_file(work_path)
-        .and_then(|file| file.parent().map(|dir| dir.join(COPIED_FROM_FILE_NAME)))
+        .map(|dir| copy_mark_in(&dir))
 }
 
 /// Записи памяти базы, которые описывают её прежнее содержимое: хеш-память наборов, копии
@@ -163,12 +173,12 @@ const PREVIOUS_MEMORY: &[&str] = &[
 /// поколением новой базы. Сбой — строка для ответа: база создана, а первая отправка назовёт
 /// выходы.
 pub(crate) fn remember_copied_base(config: &AppConfig, copied: &CopiedFrom) -> Option<String> {
-    let Some(file) = copied_from_file(config) else {
+    let Some(dir) = SourceSetsService::new(config).base_memory_dir() else {
         return Some(
             "the address of the created infobase is not recognized, so the runner keeps no memory of it; the first push names the ways out".to_owned(),
         );
     };
-    let dir = file.parent().unwrap_or(&file).to_path_buf();
+    let file = copy_mark_in(&dir);
     let mut failures: Vec<String> = PREVIOUS_MEMORY
         .iter()
         .filter_map(|name| {
@@ -217,25 +227,24 @@ pub(crate) fn forget_copied_base(config: &AppConfig) -> Option<String> {
     }
 }
 
-/// Из какой базы скопирована выбранная база, если в неё ещё не отправляли. Признак, который
-/// не прочесть или не разобрать, всё равно признак: выгрузку не предлагаем, отправка полная.
-pub(crate) fn copied_from(config: &AppConfig) -> Option<String> {
-    read_copied_from(&copied_from_file(config)?)
+/// Из какой базы скопирована выбранная база, если в неё ещё не отправляли.
+pub(crate) fn copied_from(config: &AppConfig) -> Option<CopyMark> {
+    read_copy_mark(&copied_from_file(config)?)
 }
 
-fn read_copied_from(file: &Path) -> Option<String> {
+fn read_copy_mark(file: &Path) -> Option<CopyMark> {
     let text = match std::fs::read(file) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
             tracing::debug!(file = %file.display(), %error, "the copy mark is not readable; it stands");
-            return Some("another infobase".to_owned());
+            return Some(CopyMark::Unreadable);
         }
     };
     Some(
         serde_json::from_slice::<CopiedFrom>(&text)
-            .map(|copied| format!("the infobase '{}' ({})", copied.source, copied.since))
-            .unwrap_or_else(|_| "another infobase".to_owned()),
+            .map(CopyMark::Read)
+            .unwrap_or(CopyMark::Unreadable),
     )
 }
 
@@ -244,7 +253,7 @@ struct Standing {
     /// Копия взяла базу без метки или сменила ушедшего владельца и ещё не отправляла.
     new_owner: Option<String>,
     /// База создана копией другой базы, и в неё ещё не отправляли: из какой.
-    copied: Option<String>,
+    copied: Option<CopyMark>,
     /// База в кластере или на автономном сервере: метки у неё нет.
     server: bool,
     /// Общая база (`shared: true`): остальные её владельцы из метки.
@@ -444,8 +453,9 @@ pub(crate) fn memory_of(set: &SourceSetContext, work_path: &Path) -> MemoryState
             // Копия базы до первой отправки: память — признак копии с поколением новой базы
             // (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
             Some(Recorded::Nothing) | None
-                if copied_from_file_of(set, work_path)
-                    .and_then(|file| read_copied_from(&file))
+                if set
+                    .base_memory_dir(work_path)
+                    .and_then(|dir| read_copy_mark(&copy_mark_in(&dir)))
                     .is_some() =>
             {
                 MemoryState::Remembered
@@ -1116,8 +1126,7 @@ mod tests {
         let copied = CopiedFrom {
             source: "upstream".to_owned(),
             snapshot: root.path().join("work/copies/upstream.dt"),
-            since: "now".to_owned(),
-            generation: None,
+            since: chrono::Utc::now(),
         };
 
         assert_eq!(remember_copied_base(&config, &copied), None);

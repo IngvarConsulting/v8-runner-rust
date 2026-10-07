@@ -1,14 +1,17 @@
 //! `infobase create --from <база>`: база этой рабочей копии — копия другой объявленной базы с
 //! её данными и конфигурацией (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
 //!
-//! С источника снимается образ DT — Конфигуратором `/DumpIB`, исполнителем `infobase dump`. Замок
-//! источника берёт граница команды ([`crate::use_cases::transport::hold_source_base`]), в метку
-//! источника ничего не пишется (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`). Новую базу из
-//! образа создаёт Конфигуратор, исполнитель `infobase restore`: у файловой цели `/RestoreIB`
-//! (база, которой нет, создаётся — замер «Загрузка информационной базы из DT»), в кластере —
-//! `CREATEINFOBASE`, затем `/RestoreIB`. Сеансы источника раннер не завершает: неудавшийся снимок называет, как
-//! освободить источник (`INV.CLI.A-FAILED-SNAPSHOT-NAMES-THE-RECIPE`). Память новой базы —
-//! только признак копии с её поколением (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
+//! С источника снимается образ DT Конфигуратором `/DumpIB` — исполнителем `infobase dump`
+//! ([`run_snapshot_provider`]). Замок источника берёт граница команды
+//! ([`crate::use_cases::transport::hold_source_base`]) и держит до её конца; в метку источника
+//! ничего не пишется (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`). Новую базу из образа
+//! поднимает Конфигуратор `/RestoreIB` — исполнитель `infobase restore`
+//! ([`run_restore_provider`]): файловую, которой нет, он создаёт сам (замер «Загрузка
+//! информационной базы из DT»), в кластере её прежде создаёт `CREATEINFOBASE` —
+//! [`ClusterCreation`], общий с `infobase create`. Сеансы источника раннер не завершает:
+//! неудавшийся снимок называет, как освободить источник
+//! (`INV.CLI.A-FAILED-SNAPSHOT-NAMES-THE-RECIPE`). Память новой базы — только признак копии
+//! (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -16,25 +19,24 @@ use std::time::Instant;
 use crate::config::model::{is_infobase_name, AppConfig};
 use crate::domain::capability::{Provider, TargetKind};
 use crate::domain::init::InitSource;
-use crate::platform::designer::DesignerDsl;
 use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::mask_text;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::{AppError, CapabilityReason};
-use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::exchange_guard::{
-    remember_copied_base, remember_created_base, CopiedFrom, CopiedGeneration,
-};
+use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::exchange_guard::{remember_copied_base, remember_created_base, CopiedFrom};
 use crate::use_cases::generation_reader::{designer_log_file, read_generation, GenerationProcess};
 use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
+use crate::use_cases::infobase_export::{
+    run_restore_provider, run_snapshot_provider, validate_platform_artifact,
+};
 use crate::use_cases::interruption::collecting_deferrals;
 use crate::use_cases::progress::log_live_stage;
 
 use super::{
-    cluster_create_failure, cluster_creation, ensure_created, existing_file_infobase,
-    infobase_marker_path, interruption_step_outcome, prepare_infobase_parent, standalone_refusal,
-    StepOutcome, INFOBASE_CREATE,
+    ensure_created, existing_file_infobase, infobase_marker_path, interruption_step_outcome,
+    prepare_infobase_parent, standalone_refusal, ClusterCreation, StepOutcome, INFOBASE_CREATE,
 };
 
 /// Каталог снимков источников под `workPath`.
@@ -50,10 +52,14 @@ pub(super) fn ensure_copy(
     dry_run: bool,
 ) -> (StepOutcome, Option<InitSource>) {
     let started = Instant::now();
-    let failed = |error: AppError| StepOutcome::failed("infobase", "create", started, error);
     let source = match source_config(config, from) {
         Ok(source) => source,
-        Err(error) => return (failed(error), None),
+        Err(error) => {
+            return (
+                StepOutcome::failed("infobase", "create", started, error),
+                None,
+            )
+        }
     };
     let snapshot = snapshot_path(config, from);
     let answer = Some(InitSource {
@@ -101,8 +107,7 @@ pub(crate) fn source_config(config: &AppConfig, from: &str) -> Result<AppConfig,
         infobase_name: Some(from.to_owned()),
         ..config.clone()
     };
-    let base_path = crate::support::path::absolute_from_current_dir(&config.base_path)
-        .unwrap_or_else(|_| config.base_path.clone());
+    let base_path = absolute(&config.base_path);
     let same = config.infobase_name.as_deref() == Some(from)
         || source
             .infobase_memory_address(&base_path)
@@ -115,10 +120,13 @@ pub(crate) fn source_config(config: &AppConfig, from: &str) -> Result<AppConfig,
     Ok(source)
 }
 
+fn absolute(path: &Path) -> PathBuf {
+    crate::support::path::absolute_from_current_dir(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Образ источника `workPath/copies/<источник>.dt`.
 fn snapshot_path(config: &AppConfig, from: &str) -> PathBuf {
-    crate::support::path::absolute_from_current_dir(&config.work_path)
-        .unwrap_or_else(|_| config.work_path.clone())
+    absolute(&config.work_path)
         .join(SNAPSHOTS_DIR)
         .join(format!("{from}.dt"))
 }
@@ -132,6 +140,14 @@ fn standalone_source_refusal(from: &str) -> AppError {
             "infobase create --from does not snapshot the infobase '{from}' of a standalone server: take its DT image on the server machine (`ibcmd infobase dump <file>.dt` against the server's infobase), bring the file here, load it into the infobase of this working copy with `v8-runner infobase restore --input <file>.dt --create`, then load the sources of this working copy over it with `v8-runner push --force`"
         ),
     )
+}
+
+/// Файлового источника нет на месте: снимать нечего, и рецепт про сеансы тут не поможет.
+fn missing_file_source(from: &str, dir: &Path) -> AppError {
+    AppError::Validation(format!(
+        "--from: the file infobase '{from}' is not found at '{}' (no 1Cv8.1CD there): check infobases.{from}.connection in v8project.local.yaml",
+        dir.display()
+    ))
 }
 
 /// Как освободить источник, чтобы снимок прошёл. Сеансы раннер сам не завершает, и причину
@@ -161,6 +177,59 @@ fn free_the_source(source: &AppConfig, from: &str) -> String {
     }
 }
 
+/// Пароли базы и её СУБД — для маскирования вывода платформы.
+fn infobase_secrets(config: &AppConfig) -> Vec<&str> {
+    [
+        config.infobase.password.as_deref(),
+        config
+            .infobase
+            .dbms
+            .as_ref()
+            .and_then(|dbms| dbms.password.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|secret| !secret.is_empty())
+    .collect()
+}
+
+/// Улики неудачной команды платформы с паролями, скрытыми из её вывода и журнала.
+fn masked_evidence(headline: String, result: &PlatformCommandResult, secrets: &[&str]) -> String {
+    format_failure_evidence(
+        headline,
+        &mask_text(&result.process.stdout, secrets),
+        &mask_text(&result.process.stderr, secrets),
+        result
+            .platform_log
+            .as_deref()
+            .map(|log| mask_text(log, secrets))
+            .as_deref(),
+        result.platform_log_path.as_deref(),
+    )
+}
+
+/// Убирает брошенный образ — свой артефакт команды: следующая попытка начнёт с чистого
+/// места. Неудача уборки ответ не меняет и уходит в журнал.
+fn discard_snapshot(snapshot: &Path) {
+    match std::fs::remove_file(snapshot) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            snapshot = %snapshot.display(),
+            %error,
+            "the abandoned snapshot was not removed"
+        ),
+    }
+}
+
+/// Почему снимок не удался.
+enum SnapshotFailure {
+    /// Конфигуратор ответил ненулевым кодом.
+    Exited,
+    /// Код нулевой, а образа нет или он пуст.
+    LeftNoImage(AppError),
+}
+
 /// Одна копия: источник, его образ и цель команды.
 struct Copy<'a> {
     context: &'a ExecutionContext,
@@ -172,11 +241,11 @@ struct Copy<'a> {
 }
 
 /// Чем создаётся база по виду цели.
-enum Creator {
-    /// Файловая база: Конфигуратор `/RestoreIB` создаёт её в этом каталоге.
+enum Creator<'a> {
+    /// Файловая база: `/RestoreIB` создаёт её в этом каталоге.
     File { dir: PathBuf },
-    /// База в кластере: Конфигуратор `CREATEINFOBASE`, затем `/RestoreIB`.
-    Cluster,
+    /// База в кластере: `CREATEINFOBASE`, затем `/RestoreIB`.
+    Cluster(ClusterCreation<'a>),
 }
 
 impl Copy<'_> {
@@ -185,13 +254,23 @@ impl Copy<'_> {
     }
 
     fn run(&self, utilities: &mut PlatformUtilities, dry_run: bool) -> StepOutcome {
-        if self.source.target_kind() == TargetKind::Standalone {
-            return self.failed(standalone_source_refusal(self.from));
+        match self.source.target_kind() {
+            TargetKind::Standalone => return self.failed(standalone_source_refusal(self.from)),
+            TargetKind::File => {
+                let dir = self
+                    .source
+                    .v8_connection()
+                    .file_infobase_dir(&absolute(&self.source.base_path));
+                if let Some(dir) = dir.filter(|dir| !infobase_marker_path(dir).exists()) {
+                    return self.failed(missing_file_source(self.from, &dir));
+                }
+            }
+            TargetKind::Cluster => {}
         }
         let creator = match self.config.target_kind() {
             TargetKind::Standalone => return self.failed(standalone_refusal()),
-            TargetKind::Cluster => match cluster_creation(self.config) {
-                Ok(_) => Creator::Cluster,
+            TargetKind::Cluster => match ClusterCreation::of(self.config) {
+                Ok(cluster) => Creator::Cluster(cluster),
                 Err(error) => return self.failed(error),
             },
             TargetKind::File => {
@@ -210,28 +289,12 @@ impl Copy<'_> {
             Ok(location) => location.path,
             Err(error) => return self.failed(AppError::from(error)),
         };
-        let source_target = self.source.v8_connection().describe_target();
-        let target = self.config.v8_connection().describe_target();
         if dry_run {
-            let creation = match &creator {
-                Creator::File { .. } => {
-                    format!("{target} from it via {} /RestoreIB", designer.display())
-                }
-                Creator::Cluster => format!(
-                    "{target} in the cluster from it via {} CREATEINFOBASE, then /RestoreIB",
-                    designer.display()
-                ),
-            };
             return StepOutcome::planned(
                 "infobase",
                 "create",
                 self.started,
-                format!(
-                    "would snapshot the infobase '{}' ({source_target}) to '{}' via {} /DumpIB — the source must be free, the runner ends no sessions — and create {creation}",
-                    self.from,
-                    self.snapshot.display(),
-                    designer.display()
-                ),
+                self.plan(&creator, &designer),
             );
         }
         if let Some(outcome) = interruption_step_outcome(
@@ -243,12 +306,12 @@ impl Copy<'_> {
         ) {
             return outcome;
         }
-        if let Creator::File { dir, .. } = &creator {
+        if let Creator::File { dir } = &creator {
             if let Err(error) = prepare_infobase_parent(dir) {
                 return self.failed(error);
             }
         }
-        if let Err(error) = self.take_snapshot(utilities, &designer) {
+        if let Err(error) = self.take_snapshot(&designer) {
             return self.failed(error);
         }
         if let Some(outcome) = interruption_step_outcome(
@@ -265,38 +328,46 @@ impl Copy<'_> {
             "[Platform] creating the infobase from the snapshot",
         );
         let settled = collecting_deferrals(|deferrals| {
-            let policy = self
-                .context
-                .process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
-            let generation = match &creator {
+            let mut warnings = Vec::new();
+            let target = self.config.v8_connection().describe_target();
+            match &creator {
                 Creator::File { dir } => {
-                    let created = self.restore(utilities, &designer, policy)?;
+                    let created = self.restore(&designer)?;
                     deferrals.note_result(INFOBASE_CREATE, &created);
                     ensure_created(&created, &infobase_marker_path(dir))?;
-                    self.generation_by_designer(utilities, &designer)
+                    warnings.extend(self.probe_access(utilities, &designer));
                 }
-                Creator::Cluster => {
-                    self.create_in_the_cluster(utilities, &designer, policy, deferrals)?;
-                    None
+                Creator::Cluster(cluster) => {
+                    cluster.create(self.context, self.config, utilities, deferrals)?;
+                    let restored = self.restore(&designer);
+                    if let Ok(result) = &restored {
+                        deferrals.note_result(INFOBASE_CREATE, result);
+                    }
+                    self.loaded_into_the_cluster(cluster, restored)?;
+                    warnings.push(format!(
+                        "{}; if that database existed, its data is now replaced by the image of '{}'",
+                        cluster.risk(),
+                        self.from
+                    ));
                 }
-            };
+            }
             let copied = CopiedFrom {
                 source: self.from.to_owned(),
                 snapshot: self.snapshot.to_path_buf(),
-                since: chrono::Utc::now().to_rfc3339(),
-                generation,
+                since: chrono::Utc::now(),
             };
+            warnings.extend(remember_copied_base(self.config, &copied));
             Ok(StepOutcome::ok(
                 "infobase",
                 "create",
                 self.started,
                 format!(
-                    "{target} created as a copy of the infobase '{}' from the snapshot '{}'; the first push loads every source-set in full",
+                    "{target} created as a copy of the infobase '{}' from the snapshot '{}'; its infobase users are those of the source; the first push loads every source-set in full",
                     self.from,
                     self.snapshot.display()
                 ),
             )
-            .with_warnings(remember_copied_base(self.config, &copied).as_slice()))
+            .with_warnings(&warnings))
         });
         match settled {
             Ok((step, warnings)) => step.with_warnings(&warnings),
@@ -304,13 +375,33 @@ impl Copy<'_> {
         }
     }
 
-    /// Снимок источника. Неудача — с рецептом, как освободить источник; брошенный образ
-    /// убирается.
-    fn take_snapshot(
-        &self,
-        utilities: &PlatformUtilities,
-        designer: &Path,
-    ) -> Result<(), AppError> {
+    /// План превью: снимок и создание; у кластера — с предупреждением, что существующая база
+    /// данных с тем же именем будет перезаписана образом.
+    fn plan(&self, creator: &Creator<'_>, designer: &Path) -> String {
+        let creation = match creator {
+            Creator::File { .. } => format!(
+                "{} from it via {} /RestoreIB",
+                self.config.v8_connection().describe_target(),
+                designer.display()
+            ),
+            Creator::Cluster(cluster) => format!(
+                "{}; then /RestoreIB loads the image into it, and the data of an existing database of that name is overwritten by the image of '{}'",
+                cluster.plan(designer),
+                self.from
+            ),
+        };
+        format!(
+            "would snapshot the infobase '{}' ({}) to '{}' via {} /DumpIB — the source must be free, the runner ends no sessions — and create {creation}",
+            self.from,
+            self.source.v8_connection().describe_target(),
+            self.snapshot.display(),
+            designer.display()
+        )
+    }
+
+    /// Снимок источника исполнителем `infobase dump`. Неудача — с рецептом, как освободить
+    /// источник; брошенный образ убирается.
+    fn take_snapshot(&self, designer: &Path) -> Result<(), AppError> {
         let dir = self.snapshot.parent().unwrap_or(self.snapshot);
         std::fs::create_dir_all(dir).map_err(|error| {
             AppError::Runtime(format!(
@@ -318,115 +409,81 @@ impl Copy<'_> {
                 dir.display()
             ))
         })?;
-        remove_snapshot(self.snapshot)?;
+        match std::fs::remove_file(self.snapshot) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::Runtime(format!(
+                    "failed to remove the previous snapshot '{}': {error}",
+                    self.snapshot.display()
+                )))
+            }
+        }
         log_live_stage(
             "init: infobase snapshot",
             &format!("[Конфигуратор] taking the snapshot of '{}'", self.from),
         );
-        let log = crate::support::temp::platform_logs_dir(&self.config.work_path)
-            .map(|dir| dir.join("infobase-copy-snapshot.log"))
-            .map_err(|error| {
-                AppError::Runtime(format!("failed to create platform logs dir: {error}"))
-            })?;
-        let taken = DesignerDsl::new(
-            designer.to_path_buf(),
-            self.source.v8_connection(),
-            utilities.runner_for(UtilityType::V8),
-            Some(log),
-            self.context
-                .process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+        let taken = run_snapshot_provider(
+            self.context,
+            self.source,
+            Provider::Designer,
+            Some(designer),
+            self.snapshot,
         )
-        .dump_infobase(self.snapshot)
-        .map_err(|error| {
-            // Снимок, который не дошёл до кода выхода (отмена, сбой запуска), образа не
-            // оставляет.
-            let _ = remove_snapshot(self.snapshot);
-            AppError::from(error)
-        })?;
-        let image = std::fs::metadata(self.snapshot)
-            .ok()
-            .filter(|metadata| metadata.is_file() && metadata.len() > 0);
-        if taken.process.outcome().is_err() || image.is_none() {
-            // Брошенный образ — свой артефакт команды: следующая попытка начнёт с чистого места.
-            let _ = remove_snapshot(self.snapshot);
-            return Err(self.snapshot_failure(&taken, image.is_none()));
+        .inspect_err(|_| discard_snapshot(self.snapshot))?;
+        let failure = if taken.process.outcome().is_err() {
+            Some(SnapshotFailure::Exited)
+        } else {
+            validate_platform_artifact(self.snapshot)
+                .err()
+                .map(SnapshotFailure::LeftNoImage)
+        };
+        match failure {
+            None => Ok(()),
+            Some(failure) => {
+                discard_snapshot(self.snapshot);
+                Err(self.snapshot_failure(&taken, failure))
+            }
         }
-        Ok(())
     }
 
-    /// `/RestoreIB` образа в базу команды — путь исполнителя `infobase restore`.
-    fn restore(
+    fn snapshot_failure(
         &self,
-        utilities: &PlatformUtilities,
-        designer: &Path,
-        policy: crate::platform::process::ProcessExecutionPolicy,
-    ) -> Result<PlatformCommandResult, AppError> {
-        let log = crate::support::temp::platform_logs_dir(&self.config.work_path)
-            .map(|dir| dir.join("infobase-copy-restore.log"))
-            .map_err(|error| {
-                AppError::Runtime(format!("failed to create platform logs dir: {error}"))
-            })?;
-        DesignerDsl::new(
-            designer.to_path_buf(),
-            self.config.v8_connection(),
-            utilities.runner_for(UtilityType::V8),
-            Some(log),
-            policy,
-        )
-        .restore_infobase(self.snapshot)
-        .map_err(AppError::from)
-    }
-
-    fn snapshot_failure(&self, result: &PlatformCommandResult, no_image: bool) -> AppError {
-        let secrets: Vec<&str> = [
-            self.source.infobase.password.as_deref(),
-            self.source
-                .infobase
-                .dbms
-                .as_ref()
-                .and_then(|dbms| dbms.password.as_deref()),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|secret| !secret.is_empty())
-        .collect();
-        let headline = if result.process.outcome().is_err() {
-            format!(
+        result: &PlatformCommandResult,
+        failure: SnapshotFailure,
+    ) -> AppError {
+        let headline = match failure {
+            SnapshotFailure::Exited => format!(
                 "the snapshot of the infobase '{}' failed with exit code {}",
                 self.from, result.process.exit_code
-            )
-        } else if no_image {
-            format!(
-                "the snapshot of the infobase '{}' left no image at '{}'",
-                self.from,
-                self.snapshot.display()
-            )
-        } else {
-            format!("the snapshot of the infobase '{}' failed", self.from)
+            ),
+            SnapshotFailure::LeftNoImage(error) => format!(
+                "the snapshot of the infobase '{}' left no image: {}",
+                self.from, error
+            ),
         };
-        let mut message = format_failure_evidence(
-            headline,
-            &mask_text(&result.process.stdout, &secrets),
-            &mask_text(&result.process.stderr, &secrets),
-            result
-                .platform_log
-                .as_deref()
-                .map(|log| mask_text(log, &secrets))
-                .as_deref(),
-            result.platform_log_path.as_deref(),
-        );
+        let mut message = masked_evidence(headline, result, &infobase_secrets(self.source));
         message.push_str("; ");
         message.push_str(&free_the_source(self.source, self.from));
         AppError::Platform(message)
     }
 
-    /// Поколение основной конфигурации новой файловой базы — Конфигуратором. Без ответа память
-    /// знает только, что база — копия.
-    fn generation_by_designer(
-        &self,
-        utilities: &PlatformUtilities,
-        designer: &Path,
-    ) -> Option<CopiedGeneration> {
+    /// `/RestoreIB` образа в базу команды — исполнителем `infobase restore`.
+    fn restore(&self, designer: &Path) -> Result<PlatformCommandResult, AppError> {
+        run_restore_provider(
+            self.context,
+            self.config,
+            Provider::Designer,
+            Some(designer),
+            self.snapshot,
+        )
+        .map_err(|failure| failure.into_error(INFOBASE_CREATE))
+    }
+
+    /// Открывает ли раннер новую файловую базу: пользователи у неё — пользователи источника, и
+    /// без их учётных данных в секции базы команды её не открыть. Вопрос — поколение
+    /// конфигурации; ответ не записывается, а его нет — предупреждение.
+    fn probe_access(&self, utilities: &PlatformUtilities, designer: &Path) -> Option<String> {
         let read = read_generation(
             self.context,
             self.config,
@@ -439,59 +496,42 @@ impl Copy<'_> {
             },
             None,
         );
-        match read {
-            Ok(Some(token)) => Some(CopiedGeneration {
-                tool: Provider::Designer,
-                token,
-            }),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::debug!(%error, "the generation of the copied infobase was not read");
-                None
-            }
-        }
+        let why = match read {
+            Ok(Some(_)) => return None,
+            Ok(None) => "it gave no configuration generation".to_owned(),
+            Err(error) => format!(
+                "its configuration generation was not read: {}",
+                mask_text(&error.to_string(), &infobase_secrets(self.config))
+            ),
+        };
+        let name = self.config.infobase_name.as_deref().unwrap_or("origin");
+        Some(format!(
+            "the copied infobase did not answer the runner ({why}); its infobase users are those of '{}': declare the name and password of one of them at infobases.{name} in v8project.local.yaml",
+            self.from
+        ))
     }
 
-    /// База в кластере: `CREATEINFOBASE` создаёт её пустой, `/RestoreIB` загружает образ.
-    /// Неудачная загрузка оставляет базу созданной пустой: память говорит это, и отказ
-    /// называет, как загрузить образ снова.
-    fn create_in_the_cluster(
+    /// Загрузка образа в созданную базу кластера. Неудача оставляет базу созданной пустой:
+    /// память говорит это, и отказ называет, как загрузить образ снова. Пароли базы, её СУБД и
+    /// администратора кластера в выводе скрыты.
+    fn loaded_into_the_cluster(
         &self,
-        utilities: &PlatformUtilities,
-        designer: &Path,
-        policy: crate::platform::process::ProcessExecutionPolicy,
-        deferrals: &mut crate::use_cases::interruption::Deferrals,
+        cluster: &ClusterCreation<'_>,
+        restored: Result<PlatformCommandResult, AppError>,
     ) -> Result<(), AppError> {
-        let creation = cluster_creation(self.config)?;
-        let database = format!(
-            "the database '{}' on '{}'",
-            creation.database_name, creation.database_server
-        );
-        let created = DesignerDsl::new(
-            designer.to_path_buf(),
-            self.config.v8_connection(),
-            utilities.runner_for(UtilityType::V8),
-            None,
-            policy.clone(),
-        )
-        .create_cluster_infobase(&creation)
-        .map_err(AppError::from)?;
-        deferrals.note_result(INFOBASE_CREATE, &created);
-        if created.process.outcome().is_err() {
-            return Err(cluster_create_failure(&creation, &created, &database));
-        }
-        let failure = match self.restore(utilities, designer, policy) {
-            Ok(result) => {
-                deferrals.note_result(INFOBASE_CREATE, &result);
-                match result.process.outcome() {
-                    Ok(()) => return Ok(()),
-                    Err(_) => AppError::Platform(super::failure_details(
-                        "load the snapshot",
-                        "infobase",
+        let failure = match restored {
+            Ok(result) => match result.process.outcome() {
+                Ok(()) => return Ok(()),
+                Err(code) => {
+                    let mut secrets = infobase_secrets(self.config);
+                    secrets.extend(cluster.secrets());
+                    AppError::Platform(masked_evidence(
+                        format!("load the snapshot failed for 'infobase' with exit code {code}"),
                         &result,
-                    )),
+                        &secrets,
+                    ))
                 }
-            }
+            },
             Err(error) => error,
         };
         let memory = remember_created_base(self.config, None)
@@ -501,17 +541,5 @@ impl Copy<'_> {
             "the infobase was created empty in the cluster and the snapshot was not loaded into it{memory}: load it with `v8-runner infobase restore --input {} --replace`, or load the sources with the first push, which goes in full",
             self.snapshot.display()
         )))
-    }
-}
-
-/// Убирает образ по пути снимка: прежний — до снимка, брошенный — после неудачи.
-fn remove_snapshot(snapshot: &Path) -> Result<(), AppError> {
-    match std::fs::remove_file(snapshot) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(AppError::Runtime(format!(
-            "failed to remove the previous snapshot '{}': {error}",
-            snapshot.display()
-        ))),
     }
 }

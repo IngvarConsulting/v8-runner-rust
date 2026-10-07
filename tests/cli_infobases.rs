@@ -394,7 +394,7 @@ fn a_command_without_origin_names_the_missing_step() {
 }
 
 /// `INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`: отказ копии без объявленной
-/// базы называет все три выхода — свою чистую базу, копию базы и общую базу.
+/// базы называет выходы — свою чистую базу, копию базы и базу из эталонного образа.
 #[test]
 fn a_refusal_without_origin_names_the_ways_out() {
     let project = project();
@@ -406,7 +406,7 @@ fn a_refusal_without_origin_names_the_ways_out() {
     for way in [
         "init --infobase <connection string>`, then `v8-runner infobase create`;",
         "infobase create --from <infobase>",
-        "shared: true",
+        "infobase restore --input <reference>.dt --create",
     ] {
         assert!(message.contains(way), "{way}: {message}");
     }

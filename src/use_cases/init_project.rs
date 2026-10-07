@@ -660,29 +660,17 @@ fn ensure_cluster_infobase(
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
-    // Строка подключения из конфигурации бывает с `Usr=`/`Pwd=`: базу называет
-    // `describe_target`, а не строка как есть (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
-    let target = config.v8_connection().describe_target();
-    let creation = match cluster_creation(config) {
-        Ok(creation) => creation,
+    let cluster = match ClusterCreation::of(config) {
+        Ok(cluster) => cluster,
         Err(error) => return StepOutcome::failed("infobase", "create", started, error),
     };
-    let database = format!(
-        "the database '{}' on '{}'",
-        creation.database_name, creation.database_server
-    );
     if dry_run {
-        // Есть ли база уже, без действия не узнать: CREATEINFOBASE отвечает на это кодом,
-        // которым отвечает и на любой другой отказ, а вопроса `rac` к кластеру ещё нет (#213).
         return match locate_infobase_creator(Provider::Designer, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",
                 "create",
                 started,
-                format!(
-                    "would create {target} in the cluster with {database} via {}; whether it already exists is not observable before the creation; CrSQLDB=Y silently takes an existing database of that name, even one holding another infobase, and a failed creation may leave the database abandoned in the DBMS",
-                    binary.display()
-                ),
+                format!("would create {}", cluster.plan(&binary)),
             ),
             Err(error) => StepOutcome::failed("infobase", "create", started, error),
         };
@@ -692,11 +680,84 @@ fn ensure_cluster_infobase(
     {
         return outcome;
     }
-    log_live_stage(
-        "init: infobase create",
-        "[Конфигуратор] creating the infobase in the cluster",
-    );
     let settled = collecting_deferrals(|deferrals| {
+        cluster.create(context, config, utilities, deferrals)?;
+        Ok(StepOutcome::ok(
+            "infobase",
+            "create",
+            started,
+            format!(
+                "{} created in the cluster with {}; the first push loads every source-set in full",
+                cluster.target, cluster.database
+            ),
+        )
+        .with_warnings(remember_created_base(config, None).as_slice()))
+    });
+    match settled {
+        Ok((step, warnings)) => step.with_warnings(&warnings),
+        Err(error) => StepOutcome::failed("infobase", "create", started, error),
+    }
+}
+
+/// Создание базы в кластере — одно у `infobase create` и у его копии `--from`: реквизиты,
+/// план превью с предупреждением о существующей базе данных и сам `CREATEINFOBASE`.
+struct ClusterCreation<'a> {
+    creation: ClusterInfobaseCreation<'a>,
+    /// База без учётных данных: строку подключения с `Usr=`/`Pwd=` называет
+    /// `describe_target`, а не строка как есть (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
+    target: String,
+    /// База данных в СУБД: имя и сервер.
+    database: String,
+}
+
+impl<'a> ClusterCreation<'a> {
+    fn of(config: &'a AppConfig) -> Result<Self, AppError> {
+        let creation = cluster_creation(config)?;
+        let database = format!(
+            "the database '{}' on '{}'",
+            creation.database_name, creation.database_server
+        );
+        Ok(Self {
+            creation,
+            target: config.v8_connection().describe_target(),
+            database,
+        })
+    }
+
+    /// Что создаст `CREATEINFOBASE` и чем это грозит. Есть ли база уже, без действия не
+    /// узнать: `CREATEINFOBASE` отвечает на это кодом, которым отвечает и на любой другой
+    /// отказ, а вопроса `rac` к кластеру ещё нет (#213).
+    fn plan(&self, binary: &Path) -> String {
+        format!(
+            "{} in the cluster with {} via {}; whether it already exists is not observable before the creation; {}",
+            self.target,
+            self.database,
+            binary.display(),
+            self.risk()
+        )
+    }
+
+    /// Предупреждение замера #181: существующая база данных с тем же именем берётся молча.
+    fn risk(&self) -> String {
+        format!(
+            "CrSQLDB=Y silently takes an existing database of that name ({}), even one holding another infobase, and a failed creation may leave the database abandoned in the DBMS",
+            self.database
+        )
+    }
+
+    /// `CREATEINFOBASE` с клиент-серверной строкой; отказ — с тем, что известно без прозы
+    /// платформы.
+    fn create(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        utilities: &mut PlatformUtilities,
+        deferrals: &mut Deferrals,
+    ) -> Result<(), AppError> {
+        log_live_stage(
+            "init: infobase create",
+            "[Конфигуратор] creating the infobase in the cluster",
+        );
         let binary = utilities
             .locate(UtilityType::V8)
             .map_err(AppError::from)?
@@ -708,23 +769,28 @@ fn ensure_cluster_infobase(
             None,
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
         )
-        .create_cluster_infobase(&creation)
+        .create_cluster_infobase(&self.creation)
         .map_err(AppError::from)?;
         deferrals.note_result(INFOBASE_CREATE, &created);
         if created.process.outcome().is_err() {
-            return Err(cluster_create_failure(&creation, &created, &database));
+            return Err(cluster_create_failure(
+                &self.creation,
+                &created,
+                &self.database,
+            ));
         }
-        Ok(StepOutcome::ok(
-            "infobase",
-            "create",
-            started,
-            format!("{target} created in the cluster with {database}; the first push loads every source-set in full"),
-        )
-        .with_warnings(remember_created_base(config, None).as_slice()))
-    });
-    match settled {
-        Ok((step, warnings)) => step.with_warnings(&warnings),
-        Err(error) => StepOutcome::failed("infobase", "create", started, error),
+        Ok(())
+    }
+
+    /// Пароли СУБД и администратора кластера — для маскирования вывода платформы.
+    fn secrets(&self) -> Vec<&str> {
+        [
+            self.creation.database_password,
+            self.creation.cluster_password,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 

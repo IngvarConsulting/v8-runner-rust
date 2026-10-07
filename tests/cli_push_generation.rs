@@ -358,7 +358,7 @@ fn a_copied_base_offers_no_pull_before_its_first_push() {
     // другим токеном.
     fs::write(
         memory.join("copied-from.json"),
-        r#"{"source":"upstream","snapshot":"/work/copies/upstream.dt","since":"2026-10-07T00:00:00Z","generation":null}"#,
+        r#"{"source":"upstream","snapshot":"/work/copies/upstream.dt","since":"2026-10-07T00:00:00Z"}"#,
     )
     .expect("copy mark");
     project.base_generation(FIRST);
