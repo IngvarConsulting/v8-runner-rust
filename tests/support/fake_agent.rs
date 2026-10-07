@@ -1173,6 +1173,88 @@ pub fn serve_managed_launches(agent: FakeAgent, presented: Option<russh::keys::P
     });
 }
 
+/// Двойник управляемого агента на порту, который тест держит занятым всё время прогона:
+/// возвращённый порт объявляется в `tools.designer_agent.port`.
+///
+/// Порт не освобождается ни между тестами, ни между запусками агента одного теста: сокет
+/// привязан один раз, и другой тест того же процесса получить этот порт как свободный не
+/// может. Ключ хоста каждого соединения — тот, что раннер передал агенту последним
+/// (`/AgentSSHHostKey` из файла запроса поддельного `1cv8`); `presented` подменяет его, так
+/// проверяется отказ чужому ключу.
+pub fn serve_managed_launches_on_a_reserved_port(
+    agent: FakeAgent,
+    presented: Option<russh::keys::PrivateKey>,
+) -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve agent port");
+    let port = listener.local_addr().expect("agent address").port();
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking agent socket");
+    let request = launch_request_file(&agent.base_dir_file);
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("fake agent runtime");
+        runtime.block_on(async move {
+            let listener =
+                tokio::net::TcpListener::from_std(listener).expect("fake agent listener");
+            let mut agent = agent;
+            let mut current: Option<russh::keys::PrivateKey> = None;
+            loop {
+                let Ok((socket, peer)) = listener.accept().await else {
+                    continue;
+                };
+                // Запрос запуска пишет поддельный `1cv8` первым делом; первое соединение
+                // может его опередить — тогда двойник ждёт запрос, а не отвечает старым ключом.
+                let started = std::time::Instant::now();
+                loop {
+                    if let Ok(text) = fs::read_to_string(&request) {
+                        let _ = fs::remove_file(&request);
+                        current = Some(launch_key(&text));
+                    }
+                    if current.is_some() || started.elapsed() > Duration::from_secs(20) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let Some(key) = presented.clone().or_else(|| current.clone()) else {
+                    continue;
+                };
+                let config = Arc::new(server::Config {
+                    auth_rejection_time: Duration::from_millis(50),
+                    auth_rejection_time_initial: Some(Duration::ZERO),
+                    inactivity_timeout: Some(Duration::from_secs(120)),
+                    keys: vec![key],
+                    ..server::Config::default()
+                });
+                let handler = agent.new_client(Some(peer));
+                tokio::spawn(async move {
+                    if let Ok(session) = server::run_stream(config, socket, handler).await {
+                        let _ = session.await;
+                    }
+                });
+            }
+        });
+    });
+    port
+}
+
+/// Ключ хоста из файла запроса запуска: вторая строка — путь `/AgentSSHHostKey`.
+fn launch_key(text: &str) -> russh::keys::PrivateKey {
+    match text
+        .lines()
+        .nth(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        Some(path) => {
+            russh::keys::load_secret_key(path, None).expect("host key handed to the agent")
+        }
+        None => random_host_key(),
+    }
+}
+
 /// Двойник управляемого агента для команд, чьи настройки тест не пишет (`clone`): журналы и
 /// раскладка — в своём каталоге, учётные данные — любые.
 pub struct ManagedAgentDouble {
