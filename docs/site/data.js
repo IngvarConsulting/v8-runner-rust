@@ -221,7 +221,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'test') || needEdt(ctx); },
       today: function (ctx) { return { chain: [P.client], config: ['tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'сначала отправка, как у push; test --no-push её пропускает' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tests.yaxunit.* или tests.va.*'], note: 'тонкий клиент по прямому шлюзу или по HTTP с --via web; тесты в толстом клиенте недоступны — прямой шлюз его не пускает; сначала push, --no-push пропускает' };
+        if (ctx.target === 'standalone') return { chain: [P.client], config: ['connection', 'web.url — когда строки прямого шлюза нет', 'tests.yaxunit.* или tests.va.*'], note: 'тонкий клиент по прямому шлюзу, без строки — по HTTP сервера (web.url); ключа выбора адреса у test нет; тесты в толстом клиенте недоступны — прямой шлюз его не пускает; сначала push, --no-push пропускает' };
         return { chain: [P.client], config: ['connection', 'tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'сначала push, затем прогон; --no-push пропускает отправку' };
       }
     },
@@ -340,11 +340,12 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return null; },
       today: function (ctx) { return this.target(ctx); },
       target: function (ctx) {
-        // У цели два адреса, и тонкий клиент открывается любым; умолчание задаёт вид цели.
+        // У цели два адреса, и тонкий клиент открывается любым; умолчание — строка
+        // подключения, а без неё — web.url.
         // Клиент запускается локально в любом случае — платформа нужна и для веб-пути.
         if (ctx.target === 'standalone') {
-          return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
-                   note: 'designer, thin и mcp по прямому шлюзу; thick и ordinary отказывают: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает; --via web ведёт тонкий клиент по HTTP сервера' };
+          return { chain: [P.client], config: ['connection', 'web.url — для --via web или когда строки прямого шлюза нет', 'tools.enterprise.additional-launch-keys (необязательно)'],
+                   note: 'designer, thin и mcp по прямому шлюзу; без строки прямого шлюза тонкий клиент идёт по web.url, без реквизитов базы до замера; thick и ordinary отказывают: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает; --via web ведёт тонкий клиент по HTTP сервера' };
         }
         return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
                  note: 'умолчание — строка подключения; --via web открывает ту же базу по опубликованному адресу ws-соединением' };

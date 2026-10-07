@@ -1565,14 +1565,18 @@ impl EphemeralHostKey {
             source,
         };
         std::fs::create_dir_all(dir).map_err(workspace)?;
-        // Зерно ключа — из системного генератора, через который `uuid` строит v4: новой
-        // зависимости ради одного ключа раннер не заводит.
-        let mut seed = [0u8; 32];
-        seed[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        seed[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
         let invalid = |detail: String| {
             workspace(std::io::Error::new(std::io::ErrorKind::InvalidData, detail))
         };
+        // Зерно ключа — из системного генератора (`getrandom`, тот же крейт, что уже в сборке
+        // у `uuid`); его отказ — отказ запуска агента, а не паника.
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).map_err(|error| AgentError::Workspace {
+            path: dir.to_path_buf(),
+            source: std::io::Error::other(format!(
+                "the system random generator gave no seed for the one-time host key: {error}"
+            )),
+        })?;
         let key = russh::keys::PrivateKey::new(
             russh::keys::ssh_key::private::KeypairData::Ed25519(
                 russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&seed),

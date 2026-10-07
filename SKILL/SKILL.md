@@ -142,7 +142,7 @@ v8-runner infobase create
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
   `pull`, `download`; `upload`/`check` — Designer only; `extensions` — file `ibcmd → agent`,
   cluster agent only. The agent drops out of `push`/`pull` for `format: EDT` and out of `push`
-  with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared; if it does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster still lists installed extensions through `ibcmd` (needs `dbms`). `providers.<op>: designer` restores the Designer-first choice;
+  with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared; if it does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster still lists installed extensions through `ibcmd` (needs `dbms`, #431). `providers.<op>: designer` restores the Designer-first choice;
   a cluster base refuses `providers.<op>: ibcmd` for these operations.
 - `error.kind` and `error.code` are closed enumerations. Within `capability`, the code says why:
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
@@ -272,7 +272,7 @@ v8-runner infobase create
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
   Launch uses the configured infobase and client settings; no source-set is required.
-- Need the thin client against a published base: `launch thin --via web` opens `infobase.web.url` as a ws connection. A standalone-server target takes that path by default — the runner does not start a client by its direct gate address yet (#208) — while `launch web` still opens the same address in a browser. `--via` is accepted only where the client is thin.
+- Client address: `launch thin`, `launch mcp` and the `test` client go by `infobase.connection`, or by `infobase.web.url` as a ws connection when no connection string is declared; `launch thin --via web|connection` picks one explicitly, and `--via` is accepted only where the client is thin. On a standalone server the connection string is the direct gate (`/S host:port\name` with `/N`/`/P` from `infobase.user`/`password`; its `web.url` gets no credentials until #184 measures them), `launch designer` goes by it too, and `thick`/`ordinary` (also `test --client-mode`) are refused with code `target`. A `/IBConnectionString` in `tools.enterprise.additional-launch-keys` lands after the runner's address, though the platform wants it before `/S` — declare the address in `infobase.*`, not there.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,
   `pid=null`, and a `plan` with the selected `program` and the composed `args`; credential values
