@@ -5,9 +5,9 @@
 //! код: порядок в цепочке назначает владелец проекта, и правка порядка — изменение
 //! поведения, видимое в квитанции.
 //!
-//! На этом шаге цепочки повторяют вчерашний выбор по ключу `builder`: первым стоит тот,
-//! кого раннер брал по умолчанию, вторым — тот, кого можно было назначить ключом. Замер
-//! каждой строки записан как улика и воротами не является.
+//! Порядок цепочек повторяет `target()` сайта (`docs/site/data.js`): у файловой базы
+//! `agent → designer → ibcmd`, у кластера `agent → designer` (#206). Замер каждой строки
+//! записан как улика и воротами не является.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -246,19 +246,21 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Designer, LiveVerified),
         implemented(Ibcmd, ArgvTested),
     ];
-    // Агент назначается только ключом `providers.<op>: agent`: его место в цепочке
-    // умолчаний назначает владелец. Путь раннера через агента прогнан вживую
-    // 15.09.2026 на 8.3.27.2074: полная и частичная загрузка с `update-db-cfg` в одной
-    // сессии, полная выгрузка через staging, короткое замыкание по поколению.
-    const DUMP: &[Capability] = &[
+    // Агент стоит первым у файловой базы и у кластера: порядок назначил владелец (#206).
+    // Путь раннера через агента прогнан вживую 15.09.2026 на 8.3.27.2074: полная и
+    // частичная загрузка с `update-db-cfg` в одной сессии, полная выгрузка через staging,
+    // короткое замыкание по поколению. Побайтовое равенство выгрузок агента и
+    // Конфигуратора не замерено (#420); найденные расхождения допустимы и описываются в
+    // `docs/CAPABILITIES.md`. `ibcmd` — только у файловой базы: к базе под кластером
+    // его в умолчаниях нет.
+    const AGENT_DESIGNER_IBCMD: &[Capability] = &[
+        implemented(Agent, LiveVerified),
         implemented(Designer, LiveVerified),
         implemented(Ibcmd, ArgvTested),
-        experimental(Agent, LiveVerified),
     ];
-    const BUILD: &[Capability] = &[
+    const AGENT_DESIGNER: &[Capability] = &[
+        implemented(Agent, LiveVerified),
         implemented(Designer, LiveVerified),
-        implemented(Ibcmd, ArgvTested),
-        experimental(Agent, LiveVerified),
     ];
     const DESIGNER_ONLY: &[Capability] = &[implemented(Designer, LiveVerified)];
     // Шлюз прогнан раннером на живом `ibsrv` 8.3.27 15.09.2026: build (полная и частичная
@@ -286,39 +288,55 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Designer, ArgvTested),
     ];
     // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
-    // прогнаны раннером на 8.3.27 15.09.2026.
-    const EXTENSIONS: &[Capability] = &[
+    // прогнаны раннером на 8.3.27 15.09.2026. У файловой базы состав и свойства первым
+    // читает `ibcmd`; у кластера — только агент: `ibcmd` к базе под кластером в
+    // умолчаниях нет, а адаптера Конфигуратора у семейства `extensions` нет:
+    // имена он перечисляет (`/DumpDBCfgList`), свойств не отдаёт.
+    const EXTENSIONS_FILE: &[Capability] = &[
         implemented(Ibcmd, LiveVerified),
-        experimental(Agent, LiveVerified),
+        implemented(Agent, LiveVerified),
     ];
+    const EXTENSIONS_CLUSTER: &[Capability] = &[implemented(Agent, LiveVerified)];
     // Агент: `config dump-cfg` для рабочей конфигурации прогнан раннером 15.09.2026.
-    const EXPORT: &[Capability] = &[
+    const EXPORT_FILE: &[Capability] = &[
+        implemented(Agent, LiveVerified),
         implemented(Designer, ArgvTested),
         implemented(Ibcmd, ArgvTested),
-        experimental(Agent, LiveVerified),
+    ];
+    const EXPORT_CLUSTER: &[Capability] = &[
+        implemented(Agent, LiveVerified),
+        implemented(Designer, ArgvTested),
     ];
     // Агент: `infobase-tools dump-ib` и `restore-ib` (с обрывом сессии после загрузки)
-    // прогнаны раннером 15.09.2026.
-    const SNAPSHOT: &[Capability] = &[
+    // прогнаны раннером 15.09.2026. `ibcmd` снимает и возвращает `.dt` файловой базы
+    // только по явному ключу `providers.*` (#226); у кластера его в строке нет.
+    const SNAPSHOT_FILE: &[Capability] = &[
+        implemented(Agent, LiveVerified),
         implemented(Designer, ArgvTested),
         experimental(Ibcmd, Documented),
-        experimental(Agent, LiveVerified),
+    ];
+    const SNAPSHOT_CLUSTER: &[Capability] = &[
+        implemented(Agent, LiveVerified),
+        implemented(Designer, ArgvTested),
     ];
 
     match (operation, target) {
+        // Создание базы под кластером держит `ibcmd` до #204.
         (Operation::Init, TargetKind::File | TargetKind::Cluster) => DESIGNER_THEN_IBCMD,
-        (Operation::Build, TargetKind::File | TargetKind::Cluster) => BUILD,
-        (Operation::Dump, TargetKind::File | TargetKind::Cluster) => DUMP,
+        (Operation::Build | Operation::Dump, TargetKind::File) => AGENT_DESIGNER_IBCMD,
+        (Operation::Build | Operation::Dump, TargetKind::Cluster) => AGENT_DESIGNER,
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
             DESIGNER_ONLY
         }
         (Operation::Make, _) => MAKE,
-        (Operation::Extensions, TargetKind::File | TargetKind::Cluster) => EXTENSIONS,
-        (Operation::ConfigurationExport, TargetKind::File | TargetKind::Cluster) => EXPORT,
-        (
-            Operation::InfobaseDump | Operation::InfobaseRestore,
-            TargetKind::File | TargetKind::Cluster,
-        ) => SNAPSHOT,
+        (Operation::Extensions, TargetKind::File) => EXTENSIONS_FILE,
+        (Operation::Extensions, TargetKind::Cluster) => EXTENSIONS_CLUSTER,
+        (Operation::ConfigurationExport, TargetKind::File) => EXPORT_FILE,
+        (Operation::ConfigurationExport, TargetKind::Cluster) => EXPORT_CLUSTER,
+        (Operation::InfobaseDump | Operation::InfobaseRestore, TargetKind::File) => SNAPSHOT_FILE,
+        (Operation::InfobaseDump | Operation::InfobaseRestore, TargetKind::Cluster) => {
+            SNAPSHOT_CLUSTER
+        }
         (Operation::Publish, TargetKind::File | TargetKind::Cluster) => WEBINST_ONLY,
         // Автономный сервер раннер не запускает и не создаёт, поэтому `init` и `publish`
         // строк не имеют: базу сервера создают до его запуска, HTTP он отдаёт сам.

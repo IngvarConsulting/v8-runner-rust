@@ -5,29 +5,25 @@
       "cluster": [
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "agent"
         },
         {
           "implemented": true,
-          "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
-          "provider": "agent"
+          "provider": "designer"
         }
       ],
       "file": [
         {
           "implemented": true,
+          "provider": "agent"
+        },
+        {
+          "implemented": true,
           "provider": "designer"
         },
         {
           "implemented": true,
           "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
-          "provider": "agent"
         }
       ],
       "standalone": [
@@ -45,10 +41,6 @@
       "cluster": [
         {
           "implemented": true,
-          "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
           "provider": "agent"
         }
       ],
@@ -58,7 +50,7 @@
           "provider": "ibcmd"
         },
         {
-          "implemented": false,
+          "implemented": true,
           "provider": "agent"
         }
       ],
@@ -96,18 +88,18 @@
       "cluster": [
         {
           "implemented": true,
-          "provider": "designer"
-        },
-        {
-          "implemented": false,
-          "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
           "provider": "agent"
+        },
+        {
+          "implemented": true,
+          "provider": "designer"
         }
       ],
       "file": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        },
         {
           "implemented": true,
           "provider": "designer"
@@ -115,10 +107,6 @@
         {
           "implemented": false,
           "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
-          "provider": "agent"
         }
       ],
       "standalone": [
@@ -132,18 +120,18 @@
       "cluster": [
         {
           "implemented": true,
-          "provider": "designer"
-        },
-        {
-          "implemented": false,
-          "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
           "provider": "agent"
+        },
+        {
+          "implemented": true,
+          "provider": "designer"
         }
       ],
       "file": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        },
         {
           "implemented": true,
           "provider": "designer"
@@ -151,10 +139,6 @@
         {
           "implemented": false,
           "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
-          "provider": "agent"
         }
       ],
       "standalone": [
@@ -215,29 +199,25 @@
       "cluster": [
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "agent"
         },
         {
           "implemented": true,
-          "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
-          "provider": "agent"
+          "provider": "designer"
         }
       ],
       "file": [
         {
           "implemented": true,
+          "provider": "agent"
+        },
+        {
+          "implemented": true,
           "provider": "designer"
         },
         {
           "implemented": true,
           "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
-          "provider": "agent"
         }
       ],
       "standalone": [
@@ -255,29 +235,25 @@
       "cluster": [
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "agent"
         },
         {
           "implemented": true,
-          "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
-          "provider": "agent"
+          "provider": "designer"
         }
       ],
       "file": [
         {
           "implemented": true,
+          "provider": "agent"
+        },
+        {
+          "implemented": true,
           "provider": "designer"
         },
         {
           "implemented": true,
           "provider": "ibcmd"
-        },
-        {
-          "implemented": false,
-          "provider": "agent"
         }
       ],
       "standalone": [

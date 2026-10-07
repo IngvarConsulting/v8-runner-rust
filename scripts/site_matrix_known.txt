@@ -10,17 +10,6 @@
 #
 # <операция> <цель> | сайт: <исполнители> | матрица: <исполнители> | #<задача>
 
-download file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
-download cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
-extensions file | сайт: ibcmd agent | матрица: ibcmd agent~ | #206
-extensions cluster | сайт: agent designer | матрица: ibcmd agent~ | #206
+extensions cluster | сайт: agent designer | матрица: agent | #206
 infobase.create file | сайт: ibcmd designer | матрица: designer ibcmd | #204
 infobase.create cluster | сайт: designer | матрица: designer ibcmd | #204
-infobase.dump file | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
-infobase.dump cluster | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
-infobase.restore file | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
-infobase.restore cluster | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
-pull file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
-pull cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
-push file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
-push cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
