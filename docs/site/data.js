@@ -236,8 +236,8 @@ window.RUNNER_DATA = (function () {
       },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['connection', 'source-set[]', 'standalone.gate и exchange — для agent'], note: 'Конфигуратор пишет выгрузку у раннера; agent — dump-config-to-files по SSH, результат через объявленный канал обмена' };
-        if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection', 'source-set[]'], note: 'выгрузка агента побайтно равна выгрузке Конфигуратора (замер)' };
-        return { chain: [P.agent, P.designer, P.ibcmd], config: ['connection', 'source-set[]'], note: 'выгрузка агента побайтно равна выгрузке Конфигуратора (замер)' };
+        if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection', 'source-set[]'], note: 'побайтовое сравнение выгрузки агента с выгрузкой Конфигуратора ещё не сделано (#420); найденные расхождения допустимы и описываются в docs/CAPABILITIES.md' };
+        return { chain: [P.agent, P.designer, P.ibcmd], config: ['connection', 'source-set[]'], note: 'побайтовое сравнение выгрузки агента с выгрузкой Конфигуратора ещё не сделано (#420); найденные расхождения допустимы и описываются в docs/CAPABILITIES.md' };
       }
     },
     {

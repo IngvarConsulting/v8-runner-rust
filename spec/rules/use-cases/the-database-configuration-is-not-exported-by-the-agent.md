@@ -3,7 +3,7 @@ id: INV.USE-CASES.THE-DATABASE-CONFIGURATION-IS-NOT-EXPORTED-BY-THE-AGENT
 check:
   - tests/cli_infobase.rs::download_state_db_selects_designer_by_default
   - tests/cli_infobase.rs::download_state_db_goes_through_ibcmd_without_designer
-  - tests/cli_infobase.rs::complete_server_dbms_contract_is_dispatched_to_ibcmd
+  - tests/cli_infobase.rs::a_complete_server_dbms_contract_does_not_bring_ibcmd_into_a_cluster_download
   - tests/cli_infobase.rs::download_state_db_follows_a_providers_key_naming_designer_or_ibcmd
   - tests/cli_infobase.rs::download_state_db_refuses_the_agent_before_the_platform
   - src/use_cases/infobase_export.rs::a_provider_prepared_for_another_state_is_not_dispatched
@@ -15,8 +15,10 @@ check:
 # Конфигурацию базы данных выгружают Конфигуратор и `ibcmd`, агент — нет
 
 `download --state db` исполняет `designer` (`/DumpDBCfg`) или `ibcmd` (`config save --db`).
-Цепочка умолчаний пробует их в своём порядке: не готов Конфигуратор — берётся `ibcmd`, и
-квитанция называет Конфигуратор пропущенным. Ключ `providers.download` может назначить
+Цепочка умолчаний пробует их в своём порядке: агент, стоящий в ней первым, попадает в
+пропущенные с причиной; не готов Конфигуратор — берётся `ibcmd`, и квитанция называет
+пропущенным и Конфигуратор. У кластера `ibcmd` в цепочке нет, и `--state db` там выгружает
+только Конфигуратор. Ключ `providers.download` может назначить
 любого из них. Кто выгружает конфигурацию базы данных, говорит `src/domain/capability.rs`.
 
 Агенту `--state db` не достаётся: у него нет команды для конфигурации базы данных. На

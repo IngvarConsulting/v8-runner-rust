@@ -3487,6 +3487,7 @@ dependencies = [
  "camino",
  "chrono",
  "clap",
+ "getrandom 0.4.2",
  "insta",
  "jsonschema",
  "libc",

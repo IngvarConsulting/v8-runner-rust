@@ -80,9 +80,10 @@ impl Copy {
         fs::write(
             &config,
             format!(
-                "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
+                "workPath: work\nformat: DESIGNER\n{designer_leads}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
                 platform.display(),
-            ),
+ designer_leads = support::DESIGNER_LEADS,
+),
         )
         .expect("config");
         Self { root, config }

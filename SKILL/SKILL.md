@@ -136,9 +136,14 @@ v8-runner infobase create
   (`source-set: []`), which still writes the main configuration to the file. Choose a `<dir>` outside the source-set directories and `workPath`: a package landing on, inside or around them is refused before the platform starts. This is not `make`, which builds
   artifacts from project sources.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.
-  A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`),
-  experimental IBCMD DT is skipped unless named explicitly, and a ready Designer is
-  selected before spawn when available.
+  A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`): the
+  agent, then Designer; experimental IBCMD DT (file base only) is skipped unless named
+  explicitly; `restore --create` skips the agent.
+- Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
+  `pull`, `download`; `upload`/`check` — Designer only; `extensions` — file `ibcmd → agent`,
+  cluster agent only. The agent drops out of `push`/`pull` for `format: EDT` and out of `push`
+  with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared; if it does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster still lists installed extensions through `ibcmd` (needs `dbms`, #431). `providers.<op>: designer` restores the Designer-first choice;
+  a cluster base refuses `providers.<op>: ibcmd` for these operations.
 - `error.kind` and `error.code` are closed enumerations. Within `capability`, the code says why:
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
   way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the

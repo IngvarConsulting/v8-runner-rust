@@ -10,7 +10,7 @@ use zip::ZipArchive;
 
 use crate::config::loader::LOCAL_CONFIG_FILE_NAME;
 use crate::config::model::AppConfig;
-use crate::domain::capability::{Operation, Provider};
+use crate::domain::capability::Provider;
 use crate::domain::tools_download::{
     ToolDownloadDestination, ToolDownloadTarget, ToolExtensionInstallMode, ToolReleaseChannel,
     ToolsDownloadResult,
@@ -184,7 +184,7 @@ fn download_client_mcp(
     force: bool,
 ) -> Result<Vec<ToolDownloadDestination>, AppError> {
     if mode == ToolExtensionInstallMode::Artifacts
-        && config.selected_provider(Operation::Build) != Provider::Designer
+        && config.push_provider_with_tool_extension() != Some(Provider::Designer)
     {
         return Err(AppError::Validation(
             "`tools download client-mcp` needs the Designer as the push provider because client_mcp.cfe is registered as a tool extension artifact; use `tools download client-mcp --sources` when providers.push names another executor"

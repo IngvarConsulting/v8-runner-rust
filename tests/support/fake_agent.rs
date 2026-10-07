@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -102,6 +102,11 @@ pub struct FakeAgent {
     pub hold: Option<Hold>,
     /// Запись по SFTP, которую двойник держит до знака теста.
     pub sftp_hold: Option<SftpHold>,
+    /// Принимать любой логин и пароль управляемого агента: так двойник обслуживает
+    /// команды, чьи учётные данные называет сам тест (`clone --user --password`).
+    pub any_credentials: bool,
+    /// Выгрузка в файлы отвечает ошибкой агента, пока флаг поднят.
+    pub fail_dump: Arc<AtomicBool>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -159,6 +164,8 @@ impl FakeAgent {
             sftp_read_only: false,
             hold: None,
             sftp_hold: None,
+            any_credentials: false,
+            fail_dump: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -316,6 +323,12 @@ impl FakeAgent {
             );
         }
         if line.starts_with("config dump-config-to-files") {
+            if self.fail_dump.load(Ordering::SeqCst) {
+                return (
+                    "[{\"type\":\"error\",\"error-type\":\"ConfigFilesError\",\"message\":\"Выгрузка не выполнена\"}]\n".to_owned(),
+                    false,
+                );
+            }
             let dir = option("dir").unwrap_or_default();
             let target = self.user_dir().join(&dir);
             fs::create_dir_all(&target).expect("agent output dir");
@@ -649,7 +662,9 @@ impl server::Handler for FakeAgent {
         }
         // Правило агента: база без пользователей принимает пустой логин и пустую или
         // настроенную пару; любое другое имя отвергается.
-        if self.accept_password && user.is_empty() && password == AGENT_PASSWORD {
+        if self.any_credentials
+            || (self.accept_password && user.is_empty() && password == AGENT_PASSWORD)
+        {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
@@ -1110,16 +1125,122 @@ pub fn start_fake_agent(agent: FakeAgent) -> u16 {
 
 /// То же, но ключ хоста называет вызывающий: тесты закрепления сверяют именно его.
 pub fn start_fake_agent_with_host_key(agent: FakeAgent, key: russh::keys::PrivateKey) -> u16 {
+    start_fake_agent_on(agent, key, 0)
+}
+
+/// Файл, в который поддельный `1cv8` пишет порт и ключ хоста своего запуска: рядом с
+/// файлом раскладки агента.
+pub fn launch_request_file(base_dir_file: &Path) -> PathBuf {
+    let mut name = base_dir_file.as_os_str().to_owned();
+    name.push(".launch");
+    PathBuf::from(name)
+}
+
+/// Двойник управляемого агента «поднимается» вместе с поддельным `1cv8`.
+///
+/// Раннер передаёт агенту порт (`/AgentPort`) и ключ хоста (`/AgentSSHHostKey`), а
+/// поддельный `1cv8` пишет их в файл запроса. Поток двойника ждёт этот файл и поднимает
+/// SSH-сервер на том порту с тем ключом — как настоящий агент. `presented` подменяет ключ:
+/// так проверяется отказ чужому ключу. Поток живёт, пока жив каталог файла запроса.
+pub fn serve_managed_launches(agent: FakeAgent, presented: Option<russh::keys::PrivateKey>) {
+    let request = launch_request_file(&agent.base_dir_file);
+    std::thread::spawn(move || {
+        // Сервер прежнего запуска на том же порту останавливается: у нового запуска свой ключ.
+        let mut running: HashMap<u16, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+        while request.parent().is_some_and(Path::exists) {
+            if let Ok(text) = fs::read_to_string(&request) {
+                let _ = fs::remove_file(&request);
+                let mut lines = text.lines();
+                let port: u16 = lines
+                    .next()
+                    .and_then(|line| line.trim().parse().ok())
+                    .expect("fake 1cv8 names /AgentPort");
+                let key = presented.clone().unwrap_or_else(|| {
+                    match lines.next().map(str::trim).filter(|line| !line.is_empty()) {
+                        Some(path) => russh::keys::load_secret_key(path, None)
+                            .expect("host key handed to the agent"),
+                        None => random_host_key(),
+                    }
+                });
+                if let Some(stop) = running.remove(&port) {
+                    let _ = stop.send(());
+                }
+                let (port, stop) = start_stoppable_fake_agent_on(agent.clone(), key, port);
+                running.insert(port, stop);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+}
+
+/// Двойник управляемого агента для команд, чьи настройки тест не пишет (`clone`): журналы и
+/// раскладка — в своём каталоге, учётные данные — любые.
+pub struct ManagedAgentDouble {
+    pub commands_log: PathBuf,
+    pub base_dir_file: PathBuf,
+    pub pid_file: PathBuf,
+    pub fail_dump: Arc<AtomicBool>,
+    _dir: tempfile::TempDir,
+}
+
+pub fn managed_agent_double() -> ManagedAgentDouble {
+    let dir = tempfile::tempdir().expect("agent dir");
+    let root = dir.path().to_path_buf();
+    let mut agent = FakeAgent::new(
+        true,
+        root.join("commands.log"),
+        None,
+        root.join("base-dir.txt"),
+        root.join("designer.pid"),
+    );
+    agent.any_credentials = true;
+    let fail_dump = Arc::clone(&agent.fail_dump);
+    serve_managed_launches(agent, None);
+    ManagedAgentDouble {
+        commands_log: root.join("commands.log"),
+        base_dir_file: root.join("base-dir.txt"),
+        pid_file: root.join("designer.pid"),
+        fail_dump,
+        _dir: dir,
+    }
+}
+
+/// Поднимает двойника на данном порту (`0` — на свободном) и возвращает порт.
+fn start_fake_agent_on(agent: FakeAgent, key: russh::keys::PrivateKey, port: u16) -> u16 {
+    let (port, stop) = start_stoppable_fake_agent_on(agent, key, port);
+    // Двойник живёт до конца процесса теста: сброшенный отправитель остановил бы сервер.
+    std::mem::forget(stop);
+    port
+}
+
+/// То же, но сервер останавливается, когда сброшен (или сработал) возвращённый отправитель:
+/// так управляемый двойник освобождает порт к следующему запуску на том же порту.
+fn start_stoppable_fake_agent_on(
+    agent: FakeAgent,
+    key: russh::keys::PrivateKey,
+    port: u16,
+) -> (u16, tokio::sync::oneshot::Sender<()>) {
     let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("fake agent runtime");
         runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-                .await
-                .expect("bind fake agent");
+            // Порт прежнего запуска освобождается не мгновенно: привязка повторяется.
+            let mut attempts = 0;
+            let listener = loop {
+                match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                    Ok(listener) => break listener,
+                    Err(error) if attempts < 200 => {
+                        attempts += 1;
+                        let _ = error;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("bind fake agent: {error}"),
+                }
+            };
             port_tx
                 .send(listener.local_addr().expect("addr").port())
                 .expect("port");
@@ -1131,34 +1252,56 @@ pub fn start_fake_agent_with_host_key(agent: FakeAgent, key: russh::keys::Privat
                 ..server::Config::default()
             });
             let mut agent = agent;
-            let _ = agent.run_on_socket(config, &listener).await;
+            tokio::select! {
+                _ = agent.run_on_socket(config, &listener) => {}
+                _ = stop_rx => {}
+            }
         });
     });
-    port_rx.recv().expect("fake agent port")
+    (port_rx.recv().expect("fake agent port"), stop_tx)
 }
 
 /// Поддельный `1cv8` в агентском режиме: записывает ключи, создаёт раскладку
 /// `AgentBaseDir` как платформа и живёт до сигнала.
 #[cfg(unix)]
 pub fn write_fake_designer(path: &Path, args_log: &Path, pid_file: &Path, base_dir_file: &Path) {
+    write_fake_designer_for_user(path, args_log, pid_file, base_dir_file, "");
+}
+
+/// То же, но карта `agentbasedir.json` называет пользователя базы `user`: так платформа
+/// раскладывает каталог агента для базы с пользователями.
+#[cfg(unix)]
+pub fn write_fake_designer_for_user(
+    path: &Path,
+    args_log: &Path,
+    pid_file: &Path,
+    base_dir_file: &Path,
+    user: &str,
+) {
     let body = format!(
         r#"printf '%s\n' "$*" >> "{args_log}"
 printf '%s\n' "$$" > "{pid_file}"
 base=""
+port=""
+key=""
 prev=""
 for arg in "$@"; do
   if [ "$prev" = "/AgentBaseDir" ]; then base="$arg"; fi
+  if [ "$prev" = "/AgentPort" ]; then port="$arg"; fi
+  if [ "$prev" = "/AgentSSHHostKey" ]; then key="$arg"; fi
   prev="$arg"
 done
 if [ -z "$base" ]; then exit 3; fi
+printf '%s\n%s\n' "$port" "$key" > "{launch}.tmp" && mv "{launch}.tmp" "{launch}"
 mkdir -p "$base/0"
-printf '{{"usersInfo":[{{"name":"","dir":"0"}}]}}' > "$base/agentbasedir.json"
+printf '{{"usersInfo":[{{"name":"{user}","dir":"0"}}]}}' > "$base/agentbasedir.json"
 printf '%s' "$base" > "{base_dir_file}"
 trap 'exit 0' TERM INT
 while :; do sleep 1; done"#,
         args_log = args_log.display(),
         pid_file = pid_file.display(),
         base_dir_file = base_dir_file.display(),
+        launch = launch_request_file(base_dir_file).display(),
     );
     super::write_shell_script(path, &body);
 }

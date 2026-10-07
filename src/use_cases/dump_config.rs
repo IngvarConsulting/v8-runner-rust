@@ -1782,8 +1782,18 @@ exit 0"#,
         }
     }
 
+    /// Выгрузка Конфигуратором: агент, первый в цепочке умолчаний, в этих тестах не нужен.
     fn build_config(base_path: &Path, work_path: &Path, platform_path: &Path) -> AppConfig {
-        build_config_with_builder(base_path, work_path, platform_path, Default::default())
+        build_config_with_builder(
+            base_path,
+            work_path,
+            platform_path,
+            [(
+                crate::domain::capability::Operation::Dump,
+                crate::domain::capability::Provider::Designer,
+            )]
+            .into(),
+        )
     }
 
     fn build_config_with_builder(

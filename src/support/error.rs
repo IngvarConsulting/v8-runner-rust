@@ -458,6 +458,9 @@ impl From<AgentError> for AppError {
             // Тот же класс, что и отвергнутые учётные данные: сервер ответил, но работать
             // с этой точкой входа как объявлено нельзя.
             | AgentError::HostKeyRejected { .. }
+            | AgentError::ForeignAgentOnPort { .. }
+            | AgentError::PortTaken { .. }
+            | AgentError::NoFreePort { .. }
             | AgentError::Channel { .. }
             | AgentError::Launch(_)
             | AgentError::StartupTimedOut { .. } => Self::EnvironmentUnavailable(error.to_string()),
