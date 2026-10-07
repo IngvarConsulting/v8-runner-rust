@@ -369,6 +369,46 @@ pub fn default_chain(operation: Operation, target: TargetKind) -> Vec<Provider> 
         .collect()
 }
 
+/// Что в проекте сужает цепочку умолчаний.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProjectShape {
+    /// Исходники в формате EDT (`format: EDT`).
+    pub edt_sources: bool,
+    /// Объявлено расширение-инструмент (`tools.client_mcp.extension`), которое ставит `push`.
+    pub tool_extension: bool,
+}
+
+/// Обслуживает ли исполнитель операцию у проекта такой формы.
+///
+/// Строка матрицы говорит, кто реализует операцию на цели; форма проекта сужает её. У
+/// агента нет адаптера для исходников EDT (`push` и `pull` проекта EDT идут через перевод
+/// в XML и Конфигуратор или `ibcmd`) и нет установки расширения-инструмента при `push`.
+pub const fn serves_project(operation: Operation, provider: Provider, shape: ProjectShape) -> bool {
+    match (operation, provider) {
+        (Operation::Build | Operation::Dump, Provider::Agent) if shape.edt_sources => false,
+        (Operation::Build, Provider::Agent) if shape.tool_extension => false,
+        _ => true,
+    }
+}
+
+/// Цепочка умолчаний проекта: цепочка строки без исполнителей, которые такой проект не
+/// обслуживают (`serves_project`). У автономного сервера цепочка не сужается: шлюз —
+/// единственная точка входа, и отказ о форме проекта даёт сам исполнитель.
+pub fn default_chain_for(
+    operation: Operation,
+    target: TargetKind,
+    shape: ProjectShape,
+) -> Vec<Provider> {
+    let chain = default_chain(operation, target);
+    if target == TargetKind::Standalone {
+        return chain;
+    }
+    chain
+        .into_iter()
+        .filter(|provider| serves_project(operation, *provider, shape))
+        .collect()
+}
+
 /// Есть ли у пары «операция и цель» настоящая развилка.
 ///
 /// Переопределение имеет смысл только там, где есть из чего выбирать: второй
@@ -576,11 +616,20 @@ impl ProviderPlan {
 /// Заменяет прежнее `builder: IBCMD` в конструкторах конфига внутри модульных тестов.
 #[cfg(test)]
 pub fn ibcmd_for_every_choice() -> std::collections::BTreeMap<Operation, Provider> {
+    ibcmd_for_every_choice_on(TargetKind::File)
+}
+
+/// То же для цели данного вида: у кластера `ibcmd` есть только там, где его строка его
+/// называет.
+#[cfg(test)]
+pub fn ibcmd_for_every_choice_on(
+    target: TargetKind,
+) -> std::collections::BTreeMap<Operation, Provider> {
     Operation::ALL
         .into_iter()
         .filter(|operation| {
-            has_a_choice(*operation, TargetKind::File)
-                && capability_of(*operation, TargetKind::File, Provider::Ibcmd).is_some()
+            has_a_choice(*operation, target)
+                && capability_of(*operation, target, Provider::Ibcmd).is_some()
         })
         .map(|operation| (operation, Provider::Ibcmd))
         .collect()
@@ -664,6 +713,114 @@ mod tests {
                         Some(Implementation::Implemented)
                     );
                 }
+            }
+        }
+    }
+
+    /// Порядок цепочек назначил владелец (#206): агент первым, затем Конфигуратор, у
+    /// файловой базы затем `ibcmd`; агент экспериментальным не помечен.
+    #[test]
+    fn the_agent_leads_the_file_and_cluster_chains() {
+        use Provider::{Agent, Designer, Ibcmd};
+        for operation in [
+            Operation::Build,
+            Operation::Dump,
+            Operation::ConfigurationExport,
+        ] {
+            assert_eq!(
+                default_chain(operation, TargetKind::File),
+                [Agent, Designer, Ibcmd],
+                "{operation} on file"
+            );
+            assert_eq!(
+                default_chain(operation, TargetKind::Cluster),
+                [Agent, Designer],
+                "{operation} on cluster"
+            );
+        }
+        for operation in [Operation::InfobaseDump, Operation::InfobaseRestore] {
+            for target in [TargetKind::File, TargetKind::Cluster] {
+                assert_eq!(
+                    default_chain(operation, target),
+                    [Agent, Designer],
+                    "{operation} on {}",
+                    target.as_str()
+                );
+            }
+        }
+        for operation in Operation::ALL {
+            for target in TargetKind::ALL {
+                assert_ne!(
+                    capability_of(operation, target, Agent).map(|row| row.implementation),
+                    Some(Implementation::Experimental),
+                    "{operation} on {} marks the agent experimental",
+                    target.as_str()
+                );
+            }
+        }
+    }
+
+    /// У кластера `ibcmd` нет ни в одной строке, кроме создания базы (до #204) и `make`,
+    /// которому база проекта не нужна.
+    #[test]
+    fn a_cluster_row_names_ibcmd_only_where_it_does_not_reach_the_cluster_infobase() {
+        for operation in Operation::ALL {
+            if matches!(operation, Operation::Init | Operation::Make) {
+                continue;
+            }
+            assert_eq!(
+                capability_of(operation, TargetKind::Cluster, Provider::Ibcmd),
+                None,
+                "{operation} on cluster names ibcmd"
+            );
+        }
+    }
+
+    /// Форма проекта сужает цепочку: агент выпадает у EDT из `push` и `pull`, у
+    /// расширения-инструмента — из `push`; остальные строки она не трогает.
+    #[test]
+    fn the_project_shape_drops_the_agent_where_it_has_no_adapter() {
+        use Provider::{Agent, Designer, Ibcmd};
+        let edt = ProjectShape {
+            edt_sources: true,
+            ..ProjectShape::default()
+        };
+        let tool_extension = ProjectShape {
+            tool_extension: true,
+            ..ProjectShape::default()
+        };
+        for operation in [Operation::Build, Operation::Dump] {
+            assert_eq!(
+                default_chain_for(operation, TargetKind::File, edt),
+                [Designer, Ibcmd]
+            );
+            assert_eq!(
+                default_chain_for(operation, TargetKind::Cluster, edt),
+                [Designer]
+            );
+        }
+        assert_eq!(
+            default_chain_for(Operation::Build, TargetKind::File, tool_extension),
+            [Designer, Ibcmd]
+        );
+        assert_eq!(
+            default_chain_for(Operation::Dump, TargetKind::File, tool_extension),
+            [Agent, Designer, Ibcmd]
+        );
+        assert_eq!(
+            default_chain_for(Operation::ConfigurationExport, TargetKind::Cluster, edt),
+            [Agent, Designer]
+        );
+        assert_eq!(
+            default_chain_for(Operation::Build, TargetKind::Standalone, edt),
+            [Agent]
+        );
+        for operation in Operation::ALL {
+            for target in TargetKind::ALL {
+                assert_eq!(
+                    default_chain_for(operation, target, ProjectShape::default()),
+                    default_chain(operation, target)
+                );
             }
         }
     }

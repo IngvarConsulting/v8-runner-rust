@@ -392,11 +392,15 @@ providers:
 - ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
   квитанции ответа видно, из какого файла он пришёл.
 
-Умолчания по операциям: `infobase.create`, `push`, `pull` — Конфигуратор, затем `ibcmd`;
-`download` — Конфигуратор, затем `ibcmd`; `infobase dump` и
-`infobase restore` — Конфигуратор (`ibcmd` для DT остаётся экспериментальным и
-назначается только явно); `upload`, `syntax` — только Конфигуратор;
-`extensions` — только `ibcmd`. `make` — `ibcmd`, затем Конфигуратор, при любом виде базы
+Умолчания по операциям зависят от вида базы. `push`, `pull`, `download` — агент, затем
+Конфигуратор, у файловой базы затем `ibcmd`; у кластера `ibcmd` в цепочке нет. При
+`format: EDT` агент из цепочки `push` и `pull` выпадает, при объявленном
+`tools.client_mcp.extension` — из цепочки `push`. `infobase dump` и `infobase restore` —
+агент, затем Конфигуратор (`ibcmd` для DT файловой базы остаётся экспериментальным и
+назначается только явно; у кластера его нет). `infobase.create` — Конфигуратор, затем
+`ibcmd`; `upload`, `syntax` — только Конфигуратор; `extensions` — у файловой базы `ibcmd`,
+затем агент, у кластера только агент. Вернуть Конфигуратор первым можно ключом
+`providers.<операция>: designer`. `make` — `ibcmd`, затем Конфигуратор, при любом виде базы
 проекта и без неё: пакет собирается из исходников во временной базе раннера под `workPath`.
 `providers.make` принимает `ibcmd` и `designer`; `agent` снят — валидация отказывает и
 называет выход `download` (`next`), — а `ibcmd-rs` отказывает до замера
@@ -927,8 +931,8 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
 с `--sources` он указывает `source.path` на
 `build/tools/onec-client-mcp-devkit/exts/client-mcp` и `source.format: EDT`, без
 `--sources` указывает `artifact.path` на скачанный `client_mcp.cfe`. Artifact-режим
-доступен, только когда сборку исполняет Конфигуратор; при `providers.push: ibcmd`
-используйте `--sources`.
+доступен, только когда сборку исполняет Конфигуратор: при объявленном расширении агент из
+цепочки `push` выпадает; при `providers.push: ibcmd` или `agent` используйте `--sources`.
 
 ### `tools.va`
 

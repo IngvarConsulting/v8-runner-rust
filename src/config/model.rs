@@ -686,12 +686,48 @@ impl AppConfig {
                     .unwrap_or_else(|| crate::config::loader::DEFAULT_CONFIG_FILE_NAME.to_owned()),
             },
             None => ProviderPlan::Default {
-                chain: capability::default_chain(operation, self.target_kind())
-                    .into_iter()
-                    .filter(|provider| self.missing_way(operation, *provider).is_none())
-                    .collect(),
+                chain: self.default_chain_shaped(operation, self.project_shape()),
             },
         }
+    }
+
+    /// Форма проекта, которая сужает цепочки умолчаний (`capability::serves_project`).
+    pub fn project_shape(&self) -> capability::ProjectShape {
+        capability::ProjectShape {
+            edt_sources: self.format == SourceFormat::Edt,
+            tool_extension: self.tools.client_mcp.extension.is_some(),
+        }
+    }
+
+    /// Исполнитель `push` при объявленном расширении-инструменте: так спрашивает тот, кто
+    /// расширение только собирается объявить (`tools download client-mcp`).
+    pub fn push_provider_with_tool_extension(&self) -> Option<Provider> {
+        match self.providers.get(&Operation::Build) {
+            Some(provider) => Some(*provider),
+            None => self
+                .default_chain_shaped(
+                    Operation::Build,
+                    capability::ProjectShape {
+                        tool_extension: true,
+                        ..self.project_shape()
+                    },
+                )
+                .into_iter()
+                .next(),
+        }
+    }
+
+    /// Цепочка умолчаний для проекта данной формы: строка матрицы без исполнителей, которые
+    /// такой проект не обслуживают, и без тех, чей путь к автономному серверу не объявлен.
+    fn default_chain_shaped(
+        &self,
+        operation: Operation,
+        shape: capability::ProjectShape,
+    ) -> Vec<Provider> {
+        capability::default_chain_for(operation, self.target_kind(), shape)
+            .into_iter()
+            .filter(|provider| self.missing_way(operation, *provider).is_none())
+            .collect()
     }
 
     /// The provider an operation would dispatch to, or `None` where the target has no

@@ -592,6 +592,16 @@ fn restore_creates_an_absent_infobase_through_designer() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["data"]["target_mode"], "create");
     assert_eq!(envelope["data"]["target_state"], "created");
+    // Агент открывает сессию к существующей базе: с `--create` цепочка идёт мимо него.
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
+    assert_eq!(
+        envelope["data"]["provider"]["skipped"][0]["provider"],
+        "agent"
+    );
+    assert!(envelope["data"]["provider"]["skipped"][0]["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("--create")));
     assert!(fs::read_to_string(calls)
         .expect("calls")
         .contains("/RestoreIB"));

@@ -1133,6 +1133,17 @@ mod tests {
             crate::domain::capability::Provider,
         >,
     ) -> AppConfig {
+        // Без ключей тесты грузят Конфигуратором: агент, первый в цепочке умолчаний, здесь
+        // не поднимается.
+        let providers = if providers.is_empty() {
+            [(
+                crate::domain::capability::Operation::Build,
+                crate::domain::capability::Provider::Designer,
+            )]
+            .into()
+        } else {
+            providers
+        };
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
