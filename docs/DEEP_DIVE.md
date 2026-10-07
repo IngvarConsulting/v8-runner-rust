@@ -207,6 +207,20 @@ runtime snapshot commit только указанным source-set.
   метки владельца у `make` нет.
 - Full replacement target publication идёт через staged publication model.
 
+### `infobase create`
+
+Сценарий — `use_cases::init_project`; вид цели решает путь. Файловая база: память
+собираемого набора снимается до сборки (`exchange_guard::AssembledMemory`), затем `ibcmd
+infobase create --import --apply --force` или Конфигуратор (`CREATEINFOBASE`,
+`/LoadConfigFromFiles` без файла версий, `/UpdateDBCfg`); после удачи
+`exchange_guard::remember_created_base` пишет собранному набору его дерево, остальным —
+пустую память. Сборка Конфигуратором, остановленная после создания, оставляет пустую память.
+База в кластере: строку `CREATEINFOBASE` собирает `V8Connection::create_cluster_infobase_arg`
+из `Srvr`/`Ref` подключения и реквизитов `dbms`/`cluster`; `/Out` не ставится, а вывод
+платформы в отказе проходит `mask_text` с паролями СУБД и кластера. `DBPwd` и `SPwd`
+маскирует `platform::secrets`, `DBUID` и `SUsr` прячутся в показе отказа. Все процессы
+создания — критическая фаза; отсрочку отмены называет `collecting_deferrals`.
+
 ## Shared EDT
 
 `tools.edt_cli.interactive_mode` включает shared interactive EDT execution model.

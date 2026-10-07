@@ -24,7 +24,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `clone` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
 | `init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
 | `tools download <tool>` | CLI-only загрузка выпусков (по умолчанию latest; у vanessa есть `--prerelease`) | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
-| `infobase create` | провайдер `designer` (умолчание) или `ibcmd` | Конфигуратор создаёт файловую ИБ, серверную оставляет ручной предпосылкой; `providers.infobase.create: ibcmd` создаёт файловую или серверную через `ibcmd infobase create` (серверной нужна `infobase.dbms`); при `format=EDT` дополнительно импортирует EDT workspace |
+| `infobase create` | файловая база — цепочка `ibcmd` → `designer`; база в кластере — только `designer` (`providers.infobase.create` у кластера — ошибка настроек); автономный сервер — отказ `capability`/`target` с рецептом | Файловую ИБ проекта формата DESIGNER `ibcmd` создаёт сразу с основной конфигурацией (`--import --apply --force`), Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles`, `/UpdateDBCfg`; в кластере Конфигуратор `CREATEINFOBASE` с клиент-серверной строкой регистрирует базу и создаёт базу данных (нужны `infobase.dbms` с `locale`); существующая файловая база — отказ; при `format=EDT` дополнительно импортирует EDT workspace |
 | `extensions` | `format=DESIGNER` или `format=EDT`; провайдер `ibcmd`, `agent` только по `providers.extensions: agent` | Обновляет свойства extension `source-set` или установленного расширения, названного платформенным именем (`--installed-name`); `list`/`info`/`create`/`delete`/`activate` — состав расширений ИБ; у `agent` всё это группа `config extensions` одной сессией на команду, состав читается из структурного ответа `properties get`, синоним при `create` уходит в форме `NStr()` |
 | `push` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.push: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — только `agent` через SSH-шлюз сервера, платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
 | `test` | Та же матрица, что и у `push` | По умолчанию запускает `push` |
@@ -133,9 +133,12 @@ CLI help, доверяйте текущему коду и затем синхр�
   конфигуратор. Поэтому состояние совместимости — `not_probed`, и это отдельное
   значение от `unknown`: «не спрашивали» и «спросили и не получили ответа» —
   разные факты для того, кто решает, применять ли.
-- `infobase create` для серверной ИБ не различает «создана» и «уже была»: это различие даёт
-  сама `ibcmd infobase create`, то есть действие. Превью называет цель и утилиту
-  и на этом останавливается.
+- `infobase create` для базы в кластере не различает «создана» и «уже была»: код выхода
+  `CREATEINFOBASE` у «уже существует» тот же, что у любого другого отказа, а вопрос к кластеру
+  через `rac` ждёт замера его вывода
+  ([#180](https://github.com/IngvarConsulting/v8-runner-rust/issues/180)). Превью называет цель,
+  базу данных и утилиту и на этом останавливается; существующая база получает отказ самой
+  платформы.
 - `push` в формате EDT планирует шаг экспорта целиком: выгрузка в файлы
   конфигуратора и последующая загрузка в базу не разделяются, потому что вторая
   зависит от результата первой. Два исключения названы: у внешнего набора
@@ -428,18 +431,30 @@ v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir 
 v8-runner infobase create [--dry-run]
 ```
 
-- Всегда разделяет шаг подготовки ИБ и шаг EDT workspace.
-- Для file connection Конфигуратор (умолчание) использует `1cv8 CREATEINFOBASE`.
-- При `providers.infobase.create: ibcmd` использует `ibcmd infobase create`; server path добавляет
-  `--create-database` и требует `infobase.dbms`.
-- При `ibcmd` неудачное создание считается «база уже есть» только если сама база
-  после этого читается: спрашивается `config generation-id`, и ноль она отвечает
-  лишь когда база существует и эти учётные данные её читают. Формулировка отказа
-  в решении не участвует (INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS), поэтому отказ авторизации и незаписываемый
-  путь остаются ошибкой, а не «уже есть». Вопрос только читает базу, и отмена его обрывает:
-  ответ тогда — отмена с кодом выхода создания и пометкой, что вопрос остался без ответа.
-  Если отмену отложило само создание, вопрос уже не запускается, и ответ ещё называет
-  отложенную отмену.
+- Всегда разделяет шаг подготовки ИБ и шаг EDT workspace; отказ шага базы рабочую область
+  не останавливает.
+- Файловая база проекта формата DESIGNER: первым `ibcmd infobase create --import=<основная
+  конфигурация> --apply --force`, без `ibcmd` — Конфигуратор: `CREATEINFOBASE`,
+  `/LoadConfigFromFiles` основной конфигурации без `-updateConfigDumpInfo`, `/UpdateDBCfg`.
+  Исход — по коду выхода; второго вопроса к базе нет. Память после создания знает собранный
+  набор: первый `push` его не грузит, а расширения досылает целиком. Если сборку Конфигуратором
+  остановили отказ или отмена, база остаётся пустой, память говорит это, и первый `push` полный.
+- Файловая база проекта формата EDT создаётся пустой: перевода исходников в XML при создании
+  нет ([#204](https://github.com/IngvarConsulting/v8-runner-rust/issues/204)); первый `push`
+  полный.
+- Существующая файловая база (`1Cv8.1CD` на месте) — отказ `validation` до запуска платформы,
+  и в превью тоже.
+- База в кластере: Конфигуратор `CREATEINFOBASE "Srvr=…;Ref=…;DBMS=…;DBSrvr=…;DB=…[;DBUID=…][;DBPwd=…];CrSQLDB=Y;Locale=…[;SUsr=…;SPwd=…]" /DisableStartupDialogs`
+  (замер #181). Реквизиты — `infobase.dbms` (`kind`, `server`, `name`, `locale` обязательны,
+  `user`, `password` — если есть) и `infobase.cluster.user`/`password`. Без обязательного
+  реквизита — отказ `validation` до запуска с именем ключа. `/Out` не ставится: строка успеха
+  в нём повторяет пароли. Отказ платформы называет, что неудача могла оставить базу данных в
+  СУБД; без объявленного администратора кластера он называет уровень администратора кластера и
+  его ключи. База создаётся пустой, и первый `push` полный. Запасной путь `rac infobase create`
+  пока не реализован ([#180](https://github.com/IngvarConsulting/v8-runner-rust/issues/180)).
+- Автономный сервер: отказ `capability` с кодом `target` и рецептом — `ibcmd server config init`,
+  затем `ibcmd infobase create` на машине сервера до его запуска.
+- Созданную файловую базу команда записывает в метку владельца за своей рабочей копией.
 - Для `format=EDT` использует `workPath/edt-workspace` и импортирует `CONFIGURATION`, затем
   `EXTENSION`.
 - Если настроен `tools.client_mcp.extension.source.format=EDT`, импортирует этот tool extension

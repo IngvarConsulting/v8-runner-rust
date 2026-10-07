@@ -60,7 +60,7 @@ Useful global flags:
    and creates nothing — not even the project directory.
 5. If it exists but the worktree has its own infobase to point at (a new worktree, a copied `v8project.local.yaml`), run `v8-runner init --infobase "File=build/ib"`: it leaves `v8project.yaml` untouched, writes only the local layer, and keeps the previous `origin` with its credentials as `upstream` (refused if `upstream` exists).
 6. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
-7. Run `v8-runner infobase create` only when the file infobase or EDT workspace needs to be created.
+7. Run `v8-runner infobase create` only when the infobase does not exist yet (an existing file base is refused, exit 2). File base: `ibcmd` (else Designer) builds it with the main configuration, memory knows that set, the first push sends the rest. Cluster: Designer `CREATEINFOBASE`; needs `infobase.dbms` `kind`/`server`/`name`/`locale` (+ `user`/`password`) and, if the cluster has administrators, `cluster.user`/`password` in the local layer; the base is empty and the first push is full; `providers.infobase.create` on a cluster is a config error. Standalone server: refused with the `ibcmd server config init` + `ibcmd infobase create` recipe. EDT format also imports the workspace.
 8. Run the narrowest validation command that answers the user's goal.
 
 Minimal infobase-only shape (two files):
@@ -242,8 +242,8 @@ v8-runner infobase create
   executor got the work answers the command's own form; the shared refusal form, without the
   flag, means no executor got work. Two limits are named
   rather than guessed: `upload` reports `compatibility_state: not_probed` because the probe is
-  itself a Designer run, and `infobase create` against a server infobase cannot tell "created" from
-  "already existed" without creating it.
+  itself a Designer run, and `infobase create` against a cluster infobase cannot tell "created" from
+  "already existed" without creating it (a failed creation may leave its database in the DBMS — check before a retry).
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner upload ...`.
 - Release artifacts need to be built or external artifacts published: use `v8-runner make ...` or the `artifacts` alias. `make` builds from the sources in a throwaway runner base under `workPath` (`ibcmd`, else Designer) and never opens the project base: no `origin` needed, `--infobase` and `providers.make: agent` are refused. Unexported Designer edits do not reach the package: `pull` first, or take the base's package with `download`.

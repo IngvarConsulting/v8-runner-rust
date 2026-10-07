@@ -1131,7 +1131,10 @@ fn infobase_create_records_the_created_base_for_this_copy() {
     let base = dir.path().join("bases").join("ib");
     fs::write(
         copy.root.join("v8project.local.yaml"),
-        format!("infobases:\n  origin:\n    connection: 'File={}'\n", base.display()),
+        format!(
+            "infobases:\n  origin:\n    connection: 'File={}'\n",
+            base.display()
+        ),
     )
     .expect("local layer");
 

@@ -1477,8 +1477,8 @@ mod tests {
         );
         let calls = fs::read_to_string(dir.path().join("calls.log")).expect("calls");
         assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
-        let contexts =
-            crate::change_detection::source_sets::SourceSetsService::new(&config).designer_contexts();
+        let contexts = crate::change_detection::source_sets::SourceSetsService::new(&config)
+            .designer_contexts();
         crate::use_cases::exchange_guard::require_memory(
             &ExecutionContext::cli(CommandName::Build),
             &config,

@@ -11,6 +11,8 @@ check:
   - tests/cli_launch.rs::launch_dry_run_text_masks_credentials_and_says_nothing_was_dispatched
   - tests/cli_extensions.rs::extension_preview_never_echoes_the_infobase_password
   - tests/cli_init.rs::server_infobase_create_never_echoes_the_connection_string_credentials
+  - tests/cli_init.rs::a_failed_cluster_create_never_echoes_the_passwords
+  - src/platform/secrets.rs::masks_the_dbms_and_cluster_passwords_of_a_creation_string
   - tests/cli_config_init.rs::init_in_a_new_worktree_redirects_the_copied_origin_and_keeps_it_as_upstream
 ---
 

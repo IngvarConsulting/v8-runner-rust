@@ -878,8 +878,11 @@ mod tests {
             "{:?}",
             analysis.outcome
         );
-        std::fs::write(main.root_in(&config.base_path).join("Module.bsl"), "changed")
-            .expect("edit");
+        std::fs::write(
+            main.root_in(&config.base_path).join("Module.bsl"),
+            "changed",
+        )
+        .expect("edit");
         let analysis = analyze_context(&contexts[0], &config.work_path);
         assert!(
             matches!(analysis.outcome, Ok(AnalysisOutcome::Changes { .. })),

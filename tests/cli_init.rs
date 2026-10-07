@@ -211,6 +211,11 @@ fn setup_cluster_init_project(
     let calls_log = dir.path().join("1cv8.calls.log");
 
     fs::create_dir_all(base_path.join("main")).expect("main");
+    fs::write(
+        base_path.join("main").join("Configuration.xml"),
+        "<Configuration/>\n",
+    )
+    .expect("main source");
     fs::create_dir_all(&work_path).expect("work");
     write_script(
         &v8_path,
@@ -238,7 +243,8 @@ fn setup_cluster_init_project(
 const FULL_DBMS: &str = "  dbms:\n    kind: PostgreSQL\n    server: db\n    name: demo_db\n    user: postgres\n    password: pg-s3cret\n    locale: ru\n";
 
 /// Администратор кластера в местном слое.
-const CLUSTER_ADMIN: &str = "infobases:\n  origin:\n    cluster:\n      user: cadm\n      password: c-s3cret\n";
+const CLUSTER_ADMIN: &str =
+    "infobases:\n  origin:\n    cluster:\n      user: cadm\n      password: c-s3cret\n";
 
 fn run_infobase_create(config_path: &Path, extra: &[&str]) -> std::process::Output {
     v8_runner_command()
@@ -494,7 +500,11 @@ fn a_file_base_is_created_by_ibcmd_with_the_main_configuration_and_remembers_it(
 
     let output = run_infobase_create(&config_path, &[]);
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let payload = json_of(&output);
     assert_eq!(payload["data"]["steps"][0]["status"], "ok");
     let calls = fs::read_to_string(&calls_log).expect("calls");
@@ -516,7 +526,11 @@ fn a_file_base_is_created_by_ibcmd_with_the_main_configuration_and_remembers_it(
         .args(["--json-message", "push", "--dry-run"])
         .output()
         .expect("push preview");
-    assert!(push.status.success(), "{}", String::from_utf8_lossy(&push.stdout));
+    assert!(
+        push.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push.stdout)
+    );
     let push = json_of(&push);
     let steps = push["data"]["steps"].as_array().expect("steps");
     let mode = |name: &str| {
@@ -583,7 +597,8 @@ fn a_standalone_target_is_refused_with_the_recipe() {
         assert_eq!(payload["error"]["code"], "target", "{payload}");
         let message = payload["error"]["message"].as_str().expect("message");
         assert!(
-            message.contains("ibcmd server config init") && message.contains("ibcmd infobase create"),
+            message.contains("ibcmd server config init")
+                && message.contains("ibcmd infobase create"),
             "{message}"
         );
     }
@@ -838,7 +853,6 @@ fn init_rejects_workspace_path_that_is_not_a_directory() {
         .contains("is not a directory"));
 }
 
-
 /// Базу в кластере Конфигуратор создаёт одной командой `CREATEINFOBASE` с клиент-серверной
 /// строкой: адрес из подключения, реквизиты СУБД из `dbms`, администратор кластера из
 /// `cluster`. Пароли в ответ не попадают.
@@ -878,6 +892,19 @@ fn a_cluster_base_is_created_by_the_designer_with_the_client_server_string() {
     for secret in ["pg-s3cret", "c-s3cret"] {
         assert!(!stdout.contains(secret), "{secret} in {stdout}");
     }
+
+    // Базу Конфигуратор создал пустой: память знает только, что база есть, и первая
+    // отправка грузит набор целиком без отказа первого знакомства.
+    let push = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args(["--json-message", "push", "--dry-run"])
+        .output()
+        .expect("push preview");
+    let push = json_of(&push);
+    assert_eq!(push["ok"], true, "{push}");
+    assert_eq!(push["data"]["steps"][0]["source_set"], "main", "{push}");
+    assert_eq!(push["data"]["steps"][0]["mode"], "full", "{push}");
 }
 
 /// Без `dbms.locale` платформа оставила бы в СУБД брошенную базу данных: отказ до запуска

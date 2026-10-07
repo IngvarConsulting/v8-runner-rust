@@ -463,7 +463,10 @@ mod tests {
             .create_cluster_infobase_arg(&creation(None, None))
             .is_some_and(|arg| arg.starts_with("Srvr=srv;Ref=demo;DBMS=")));
         let file = V8Connection::from_connection_string("File=/tmp/ib");
-        assert_eq!(file.create_cluster_infobase_arg(&creation(None, None)), None);
+        assert_eq!(
+            file.create_cluster_infobase_arg(&creation(None, None)),
+            None
+        );
     }
 
     #[test]
