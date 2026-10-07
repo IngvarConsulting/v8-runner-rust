@@ -140,7 +140,9 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    файлом ключа, который раннер отдал платформе. Ключа для сверки нет — принимается любой, и
    его отпечаток называется, чтобы ключ можно было закрепить; подмену хоста в сети раннер
    тогда не заметит — [11](11-risks-and-technical-debt.md). Первая команда переводит сессию
-   в JSON, затем подключение к базе.
+   в JSON, затем подключение к базе. Ответ на команду — JSON-массивы до итогового
+   сообщения; проза до массива уходит в журнал сессии, а массив, который не разбирается как
+   сообщения известного типа, — отказ.
 3. Сессия одна на команду: `push` открывает её при первой настоящей загрузке и ведёт через
    все наборы, остальные команды — одну на операцию.
 4. Файлы идут каналом: общим каталогом или SFTP шлюза. В общий каталог раннер выставляет
@@ -164,6 +166,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 
 Правила: [готовность — аутентификация](../rules/platform/agent-readiness-is-authentication.md),
 [сессия открывается в JSON](../rules/platform/agent-session-opens-in-json-mode.md),
+[ответ читается только как JSON](../rules/platform/an-agent-reply-is-read-only-as-json.md),
+[выгрузка сравнена с Конфигуратором](../rules/platform/an-agent-dump-is-compared-with-the-designer-dump.md),
 [сессия не живёт дольше замка](../rules/platform/agent-session-lives-with-the-lock.md),
 [файлы удалённой цели — объявленным каналом](../rules/platform/remote-files-travel-by-a-declared-channel.md),
 [неизменившееся поколение не выгружается](../rules/use-cases/an-unchanged-generation-is-not-dumped.md),
