@@ -307,11 +307,12 @@ impl StandaloneWay {
         }
     }
 
-    /// The one wording of a missing way: whom it lacks, which way and what to declare.
-    /// Every refusal and skip reason about an undeclared way is built from it.
-    pub fn undeclared(self, provider: Provider) -> String {
+    /// The one wording of a missing way: whom it lacks — a provider or a client — which way
+    /// and what to declare. Every refusal and skip reason about an undeclared way is built
+    /// from it.
+    pub fn undeclared(self, who: impl std::fmt::Display) -> String {
         format!(
-            "{provider} reaches a standalone server by {}, which is not declared: declare {}",
+            "{who} reaches a standalone server by {}, which is not declared: declare {}",
             self.name(),
             self.key()
         )
@@ -695,6 +696,12 @@ impl AppConfig {
         self.infobase.memory_address(base_path)
     }
 
+    /// `infobase.connection` is declared. Only a standalone server may leave it empty: its
+    /// connection string is the direct gate, and the section may declare the SSH gate alone.
+    pub fn connection_declared(&self) -> bool {
+        !self.infobase.connection.trim().is_empty()
+    }
+
     /// Kind of the target infobase, as declared by the connection contract.
     pub fn target_kind(&self) -> TargetKind {
         if self.infobase.standalone.is_some() {
@@ -718,7 +725,7 @@ impl AppConfig {
         let standalone = self.infobase.standalone.as_ref()?;
         let way = StandaloneWay::of(provider)?;
         let declared = match way {
-            StandaloneWay::DirectGate => !self.infobase.connection.trim().is_empty(),
+            StandaloneWay::DirectGate => self.connection_declared(),
             StandaloneWay::SshGate => standalone.gate.is_some(),
         };
         (!declared).then_some(way)

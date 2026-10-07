@@ -417,7 +417,7 @@
           "type": "string"
         },
         "via": {
-          "description": "Which address opens the base: web for infobase.web.url, connection for infobase.connection. Thin client only; the default follows the target kind.",
+          "description": "Which address opens the base: web for infobase.web.url, connection for infobase.connection. Thin client only; the default is infobase.connection, or infobase.web.url when no connection string is declared.",
           "type": [
             "string",
             "null"

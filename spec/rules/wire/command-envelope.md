@@ -37,8 +37,8 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 него заполнены поля `base_generation` (поколение базы сейчас) и `local_generation` (записанное
 после прошлого обмена). Код выхода у этих отказов — 3. Их `next` — `pull` с `source_set`, а
 когда выгрузку предлагать нельзя, — `push` с `keys` `{"--force": ""}`: ключ без значения
-несёт пустую строку. Код `subject` таблица называет, и сторож это проверяет, но ни один отказ
-пока этой причиной не отвечает.
+несёт пустую строку. Коды `subject` и `soon` таблица называет, и сторож это проверяет, но ни
+один отказ пока этими причинами не отвечает.
 
 **Что может назвать MCP.** Конверт один, словарь у транспортов разный: MCP сводит рода к
 `validation`, `runtime` и `platform` (`DEC.2026-04-20.BUSINESS-FAILURES-ARE-NOT-TRANSPORT-FAULTS`),
@@ -89,15 +89,15 @@ generated_envelope_schema_is_current`. Руками её не правят — �
       "status": "failed",
       "kind": "resolve_target",
       "duration_ms": 3,
-      "message": "standalone target is opened by its web address"
+      "message": "a standalone server is not opened by the thick client"
     }
   ],
   "error": {
     "code": "target",
     "kind": "capability",
-    "message": "a standalone server is opened by its web address: use `launch web` with infobase.web.url; a client is not launched against the gate",
+    "message": "the thick client and the ordinary application are not launched against a standalone server: it is opened by the thin client, by the Designer or in a browser",
     "next": {
-      "command": "launch web"
+      "command": "launch thin"
     }
   }
 }

@@ -961,36 +961,59 @@ fn a_standalone_snapshot_without_the_direct_gate_is_refused_before_any_session()
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 }
 
-/// Тонкий клиент по прямому шлюзу автономного сервера раннер пока не запускает (#208): он
-/// идёт по клиентскому адресу без всякого ключа. Не объявлен адрес — отказ называет именно его, а не платформу: платформы
-/// на этой машине нет вовсе, и до её поиска дело не доходит.
+/// У автономной цели без прямого шлюза и без `infobase.web.url` тонкому клиенту идти
+/// некуда: отказ называет оба ключа, а не платформу — платформы на этой машине нет вовсе,
+/// и до её поиска дело не доходит.
 #[test]
-fn a_thin_client_against_a_standalone_server_asks_for_the_web_address() {
+fn a_thin_client_without_either_address_names_both() {
     let harness = harness();
 
     let (code, payload) = run(&harness, &["launch", "thin", "--dry-run"]);
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    let message = error_message(&payload);
     assert!(
-        error_message(&payload).contains("infobase.web.url"),
+        message.contains("infobase.connection") && message.contains("infobase.web.url"),
         "{payload}"
     );
 }
 
-/// Второй путь открыли только тонкому клиенту. Остальные режимы против автономной цели
-/// отказывают ровно как до его появления: клиентов по прямому шлюзу раннер пока не
-/// запускает (#208), а по
-/// клиентскому адресу ходит только тонкий.
+/// Конфигуратор ходит к автономной цели только строкой прямого шлюза; без неё отказ
+/// называет строку тем же текстом, что у пакетных команд, — до поиска платформы.
 #[test]
-fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
+fn the_designer_without_the_direct_gate_names_the_connection_string() {
     let harness = harness();
 
-    for mode in [
-        vec!["launch", "designer", "--dry-run"],
-        vec!["launch", "thick", "--dry-run"],
-        vec!["launch", "ordinary", "--dry-run"],
-        vec!["launch", "mcp", "--mode", "thick", "--dry-run"],
+    let (code, payload) = run(&harness, &["launch", "designer", "--dry-run"]);
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert_eq!(
+        error_message(&payload),
+        "designer reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "{payload}"
+    );
+}
+
+/// Толстый клиент и обычное приложение против автономной цели не запускаются ни
+/// `launch`, ни `launch mcp`: род `capability`, код `target`, выход назван полем `next` —
+/// тонкий клиент того же вида запуска.
+#[test]
+fn a_thick_client_against_a_standalone_server_is_refused() {
+    let harness = harness();
+
+    for (mode, next) in [
+        (vec!["launch", "thick", "--dry-run"], "launch thin"),
+        (vec!["launch", "ordinary", "--dry-run"], "launch thin"),
+        (
+            vec!["launch", "mcp", "--mode", "thick", "--dry-run"],
+            "launch mcp",
+        ),
+        (
+            vec!["launch", "mcp", "--mode", "ordinary", "--dry-run"],
+            "launch mcp",
+        ),
     ] {
         let (code, payload) = run(&harness, &mode);
 
@@ -1001,11 +1024,7 @@ fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
         );
         assert_eq!(payload["error"]["code"], "target", "{mode:?}: {payload}");
         assert_eq!(
-            payload["error"]["next"]["command"], "launch web",
-            "{mode:?}: {payload}"
-        );
-        assert!(
-            error_message(&payload).contains("launch web"),
+            payload["error"]["next"]["command"], next,
             "{mode:?}: {payload}"
         );
     }
@@ -1017,40 +1036,52 @@ fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
 fn a_standalone_target_refusal_names_the_next_step_as_a_field() {
     let harness = harness();
 
-    let (code, payload) = run(&harness, &["launch", "designer", "--dry-run"]);
+    let (code, payload) = run(&harness, &["launch", "thick", "--dry-run"]);
 
     assert_eq!(code, 2, "{payload}");
     assert_eq!(payload["error"]["kind"], "capability", "{payload}");
     assert_eq!(payload["error"]["code"], "target", "{payload}");
     assert_eq!(
-        payload["error"]["next"]["command"], "launch web",
+        payload["error"]["next"]["command"], "launch thin",
         "{payload}"
     );
-    // Проза не сокращается: шаг назван и ей тоже.
-    assert!(error_message(&payload).contains("launch web"), "{payload}");
+    // Проза не сокращается: выход назван и ей тоже.
+    assert!(error_message(&payload).contains("thin client"), "{payload}");
 }
 
-/// «Пока не умеет» — свой код отказа: вызывающему видно, что дело во времени, а не в
-/// предмете и не в цели.
+/// Клиент тестов подчиняется той же границе режимов, и отказ приходит до сборки: в базу,
+/// которую клиент тестов не откроет, исходники не отправляются.
 #[test]
-fn a_test_run_against_a_standalone_server_refuses_with_the_soon_code() {
+fn a_thick_test_client_against_a_standalone_server_is_refused_before_the_build() {
     let harness = harness();
 
-    let (code, payload) = run(&harness, &["test", "yaxunit", "all", "--no-push"]);
+    for client_mode in ["thick", "ordinary"] {
+        let (code, payload) = run(
+            &harness,
+            &["test", "--client-mode", client_mode, "yaxunit", "all"],
+        );
 
-    assert_eq!(code, 2, "{payload}");
-    assert_eq!(payload["error"]["kind"], "capability", "{payload}");
-    assert_eq!(payload["error"]["code"], "soon", "{payload}");
-    assert!(
-        error_message(&payload).contains("standalone server yet (#208)"),
-        "{payload}"
-    );
+        assert_eq!(code, 2, "{client_mode}: {payload}");
+        assert_eq!(
+            payload["error"]["kind"], "capability",
+            "{client_mode}: {payload}"
+        );
+        assert_eq!(
+            payload["error"]["code"], "target",
+            "{client_mode}: {payload}"
+        );
+        assert!(
+            payload["error"].get("next").is_none_or(Value::is_null),
+            "у test следующего шага нет: {client_mode}: {payload}"
+        );
+    }
+    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 }
 
-/// Тонкий клиент по прямому шлюзу автономной цели раннер пока не запускает (#208),
-/// поэтому просить его — ошибка конфигурации, а не пустой запуск.
+/// `--via connection` без строки прямого шлюза — ошибка конфигурации, а не пустой запуск:
+/// отказ называет строку, которую нужно объявить.
 #[test]
-fn via_connection_against_a_standalone_server_is_refused() {
+fn via_connection_without_the_direct_gate_names_the_connection_string() {
     let harness = harness();
 
     let (code, payload) = run(
@@ -1060,8 +1091,9 @@ fn via_connection_against_a_standalone_server_is_refused() {
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
-    assert!(
-        error_message(&payload).contains("standalone server yet (#208)"),
+    assert_eq!(
+        error_message(&payload),
+        "the thin client reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
         "{payload}"
     );
 }

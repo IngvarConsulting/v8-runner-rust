@@ -1097,15 +1097,15 @@ mod envelope_tests {
     fn the_mcp_envelope_carries_the_next_step_of_a_refusal() {
         let error = UseCaseError::new(
             UseCaseErrorKind::Capability(CapabilityReason::Target),
-            "a standalone server is opened by its web address",
+            "the thick client and the ordinary application are not launched against a standalone server",
         )
-        .with_next(NextStep::command("launch web"));
+        .with_next(NextStep::command("launch thin"));
 
         let business = McpBusinessError::from_use_case(&error);
         let envelope = envelope_error(&business);
 
         let rendered = serde_json::to_value(&envelope).expect("envelope error serializes");
-        assert_eq!(rendered["next"]["command"], "launch web", "{rendered}");
+        assert_eq!(rendered["next"]["command"], "launch thin", "{rendered}");
         // Словарь MCP уже: кода возможности у него нет, и это граница, а не потеря.
         assert_eq!(rendered["kind"], "runtime", "{rendered}");
     }
