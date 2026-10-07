@@ -853,6 +853,41 @@ mod tests {
         assert_eq!(new_owner_since(&config), None);
     }
 
+    /// Набор, из которого раннер собрал созданную базу, память помнит его деревом, снятым
+    /// до сборки: неизменный набор первая отправка не грузит, а правка, сделанная после
+    /// снятия, остаётся изменением.
+    #[test]
+    fn a_created_base_remembers_the_set_it_was_assembled_from() {
+        use crate::change_detection::analyzer::{analyze_context, AnalysisOutcome};
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let main = config.source_sets[0].clone();
+        std::fs::write(
+            main.root_in(&config.base_path).join("Configuration.xml"),
+            "<Configuration/>",
+        )
+        .expect("source");
+        let memory = AssembledMemory::prepare(&config, &main).expect("assembled memory");
+
+        assert_eq!(remember_created_base(&config, Some(&memory)), None);
+
+        let contexts = SourceSetsService::new(&config).designer_contexts();
+        let analysis = analyze_context(&contexts[0], &config.work_path);
+        assert!(
+            matches!(analysis.outcome, Ok(AnalysisOutcome::NoChanges)),
+            "{:?}",
+            analysis.outcome
+        );
+        std::fs::write(main.root_in(&config.base_path).join("Module.bsl"), "changed")
+            .expect("edit");
+        let analysis = analyze_context(&contexts[0], &config.work_path);
+        assert!(
+            matches!(analysis.outcome, Ok(AnalysisOutcome::Changes { .. })),
+            "{:?}",
+            analysis.outcome
+        );
+    }
+
     /// Признак нового владельца, который не прочесть, стоит: выгрузку отказ не предлагает.
     #[test]
     fn an_unreadable_new_owner_mark_stands() {

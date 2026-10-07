@@ -2950,7 +2950,12 @@ mod tests {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
-            providers: crate::domain::capability::ibcmd_for_every_choice(),
+            // Создание базы в кластере развилки не имеет: ключ `infobase.create` здесь —
+            // ошибка, к секции СУБД не относящаяся.
+            providers: crate::domain::capability::ibcmd_for_every_choice()
+                .into_iter()
+                .filter(|(operation, _)| *operation != crate::domain::capability::Operation::Init)
+                .collect(),
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig {
                 connection: "Srvr=localhost;Ref=ib".to_owned(),

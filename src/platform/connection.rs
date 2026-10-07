@@ -417,7 +417,54 @@ pub(crate) fn split_arg_string(raw: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::V8Connection;
+    use super::{ClusterInfobaseCreation, V8Connection};
+
+    fn creation<'a>(
+        cluster_user: Option<&'a str>,
+        cluster_password: Option<&'a str>,
+    ) -> ClusterInfobaseCreation<'a> {
+        ClusterInfobaseCreation {
+            dbms: "PostgreSQL",
+            database_server: "db",
+            database_name: "demo_db",
+            database_user: Some("postgres"),
+            database_password: Some("pg;pass\"word"),
+            locale: "ru",
+            cluster_user,
+            cluster_password,
+        }
+    }
+
+    /// Строка `CREATEINFOBASE` кластера — порядок и состав замера #181; значение с `;` или
+    /// кавычкой берётся в кавычки, внутренняя кавычка удваивается.
+    #[test]
+    fn a_cluster_creation_string_follows_the_measured_form() {
+        let connection = V8Connection::from_connection_string("Srvr=srv:1541;Ref=demo;");
+
+        assert_eq!(
+            connection
+                .create_cluster_infobase_arg(&creation(Some("cadm"), Some("c")))
+                .as_deref(),
+            Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru;SUsr=cadm;SPwd=c")
+        );
+        assert_eq!(
+            connection
+                .create_cluster_infobase_arg(&creation(None, None))
+                .as_deref(),
+            Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru")
+        );
+    }
+
+    /// Адрес берётся и из ключа `/S`, а у файловой базы строки кластера нет.
+    #[test]
+    fn a_cluster_creation_string_reads_the_s_form_and_refuses_a_file_base() {
+        let s_form = V8Connection::from_connection_string("/S srv\\demo");
+        assert!(s_form
+            .create_cluster_infobase_arg(&creation(None, None))
+            .is_some_and(|arg| arg.starts_with("Srvr=srv;Ref=demo;DBMS=")));
+        let file = V8Connection::from_connection_string("File=/tmp/ib");
+        assert_eq!(file.create_cluster_infobase_arg(&creation(None, None)), None);
+    }
 
     #[test]
     fn snapshot_address_identity_ignores_credentials_and_canonicalizes_file_paths() {

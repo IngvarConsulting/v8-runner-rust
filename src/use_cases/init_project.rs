@@ -436,23 +436,36 @@ fn create_file_infobase(
             };
             // Запасной исполнитель собирает базу теми же шагами, что отправка: загрузка
             // исходников без записи файла версий в каталог, затем обновление базы данных.
-            let log_file = designer_log_file(config)?;
-            let designer = DesignerDsl::new(
-                binary,
-                config.v8_connection(),
-                runner,
-                Some(log_file),
-                policy,
-            );
-            let loaded = designer
-                .load_config_from_files_untouched(import, None)
-                .map_err(AppError::from)?;
-            deferrals.note_result(INFOBASE_CREATE, &loaded);
-            ensure_platform_success("load the main configuration", "infobase", &loaded)?;
-            let updated = designer.update_db_cfg(None).map_err(AppError::from)?;
-            deferrals.note_result(INFOBASE_CREATE, &updated);
-            ensure_platform_success("update the database configuration", "infobase", &updated)?;
-            Ok(created)
+            // Сборка, которая не дошла до конца — отказ, отмена, — оставляет базу созданной
+            // пустой: память говорит это, и первая отправка полная.
+            let assembled = (|| {
+                let designer = DesignerDsl::new(
+                    binary,
+                    config.v8_connection(),
+                    runner,
+                    Some(designer_log_file(config)?),
+                    policy,
+                );
+                let loaded = designer
+                    .load_config_from_files_untouched(import, None)
+                    .map_err(AppError::from)?;
+                deferrals.note_result(INFOBASE_CREATE, &loaded);
+                ensure_platform_success("load the main configuration", "infobase", &loaded)?;
+                let updated = designer.update_db_cfg(None).map_err(AppError::from)?;
+                deferrals.note_result(INFOBASE_CREATE, &updated);
+                ensure_platform_success("update the database configuration", "infobase", &updated)
+            })();
+            match assembled {
+                Ok(()) => Ok(created),
+                Err(error) => {
+                    let memory = remember_created_base(config, None)
+                        .map(|failure| format!(" ({failure})"))
+                        .unwrap_or_default();
+                    Err(error.with_context(format!(
+                        "the infobase was created empty and its main configuration was not loaded{memory}; the first push loads every source-set in full"
+                    )))
+                }
+            }
         }
         other => Err(crate::use_cases::unimplemented_provider(
             Operation::Init,
@@ -1016,6 +1029,17 @@ mod tests {
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
+    /// Рабочая область — шаг за шагом базы: тесты рабочей области берут ответ команды и тогда,
+    /// когда шаг базы на серверной цели без реквизитов СУБД отказывает.
+    fn workspace_step_result(
+        result: crate::use_cases::result::UseCaseResult<crate::domain::init::InitResult>,
+    ) -> crate::domain::init::InitResult {
+        match result {
+            Ok(result) => result,
+            Err(failure) => failure.payload.expect("payload"),
+        }
+    }
+
     fn sample_config() -> AppConfig {
         AppConfig {
             base_path: PathBuf::from("/tmp/base"),
@@ -1121,32 +1145,28 @@ mod tests {
         assert_eq!(ordered[1].name, "ext");
     }
 
+    /// База в кластере без реквизитов СУБД — отказ шага базы до запуска платформы; рабочая
+    /// область формата Конфигуратора пропускается.
     #[test]
-    fn init_skips_infobase_creation_for_server_connection() {
+    fn init_refuses_a_cluster_base_without_the_dbms_section() {
         let mut config = sample_config();
         config.format = SourceFormat::Designer;
         config.infobase.connection = "Srvr=server;Ref=demo".to_owned();
 
-        let result = super::run_init(
+        let failure = super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
         )
-        .expect("server init should skip infobase create");
+        .expect_err("a cluster base needs the dbms section");
 
-        assert!(result.ok);
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
+        assert!(failure.error.message().contains("infobase.dbms.kind"));
+        let result = failure.payload.expect("payload");
         assert_eq!(result.steps.len(), 2);
-        assert_eq!(result.steps[0].target, "infobase");
-        assert_eq!(result.steps[0].action, "create");
-        assert_eq!(result.steps[0].status, InitStepStatus::Skipped);
-        assert_eq!(
-            result.steps[0].message.as_deref(),
-            Some(
-                "server infobase connection detected; automatic creation is not supported by the designer provider, set providers.init: ibcmd"
-            )
-        );
+        assert_eq!(result.steps[0].status, InitStepStatus::Failed);
         assert_eq!(result.steps[1].target, "edt_workspace");
         assert_eq!(result.steps[1].status, InitStepStatus::Skipped);
     }
@@ -1195,6 +1215,9 @@ mod tests {
         config.base_path = root.join("base");
         config.work_path = root.join("work");
         config.format = SourceFormat::Designer;
+        for set in ["main", "ext"] {
+            fs::create_dir_all(config.base_path.join(set)).expect("sources");
+        }
         config.infobase = infobase;
         config.providers = providers;
         config.tools.platform.path = Some(platform.to_path_buf());
@@ -1253,12 +1276,16 @@ mod tests {
                 .as_deref(),
             &held.script_branch("CREATEINFOBASE", exit_code),
         );
-        let config = config_with_platform(
+        let mut config = config_with_platform(
             root,
             InfobaseConfig::file(format!("File={}", infobase.display())),
             &platform,
             Default::default(),
         );
+        // Без набора основной конфигурации создание — один процесс: отсрочку называет он.
+        config
+            .source_sets
+            .retain(|set| set.purpose != SourceSetPurpose::Configuration);
         (config, held)
     }
 
@@ -1293,7 +1320,7 @@ mod tests {
         assert!(result.provider_dispatched);
         assert_eq!(result.steps[0].status, InitStepStatus::Ok);
         let message = result.steps[0].message.as_deref().expect("message");
-        assert!(message.starts_with("infobase created:"), "{message}");
+        assert!(message.starts_with("infobase created empty:"), "{message}");
         assert!(
             message.contains(
                 "infobase create completed successfully after cancellation request during critical phase"
@@ -1385,66 +1412,93 @@ mod tests {
         );
     }
 
-    /// ibcmd: создание, отложившее отмену и вернувшее 255, оставляет вопрос о базе без
-    /// ответа — после отмены его уже не запускают. Ответ — отмена, и он называет и отсрочку,
-    /// и код создания.
+    /// ibcmd: создание файловой базы, отложившее отмену и вернувшее 255, — отказ по коду
+    /// выхода; второго вопроса к базе нет, а текст называет отсрочку первой.
     #[cfg(unix)]
     #[test]
-    fn an_ibcmd_creation_whose_question_went_unanswered_names_the_deferred_cancellation() {
-        for (case, infobase) in [
-            ("file", None),
-            (
-                "server",
-                Some(InfobaseConfig::server(
-                    "Srvr=srv;Ref=demo",
-                    crate::config::model::InfobaseDbmsConfig::new(
-                        "PostgreSQL",
-                        "localhost",
-                        "demo",
-                    ),
-                )),
+    fn an_ibcmd_creation_that_failed_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let ibcmd = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        let held = HeldCommand::in_dir(dir.path());
+        write_utility(&ibcmd, &calls, None, &held.script_branch("create", 255));
+        let config = config_with_platform(
+            dir.path(),
+            InfobaseConfig::file(format!("File={}", dir.path().join("ib").display())),
+            &ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+
+        let failure =
+            create_interrupted_while_held(&config, &held).expect_err("the creation failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message.starts_with(
+                "infobase create ended after cancellation request during critical phase"
             ),
-        ] {
-            let dir = tempdir().expect("tempdir");
-            let ibcmd = dir.path().join("ibcmd");
-            let calls = dir.path().join("calls.log");
-            let held = HeldCommand::in_dir(dir.path());
-            write_utility(&ibcmd, &calls, None, &held.script_branch("create", 255));
-            let infobase = infobase.unwrap_or_else(|| {
-                InfobaseConfig::file(format!("File={}", dir.path().join("ib").display()))
-            });
-            let config = config_with_platform(
-                dir.path(),
-                infobase,
-                &ibcmd,
-                crate::domain::capability::ibcmd_for_every_choice(),
-            );
+            "{message}"
+        );
+        assert!(message.contains("with exit code 255"), "{message}");
+        let payload = failure.payload.expect("payload");
+        assert!(payload.provider_dispatched);
+        let calls = fs::read_to_string(&calls).expect("calls");
+        assert!(calls.contains("--import="), "{calls}");
+        assert!(!calls.contains("generation-id"), "{calls}");
+    }
 
-            let failure = create_interrupted_while_held(&config, &held)
-                .expect_err("the command is cancelled");
+    /// Конфигуратор создал базу, отложив отмену: сборку основной конфигурации отмена
+    /// останавливает, база остаётся пустой, и память говорит это — первая отправка полная.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancellation_deferred_by_the_creation_leaves_an_empty_remembered_base() {
+        let dir = tempdir().expect("tempdir");
+        let (mut config, held) = held_designer_create(dir.path(), 0, InfobaseFile::Laid);
+        config.source_sets = sample_config().source_sets;
+        fs::write(
+            config.base_path.join("main").join("Configuration.xml"),
+            "<Configuration/>",
+        )
+        .expect("main source");
 
-            assert_eq!(
-                failure.error.kind(),
-                UseCaseErrorKind::Cancelled(CancelledAt::Boundary),
-                "{case}"
-            );
-            let message = failure.error.message();
-            assert!(
-                message.starts_with(
-                    "infobase create ended after cancellation request during critical phase"
-                ),
-                "{case}: {message}"
-            );
-            assert!(message.contains("with exit code 255"), "{case}: {message}");
-            assert!(
-                message.contains("whether the infobase already existed went unanswered"),
-                "{case}: {message}"
-            );
-            let payload = failure.payload.expect("payload");
-            assert!(payload.provider_dispatched, "{case}");
-            let calls = fs::read_to_string(&calls).expect("calls");
-            assert!(!calls.contains("generation-id"), "{case}: {calls}");
-        }
+        let failure =
+            create_interrupted_while_held(&config, &held).expect_err("the assembly is stopped");
+
+        assert!(matches!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(_)
+        ));
+        let message = failure.error.message();
+        assert!(
+            message.contains("the infobase was created empty")
+                && message.contains("the first push loads every source-set in full"),
+            "{message}"
+        );
+        let calls = fs::read_to_string(dir.path().join("calls.log")).expect("calls");
+        assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
+        let contexts =
+            crate::change_detection::source_sets::SourceSetsService::new(&config).designer_contexts();
+        crate::use_cases::exchange_guard::require_memory(
+            &ExecutionContext::cli(CommandName::Build),
+            &config,
+            &contexts,
+            None,
+        )
+        .expect("the empty base is remembered");
+        let main = contexts
+            .iter()
+            .find(|context| context.name() == "main")
+            .expect("main");
+        let analysis = crate::change_detection::analyzer::analyze_context(main, &config.work_path);
+        assert!(
+            matches!(
+                analysis.outcome,
+                Ok(crate::change_detection::analyzer::AnalysisOutcome::Changes { .. })
+            ),
+            "the main configuration is not remembered as loaded: {:?}",
+            analysis.outcome
+        );
     }
 
     #[cfg(unix)]
@@ -1468,17 +1522,16 @@ mod tests {
         config.tools.edt_cli.path = Some(edt_script);
         config.tools.edt_cli.interactive_mode = false;
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
         assert!(edt_calls_text.contains("-command import --project"));
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
@@ -1521,17 +1574,16 @@ mod tests {
             }),
         });
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             2
@@ -1575,17 +1627,16 @@ mod tests {
             }),
         });
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             1
@@ -1631,17 +1682,16 @@ mod tests {
             }),
         });
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             1
@@ -1671,16 +1721,15 @@ mod tests {
         config.tools.edt_cli.interactive_mode = true;
         config.tools.edt_cli.auto_start = true;
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
-        assert!(result.ok);
+        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
         assert!(
             !edt_calls.exists()
                 || fs::read_to_string(&edt_calls)
@@ -1714,17 +1763,16 @@ mod tests {
         config.tools.edt_cli.startup_timeout_ms = 30_000;
         config.tools.edt_cli.command_timeout_ms = 2_000;
 
-        let result = super::run_init(
+        let result = workspace_step_result(super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
             false,
-        )
-        .expect("init");
+        ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert!(result.ok);
+        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
         assert_eq!(edt_calls_text.matches("START").count(), 1);
         assert_eq!(edt_calls_text.matches("import --project").count(), 2);
     }

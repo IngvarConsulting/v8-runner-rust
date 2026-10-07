@@ -84,7 +84,8 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     let expectations: Vec<(Vec<&str>, &str)> = vec![
         (vec!["build", "--dry-run"], "designer"),
         (vec!["dump", "--force", "--dry-run"], "designer"),
-        (vec!["infobase", "create", "--dry-run"], "designer"),
+        // Файловую базу первым создаёт `ibcmd`: сразу с основной конфигурацией (#204).
+        (vec!["infobase", "create", "--dry-run"], "ibcmd"),
         // `make` собирает во временной базе раннера: первым в цепочке стоит `ibcmd`.
         (
             vec!["make", "main", "--output", &artifact, "--dry-run"],

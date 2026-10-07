@@ -805,12 +805,23 @@ fn a_pull_without_an_answer_or_of_objects_leaves_the_record_as_it_was() {
 /// знакомства.
 #[test]
 fn a_base_created_by_the_runner_takes_the_first_push() {
-    let project = Project::new("File=ib");
+    let project = Project::new("File=ib").with_extension();
 
     succeeded(&project.run(&["infobase", "create"]));
     let pushed = succeeded(&project.run(&["push"]));
 
-    assert_eq!(pushed["data"]["steps"][0]["mode"], "full", "{pushed}");
+    // Основную конфигурацию база получила при создании, и память её знает; расширение
+    // досылает первая отправка целиком.
+    let steps = pushed["data"]["steps"].as_array().expect("steps");
+    let mode = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step["source_set"] == name)
+            .map(|step| step["mode"].clone())
+            .unwrap_or_else(|| panic!("{name} in {pushed}"))
+    };
+    assert_eq!(mode("main"), "skipped", "{pushed}");
+    assert_eq!(mode("ext"), "full", "{pushed}");
 }
 
 /// Поколение всех наборов сверяется до первой загрузки: отказ по расширению приходит раньше,

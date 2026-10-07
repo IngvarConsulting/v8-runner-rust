@@ -1118,3 +1118,28 @@ fn a_refusal_on_a_shared_base_offers_pull_first_and_names_push_force() {
     assert!(message.contains("push main --force`"), "{message}");
     assert!(message.contains(&first.canonical_root()), "{message}");
 }
+
+/// `infobase create` записывает созданную файловую базу в метку за своей копией.
+#[test]
+fn infobase_create_records_the_created_base_for_this_copy() {
+    let dir = temp_workspace();
+    let copy = Copy::at(dir.path().join("own"));
+    write_shell_script(
+        &copy.root.join("1cv8"),
+        "if [ \"$1\" = \"CREATEINFOBASE\" ]; then path=${2#File=\\'}; path=${path%\\'}; mkdir -p \"$path\" && : > \"$path/1Cv8.1CD\"; fi\nexit 0",
+    );
+    let base = dir.path().join("bases").join("ib");
+    fs::write(
+        copy.root.join("v8project.local.yaml"),
+        format!("infobases:\n  origin:\n    connection: 'File={}'\n", base.display()),
+    )
+    .expect("local layer");
+
+    succeeded(&copy.run(&["infobase", "create"]));
+
+    assert!(base.join("1Cv8.1CD").is_file());
+    assert_eq!(
+        owners_of(&base.parent().expect("parent").join(MARKER_NAME)),
+        [copy.canonical_root()]
+    );
+}

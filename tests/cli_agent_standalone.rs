@@ -822,7 +822,7 @@ fn a_file_address_next_to_the_standalone_section_is_refused() {
 }
 
 /// У автономного сервера один исполнитель: ключ `providers.*` — ошибка, а операции без
-/// строки в матрице (`load`, `init`) отказывают типизированно и сессии не открывают.
+/// строки в матрице (`load`, `infobase create`) отказывают типизированно и сессии не открывают.
 #[test]
 fn a_standalone_server_has_one_executor_and_no_load() {
     let harness = harness();
@@ -850,16 +850,13 @@ fn a_standalone_server_has_one_executor_and_no_load() {
     );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 
+    // Базу автономного сервера создают на его машине до запуска: отказ рода подбора с
+    // рецептом (#204).
     let (code, payload) = run(&harness, &["infobase", "create"]);
-    assert_eq!(code, 0, "{payload}");
-    assert_eq!(
-        payload["data"]["steps"][0]["status"], "skipped",
-        "{payload}"
-    );
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["code"], "target", "{payload}");
     assert!(
-        payload["data"]["steps"][0]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("never created by the runner")),
+        error_message(&payload).contains("ibcmd server config init"),
         "{payload}"
     );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));

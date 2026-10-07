@@ -667,6 +667,22 @@ mod tests {
         assert_eq!(args[1], "Srvr=\"srv:1541\";Ref=\"ut\";Usr=Админ;Pwd=***;");
     }
 
+    /// Строка `CREATEINFOBASE` кластера несёт пароль СУБД и администратора кластера:
+    /// превью прячет пароли, показ отказа — ещё и имена (#204).
+    #[test]
+    fn masks_the_dbms_and_cluster_passwords_of_a_creation_string() {
+        let string = "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;DBUID=postgres;DBPwd=pg;CrSQLDB=Y;Locale=ru;SUsr=cadm;SPwd=c";
+        assert_eq!(
+            preview(&["CREATEINFOBASE", string], &[])[1],
+            "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;DBUID=postgres;DBPwd=***;CrSQLDB=Y;Locale=ru;SUsr=cadm;SPwd=***"
+        );
+        let shown = rendered(&["CREATEINFOBASE", string]);
+        for hidden in ["postgres", "DBPwd=pg", "cadm", "SPwd=c;", "SPwd=c\n"] {
+            assert!(!shown.contains(hidden), "{hidden} in {shown}");
+        }
+        assert!(shown.ends_with("SPwd=***"), "{shown}");
+    }
+
     #[test]
     fn masks_a_password_quoted_around_a_semicolon() {
         let args = preview(&["File=/tmp/ib;Pwd=\"sec;ret\";Locale=ru"], &[]);

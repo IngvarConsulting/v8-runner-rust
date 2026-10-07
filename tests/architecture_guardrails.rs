@@ -355,8 +355,8 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "ветка `ibcmd` после выбора",
         ),
         (
-            "crate::use_cases::init_project::create_infobase_via_ibcmd",
-            "создание базы, когда выбран `ibcmd`",
+            "crate::use_cases::init_project::create_file_infobase",
+            "создание файловой базы, когда выбран `ibcmd`",
         ),
         (
             "crate::use_cases::build_project::helpers::build_ibcmd_dsl",
@@ -2320,14 +2320,6 @@ fn a_critical_phase_names_its_deferral_through_the_owner() {
         (
             "crate::use_cases::infobase_export::run_restore_provider",
             "crate::use_cases::infobase_export::run_infobase_restore",
-        ),
-        (
-            "crate::use_cases::init_project::create_infobase_via_designer",
-            "crate::use_cases::init_project::infobase_create_step",
-        ),
-        (
-            "crate::use_cases::init_project::create_infobase_via_ibcmd",
-            "crate::use_cases::init_project::infobase_create_step",
         ),
         (
             "crate::use_cases::tool_extension::build_designer_dsl",

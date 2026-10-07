@@ -1195,6 +1195,41 @@ mod tests {
         assert!(args.contains("infobase\n--db-path\n/ib\ncreate"));
     }
 
+    /// `infobase create` с импортом — ключи замера: `--import=<каталог> --apply --force`;
+    /// исход только по коду выхода, второго вопроса к базе нет.
+    #[cfg(unix)]
+    #[test]
+    fn infobase_create_with_import_passes_the_measured_keys_and_asks_nothing_more() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        write_script(
+            &script,
+            &format!(
+                "printf '%s\\n' \"$@\" >> \"{}\"\nexit 255",
+                args_log.display()
+            ),
+        );
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        let result = dsl
+            .infobase_create(Some(std::path::Path::new("/src/main")))
+            .expect("create");
+
+        assert_eq!(result.process.exit_code, 255);
+        let args = fs::read_to_string(args_log).expect("args");
+        assert_eq!(
+            args,
+            "infobase\n--db-path\n/ib\ncreate\n--import=/src/main\n--apply\n--force\n"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn server_infobase_create_adds_create_database_and_asks_the_infobase() {

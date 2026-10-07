@@ -774,6 +774,46 @@ mod tests {
         assert!(args.contains("File='/tmp/my ib'"));
     }
 
+    /// `CREATEINFOBASE` кластера: строка создания одним аргументом и
+    /// `/DisableStartupDialogs`, без `/Out`, даже когда журнал задан.
+    #[cfg(unix)]
+    #[test]
+    fn create_cluster_infobase_passes_the_string_and_disables_dialogs_without_out() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        let args_log = dir.path().join("args.log");
+        write_script(
+            &script,
+            &format!("printf '%s\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let dsl = DesignerDsl::new(
+            script,
+            V8Connection::from_connection_string("Srvr=srv;Ref=demo"),
+            &runner as &dyn ProcessRunner,
+            Some(dir.path().join("out.log")),
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.create_cluster_infobase(&crate::platform::connection::ClusterInfobaseCreation {
+            dbms: "PostgreSQL",
+            database_server: "db",
+            database_name: "demo",
+            database_user: None,
+            database_password: None,
+            locale: "ru",
+            cluster_user: None,
+            cluster_password: None,
+        })
+        .expect("create infobase");
+
+        let args = fs::read_to_string(args_log).expect("args log");
+        assert_eq!(
+            args,
+            "CREATEINFOBASE\nSrvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;CrSQLDB=Y;Locale=ru\n/DisableStartupDialogs\n"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn dump_cfg_passes_dumpcfg_extension_and_out_arguments() {
