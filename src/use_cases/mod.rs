@@ -10,6 +10,8 @@ mod build_progress;
 pub mod build_project;
 /// Syntax-check orchestration use case.
 pub mod check_syntax;
+/// Which address a client opens the base by: one rule for `launch` and the test client.
+pub(crate) mod client_address;
 /// Client-side MCP HTTP readiness probes.
 pub(in crate::use_cases) mod client_mcp_readiness;
 /// Command lock with its owner record, shared by the workspace and infobase locks.
