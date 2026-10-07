@@ -27,6 +27,8 @@ pub enum LaunchClientMode {
 pub struct EnterpriseDsl<'a> {
     binary: PathBuf,
     connection: V8Connection,
+    /// Клиентский адрес, когда клиент идёт по нему, а не по строке подключения.
+    web_url: Option<String>,
     additional_launch_keys: Vec<String>,
     client_mode: LaunchClientMode,
     runner: &'a dyn ProcessRunner,
@@ -38,6 +40,7 @@ impl<'a> EnterpriseDsl<'a> {
     pub fn new(
         binary: PathBuf,
         connection: V8Connection,
+        web_url: Option<String>,
         additional_launch_keys: Vec<String>,
         client_mode: LaunchClientMode,
         runner: &'a dyn ProcessRunner,
@@ -47,6 +50,7 @@ impl<'a> EnterpriseDsl<'a> {
         Self {
             binary,
             connection,
+            web_url,
             additional_launch_keys,
             client_mode,
             runner,
@@ -99,9 +103,16 @@ impl<'a> EnterpriseDsl<'a> {
     fn build_args(&self, launch: &LaunchOptions) -> Vec<String> {
         let mut launch = launch.clone();
         launch.internal_out = Some(self.log_file.display().to_string());
+        let address = match self.web_url.as_deref() {
+            None => LaunchAddress::Connection(&self.connection),
+            Some(url) => LaunchAddress::Web {
+                url,
+                credentials: &self.connection,
+            },
+        };
         build_launch_args(
             self.client_mode,
-            LaunchAddress::Connection(&self.connection),
+            address,
             &self.additional_launch_keys,
             &launch,
         )
@@ -121,18 +132,17 @@ impl From<LaunchClientModeRequest> for LaunchClientMode {
 
 /// Чем клиент открывает базу в командной строке.
 ///
-/// Административный адрес несёт реквизиты базы рядом с собой; клиентский — не всегда:
-/// у автономной цели `infobase.user`/`password` принадлежат SSH-шлюзу, и клиенту их
-/// отдавать нельзя. Поэтому реквизиты у веб-адреса — отдельное, необязательное поле.
+/// Реквизиты базы идут при любом адресе: `infobase.user`/`password` — пользователь базы у
+/// файловой, у кластерной и у автономной цели. Клиентский адрес строки подключения не
+/// несёт, поэтому реквизиты при нём — отдельное поле.
 #[derive(Debug, Clone, Copy)]
 pub enum LaunchAddress<'a> {
     /// `infobase.connection` вместе с `/N` и `/P`.
     Connection(&'a V8Connection),
-    /// `infobase.web.url` как ws-соединение; реквизиты прилагаются, только если они
-    /// действительно реквизиты базы.
+    /// `infobase.web.url` как ws-соединение с `/N` и `/P` из `credentials`.
     Web {
         url: &'a str,
-        credentials: Option<&'a V8Connection>,
+        credentials: &'a V8Connection,
     },
 }
 
@@ -142,9 +152,7 @@ impl LaunchAddress<'_> {
             Self::Connection(connection) => connection.args(),
             Self::Web { url, credentials } => {
                 let mut args = vec!["/WS".to_owned(), url.to_string()];
-                if let Some(connection) = credentials {
-                    args.extend(connection.credential_args());
-                }
+                args.extend(credentials.credential_args());
                 args
             }
         }
@@ -274,7 +282,7 @@ mod tests {
             LaunchClientMode::Thin,
             LaunchAddress::Web {
                 url: "http://localhost/base",
-                credentials: Some(&connection),
+                credentials: &connection,
             },
             &[],
             &LaunchOptions::default(),
@@ -291,38 +299,38 @@ mod tests {
         );
     }
 
-    /// У автономной цели `infobase.user` и `infobase.password` — данные SSH-шлюза, а не
-    /// базы, поэтому реквизиты к адресу не прилагаются.
+    /// Реквизиты базы идут и при клиентском адресе: `/N` и `/P` следуют за `/WS`.
     #[test]
-    fn a_web_address_without_credentials_carries_no_user_keys() {
-        let mut connection = V8Connection::from_connection_string("File=/tmp/ib");
-        connection.user = Some("gate".to_owned());
-        connection.password = Some("gate-secret".to_owned());
+    fn a_web_address_carries_the_infobase_credentials() {
+        let mut connection = V8Connection::from_connection_string("Srvr=h:1541;Ref=demo");
+        connection.user = Some("Admin".to_owned());
+        connection.password = Some("s3cret".to_owned());
 
-        let with_credentials = build_launch_args(
+        let args = build_launch_args(
             LaunchClientMode::Thin,
             LaunchAddress::Web {
                 url: "http://localhost/base",
-                credentials: Some(&connection),
-            },
-            &[],
-            &LaunchOptions::default(),
-        );
-        let without = build_launch_args(
-            LaunchClientMode::Thin,
-            LaunchAddress::Web {
-                url: "http://localhost/base",
-                credentials: None,
+                credentials: &connection,
             },
             &[],
             &LaunchOptions::default(),
         );
 
-        assert!(with_credentials.contains(&"/N".to_owned()));
-        assert!(with_credentials.contains(&"gate-secret".to_owned()));
-        assert!(!without.contains(&"/N".to_owned()));
-        assert!(!without.contains(&"/P".to_owned()));
-        assert!(!without.iter().any(|arg| arg.contains("gate-secret")));
+        assert_eq!(
+            &args[2..],
+            [
+                "/WS",
+                "http://localhost/base",
+                "/N",
+                "Admin",
+                "/P",
+                "s3cret"
+            ]
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "/S"),
+            "клиентский адрес заменяет строку подключения: {args:?}"
+        );
     }
 
     #[test]

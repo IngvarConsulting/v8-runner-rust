@@ -237,6 +237,7 @@ pub(super) fn build_enterprise_dsl<'a>(
     launch: &LaunchOptions,
     runner: &'a dyn crate::platform::process::ProcessRunner,
     client_mode: LaunchClientModeRequest,
+    web_url: Option<String>,
     timeout_override_ms: Option<u64>,
 ) -> Result<EnterpriseDsl<'a>, AppError> {
     let mut utilities = PlatformUtilities::from_config(config);
@@ -254,6 +255,7 @@ pub(super) fn build_enterprise_dsl<'a>(
     Ok(EnterpriseDsl::new(
         location.path,
         config.v8_connection(),
+        web_url,
         additional_launch_keys,
         client_mode.into(),
         runner,

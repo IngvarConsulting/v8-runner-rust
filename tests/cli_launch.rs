@@ -2496,52 +2496,230 @@ fn additional_launch_keys_do_not_displace_the_web_address() {
     assert!(ws < theirs, "наш адрес идёт первым: {args:?}");
 }
 
-/// У автономной цели `infobase.user` и `infobase.password` — учётные данные SSH-шлюза, а
-/// не базы. Тонкий клиент к ней идёт по вебу без всякого ключа и **без** `/N` и `/P`:
-/// иначе раннер отдал бы пароль шлюза в командную строку клиента.
-#[test]
-fn a_standalone_thin_client_carries_the_address_without_the_gate_credentials() {
+/// Строка прямого шлюза `Srvr=127.0.0.1:1541;Ref=demo` (замер #178) ключом `/S`, которым раннер отдаёт серверную строку платформе.
+const DIRECT_GATE_SWITCH: &str = "127.0.0.1:1541\\demo";
+
+/// Проект с автономной целью: `infobase` — тело секции базы с отступом в два пробела,
+/// `tools` — добавка к секции `tools`. Клиенты платформы пишут свои аргументы в журнал.
+fn setup_standalone_project(infobase: &str, tools: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = temp_workspace();
     let work_path = dir.path().join("work");
     let install_dir = dir.path().join("platform");
-    let exchange = dir.path().join("exchange");
     let config_path = dir.path().join("v8project.yaml");
+    let args_log = dir.path().join("client.args.log");
     fs::create_dir_all(dir.path().join("project")).expect("base");
     fs::create_dir_all(&work_path).expect("work");
-    fs::create_dir_all(&exchange).expect("exchange");
-    write_script(&install_dir.join("bin").join("1cv8c"));
+    fs::create_dir_all(dir.path().join("exchange")).expect("exchange");
+    for binary in ["1cv8", "1cv8c"] {
+        write_logging_script(&install_dir.join("bin").join(binary), &args_log);
+    }
     fs::write(
         &config_path,
         format!(
-            "workPath: '{work}'\nformat: DESIGNER\ninfobase:\n  user: gate-user\n  password: gate-secret\n  web:\n    url: 'http://localhost/standalone'\n  standalone:\n    gate: 127.0.0.1:1543\n    exchange:\n      dir: '{exchange}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{platform}'\n",
+            "workPath: '{work}'\nformat: DESIGNER\ninfobase:\n{infobase}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{platform}'\n{tools}",
             work = work_path.display(),
-            exchange = exchange.display(),
             platform = install_dir.display(),
+            infobase = infobase.replace("{exchange}", &dir.path().join("exchange").display().to_string()),
         ),
     )
     .expect("config");
+    (dir, config_path, args_log)
+}
+
+/// Автономная цель с прямым шлюзом, пользователем базы и клиентским адресом.
+const STANDALONE_WITH_THE_DIRECT_GATE: &str = "  connection: 'Srvr=127.0.0.1:1541;Ref=demo'\n  user: Admin\n  password: s3cret\n  web:\n    url: 'http://localhost/standalone'\n  standalone: {}\n";
+
+/// Автономная цель только с SSH-шлюзом и клиентским адресом: строки подключения нет.
+const STANDALONE_WITHOUT_THE_DIRECT_GATE: &str = "  user: Admin\n  password: s3cret\n  web:\n    url: 'http://localhost/standalone'\n  standalone:\n    gate: 127.0.0.1:1543\n    exchange:\n      dir: '{exchange}'\n";
+
+/// Где в плане адрес и что за ним идёт: ключ адреса, значение и реквизиты.
+fn address_window<'a>(args: &'a [String], switch: &str) -> Vec<&'a str> {
+    let at = args
+        .iter()
+        .position(|arg| arg == switch)
+        .unwrap_or_else(|| panic!("no {switch} in {args:?}"));
+    args.get(at..at + 6)
+        .unwrap_or_else(|| {
+            panic!("{switch} is not followed by an address and credentials: {args:?}")
+        })
+        .iter()
+        .map(String::as_str)
+        .collect()
+}
+
+/// У автономной цели с объявленной строкой прямого шлюза тонкий клиент без ключа и с
+/// `--via connection` идёт по ней, как в кластер: `/S host:port\name`, и объявленный
+/// клиентский адрес строку не подменяет.
+#[test]
+fn a_standalone_thin_client_goes_by_the_direct_gate_by_default() {
+    let (_dir, config_path, _log) = setup_standalone_project(STANDALONE_WITH_THE_DIRECT_GATE, "");
+
+    for arguments in [
+        vec!["launch", "thin", "--dry-run"],
+        vec!["launch", "thin", "--via", "connection", "--dry-run"],
+        vec!["launch", "mcp", "--dry-run"],
+    ] {
+        let payload = launch_json(&config_path, &arguments);
+
+        assert_eq!(payload["ok"], true, "{arguments:?}: {payload}");
+        assert_eq!(
+            payload["data"]["via"], "connection",
+            "{arguments:?}: {payload}"
+        );
+        assert!(payload["data"]["url"].is_null(), "{arguments:?}: {payload}");
+        let args = planned_args(&payload);
+        assert_eq!(args[0], "ENTERPRISE", "{arguments:?}: {args:?}");
+        assert_eq!(
+            address_window(&args, "/S")[..2],
+            ["/S", DIRECT_GATE_SWITCH],
+            "{arguments:?}: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "/WS"),
+            "{arguments:?}: {args:?}"
+        );
+    }
+}
+
+/// Без строки прямого шлюза тонкий клиент без ключа идёт по клиентскому адресу.
+#[test]
+fn a_standalone_thin_client_without_the_direct_gate_goes_by_the_web_address() {
+    let (_dir, config_path, _log) =
+        setup_standalone_project(STANDALONE_WITHOUT_THE_DIRECT_GATE, "");
 
     let payload = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
 
     assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(payload["data"]["via"], "web", "{payload}");
     assert_eq!(
-        payload["data"]["via"], "web",
-        "умолчание автономной цели — веб: {payload}"
+        payload["data"]["url"], "http://localhost/standalone",
+        "{payload}"
     );
     let args = planned_args(&payload);
-    let at = args
+    assert_eq!(
+        address_window(&args, "/WS")[..2],
+        ["/WS", "http://localhost/standalone"],
+        "{args:?}"
+    );
+    assert!(!args.iter().any(|arg| arg == "/S"), "{args:?}");
+}
+
+/// Конфигуратор против автономной цели идёт по строке прямого шлюза ключом `/S`.
+#[test]
+fn a_standalone_designer_goes_by_the_direct_gate() {
+    let (_dir, config_path, _log) = setup_standalone_project(STANDALONE_WITH_THE_DIRECT_GATE, "");
+
+    let payload = launch_json(&config_path, &["launch", "designer", "--dry-run"]);
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(payload["data"]["via"], "connection", "{payload}");
+    let args = planned_args(&payload);
+    assert_eq!(args[0], "DESIGNER", "{args:?}");
+    assert_eq!(
+        address_window(&args, "/S")[..2],
+        ["/S", DIRECT_GATE_SWITCH],
+        "{args:?}"
+    );
+}
+
+/// `infobase.user` и `infobase.password` автономной цели — пользователь базы, и клиент
+/// получает их при любом адресе: Конфигуратор и тонкий клиент по прямому шлюзу, тонкий
+/// клиент по клиентскому адресу. В плане пароль скрыт.
+#[test]
+fn a_standalone_client_carries_the_infobase_credentials_with_a_masked_password() {
+    for (infobase, arguments, switch, address) in [
+        (
+            STANDALONE_WITH_THE_DIRECT_GATE,
+            vec!["launch", "thin", "--dry-run"],
+            "/S",
+            DIRECT_GATE_SWITCH,
+        ),
+        (
+            STANDALONE_WITH_THE_DIRECT_GATE,
+            vec!["launch", "designer", "--dry-run"],
+            "/S",
+            DIRECT_GATE_SWITCH,
+        ),
+        (
+            STANDALONE_WITH_THE_DIRECT_GATE,
+            vec!["launch", "thin", "--via", "web", "--dry-run"],
+            "/WS",
+            "http://localhost/standalone",
+        ),
+        (
+            STANDALONE_WITHOUT_THE_DIRECT_GATE,
+            vec!["launch", "thin", "--dry-run"],
+            "/WS",
+            "http://localhost/standalone",
+        ),
+    ] {
+        let (_dir, config_path, _log) = setup_standalone_project(infobase, "");
+
+        let payload = launch_json(&config_path, &arguments);
+
+        assert_eq!(payload["ok"], true, "{arguments:?}: {payload}");
+        let args = planned_args(&payload);
+        assert_eq!(
+            address_window(&args, switch),
+            [switch, address, "/N", "Admin", "/P", "***"],
+            "{arguments:?}: {args:?}"
+        );
+        assert!(
+            !payload.to_string().contains("s3cret"),
+            "{arguments:?} показал пароль: {payload}"
+        );
+    }
+}
+
+/// Маскируется отчёт, а не запуск: тонкий клиент автономной цели получает настоящий пароль
+/// базы, а ответ его не несёт.
+#[test]
+fn a_launched_standalone_client_receives_the_real_infobase_password() {
+    let (_dir, config_path, args_log) =
+        setup_standalone_project(STANDALONE_WITH_THE_DIRECT_GATE, "");
+
+    let payload = launch_json(&config_path, &["launch", "thin"]);
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert!(
+        !payload.to_string().contains("s3cret"),
+        "ответ не должен нести пароль: {payload}"
+    );
+    let dispatched: Vec<String> = read_args_log(&args_log)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        address_window(&dispatched, "/S"),
+        ["/S", DIRECT_GATE_SWITCH, "/N", "Admin", "/P", "s3cret"],
+        "{dispatched:?}"
+    );
+}
+
+/// Известный предел порядка ключей: пользовательский `/IBConnectionString` из
+/// `tools.enterprise.additional-launch-keys` встаёт после нашего `/S`, а справка платформы
+/// требует, чтобы `/IBConnectionString` стоял раньше `/S`. Раннер порядок не чинит.
+#[test]
+fn a_user_connection_key_lands_after_the_direct_gate_address() {
+    let (_dir, config_path, _log) = setup_standalone_project(
+        STANDALONE_WITH_THE_DIRECT_GATE,
+        "  enterprise:\n    additional-launch-keys: ['/IBConnectionString', 'Srvr=other:1541;Ref=x']\n",
+    );
+
+    let payload = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    let args = planned_args(&payload);
+    let ours = args
         .iter()
-        .position(|arg| arg == "/WS")
-        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
-    assert_eq!(args[at + 1], "http://localhost/standalone", "{args:?}");
-    assert!(
-        !args.iter().any(|arg| arg == "/N" || arg == "/P"),
-        "реквизиты шлюза клиенту не принадлежат: {args:?}"
-    );
-    assert!(
-        !args.iter().any(|arg| arg.contains("gate-secret")),
-        "пароль шлюза не должен попадать в командную строку: {args:?}"
-    );
+        .position(|arg| arg == "/S")
+        .unwrap_or_else(|| panic!("no /S in {args:?}"));
+    let theirs = args
+        .iter()
+        .position(|arg| arg == "/IBConnectionString")
+        .unwrap_or_else(|| panic!("user key dropped: {args:?}"));
+    assert!(ours < theirs, "наш адрес идёт первым: {args:?}");
 }
 
 /// Маскируется отчёт, а не запуск: в процесс уходит настоящий адрес, иначе клиент никуда

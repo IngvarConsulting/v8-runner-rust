@@ -639,6 +639,94 @@ fn test_yaxunit_no_build_runs_for_server_infobase() {
     assert!(test_calls.exists());
 }
 
+/// Автономная цель в местном слое: `body` — поля базы `origin` с отступом в четыре пробела.
+fn write_standalone_origin(config_path: &Path, body: &str) {
+    fs::write(
+        config_path.with_file_name("v8project.local.yaml"),
+        format!("infobases:\n  origin:\n{body}"),
+    )
+    .expect("local config");
+}
+
+fn run_prepared_yaxunit(config_path: &Path) -> std::process::Output {
+    v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "--no-push",
+            "yaxunit",
+            "all",
+        ])
+        .output()
+        .expect("run")
+}
+
+/// Клиент тестов идёт к автономной цели по строке прямого шлюза ключом `/S` и получает
+/// реквизиты базы — по тому же правилу адреса, что `launch` без `--via`.
+#[test]
+fn a_test_client_goes_by_the_direct_gate_of_a_standalone_server() {
+    let (_dir, config_path, build_calls, test_calls, _captured_config) =
+        setup_project("work", JUNIT_SMOKE_REPORT_FIXTURE, "", 0, false, 5, None);
+    write_standalone_origin(
+        &config_path,
+        "    connection: 'Srvr=127.0.0.1:1541;Ref=demo'\n    user: Admin\n    password: s3cret\n    web:\n      url: 'http://localhost/standalone'\n    standalone: {}\n",
+    );
+
+    let output = run_prepared_yaxunit(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!build_calls.exists());
+    let calls = fs::read_to_string(test_calls).expect("test calls");
+    assert!(
+        calls.contains("/S 127.0.0.1:1541\\demo /N Admin /P s3cret"),
+        "{calls}"
+    );
+    assert!(!calls.contains("/WS"), "{calls}");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("s3cret"),
+        "ответ не должен нести пароль"
+    );
+}
+
+/// Без строки прямого шлюза клиент тестов идёт по клиентскому адресу с реквизитами базы.
+#[test]
+fn a_test_client_without_the_direct_gate_goes_by_the_web_address() {
+    let (dir, config_path, build_calls, test_calls, _captured_config) =
+        setup_project("work", JUNIT_SMOKE_REPORT_FIXTURE, "", 0, false, 5, None);
+    let exchange = dir.path().join("exchange");
+    fs::create_dir_all(&exchange).expect("exchange");
+    write_standalone_origin(
+        &config_path,
+        &format!(
+            "    user: Admin\n    password: s3cret\n    web:\n      url: 'http://localhost/standalone'\n    standalone:\n      gate: 127.0.0.1:1543\n      exchange:\n        dir: '{}'\n",
+            exchange.display()
+        ),
+    );
+
+    let output = run_prepared_yaxunit(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!build_calls.exists());
+    let calls = fs::read_to_string(test_calls).expect("test calls");
+    assert!(
+        calls.contains("/WS http://localhost/standalone /N Admin /P s3cret"),
+        "{calls}"
+    );
+    assert!(!calls.contains("/S "), "{calls}");
+}
+
 #[test]
 fn test_no_build_rejects_missing_file_infobase_before_platform_launch() {
     let (dir, config_path, build_calls, test_calls, _captured_config) =

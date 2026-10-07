@@ -307,11 +307,12 @@ impl StandaloneWay {
         }
     }
 
-    /// The one wording of a missing way: whom it lacks, which way and what to declare.
-    /// Every refusal and skip reason about an undeclared way is built from it.
-    pub fn undeclared(self, provider: Provider) -> String {
+    /// The one wording of a missing way: whom it lacks — a provider or a client — which way
+    /// and what to declare. Every refusal and skip reason about an undeclared way is built
+    /// from it.
+    pub fn undeclared(self, who: impl std::fmt::Display) -> String {
         format!(
-            "{provider} reaches a standalone server by {}, which is not declared: declare {}",
+            "{who} reaches a standalone server by {}, which is not declared: declare {}",
             self.name(),
             self.key()
         )
