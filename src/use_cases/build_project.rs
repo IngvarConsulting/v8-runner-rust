@@ -107,6 +107,20 @@ fn run_build_branch(
         Ok(selected) => (selected.provider, selected.receipt),
         Err((_error, receipt)) => (config.selected_provider(Operation::Build), receipt),
     };
+    // Пока стоит признак копии, отправка полная у каждого набора: каталог с содержимым копии
+    // сравнивать не с чем (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
+    let promoted;
+    let args = if args.load == PushMode::Changes
+        && crate::use_cases::exchange_guard::copied_from(config).is_some()
+    {
+        promoted = BuildArgs {
+            load: PushMode::Full,
+            ..args.clone()
+        };
+        &promoted
+    } else {
+        args
+    };
     let outcome = match require_memory(context, config, args) {
         Ok(()) => run_build_selected(context, config, args, provider),
         Err(error) => Err(BuildExecutionFailure::with_payload(
@@ -154,7 +168,8 @@ fn require_memory(
 }
 
 /// Первая удачная отправка — загрузка хотя бы одного набора — снимает признак нового
-/// владельца: с ней выгрузка снова становится выходом из отказа.
+/// владельца, а признак копии — когда у каждого набора снова есть своя память: с ними
+/// выгрузка снова становится выходом из отказа.
 fn forget_new_owner_after_a_push(
     config: &AppConfig,
     args: &BuildArgs,
@@ -168,7 +183,13 @@ fn forget_new_owner_after_a_push(
         .iter()
         .any(|step| step.ok && matches!(step.mode, BuildMode::Full | BuildMode::Partial { .. }));
     if !args.dry_run && loaded {
-        if let Some(warning) = crate::use_cases::exchange_guard::forget_new_owner(config) {
+        for warning in [
+            crate::use_cases::exchange_guard::forget_new_owner(config),
+            crate::use_cases::exchange_guard::forget_copied_base_once_every_set_remembers(config),
+        ]
+        .into_iter()
+        .flatten()
+        {
             tracing::warn!("{warning}");
         }
     }

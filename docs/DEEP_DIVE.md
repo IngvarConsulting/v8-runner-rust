@@ -242,6 +242,19 @@ infobase create --import --apply --force` или Конфигуратор (`CREA
 маскирует `platform::secrets`, `DBUID` и `SUsr` прячутся в показе отказа. Все процессы
 создания — критическая фаза; отсрочку отмены называет `collecting_deferrals`.
 
+С `--from` путь другой — `init_project/copy.rs`: конфигурация источника
+(`copy::source_config`) — та же, что у команды, с его секцией из местного слоя. Замок
+источника берёт граница — `transport::hold_source_base` из адаптера CLI, вслед за замками
+своей базы, до конца команды; проверки владельца у источника нет. Снимок и загрузка образа
+идут исполнителями `infobase dump` и `infobase restore` — `infobase_export::
+run_snapshot_provider` и `run_restore_provider` с Конфигуратором, образ проверяет
+`validate_platform_artifact`; у кластера перед загрузкой базу создаёт `ClusterCreation` —
+тот же, что у `infobase create`, с тем же предупреждением о `CrSQLDB=Y`. После удачи
+`exchange_guard::remember_copied_base` стирает прежнюю память под именем базы и пишет
+`copied-from.json`: источник, образ, время. `memory_of` считает признак
+памятью набора, `build_project` превращает первую отправку в полную, `Standing` не предлагает
+выгрузку; признак снимает удачная отправка (`forget_copied_base`) и `remember_created_base`.
+
 ## Shared EDT
 
 `tools.edt_cli.interactive_mode` включает shared interactive EDT execution model.

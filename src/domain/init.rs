@@ -16,7 +16,21 @@ pub struct InitResult {
     /// Always present, so an absent field never has to be read as "no work was given".
     pub provider_dispatched: bool,
     pub steps: Vec<InitStep>,
+    /// Источник копии у `infobase create --from`: база, с которой снят образ, и путь снимка.
+    /// Без `--from` поля нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<InitSource>,
     pub duration_ms: u64,
+}
+
+/// База-источник копии и снимок, из которого создана новая база.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct InitSource {
+    /// Имя базы-источника в местном слое.
+    pub infobase: String,
+    /// Абсолютный путь образа DT под `workPath`, снятого с источника; под превью — путь,
+    /// куда он лёг бы.
+    pub snapshot: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]

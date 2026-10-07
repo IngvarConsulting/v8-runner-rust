@@ -92,7 +92,7 @@ use crate::use_cases::run_tests;
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
 use crate::use_cases::transport::{
-    dispatch_with_workspace_lock, preview_boundary, BoundaryRefusal,
+    dispatch_with_workspace_lock, hold_source_base, preview_boundary, BoundaryRefusal,
 };
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
@@ -164,8 +164,9 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
-        Command::Init => execute_init(
+        Command::Init(args) => execute_init(
             config,
+            args,
             presenter,
             clean_before_execution,
             dry_run,
@@ -623,9 +624,9 @@ pub fn command_name(command: &Command) -> CommandName {
                     command: InfobaseConfigurationCommand::Export(_),
                 }),
         }) => CommandName::InfobaseConfigurationExport,
-        Command::Init => CommandName::Init,
+        Command::Init(_) => CommandName::Init,
         Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Create,
+            command: InfobaseCommand::Create(_),
         }) => unreachable!("infobase create is normalised into its own command in app::run"),
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Dump(_),
@@ -657,7 +658,7 @@ pub fn infobase_transfer_operation(
             }) => Some(Operation::ConfigurationExport),
             InfobaseCommand::Dump(_) => Some(Operation::InfobaseDump),
             InfobaseCommand::Restore(_) => Some(Operation::InfobaseRestore),
-            InfobaseCommand::Create => None,
+            InfobaseCommand::Create(_) => None,
         },
         _ => None,
     }
@@ -1068,12 +1069,16 @@ fn render_extensions_text(
 
 fn execute_init(
     config: &AppConfig,
+    args: &crate::cli::args::InfobaseCreateArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = InitRequest { dry_run };
+    let request = InitRequest {
+        dry_run,
+        from: args.from.clone(),
+    };
     let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
@@ -1082,40 +1087,77 @@ fn execute_init(
         BaseAccess::Writes,
         clean_before_execution,
         dry_run,
-        || match init_project::execute(&context, config, &request) {
-            Ok(result) => {
-                if presenter.is_json() {
-                    presenter.print_envelope(&Envelope::ok(
+        || {
+            // Источник `--from` читается целиком: его замок берёт граница вслед за замками
+            // своей базы, и держится он до конца команды. Источник, которого нет, называет
+            // сценарий своим отказом; превью замков не берёт.
+            let _source_lock = match args
+                .from
+                .as_deref()
+                .filter(|_| !dry_run)
+                .and_then(|from| init_project::copy::source_config(config, from).ok())
+            {
+                None => None,
+                Some(source) => match hold_source_base(&source, CommandName::Init) {
+                    Ok((lock, notes)) => {
+                        for note in &notes {
+                            presenter.note_leading_warnings(
+                                note.phase.as_str(),
+                                std::slice::from_ref(&note.message),
+                            );
+                        }
+                        Some(lock)
+                    }
+                    Err(refusal) => {
+                        print_workspace_refusal(presenter, CommandName::Init, &refusal);
+                        return Err(refusal.error);
+                    }
+                },
+            };
+            run_init_use_case(&context, config, &request, presenter)
+        },
+    )
+}
+
+fn run_init_use_case(
+    context: &crate::use_cases::context::ExecutionContext,
+    config: &AppConfig,
+    request: &InitRequest,
+    presenter: &Presenter,
+) -> Result<(), UseCaseError> {
+    match init_project::execute(context, config, request) {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    CommandName::Init.as_str(),
+                    result.duration_ms,
+                    result,
+                ));
+            } else {
+                render_init_text(&result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                if let Some(result) = failure.payload {
+                    presenter.print_envelope(&failure_envelope(
                         CommandName::Init.as_str(),
                         result.duration_ms,
                         result,
+                        &error,
                     ));
-                } else {
-                    render_init_text(&result, presenter);
                 }
-                Ok(())
-            }
-            Err(failure) => {
-                let error = failure.error;
-                if presenter.is_json() {
-                    if let Some(result) = failure.payload {
-                        presenter.print_envelope(&failure_envelope(
-                            CommandName::Init.as_str(),
-                            result.duration_ms,
-                            result,
-                            &error,
-                        ));
-                    }
-                } else {
-                    if let Some(result) = failure.payload.as_ref() {
-                        render_init_text(result, presenter);
-                    }
-                    presenter.print_error(&error.to_string());
+            } else {
+                if let Some(result) = failure.payload.as_ref() {
+                    render_init_text(result, presenter);
                 }
-                Err(error)
+                presenter.print_error(&error.to_string());
             }
-        },
-    )
+            Err(error)
+        }
+    }
 }
 
 fn execute_build(
@@ -1437,7 +1479,7 @@ pub struct PreparedInfobaseCliCommand {
 
 pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
     match &args.command {
-        InfobaseCommand::Create => {
+        InfobaseCommand::Create(_) => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1514,7 +1556,7 @@ pub fn render_infobase_pre_dispatch_failure(
     // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
     let selection: Option<ProviderReceipt> = None;
     match &args.command {
-        InfobaseCommand::Create => {
+        InfobaseCommand::Create(_) => {
             unreachable!("infobase create has no export request to render")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1571,7 +1613,7 @@ pub fn prepare_infobase_command(
     dry_run: bool,
 ) -> Result<PreparedInfobaseCommand, UseCaseError> {
     match &args.command {
-        InfobaseCommand::Create => {
+        InfobaseCommand::Create(_) => {
             unreachable!("infobase create is dispatched before the export machinery")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1682,7 +1724,7 @@ pub fn prepare_infobase_cli_command(
 
 fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     match &args.command {
-        InfobaseCommand::Create => {
+        InfobaseCommand::Create(_) => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
         InfobaseCommand::Configuration(_) => CommandName::InfobaseConfigurationExport,
@@ -4428,6 +4470,13 @@ fn render_load_text(
 
 fn render_init_text(result: &InitResult, presenter: &Presenter) {
     let mut details = Vec::new();
+    if let Some(source) = &result.source {
+        details.push(format!(
+            "source: infobase '{}', snapshot {}",
+            source.infobase,
+            source.snapshot.display()
+        ));
+    }
     for step in &result.steps {
         if is_designer_edt_workspace_noop(step) {
             continue;
@@ -5726,7 +5775,10 @@ mod tests {
 
     #[test]
     fn resolves_command_name() {
-        assert_eq!(command_name(&Command::Init), CommandName::Init);
+        assert_eq!(
+            command_name(&Command::Init(Default::default())),
+            CommandName::Init
+        );
         assert_eq!(
             command_name(&Command::Extensions(ExtensionsArgs {
                 command: None,

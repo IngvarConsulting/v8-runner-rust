@@ -139,6 +139,35 @@ fn acquire(
     Ok((workspace_lock, infobase_lock, notes))
 }
 
+/// Замок базы-источника у команды, которая читает её целиком, — `infobase create --from`.
+///
+/// Берётся на границе вслед за замками своего `workPath` и своей базы и держится, пока его
+/// держит вызывающий, — всё время команды, а снимок источника идёт под ним: команды
+/// копии-владельца в это время получают `InfobaseBusy`. Источник команда только читает,
+/// поэтому замок, который не взять не из-за другой команды, — замечание, а проверки владельца
+/// у источника нет: чтение владельцем не делает (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`).
+pub(crate) fn hold_source_base(
+    source: &AppConfig,
+    command: CommandName,
+) -> Result<(InfobaseLock, Vec<BoundaryNote>), BoundaryRefusal> {
+    let lock =
+        acquire_infobase_lock(source, command.as_str(), BaseAccess::Reads).map_err(|error| {
+            BoundaryRefusal {
+                phase: InfobaseTransferPhase::InfobaseLock,
+                error: error.into(),
+            }
+        })?;
+    let notes = lock
+        .warning()
+        .map(|message| BoundaryNote {
+            phase: InfobaseTransferPhase::InfobaseLock,
+            message: message.to_owned(),
+        })
+        .into_iter()
+        .collect();
+    Ok((lock, notes))
+}
+
 /// Maps a use-case failure payload into a transport-specific response while preserving the
 /// original transport-neutral error for the adapter boundary.
 #[cfg(test)]

@@ -71,7 +71,7 @@ pub enum Command {
     Config(ConfigArgs),
     /// Creating the infobase; parsed as `infobase create` and normalised here.
     #[command(skip)]
-    Init,
+    Init(InfobaseCreateArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -598,7 +598,7 @@ pub struct InfobaseArgs {
 #[derive(Subcommand, Debug)]
 pub enum InfobaseCommand {
     /// Create the infobase and the EDT workspace declared by the project
-    Create,
+    Create(InfobaseCreateArgs),
     /// Previous spelling of `download`; hidden for one release cycle
     #[command(hide = true)]
     Configuration(InfobaseConfigurationArgs),
@@ -606,6 +606,17 @@ pub enum InfobaseCommand {
     Dump(InfobaseDumpArgs),
     /// Load the complete infobase from a DT transfer file, discarding current data
     Restore(InfobaseRestoreArgs),
+}
+
+#[derive(Args, Debug, Clone, Default)]
+#[command(
+    next_help_heading = "Command options",
+    after_help = "Without --from: a new infobase with the configuration of this project's sources. With --from <INFOBASE>: a copy of another infobase declared in v8project.local.yaml, with its data and configuration — the source is snapshotted to a DT image under workPath (it must be free: the runner ends no sessions), and the new infobase is made from that image; the first push after it loads every set in full. A source or a target on a standalone server is refused with a recipe."
+)]
+pub struct InfobaseCreateArgs {
+    /// Declared infobase to copy, with its data and configuration
+    #[arg(long, value_name = "INFOBASE")]
+    pub from: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -968,8 +979,8 @@ pub struct DesignerModulesSyntaxArgs {
 mod tests {
     use super::{
         ArtifactsArgs, Cli, Command, DirectLaunchOptionsArgs, ExtensionsArgs, InfobaseArgs,
-        InfobaseCommand, LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget,
-        TestLaunchOptionsArgs, TestRunner, TestScope,
+        InfobaseCommand, InfobaseCreateArgs, LaunchArgs, LoadArgs, McpCommand, McpServeTransport,
+        SyntaxTarget, TestLaunchOptionsArgs, TestRunner, TestScope,
     };
     use clap::Parser;
 
@@ -1010,8 +1021,17 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Infobase(InfobaseArgs {
-                command: InfobaseCommand::Create,
+                command: InfobaseCommand::Create(InfobaseCreateArgs { from: None }),
             })
+        ));
+
+        let cli = Cli::try_parse_from(["v8-runner", "infobase", "create", "--from", "upstream"])
+            .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Command::Infobase(InfobaseArgs {
+                command: InfobaseCommand::Create(InfobaseCreateArgs { from: Some(ref name) }),
+            }) if name == "upstream"
         ));
     }
 
