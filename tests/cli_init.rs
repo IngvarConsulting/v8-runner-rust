@@ -341,7 +341,11 @@ fn init_designer_creates_infobase_and_skips_edt_workspace() {
     let calls: Vec<_> = calls.lines().collect();
     assert_eq!(calls.len(), 3, "{calls:?}");
     assert!(calls[0].starts_with("CREATEINFOBASE File="), "{calls:?}");
-    let main = config_path.with_file_name("main").display().to_string();
+    // Раннер называет набор каноническим путём: на macOS `/var` — ссылка на `/private/var`.
+    let main = fs::canonicalize(config_path.with_file_name("main"))
+        .expect("canonical main")
+        .display()
+        .to_string();
     assert!(
         calls[1].ends_with(&format!("/LoadConfigFromFiles {main}")),
         "{calls:?}"
@@ -518,7 +522,9 @@ fn a_file_base_is_created_by_ibcmd_with_the_main_configuration_and_remembers_it(
     assert!(
         create.ends_with(&format!(
             "create --import={} --apply --force",
-            base_path.join("main").display()
+            fs::canonicalize(base_path.join("main"))
+                .expect("canonical main")
+                .display()
         )),
         "{create}"
     );
