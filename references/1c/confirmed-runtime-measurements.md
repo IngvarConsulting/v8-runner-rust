@@ -1837,3 +1837,17 @@ ibcmd-rs cf export --platform 8.3.27 /s/irs/out/p.epf /s/irs/out/x_p.epf  # rc=0
 `ok: true`, пропуски названы только в `opaque`. Без лицензии `tools download ibcmd-rs` и
 распространение исключены; остаётся путь к утилите из настроек. Windows и macOS не мерены:
 macOS-сборки нет, Windows на стенде нет.
+
+**Перепроверка на `master` ibcmd-rs** (`e382f21`, 02.10.2026; собран `cargo build --release` на
+macOS arm64 за 2 мин; сам называет себя `0.4.0`). `cf bootstrap --base-free --platform 8.3.27`:
+
+| вход | исход |
+| --- | --- |
+| выгрузка фикстуры 8.3.27.2074 целиком | rc=2, `base_free_compile_failed`, четыре строки: `WebSocketClient` не знает ни `Configuration.xml`, ни сам объект; «no base-free compiler for ExternalDataSource yet»; право роли `ExclusiveModeTerminationAtSessionStart` — «unknown right» |
+| то же без WebSocket-клиента, внешнего источника данных и этого права | rc=0. `.cf` платформа загружает (`/LoadCfg`) и применяет (`/UpdateDBCfg`), её выгрузка совпадает с деревом файл в файл |
+| XML расширения | rc=0, `ok: true`, но `/LoadCfg -Extension` отвечает rc=1 «Ожидается файл расширения конфигурации». У пакета `storage_version` 5 и корень `root`/`version`/`versions`; у `.cfe` Конфигуратора — 6 и `configinfo` |
+| XML внешней обработки | rc=2, ищет `Configuration.xml`: сборки `.epf`/`.erf` из XML нет |
+
+`cf export` на `master` даёт то же, что 0.4.0: `.cf` неполон при `ok: true`, `.cfe`, `.epf` и
+`.erf` выгружаются верно. Задачи автору — Untru/ibcmd-rs#432–#442; решение владельца —
+встраивание ждёт выпуска с исправлениями (#413).
