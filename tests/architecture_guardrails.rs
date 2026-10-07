@@ -174,7 +174,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 28,
+        report.accepted, 30,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );

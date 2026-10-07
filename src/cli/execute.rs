@@ -92,7 +92,7 @@ use crate::use_cases::run_tests;
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
 use crate::use_cases::transport::{
-    dispatch_with_workspace_lock, preview_boundary, BoundaryRefusal,
+    dispatch_with_workspace_lock, hold_source_base, preview_boundary, BoundaryRefusal,
 };
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
@@ -1087,40 +1087,77 @@ fn execute_init(
         BaseAccess::Writes,
         clean_before_execution,
         dry_run,
-        || match init_project::execute(&context, config, &request) {
-            Ok(result) => {
-                if presenter.is_json() {
-                    presenter.print_envelope(&Envelope::ok(
+        || {
+            // Источник `--from` читается целиком: его замок берёт граница вслед за замками
+            // своей базы, и держится он до конца команды. Источник, которого нет, называет
+            // сценарий своим отказом; превью замков не берёт.
+            let _source_lock = match args
+                .from
+                .as_deref()
+                .filter(|_| !dry_run)
+                .and_then(|from| init_project::copy::source_config(config, from).ok())
+            {
+                None => None,
+                Some(source) => match hold_source_base(&source, CommandName::Init) {
+                    Ok((lock, notes)) => {
+                        for note in &notes {
+                            presenter.note_leading_warnings(
+                                note.phase.as_str(),
+                                std::slice::from_ref(&note.message),
+                            );
+                        }
+                        Some(lock)
+                    }
+                    Err(refusal) => {
+                        print_workspace_refusal(presenter, CommandName::Init, &refusal);
+                        return Err(refusal.error);
+                    }
+                },
+            };
+            run_init_use_case(&context, config, &request, presenter)
+        },
+    )
+}
+
+fn run_init_use_case(
+    context: &crate::use_cases::context::ExecutionContext,
+    config: &AppConfig,
+    request: &InitRequest,
+    presenter: &Presenter,
+) -> Result<(), UseCaseError> {
+    match init_project::execute(context, config, request) {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    CommandName::Init.as_str(),
+                    result.duration_ms,
+                    result,
+                ));
+            } else {
+                render_init_text(&result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                if let Some(result) = failure.payload {
+                    presenter.print_envelope(&failure_envelope(
                         CommandName::Init.as_str(),
                         result.duration_ms,
                         result,
+                        &error,
                     ));
-                } else {
-                    render_init_text(&result, presenter);
                 }
-                Ok(())
-            }
-            Err(failure) => {
-                let error = failure.error;
-                if presenter.is_json() {
-                    if let Some(result) = failure.payload {
-                        presenter.print_envelope(&failure_envelope(
-                            CommandName::Init.as_str(),
-                            result.duration_ms,
-                            result,
-                            &error,
-                        ));
-                    }
-                } else {
-                    if let Some(result) = failure.payload.as_ref() {
-                        render_init_text(result, presenter);
-                    }
-                    presenter.print_error(&error.to_string());
+            } else {
+                if let Some(result) = failure.payload.as_ref() {
+                    render_init_text(result, presenter);
                 }
-                Err(error)
+                presenter.print_error(&error.to_string());
             }
-        },
-    )
+            Err(error)
+        }
+    }
 }
 
 fn execute_build(

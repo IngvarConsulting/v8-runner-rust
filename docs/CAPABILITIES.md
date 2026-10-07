@@ -527,11 +527,13 @@ v8-runner infobase create [--from <INFOBASE>] [--dry-run]
   project в EDT workspace, не добавляя его в project `source-set`.
 - `--from <база>` создаёт базу этой рабочей копии как копию другой базы, объявленной по имени
   в `v8project.local.yaml`, с её данными и конфигурацией. С источника Конфигуратор снимает
-  образ `/DumpIB` в `workPath/copies/<база>.dt` под замком источника; в метку источника копия
-  не пишется, новая база записывается в метку за этой копией. Файловую базу из образа создаёт
-  `ibcmd infobase restore --create-database`, базу в кластере — Конфигуратор: `CREATEINFOBASE`
-  (реквизиты как выше), затем `/RestoreIB` образа; шаблон .dt у `CREATEINFOBASE` ждёт замера
-  ([#434](https://github.com/IngvarConsulting/v8-runner-rust/issues/434)). Неудача
+  образ `/DumpIB` в `workPath/copies/<база>.dt`; замок источника команда держит до конца, и
+  источник, занятый другой командой, — отказ `infobase_busy` до снимка. В метку источника
+  копия не пишется, новая база записывается в метку за этой копией. Новую базу из образа
+  создаёт Конфигуратор: файловую — `/RestoreIB`, базу в кластере — `CREATEINFOBASE` (реквизиты
+  как выше), затем `/RestoreIB`. Создание файловой базы через `ibcmd` ждёт его исполнителя
+  `.dt` ([#226](https://github.com/IngvarConsulting/v8-runner-rust/issues/226)), шаблон .dt у
+  `CREATEINFOBASE` — замера ([#434](https://github.com/IngvarConsulting/v8-runner-rust/issues/434)). Неудача
   `/RestoreIB` оставляет базу в кластере пустой, и отказ называет
   `infobase restore --input <образ> --replace`. Ответ называет источник в `data.source`:
   `infobase` и `snapshot`.

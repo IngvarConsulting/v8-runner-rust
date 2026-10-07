@@ -31,7 +31,7 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::throwaway_infobase::{edt_sources_to_xml, EdtConversion};
 use crate::use_cases::tool_extension;
 
-mod copy;
+pub(crate) mod copy;
 
 pub fn execute(
     context: &ExecutionContext,

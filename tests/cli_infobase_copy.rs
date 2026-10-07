@@ -1,9 +1,10 @@
 //! `infobase create --from <база>` (#330): база рабочей копии — копия другой объявленной базы.
 //!
-//! Поддельный Конфигуратор снимает образ (`/DumpIB`) — копирует в него файл файловой базы из строки соединения, а
-//! при файле `busy` рядом с собой отказывает, как занятая база; поддельный `ibcmd` создаёт
-//! базу из образа (`infobase restore --create-database`) и отвечает поколением. Оба пишут
-//! вызовы в журнал.
+//! Поддельный Конфигуратор снимает образ (`/DumpIB`) — копирует в него файл файловой базы из
+//! строки соединения, а при файле `busy` рядом с собой отказывает, как занятая база; `/RestoreIB`
+//! создаёт файловую базу из образа; поколение отвечает токеном; при файле `hold` загрузка
+//! конфигурации ждёт файла `release`. Поддельный `ibcmd` создаёт базу соседа. Вызовы пишутся в
+//! журнал.
 #![cfg(unix)]
 
 mod support;
@@ -29,15 +30,24 @@ fn write_platform(root: &Path) -> PathBuf {
 out=''
 base=''
 dump=''
+restore=''
 previous=''
 for arg in "$@"; do
   case "$previous" in
     /Out) out="$arg" ;;
-    /IBConnectionString) base="${{arg#File=}}"; base="${{base%;}}"; base="${{base#[\"\']}}"; base="${{base%[\"\']}}" ;;
+    /IBConnectionString)
+      case "$arg" in
+        File=*) base="${{arg#File=}}"; base="${{base%;}}"; base="${{base#[\"\']}}"; base="${{base%[\"\']}}" ;;
+      esac ;;
     /DumpIB) dump="$arg" ;;
+    /RestoreIB) restore="$arg" ;;
   esac
   previous="$arg"
 done
+if [ -n "$restore" ]; then
+  if [ -n "$base" ]; then mkdir -p "$base" && cat "$restore" > "$base/1Cv8.1CD"; fi
+  exit 0
+fi
 if [ -n "$dump" ]; then
   if [ -f '{busy}' ]; then
     printf 'the infobase is held exclusively\n' >&2
@@ -48,11 +58,20 @@ if [ -n "$dump" ]; then
 fi
 case "$*" in
   *'/GetConfigGenerationID'*) printf '{TOKEN}\r\n' > "$out"; exit 0 ;;
+  *'/LoadConfigFromFiles'*)
+    if [ -f '{hold}' ]; then
+      : > '{started}'
+      waited=0
+      while [ ! -e '{release}' ] && [ "$waited" -lt 300 ]; do sleep 0.1; waited=$((waited + 1)); done
+    fi ;;
 esac
 if [ -n "$out" ]; then : > "$out"; fi
 exit 0"#,
             calls = calls.display(),
             busy = root.join("busy").display(),
+            hold = root.join("hold").display(),
+            started = root.join("started").display(),
+            release = root.join("release").display(),
         ),
     );
     write_shell_script(
@@ -61,12 +80,10 @@ exit 0"#,
             r#"printf 'ibcmd %s\n' "$*" >> '{calls}'
 command=''
 path=''
-image=''
-for arg in "$@"; do image="$arg"; done
 previous=''
 for arg in "$@"; do
   case "$arg" in
-    create|restore) if [ -z "$command" ]; then command="$arg"; fi ;;
+    create) if [ -z "$command" ]; then command="$arg"; fi ;;
     generation-id) command=generation ;;
   esac
   if [ "$previous" = '--db-path' ]; then path="$arg"; fi
@@ -74,7 +91,6 @@ for arg in "$@"; do
 done
 case "$command" in
   create) mkdir -p "$path" && printf 'database of %s\n' "$path" > "$path/1Cv8.1CD" ;;
-  restore) mkdir -p "$path" && cat "$image" > "$path/1Cv8.1CD" ;;
   generation) printf '{TOKEN}\n' ;;
 esac
 exit 0"#,
@@ -94,7 +110,7 @@ fn write_copy(dir: &Path, platform: &Path, local: &str) -> PathBuf {
     fs::write(
         &config,
         format!(
-            "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: work\nformat: DESIGNER\nproviders:\n  build: designer\n  dump: designer\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\ntools:\n  platform:\n    path: '{}'\n",
             platform.display()
         ),
     )
@@ -275,9 +291,13 @@ fn debugging_on_a_copy_of_the_base_leaves_the_neighbour_untouched() {
     );
     let restore = log
         .lines()
-        .find(|line| line.contains(" restore "))
+        .find(|line| line.contains("/RestoreIB"))
         .expect("restore call");
-    assert!(restore.contains("--create-database"), "{restore}");
+    assert!(restore.contains("upstream.dt"), "{restore}");
+    assert!(
+        restore.contains(&wt.join("build").join("ib").display().to_string()),
+        "{restore}"
+    );
 
     assert_eq!(
         fs::read(neighbour_base.join("1Cv8.1CD")).expect("neighbour base"),
@@ -336,7 +356,7 @@ fn a_copied_base_starts_with_a_full_push() {
         serde_json::from_slice(&fs::read(memory.join("copied-from.json")).expect("the copy mark"))
             .expect("json");
     assert_eq!(mark["source"], "upstream", "{mark}");
-    assert_eq!(mark["generation"]["tool"], "ibcmd", "{mark}");
+    assert_eq!(mark["generation"]["tool"], "designer", "{mark}");
     assert_eq!(mark["generation"]["token"], TOKEN, "{mark}");
     for stale in ["hashes", "dump-info", "generation.json"] {
         assert!(!memory.join(stale).exists(), "{stale} is erased");
@@ -385,7 +405,7 @@ fn a_failed_snapshot_of_a_file_base_names_the_recipe() {
     );
     assert!(!wt.join("build").join("ib").join("1Cv8.1CD").exists());
     assert!(!wt.join("work").join("copies").join("upstream.dt").exists());
-    assert!(!calls(stand.root()).contains(" restore "));
+    assert!(!calls(stand.root()).contains("/RestoreIB"));
     assert_eq!(
         fs::read(owner_marker(&neighbour_base)).expect("neighbour marker"),
         neighbour_marker
@@ -480,7 +500,7 @@ fn a_preview_names_the_snapshot_and_a_wrong_source_is_refused() {
         .as_str()
         .expect("message");
     assert!(
-        message.contains("/DumpIB") && message.contains("restore --create-database"),
+        message.contains("/DumpIB") && message.contains("/RestoreIB"),
         "{message}"
     );
 
@@ -533,4 +553,42 @@ fn a_cluster_copy_is_created_by_the_designer_and_loaded_from_the_image() {
     assert!(!copied.to_string().contains("pg-s3cret"), "{copied}");
     let memory = wt.join("work").join("infobases").join("origin");
     assert!(memory.join("copied-from.json").exists());
+}
+
+/// Источник, который держит команда копии-владельца, — отказ `infobase_busy` на шаге
+/// `infobase lock` до снимка; пока идёт копия, замок источника держит она.
+#[test]
+fn a_source_held_by_a_running_command_is_refused_before_the_snapshot() {
+    let stand = Stand::new();
+    let (neighbour, neighbour_base) = stand.neighbour();
+    let worktree = stand.worktree(&neighbour_base);
+    let wt = worktree.parent().expect("worktree").to_path_buf();
+    init_own_base(&worktree);
+    fs::write(stand.root().join("hold"), "").expect("hold");
+    let _holder = support::RunnerGuard(
+        v8_runner_command()
+            .arg("--config")
+            .arg(&neighbour)
+            .args(["--json-message", "push", "--force"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn push"),
+    );
+    assert!(
+        support::wait_for_file(
+            &stand.root().join("started"),
+            std::time::Duration::from_secs(30)
+        ),
+        "the holding push never reached the platform"
+    );
+
+    let output = run(&worktree, &["infobase", "create", "--from", "upstream"]);
+    fs::write(stand.root().join("release"), "").expect("release");
+
+    let payload = envelope(&output);
+    assert_eq!(payload["error"]["code"], "infobase_busy", "{payload}");
+    assert_eq!(payload["steps"][0]["name"], "infobase lock", "{payload}");
+    assert!(!calls(stand.root()).contains("/DumpIB"));
+    assert!(!wt.join("build").join("ib").join("1Cv8.1CD").exists());
 }

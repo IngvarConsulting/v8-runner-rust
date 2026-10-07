@@ -45,7 +45,7 @@ check:
       "target": "infobase",
       "action": "create",
       "status": "planned",
-      "message": "would snapshot the infobase 'upstream' (file infobase '/work/erp/build/ib') to '/work/erp-wt/work/copies/upstream.dt' via /opt/1cv8/bin/1cv8 /DumpIB — the source must be free, the runner ends no sessions — and create file infobase '/work/erp-wt/build/ib' from it via /opt/1cv8/bin/ibcmd infobase restore --create-database",
+      "message": "would snapshot the infobase 'upstream' (file infobase '/work/erp/build/ib') to '/work/erp-wt/work/copies/upstream.dt' via /opt/1cv8/bin/1cv8 /DumpIB — the source must be free, the runner ends no sessions — and create file infobase '/work/erp-wt/build/ib' from it via /opt/1cv8/bin/1cv8 /RestoreIB",
       "duration_ms": 0
     },
     {

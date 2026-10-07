@@ -1,11 +1,12 @@
 //! `infobase create --from <база>`: база этой рабочей копии — копия другой объявленной базы с
 //! её данными и конфигурацией (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
 //!
-//! С источника снимается образ DT — Конфигуратором `/DumpIB` под замком источника, который
-//! берётся только на время снимка и в метку источника ничего не пишет
-//! (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`). Новую базу из образа создаёт у файловой
-//! цели `ibcmd infobase restore --create-database`, в кластере — Конфигуратор: `CREATEINFOBASE`,
-//! затем `/RestoreIB`. Сеансы источника раннер не завершает: неудавшийся снимок называет, как
+//! С источника снимается образ DT — Конфигуратором `/DumpIB`, исполнителем `infobase dump`. Замок
+//! источника берёт граница команды ([`crate::use_cases::transport::hold_source_base`]), в метку
+//! источника ничего не пишется (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`). Новую базу из
+//! образа создаёт Конфигуратор, исполнитель `infobase restore`: у файловой цели `/RestoreIB`
+//! (база, которой нет, создаётся — замер «Загрузка информационной базы из DT»), в кластере —
+//! `CREATEINFOBASE`, затем `/RestoreIB`. Сеансы источника раннер не завершает: неудавшийся снимок называет, как
 //! освободить источник (`INV.CLI.A-FAILED-SNAPSHOT-NAMES-THE-RECIPE`). Память новой базы —
 //! только признак копии с её поколением (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
 
@@ -16,7 +17,6 @@ use crate::config::model::{is_infobase_name, AppConfig};
 use crate::domain::capability::{Provider, TargetKind};
 use crate::domain::init::InitSource;
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::mask_text;
@@ -26,9 +26,8 @@ use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::exchange_guard::{
     remember_copied_base, remember_created_base, CopiedFrom, CopiedGeneration,
 };
-use crate::use_cases::generation_reader::{read_generation, GenerationProcess};
+use crate::use_cases::generation_reader::{designer_log_file, read_generation, GenerationProcess};
 use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
-use crate::use_cases::infobase_lock::{acquire_infobase_lock, BaseAccess};
 use crate::use_cases::interruption::collecting_deferrals;
 use crate::use_cases::progress::log_live_stage;
 
@@ -74,8 +73,8 @@ pub(super) fn ensure_copy(
 
 /// Конфигурация источника: та же, что у команды, с секцией базы `from` из местного слоя.
 /// Копировать можно только объявленную базу — у строки соединения нет учётных данных, —
-/// и не ту, которую команда создаёт.
-fn source_config(config: &AppConfig, from: &str) -> Result<AppConfig, AppError> {
+/// и не ту, которую команда создаёт. По ней же граница команды берёт замок источника.
+pub(crate) fn source_config(config: &AppConfig, from: &str) -> Result<AppConfig, AppError> {
     if !is_infobase_name(from) {
         return Err(AppError::Validation(
             "--from names an infobase declared in v8project.local.yaml by its name, not by a connection string: declare the source under infobases.<name> with its credentials and pass that name".to_owned(),
@@ -174,8 +173,8 @@ struct Copy<'a> {
 
 /// Чем создаётся база по виду цели.
 enum Creator {
-    /// Файловая база: `ibcmd infobase restore --create-database` в этот каталог.
-    File { dir: PathBuf, ibcmd: PathBuf },
+    /// Файловая база: Конфигуратор `/RestoreIB` создаёт её в этом каталоге.
+    File { dir: PathBuf },
     /// База в кластере: Конфигуратор `CREATEINFOBASE`, затем `/RestoreIB`.
     Cluster,
 }
@@ -204,13 +203,7 @@ impl Copy<'_> {
                 if infobase_marker_path(&dir).exists() {
                     return self.failed(existing_file_infobase(&dir));
                 }
-                match utilities.locate(UtilityType::Ibcmd) {
-                    Ok(location) => Creator::File {
-                        dir,
-                        ibcmd: location.path,
-                    },
-                    Err(error) => return self.failed(AppError::from(error)),
-                }
+                Creator::File { dir }
             }
         };
         let designer = match utilities.locate(UtilityType::V8) {
@@ -221,10 +214,9 @@ impl Copy<'_> {
         let target = self.config.v8_connection().describe_target();
         if dry_run {
             let creation = match &creator {
-                Creator::File { ibcmd, .. } => format!(
-                    "{target} from it via {} infobase restore --create-database",
-                    ibcmd.display()
-                ),
+                Creator::File { .. } => {
+                    format!("{target} from it via {} /RestoreIB", designer.display())
+                }
                 Creator::Cluster => format!(
                     "{target} in the cluster from it via {} CREATEINFOBASE, then /RestoreIB",
                     designer.display()
@@ -256,10 +248,9 @@ impl Copy<'_> {
                 return self.failed(error);
             }
         }
-        let lock_warning = match self.take_snapshot(utilities, &designer) {
-            Ok(warning) => warning,
-            Err(error) => return self.failed(error),
-        };
+        if let Err(error) = self.take_snapshot(utilities, &designer) {
+            return self.failed(error);
+        }
         if let Some(outcome) = interruption_step_outcome(
             self.context,
             "infobase",
@@ -278,21 +269,11 @@ impl Copy<'_> {
                 .context
                 .process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
             let generation = match &creator {
-                Creator::File { dir, ibcmd } => {
-                    let marker = infobase_marker_path(dir);
-                    let connection = IbcmdConnection::from_infobase(&self.config.infobase)
-                        .map_err(AppError::from)?;
-                    let created = IbcmdDsl::new(
-                        ibcmd.clone(),
-                        connection,
-                        utilities.runner_for(UtilityType::Ibcmd),
-                        policy,
-                    )
-                    .infobase_restore_creating(self.snapshot)
-                    .map_err(AppError::from)?;
+                Creator::File { dir } => {
+                    let created = self.restore(utilities, &designer, policy)?;
                     deferrals.note_result(INFOBASE_CREATE, &created);
-                    ensure_created(&created, &marker)?;
-                    self.generation_by_ibcmd(ibcmd, utilities)
+                    ensure_created(&created, &infobase_marker_path(dir))?;
+                    self.generation_by_designer(utilities, &designer)
                 }
                 Creator::Cluster => {
                     self.create_in_the_cluster(utilities, &designer, policy, deferrals)?;
@@ -315,7 +296,6 @@ impl Copy<'_> {
                     self.snapshot.display()
                 ),
             )
-            .with_warnings(lock_warning.as_slice())
             .with_warnings(remember_copied_base(self.config, &copied).as_slice()))
         });
         match settled {
@@ -324,15 +304,13 @@ impl Copy<'_> {
         }
     }
 
-    /// Снимок источника под его замком. Занятый источник — отказ `InfobaseBusy`; замок, который
-    /// не взять по другой причине, — предупреждение: снимок только читает источник. Неудача —
-    /// с рецептом, как освободить источник; брошенный образ убирается.
+    /// Снимок источника. Неудача — с рецептом, как освободить источник; брошенный образ
+    /// убирается.
     fn take_snapshot(
         &self,
         utilities: &PlatformUtilities,
         designer: &Path,
-    ) -> Result<Option<String>, AppError> {
-        let lock = acquire_infobase_lock(self.source, INFOBASE_CREATE, BaseAccess::Reads)?;
+    ) -> Result<(), AppError> {
         let dir = self.snapshot.parent().unwrap_or(self.snapshot);
         std::fs::create_dir_all(dir).map_err(|error| {
             AppError::Runtime(format!(
@@ -373,7 +351,30 @@ impl Copy<'_> {
             let _ = remove_snapshot(self.snapshot);
             return Err(self.snapshot_failure(&taken, image.is_none()));
         }
-        Ok(lock.warning().map(str::to_owned))
+        Ok(())
+    }
+
+    /// `/RestoreIB` образа в базу команды — путь исполнителя `infobase restore`.
+    fn restore(
+        &self,
+        utilities: &PlatformUtilities,
+        designer: &Path,
+        policy: crate::platform::process::ProcessExecutionPolicy,
+    ) -> Result<PlatformCommandResult, AppError> {
+        let log = crate::support::temp::platform_logs_dir(&self.config.work_path)
+            .map(|dir| dir.join("infobase-copy-restore.log"))
+            .map_err(|error| {
+                AppError::Runtime(format!("failed to create platform logs dir: {error}"))
+            })?;
+        DesignerDsl::new(
+            designer.to_path_buf(),
+            self.config.v8_connection(),
+            utilities.runner_for(UtilityType::V8),
+            Some(log),
+            policy,
+        )
+        .restore_infobase(self.snapshot)
+        .map_err(AppError::from)
     }
 
     fn snapshot_failure(&self, result: &PlatformCommandResult, no_image: bool) -> AppError {
@@ -419,28 +420,28 @@ impl Copy<'_> {
         AppError::Platform(message)
     }
 
-    /// Поколение основной конфигурации новой файловой базы — тем же `ibcmd`. Без ответа память
+    /// Поколение основной конфигурации новой файловой базы — Конфигуратором. Без ответа память
     /// знает только, что база — копия.
-    fn generation_by_ibcmd(
+    fn generation_by_designer(
         &self,
-        ibcmd: &Path,
         utilities: &PlatformUtilities,
+        designer: &Path,
     ) -> Option<CopiedGeneration> {
         let read = read_generation(
             self.context,
             self.config,
             || {
-                Ok(GenerationProcess::Ibcmd {
-                    binary: ibcmd,
-                    runner: utilities.runner_for(UtilityType::Ibcmd),
-                    data_path: None,
+                Ok(GenerationProcess::Designer {
+                    binary: designer,
+                    runner: utilities.runner_for(UtilityType::V8),
+                    log_file: designer_log_file(self.config, "infobase-copy-generation")?,
                 })
             },
             None,
         );
         match read {
             Ok(Some(token)) => Some(CopiedGeneration {
-                tool: Provider::Ibcmd,
+                tool: Provider::Designer,
                 token,
             }),
             Ok(None) => None,
@@ -479,20 +480,7 @@ impl Copy<'_> {
         if created.process.outcome().is_err() {
             return Err(cluster_create_failure(&creation, &created, &database));
         }
-        let log = crate::support::temp::platform_logs_dir(&self.config.work_path)
-            .map(|dir| dir.join("infobase-copy-restore.log"))
-            .map_err(|error| {
-                AppError::Runtime(format!("failed to create platform logs dir: {error}"))
-            })?;
-        let restored = DesignerDsl::new(
-            designer.to_path_buf(),
-            self.config.v8_connection(),
-            utilities.runner_for(UtilityType::V8),
-            Some(log),
-            policy,
-        )
-        .restore_infobase(self.snapshot);
-        let failure = match restored {
+        let failure = match self.restore(utilities, designer, policy) {
             Ok(result) => {
                 deferrals.note_result(INFOBASE_CREATE, &result);
                 match result.process.outcome() {
@@ -504,7 +492,7 @@ impl Copy<'_> {
                     )),
                 }
             }
-            Err(error) => AppError::from(error),
+            Err(error) => error,
         };
         let memory = remember_created_base(self.config, None)
             .map(|failure| format!(" ({failure})"))
