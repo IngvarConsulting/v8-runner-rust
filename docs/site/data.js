@@ -344,8 +344,8 @@ window.RUNNER_DATA = (function () {
         // подключения, а без неё — web.url.
         // Клиент запускается локально в любом случае — платформа нужна и для веб-пути.
         if (ctx.target === 'standalone') {
-          return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
-                   note: 'designer, thin и mcp по прямому шлюзу; thick и ordinary отказывают: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает; --via web ведёт тонкий клиент по HTTP сервера' };
+          return { chain: [P.client], config: ['connection', 'web.url — для --via web или когда строки прямого шлюза нет', 'tools.enterprise.additional-launch-keys (необязательно)'],
+                   note: 'designer, thin и mcp по прямому шлюзу; без строки прямого шлюза тонкий клиент идёт по web.url, без реквизитов базы до замера; thick и ordinary отказывают: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает; --via web ведёт тонкий клиент по HTTP сервера' };
         }
         return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
                  note: 'умолчание — строка подключения; --via web открывает ту же базу по опубликованному адресу ws-соединением' };
