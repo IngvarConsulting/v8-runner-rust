@@ -14,8 +14,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use support::fake_agent::{
-    read_or_empty, serve_managed_launches, write_fake_designer, FakeAgent, Hold, HoldReply,
-    AGENT_PASSWORD,
+    read_or_empty, serve_managed_launches_on_a_reserved_port, write_fake_designer, FakeAgent, Hold,
+    HoldReply, AGENT_PASSWORD,
 };
 use support::{
     interrupt_at_hold, temp_workspace, v8_runner_command, CRITICAL_INTERRUPTION_DEFERRED,
@@ -60,10 +60,9 @@ fn harness_holding(hold: Option<Hold>) -> Harness {
         designer_pid_file.clone(),
     );
     agent.hold = hold;
-    // Двойник поднимается вместе с поддельным `1cv8` на объявленном порту и с ключом,
-    // который раннер передал агенту.
-    serve_managed_launches(agent, None);
-    let port = support::free_tcp_port();
+    // Двойник держит объявленный порт занятым весь прогон и отвечает ключом, который
+    // раннер передал агенту.
+    let port = serve_managed_launches_on_a_reserved_port(agent, None);
     write_fake_designer(
         &bin.join("1cv8"),
         &designer_args_log,

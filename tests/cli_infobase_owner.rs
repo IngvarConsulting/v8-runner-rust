@@ -221,18 +221,21 @@ fn assert_infobase_held(output: &Output, command: &str, owner: &Copy, stand: &St
         message.contains("v8project.local.yaml"),
         "says how to free the base: {message}"
     );
-    assert!(
-        message.contains("infobase create --from") && message.contains("shared: true"),
-        "names the other ways out: {message}"
-    );
-    let shared_way = message
-        .split("a shared infobase")
+    // `INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`: своя чистая база, копия
+    // базы и база из эталонного образа; общую базу выходом отказ не называет (#437).
+    let ways = message
+        .split("Ways out for this working copy:")
         .nth(1)
-        .and_then(|rest| rest.split(". ").next())
-        .expect("names a shared infobase as a way out");
+        .and_then(|rest| rest.split("To free the infobase").next())
+        .expect("names the ways out");
     assert!(
-        !shared_way.contains("not available yet"),
-        "a shared infobase is available: {message}"
+        ways.contains("init --infobase <connection string>")
+            && ways.contains("v8-runner infobase create`")
+            && ways.contains("infobase create --from upstream")
+            && ways.contains("infobase restore --input <reference>.dt --create")
+            && !ways.contains("shared")
+            && !ways.contains("not available yet"),
+        "names the ways out: {message}"
     );
     message
 }

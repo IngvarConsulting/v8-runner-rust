@@ -176,8 +176,14 @@ impl SourceSetContext {
 
     /// Журнал поколений базы этого набора: `workPath/infobases/<база>/generation.json`.
     pub fn generation_file(&self, work_path: &Path) -> Option<PathBuf> {
+        self.base_memory_dir(work_path)
+            .map(|dir| dir.join(GENERATION_FILE_NAME))
+    }
+
+    /// Память базы этого набора: `workPath/infobases/<база>`; `None` у набора без памяти базы.
+    pub fn base_memory_dir(&self, work_path: &Path) -> Option<PathBuf> {
         self.source_set_base()
-            .map(|base| infobase_memory_dir(work_path, base).join(GENERATION_FILE_NAME))
+            .map(|base| infobase_memory_dir(work_path, base))
     }
 
     fn source_set_base(&self) -> Option<&str> {

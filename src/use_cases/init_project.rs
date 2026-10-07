@@ -31,6 +31,8 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::throwaway_infobase::{edt_sources_to_xml, EdtConversion};
 use crate::use_cases::tool_extension;
 
+pub(crate) mod copy;
+
 pub fn execute(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -41,7 +43,7 @@ pub fn execute(
         transport = ?context.transport(),
         "executing init use case"
     );
-    stamp_dispatch(run_init(context, config, args.dry_run), context.work())
+    stamp_dispatch(run_init(context, config, args), context.work())
 }
 
 pub(crate) type InitExecutionFailure = UseCaseFailure<InitResult>;
@@ -52,14 +54,21 @@ const INFOBASE_CREATE: &str = "infobase create";
 fn run_init(
     context: &ExecutionContext,
     config: &AppConfig,
-    dry_run: bool,
+    args: &InitRequest,
 ) -> UseCaseResult<InitResult> {
+    let dry_run = args.dry_run;
     let started = Instant::now();
     let mut utilities = PlatformUtilities::from_config(config);
     // Исполнитель нужен только шагу создания базы, и тот сам сообщает об отсутствии
     // утилиты своим статусом: отказ выбора здесь не прерывает команду — у серверного
     // подключения и у чисто EDT-проекта этот шаг может и не понадобиться. Квитанция
     // при этом остаётся честной: никто не готов, пропущенные названы.
+    // Копию `--from` создаёт только Конфигуратор: квитанция называет его, а ключ, который
+    // назначает другого исполнителя, — отказ до снимка: названный ключом исполнитель не
+    // подменяется.
+    if args.from.is_some() {
+        return copy_with_the_designer(context, config, args, &mut utilities, started);
+    }
     let (provider, receipt) =
         match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Init)
         {
@@ -137,12 +146,82 @@ fn run_init(
     }
 }
 
+/// `infobase create --from`: шаг копии и, у формата EDT, рабочая область. Исполнитель —
+/// Конфигуратор: снимок и загрузка образа идут им (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
+fn copy_with_the_designer(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &InitRequest,
+    utilities: &mut PlatformUtilities,
+    started: Instant,
+) -> UseCaseResult<InitResult> {
+    let dry_run = args.dry_run;
+    let origin = match config.providers.get(&Operation::Init) {
+        None => crate::domain::capability::ProviderOrigin::Default,
+        Some(Provider::Designer) => crate::domain::capability::ProviderOrigin::Override {
+            file: config
+                .provider_origins
+                .get(&Operation::Init)
+                .cloned()
+                .unwrap_or_default(),
+        },
+        Some(other) => {
+            let error = UseCaseError::from(AppError::Validation(format!(
+                "infobase create --from takes the snapshot and loads the image with the Designer, and providers.{} names {}: remove the key or set it to designer",
+                Operation::Init.as_str(),
+                other.as_str()
+            )));
+            let mut result = init_result(started, Vec::new(), false);
+            result.provider = Some(crate::domain::capability::ProviderReceipt {
+                selected: None,
+                origin: crate::domain::capability::ProviderOrigin::Override {
+                    file: config
+                        .provider_origins
+                        .get(&Operation::Init)
+                        .cloned()
+                        .unwrap_or_default(),
+                },
+                skipped: Vec::new(),
+                endpoint: None,
+            });
+            return Err(InitExecutionFailure::with_payload(error, result));
+        }
+    };
+    let from = args.from.as_deref().unwrap_or_default();
+    let mut steps = Vec::new();
+    let mut first_error: Option<UseCaseError> = None;
+    let mut shared_edt: Option<EdtDsl<'static>> = None;
+    let (step, source) = copy::ensure_copy(context, config, utilities, from, dry_run);
+    record_step(&mut steps, &mut first_error, step);
+    record_step(
+        &mut steps,
+        &mut first_error,
+        ensure_edt_workspace(context, config, utilities, &mut shared_edt, dry_run),
+    );
+    let mut result = init_result(started, steps, first_error.is_none());
+    result.source = source;
+    result.provider = Some(crate::domain::capability::ProviderReceipt {
+        selected: Some(Provider::Designer),
+        origin,
+        skipped: Vec::new(),
+        endpoint: None,
+    });
+    if dry_run {
+        log_live_stage("init: preview", "[Init] preview only, nothing created");
+    }
+    match first_error {
+        Some(error) => Err(InitExecutionFailure::with_payload(error, result)),
+        None => Ok(result),
+    }
+}
+
 fn init_result(started: Instant, steps: Vec<InitStep>, ok: bool) -> InitResult {
     InitResult {
         provider: None,
         ok,
         provider_dispatched: false,
         steps,
+        source: None,
         duration_ms: started.elapsed().as_millis() as u64,
     }
 }
@@ -539,7 +618,7 @@ fn create_file_infobase(
             .infobase_create(import)
             .map_err(AppError::from)?;
             deferrals.note_result(INFOBASE_CREATE, &created);
-            ensure_created(&created, marker)?;
+            ensure_created(&created, marker, &infobase_secrets(config))?;
             Ok(created)
         }
         Provider::Designer => {
@@ -558,7 +637,7 @@ fn create_file_infobase(
             .create_infobase()
             .map_err(AppError::from)?;
             deferrals.note_result(INFOBASE_CREATE, &created);
-            ensure_created(&created, marker)?;
+            ensure_created(&created, marker, &infobase_secrets(config))?;
             let Some(import) = import else {
                 return Ok(created);
             };
@@ -616,9 +695,13 @@ fn assemble_with_designer(
 /// Исход создания по коду выхода. Неудача, после которой файл базы всё же появился, оставила
 /// каталог с базой неизвестного вида: повтор `infobase create` на ней отказывает, а память о
 /// ней не записана, — отказ называет оба выхода.
-fn ensure_created(result: &PlatformCommandResult, marker: &Path) -> Result<(), AppError> {
+fn ensure_created(
+    result: &PlatformCommandResult,
+    marker: &Path,
+    secrets: &[&str],
+) -> Result<(), AppError> {
     result.process.outcome().map_err(|_code| {
-        let error = failed_create(result);
+        let error = failed_create(result, secrets);
         if !marker.exists() {
             return error;
         }
@@ -646,29 +729,17 @@ fn ensure_cluster_infobase(
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
-    // Строка подключения из конфигурации бывает с `Usr=`/`Pwd=`: базу называет
-    // `describe_target`, а не строка как есть (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
-    let target = config.v8_connection().describe_target();
-    let creation = match cluster_creation(config) {
-        Ok(creation) => creation,
+    let cluster = match ClusterCreation::of(config) {
+        Ok(cluster) => cluster,
         Err(error) => return StepOutcome::failed("infobase", "create", started, error),
     };
-    let database = format!(
-        "the database '{}' on '{}'",
-        creation.database_name, creation.database_server
-    );
     if dry_run {
-        // Есть ли база уже, без действия не узнать: CREATEINFOBASE отвечает на это кодом,
-        // которым отвечает и на любой другой отказ, а вопроса `rac` к кластеру ещё нет (#213).
         return match locate_infobase_creator(Provider::Designer, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",
                 "create",
                 started,
-                format!(
-                    "would create {target} in the cluster with {database} via {}; whether it already exists is not observable before the creation; CrSQLDB=Y silently takes an existing database of that name, even one holding another infobase, and a failed creation may leave the database abandoned in the DBMS",
-                    binary.display()
-                ),
+                format!("would create {}", cluster.plan(&binary)),
             ),
             Err(error) => StepOutcome::failed("infobase", "create", started, error),
         };
@@ -678,11 +749,84 @@ fn ensure_cluster_infobase(
     {
         return outcome;
     }
-    log_live_stage(
-        "init: infobase create",
-        "[Конфигуратор] creating the infobase in the cluster",
-    );
     let settled = collecting_deferrals(|deferrals| {
+        cluster.create(context, config, utilities, deferrals)?;
+        Ok(StepOutcome::ok(
+            "infobase",
+            "create",
+            started,
+            format!(
+                "{} created in the cluster with {}; the first push loads every source-set in full",
+                cluster.target, cluster.database
+            ),
+        )
+        .with_warnings(remember_created_base(config, None).as_slice()))
+    });
+    match settled {
+        Ok((step, warnings)) => step.with_warnings(&warnings),
+        Err(error) => StepOutcome::failed("infobase", "create", started, error),
+    }
+}
+
+/// Создание базы в кластере — одно у `infobase create` и у его копии `--from`: реквизиты,
+/// план превью с предупреждением о существующей базе данных и сам `CREATEINFOBASE`.
+struct ClusterCreation<'a> {
+    creation: ClusterInfobaseCreation<'a>,
+    /// База без учётных данных: строку подключения с `Usr=`/`Pwd=` называет
+    /// `describe_target`, а не строка как есть (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
+    target: String,
+    /// База данных в СУБД: имя и сервер.
+    database: String,
+}
+
+impl<'a> ClusterCreation<'a> {
+    fn of(config: &'a AppConfig) -> Result<Self, AppError> {
+        let creation = cluster_creation(config)?;
+        let database = format!(
+            "the database '{}' on '{}'",
+            creation.database_name, creation.database_server
+        );
+        Ok(Self {
+            creation,
+            target: config.v8_connection().describe_target(),
+            database,
+        })
+    }
+
+    /// Что создаст `CREATEINFOBASE` и чем это грозит. Есть ли база уже, без действия не
+    /// узнать: `CREATEINFOBASE` отвечает на это кодом, которым отвечает и на любой другой
+    /// отказ, а вопроса `rac` к кластеру ещё нет (#213).
+    fn plan(&self, binary: &Path) -> String {
+        format!(
+            "{} in the cluster with {} via {}; whether it already exists is not observable before the creation; {}",
+            self.target,
+            self.database,
+            binary.display(),
+            self.risk()
+        )
+    }
+
+    /// Предупреждение замера #181: существующая база данных с тем же именем берётся молча.
+    fn risk(&self) -> String {
+        format!(
+            "CrSQLDB=Y silently takes an existing database of that name ({}), even one holding another infobase, and a failed creation may leave the database abandoned in the DBMS",
+            self.database
+        )
+    }
+
+    /// `CREATEINFOBASE` с клиент-серверной строкой; отказ — с тем, что известно без прозы
+    /// платформы.
+    fn create(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        utilities: &mut PlatformUtilities,
+        deferrals: &mut Deferrals,
+    ) -> Result<(), AppError> {
+        log_live_stage(
+            "init: infobase create",
+            "[Конфигуратор] creating the infobase in the cluster",
+        );
         let binary = utilities
             .locate(UtilityType::V8)
             .map_err(AppError::from)?
@@ -694,23 +838,51 @@ fn ensure_cluster_infobase(
             None,
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
         )
-        .create_cluster_infobase(&creation)
+        .create_cluster_infobase(&self.creation)
         .map_err(AppError::from)?;
         deferrals.note_result(INFOBASE_CREATE, &created);
         if created.process.outcome().is_err() {
-            return Err(cluster_create_failure(&creation, &created, &database));
+            return Err(self.failure(&created));
         }
-        Ok(StepOutcome::ok(
-            "infobase",
-            "create",
-            started,
-            format!("{target} created in the cluster with {database}; the first push loads every source-set in full"),
-        )
-        .with_warnings(remember_created_base(config, None).as_slice()))
-    });
-    match settled {
-        Ok((step, warnings)) => step.with_warnings(&warnings),
-        Err(error) => StepOutcome::failed("infobase", "create", started, error),
+        Ok(())
+    }
+
+    /// Отказ `CREATEINFOBASE`. Причину по прозе платформы раннер не угадывает
+    /// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно без
+    /// неё: без администратора кластера — этот уровень и его ключи; и что неудача может
+    /// оставить базу данных в СУБД. Пароли в выводе платформы скрыты.
+    fn failure(&self, result: &PlatformCommandResult) -> AppError {
+        let mut message = format_failure_evidence(
+            format!(
+                "create infobase failed for 'infobase' with exit code {}",
+                result.process.exit_code
+            ),
+            &mask_text(&result.process.stdout, &self.secrets()),
+            &mask_text(&result.process.stderr, &self.secrets()),
+            None,
+            None,
+        );
+        if self.creation.cluster_user.is_none() {
+            message.push_str(
+                "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
+            );
+        }
+        message.push_str(&format!(
+            "; a failed creation may leave {} in the DBMS, and a retry over it registers the infobase on that database — check the DBMS before retrying",
+            self.database
+        ));
+        AppError::Platform(message)
+    }
+
+    /// Пароли СУБД и администратора кластера — для маскирования вывода платформы.
+    fn secrets(&self) -> Vec<&str> {
+        [
+            self.creation.database_password,
+            self.creation.cluster_password,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 
@@ -737,40 +909,6 @@ fn cluster_creation(config: &AppConfig) -> Result<ClusterInfobaseCreation<'_>, A
             .and_then(|cluster| cluster.password.as_deref())
             .filter(|password| !password.is_empty()),
     })
-}
-
-/// Отказ создания базы в кластере. Причину по прозе платформы раннер не угадывает
-/// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно без неё:
-/// без администратора кластера — этот уровень и его ключи; и что неудача может оставить базу
-/// данных в СУБД. Пароли в выводе платформы скрыты.
-fn cluster_create_failure(
-    creation: &ClusterInfobaseCreation<'_>,
-    result: &PlatformCommandResult,
-    database: &str,
-) -> AppError {
-    let secrets: Vec<&str> = [creation.database_password, creation.cluster_password]
-        .into_iter()
-        .flatten()
-        .collect();
-    let mut message = format_failure_evidence(
-        format!(
-            "create infobase failed for 'infobase' with exit code {}",
-            result.process.exit_code
-        ),
-        &mask_text(&result.process.stdout, &secrets),
-        &mask_text(&result.process.stderr, &secrets),
-        None,
-        None,
-    );
-    if creation.cluster_user.is_none() {
-        message.push_str(
-            "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
-        );
-    }
-    message.push_str(&format!(
-        "; a failed creation may leave {database} in the DBMS, and a retry over it registers the infobase on that database — check the DBMS before retrying"
-    ));
-    AppError::Platform(message)
 }
 
 fn ensure_edt_workspace(
@@ -1067,26 +1205,65 @@ fn ensure_platform_success(
     result
         .process
         .outcome()
-        .map_err(|_code| AppError::Platform(failure_details(action, target, result)))
+        .map_err(|_code| AppError::Platform(failure_details(action, target, result, &[])))
 }
 
-/// Создание базы не удалось.
-fn failed_create(result: &PlatformCommandResult) -> AppError {
-    AppError::Platform(failure_details("create infobase", "infobase", result))
+/// Создание базы не удалось; пароли `secrets` в выводе платформы скрыты.
+fn failed_create(result: &PlatformCommandResult, secrets: &[&str]) -> AppError {
+    AppError::Platform(failure_details(
+        "create infobase",
+        "infobase",
+        result,
+        secrets,
+    ))
 }
 
 /// Что не удалось и с каким кодом; вывод и журнал за ним пишет владелец улик.
-fn failure_details(action: &str, target: &str, result: &PlatformCommandResult) -> String {
-    format_failure_evidence(
+fn failure_details(
+    action: &str,
+    target: &str,
+    result: &PlatformCommandResult,
+    secrets: &[&str],
+) -> String {
+    masked_evidence(
         format!(
             "{action} failed for '{target}' with exit code {}",
             result.process.exit_code
         ),
-        &result.process.stdout,
-        &result.process.stderr,
-        result.platform_log.as_deref(),
+        result,
+        secrets,
+    )
+}
+
+/// Улики неудачной команды платформы — вывод и журнал — с паролями `secrets`, скрытыми из них.
+fn masked_evidence(headline: String, result: &PlatformCommandResult, secrets: &[&str]) -> String {
+    format_failure_evidence(
+        headline,
+        &mask_text(&result.process.stdout, secrets),
+        &mask_text(&result.process.stderr, secrets),
+        result
+            .platform_log
+            .as_deref()
+            .map(|log| mask_text(log, secrets))
+            .as_deref(),
         result.platform_log_path.as_deref(),
     )
+}
+
+/// Пароли базы и её СУБД из секции конфигурации — для маскирования вывода платформы.
+fn infobase_secrets(config: &AppConfig) -> Vec<&str> {
+    [
+        config.infobase.password.as_deref(),
+        config
+            .infobase
+            .dbms
+            .as_ref()
+            .and_then(|dbms| dbms.password.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|secret| !secret.is_empty())
+    .collect()
 }
 
 fn missing_infobase_marker_error(
@@ -1107,7 +1284,8 @@ fn missing_infobase_marker_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        edt_workspace_marker_path, infobase_marker_path, ordered_source_sets, InitStepStatus,
+        edt_workspace_marker_path, infobase_marker_path, ordered_source_sets, InitRequest,
+        InitStepStatus,
     };
     #[cfg(unix)]
     use crate::config::model::InfobaseConfig;
@@ -1264,7 +1442,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         )
         .expect_err("a cluster base needs the dbms section");
 
@@ -1293,7 +1471,7 @@ mod tests {
             )
             .with_cancellation(cancellation),
             &config,
-            false,
+            &InitRequest::default(),
         )
         .expect_err("interrupted init");
         let payload = failure.payload.expect("payload");
@@ -1407,7 +1585,10 @@ mod tests {
             super::execute(
                 &ExecutionContext::cli(CommandName::Init).with_cancellation(cancellation),
                 config,
-                &crate::use_cases::request::InitRequest { dry_run: false },
+                &crate::use_cases::request::InitRequest {
+                    dry_run: false,
+                    from: None,
+                },
             )
         })
     }
@@ -1643,7 +1824,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
@@ -1695,7 +1876,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
@@ -1748,7 +1929,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
@@ -1803,7 +1984,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
@@ -1842,7 +2023,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
@@ -1897,7 +2078,11 @@ mod tests {
         config.tools.edt_cli.path = Some(edt_script);
         config.tools.edt_cli.interactive_mode = true;
 
-        let result = super::run_init(&ExecutionContext::cli(CommandName::Init), &config, false);
+        let result = super::run_init(
+            &ExecutionContext::cli(CommandName::Init),
+            &config,
+            &InitRequest::default(),
+        );
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
         let result = result.unwrap_or_else(|failure| panic!("{failure:?}\nEDT: {edt_calls_text}"));
@@ -1944,7 +2129,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
-            false,
+            &InitRequest::default(),
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");

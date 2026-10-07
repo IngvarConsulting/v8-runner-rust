@@ -60,7 +60,7 @@ flowchart TB
 `mcp serve` разбирает `app.rs`. Имена в коде старше имён команд: `push` — `build_project`,
 `pull` — `dump_config`, `upload` — `load_artifact`, `check` — `check_syntax`, `make` —
 `artifacts`, `clone` — `bootstrap_project`, `init` — `config_init`, `infobase create` —
-`init_project` (в `CommandName` — `Init`), `download`, `infobase dump` и `restore` —
+`init_project` (в `CommandName` — `Init`; копия базы `--from` — `init_project/copy.rs`), `download`, `infobase dump` и `restore` —
 `infobase_export`, `extensions` — `configure_extensions` и `extension_inventory`, `test` —
 `run_tests`; остальные названы по команде: `convert_sources`, `launch_app`, `publish_infobase`,
 `tools_download`, `status`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит

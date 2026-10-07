@@ -845,6 +845,9 @@ pub struct LaunchRequest {
 pub struct InitRequest {
     /// Decide every step and locate the platform without creating anything.
     pub dry_run: bool,
+    /// `--from <база>`: имя объявленной базы, копией которой становится база этой рабочей
+    /// копии (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
+    pub from: Option<String>,
 }
 
 /// Transport-neutral request for extension property updates.
