@@ -27,7 +27,6 @@ use crate::support::error::{AppError, CapabilityReason};
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::exchange_guard::{remember_copied_base, remember_created_base, CopiedFrom};
 use crate::use_cases::generation_reader::{designer_log_file, read_generation, GenerationProcess};
-use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
 use crate::use_cases::infobase_export::{
     run_restore_provider, run_snapshot_provider, validate_platform_artifact,
 };
@@ -35,7 +34,8 @@ use crate::use_cases::interruption::collecting_deferrals;
 use crate::use_cases::progress::log_live_stage;
 
 use super::{
-    ensure_created, existing_file_infobase, infobase_marker_path, interruption_step_outcome,
+    ensure_created, existing_file_infobase, failure_details, infobase_marker_path,
+    infobase_secrets, interruption_step_outcome, locate_infobase_creator, masked_evidence,
     prepare_infobase_parent, standalone_refusal, ClusterCreation, StepOutcome, INFOBASE_CREATE,
 };
 
@@ -177,37 +177,6 @@ fn free_the_source(source: &AppConfig, from: &str) -> String {
     }
 }
 
-/// Пароли базы и её СУБД — для маскирования вывода платформы.
-fn infobase_secrets(config: &AppConfig) -> Vec<&str> {
-    [
-        config.infobase.password.as_deref(),
-        config
-            .infobase
-            .dbms
-            .as_ref()
-            .and_then(|dbms| dbms.password.as_deref()),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|secret| !secret.is_empty())
-    .collect()
-}
-
-/// Улики неудачной команды платформы с паролями, скрытыми из её вывода и журнала.
-fn masked_evidence(headline: String, result: &PlatformCommandResult, secrets: &[&str]) -> String {
-    format_failure_evidence(
-        headline,
-        &mask_text(&result.process.stdout, secrets),
-        &mask_text(&result.process.stderr, secrets),
-        result
-            .platform_log
-            .as_deref()
-            .map(|log| mask_text(log, secrets))
-            .as_deref(),
-        result.platform_log_path.as_deref(),
-    )
-}
-
 /// Убирает брошенный образ — свой артефакт команды: следующая попытка начнёт с чистого
 /// места. Неудача уборки ответ не меняет и уходит в журнал.
 fn discard_snapshot(snapshot: &Path) {
@@ -285,9 +254,11 @@ impl Copy<'_> {
                 Creator::File { dir }
             }
         };
-        let designer = match utilities.locate(UtilityType::V8) {
-            Ok(location) => location.path,
-            Err(error) => return self.failed(AppError::from(error)),
+        // Конфигуратор ищется так же, как у `infobase create`: превью отказывает на той же
+        // отсутствующей платформе, что и прогон.
+        let designer = match locate_infobase_creator(Provider::Designer, utilities) {
+            Ok(binary) => binary,
+            Err(error) => return self.failed(error),
         };
         if dry_run {
             return StepOutcome::planned(
@@ -334,7 +305,9 @@ impl Copy<'_> {
                 Creator::File { dir } => {
                     let created = self.restore(&designer)?;
                     deferrals.note_result(INFOBASE_CREATE, &created);
-                    ensure_created(&created, &infobase_marker_path(dir))?;
+                    let mut secrets = infobase_secrets(self.config);
+                    secrets.extend(infobase_secrets(self.source));
+                    ensure_created(&created, &infobase_marker_path(dir), &secrets)?;
                     warnings.extend(self.probe_access(utilities, &designer));
                 }
                 Creator::Cluster(cluster) => {
@@ -522,11 +495,13 @@ impl Copy<'_> {
         let failure = match restored {
             Ok(result) => match result.process.outcome() {
                 Ok(()) => return Ok(()),
-                Err(code) => {
+                Err(_) => {
                     let mut secrets = infobase_secrets(self.config);
+                    secrets.extend(infobase_secrets(self.source));
                     secrets.extend(cluster.secrets());
-                    AppError::Platform(masked_evidence(
-                        format!("load the snapshot failed for 'infobase' with exit code {code}"),
+                    AppError::Platform(failure_details(
+                        "load the snapshot",
+                        "infobase",
                         &result,
                         &secrets,
                     ))

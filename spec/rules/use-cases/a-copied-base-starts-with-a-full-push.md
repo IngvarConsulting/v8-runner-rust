@@ -4,6 +4,7 @@ check:
   - tests/cli_infobase_copy.rs::a_copied_base_starts_with_a_full_push
   - tests/cli_infobase_copy.rs::debugging_on_a_copy_of_the_base_leaves_the_neighbour_untouched
   - src/use_cases/exchange_guard.rs::a_copy_mark_is_memory_and_offers_no_pull
+  - tests/cli_infobase_copy.rs::a_base_assembled_from_the_sources_removes_the_copy_mark
 ---
 
 # После копии базы первая отправка полная

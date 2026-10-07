@@ -553,7 +553,7 @@ fn create_file_infobase(
             .infobase_create(import)
             .map_err(AppError::from)?;
             deferrals.note_result(INFOBASE_CREATE, &created);
-            ensure_created(&created, marker)?;
+            ensure_created(&created, marker, &infobase_secrets(config))?;
             Ok(created)
         }
         Provider::Designer => {
@@ -572,7 +572,7 @@ fn create_file_infobase(
             .create_infobase()
             .map_err(AppError::from)?;
             deferrals.note_result(INFOBASE_CREATE, &created);
-            ensure_created(&created, marker)?;
+            ensure_created(&created, marker, &infobase_secrets(config))?;
             let Some(import) = import else {
                 return Ok(created);
             };
@@ -630,9 +630,13 @@ fn assemble_with_designer(
 /// Исход создания по коду выхода. Неудача, после которой файл базы всё же появился, оставила
 /// каталог с базой неизвестного вида: повтор `infobase create` на ней отказывает, а память о
 /// ней не записана, — отказ называет оба выхода.
-fn ensure_created(result: &PlatformCommandResult, marker: &Path) -> Result<(), AppError> {
+fn ensure_created(
+    result: &PlatformCommandResult,
+    marker: &Path,
+    secrets: &[&str],
+) -> Result<(), AppError> {
     result.process.outcome().map_err(|_code| {
-        let error = failed_create(result);
+        let error = failed_create(result, secrets);
         if !marker.exists() {
             return error;
         }
@@ -773,13 +777,36 @@ impl<'a> ClusterCreation<'a> {
         .map_err(AppError::from)?;
         deferrals.note_result(INFOBASE_CREATE, &created);
         if created.process.outcome().is_err() {
-            return Err(cluster_create_failure(
-                &self.creation,
-                &created,
-                &self.database,
-            ));
+            return Err(self.failure(&created));
         }
         Ok(())
+    }
+
+    /// Отказ `CREATEINFOBASE`. Причину по прозе платформы раннер не угадывает
+    /// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно без
+    /// неё: без администратора кластера — этот уровень и его ключи; и что неудача может
+    /// оставить базу данных в СУБД. Пароли в выводе платформы скрыты.
+    fn failure(&self, result: &PlatformCommandResult) -> AppError {
+        let mut message = format_failure_evidence(
+            format!(
+                "create infobase failed for 'infobase' with exit code {}",
+                result.process.exit_code
+            ),
+            &mask_text(&result.process.stdout, &self.secrets()),
+            &mask_text(&result.process.stderr, &self.secrets()),
+            None,
+            None,
+        );
+        if self.creation.cluster_user.is_none() {
+            message.push_str(
+                "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
+            );
+        }
+        message.push_str(&format!(
+            "; a failed creation may leave {} in the DBMS, and a retry over it registers the infobase on that database — check the DBMS before retrying",
+            self.database
+        ));
+        AppError::Platform(message)
     }
 
     /// Пароли СУБД и администратора кластера — для маскирования вывода платформы.
@@ -817,40 +844,6 @@ fn cluster_creation(config: &AppConfig) -> Result<ClusterInfobaseCreation<'_>, A
             .and_then(|cluster| cluster.password.as_deref())
             .filter(|password| !password.is_empty()),
     })
-}
-
-/// Отказ создания базы в кластере. Причину по прозе платформы раннер не угадывает
-/// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно без неё:
-/// без администратора кластера — этот уровень и его ключи; и что неудача может оставить базу
-/// данных в СУБД. Пароли в выводе платформы скрыты.
-fn cluster_create_failure(
-    creation: &ClusterInfobaseCreation<'_>,
-    result: &PlatformCommandResult,
-    database: &str,
-) -> AppError {
-    let secrets: Vec<&str> = [creation.database_password, creation.cluster_password]
-        .into_iter()
-        .flatten()
-        .collect();
-    let mut message = format_failure_evidence(
-        format!(
-            "create infobase failed for 'infobase' with exit code {}",
-            result.process.exit_code
-        ),
-        &mask_text(&result.process.stdout, &secrets),
-        &mask_text(&result.process.stderr, &secrets),
-        None,
-        None,
-    );
-    if creation.cluster_user.is_none() {
-        message.push_str(
-            "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
-        );
-    }
-    message.push_str(&format!(
-        "; a failed creation may leave {database} in the DBMS, and a retry over it registers the infobase on that database — check the DBMS before retrying"
-    ));
-    AppError::Platform(message)
 }
 
 fn ensure_edt_workspace(
@@ -1147,26 +1140,65 @@ fn ensure_platform_success(
     result
         .process
         .outcome()
-        .map_err(|_code| AppError::Platform(failure_details(action, target, result)))
+        .map_err(|_code| AppError::Platform(failure_details(action, target, result, &[])))
 }
 
-/// Создание базы не удалось.
-fn failed_create(result: &PlatformCommandResult) -> AppError {
-    AppError::Platform(failure_details("create infobase", "infobase", result))
+/// Создание базы не удалось; пароли `secrets` в выводе платформы скрыты.
+fn failed_create(result: &PlatformCommandResult, secrets: &[&str]) -> AppError {
+    AppError::Platform(failure_details(
+        "create infobase",
+        "infobase",
+        result,
+        secrets,
+    ))
 }
 
 /// Что не удалось и с каким кодом; вывод и журнал за ним пишет владелец улик.
-fn failure_details(action: &str, target: &str, result: &PlatformCommandResult) -> String {
-    format_failure_evidence(
+fn failure_details(
+    action: &str,
+    target: &str,
+    result: &PlatformCommandResult,
+    secrets: &[&str],
+) -> String {
+    masked_evidence(
         format!(
             "{action} failed for '{target}' with exit code {}",
             result.process.exit_code
         ),
-        &result.process.stdout,
-        &result.process.stderr,
-        result.platform_log.as_deref(),
+        result,
+        secrets,
+    )
+}
+
+/// Улики неудачной команды платформы — вывод и журнал — с паролями `secrets`, скрытыми из них.
+fn masked_evidence(headline: String, result: &PlatformCommandResult, secrets: &[&str]) -> String {
+    format_failure_evidence(
+        headline,
+        &mask_text(&result.process.stdout, secrets),
+        &mask_text(&result.process.stderr, secrets),
+        result
+            .platform_log
+            .as_deref()
+            .map(|log| mask_text(log, secrets))
+            .as_deref(),
         result.platform_log_path.as_deref(),
     )
+}
+
+/// Пароли базы и её СУБД из секции конфигурации — для маскирования вывода платформы.
+fn infobase_secrets(config: &AppConfig) -> Vec<&str> {
+    [
+        config.infobase.password.as_deref(),
+        config
+            .infobase
+            .dbms
+            .as_ref()
+            .and_then(|dbms| dbms.password.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|secret| !secret.is_empty())
+    .collect()
 }
 
 fn missing_infobase_marker_error(

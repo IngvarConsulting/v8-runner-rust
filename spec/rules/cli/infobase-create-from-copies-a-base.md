@@ -8,6 +8,9 @@ check:
   - tests/cli_infobase_copy.rs::a_source_held_by_a_running_command_is_refused_before_the_snapshot
   - tests/cli_infobase_copy.rs::the_source_stays_locked_while_the_copy_runs
   - tests/cli_infobase_copy.rs::a_copy_the_runner_cannot_open_names_the_users_of_the_source
+  - tests/cli_infobase_copy.rs::a_copy_into_a_standalone_server_is_refused_with_the_recipe
+  - tests/cli_infobase_copy.rs::a_failed_load_into_the_cluster_names_the_image_and_hides_the_passwords
+  - tests/cli_infobase_copy.rs::a_failed_load_into_a_file_base_hides_the_passwords
 ---
 
 # `infobase create --from` копирует базу
@@ -16,7 +19,8 @@ check:
 объявленной по имени в местном слое, с её данными и конфигурацией: снимает с источника образ
 DT Конфигуратором (`/DumpIB`) в `workPath/copies/<база>.dt` и поднимает из него новую базу
 Конфигуратором — файловую `/RestoreIB`, базу в кластере `CREATEINFOBASE`, затем `/RestoreIB`.
-Новую базу на автономном сервере команда не создаёт: отказ называет рецепт. Источник, не
+Новую базу на автономном сервере команда не создаёт: отказ рода подбора называет рецепт
+`ibcmd server config init` и `ibcmd infobase create`, и снимок не начинается. Источник, не
 объявленный в местном слое, файловый источник без базы на месте и база, которую команда
 создаёт, — отказ до платформы.
 
@@ -32,6 +36,10 @@ DT Конфигуратором (`/DumpIB`) в `workPath/copies/<база>.dt` �
 существующую базу данных с тем же именем, и сверх того — что её данные заменит образ
 источника. Отказа это не даёт: решение владельца от 07.10.2026 — предупредить, дальше
 ответственность разработчика.
+
+Неудачная загрузка образа в созданную базу кластера оставляет её пустой, и отказ называет
+это и `infobase restore --input <образ> --replace`. Пароли новой базы и источника в
+отказах загрузки скрыты.
 
 Пользователи новой базы — пользователи источника. Новую файловую базу команда спрашивает о
 поколении конфигурации; нет ответа — предупреждение, которое называет пользователей

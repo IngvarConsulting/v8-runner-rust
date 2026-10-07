@@ -47,6 +47,11 @@ for arg in "$@"; do
   previous="$arg"
 done
 if [ -n "$restore" ]; then
+  if [ -f '{hold_restore}' ]; then
+    : > '{restore_started}'
+    waited=0
+    while [ ! -e '{restore_release}' ] && [ "$waited" -lt 300 ]; do sleep 0.1; waited=$((waited + 1)); done
+  fi
   if [ -f '{fail_restore}' ]; then
     printf 'the image is not loaded: %s\n' "$*" >&2
     exit 1
@@ -84,6 +89,9 @@ exit 0"#,
             busy = root.join("busy").display(),
             fail_restore = root.join("fail-restore").display(),
             hold_dump = root.join("hold-dump").display(),
+            hold_restore = root.join("hold-restore").display(),
+            restore_started = root.join("restore-started").display(),
+            restore_release = root.join("restore-release").display(),
             dump_started = root.join("dump-started").display(),
             dump_release = root.join("dump-release").display(),
             no_generation = root.join("no-generation").display(),
@@ -363,8 +371,7 @@ fn debugging_on_a_copy_of_the_base_leaves_the_neighbour_untouched() {
     );
 }
 
-/// Память копии — только признак копии и поколение новой базы: прежняя память под именем
-/// базы стирается, первая отправка идёт полной и отказом первого знакомства не
+/// Память копии — только признак копии: прежняя память под именем базы стирается, первая отправка идёт полной и отказом первого знакомства не
 /// останавливается.
 #[test]
 fn a_copied_base_starts_with_a_full_push() {
@@ -746,43 +753,49 @@ fn a_failed_load_into_the_cluster_names_the_image_and_hides_the_passwords() {
     assert!(
         message.contains("created empty in the cluster")
             && message.contains("infobase restore --input")
+            && message.contains("--replace")
             && message.contains("the image is not loaded"),
         "{message}"
     );
 }
 
-/// Пока идёт копия, замок источника держит она: команда копии-владельца получает
-/// `infobase_busy`.
+/// Пока идёт копия, замок источника держит она — и во время снимка, и во время загрузки образа
+/// в новую базу: команда копии-владельца получает `infobase_busy`.
 #[test]
 fn the_source_stays_locked_while_the_copy_runs() {
-    let stand = Stand::new();
-    let (neighbour, neighbour_base) = stand.neighbour();
-    let worktree = stand.worktree(&neighbour_base);
-    init_own_base(&worktree);
-    fs::write(stand.root().join("hold-dump"), "").expect("hold");
-    let _copy = support::RunnerGuard(
-        v8_runner_command()
-            .arg("--config")
-            .arg(&worktree)
-            .args(["--json-message", "infobase", "create", "--from", "upstream"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn copy"),
-    );
-    assert!(
-        support::wait_for_file(
-            &stand.root().join("dump-started"),
-            std::time::Duration::from_secs(30)
-        ),
-        "the copy never reached the snapshot"
-    );
+    for phase in ["dump", "restore"] {
+        let stand = Stand::new();
+        let (neighbour, neighbour_base) = stand.neighbour();
+        let worktree = stand.worktree(&neighbour_base);
+        init_own_base(&worktree);
+        fs::write(stand.root().join(format!("hold-{phase}")), "").expect("hold");
+        let _copy = support::RunnerGuard(
+            v8_runner_command()
+                .arg("--config")
+                .arg(&worktree)
+                .args(["--json-message", "infobase", "create", "--from", "upstream"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn copy"),
+        );
+        assert!(
+            support::wait_for_file(
+                &stand.root().join(format!("{phase}-started")),
+                std::time::Duration::from_secs(30)
+            ),
+            "the copy never reached {phase}"
+        );
 
-    let output = run(&neighbour, &["push", "--force"]);
-    fs::write(stand.root().join("dump-release"), "").expect("release");
+        let output = run(&neighbour, &["push", "--force"]);
+        fs::write(stand.root().join(format!("{phase}-release")), "").expect("release");
 
-    let payload = envelope(&output);
-    assert_eq!(payload["error"]["code"], "infobase_busy", "{payload}");
+        let payload = envelope(&output);
+        assert_eq!(
+            payload["error"]["code"], "infobase_busy",
+            "{phase}: {payload}"
+        );
+    }
 }
 
 /// Новая файловая база, о поколении которой раннер ответа не получил, — предупреждение: её
@@ -808,4 +821,105 @@ fn a_copy_the_runner_cannot_open_names_the_users_of_the_source() {
             && message.contains("infobases.origin"),
         "{message}"
     );
+}
+
+/// Неудачная загрузка образа в файловую базу: пароли новой базы и источника, которые
+/// напечатал Конфигуратор, в отказе скрыты.
+#[test]
+fn a_failed_load_into_a_file_base_hides_the_passwords() {
+    let stand = Stand::new();
+    let source = stand.root().join("erp-ib");
+    fs::create_dir_all(&source).expect("source");
+    fs::write(source.join("1Cv8.1CD"), "source data").expect("source base");
+    let worktree = write_copy(
+        &stand.root().join("wt"),
+        &stand.platform,
+        &format!(
+            "infobases:\n  origin:\n    connection: 'File=build/ib'\n    user: Admin\n    password: ib-s3cret\n  upstream:\n    connection: 'File={}'\n    user: Admin\n    password: src-s3cret\n",
+            source.display()
+        ),
+    );
+    fs::write(stand.root().join("fail-restore"), "").expect("fail restore");
+
+    let output = run(&worktree, &["infobase", "create", "--from", "upstream"]);
+
+    assert!(!output.status.success());
+    assert!(calls(stand.root()).contains("ib-s3cret"));
+    let payload = envelope(&output);
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("the image is not loaded"), "{message}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !text.contains("ib-s3cret") && !text.contains("src-s3cret"),
+        "{text}"
+    );
+}
+
+/// Новую базу на автономном сервере `--from` не создаёт: отказ рода подбора с рецептом, и
+/// снимок не начинается.
+#[test]
+fn a_copy_into_a_standalone_server_is_refused_with_the_recipe() {
+    let stand = Stand::new();
+    let source = stand.root().join("erp-ib");
+    fs::create_dir_all(&source).expect("source");
+    fs::write(source.join("1Cv8.1CD"), "source data").expect("source base");
+    let worktree = write_copy(
+        &stand.root().join("wt"),
+        &stand.platform,
+        &format!(
+            "infobases:\n  origin:\n    user: gate\n    standalone:\n      gate: 127.0.0.1:1543\n      exchange: sftp\n  upstream:\n    connection: 'File={}'\n",
+            source.display()
+        ),
+    );
+    // Ключи исполнителей проекта ведут к Конфигуратору, которому прямой шлюз здесь не объявлен.
+    let project = fs::read_to_string(&worktree).expect("project");
+    fs::write(
+        &worktree,
+        project.replace("providers:\n  build: designer\n  dump: designer\n", ""),
+    )
+    .expect("project without providers");
+
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let mut args = vec!["infobase", "create", "--from", "upstream"];
+        args.extend_from_slice(extra);
+        let output = run(&worktree, &args);
+
+        assert!(!output.status.success(), "{extra:?}");
+        let payload = envelope(&output);
+        assert_eq!(payload["error"]["kind"], "capability", "{payload}");
+        assert_eq!(payload["error"]["code"], "target", "{payload}");
+        let message = payload["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("ibcmd server config init")
+                && message.contains("ibcmd infobase create"),
+            "{message}"
+        );
+    }
+    assert!(!calls(stand.root()).contains("/DumpIB"));
+}
+
+/// База, собранная `infobase create` из исходников, снимает признак копии: её содержимое —
+/// исходники этой копии.
+#[test]
+fn a_base_assembled_from_the_sources_removes_the_copy_mark() {
+    let stand = Stand::new();
+    let (_neighbour, neighbour_base) = stand.neighbour();
+    let worktree = stand.worktree(&neighbour_base);
+    let wt = worktree.parent().expect("worktree").to_path_buf();
+    init_own_base(&worktree);
+    succeeded(&run(
+        &worktree,
+        &["infobase", "create", "--from", "upstream"],
+    ));
+    let mark = wt
+        .join("work")
+        .join("infobases")
+        .join("origin")
+        .join("copied-from.json");
+    assert!(mark.exists());
+    fs::remove_dir_all(wt.join("build").join("ib")).expect("drop the copy");
+
+    succeeded(&run(&worktree, &["infobase", "create"]));
+
+    assert!(!mark.exists(), "the assembled base is no copy");
 }
