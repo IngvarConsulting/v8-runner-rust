@@ -1605,7 +1605,7 @@ impl EphemeralHostKey {
 
     /// Ожидание сессии: только этот ключ.
     pub fn expectation(&self) -> HostKeyExpectation {
-        HostKeyExpectation::Pinned(self.fingerprint.clone())
+        HostKeyExpectation::Pinned(self.fingerprint)
     }
 }
 
