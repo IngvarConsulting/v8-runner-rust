@@ -34,7 +34,7 @@ use crate::use_cases::interruption::{CommandFailure, Deferrals};
 
 /// Открытая точка входа: свой процесс с сессией или только сессия к чужому.
 pub(crate) enum AgentHandle {
-    Managed(ManagedAgent),
+    Managed(Box<ManagedAgent>),
     Attached {
         session: AgentSession,
         base_dir: PathBuf,
@@ -294,7 +294,7 @@ fn open_handle(
                 wait,
             )
             .map_err(AppError::from)?;
-            Ok(AgentHandle::Managed(managed))
+            Ok(AgentHandle::Managed(Box::new(managed)))
         }
     }
 }
