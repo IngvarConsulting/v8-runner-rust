@@ -1,12 +1,12 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 3
+version: 4
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
   - src/command_envelope.rs::every_error_kind_and_code_is_named_by_the_schema_and_by_a_table
   - tests/cli_infobase_lock.rs::an_mcp_tool_on_a_held_base_is_refused_at_once
-  - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner
+  - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_runs_with_a_warning_and_names_the_owner
 ---
 
 # Конверт ответа команды
@@ -25,8 +25,9 @@ check:
 цели) и `soon` (пока не умеет), и все отвечают кодом выхода 2. У `workspace` — чужая работа
 с тем же местом, с кодом выхода 3: занятость, которая проходит, если повторить, —
 `workspace_busy` (рабочий каталог держит другая команда) и `infobase_busy` (файловую базу
-держит другая команда), — и `infobase_held`: файловую базу держит другая рабочая копия, и
-повтор этого не меняет.
+держит другая команда). База другой рабочей копии отказом не служит: команда идёт, а
+`warnings` несёт предупреждение
+(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`).
 
 Схема порождается из типов: `UPDATE_ENVELOPE_SCHEMA=1 cargo test
 generated_envelope_schema_is_current`. Руками её не правят — иначе закрытый набор
@@ -43,9 +44,8 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 **Что может назвать MCP.** Конверт один, словарь у транспортов разный: MCP сводит рода к
 `validation`, `runtime` и `platform` (`DEC.2026-04-20.BUSINESS-FAILURES-ARE-NOT-TRANSPORT-FAULTS`),
 поэтому ни одного кода возможности там не появляется — отказ по возможности приезжает как
-`runtime_failure`. Так же приезжают занятый каталог, занятая база и база другой рабочей
-копии: MCP отказывает сразу, у занятой базы текст называет базу и команду, которая её держит,
-а у базы другой копии — копию-владельца. Шаг `next` от этого не
+`runtime_failure`. Так же приезжают занятый каталог и занятая база: MCP отказывает сразу, у
+занятой базы текст называет базу и команду, которая её держит. Шаг `next` от этого не
 зависит и едет обоими транспортами: он про предмет, а не про провод.
 
 **Что изменила версия 2.** Рода и коды стали перечислениями, у отказа появились `next` и
@@ -57,10 +57,14 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 
 **Что изменила версия 3.** Набор кодов вырос: `infobase_busy` — отказ на шаге
 `infobase lock`, когда файловую базу держит другая команда, и `infobase_held` — отказ на шаге
-`infobase owner`, когда её держит другая рабочая копия; его `next` — своя чистая база,
+`infobase owner`, когда её держит другая рабочая копия (убран в версии 4); его `next` — своя чистая база,
 `infobase create`. Рода не изменились. В эту же версию вошли производители кодов
 `non_fast_forward` и `no_memory` и шаг `next` с `source_set` и `keys`; код чужих изменений
 войдёт в неё же, когда появится его производитель.
+
+**Что изменила версия 4.** Кода `infobase_held` больше нет: запись в базу другой рабочей копии
+не отказывает, а предупреждает (#437). Несовместимо с 0.13.0: потребитель, который ждал этот
+код, теперь получает удачу или другой отказ с предупреждением в `warnings`.
 
 **Два разных `code`.** Код отказа команды живёт в `error.code` этой формы. Код шага
 исполнителя, который едет внутри `data.execution.errors[]`, — другой словарь и другая
