@@ -1499,7 +1499,10 @@ esac
 exit 0"#;
 
 struct PackageProject {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    /// Канонический путь временного каталога: на macOS `/var` — ссылка на `/private/var`, а
+    /// раннер отвечает каноническими путями.
+    base: PathBuf,
     root: PathBuf,
 }
 
@@ -1508,7 +1511,8 @@ impl PackageProject {
     /// формате Конфигуратора; `ibcmd` лежит в `platform/bin`, база не объявлена.
     fn new() -> Self {
         let dir = temp_workspace();
-        let root = dir.path().join("project");
+        let base = fs::canonicalize(dir.path()).expect("canonical temp dir");
+        let root = base.join("project");
         write_designer_source(&root.join("src/cf"), "Main", false);
         write_designer_source(&root.join("src/sales"), "Sales", true);
         write_designer_external_source(&root.join("src/tools"), &["Tool"]);
@@ -1518,7 +1522,11 @@ impl PackageProject {
         )
         .expect("project file");
         write_script(&root.join("platform/bin/ibcmd"), IBCMD);
-        Self { dir, root }
+        Self {
+            _dir: dir,
+            base,
+            root,
+        }
     }
 
     fn run(&self, args: &[&str]) -> (std::process::Output, Value) {
@@ -1651,9 +1659,9 @@ fn convert_an_external_set_to_a_package_is_refused() {
 #[test]
 fn convert_a_package_file_to_xml_exports_it_in_a_throwaway_base() {
     let project = PackageProject::new();
-    let package = project.dir.path().join("main.cf");
+    let package = project.base.join("main.cf");
     fs::write(&package, "package").expect("package file");
-    let target = project.dir.path().join("xml");
+    let target = project.base.join("xml");
 
     let (output, envelope) = project.run(&[
         "convert",
@@ -1691,7 +1699,7 @@ fn convert_a_package_file_to_xml_exports_it_in_a_throwaway_base() {
 #[test]
 fn convert_a_package_file_without_to_goes_to_xml_under_work_path() {
     let project = PackageProject::new();
-    let package = project.dir.path().join("ext.cfe");
+    let package = project.base.join("ext.cfe");
     fs::write(&package, "package").expect("package file");
 
     let (output, envelope) = project.run(&["convert", &package.display().to_string()]);
@@ -1712,7 +1720,7 @@ fn convert_a_package_file_without_to_goes_to_xml_under_work_path() {
 fn convert_a_package_direction_without_ibcmd_answers_an_environment_failure() {
     let project = PackageProject::new();
     fs::remove_file(project.root.join("platform/bin/ibcmd")).expect("remove ibcmd");
-    let empty_path = project.dir.path().join("no-tools");
+    let empty_path = project.base.join("no-tools");
     fs::create_dir_all(&empty_path).expect("empty PATH");
 
     let output = v8_runner_command()
@@ -1764,7 +1772,7 @@ fn convert_a_package_preview_dispatches_nothing() {
 #[test]
 fn convert_refuses_a_direction_that_is_not_a_conversion() {
     let project = PackageProject::new();
-    let package = project.dir.path().join("main.cf");
+    let package = project.base.join("main.cf");
     fs::write(&package, "package").expect("package file");
     let package = package.display().to_string();
 
@@ -1932,7 +1940,7 @@ fn convert_a_cancelled_run_removes_the_throwaway_base() {
 #[test]
 fn convert_a_package_file_output_inside_the_project_is_refused() {
     let project = PackageProject::new();
-    let package = project.dir.path().join("main.cf");
+    let package = project.base.join("main.cf");
     fs::write(&package, "package").expect("package file");
     for output in [
         project.root.join("src/cf/xml"),
@@ -1957,7 +1965,7 @@ fn convert_a_package_file_output_inside_the_project_is_refused() {
 #[test]
 fn convert_to_package_reads_the_output_as_make_does() {
     let project = PackageProject::new();
-    let out = project.dir.path().join("out");
+    let out = project.base.join("out");
 
     let (output, envelope) = project.run(&[
         "convert",
