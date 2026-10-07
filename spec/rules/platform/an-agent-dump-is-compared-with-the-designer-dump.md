@@ -1,7 +1,7 @@
 ---
 id: INV.PLATFORM.AN-AGENT-DUMP-IS-COMPARED-WITH-THE-DESIGNER-DUMP
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/230
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/420
 ---
 
 # Выгрузка агента сравнена с выгрузкой Конфигуратора побайтно
