@@ -208,12 +208,8 @@ impl ThrowawayInfobase {
         self.dir.join("xml").join(source_set)
     }
 
-    /// Переводит исходники набора формата EDT в XML каталога [`Self::xml_dir`] — один
-    /// владелец перевода для `make` и `convert`: `1cedtcli` шагом сборки `push`
-    /// (`build_project::execute_edt_export_step`) в рабочей области [`edt_workspace`].
-    /// Предел шага задаёт вызывающий: `make` идёт без предела, как `push`, `convert` — с
-    /// пределом EDT команды (`ExecutionContext::edt_timeout`). Ответ — каталог XML и
-    /// предупреждения шага.
+    /// Переводит исходники набора формата EDT в XML каталога [`Self::xml_dir`] единственным
+    /// переводом [`edt_sources_to_xml`]. Ответ — каталог XML и предупреждения шага.
     pub(crate) fn xml_from_edt(
         &self,
         context: &ExecutionContext,
@@ -221,34 +217,13 @@ impl ThrowawayInfobase {
         source_set: &SourceSetConfig,
         timeout: Option<Duration>,
     ) -> Result<(PathBuf, Vec<String>), AppError> {
-        let inventory = SourceSetInventory::new(config);
-        let edt_context = inventory.edt_context(&source_set.name).ok_or_else(|| {
-            AppError::Runtime(format!(
-                "missing EDT context for source-set '{}'",
-                source_set.name
-            ))
-        })?;
-        let mut utilities = PlatformUtilities::from_config(config);
-        let location = utilities
-            .locate(UtilityType::EdtCli)
-            .map_err(AppError::from)?;
-        let edt = EdtDsl::new(
-            location.path,
-            edt_workspace(&config.work_path),
-            utilities.runner_for(UtilityType::EdtCli),
-            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        )
-        .with_timeout(timeout);
         let target = self.xml_dir(&source_set.name);
-        log_live_stage("edt export", "[EDT] converting the sources to XML");
-        let warnings = crate::use_cases::build_project::execute_edt_export_step(
+        let warnings = edt_sources_to_xml(
             context,
             config,
-            &edt,
             source_set,
-            edt_context,
             &target,
-            context.command().as_str(),
+            EdtConversion::OneShot { timeout },
         )?;
         Ok((target, warnings))
     }
@@ -481,6 +456,68 @@ impl Drop for ThrowawayInfobase {
     fn drop(&mut self) {
         let _ = self.remove();
     }
+}
+
+/// Чем [`edt_sources_to_xml`] переводит исходники EDT.
+pub(crate) enum EdtConversion<'s> {
+    /// Общая сессия EDT, которую команда уже держит: одноразовый `1cedtcli` упёрся бы в
+    /// рабочую область сессии. Предел — у самой сессии (`command_timeout_ms`).
+    Session(&'s EdtDsl<'s>),
+    /// Одноразовый `1cedtcli` с пределом шага: `None` — без предела, как у `push`.
+    OneShot { timeout: Option<Duration> },
+}
+
+/// Единственный перевод исходников набора формата EDT в XML каталога `target`: `1cedtcli`
+/// шагом сборки `push` (`build_project::execute_edt_export_step`) в рабочей области
+/// [`edt_workspace`]. Его зовут временная база `make` и `convert`
+/// ([`ThrowawayInfobase::xml_from_edt`]) и сборка файловой базы проекта EDT у
+/// `infobase create`. Чем переводить, задаёт вызывающий ([`EdtConversion`]): `make` и
+/// `infobase create` без общей сессии — одноразовым процессом без предела, как `push`,
+/// `convert` — с пределом EDT команды (`ExecutionContext::edt_timeout`), `infobase create` при
+/// общей сессии — через неё, с её пределом.
+/// Ответ — предупреждения шага.
+pub(crate) fn edt_sources_to_xml(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    source_set: &SourceSetConfig,
+    target: &Path,
+    runner: EdtConversion<'_>,
+) -> Result<Vec<String>, AppError> {
+    let inventory = SourceSetInventory::new(config);
+    let edt_context = inventory.edt_context(&source_set.name).ok_or_else(|| {
+        AppError::Runtime(format!(
+            "missing EDT context for source-set '{}'",
+            source_set.name
+        ))
+    })?;
+    let mut utilities = PlatformUtilities::from_config(config);
+    let one_shot;
+    let edt = match runner {
+        EdtConversion::Session(session) => session,
+        EdtConversion::OneShot { timeout } => {
+            let location = utilities
+                .locate(UtilityType::EdtCli)
+                .map_err(AppError::from)?;
+            one_shot = EdtDsl::new(
+                location.path,
+                edt_workspace(&config.work_path),
+                utilities.runner_for(UtilityType::EdtCli),
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+            )
+            .with_timeout(timeout);
+            &one_shot
+        }
+    };
+    log_live_stage("edt export", "[EDT] converting the sources to XML");
+    crate::use_cases::build_project::execute_edt_export_step(
+        context,
+        config,
+        edt,
+        source_set,
+        edt_context,
+        target,
+        context.command().as_str(),
+    )
 }
 
 /// Брошенные базы прошлых прогонов: свои по описанию и имени, старше срока уборки. Чужое и

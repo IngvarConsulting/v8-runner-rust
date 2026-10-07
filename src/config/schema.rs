@@ -776,6 +776,11 @@ struct InfobaseDbmsSchema {
     /// Optional DBMS password passed to `ibcmd --database-password`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,
+    /// National settings of a new infobase in a cluster, `Locale=` of `CREATEINFOBASE`
+    /// (measurement #181 passed with `ru`; the value must suit the database). `infobase create` in a cluster requires it: without it the platform
+    /// leaves an abandoned database in the DBMS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    locale: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

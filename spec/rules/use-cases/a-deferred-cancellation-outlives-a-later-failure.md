@@ -25,7 +25,7 @@ check:
   - src/platform/ibcmd.rs::a_create_that_deferred_a_cancel_keeps_its_result_when_the_question_is_refused
   - src/use_cases/init_project.rs::a_failed_creation_after_a_deferred_cancellation_names_it
   - src/use_cases/init_project.rs::a_creation_without_its_marker_after_a_deferred_cancellation_names_it
-  - src/use_cases/init_project.rs::an_ibcmd_creation_whose_question_went_unanswered_names_the_deferred_cancellation
+  - src/use_cases/init_project.rs::an_ibcmd_creation_that_failed_after_a_deferred_cancellation_names_it
   - src/use_cases/init_project.rs::a_stop_after_the_creation_leaves_its_deferred_cancellation_in_the_step
   - tests/architecture_guardrails.rs::a_critical_phase_names_its_deferral_through_the_owner
 ---

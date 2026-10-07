@@ -207,6 +207,13 @@
             "null"
           ]
         },
+        "locale": {
+          "description": "National settings of a new infobase in a cluster, `Locale=` of `CREATEINFOBASE`\n(measurement #181 passed with `ru`; the value must suit the database). `infobase create` in a cluster requires it: without it the platform\nleaves an abandoned database in the DBMS.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "Physical database name passed to `ibcmd --database-name`.",
           "type": [

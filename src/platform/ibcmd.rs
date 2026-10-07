@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::config::model::InfobaseConfig;
+use crate::config::model::{InfobaseConfig, MissingDbmsField};
 use crate::platform::connection::{file_infobase, name_the_account, V8Connection};
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
@@ -11,8 +11,8 @@ use crate::platform::result::PlatformCommandResult;
 
 #[derive(Debug, Error)]
 pub enum IbcmdError {
-    #[error("server-based IBCMD connection requires infobase.dbms.{0}")]
-    MissingServerDbmsField(&'static str),
+    #[error(transparent)]
+    MissingServerDbmsField(#[from] MissingDbmsField),
 
     #[error("failed to execute ibcmd process: {0}")]
     Spawn(ProcessError),
@@ -42,18 +42,15 @@ impl IbcmdConnection {
     pub fn from_infobase(infobase: &InfobaseConfig) -> Result<Self, IbcmdError> {
         let conn = V8Connection::from_connection_string(&infobase.connection);
         let Some(database_path) = conn.file_path() else {
-            let Some(dbms) = infobase.dbms.as_ref() else {
-                return Err(IbcmdError::MissingServerDbmsField("kind"));
-            };
-
+            let access = infobase.dbms_access()?;
             return Ok(Self::Server {
-                dbms_kind: required_dbms_field("kind", dbms.kind.as_deref())?,
-                database_server: required_dbms_field("server", dbms.server.as_deref())?,
-                database_name: required_dbms_field("name", dbms.name.as_deref())?,
+                dbms_kind: access.kind.to_owned(),
+                database_server: access.server.to_owned(),
+                database_name: access.name.to_owned(),
                 user: infobase.user.clone(),
                 password: infobase.password.clone(),
-                database_user: dbms.user.clone(),
-                database_password: dbms.password.clone(),
+                database_user: access.user.map(str::to_owned),
+                database_password: access.password.map(str::to_owned),
             });
         };
 
@@ -314,6 +311,24 @@ impl<'a> IbcmdDsl<'a> {
         };
 
         Ok(IbcmdInfobaseCreateOutcome { status, result })
+    }
+
+    /// `infobase create [--import=<каталог> --apply --force]`: новая база, с `import` — сразу с
+    /// конфигурацией из XML-исходников, применённой к базе данных (замер 8.3.27.2074 у #205).
+    /// Исход — по коду выхода, у вызывающего: о базе, которой до вызова не было, второй
+    /// вопрос не задаётся — неудача импорта оставляет базу, и вопрос назвал бы её «уже
+    /// была».
+    pub fn infobase_create(
+        &self,
+        import: Option<&Path>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.create_infobase_args();
+        if let Some(import) = import {
+            args.push(format!("--import={}", import.display()));
+            args.push("--apply".to_owned());
+            args.push("--force".to_owned());
+        }
+        self.run(&args)
     }
 
     /// Updates extension security properties in the target infobase.
@@ -584,13 +599,6 @@ impl<'a> IbcmdDsl<'a> {
 fn push_option_value(args: &mut Vec<String>, key: &str, value: impl ToString) {
     args.push(key.to_owned());
     args.push(value.to_string());
-}
-
-fn required_dbms_field(field: &'static str, value: Option<&str>) -> Result<String, IbcmdError> {
-    match value.map(str::trim) {
-        Some(value) if !value.is_empty() => Ok(value.to_owned()),
-        _ => Err(IbcmdError::MissingServerDbmsField(field)),
-    }
 }
 
 #[cfg(test)]
@@ -1175,6 +1183,41 @@ mod tests {
         assert!(args.contains("infobase"));
         assert!(args.contains("create"));
         assert!(args.contains("infobase\n--db-path\n/ib\ncreate"));
+    }
+
+    /// `infobase create` с импортом — ключи замера: `--import=<каталог> --apply --force`;
+    /// исход только по коду выхода, второго вопроса к базе нет.
+    #[cfg(unix)]
+    #[test]
+    fn infobase_create_with_import_passes_the_measured_keys_and_asks_nothing_more() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        write_script(
+            &script,
+            &format!(
+                "printf '%s\\n' \"$@\" >> \"{}\"\nexit 255",
+                args_log.display()
+            ),
+        );
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        let result = dsl
+            .infobase_create(Some(std::path::Path::new("/src/main")))
+            .expect("create");
+
+        assert_eq!(result.process.exit_code, 255);
+        let args = fs::read_to_string(args_log).expect("args");
+        assert_eq!(
+            args,
+            "infobase\n--db-path\n/ib\ncreate\n--import=/src/main\n--apply\n--force\n"
+        );
     }
 
     #[cfg(unix)]

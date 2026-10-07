@@ -574,6 +574,109 @@ pub struct InfobaseDbmsConfig {
     /// Optional DBMS password passed as `--database-password`.
     #[serde(default)]
     pub password: Option<String>,
+
+    /// National settings of a new infobase in a cluster: `Locale=` of `CREATEINFOBASE`.
+    #[serde(default)]
+    pub locale: Option<String>,
+}
+
+/// Обязательное поле секции `infobase.dbms`, которого нет: раннер идёт в СУБД сам и берёт
+/// его из секции. Текст один у всех, кто читает контракт.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("infobase.dbms.{} is not declared: the runner goes to the DBMS itself and takes {} from the dbms section{}", .field.key(), .field.meaning(), .field.consequence())]
+pub struct MissingDbmsField {
+    pub field: DbmsField,
+}
+
+/// Обязательное поле секции `infobase.dbms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbmsField {
+    Kind,
+    Server,
+    Name,
+    /// Нужно только созданию базы в кластере.
+    Locale,
+}
+
+impl DbmsField {
+    /// Ключ поля в секции.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Kind => "kind",
+            Self::Server => "server",
+            Self::Name => "name",
+            Self::Locale => "locale",
+        }
+    }
+
+    const fn meaning(self) -> &'static str {
+        match self {
+            Self::Kind => "the DBMS kind",
+            Self::Server => "the DBMS server",
+            Self::Name => "the database name",
+            Self::Locale => "the locale of a new cluster infobase",
+        }
+    }
+
+    const fn consequence(self) -> &'static str {
+        match self {
+            Self::Kind | Self::Server | Self::Name => "",
+            Self::Locale => {
+                " — without Locale CREATEINFOBASE leaves an abandoned database in the DBMS"
+            }
+        }
+    }
+}
+
+/// Непустое имя или пароль: имя из одних пробелов — не имя. Одно правило для учётных
+/// записей СУБД и кластера.
+pub(crate) fn declared_name(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+/// Проверенный доступ к СУБД — единственное чтение контракта `infobase.dbms`: обязательные
+/// поля непусты и без пробелов по краям, необязательные пустыми не передаются.
+#[derive(Clone, Copy)]
+pub struct DbmsAccess<'a> {
+    pub kind: &'a str,
+    pub server: &'a str,
+    pub name: &'a str,
+    pub user: Option<&'a str>,
+    pub password: Option<&'a str>,
+}
+
+impl InfobaseConfig {
+    /// Доступ к СУБД из секции `dbms`; без секции не хватает первого поля — `kind`.
+    pub fn dbms_access(&self) -> Result<DbmsAccess<'_>, MissingDbmsField> {
+        let dbms = self.dbms.as_ref().ok_or(MissingDbmsField {
+            field: DbmsField::Kind,
+        })?;
+        Ok(DbmsAccess {
+            kind: required_dbms_field(DbmsField::Kind, dbms.kind.as_deref())?,
+            server: required_dbms_field(DbmsField::Server, dbms.server.as_deref())?,
+            name: required_dbms_field(DbmsField::Name, dbms.name.as_deref())?,
+            user: declared_name(dbms.user.as_deref()),
+            password: dbms
+                .password
+                .as_deref()
+                .filter(|password| !password.is_empty()),
+        })
+    }
+
+    /// Национальные настройки новой базы в кластере (`dbms.locale`).
+    pub fn dbms_locale(&self) -> Result<&str, MissingDbmsField> {
+        required_dbms_field(
+            DbmsField::Locale,
+            self.dbms.as_ref().and_then(|dbms| dbms.locale.as_deref()),
+        )
+    }
+}
+
+fn required_dbms_field(field: DbmsField, value: Option<&str>) -> Result<&str, MissingDbmsField> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(MissingDbmsField { field })
 }
 
 impl InfobaseDbmsConfig {
@@ -590,6 +693,7 @@ impl InfobaseDbmsConfig {
             name: Some(name.into()),
             user: None,
             password: None,
+            locale: None,
         }
     }
 

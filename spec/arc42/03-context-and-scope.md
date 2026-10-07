@@ -22,9 +22,9 @@ flowchart LR
 
 | Внешняя система | Канал | Где в коде | Кто пользуется |
 | --- | --- | --- | --- |
-| Конфигуратор, пакетный | Процесс `1cv8 DESIGNER`; создание файловой базы — `1cv8 CREATEINFOBASE`; автономный сервер — его прямой шлюз строкой `Srvr=…;Ref=…` | [`designer.rs`](../../src/platform/designer.rs) | `push`, `pull`, `upload`, `download`, `make`, `check`, `infobase create`, `dump`, `restore`, `clone` |
+| Конфигуратор, пакетный | Процесс `1cv8 DESIGNER`; создание файловой базы и базы в кластере — `1cv8 CREATEINFOBASE`; автономный сервер — его прямой шлюз строкой `Srvr=…;Ref=…` | [`designer.rs`](../../src/platform/designer.rs) | `push`, `pull`, `upload`, `download`, `make`, `check`, `infobase create`, `dump`, `restore`, `clone` |
 | Клиенты платформы | Процесс `1cv8c`, `1cv8 ENTERPRISE` или `1cv8 DESIGNER` для `launch designer` | [`enterprise.rs`](../../src/platform/enterprise.rs) | `test`, `launch` |
-| `ibcmd` | Процесс; у серверной базы — прямо в СУБД | [`ibcmd.rs`](../../src/platform/ibcmd.rs) | `extensions`; `push`, `pull`, `download`, `infobase create` — вторым в цепочке или по ключу; проба расширения у `upload` |
+| `ibcmd` | Процесс; у серверной базы — прямо в СУБД | [`ibcmd.rs`](../../src/platform/ibcmd.rs) | `extensions`; `infobase create` файловой базы — первым; `push`, `pull`, `download` — вторым в цепочке или по ключу; проба расширения у `upload` |
 | EDT | Процесс `1cedtcli`, одноразовый или долгий | [`edt.rs`](../../src/platform/edt.rs), [`edt_session.rs`](../../src/platform/edt_session.rs) | `check`, `convert`, `push` и `pull` формата EDT, `infobase create`, `make` |
 | Агент Конфигуратора | SSH встроенным клиентом: свой — на петлевом адресе, чужой — по `tools.designer_agent.attach` | [`agent.rs`](../../src/platform/agent.rs) | По ключу `providers.*`: `push`, `pull`, `extensions`, `download`, `infobase dump`, `restore` |
 | Шлюз автономного сервера | SSH; файлы — SFTP того же соединения или общий каталог | [`agent.rs`](../../src/platform/agent.rs), [`sftp.rs`](../../src/platform/sftp.rs) | `extensions`; `push`, `pull`, `download` — вторым после Конфигуратора по прямому шлюзу |

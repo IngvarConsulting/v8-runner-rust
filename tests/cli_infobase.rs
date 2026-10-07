@@ -1319,7 +1319,7 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'Srvr=cluster;Ref=demo'\n  dbms:\n    kind: PostgreSQL\n    server: db.example.test\n    name: demo_data\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'Srvr=cluster;Ref=demo'\n  dbms:\n    kind: PostgreSQL\n    server: db.example.test\n    name: demo_data\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
             work.display(),
             platform.display(),
         ),

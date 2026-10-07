@@ -211,14 +211,36 @@ runtime snapshot commit только указанным source-set.
   — `ibcmd` (`infobase create` со своим `--data`, затем `config import --out`) или
   Конфигуратор (`CREATEINFOBASE`, `/LoadConfigFromFiles` без файла версий, `/DumpCfg`;
   расширение — поверх основной конфигурации). Исходники EDT сперва переводит в XML
-  `ThrowawayInfobase::xml_from_edt` — один владелец у `make` и `convert`: шаг сборки
-  `build_project::execute_edt_export_step` в рабочей области `workPath/edt-workspace`; у
-  `make` шаг без предела, как у `push`, у `convert` — с пределом EDT команды. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
+  `throwaway_infobase::edt_sources_to_xml` — единственный перевод у `make`, `convert` и
+  `infobase create` (временная база зовёт его через `ThrowawayInfobase::xml_from_edt`): шаг
+  сборки `build_project::execute_edt_export_step` в рабочей области `workPath/edt-workspace`,
+  общей сессией EDT команды, если она её держит, — тогда действует предел команды сессии
+  (`tools.edt_cli.command_timeout_ms`); одноразовым процессом у `make` и `infobase create` шаг
+  без предела, как у `push`, у `convert` — с пределом EDT команды. Других вызывающих шага, кроме сборки
+  `push`, нет — это держит проверка `the_edt_export_step_has_one_converter_besides_push`. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
   `make <SET>` — своя, обход без набора — общая на все наборы; внешние обработки Конфигуратор
   собирает поверх основной конфигурации в своей базе; после прогона она убирается, а
   брошенную описание `TempDirKind::ThrowawayInfobase` выдаёт уборке как свою. Замка базы и
   метки владельца у `make` нет.
 - Full replacement target publication идёт через staged publication model.
+
+### `infobase create`
+
+Сценарий — `use_cases::init_project`; вид цели решает путь. Файловая база: память
+собираемого набора снимается до сборки (`exchange_guard::AssembledMemory`; у проекта EDT —
+исходники EDT до перевода, а основной набор переводит в XML каталога, куда его переводит
+`push`, единственный перевод `throwaway_infobase::edt_sources_to_xml` после импорта рабочей
+области), затем `ibcmd
+infobase create --import --apply --force` или Конфигуратор (`CREATEINFOBASE`,
+`/LoadConfigFromFiles` без файла версий, `/UpdateDBCfg`); после удачи
+`exchange_guard::remember_created_base` пишет собранному набору его дерево, остальным —
+пустую память. Сборка Конфигуратором, остановленная после создания, оставляет пустую память.
+База в кластере: строку `CREATEINFOBASE` собирает `V8Connection::create_cluster_infobase_arg`
+из `Srvr`/`Ref` подключения и реквизитов `dbms`/`cluster`, всегда с `CrSQLDB=Y` и
+`SchJobDn=Y` (база создаётся с запретом регламентных заданий); `/Out` не ставится, а вывод
+платформы в отказе проходит `mask_text` с паролями СУБД и кластера. `DBPwd` и `SPwd`
+маскирует `platform::secrets`, `DBUID` и `SUsr` прячутся в показе отказа. Все процессы
+создания — критическая фаза; отсрочку отмены называет `collecting_deferrals`.
 
 ## Shared EDT
 

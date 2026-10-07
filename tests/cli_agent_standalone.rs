@@ -871,7 +871,7 @@ fn a_file_address_next_to_the_standalone_section_is_refused() {
 /// Без строки прямого шлюза автономному серверу остаётся агент: ключ `providers.*`,
 /// назначивший Конфигуратор, — ошибка, называющая строку; агента назначить можно.
 /// Операции, которые исполняет только Конфигуратор (`upload`, `check`), отказывают с тем же
-/// выходом и сессии не открывают; `infobase create` раннер не делает никогда.
+/// выходом и сессии не открывают; `infobase create` отказывает с рецептом.
 #[test]
 fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
     let harness = harness();
@@ -926,16 +926,13 @@ fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
     );
     assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
 
+    // Базу автономного сервера создают на его машине до запуска: отказ рода подбора с
+    // рецептом (#204).
     let (code, payload) = run(&harness, &["infobase", "create"]);
-    assert_eq!(code, 0, "{payload}");
-    assert_eq!(
-        payload["data"]["steps"][0]["status"], "skipped",
-        "{payload}"
-    );
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["code"], "target", "{payload}");
     assert!(
-        payload["data"]["steps"][0]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("never created by the runner")),
+        error_message(&payload).contains("ibcmd server config init"),
         "{payload}"
     );
     assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
