@@ -227,6 +227,23 @@ pub(crate) fn forget_copied_base(config: &AppConfig) -> Option<String> {
     }
 }
 
+/// Снимает признак копии после отправки, когда у каждого набора базы снова есть своя
+/// память — хеш-память или запись поколения. Отправка части наборов признак оставляет: у
+/// остальных памяти нет, и пока он стоит, отправка полная, а выгрузку не предлагают
+/// (`INV.USE-CASES.A-COPIED-BASE-OFFERS-NO-PULL-BEFORE-ITS-FIRST-PUSH`).
+pub(crate) fn forget_copied_base_once_every_set_remembers(config: &AppConfig) -> Option<String> {
+    let every_set_remembers = SourceSetsService::new(config)
+        .designer_contexts()
+        .iter()
+        .filter(|set| set.storage_identity().is_some())
+        .all(|set| own_memory_of(set, &config.work_path) == Some(MemoryState::Remembered));
+    if every_set_remembers {
+        forget_copied_base(config)
+    } else {
+        None
+    }
+}
+
 /// Из какой базы скопирована выбранная база, если в неё ещё не отправляли.
 pub(crate) fn copied_from(config: &AppConfig) -> Option<CopyMark> {
     read_copy_mark(&copied_from_file(config)?)
@@ -443,24 +460,32 @@ pub(crate) fn memory_of(set: &SourceSetContext, work_path: &Path) -> MemoryState
     if set.storage_identity().is_none() {
         return MemoryState::Unbound;
     }
+    match own_memory_of(set, work_path) {
+        Some(state) => state,
+        // Копия базы до первой отправки: память — признак копии
+        // (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
+        None if set
+            .base_memory_dir(work_path)
+            .and_then(|dir| read_copy_mark(&copy_mark_in(&dir)))
+            .is_some() =>
+        {
+            MemoryState::Remembered
+        }
+        None => MemoryState::Missing,
+    }
+}
+
+/// Своя память набора без признака копии: хеш-память, а без неё запись журнала поколений;
+/// `None` — ни той, ни другой.
+fn own_memory_of(set: &SourceSetContext, work_path: &Path) -> Option<MemoryState> {
     match analyzer::snapshot_memory(set, work_path) {
-        SnapshotMemory::Own => MemoryState::Remembered,
-        SnapshotMemory::Foreign => MemoryState::Foreign,
-        SnapshotMemory::Unreadable => MemoryState::Unreadable,
+        SnapshotMemory::Own => Some(MemoryState::Remembered),
+        SnapshotMemory::Foreign => Some(MemoryState::Foreign),
+        SnapshotMemory::Unreadable => Some(MemoryState::Unreadable),
         SnapshotMemory::Nothing => match GenerationLedger::of(set, work_path).map(|l| l.read()) {
-            Some(Recorded::Ours(_)) => MemoryState::Remembered,
-            Some(Recorded::Foreign { .. }) => MemoryState::Foreign,
-            // Копия базы до первой отправки: память — признак копии с поколением новой базы
-            // (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
-            Some(Recorded::Nothing) | None
-                if set
-                    .base_memory_dir(work_path)
-                    .and_then(|dir| read_copy_mark(&copy_mark_in(&dir)))
-                    .is_some() =>
-            {
-                MemoryState::Remembered
-            }
-            Some(Recorded::Nothing) | None => MemoryState::Missing,
+            Some(Recorded::Ours(_)) => Some(MemoryState::Remembered),
+            Some(Recorded::Foreign { .. }) => Some(MemoryState::Foreign),
+            Some(Recorded::Nothing) | None => None,
         },
     }
 }

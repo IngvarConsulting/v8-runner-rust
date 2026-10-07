@@ -11,6 +11,7 @@ check:
   - tests/cli_infobase_copy.rs::a_copy_into_a_standalone_server_is_refused_with_the_recipe
   - tests/cli_infobase_copy.rs::a_failed_load_into_the_cluster_names_the_image_and_hides_the_passwords
   - tests/cli_infobase_copy.rs::a_failed_load_into_a_file_base_hides_the_passwords
+  - tests/cli_infobase_copy.rs::a_copy_is_made_by_the_designer_and_a_key_naming_another_executor_is_refused
 ---
 
 # `infobase create --from` копирует базу
@@ -22,7 +23,9 @@ DT Конфигуратором (`/DumpIB`) в `workPath/copies/<база>.dt` �
 Новую базу на автономном сервере команда не создаёт: отказ рода подбора называет рецепт
 `ibcmd server config init` и `ibcmd infobase create`, и снимок не начинается. Источник, не
 объявленный в местном слое, файловый источник без базы на месте и база, которую команда
-создаёт, — отказ до платформы.
+создаёт, — отказ до платформы. Исполнитель копии — Конфигуратор, и квитанция называет его;
+ключ `providers.infobase.create`, назначающий другого исполнителя, — отказ `validation` до
+снимка с именем ключа: названный ключом исполнитель не подменяется.
 
 Источник читается как база целиком: его замок берёт граница команды вслед за замками своей
 базы и держит до конца команды; источник, который держит другая команда, — отказ

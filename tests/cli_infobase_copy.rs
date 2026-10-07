@@ -923,3 +923,109 @@ fn a_base_assembled_from_the_sources_removes_the_copy_mark() {
 
     assert!(!mark.exists(), "the assembled base is no copy");
 }
+
+/// Отправка части наборов признак копии не снимает: у остальных памяти нет, и следующая
+/// отправка всех наборов полная, без отказа первого знакомства и без предложения `pull`.
+#[test]
+fn a_push_of_one_set_keeps_the_copy_mark_until_every_set_is_remembered() {
+    let stand = Stand::new();
+    let (_neighbour, neighbour_base) = stand.neighbour();
+    let worktree = stand.worktree(&neighbour_base);
+    let wt = worktree.parent().expect("worktree").to_path_buf();
+    fs::create_dir_all(wt.join("ext")).expect("ext");
+    fs::write(
+        wt.join("ext").join("Configuration.xml"),
+        "<Configuration/>\n",
+    )
+    .expect("ext source");
+    let project = fs::read_to_string(&worktree).expect("project");
+    fs::write(
+        &worktree,
+        project.replace(
+            "    path: src\n",
+            "    path: src\n  - name: ext\n    type: EXTENSION\n    path: ext\n",
+        ),
+    )
+    .expect("project with an extension");
+    init_own_base(&worktree);
+    succeeded(&run(
+        &worktree,
+        &["infobase", "create", "--from", "upstream"],
+    ));
+    let mark = wt
+        .join("work")
+        .join("infobases")
+        .join("origin")
+        .join("copied-from.json");
+
+    let main = succeeded(&run(&worktree, &["push", "main"]));
+    assert_eq!(
+        step_modes(&main),
+        vec![("main".to_owned(), "full".to_owned())],
+        "{main}"
+    );
+    assert!(
+        mark.exists(),
+        "the extension has no memory yet: the mark stays"
+    );
+
+    let output = run(&worktree, &["push"]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        !text.contains("\"next\"") && !text.contains("no_memory"),
+        "no refusal and no way out offered: {text}"
+    );
+    let all = succeeded(&output);
+    assert_eq!(
+        step_modes(&all),
+        vec![
+            ("main".to_owned(), "full".to_owned()),
+            ("ext".to_owned(), "full".to_owned())
+        ],
+        "{all}"
+    );
+    assert!(!mark.exists(), "every set is remembered now");
+}
+
+/// Копию создаёт Конфигуратор, и квитанция называет его; ключ, назначающий `infobase create`
+/// другого исполнителя, — отказ до снимка с именем ключа.
+#[test]
+fn a_copy_is_made_by_the_designer_and_a_key_naming_another_executor_is_refused() {
+    let stand = Stand::new();
+    let (_neighbour, neighbour_base) = stand.neighbour();
+    let worktree = stand.worktree(&neighbour_base);
+    init_own_base(&worktree);
+
+    let preview = succeeded(&run(
+        &worktree,
+        &["infobase", "create", "--from", "upstream", "--dry-run"],
+    ));
+    assert_eq!(
+        preview["data"]["provider"]["selected"], "designer",
+        "{preview}"
+    );
+    assert_eq!(
+        preview["data"]["provider"]["origin"]["kind"], "default",
+        "{preview}"
+    );
+
+    let project = fs::read_to_string(&worktree).expect("project");
+    fs::write(
+        &worktree,
+        project.replace("providers:\n", "providers:\n  infobase.create: ibcmd\n"),
+    )
+    .expect("project with the key");
+    let before = calls(stand.root());
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let mut args = vec!["infobase", "create", "--from", "upstream"];
+        args.extend_from_slice(extra);
+        let output = run(&worktree, &args);
+
+        assert!(!output.status.success(), "{extra:?}");
+        let payload = envelope(&output);
+        assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+        let message = payload["error"]["message"].as_str().expect("message");
+        assert!(message.contains("providers.infobase.create"), "{message}");
+    }
+    assert_eq!(calls(stand.root()), before, "nothing is snapshotted");
+}

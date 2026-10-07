@@ -36,7 +36,7 @@ check:
 
 ```json
 {
-  "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
+  "provider": {"selected": "designer", "origin": {"kind": "default"}},
   "ok": true,
   "provider_dispatched": false,
   "duration_ms": 0,

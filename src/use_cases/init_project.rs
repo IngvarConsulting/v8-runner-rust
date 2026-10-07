@@ -58,12 +58,17 @@ fn run_init(
 ) -> UseCaseResult<InitResult> {
     let dry_run = args.dry_run;
     let started = Instant::now();
-    let mut source = None;
     let mut utilities = PlatformUtilities::from_config(config);
     // Исполнитель нужен только шагу создания базы, и тот сам сообщает об отсутствии
     // утилиты своим статусом: отказ выбора здесь не прерывает команду — у серверного
     // подключения и у чисто EDT-проекта этот шаг может и не понадобиться. Квитанция
     // при этом остаётся честной: никто не готов, пропущенные названы.
+    // Копию `--from` создаёт только Конфигуратор: квитанция называет его, а ключ, который
+    // назначает другого исполнителя, — отказ до снимка: названный ключом исполнитель не
+    // подменяется.
+    if args.from.is_some() {
+        return copy_with_the_designer(context, config, args, &mut utilities, started);
+    }
     let (provider, receipt) =
         match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Init)
         {
@@ -97,10 +102,7 @@ fn run_init(
     let workspace_failed = steps
         .last()
         .is_some_and(|step: &InitStep| step.status == InitStepStatus::Failed);
-    let infobase = if workspace_failed
-        && config.target_kind() == TargetKind::File
-        && args.from.is_none()
-    {
+    let infobase = if workspace_failed && config.target_kind() == TargetKind::File {
         StepOutcome::failed(
             "infobase",
             "create",
@@ -111,11 +113,6 @@ fn run_init(
                 "the infobase of an EDT project is assembled from its sources converted to XML in the EDT workspace, and the workspace was not initialized: the infobase is not created; run infobase create again once the workspace import succeeds".to_owned()
             }),
         )
-    } else if let Some(from) = args.from.as_deref() {
-        // Копия другой базы собирается не из исходников: рабочая область ей не нужна.
-        let (step, copied) = copy::ensure_copy(context, config, &mut utilities, from, dry_run);
-        source = copied;
-        step
     } else {
         ensure_infobase(
             context,
@@ -136,7 +133,6 @@ fn run_init(
     }
 
     let mut result = init_result(started, steps, first_error.is_none());
-    result.source = source;
     if dry_run {
         // Строка о ходе остаётся в выводе, хотя ни база, ни рабочее пространство не
         // тронуты: запись о вызове несёт конверт, журнала превью не ведёт.
@@ -144,6 +140,75 @@ fn run_init(
     }
     result.provider = Some(receipt);
 
+    match first_error {
+        Some(error) => Err(InitExecutionFailure::with_payload(error, result)),
+        None => Ok(result),
+    }
+}
+
+/// `infobase create --from`: шаг копии и, у формата EDT, рабочая область. Исполнитель —
+/// Конфигуратор: снимок и загрузка образа идут им (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
+fn copy_with_the_designer(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &InitRequest,
+    utilities: &mut PlatformUtilities,
+    started: Instant,
+) -> UseCaseResult<InitResult> {
+    let dry_run = args.dry_run;
+    let origin = match config.providers.get(&Operation::Init) {
+        None => crate::domain::capability::ProviderOrigin::Default,
+        Some(Provider::Designer) => crate::domain::capability::ProviderOrigin::Override {
+            file: config
+                .provider_origins
+                .get(&Operation::Init)
+                .cloned()
+                .unwrap_or_default(),
+        },
+        Some(other) => {
+            let error = UseCaseError::from(AppError::Validation(format!(
+                "infobase create --from takes the snapshot and loads the image with the Designer, and providers.{} names {}: remove the key or set it to designer",
+                Operation::Init.as_str(),
+                other.as_str()
+            )));
+            let mut result = init_result(started, Vec::new(), false);
+            result.provider = Some(crate::domain::capability::ProviderReceipt {
+                selected: None,
+                origin: crate::domain::capability::ProviderOrigin::Override {
+                    file: config
+                        .provider_origins
+                        .get(&Operation::Init)
+                        .cloned()
+                        .unwrap_or_default(),
+                },
+                skipped: Vec::new(),
+                endpoint: None,
+            });
+            return Err(InitExecutionFailure::with_payload(error, result));
+        }
+    };
+    let from = args.from.as_deref().unwrap_or_default();
+    let mut steps = Vec::new();
+    let mut first_error: Option<UseCaseError> = None;
+    let mut shared_edt: Option<EdtDsl<'static>> = None;
+    let (step, source) = copy::ensure_copy(context, config, utilities, from, dry_run);
+    record_step(&mut steps, &mut first_error, step);
+    record_step(
+        &mut steps,
+        &mut first_error,
+        ensure_edt_workspace(context, config, utilities, &mut shared_edt, dry_run),
+    );
+    let mut result = init_result(started, steps, first_error.is_none());
+    result.source = source;
+    result.provider = Some(crate::domain::capability::ProviderReceipt {
+        selected: Some(Provider::Designer),
+        origin,
+        skipped: Vec::new(),
+        endpoint: None,
+    });
+    if dry_run {
+        log_live_stage("init: preview", "[Init] preview only, nothing created");
+    }
     match first_error {
         Some(error) => Err(InitExecutionFailure::with_payload(error, result)),
         None => Ok(result),
