@@ -145,14 +145,15 @@ fn write_http_designer_config(
     idle_ttl_secs: u64,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\n    allowed_hosts:\n      - runner.test\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\n    allowed_hosts:\n      - runner.test\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         bind_address,
         stateful_sessions,
         max_sessions,
         idle_ttl_secs,
         platform_path.display(),
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(path, config).expect("designer config");
 }
 

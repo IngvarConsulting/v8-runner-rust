@@ -120,14 +120,15 @@ fn write_sample(dir: &Path, with_executors: Option<&ManagedAgentDouble>) {
     fs::write(
         dir.join("v8project.yaml"),
         format!(
-            "workPath: {work}\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File={ib}'\n  web:\n    server: apache24\n    wsdir: demo\n    dir: '{web}'\n    url: http://localhost/demo\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n{strictness}  edt_cli:\n    path: {edt}\n    version: '1999.9.9'\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {extension}\n",
+            "workPath: {work}\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File={ib}'\n  web:\n    server: apache24\n    wsdir: demo\n    dir: '{web}'\n    url: http://localhost/demo\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n{strictness}  edt_cli:\n    path: {edt}\n    version: '1999.9.9'\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {extension}\n",
             work = dir.join("work").display(),
             ib = dir.join("ib").display(),
             web = dir.join("web").display(),
             platform = dir.join("platform").display(),
             edt = bin.join("1cedtcli").display(),
             extension = extension.display(),
-        ),
+ designer_leads = support::DESIGNER_LEADS,
+),
     )
     .expect("write config");
 }

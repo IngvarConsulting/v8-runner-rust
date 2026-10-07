@@ -109,6 +109,9 @@ enum DetailKind {
     Artifact,
     /// `[diagnostic] …`, `[detail] …` и прочие пометки-улики.
     Note,
+    /// `[skipped:исполнитель] причина` — кого выбор исполнителя пропустил. Пометка называет
+    /// предмет строки, поэтому одна причина у разных исполнителей — разные строки.
+    Skipped,
     /// `[warning] …` — сделано, но не так, как просили.
     Warning,
     /// `[error] …`, `[error:код] …` — не сделано.
@@ -122,6 +125,7 @@ fn detail_kind(line: &str) -> DetailKind {
         return match label {
             "[warning]" => DetailKind::Warning,
             "[artifact]" => DetailKind::Artifact,
+            _ if label.starts_with("[skipped:") => DetailKind::Skipped,
             _ if label == "[error]" || label.starts_with("[error:") => DetailKind::Error,
             _ => DetailKind::Note,
         };
@@ -194,6 +198,7 @@ pub fn text_output_grammar() -> Value {
             {"kind": "mark", "pattern": "^[✓✗○→] .*$", "description": "шаг со своим исходом"},
             {"kind": "artifact", "pattern": "^\\[artifact\\] .*$", "description": "что легло на диск"},
             {"kind": "note", "pattern": "^\\[[a-z][a-z0-9_-]*\\] .*$", "description": "пометка-улика"},
+            {"kind": "skipped", "pattern": "^\\[skipped:[a-z0-9-]+\\] .*$", "description": "исполнитель, пропущенный выбором, и причина"},
             {"kind": "warning", "pattern": "^\\[warning\\] .*$", "description": "сделано не так, как просили"},
             {"kind": "error", "pattern": "^\\[error(:[a-z0-9_]+)?\\] .*$", "description": "не сделано"}
         ]
@@ -367,13 +372,13 @@ fn drop_repeated_messages(lines: &mut Vec<String>) {
     let mut seen_later = std::collections::HashSet::new();
     let mut kept: Vec<String> = Vec::with_capacity(lines.len());
     for line in lines.iter().rev() {
-        let Some((tag, message)) = bracketed_prefix(line) else {
+        let Some((_, message)) = bracketed_prefix(line) else {
             kept.push(line.clone());
             continue;
         };
-        // Пропуск называет исполнителя пометкой: одна причина у двух исполнителей — два
-        // разных факта, а не повтор (агент и Конфигуратор ждут одну и ту же платформу).
-        if tag.starts_with("[skipped:") {
+        // Пропуск — свой вид строки: одна причина у двух исполнителей — два разных факта, а
+        // не повтор (агент и Конфигуратор ждут одну и ту же платформу).
+        if detail_kind(line) == DetailKind::Skipped {
             kept.push(line.clone());
             continue;
         }

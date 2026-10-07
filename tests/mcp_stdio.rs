@@ -99,10 +99,11 @@ fn run_cli_json_with_status(config_path: &Path, args: &[&str]) -> (bool, Value) 
 
 fn write_config(path: &Path, _base_path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(path, config).expect("config");
 }
 
@@ -135,12 +136,13 @@ fn write_designer_config_with_options(
     max_concurrent_calls: usize,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
         work_path.display(),
         max_concurrent_calls,
         platform_path.display(),
         command_timeout_ms,
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(path, config).expect("designer config");
 }
 
@@ -271,10 +273,11 @@ fn write_designer_suite_config(
     platform_path: &Path,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File=ib'\ntests:\n  execution_timeout_seconds: 5\nmcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\ntests:\n  execution_timeout_seconds: 5\nmcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(path, config).expect("designer suite config");
 }
 

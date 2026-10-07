@@ -27,6 +27,11 @@
       "pattern": "^\\[[a-z][a-z0-9_-]*\\] .*$"
     },
     {
+      "description": "исполнитель, пропущенный выбором, и причина",
+      "kind": "skipped",
+      "pattern": "^\\[skipped:[a-z0-9-]+\\] .*$"
+    },
+    {
       "description": "сделано не так, как просили",
       "kind": "warning",
       "pattern": "^\\[warning\\] .*$"

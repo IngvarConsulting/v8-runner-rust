@@ -86,9 +86,10 @@ impl Project {
         fs::write(
             &config,
             format!(
-                "workPath: work\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
-                root.join("1cv8").display()
-            ),
+                "workPath: work\nformat: DESIGNER\n{designer_leads}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
+                root.join("1cv8").display(),
+ designer_leads = support::DESIGNER_LEADS,
+),
         )
         .expect("config");
         fs::write(

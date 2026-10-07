@@ -74,11 +74,12 @@ impl Stand {
         fs::write(
             &config,
             format!(
-                "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
+                "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
                 work.display(),
                 self.base.display(),
                 platform.display(),
-            ),
+ designer_leads = support::DESIGNER_LEADS,
+),
         )
         .expect("config");
         // Память о базе, как после её создания раннером: тесты замка начинают не с первого

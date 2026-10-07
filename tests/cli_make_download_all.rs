@@ -81,7 +81,7 @@ impl Project {
         fs::write(root.join("ib/1Cv8.1CD"), "database").expect("infobase file");
         fs::write(
             root.join("v8project.yaml"),
-            "workPath: work\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\nsource-set:\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: src/tools\n  - name: Sales\n    type: EXTENSION\n    path: src/sales\n  - name: main\n    type: CONFIGURATION\n    path: src/cf\n  - name: Gone\n    type: EXTENSION\n    path: src/gone\ntools:\n  platform:\n    path: platform\n",
+            format!("workPath: work\nformat: DESIGNER\n{designer_leads}source-set:\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: src/tools\n  - name: Sales\n    type: EXTENSION\n    path: src/sales\n  - name: main\n    type: CONFIGURATION\n    path: src/cf\n  - name: Gone\n    type: EXTENSION\n    path: src/gone\ntools:\n  platform:\n    path: platform\n", designer_leads = support::DESIGNER_LEADS),
         )
         .expect("project file");
         fs::write(

@@ -396,10 +396,22 @@ pub struct ProjectShape {
 /// агента нет адаптера для исходников EDT (`push` и `pull` проекта EDT идут через перевод
 /// в XML и Конфигуратор или `ibcmd`) и нет установки расширения-инструмента при `push`.
 pub const fn serves_project(operation: Operation, provider: Provider, shape: ProjectShape) -> bool {
-    match (operation, provider) {
-        (Operation::Build | Operation::Dump, Provider::Agent) if shape.edt_sources => false,
-        (Operation::Build, Provider::Agent) if shape.tool_extension => false,
-        _ => true,
+    match provider {
+        Provider::Agent => match operation {
+            Operation::Build => !shape.edt_sources && !shape.tool_extension,
+            Operation::Dump => !shape.edt_sources,
+            Operation::Init
+            | Operation::Load
+            | Operation::Extensions
+            | Operation::ConfigurationExport
+            | Operation::InfobaseDump
+            | Operation::InfobaseRestore
+            | Operation::Syntax
+            | Operation::Make
+            | Operation::Convert
+            | Operation::Publish => true,
+        },
+        Provider::Designer | Provider::Ibcmd | Provider::IbcmdRs | Provider::Webinst => true,
     }
 }
 

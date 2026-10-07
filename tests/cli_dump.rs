@@ -181,10 +181,11 @@ fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
 
 fn write_designer_config(path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
 
     fs::write(path, config).expect("config");
 }
