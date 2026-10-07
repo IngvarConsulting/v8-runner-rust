@@ -660,8 +660,13 @@ mod tests {
 
     #[test]
     fn contextual_ibcmd_validation_errors_keep_typed_source() {
-        let app_error = AppError::from(IbcmdError::MissingServerDbmsField("kind"))
-            .with_context("failed to build ibcmd connection");
+        let app_error = AppError::from(IbcmdError::from(
+            crate::config::model::InfobaseConfig::file("File=/ib")
+                .dbms_access()
+                .err()
+                .expect("no dbms section"),
+        ))
+        .with_context("failed to build ibcmd connection");
         assert!(matches!(app_error, AppError::ValidationIbcmdContext { .. }));
 
         let error = UseCaseError::from(app_error);
@@ -719,8 +724,11 @@ mod tests {
 
     #[test]
     fn contextual_designer_errors_keep_typed_platform_source() {
-        let app_error = AppError::from(DesignerError::UtilityNotFound("1cv8".to_owned()))
-            .with_context("failed to resolve designer utility");
+        let app_error = AppError::from(DesignerError::StaleLogCleanup {
+            path: "/tmp/designer.log".into(),
+            source: std::io::Error::other("busy"),
+        })
+        .with_context("failed to resolve designer utility");
         assert!(matches!(
             app_error,
             AppError::PlatformDesignerContext { .. }
@@ -732,6 +740,8 @@ mod tests {
         assert!(error
             .message()
             .contains("failed to resolve designer utility"));
-        assert!(error.message().contains("designer utility not found"));
+        assert!(error
+            .message()
+            .contains("failed to remove previous designer /Out log"));
     }
 }

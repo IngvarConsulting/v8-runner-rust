@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::domain::syntax::SyntaxCheckStatus;
-use crate::platform::connection::V8Connection;
+use crate::platform::connection::{ClusterInfobaseCreation, V8Connection};
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
@@ -11,8 +11,10 @@ use crate::platform::result::PlatformCommandResult;
 
 #[derive(Debug, Error)]
 pub enum DesignerError {
-    #[error("designer utility not found: {0}")]
-    UtilityNotFound(String),
+    /// Строка подключения не той формы, что нужна команде: `CREATEINFOBASE` файловой базы
+    /// ждёт `File=`, базы в кластере — `Srvr=…;Ref=…`.
+    #[error("CREATEINFOBASE requires {0}")]
+    ConnectionForm(&'static str),
 
     #[error("failed to execute designer process: {0}")]
     Spawn(ProcessError),
@@ -210,11 +212,36 @@ impl<'a> DesignerDsl<'a> {
     /// `CREATEINFOBASE <connection-string>`
     pub fn create_infobase(&self) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = vec!["CREATEINFOBASE".to_owned()];
-        let connection = self.connection.create_infobase_arg().ok_or_else(|| {
-            DesignerError::UtilityNotFound("file-based connection is required".to_owned())
-        })?;
+        let connection =
+            self.connection
+                .create_infobase_arg()
+                .ok_or(DesignerError::ConnectionForm(
+                    "a file-based connection File=…",
+                ))?;
         args.push(connection);
         self.run(&args)
+    }
+
+    /// `CREATEINFOBASE <клиент-серверная строка> /DisableStartupDialogs`: регистрация базы в
+    /// кластере и база данных в СУБД одной командой (замер #181, 8.5.4.1878). Без
+    /// `/DisableStartupDialogs` при заполненном списке администраторов кластера и без `SUsr`
+    /// клиент спросил бы пароль окном. `/Out` не ставится: строка успеха в нём повторяет всю
+    /// строку соединения вместе с `DBPwd` и `SPwd`.
+    pub fn create_cluster_infobase(
+        &self,
+        creation: &ClusterInfobaseCreation<'_>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let connection = self
+            .connection
+            .create_cluster_infobase_arg(creation)
+            .ok_or(DesignerError::ConnectionForm(
+                "a cluster connection Srvr=…;Ref=…",
+            ))?;
+        self.run(&[
+            "CREATEINFOBASE".to_owned(),
+            connection,
+            "/DisableStartupDialogs".to_owned(),
+        ])
     }
 
     /// `/DumpConfigToFiles <dir> [-Extension <name>]`
@@ -748,6 +775,46 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args log");
         assert!(args.contains("CREATEINFOBASE"));
         assert!(args.contains("File='/tmp/my ib'"));
+    }
+
+    /// `CREATEINFOBASE` кластера: строка создания одним аргументом и
+    /// `/DisableStartupDialogs`, без `/Out`, даже когда журнал задан.
+    #[cfg(unix)]
+    #[test]
+    fn create_cluster_infobase_passes_the_string_and_disables_dialogs_without_out() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        let args_log = dir.path().join("args.log");
+        write_script(
+            &script,
+            &format!("printf '%s\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let dsl = DesignerDsl::new(
+            script,
+            V8Connection::from_connection_string("Srvr=srv;Ref=demo"),
+            &runner as &dyn ProcessRunner,
+            Some(dir.path().join("out.log")),
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.create_cluster_infobase(&crate::platform::connection::ClusterInfobaseCreation {
+            dbms: "PostgreSQL",
+            database_server: "db",
+            database_name: "demo",
+            database_user: None,
+            database_password: None,
+            locale: "ru",
+            cluster_user: None,
+            cluster_password: None,
+        })
+        .expect("create infobase");
+
+        let args = fs::read_to_string(args_log).expect("args log");
+        assert_eq!(
+            args,
+            "CREATEINFOBASE\nSrvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;CrSQLDB=Y;Locale=ru;SchJobDn=Y\n/DisableStartupDialogs\n"
+        );
     }
 
     #[cfg(unix)]

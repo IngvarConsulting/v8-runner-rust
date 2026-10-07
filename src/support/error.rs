@@ -209,7 +209,7 @@ impl AppError {
             Self::PlatformDesigner(source) | Self::PlatformDesignerContext { source, .. } => {
                 match source {
                     DesignerError::Spawn(error) => process_cancellation(error),
-                    DesignerError::UtilityNotFound(_) | DesignerError::StaleLogCleanup { .. } => {
+                    DesignerError::ConnectionForm(_) | DesignerError::StaleLogCleanup { .. } => {
                         None
                     }
                 }
@@ -393,9 +393,8 @@ impl From<IbcmdError> for AppError {
 impl From<DesignerError> for AppError {
     fn from(error: DesignerError) -> Self {
         match error {
-            DesignerError::UtilityNotFound(_) | DesignerError::StaleLogCleanup { .. } => {
-                Self::PlatformDesigner(error)
-            }
+            DesignerError::StaleLogCleanup { .. } => Self::PlatformDesigner(error),
+            DesignerError::ConnectionForm(_) => Self::Validation(error.to_string()),
             DesignerError::Spawn(error) => Self::PlatformProcess(error),
         }
     }
@@ -459,6 +458,9 @@ impl From<AgentError> for AppError {
             // Тот же класс, что и отвергнутые учётные данные: сервер ответил, но работать
             // с этой точкой входа как объявлено нельзя.
             | AgentError::HostKeyRejected { .. }
+            | AgentError::ForeignAgentOnPort { .. }
+            | AgentError::PortTaken { .. }
+            | AgentError::NoFreePort { .. }
             | AgentError::Channel { .. }
             | AgentError::Launch(_)
             | AgentError::StartupTimedOut { .. } => Self::EnvironmentUnavailable(error.to_string()),

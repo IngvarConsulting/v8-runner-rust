@@ -125,13 +125,19 @@
 Исполнители: `designer` — пакетный Конфигуратор, у автономного сервера по его прямому
 шлюзу; `ibcmd`; `agent` — агент Конфигуратора или SSH-шлюз; `webinst`;
 объявленный `ibcmd-rs` строк и адаптера не имеет.
-Экспериментальный идёт только по ключу `providers.*`. Выбор и квитанция — [6.2](06-runtime-view.md). Таблица
+Экспериментальный идёт только по ключу `providers.*`. У файловой базы и кластера первым стоит
+агент, `ibcmd` у кластера в строках нет; форма проекта (`ProjectShape`: исходники EDT,
+расширение-инструмент) убирает из цепочки исполнителя без адаптера для неё. Выбор и
+квитанция — [6.2](06-runtime-view.md). Таблица
 для пользователя в [`docs/CAPABILITIES.md`](../../docs/CAPABILITIES.md) написана руками.
 
 Правила: [умолчания живут в коде](../rules/use-cases/provider-defaults-live-in-code.md),
 [у кластерной цели исполнитель есть у каждой операции](../rules/use-cases/a-cluster-target-is-served-by-every-operation.md),
 [автономный сервер: Конфигуратор первым](../rules/use-cases/a-standalone-target-goes-to-the-designer-first.md),
-[исполнителю автономной цели нужен объявленный путь](../rules/config/a-standalone-executor-needs-its-declared-way.md).
+[исполнителю автономной цели нужен объявленный путь](../rules/config/a-standalone-executor-needs-its-declared-way.md),
+[агент стоит первым](../rules/use-cases/the-agent-leads-a-default-chain.md),
+[в строках кластера нет `ibcmd`](../rules/use-cases/a-cluster-row-does-not-name-ibcmd.md),
+[форма проекта сужает цепочку](../rules/use-cases/a-project-shape-narrows-a-default-chain.md).
 
 ### 8.5 Анализ изменений
 

@@ -20,8 +20,9 @@ use crate::config::model::{AppConfig, DesignerAgentMode};
 use crate::domain::capability::{Provider, SessionEndpoint, SessionMode};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::agent::{
-    self, AgentEndpoint, AgentError, AgentLaunch, AgentSession, AgentSessionRequest,
-    HostKeyExpectation, ManagedAgent, WaitPolicy,
+    self, free_managed_port, AgentEndpoint, AgentError, AgentLaunch, AgentSession,
+    AgentSessionRequest, EphemeralHostKey, HostKeyExpectation, LaunchHostKey, ManagedAgent,
+    WaitPolicy,
 };
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
@@ -33,7 +34,7 @@ use crate::use_cases::interruption::{CommandFailure, Deferrals};
 
 /// Открытая точка входа: свой процесс с сессией или только сессия к чужому.
 pub(crate) enum AgentHandle {
-    Managed(ManagedAgent),
+    Managed(Box<ManagedAgent>),
     Attached {
         session: AgentSession,
         base_dir: PathBuf,
@@ -254,36 +255,46 @@ fn open_handle(
                         .to_owned(),
                 )
             })?;
+            // Порт не объявлен — свободный на этот запуск: фиксированный порт отдал бы сессию
+            // первому, кто на нём слушает.
+            let port = match port {
+                Some(port) => port,
+                None => free_managed_port().map_err(AppError::from)?,
+            };
+            // Ключ не объявлен — одноразовый на этот запуск, и сессия закреплена на нём.
+            let host_key = match agent.host_key.clone() {
+                Some(declared) => LaunchHostKey::Declared(declared),
+                None => LaunchHostKey::OneTime(
+                    EphemeralHostKey::create(&config.work_path.join("agent").join("host-keys"))
+                        .map_err(AppError::from)?,
+                ),
+            };
             let launch = AgentLaunch {
                 v8: v8.to_path_buf(),
                 infobase_args: connection.infobase_args(),
                 port,
-                host_key: agent.host_key.clone(),
                 base_dir: config.work_path.join("agent").join("base"),
                 process_log: transcript_log.with_extension("process"),
+                // Агент публикует ключ из отданного файла как есть, поэтому открытая часть
+                // файла и есть ожидание.
+                host_key,
             };
             let request = AgentSessionRequest {
                 endpoint: launch.endpoint(),
                 user,
                 password,
                 transcript_log: Some(transcript_log),
-                // Тот же файл, что уезжает агенту в `/AgentSSHHostKey`: он публикует
-                // ключ оттуда как есть, поэтому открытая часть файла и есть ожидание.
-                host_key: launch
-                    .host_key
-                    .as_deref()
-                    .map(HostKeyExpectation::of_host_key_file)
-                    .unwrap_or_default(),
+                host_key: launch.host_key.expectation(),
             };
             let managed = ManagedAgent::launch(
                 utilities.runner_for(UtilityType::V8),
-                &launch,
+                launch,
                 request,
                 Duration::from_millis(agent.startup_timeout_ms.max(1)),
                 wait,
             )
             .map_err(AppError::from)?;
-            Ok(AgentHandle::Managed(managed))
+            Ok(AgentHandle::Managed(Box::new(managed)))
         }
     }
 }

@@ -10,11 +10,14 @@ use support::{hold_workspace_lock, temp_workspace, v8_runner_command, write_shel
 
 /// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
 /// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
+/// `IBCMD` — `ibcmd` всюду, где у операции файловой базы есть развилка; `DESIGNER` —
+/// Конфигуратор первым (двойник платформы здесь — пакетный Конфигуратор, агента он не
+/// поднимает); `DEFAULT` — без ключей, цепочка умолчаний матрицы.
 fn providers_yaml(builder: &str) -> &'static str {
-    if builder == "IBCMD" {
-        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
-    } else {
-        ""
+    match builder {
+        "IBCMD" => "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n",
+        "DESIGNER" => support::DESIGNER_LEADS,
+        _ => "",
     }
 }
 
@@ -166,7 +169,7 @@ fn configuration_cfe_dry_run_preserves_extension_intent_without_dispatch() {
 }
 
 #[test]
-fn dt_dry_run_reports_designer_fallback_without_dispatch() {
+fn dt_dry_run_reports_the_default_chain_without_dispatch() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -198,7 +201,9 @@ fn dt_dry_run_reports_designer_fallback_without_dispatch() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["command"], "infobase.dump");
     assert_eq!(envelope["data"]["mode"], "preview");
-    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
+    // Ключи `ibcmd` у других операций снимок не трогают: первым в его цепочке стоит
+    // агент, экспериментальный `ibcmd` в неё не входит.
+    assert_eq!(envelope["data"]["provider"]["selected"], "agent");
     assert_eq!(envelope["data"]["artifact_kind"], "dt");
     assert_eq!(envelope["data"]["provider_dispatched"], false);
     assert!(!calls.exists());
@@ -428,7 +433,7 @@ fn setup(builder: &str) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
 
 #[test]
 fn designer_exports_database_extension_to_cfe_with_typed_json() {
-    let (dir, config, base, calls) = setup("DESIGNER");
+    let (dir, config, base, calls) = setup("DEFAULT");
     let output = base.join("dist/sales.cfe");
     let command = v8_runner_command()
         .args([
@@ -465,12 +470,17 @@ fn designer_exports_database_extension_to_cfe_with_typed_json() {
     assert_eq!(envelope["data"]["published"], true);
     assert_eq!(envelope["data"]["target_state"], "created");
     assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
+    // Агент, первый в цепочке, конфигурацию базы данных не выгружает: он пропущен.
+    assert_eq!(
+        envelope["data"]["provider"]["skipped"][0]["provider"], "agent",
+        "{}",
+        envelope["data"]["provider"]
+    );
     assert_eq!(
         envelope["data"]["provider"]["skipped"]
             .as_array()
-            .map(Vec::len)
-            .unwrap_or(0),
-        0,
+            .map(Vec::len),
+        Some(1),
         "{}",
         envelope["data"]["provider"]
     );
@@ -571,7 +581,7 @@ fn restore_replaces_an_existing_infobase_through_designer() {
 
 #[test]
 fn restore_creates_an_absent_infobase_through_designer() {
-    let (dir, config, base, calls) = setup("DESIGNER");
+    let (dir, config, base, calls) = setup("DEFAULT");
     let input = write_dt(&dir.path().join("transfer/base.dt"));
     fs::remove_file(base.join("ib").join("1Cv8.1CD")).expect("drop infobase file");
     let command = v8_runner_command()
@@ -592,6 +602,16 @@ fn restore_creates_an_absent_infobase_through_designer() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["data"]["target_mode"], "create");
     assert_eq!(envelope["data"]["target_state"], "created");
+    // Агент открывает сессию к существующей базе: с `--create` цепочка идёт мимо него.
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
+    assert_eq!(
+        envelope["data"]["provider"]["skipped"][0]["provider"],
+        "agent"
+    );
+    assert!(envelope["data"]["provider"]["skipped"][0]["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("--create")));
     assert!(fs::read_to_string(calls)
         .expect("calls")
         .contains("/RestoreIB"));
@@ -780,8 +800,9 @@ fn restore_is_not_dispatched_when_ibcmd_is_the_only_environment() {
     let skipped = envelope["data"]["provider"]["skipped"]
         .as_array()
         .expect("skipped providers");
-    assert_eq!(skipped.len(), 1, "{skipped:?}");
-    assert_eq!(skipped[0]["provider"], "designer");
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_eq!(skipped[0]["provider"], "agent");
+    assert_eq!(skipped[1]["provider"], "designer");
     assert!(
         !calls.exists(),
         "experimental IBCMD restore must not dispatch"
@@ -789,7 +810,7 @@ fn restore_is_not_dispatched_when_ibcmd_is_the_only_environment() {
 }
 
 #[test]
-fn dt_uses_designer_by_default_even_when_other_operations_name_ibcmd() {
+fn dt_ignores_ibcmd_named_for_other_operations() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -800,6 +821,13 @@ fn dt_uses_designer_by_default_even_when_other_operations_name_ibcmd() {
     write_ibcmd(&platform.join("ibcmd"), &calls);
     write_designer(&platform.join("1cv8"), &calls);
     write_config(&config, &base, &work, "IBCMD", &platform);
+    // Конфигуратор назначен снимку ключом: агент, первый в цепочке, здесь не поднимается.
+    let text = fs::read_to_string(&config).expect("config");
+    fs::write(
+        &config,
+        text.replace("providers:\n", "providers:\n  infobase.dump: designer\n"),
+    )
+    .expect("designer for the snapshot");
     let output = base.join("dist/base.dt");
     let command = v8_runner_command()
         .args([
@@ -895,7 +923,7 @@ fn a_default_chain_skips_the_missing_designer_and_selects_ibcmd() {
     fs::create_dir_all(&platform).expect("platform");
     let calls = dir.path().join("calls.log");
     write_ibcmd(&platform.join("ibcmd"), &calls);
-    write_config(&config, &base, &work, "DESIGNER", &platform);
+    write_config(&config, &base, &work, "DEFAULT", &platform);
     let output = base.join("dist/main.cf");
 
     let command = v8_runner_command()
@@ -919,13 +947,21 @@ fn a_default_chain_skips_the_missing_designer_and_selects_ibcmd() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["data"]["provider"]["selected"], "ibcmd");
     assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
+    // Агенту файловой базы нужна та же платформа, что и Конфигуратору: без неё
+    // пропущены оба.
+    let skipped = envelope["data"]["provider"]["skipped"]
+        .as_array()
+        .expect("skipped providers");
     assert_eq!(
-        envelope["data"]["provider"]["skipped"][0]["provider"],
-        "designer"
+        skipped
+            .iter()
+            .map(|entry| entry["provider"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["agent", "designer"]
     );
-    assert!(envelope["data"]["provider"]["skipped"][0]["reason"]
+    assert!(skipped.iter().all(|entry| entry["reason"]
         .as_str()
-        .is_some_and(|reason| reason.contains("environment is not ready")));
+        .is_some_and(|reason| reason.contains("environment is not ready"))));
     assert!(fs::read_to_string(calls)
         .expect("calls")
         .contains("config save"));
@@ -946,7 +982,7 @@ fn setup_designer_and_ibcmd(
     let ibcmd_calls = dir.path().join("ibcmd-calls.log");
     write_designer(&platform.join("1cv8"), &designer_calls);
     write_ibcmd(&platform.join("ibcmd"), &ibcmd_calls);
-    write_config(&config, &base, &work, "DESIGNER", &platform);
+    write_config(&config, &base, &work, "DEFAULT", &platform);
     if !providers.is_empty() {
         let text = fs::read_to_string(&config).expect("config");
         fs::write(&config, format!("{providers}{text}")).expect("providers");
@@ -979,8 +1015,8 @@ fn download_database_configuration(config: &Path, output: &Path, extra: &[&str])
     })
 }
 
-/// `download --state db` без ключа берёт первого из цепочки — Конфигуратор с `/DumpDBCfg`;
-/// пропущенных нет, `ibcmd` не запускается.
+/// `download --state db` без ключа берёт первого из цепочки, кто её выгружает, —
+/// Конфигуратор с `/DumpDBCfg`; агент пропущен с причиной, `ibcmd` не запускается.
 #[test]
 fn download_state_db_selects_designer_by_default() {
     let (_dir, config, base, designer_calls, ibcmd_calls) = setup_designer_and_ibcmd("");
@@ -992,9 +1028,12 @@ fn download_state_db_selects_designer_by_default() {
     assert_eq!(envelope["data"]["state"], "database", "{envelope}");
     assert_eq!(envelope["data"]["provider"]["selected"], "designer");
     assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
-    // Пустой перечень пропущенных форма не печатает.
-    assert!(
-        envelope["data"]["provider"].get("skipped").is_none(),
+    assert_eq!(
+        envelope["data"]["provider"]["skipped"],
+        serde_json::json!([{
+            "provider": "agent",
+            "reason": "agent has no command for the database configuration that download --state db takes"
+        }]),
         "{envelope}"
     );
     assert_eq!(fs::read(&output).expect("published cf"), b"payload");
@@ -1007,7 +1046,7 @@ fn download_state_db_selects_designer_by_default() {
 }
 
 /// Конфигуратора на машине нет: `download --state db` идёт дальше по цепочке к `ibcmd`
-/// (`config save --db`), квитанция называет пропущенным Конфигуратор.
+/// (`config save --db`), квитанция называет пропущенными агента и Конфигуратор.
 #[test]
 fn download_state_db_goes_through_ibcmd_without_designer() {
     let dir = temp_workspace();
@@ -1018,7 +1057,7 @@ fn download_state_db_goes_through_ibcmd_without_designer() {
     fs::create_dir_all(&platform).expect("platform");
     let calls = dir.path().join("calls.log");
     write_ibcmd(&platform.join("ibcmd"), &calls);
-    write_config(&config, &base, &work, "DESIGNER", &platform);
+    write_config(&config, &base, &work, "DEFAULT", &platform);
     let output = base.join("dist/main.cf");
 
     let envelope = download_database_configuration(&config, &output, &[]);
@@ -1030,8 +1069,9 @@ fn download_state_db_goes_through_ibcmd_without_designer() {
     let skipped = envelope["data"]["provider"]["skipped"]
         .as_array()
         .expect("skipped providers");
-    assert_eq!(skipped.len(), 1, "{skipped:?}");
-    assert_eq!(skipped[0]["provider"], "designer");
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_eq!(skipped[0]["provider"], "agent");
+    assert_eq!(skipped[1]["provider"], "designer");
     assert_eq!(fs::read(&output).expect("published cf"), b"payload");
     let argv = fs::read_to_string(calls).expect("calls");
     assert!(argv.contains("config save"), "{argv}");
@@ -1138,13 +1178,14 @@ fn ibcmd_only_environment_cannot_dump_dt_until_capability_is_implemented() {
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["error"]["code"], "environment_unavailable");
-    // `ibcmd` для DT в цепочку умолчаний не входит вовсе: пропущен один Конфигуратор.
+    // `ibcmd` для DT в цепочку умолчаний не входит вовсе: пропущены агент и Конфигуратор.
     assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
     let skipped = envelope["data"]["provider"]["skipped"]
         .as_array()
         .expect("skipped providers");
-    assert_eq!(skipped.len(), 1, "{skipped:?}");
-    assert_eq!(skipped[0]["provider"], "designer");
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_eq!(skipped[0]["provider"], "agent");
+    assert_eq!(skipped[1]["provider"], "designer");
     assert!(!calls.exists());
     assert!(!output.exists());
 }
@@ -1192,6 +1233,7 @@ fn thin_client_alone_is_not_reported_as_designer_ready() {
 
 /// `infobase.dbms` нужна, чтобы создать серверную базу, а не чтобы с ней работать:
 /// экспорт на серверном подключении без неё идёт через Конфигуратор как ни в чём не бывало.
+/// Конфигуратор назначен ключом: первым в цепочке кластера стоит агент.
 #[test]
 fn a_server_connection_without_dbms_still_exports_through_the_designer() {
     let dir = temp_workspace();
@@ -1208,7 +1250,7 @@ fn a_server_connection_without_dbms_still_exports_through_the_designer() {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=localhost;Ref=demo'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  download: designer\ninfobase:\n  connection: 'Srvr=localhost;Ref=demo'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
             work.display(),
             platform.display(),
         ),
@@ -1240,7 +1282,7 @@ fn a_server_connection_without_dbms_still_exports_through_the_designer() {
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["data"]["provider"]["selected"], "designer");
-    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "override");
     let argv = fs::read_to_string(calls).expect("calls");
     assert!(argv.contains("/DumpCfg"));
     assert!(!argv.contains("config save"));
@@ -1266,7 +1308,7 @@ fn a_declared_server_address_reaches_the_designer_as_s_with_separate_credentials
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=\"srv:1541\";Ref=\"demo\";'\n  user: Admin\n  password: secret\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  download: designer\ninfobase:\n  connection: 'Srvr=\"srv:1541\";Ref=\"demo\";'\n  user: Admin\n  password: secret\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
             work.display(),
             platform.display(),
         ),
@@ -1304,8 +1346,10 @@ fn a_declared_server_address_reaches_the_designer_as_s_with_separate_credentials
     assert!(!argv.contains("/IBConnectionString"), "{argv}");
 }
 
+/// Полная секция `dbms` и готовый `ibcmd` не вводят его в цепочку кластера (#206):
+/// `download --state db` пробует агента и Конфигуратор, а `ibcmd` не запускается.
 #[test]
-fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
+fn a_complete_server_dbms_contract_does_not_bring_ibcmd_into_a_cluster_download() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -1319,7 +1363,7 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'Srvr=cluster;Ref=demo'\n  dbms:\n    kind: PostgreSQL\n    server: db.example.test\n    name: demo_data\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=cluster;Ref=demo'\n  dbms:\n    kind: PostgreSQL\n    server: db.example.test\n    name: demo_data\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
             work.display(),
             platform.display(),
         ),
@@ -1332,26 +1376,30 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
             "--config",
             &config.display().to_string(),
             "--json-message",
-            "infobase",
-            "configuration",
-            "export",
+            "download",
             "--state",
-            "database",
+            "db",
             "--output",
             &output.display().to_string(),
         ])
         .output()
-        .expect("run export");
-
-    assert!(command.status.success());
+        .expect("run download");
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["provider"]["selected"], "ibcmd");
-    let argv = fs::read_to_string(calls).expect("calls");
-    assert!(argv.contains("--dbms PostgreSQL"));
-    assert!(argv.contains("--database-server db.example.test"));
-    assert!(argv.contains("--database-name demo_data"));
-    assert!(argv.contains("config save"));
-    assert!(argv.split_whitespace().any(|argument| argument == "--db"));
+
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
+    let skipped = envelope["data"]["provider"]["skipped"]
+        .as_array()
+        .expect("skipped providers")
+        .iter()
+        .map(|entry| entry["provider"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(skipped, ["agent", "designer"], "{envelope}");
+    assert!(
+        !calls.exists(),
+        "ibcmd must not run against a cluster infobase"
+    );
+    assert!(!output.exists());
 }
 
 #[test]
@@ -1608,7 +1656,10 @@ fn text_output_uses_the_same_canonical_provider_name_as_json() {
     assert!(!stdout.contains("DesignerBatch"));
     assert!(stdout.contains("published: true"));
     assert!(stdout.contains("subject: infobase"));
-    assert!(stdout.contains("provider: designer (default)"));
+    assert!(
+        stdout.contains("provider: designer (providers.* in v8project.yaml)"),
+        "{stdout}"
+    );
     assert!(stdout.contains("artifact kind: dt"));
     assert!(stdout.contains("execution status: succeeded"));
 }
@@ -1623,7 +1674,7 @@ fn text_output_explains_the_skipped_default_and_the_selected_alternate() {
     fs::create_dir_all(&platform).expect("platform");
     let calls = dir.path().join("calls.log");
     write_ibcmd(&platform.join("ibcmd"), &calls);
-    write_config(&config, &base, &work, "DESIGNER", &platform);
+    write_config(&config, &base, &work, "DEFAULT", &platform);
     let output = base.join("dist/main.cf");
 
     let command = v8_runner_command()
@@ -1649,6 +1700,7 @@ fn text_output_explains_the_skipped_default_and_the_selected_alternate() {
     );
     let stdout = String::from_utf8_lossy(&command.stdout);
     assert!(stdout.contains("provider: ibcmd (default)"), "{stdout}");
+    assert!(stdout.contains("[skipped:agent]"), "{stdout}");
     assert!(stdout.contains("[skipped:designer]"), "{stdout}");
 }
 
@@ -2031,4 +2083,93 @@ fn infobase_dump_into_a_package_names_download() {
         assert!(!calls.exists(), "{name}: the platform must not be started");
         assert!(!output.exists());
     }
+}
+
+/// Управляемый агент не поднялся — `1cv8` в агентском режиме сразу вышел. Выбор исполнителя
+/// закончился до запуска: команда отказывает, квитанция называет агента, и Конфигуратор
+/// пакетным процессом не вызывается — отката по цепочке после запуска нет.
+#[test]
+fn a_managed_agent_that_did_not_start_fails_the_command_without_the_designer() {
+    let (_dir, config, base, calls) = setup("DEFAULT");
+    let output = base.join("dist/main.cf");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "download",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .output()
+        .expect("run download");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(
+        envelope["error"]["code"], "environment_unavailable",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["data"]["provider"]["selected"], "agent",
+        "{envelope}"
+    );
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
+    let argv = fs::read_to_string(&calls).expect("calls");
+    assert!(argv.contains("/AgentMode"), "{argv}");
+    assert!(
+        argv.lines().all(|line| line.contains("/AgentMode")),
+        "the Designer ran as a batch process after the agent: {argv}"
+    );
+    assert!(!output.exists());
+}
+
+/// Объявленный порт агента занят другим процессом, и агент на нём не поднялся: отказ
+/// называет порт занятым и советует другой, Конфигуратор пакетно не вызывается.
+#[test]
+fn a_taken_port_of_the_managed_agent_is_named() {
+    let (_dir, config, base, calls) = setup("DEFAULT");
+    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("hold a port");
+    let port = holder.local_addr().expect("address").port();
+    let text = fs::read_to_string(&config).expect("config");
+    fs::write(
+        &config,
+        format!("{text}  designer_agent:\n    port: {port}\n"),
+    )
+    .expect("declared port");
+    let output = base.join("dist/main.cf");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "download",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .output()
+        .expect("run download");
+
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(
+        envelope["error"]["code"], "environment_unavailable",
+        "{envelope}"
+    );
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&format!(
+            "port {port} of the managed agent is taken by another process"
+        )),
+        "{message}"
+    );
+    let argv = fs::read_to_string(&calls).expect("calls");
+    assert!(
+        argv.lines().all(|line| line.contains("/AgentMode")),
+        "{argv}"
+    );
+    drop(holder);
 }

@@ -43,13 +43,15 @@ const IDENTITY_FLAGS: &[&str] = &[
     "target-db-user",
 ];
 
-/// Секретные параметры строки соединения: пароль базы и пароли веб-сервера и прокси
-/// (`IBConnectionString`, «Связи»). Набор отдельный от ключей командной строки —
+/// Секретные параметры строки соединения: пароль базы, пароли веб-сервера и прокси
+/// (`IBConnectionString`, «Связи»), пароль СУБД и администратора кластера в строке
+/// `CREATEINFOBASE` (`DBPwd`, `SPwd`). Набор отдельный от ключей командной строки —
 /// иначе `p=` или `user=` внутри чужого значения маскировались бы зря.
-const SECRET_SEGMENTS: &[&str] = &["pwd", "wsp", "wsppwd", "password"];
+const SECRET_SEGMENTS: &[&str] = &["pwd", "wsp", "wsppwd", "password", "dbpwd", "spwd"];
 
-/// Параметры строки соединения, называющие пользователя.
-const IDENTITY_SEGMENTS: &[&str] = &["usr", "wsn", "wspuser"];
+/// Параметры строки соединения, называющие пользователя, — и в строке `CREATEINFOBASE`
+/// (`DBUID`, `SUsr`).
+const IDENTITY_SEGMENTS: &[&str] = &["usr", "wsn", "wspuser", "dbuid", "susr"];
 
 /// Что именно скрывает показ аргументов.
 #[derive(Clone, Copy)]
@@ -663,6 +665,22 @@ mod tests {
             &[],
         );
         assert_eq!(args[1], "Srvr=\"srv:1541\";Ref=\"ut\";Usr=Админ;Pwd=***;");
+    }
+
+    /// Строка `CREATEINFOBASE` кластера несёт пароль СУБД и администратора кластера:
+    /// превью прячет пароли, показ отказа — ещё и имена (#204).
+    #[test]
+    fn masks_the_dbms_and_cluster_passwords_of_a_creation_string() {
+        let string = "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;DBUID=postgres;DBPwd=pg;CrSQLDB=Y;Locale=ru;SchJobDn=Y;SUsr=cadm;SPwd=c";
+        assert_eq!(
+            preview(&["CREATEINFOBASE", string], &[])[1],
+            "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;DBUID=postgres;DBPwd=***;CrSQLDB=Y;Locale=ru;SchJobDn=Y;SUsr=cadm;SPwd=***"
+        );
+        let shown = rendered(&["CREATEINFOBASE", string]);
+        for hidden in ["postgres", "DBPwd=pg", "cadm", "SPwd=c;", "SPwd=c\n"] {
+            assert!(!shown.contains(hidden), "{hidden} in {shown}");
+        }
+        assert!(shown.ends_with("SPwd=***"), "{shown}");
     }
 
     #[test]

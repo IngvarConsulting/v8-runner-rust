@@ -655,3 +655,52 @@ fn upload_of_a_transfer_file_names_infobase_restore() {
         );
     }
 }
+
+/// `ibcmd` идёт в СУБД сам, поэтому ему секция `infobase.dbms` нужна и у серверной базы.
+/// У кластера остался один такой вызов — список расширений перед `upload .cfe` (#431):
+/// без секции он отказывает, называя её, до запуска `ibcmd` и до загрузки Конфигуратором.
+#[test]
+fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
+    let (dir, config_path, _binary_path, base_path, calls_log) = setup_project();
+    fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
+    let ibcmd_started = dir.path().join("ibcmd-started");
+    write_script(
+        &dir.path().join("ibcmd"),
+        &format!("touch '{}'\nexit 0", ibcmd_started.display()),
+    );
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace(
+            "connection: 'File=ib'",
+            "connection: 'Srvr=127.0.0.1:1541;Ref=demo'",
+        ),
+    )
+    .expect("server config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "upload",
+            "--path",
+            &base_path.join("release.cfe").display().to_string(),
+            "--extension",
+            "ExistingExt",
+        ])
+        .output()
+        .expect("run command");
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(output.status.code(), Some(2), "{payload}");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("infobase.dbms")),
+        "{payload}"
+    );
+    assert!(!ibcmd_started.exists(), "ibcmd must not be started");
+    let calls = fs::read_to_string(&calls_log).unwrap_or_default();
+    assert!(!calls.contains("/LoadCfg"), "{calls}");
+}

@@ -2981,7 +2981,9 @@ mod tests {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
-            providers: crate::domain::capability::ibcmd_for_every_choice(),
+            providers: crate::domain::capability::ibcmd_for_every_choice_on(
+                crate::domain::capability::TargetKind::Cluster,
+            ),
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig {
                 connection: "Srvr=localhost;Ref=ib".to_owned(),

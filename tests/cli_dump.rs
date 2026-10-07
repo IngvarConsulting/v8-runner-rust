@@ -130,7 +130,7 @@ fn write_config_with_infobase(
     infobase_yaml: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         infobase_yaml,
         platform_path.display(),
@@ -181,10 +181,11 @@ fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
 
 fn write_designer_config(path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
 
     fs::write(path, config).expect("config");
 }
@@ -698,15 +699,17 @@ fn dump_text_failure_shows_error_message() {
     assert!(stdout.contains("exit code 17"));
 }
 
+/// У кластера `ibcmd` в строке `pull` нет (#206): ключ отказывает при проверке настроек и
+/// называет исполнителей строки, `ibcmd` не запускается и при полной секции `dbms`.
 #[test]
-fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
-    let (_dir, config_path, _binary_path, work_path, _base_path, calls_log) = setup_project();
+fn a_cluster_infobase_refuses_providers_pull_ibcmd_before_the_platform() {
+    let (_dir, config_path, _binary_path, _work_path, _base_path, calls_log) = setup_project();
     write_config_with_infobase(
         &config_path,
         &config_path.parent().expect("dir").join("project"),
         &config_path.parent().expect("dir").join("work"),
         &config_path.parent().expect("dir").join("ibcmd"),
-        "  connection: 'Srvr=server;Ref=main'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: maindb\n    user: postgres\n    password: pg-secret\n",
+        "  connection: 'Srvr=server;Ref=main'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: maindb\n    user: postgres\n    password: pg-secret\n"
     );
 
     let output = v8_runner_command()
@@ -722,12 +725,15 @@ fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
         .output()
         .expect("run command");
 
-    assert!(output.status.success());
-    let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
-    assert!(calls.contains("--user Admin --password secret"));
-    assert!(calls.contains("--database-user postgres --database-password pg-secret"));
-    assert_ibcmd_data_path(&calls, &work_path);
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(
+            "does not implement this operation on a cluster infobase; implemented: agent, designer"
+        ),
+        "{stdout}"
+    );
+    assert!(!calls_log.exists(), "ibcmd must not run");
 }
 
 fn git(dir: &Path, args: &[&str]) {

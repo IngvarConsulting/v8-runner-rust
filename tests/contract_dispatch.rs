@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use support::command_data::{assert_data_matches_one_of, form_index, form_schema, slug_list};
+use support::fake_agent::{launch_request_file, managed_agent_double, ManagedAgentDouble};
 use support::{temp_workspace, v8_runner_command, wait_for_file, write_shell_script};
 
 /// Утилиты, которые заглушает образец с исполнителями.
@@ -51,7 +52,7 @@ fn no_tools(dir: &Path) -> PathBuf {
 /// Без исполнителей каталог платформы пуст, поиск строгий с версией — утилиты за его
 /// пределами он не ищет. EDT CLI строгого поиска не знает, поэтому ей назначена версия,
 /// которой нет ни у одной установки: кандидаты из корней по умолчанию сверяются с ней.
-fn write_sample(dir: &Path, with_executors: bool) {
+fn write_sample(dir: &Path, with_executors: Option<&ManagedAgentDouble>) {
     let project = dir.join("project");
     let extension = project.join("exts").join("client-mcp");
     fs::create_dir_all(project.join("configuration")).expect("configuration dir");
@@ -82,7 +83,7 @@ fn write_sample(dir: &Path, with_executors: bool) {
     let bin = dir.join("platform").join("bin");
     fs::create_dir_all(&bin).expect("platform dir");
     let journal = calls(dir);
-    let strictness = if with_executors {
+    let strictness = if let Some(agent) = with_executors {
         for executor in EXECUTORS {
             write_shell_script(
                 &bin.join(executor),
@@ -92,6 +93,18 @@ fn write_sample(dir: &Path, with_executors: bool) {
                 ),
             );
         }
+        // `clone` выгружает через агента, первого в цепочке `pull`: заглушка `1cv8` в
+        // агентском режиме поднимает раскладку двойника, называет ему порт и ключ хоста и живёт до сигнала,
+        // как платформа.
+        write_shell_script(
+            &bin.join("1cv8"),
+            &format!(
+                "printf '%s\\n' 1cv8 >> '{journal}'\ncase \"$*\" in *'/AgentMode'*) ;; *) exit 0 ;; esac\nbase=''\nprev=''\nport=''\nkey=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '/AgentBaseDir' ]; then base=\"$arg\"; fi\n  if [ \"$prev\" = '/AgentPort' ]; then port=\"$arg\"; fi\n  if [ \"$prev\" = '/AgentSSHHostKey' ]; then key=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n%s\\n' \"$port\" \"$key\" > '{launch}.tmp' && mv '{launch}.tmp' '{launch}'\nmkdir -p \"$base/0\"\nprintf '{{\"usersInfo\":[{{\"name\":\"\",\"dir\":\"0\"}}]}}' > \"$base/agentbasedir.json\"\nprintf '%s' \"$base\" > '{base_dir_file}'\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done",
+                journal = journal.display(),
+                base_dir_file = agent.base_dir_file.display(),
+                launch = launch_request_file(&agent.base_dir_file).display(),
+            ),
+        );
         write_shell_script(
             &bin.join("1cv8c"),
             &format!(
@@ -107,14 +120,15 @@ fn write_sample(dir: &Path, with_executors: bool) {
     fs::write(
         dir.join("v8project.yaml"),
         format!(
-            "workPath: {work}\nformat: DESIGNER\ninfobase:\n  connection: 'File={ib}'\n  web:\n    server: apache24\n    wsdir: demo\n    dir: '{web}'\n    url: http://localhost/demo\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n{strictness}  edt_cli:\n    path: {edt}\n    version: '1999.9.9'\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {extension}\n",
+            "workPath: {work}\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File={ib}'\n  web:\n    server: apache24\n    wsdir: demo\n    dir: '{web}'\n    url: http://localhost/demo\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n{strictness}  edt_cli:\n    path: {edt}\n    version: '1999.9.9'\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {extension}\n",
             work = dir.join("work").display(),
             ib = dir.join("ib").display(),
             web = dir.join("web").display(),
             platform = dir.join("platform").display(),
             edt = bin.join("1cedtcli").display(),
             extension = extension.display(),
-        ),
+ designer_leads = support::DESIGNER_LEADS,
+),
     )
     .expect("write config");
 }
@@ -318,11 +332,13 @@ fn every_form_carrying_the_flag_has_a_row_with_work() {
 #[test]
 fn the_flag_says_whether_a_stub_executor_ran() {
     let forms = forms_carrying_the_flag();
+    // Двойник управляемого агента: поднимается вместе с заглушкой `1cv8` в агентском режиме.
+    let agent = managed_agent_double();
     for index in 0..rows(Path::new(".")).len() {
         // Каждая строка — на свежем образце: состояние, записанное одной командой, лишило
         // бы работы следующую.
         let dir = temp_workspace();
-        write_sample(dir.path(), true);
+        write_sample(dir.path(), Some(&agent));
         let row = rows(dir.path()).swap_remove(index);
         let payload = run(dir.path(), &row.arguments, "/usr/bin:/bin");
         let context = format!("`{}`", row.arguments.join(" "));
@@ -359,7 +375,7 @@ fn the_flag_says_whether_a_stub_executor_ran() {
 fn no_form_says_an_executor_got_work_when_there_is_none() {
     for index in 0..rows(Path::new(".")).len() {
         let dir = temp_workspace();
-        write_sample(dir.path(), false);
+        write_sample(dir.path(), None);
         let row = rows(dir.path()).swap_remove(index);
         let path = no_tools(dir.path()).display().to_string();
         let payload = run(dir.path(), &row.arguments, &path);

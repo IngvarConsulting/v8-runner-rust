@@ -67,6 +67,8 @@ const PROJECT: &str =
 # Проект с расширением, объявленным не по соглашению.
 workPath: work
 format: DESIGNER
+providers:
+  pull: designer
 source-set:
   # Основная конфигурация.
   - name: main
@@ -351,10 +353,7 @@ fn a_pull_all_preview_reads_nothing_and_writes_nothing() {
 #[test]
 fn ibcmd_lists_the_installed_extensions() {
     let project = Project::new(&["Old", "Gone", "Fresh"]);
-    let text = PROJECT.replace(
-        "format: DESIGNER\n",
-        "format: DESIGNER\nproviders:\n  pull: ibcmd\n",
-    );
+    let text = PROJECT.replace("  pull: designer\n", "  pull: ibcmd\n");
     fs::write(project.project_file(), &text).expect("project file");
     commit_sources(&project.root);
 
@@ -532,7 +531,7 @@ fn a_declaration_that_breaks_the_project_is_refused_before_any_dump() {
 #[test]
 fn a_project_file_that_cannot_take_the_declaration_is_refused_before_any_dump() {
     let project = Project::new(&["Old", "Fresh"]);
-    let text = "workPath: work\nformat: DESIGNER\nsource-set: [{name: main, type: CONFIGURATION, path: src/cf}, {name: Old, type: EXTENSION, path: exts/old}]\ntools:\n  platform:\n    path: platform\n";
+    let text = "workPath: work\nformat: DESIGNER\nproviders:\n  pull: designer\nsource-set: [{name: main, type: CONFIGURATION, path: src/cf}, {name: Old, type: EXTENSION, path: exts/old}]\ntools:\n  platform:\n    path: platform\n";
     rewrite_project(&project, text);
 
     let (output, envelope) = project.pull(&["--all"]);
@@ -557,10 +556,7 @@ fn a_listed_name_that_is_not_an_identifier_is_refused_before_any_dump() {
     assert!(message.contains("\"1Bad\""), "{message}");
 
     let project = Project::new(&["Old", "Bad Name"]);
-    let text = PROJECT.replace(
-        "format: DESIGNER\n",
-        "format: DESIGNER\nproviders:\n  pull: ibcmd\n",
-    );
+    let text = PROJECT.replace("  pull: designer\n", "  pull: ibcmd\n");
     rewrite_project(&project, &text);
 
     let (output, envelope) = project.pull(&["--all"]);

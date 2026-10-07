@@ -161,12 +161,13 @@ fn write_config(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}tests:\n  execution_timeout_seconds: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         timeout_seconds,
         install_dir.display(),
         additional_launch_keys_block,
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(path, config).expect("config");
     write_local_origin(path, "File=ib", Some("secret"));
 }
@@ -354,14 +355,15 @@ fn setup_va_project_with_work_name(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\n        ignore_tags:\n          - '@draft'\n        scenario_filter:\n          - Проверка логина\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}tests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\n        ignore_tags:\n          - '@draft'\n        scenario_filter:\n          - Проверка логина\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         va_params.display(),
         features_dir.display(),
         va_epf.display(),
         install_dir.display(),
         additional_launch_keys_block,
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(&config_path, config).expect("config");
     write_local_origin(&config_path, "File=ib", Some("secret"));
     remember_origin(&base_path, &work_path);
@@ -1881,9 +1883,10 @@ fn vanessa_resolves_a_relative_epf_path_from_a_nested_config_directory() {
     fs::write(
         &config_path,
         format!(
-            "workPath: ./work\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: ./va.json\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: ./features\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: ./build/tools/vanessa.epf\n  platform:\n    path: '{}'\n",
-            install_dir.display()
-        ),
+            "workPath: ./work\nformat: DESIGNER\n{designer_leads}tests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: ./va.json\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: ./features\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: ./build/tools/vanessa.epf\n  platform:\n    path: '{}'\n",
+            install_dir.display(),
+ designer_leads = support::DESIGNER_LEADS,
+),
     )
     .expect("config");
     write_local_origin(&config_path, "File=./ib", None);

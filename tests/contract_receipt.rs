@@ -82,9 +82,12 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     let artifact = dir.path().join("main.cf").display().to_string();
 
     let expectations: Vec<(Vec<&str>, &str)> = vec![
-        (vec!["build", "--dry-run"], "designer"),
-        (vec!["dump", "--force", "--dry-run"], "designer"),
-        (vec!["infobase", "create", "--dry-run"], "designer"),
+        // У файловой базы `push` и `pull` первым пробуют агента: его поднимает раннер, и
+        // готов он тогда же, когда найдена платформа.
+        (vec!["build", "--dry-run"], "agent"),
+        (vec!["dump", "--force", "--dry-run"], "agent"),
+        // Файловую базу первым создаёт `ibcmd`: сразу с основной конфигурацией (#204).
+        (vec!["infobase", "create", "--dry-run"], "ibcmd"),
         // `make` собирает во временной базе раннера: первым в цепочке стоит `ibcmd`.
         (
             vec!["make", "main", "--output", &artifact, "--dry-run"],
@@ -115,8 +118,9 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     }
 }
 
-/// Умолчание — цепочка: без Конфигуратора сборка идёт через `ibcmd`, и квитанция
-/// называет пропущенного с причиной.
+/// Умолчание — цепочка: без платформы сборка идёт через `ibcmd`, и квитанция называет
+/// пропущенных с причиной — агента, которого раннер поднимает той же платформой, и
+/// Конфигуратор.
 #[test]
 fn a_default_chain_reports_who_was_skipped_and_why() {
     let dir = temp_workspace();
@@ -127,10 +131,13 @@ fn a_default_chain_reports_who_was_skipped_and_why() {
     assert_eq!(code, 0, "{payload}");
     let receipt = &payload["data"]["provider"];
     assert_eq!(receipt["selected"], "ibcmd");
-    assert_eq!(receipt["skipped"][0]["provider"], "designer");
-    assert!(receipt["skipped"][0]["reason"]
-        .as_str()
-        .is_some_and(|reason| reason.contains("not ready")));
+    assert_eq!(receipt["skipped"][0]["provider"], "agent");
+    assert_eq!(receipt["skipped"][1]["provider"], "designer");
+    for skipped in receipt["skipped"].as_array().expect("skipped") {
+        assert!(skipped["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("not ready")));
+    }
 }
 
 /// Переопределение называет файл, из которого пришло, и не откатывается.
@@ -169,4 +176,50 @@ fn a_local_override_is_attributed_to_the_local_file() {
     let receipt = &payload["data"]["provider"];
     assert_eq!(receipt["selected"], "ibcmd");
     assert_eq!(receipt["origin"]["file"], "v8project.local.yaml");
+}
+
+/// Проект EDT: у агента нет адаптера исходников EDT, и без ключа `push` первым берёт
+/// Конфигуратор; ключ `providers.push: agent` форма проекта не переписывает.
+#[test]
+fn an_edt_project_pushes_through_the_designer_unless_a_key_names_the_agent() {
+    for (providers, expected, origin) in [
+        ("", "designer", "default"),
+        ("providers:\n  push: agent\n", "agent", "override"),
+    ] {
+        let dir = temp_workspace();
+        let config_path = write_project(dir.path(), &["1cv8", "ibcmd"], providers);
+        let text = fs::read_to_string(&config_path).expect("config");
+        fs::write(
+            &config_path,
+            text.replace("format: DESIGNER", "format: EDT"),
+        )
+        .expect("edt");
+        let project = dir.path().join("project").join("configuration");
+        fs::create_dir_all(project.join("DT-INF")).expect("dt-inf");
+        fs::create_dir_all(project.join("src").join("Configuration")).expect("src");
+        fs::write(
+            project
+                .join("src")
+                .join("Configuration")
+                .join("Configuration.mdo"),
+            "<mdclass:Configuration/>",
+        )
+        .expect("edt configuration");
+        fs::write(
+            project.join(".project"),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<projectDescription>\n  <name>main</name>\n  <natures>\n    <nature>com._1c.g5.v8.dt.core.V8ConfigurationNature</nature>\n  </natures>\n</projectDescription>\n",
+        )
+        .expect("edt project");
+        fs::write(
+            project.join("DT-INF").join("PROJECT.PMF"),
+            "Manifest-Version: 1.0\nRuntime-Version: 8.3.27\n",
+        )
+        .expect("edt manifest");
+
+        let (_code, payload) = run(&config_path, &["push", "--dry-run"]);
+
+        let receipt = &payload["data"]["provider"];
+        assert_eq!(receipt["selected"], expected, "{payload}");
+        assert_eq!(receipt["origin"]["kind"], origin, "{payload}");
+    }
 }

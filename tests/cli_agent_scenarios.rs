@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 use support::command_data::assert_data_matches_one_of;
 use support::fake_agent::{
-    read_or_empty, start_fake_agent, write_fake_designer, FakeAgent, Hold, HoldReply,
+    read_or_empty, serve_managed_launches, write_fake_designer, FakeAgent, Hold, HoldReply,
     AGENT_PASSWORD,
 };
 use support::{
@@ -89,7 +89,10 @@ fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>
         designer_pid_file.clone(),
     );
     agent.hold = hold;
-    let port = start_fake_agent(agent);
+    // Двойник поднимается вместе с поддельным `1cv8` на объявленном порту и с ключом,
+    // который раннер передал агенту.
+    serve_managed_launches(agent, None);
+    let port = support::free_tcp_port();
     write_fake_designer(
         &bin.join("1cv8"),
         &designer_args_log,
@@ -101,10 +104,15 @@ fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>
         str::to_owned,
     );
     let config_path = root.join("v8project.yaml");
+    let providers = if providers.is_empty() {
+        String::new()
+    } else {
+        format!("providers:\n{providers}")
+    };
     fs::write(
         &config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\nproviders:\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
+            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
             work = work_path.display(),
             password = AGENT_PASSWORD,
             platform = root.join("platform").display(),
@@ -382,10 +390,8 @@ fn infobase_restore_through_the_agent_survives_the_agent_closing_the_session() {
 /// свойствами, составом и его изменением. Превью называет базу в кластере, а не в СУБД.
 #[test]
 fn a_server_base_without_dbms_serves_extensions_through_the_agent() {
-    let harness = harness_for(
-        Some("Srvr=127.0.0.1:1541;Ref=demo"),
-        "  extensions: agent\n",
-    );
+    // У кластера агент — единственный исполнитель `extensions`: ключ ему не нужен.
+    let harness = harness_for(Some("Srvr=127.0.0.1:1541;Ref=demo"), "");
 
     let (code, payload) = run(&harness, &["extensions", "list", "--dry-run"]);
     assert_eq!(code, 0, "{payload}");

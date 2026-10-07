@@ -12,13 +12,13 @@ const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNatu
 const V8_EXTENSION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExtensionNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
 
-/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
+/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — Конфигуратор первым,
 /// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
 fn providers_yaml(builder: &str) -> &'static str {
     if builder == "IBCMD" {
-        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
+        "providers:\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
     } else {
-        ""
+        support::DESIGNER_LEADS
     }
 }
 
@@ -1681,7 +1681,9 @@ fn build_ibcmd_server_connection_fails_at_config_load() {
 }
 
 #[test]
-fn build_ibcmd_server_connection_passes_dbms_and_infobase_credentials() {
+fn a_cluster_infobase_refuses_providers_push_ibcmd_before_the_platform() {
+    // У кластера `ibcmd` в строке `push` нет (#206): ключ отказывает при проверке настроек
+    // и называет тех, кого можно назначить, — даже при полной секции `dbms`.
     let (dir, config_path, binary_path, _work_path, _base_path, calls_log) = setup_ibcmd_project();
     write_config_with_builder_and_infobase(
         &config_path,
@@ -1691,8 +1693,6 @@ fn build_ibcmd_server_connection_passes_dbms_and_infobase_credentials() {
         "IBCMD",
         "  connection: 'Srvr=server;Ref=main'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: maindb\n    user: postgres\n    password: pg-secret\n",
     );
-    force_push(&config_path, dir.path());
-    fs::remove_file(&calls_log).expect("calls of the forced push");
 
     let output = v8_runner_command()
         .args([
@@ -1704,13 +1704,15 @@ fn build_ibcmd_server_connection_passes_dbms_and_infobase_credentials() {
         .output()
         .expect("run command");
 
-    assert!(output.status.success());
-    let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
-    assert!(calls.contains("--user Admin --password secret"));
-    assert!(calls.contains("--database-user postgres --database-password pg-secret"));
-    assert!(calls.contains("config import"));
-    assert!(calls.contains("config apply"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "providers.push: 'ibcmd' does not implement this operation on a cluster infobase; implemented: agent, designer"
+        ),
+        "{stderr}"
+    );
+    assert!(!calls_log.exists(), "ibcmd must not run");
 }
 
 #[test]

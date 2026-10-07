@@ -588,7 +588,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn execute_updates_extension_properties_via_ibcmd_server_contract() {
+    /// У кластера `ibcmd` в строке `extensions` нет (#206): ни готовый `ibcmd`, ни секция
+    /// `dbms` не делают его исполнителем, и без платформы для агента команда отказывает.
+    fn extensions_on_a_cluster_target_go_to_the_agent_not_to_ibcmd() {
         let dir = tempdir().expect("tempdir");
         let calls = dir.path().join("ibcmd.calls.log");
         let ibcmd = dir.path().join("ibcmd");
@@ -610,22 +612,29 @@ mod tests {
         )
         .with_credentials(Some("Admin".to_owned()), Some("secret".to_owned()));
 
-        let result = execute(
+        let failure = execute(
             &ExecutionContext::cli(CommandName::Extensions),
             &config,
             &ConfigureExtensionsRequest::default(),
         )
-        .expect("execute");
+        .expect_err("no agent without the platform");
 
-        assert!(result.ok);
-        let calls_text = fs::read_to_string(calls).expect("calls");
-        assert!(calls_text.contains("--dbms PostgreSQL"));
-        assert!(calls_text.contains("--database-server localhost"));
-        assert!(calls_text.contains("--database-name demo"));
-        assert!(calls_text.contains("--database-user postgres"));
-        assert!(calls_text.contains("--database-password pg-secret"));
-        assert!(calls_text.contains("--user Admin"));
-        assert!(calls_text.contains("--password secret"));
+        let receipt = failure
+            .payload
+            .as_ref()
+            .and_then(|result| result.provider.as_ref())
+            .expect("receipt");
+        assert_eq!(receipt.selected, None);
+        let skipped = receipt
+            .skipped
+            .iter()
+            .map(|entry| entry.provider)
+            .collect::<Vec<_>>();
+        assert_eq!(skipped, [crate::domain::capability::Provider::Agent]);
+        assert!(
+            !calls.exists(),
+            "ibcmd must not run against a cluster infobase"
+        );
     }
 
     #[cfg(unix)]

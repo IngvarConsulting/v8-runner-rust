@@ -11,8 +11,9 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/212
 запрашивает только нужный ей уровень — `sessions list` и `sessions terminate` кластер,
 `sessions deny` и `sessions allow` кластер и базу, `infobase create` в кластере с
 заполненным списком администраторов кластер, — и отказ без него называет уровень и
-ключ секции, а не «неверный пароль». Проверки допишут `sessions` (#212) и
-`infobase create` (#204); разрыв закрыт, когда проверку дописала каждая из этих задач.
+ключ секции, а не «неверный пароль». Часть для `infobase create` держит своё правило
+`INV.CLI.INFOBASE-CREATE-IN-A-CLUSTER-NAMES-THE-CLUSTER-ADMINISTRATOR`; разрыв — за
+`sessions` (#212).
 
 Источник: [`cli.html#map`](../../../docs/site/cli.html#map),
 [`platform.html#t59`](../../../docs/site/platform.html#t59).
