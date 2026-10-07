@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use support::command_data::{assert_data_matches_one_of, form_index, form_schema, slug_list};
-use support::fake_agent::{default_port_agent, DefaultPortAgent};
+use support::fake_agent::{launch_request_file, managed_agent_double, ManagedAgentDouble};
 use support::{temp_workspace, v8_runner_command, wait_for_file, write_shell_script};
 
 /// Утилиты, которые заглушает образец с исполнителями.
@@ -52,7 +52,7 @@ fn no_tools(dir: &Path) -> PathBuf {
 /// Без исполнителей каталог платформы пуст, поиск строгий с версией — утилиты за его
 /// пределами он не ищет. EDT CLI строгого поиска не знает, поэтому ей назначена версия,
 /// которой нет ни у одной установки: кандидаты из корней по умолчанию сверяются с ней.
-fn write_sample(dir: &Path, with_executors: Option<&DefaultPortAgent>) {
+fn write_sample(dir: &Path, with_executors: Option<&ManagedAgentDouble>) {
     let project = dir.join("project");
     let extension = project.join("exts").join("client-mcp");
     fs::create_dir_all(project.join("configuration")).expect("configuration dir");
@@ -94,13 +94,15 @@ fn write_sample(dir: &Path, with_executors: Option<&DefaultPortAgent>) {
             );
         }
         // `clone` выгружает через агента, первого в цепочке `pull`: заглушка `1cv8` в
-        // агентском режиме поднимает раскладку двойника и живёт до сигнала, как платформа.
+        // агентском режиме поднимает раскладку двойника, называет ему порт и ключ хоста и живёт до сигнала,
+        // как платформа.
         write_shell_script(
             &bin.join("1cv8"),
             &format!(
-                "printf '%s\\n' 1cv8 >> '{journal}'\ncase \"$*\" in *'/AgentMode'*) ;; *) exit 0 ;; esac\nbase=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '/AgentBaseDir' ]; then base=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nmkdir -p \"$base/0\"\nprintf '{{\"usersInfo\":[{{\"name\":\"\",\"dir\":\"0\"}}]}}' > \"$base/agentbasedir.json\"\nprintf '%s' \"$base\" > '{base_dir_file}'\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done",
+                "printf '%s\\n' 1cv8 >> '{journal}'\ncase \"$*\" in *'/AgentMode'*) ;; *) exit 0 ;; esac\nbase=''\nprev=''\nport=''\nkey=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '/AgentBaseDir' ]; then base=\"$arg\"; fi\n  if [ \"$prev\" = '/AgentPort' ]; then port=\"$arg\"; fi\n  if [ \"$prev\" = '/AgentSSHHostKey' ]; then key=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n%s\\n' \"$port\" \"$key\" > '{launch}.tmp' && mv '{launch}.tmp' '{launch}'\nmkdir -p \"$base/0\"\nprintf '{{\"usersInfo\":[{{\"name\":\"\",\"dir\":\"0\"}}]}}' > \"$base/agentbasedir.json\"\nprintf '%s' \"$base\" > '{base_dir_file}'\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done",
                 journal = journal.display(),
                 base_dir_file = agent.base_dir_file.display(),
+                launch = launch_request_file(&agent.base_dir_file).display(),
             ),
         );
         write_shell_script(
@@ -329,8 +331,8 @@ fn every_form_carrying_the_flag_has_a_row_with_work() {
 #[test]
 fn the_flag_says_whether_a_stub_executor_ran() {
     let forms = forms_carrying_the_flag();
-    // Двойник агента на порту по умолчанию: его замок держится весь прогон таблицы.
-    let agent = default_port_agent();
+    // Двойник управляемого агента: поднимается вместе с заглушкой `1cv8` в агентском режиме.
+    let agent = managed_agent_double();
     for index in 0..rows(Path::new(".")).len() {
         // Каждая строка — на свежем образце: состояние, записанное одной командой, лишило
         // бы работы следующую.

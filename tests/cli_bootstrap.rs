@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use support::command_data::assert_data_matches_its_command_form;
 use support::fake_agent::{
-    default_port_agent, read_or_empty, write_fake_designer, write_fake_designer_for_user,
+    managed_agent_double, read_or_empty, write_fake_designer, write_fake_designer_for_user,
 };
 use support::{
     hold_workspace_lock, interruptible_stub, temp_workspace, terminate_and_wait, v8_runner_command,
@@ -67,7 +67,7 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -134,7 +134,7 @@ fn clone_with_a_dotted_source_dir_hands_the_platform_a_clean_path() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -188,7 +188,7 @@ fn bootstrap_unquotes_simple_file_connection_path() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -229,7 +229,7 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer_for_user(
         &platform_path,
         &calls_log,
@@ -316,7 +316,7 @@ fn bootstrap_preserves_non_secret_connection_attributes() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -431,7 +431,7 @@ fn bootstrap_force_overwrites_existing_targets() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -561,7 +561,7 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer_for_user(
         &platform_path,
         &calls_log,
@@ -706,9 +706,6 @@ fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
     let release = dir.path().join("dump-release");
     let stderr = dir.path().join("stderr.log");
     write_script(&platform_path, &interruptible_stub(&started, &release));
-    // Первым в цепочке `pull` стоит агент: раннер ждёт его на порту по умолчанию, где у
-    // других тестов этого набора живёт двойник, — замок держит порт за этим тестом.
-    let _agent = default_port_agent();
 
     let mut args = bootstrap_args(
         &project_dir,
@@ -1282,7 +1279,7 @@ fn clone_preview_text_output_does_not_announce_a_cloned_project() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -1343,7 +1340,7 @@ fn clone_resolves_a_symlinked_project_directory_to_its_target() {
     std::os::unix::fs::symlink(&target, &link).expect("symlink");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -1397,7 +1394,7 @@ fn clone_into_a_subdirectory_of_a_repository_writes_the_project_gitignore() {
     let project_dir = repo.join("apps").join("erp");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -1450,7 +1447,7 @@ fn clone_takes_its_source_from_the_from_key() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -1610,7 +1607,7 @@ fn clone_into_a_directory_holding_only_git_writes_the_project() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,
@@ -1643,7 +1640,7 @@ fn clone_force_writes_the_project_into_a_non_empty_directory() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    let agent = default_port_agent();
+    let agent = managed_agent_double();
     write_fake_designer(
         &platform_path,
         &calls_log,

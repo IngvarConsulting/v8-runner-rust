@@ -329,6 +329,24 @@ pub enum AgentError {
     #[error("managed agent could not be launched: {0}")]
     Launch(#[source] crate::platform::process::ProcessError),
 
+    /// Порт управляемого агента занят другим процессом: свободный порт раннер выбирает
+    /// перед запуском, и между выбором и запуском его мог занять кто-то ещё.
+    #[error(
+        "port {port} of the managed agent is taken by another process ({detail}): run the command again for another free port, or declare a free tools.designer_agent.port"
+    )]
+    PortTaken { port: u16, detail: String },
+
+    /// На порту управляемого агента ответил SSH-сервер с чужим ключом хоста: это не тот
+    /// агент, которого поднял раннер, и сессия к нему не открывается.
+    #[error(
+        "{endpoint} answered with host key {presented}, not with the key the runner handed to the agent it launched ({expected}): another SSH server holds the port, and the runner does not talk to it"
+    )]
+    ForeignAgentOnPort {
+        endpoint: String,
+        expected: String,
+        presented: String,
+    },
+
     #[error("managed agent did not accept a session within {timeout_ms} ms; last: {last}")]
     StartupTimedOut { timeout_ms: u64, last: String },
 
@@ -1367,6 +1385,8 @@ pub struct ManagedAgent {
     process: Option<crate::platform::process::ManagedSpawnResult>,
     session: Option<AgentSession>,
     base_dir: PathBuf,
+    /// Одноразовый ключ хоста этого запуска; `None` — ключ объявлен в `host-key`.
+    host_key: Option<EphemeralHostKey>,
 }
 
 impl ManagedAgent {
@@ -1395,7 +1415,13 @@ impl ManagedAgent {
         let process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
             .spawn_managed(&request, ManagedSpawnMode::Wait, None)
-            .map_err(AgentError::Launch)?;
+            .map_err(|error| match port_taken(launch.port) {
+                Some(detail) => AgentError::PortTaken {
+                    port: launch.port,
+                    detail,
+                },
+                None => AgentError::Launch(error),
+            })?;
         debug!(
             pid = process.pid(),
             port = launch.port,
@@ -1407,6 +1433,18 @@ impl ManagedAgent {
             let last = match AgentSession::open(&session, policy) {
                 Ok(opened) => break opened,
                 Err(error @ AgentError::Unreachable { .. }) => error.to_string(),
+                Err(AgentError::HostKeyRejected {
+                    endpoint,
+                    expected,
+                    presented,
+                }) => {
+                    process.terminate();
+                    return Err(AgentError::ForeignAgentOnPort {
+                        endpoint,
+                        expected,
+                        presented,
+                    });
+                }
                 Err(error) => {
                     process.terminate();
                     return Err(error);
@@ -1432,7 +1470,14 @@ impl ManagedAgent {
             process: Some(process),
             session: Some(opened),
             base_dir: launch.base_dir.clone(),
+            host_key: None,
         })
+    }
+
+    /// Одноразовый ключ хоста живёт, пока жив агент: файл удаляется вместе с ним.
+    pub fn holding(mut self, host_key: Option<EphemeralHostKey>) -> Self {
+        self.host_key = host_key;
+        self
     }
 
     pub fn session(&mut self) -> &mut AgentSession {
@@ -1479,6 +1524,94 @@ impl Drop for ManagedAgent {
         // Сессия закрывается первой, чтобы процесс не ждал клиента при снятии.
         self.session.take();
         self.process.take();
+        self.host_key.take();
+    }
+}
+
+/// Занят ли порт на адресе управляемого агента: `Some` — чем, `None` — свободен.
+fn port_taken(port: u16) -> Option<String> {
+    std::net::TcpListener::bind((MANAGED_LISTEN_HOST, port))
+        .err()
+        .map(|error| error.to_string())
+}
+
+/// Свободный порт на адресе управляемого агента: система назначает его привязке к
+/// порту `0`, привязка тут же закрывается, и номер уходит агенту в `/AgentPort`.
+pub fn free_managed_port() -> Result<u16, AgentError> {
+    std::net::TcpListener::bind((MANAGED_LISTEN_HOST, 0))
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .map_err(|error| AgentError::PortTaken {
+            port: 0,
+            detail: format!("no free port on {MANAGED_LISTEN_HOST}: {error}"),
+        })
+}
+
+/// Одноразовый ключ хоста управляемого агента.
+///
+/// Без объявленного `host-key` раннер создаёт ED25519-ключ на каждый запуск и отдаёт его
+/// агенту тем же `/AgentSSHHostKey`, что и объявленный; ожидание сессии закрепляется на
+/// его отпечатке, поэтому другой SSH-сервер на том же порту отвергается. Файл доступен
+/// только владельцу и удаляется вместе с агентом.
+pub struct EphemeralHostKey {
+    path: PathBuf,
+    fingerprint: Fingerprint,
+}
+
+impl EphemeralHostKey {
+    pub fn create(dir: &Path) -> Result<Self, AgentError> {
+        let workspace = |source| AgentError::Workspace {
+            path: dir.to_path_buf(),
+            source,
+        };
+        std::fs::create_dir_all(dir).map_err(workspace)?;
+        // Зерно ключа — из системного генератора, через который `uuid` строит v4: новой
+        // зависимости ради одного ключа раннер не заводит.
+        let mut seed = [0u8; 32];
+        seed[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        seed[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        let invalid = |detail: String| {
+            workspace(std::io::Error::new(std::io::ErrorKind::InvalidData, detail))
+        };
+        let key = russh::keys::PrivateKey::new(
+            russh::keys::ssh_key::private::KeypairData::Ed25519(
+                russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&seed),
+            ),
+            "v8-runner managed agent",
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        let text = key
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .map_err(|error| invalid(error.to_string()))?;
+        let path = dir.join(format!("host-key-{}", uuid::Uuid::new_v4().simple()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(workspace)?;
+        file.write_all(text.as_bytes()).map_err(workspace)?;
+        Ok(Self {
+            path,
+            fingerprint: key.public_key().fingerprint(HashAlg::Sha256),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Ожидание сессии: только этот ключ.
+    pub fn expectation(&self) -> HostKeyExpectation {
+        HostKeyExpectation::Pinned(self.fingerprint.clone())
+    }
+}
+
+impl Drop for EphemeralHostKey {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

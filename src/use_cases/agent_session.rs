@@ -20,8 +20,8 @@ use crate::config::model::{AppConfig, DesignerAgentMode};
 use crate::domain::capability::{Provider, SessionEndpoint, SessionMode};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::agent::{
-    self, AgentEndpoint, AgentError, AgentLaunch, AgentSession, AgentSessionRequest,
-    HostKeyExpectation, ManagedAgent, WaitPolicy,
+    self, free_managed_port, AgentEndpoint, AgentError, AgentLaunch, AgentSession,
+    AgentSessionRequest, EphemeralHostKey, HostKeyExpectation, ManagedAgent, WaitPolicy,
 };
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
@@ -254,11 +254,28 @@ fn open_handle(
                         .to_owned(),
                 )
             })?;
+            // Порт не объявлен — свободный на этот запуск: фиксированный порт отдал бы сессию
+            // первому, кто на нём слушает.
+            let port = match port {
+                Some(port) => port,
+                None => free_managed_port().map_err(AppError::from)?,
+            };
+            // Ключ не объявлен — одноразовый на этот запуск, и сессия закреплена на нём.
+            let ephemeral = match agent.host_key {
+                Some(_) => None,
+                None => Some(
+                    EphemeralHostKey::create(&config.work_path.join("agent").join("host-keys"))
+                        .map_err(AppError::from)?,
+                ),
+            };
             let launch = AgentLaunch {
                 v8: v8.to_path_buf(),
                 infobase_args: connection.infobase_args(),
                 port,
-                host_key: agent.host_key.clone(),
+                host_key: agent
+                    .host_key
+                    .clone()
+                    .or_else(|| ephemeral.as_ref().map(|key| key.path().to_path_buf())),
                 base_dir: config.work_path.join("agent").join("base"),
                 process_log: transcript_log.with_extension("process"),
             };
@@ -269,11 +286,14 @@ fn open_handle(
                 transcript_log: Some(transcript_log),
                 // Тот же файл, что уезжает агенту в `/AgentSSHHostKey`: он публикует
                 // ключ оттуда как есть, поэтому открытая часть файла и есть ожидание.
-                host_key: launch
-                    .host_key
-                    .as_deref()
-                    .map(HostKeyExpectation::of_host_key_file)
-                    .unwrap_or_default(),
+                host_key: match ephemeral.as_ref() {
+                    Some(key) => key.expectation(),
+                    None => launch
+                        .host_key
+                        .as_deref()
+                        .map(HostKeyExpectation::of_host_key_file)
+                        .unwrap_or_default(),
+                },
             };
             let managed = ManagedAgent::launch(
                 utilities.runner_for(UtilityType::V8),
@@ -282,7 +302,8 @@ fn open_handle(
                 Duration::from_millis(agent.startup_timeout_ms.max(1)),
                 wait,
             )
-            .map_err(AppError::from)?;
+            .map_err(AppError::from)?
+            .holding(ephemeral);
             Ok(AgentHandle::Managed(managed))
         }
     }

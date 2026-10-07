@@ -1128,69 +1128,119 @@ pub fn start_fake_agent_with_host_key(agent: FakeAgent, key: russh::keys::Privat
     start_fake_agent_on(agent, key, 0)
 }
 
-/// Порт управляемого агента по умолчанию (`tools.designer_agent.port`).
-pub const DEFAULT_AGENT_PORT: u16 = 1543;
+/// Файл, в который поддельный `1cv8` пишет порт и ключ хоста своего запуска: рядом с
+/// файлом раскладки агента.
+pub fn launch_request_file(base_dir_file: &Path) -> PathBuf {
+    let mut name = base_dir_file.as_os_str().to_owned();
+    name.push(".launch");
+    PathBuf::from(name)
+}
 
-/// Двойник управляемого агента на порту по умолчанию.
+/// Двойник управляемого агента «поднимается» вместе с поддельным `1cv8`.
 ///
-/// `clone` пишет проект сам, и порт агента ему не назначить: раннер поднимает агента на
-/// порту по умолчанию. Порт один на машину, поэтому двойник один на процесс теста, а тест,
-/// которому он нужен, держит его замок весь прогон: раскладку агента двойнику сообщает
-/// файл, общий для всех. Тест, чей раннер может поднять агента без двойника, тоже берёт
-/// замок — иначе он подключился бы к двойнику чужого теста.
-pub struct DefaultPortAgent {
+/// Раннер передаёт агенту порт (`/AgentPort`) и ключ хоста (`/AgentSSHHostKey`), а
+/// поддельный `1cv8` пишет их в файл запроса. Поток двойника ждёт этот файл и поднимает
+/// SSH-сервер на том порту с тем ключом — как настоящий агент. `presented` подменяет ключ:
+/// так проверяется отказ чужому ключу. Поток живёт, пока жив каталог файла запроса.
+pub fn serve_managed_launches(agent: FakeAgent, presented: Option<russh::keys::PrivateKey>) {
+    let request = launch_request_file(&agent.base_dir_file);
+    std::thread::spawn(move || {
+        // Сервер прежнего запуска на том же порту останавливается: у нового запуска свой ключ.
+        let mut running: HashMap<u16, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+        while request.parent().is_some_and(Path::exists) {
+            if let Ok(text) = fs::read_to_string(&request) {
+                let _ = fs::remove_file(&request);
+                let mut lines = text.lines();
+                let port: u16 = lines
+                    .next()
+                    .and_then(|line| line.trim().parse().ok())
+                    .expect("fake 1cv8 names /AgentPort");
+                let key = presented.clone().unwrap_or_else(|| {
+                    match lines.next().map(str::trim).filter(|line| !line.is_empty()) {
+                        Some(path) => russh::keys::load_secret_key(path, None)
+                            .expect("host key handed to the agent"),
+                        None => random_host_key(),
+                    }
+                });
+                if let Some(stop) = running.remove(&port) {
+                    let _ = stop.send(());
+                }
+                let (port, stop) = start_stoppable_fake_agent_on(agent.clone(), key, port);
+                running.insert(port, stop);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+}
+
+/// Двойник управляемого агента для команд, чьи настройки тест не пишет (`clone`): журналы и
+/// раскладка — в своём каталоге, учётные данные — любые.
+pub struct ManagedAgentDouble {
     pub commands_log: PathBuf,
     pub base_dir_file: PathBuf,
     pub pid_file: PathBuf,
     pub fail_dump: Arc<AtomicBool>,
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
 }
 
-pub fn default_port_agent() -> DefaultPortAgent {
-    static LOCK: Mutex<()> = Mutex::new(());
-    static SHARED: std::sync::OnceLock<(PathBuf, Arc<AtomicBool>)> = std::sync::OnceLock::new();
-    let guard = LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (root, fail_dump) = SHARED.get_or_init(|| {
-        let root = tempfile::tempdir().expect("agent dir").keep();
-        let mut agent = FakeAgent::new(
-            true,
-            root.join("commands.log"),
-            None,
-            root.join("base-dir.txt"),
-            root.join("designer.pid"),
-        );
-        agent.any_credentials = true;
-        let fail_dump = Arc::clone(&agent.fail_dump);
-        start_fake_agent_on(agent, random_host_key(), DEFAULT_AGENT_PORT);
-        (root, fail_dump)
-    });
-    for name in ["commands.log", "base-dir.txt", "designer.pid"] {
-        let _ = fs::remove_file(root.join(name));
-    }
-    fail_dump.store(false, Ordering::SeqCst);
-    DefaultPortAgent {
+pub fn managed_agent_double() -> ManagedAgentDouble {
+    let dir = tempfile::tempdir().expect("agent dir");
+    let root = dir.path().to_path_buf();
+    let mut agent = FakeAgent::new(
+        true,
+        root.join("commands.log"),
+        None,
+        root.join("base-dir.txt"),
+        root.join("designer.pid"),
+    );
+    agent.any_credentials = true;
+    let fail_dump = Arc::clone(&agent.fail_dump);
+    serve_managed_launches(agent, None);
+    ManagedAgentDouble {
         commands_log: root.join("commands.log"),
         base_dir_file: root.join("base-dir.txt"),
         pid_file: root.join("designer.pid"),
-        fail_dump: Arc::clone(fail_dump),
-        _guard: guard,
+        fail_dump,
+        _dir: dir,
     }
 }
 
 /// Поднимает двойника на данном порту (`0` — на свободном) и возвращает порт.
 fn start_fake_agent_on(agent: FakeAgent, key: russh::keys::PrivateKey, port: u16) -> u16 {
+    let (port, stop) = start_stoppable_fake_agent_on(agent, key, port);
+    // Двойник живёт до конца процесса теста: сброшенный отправитель остановил бы сервер.
+    std::mem::forget(stop);
+    port
+}
+
+/// То же, но сервер останавливается, когда сброшен (или сработал) возвращённый отправитель:
+/// так управляемый двойник освобождает порт к следующему запуску на том же порту.
+fn start_stoppable_fake_agent_on(
+    agent: FakeAgent,
+    key: russh::keys::PrivateKey,
+    port: u16,
+) -> (u16, tokio::sync::oneshot::Sender<()>) {
     let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("fake agent runtime");
         runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-                .await
-                .expect("bind fake agent");
+            // Порт прежнего запуска освобождается не мгновенно: привязка повторяется.
+            let mut attempts = 0;
+            let listener = loop {
+                match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                    Ok(listener) => break listener,
+                    Err(error) if attempts < 200 => {
+                        attempts += 1;
+                        let _ = error;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("bind fake agent: {error}"),
+                }
+            };
             port_tx
                 .send(listener.local_addr().expect("addr").port())
                 .expect("port");
@@ -1202,10 +1252,13 @@ fn start_fake_agent_on(agent: FakeAgent, key: russh::keys::PrivateKey, port: u16
                 ..server::Config::default()
             });
             let mut agent = agent;
-            let _ = agent.run_on_socket(config, &listener).await;
+            tokio::select! {
+                _ = agent.run_on_socket(config, &listener) => {}
+                _ = stop_rx => {}
+            }
         });
     });
-    port_rx.recv().expect("fake agent port")
+    (port_rx.recv().expect("fake agent port"), stop_tx)
 }
 
 /// Поддельный `1cv8` в агентском режиме: записывает ключи, создаёт раскладку
@@ -1229,12 +1282,17 @@ pub fn write_fake_designer_for_user(
         r#"printf '%s\n' "$*" >> "{args_log}"
 printf '%s\n' "$$" > "{pid_file}"
 base=""
+port=""
+key=""
 prev=""
 for arg in "$@"; do
   if [ "$prev" = "/AgentBaseDir" ]; then base="$arg"; fi
+  if [ "$prev" = "/AgentPort" ]; then port="$arg"; fi
+  if [ "$prev" = "/AgentSSHHostKey" ]; then key="$arg"; fi
   prev="$arg"
 done
 if [ -z "$base" ]; then exit 3; fi
+printf '%s\n%s\n' "$port" "$key" > "{launch}.tmp" && mv "{launch}.tmp" "{launch}"
 mkdir -p "$base/0"
 printf '{{"usersInfo":[{{"name":"{user}","dir":"0"}}]}}' > "$base/agentbasedir.json"
 printf '%s' "$base" > "{base_dir_file}"
@@ -1243,6 +1301,7 @@ while :; do sleep 1; done"#,
         args_log = args_log.display(),
         pid_file = pid_file.display(),
         base_dir_file = base_dir_file.display(),
+        launch = launch_request_file(base_dir_file).display(),
     );
     super::write_shell_script(path, &body);
 }
