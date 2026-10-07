@@ -331,6 +331,21 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
+    /// `infobase restore --create-database <файл>`: новая база из образа DT. У файловой базы,
+    /// которой ещё нет, `ibcmd` с этим ключом создаёт её и загружает образ, а без ключа
+    /// отказывает (замер «Загрузка информационной базы из DT», 8.3.27.2074). Исход — по коду
+    /// выхода, у вызывающего.
+    pub fn infobase_restore_creating(
+        &self,
+        image: &Path,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.infobase_args(&["restore", "--create-database"]);
+        args.extend(self.connection.auth_args());
+        args.extend(self.connection.dbms_auth_args());
+        args.push(image.display().to_string());
+        self.run(&args)
+    }
+
     /// Updates extension security properties in the target infobase.
     pub fn infobase_extension_update_properties(
         &self,
@@ -1217,6 +1232,41 @@ mod tests {
         assert_eq!(
             args,
             "infobase\n--db-path\n/ib\ncreate\n--import=/src/main\n--apply\n--force\n"
+        );
+    }
+
+    /// Новая база из образа — ключ замера `--create-database`, образ последним; исход только
+    /// по коду выхода.
+    #[cfg(unix)]
+    #[test]
+    fn a_base_from_an_image_is_restored_with_the_measured_create_key() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        write_script(
+            &script,
+            &format!(
+                "printf '%s\\n' \"$@\" >> \"{}\"\nexit 255",
+                args_log.display()
+            ),
+        );
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        let result = dsl
+            .infobase_restore_creating(std::path::Path::new("/snap/upstream.dt"))
+            .expect("restore");
+
+        assert_eq!(result.process.exit_code, 255);
+        let args = fs::read_to_string(args_log).expect("args");
+        assert_eq!(
+            args,
+            "infobase\n--db-path\n/ib\nrestore\n--create-database\n/snap/upstream.dt\n"
         );
     }
 

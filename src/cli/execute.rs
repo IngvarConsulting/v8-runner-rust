@@ -164,8 +164,9 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
-        Command::Init => execute_init(
+        Command::Init(args) => execute_init(
             config,
+            args,
             presenter,
             clean_before_execution,
             dry_run,
@@ -623,9 +624,9 @@ pub fn command_name(command: &Command) -> CommandName {
                     command: InfobaseConfigurationCommand::Export(_),
                 }),
         }) => CommandName::InfobaseConfigurationExport,
-        Command::Init => CommandName::Init,
+        Command::Init(_) => CommandName::Init,
         Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Create,
+            command: InfobaseCommand::Create(_),
         }) => unreachable!("infobase create is normalised into its own command in app::run"),
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Dump(_),
@@ -657,7 +658,7 @@ pub fn infobase_transfer_operation(
             }) => Some(Operation::ConfigurationExport),
             InfobaseCommand::Dump(_) => Some(Operation::InfobaseDump),
             InfobaseCommand::Restore(_) => Some(Operation::InfobaseRestore),
-            InfobaseCommand::Create => None,
+            InfobaseCommand::Create(_) => None,
         },
         _ => None,
     }
@@ -1068,12 +1069,16 @@ fn render_extensions_text(
 
 fn execute_init(
     config: &AppConfig,
+    args: &crate::cli::args::InfobaseCreateArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = InitRequest { dry_run };
+    let request = InitRequest {
+        dry_run,
+        from: args.from.clone(),
+    };
     let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
@@ -1437,7 +1442,7 @@ pub struct PreparedInfobaseCliCommand {
 
 pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
     match &args.command {
-        InfobaseCommand::Create => {
+        InfobaseCommand::Create(_) => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1514,7 +1519,7 @@ pub fn render_infobase_pre_dispatch_failure(
     // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
     let selection: Option<ProviderReceipt> = None;
     match &args.command {
-        InfobaseCommand::Create => {
+        InfobaseCommand::Create(_) => {
             unreachable!("infobase create has no export request to render")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1571,7 +1576,7 @@ pub fn prepare_infobase_command(
     dry_run: bool,
 ) -> Result<PreparedInfobaseCommand, UseCaseError> {
     match &args.command {
-        InfobaseCommand::Create => {
+        InfobaseCommand::Create(_) => {
             unreachable!("infobase create is dispatched before the export machinery")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1682,7 +1687,7 @@ pub fn prepare_infobase_cli_command(
 
 fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     match &args.command {
-        InfobaseCommand::Create => {
+        InfobaseCommand::Create(_) => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
         InfobaseCommand::Configuration(_) => CommandName::InfobaseConfigurationExport,
@@ -4428,6 +4433,13 @@ fn render_load_text(
 
 fn render_init_text(result: &InitResult, presenter: &Presenter) {
     let mut details = Vec::new();
+    if let Some(source) = &result.source {
+        details.push(format!(
+            "source: infobase '{}', snapshot {}",
+            source.infobase,
+            source.snapshot.display()
+        ));
+    }
     for step in &result.steps {
         if is_designer_edt_workspace_noop(step) {
             continue;
@@ -5726,7 +5738,10 @@ mod tests {
 
     #[test]
     fn resolves_command_name() {
-        assert_eq!(command_name(&Command::Init), CommandName::Init);
+        assert_eq!(
+            command_name(&Command::Init(Default::default())),
+            CommandName::Init
+        );
         assert_eq!(
             command_name(&Command::Extensions(ExtensionsArgs {
                 command: None,

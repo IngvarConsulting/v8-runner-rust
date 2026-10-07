@@ -31,6 +31,8 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::throwaway_infobase::{edt_sources_to_xml, EdtConversion};
 use crate::use_cases::tool_extension;
 
+mod copy;
+
 pub fn execute(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -41,7 +43,7 @@ pub fn execute(
         transport = ?context.transport(),
         "executing init use case"
     );
-    stamp_dispatch(run_init(context, config, args.dry_run), context.work())
+    stamp_dispatch(run_init(context, config, args), context.work())
 }
 
 pub(crate) type InitExecutionFailure = UseCaseFailure<InitResult>;
@@ -52,9 +54,11 @@ const INFOBASE_CREATE: &str = "infobase create";
 fn run_init(
     context: &ExecutionContext,
     config: &AppConfig,
-    dry_run: bool,
+    args: &InitRequest,
 ) -> UseCaseResult<InitResult> {
+    let dry_run = args.dry_run;
     let started = Instant::now();
+    let mut source = None;
     let mut utilities = PlatformUtilities::from_config(config);
     // Исполнитель нужен только шагу создания базы, и тот сам сообщает об отсутствии
     // утилиты своим статусом: отказ выбора здесь не прерывает команду — у серверного
@@ -93,7 +97,7 @@ fn run_init(
     let workspace_failed = steps
         .last()
         .is_some_and(|step: &InitStep| step.status == InitStepStatus::Failed);
-    let infobase = if workspace_failed && config.target_kind() == TargetKind::File {
+    let infobase = if workspace_failed && config.target_kind() == TargetKind::File && args.from.is_none() {
         StepOutcome::failed(
             "infobase",
             "create",
@@ -104,6 +108,11 @@ fn run_init(
                 "the infobase of an EDT project is assembled from its sources converted to XML in the EDT workspace, and the workspace was not initialized: the infobase is not created; run infobase create again once the workspace import succeeds".to_owned()
             }),
         )
+    } else if let Some(from) = args.from.as_deref() {
+        // Копия другой базы собирается не из исходников: рабочая область ей не нужна.
+        let (step, copied) = copy::ensure_copy(context, config, &mut utilities, from, dry_run);
+        source = copied;
+        step
     } else {
         ensure_infobase(
             context,
@@ -124,6 +133,7 @@ fn run_init(
     }
 
     let mut result = init_result(started, steps, first_error.is_none());
+    result.source = source;
     if dry_run {
         // Строка о ходе остаётся в выводе, хотя ни база, ни рабочее пространство не
         // тронуты: запись о вызове несёт конверт, журнала превью не ведёт.
@@ -143,6 +153,7 @@ fn init_result(started: Instant, steps: Vec<InitStep>, ok: bool) -> InitResult {
         ok,
         provider_dispatched: false,
         steps,
+        source: None,
         duration_ms: started.elapsed().as_millis() as u64,
     }
 }
@@ -1407,7 +1418,10 @@ mod tests {
             super::execute(
                 &ExecutionContext::cli(CommandName::Init).with_cancellation(cancellation),
                 config,
-                &crate::use_cases::request::InitRequest { dry_run: false },
+                &crate::use_cases::request::InitRequest {
+                    dry_run: false,
+                    from: None,
+                },
             )
         })
     }

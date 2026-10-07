@@ -46,8 +46,8 @@ fn canonical_command(command: Command) -> Command {
         // Создание базы — свой сценарий, а не выгрузка: путь `infobase create` сводится
         // к внутреннему варианту, и ниже по течению команда остаётся прежней.
         Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Create,
-        }) => Command::Init,
+            command: InfobaseCommand::Create(args),
+        }) => Command::Init(args),
         command => command,
     }
 }
@@ -261,7 +261,7 @@ pub fn run() -> i32 {
         Command::ConfigInit(_) | Command::Download(_) => {
             unreachable!("new command names are normalised in canonical_command")
         }
-        Command::Init
+        Command::Init(_)
         | Command::Config(_)
         | Command::Tools(_)
         | Command::Extensions(_)

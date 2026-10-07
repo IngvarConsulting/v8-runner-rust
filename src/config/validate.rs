@@ -367,7 +367,7 @@ pub enum ConfigValidationError {
     InfobaseNotDeclared { name: String, declared: String },
 
     #[error(
-        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`)"
+        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`). Ways out for a working copy without an infobase of its own: its own clean infobase — `v8-runner init --infobase <connection string>`, then `v8-runner infobase create`; a copy of a declared infobase with its data — `v8-runner init --infobase <connection string>`, then `v8-runner infobase create --from <infobase>`; a shared infobase — declare it in v8project.local.yaml with `shared: true` in every working copy that holds it"
     )]
     OriginNotDeclared { declared: String },
 

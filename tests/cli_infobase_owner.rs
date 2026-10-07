@@ -220,9 +220,15 @@ fn assert_infobase_held(output: &Output, command: &str, owner: &Copy, stand: &St
         message.contains("v8project.local.yaml"),
         "says how to free the base: {message}"
     );
+    // `INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`: своя чистая база, копия
+    // базы и общая база — все три выхода доступны.
     assert!(
-        message.contains("infobase create --from") && message.contains("shared: true"),
-        "names the other ways out: {message}"
+        message.contains("init --infobase <connection string>")
+            && message.contains("v8-runner infobase create`")
+            && message.contains("infobase create --from upstream")
+            && message.contains("shared: true")
+            && !message.contains("not available yet"),
+        "names the ways out: {message}"
     );
     let shared_way = message
         .split("a shared infobase")

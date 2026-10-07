@@ -110,10 +110,141 @@ pub(crate) fn new_owner_since(config: &AppConfig) -> Option<String> {
     )
 }
 
+/// Файл признака копии под памятью базы.
+const COPIED_FROM_FILE_NAME: &str = "copied-from.json";
+
+/// Признак копии: содержимое базы пришло из другой базы (`infobase create --from`), и в
+/// неё ещё не отправляли. Вместе с поколением новой базы это вся память о ней
+/// (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CopiedFrom {
+    /// Имя базы-источника в местном слое.
+    pub(crate) source: String,
+    /// Образ DT, из которого создана база.
+    pub(crate) snapshot: PathBuf,
+    /// Когда база создана.
+    pub(crate) since: String,
+    /// Поколение основной конфигурации новой базы сразу после копии; `None` — инструмент
+    /// ответа не дал.
+    pub(crate) generation: Option<CopiedGeneration>,
+}
+
+/// Поколение новой базы и инструмент, которым оно прочитано: токены разных инструментов
+/// несравнимы (`INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CopiedGeneration {
+    pub(crate) tool: Provider,
+    pub(crate) token: String,
+}
+
+fn copied_from_file(config: &AppConfig) -> Option<PathBuf> {
+    SourceSetsService::new(config)
+        .base_memory_dir()
+        .map(|dir| dir.join(COPIED_FROM_FILE_NAME))
+}
+
+/// Признак копии рядом с журналом поколений набора: оба лежат под памятью его базы.
+fn copied_from_file_of(set: &SourceSetContext, work_path: &Path) -> Option<PathBuf> {
+    set.generation_file(work_path)
+        .and_then(|file| file.parent().map(|dir| dir.join(COPIED_FROM_FILE_NAME)))
+}
+
+/// Записи памяти базы, которые описывают её прежнее содержимое: хеш-память наборов, копии
+/// файла версий, журнал поколений и признак нового владельца.
+const PREVIOUS_MEMORY: &[&str] = &[
+    "hashes",
+    "dump-info",
+    crate::domain::source_set::GENERATION_FILE_NAME,
+    NEW_OWNER_FILE_NAME,
+];
+
+/// Память о базе, которую раннер только что создал копией другой базы: прежняя память под
+/// её именем стирается — хешей и файла версий у копии нет, — и пишется признак копии с
+/// поколением новой базы. Сбой — строка для ответа: база создана, а первая отправка назовёт
+/// выходы.
+pub(crate) fn remember_copied_base(config: &AppConfig, copied: &CopiedFrom) -> Option<String> {
+    let Some(file) = copied_from_file(config) else {
+        return Some(
+            "the address of the created infobase is not recognized, so the runner keeps no memory of it; the first push names the ways out".to_owned(),
+        );
+    };
+    let dir = file.parent().unwrap_or(&file).to_path_buf();
+    let mut failures: Vec<String> = PREVIOUS_MEMORY
+        .iter()
+        .filter_map(|name| {
+            let entry = dir.join(name);
+            let removed = match std::fs::symlink_metadata(&entry) {
+                Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&entry),
+                Ok(_) => std::fs::remove_file(&entry),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+            removed
+                .err()
+                .map(|error| format!("'{}': {error}", entry.display()))
+        })
+        .collect();
+    let written = serde_json::to_vec_pretty(copied)
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+            crate::support::fs::write_file_atomically(&file, |out| {
+                std::io::Write::write_all(out, &text)
+            })
+            .map_err(|error| format!("'{}': {error}", file.display()))
+        });
+    if let Err(error) = written {
+        failures.push(error);
+    }
+    (!failures.is_empty()).then(|| {
+        format!(
+            "the memory of the copied infobase was not written ({}); the first push names the ways out",
+            failures.join("; ")
+        )
+    })
+}
+
+/// Снимает признак копии: первая удачная отправка или новая база, собранная из исходников.
+pub(crate) fn forget_copied_base(config: &AppConfig) -> Option<String> {
+    let file = copied_from_file(config)?;
+    match std::fs::remove_file(&file) {
+        Ok(()) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(format!(
+            "the mark that the infobase is a copy of another one was not removed from '{}': {error}; the next push loads every source-set in full again and refusals keep offering no pull",
+            file.display()
+        )),
+    }
+}
+
+/// Из какой базы скопирована выбранная база, если в неё ещё не отправляли. Признак, который
+/// не прочесть или не разобрать, всё равно признак: выгрузку не предлагаем, отправка полная.
+pub(crate) fn copied_from(config: &AppConfig) -> Option<String> {
+    read_copied_from(&copied_from_file(config)?)
+}
+
+fn read_copied_from(file: &Path) -> Option<String> {
+    let text = match std::fs::read(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::debug!(file = %file.display(), %error, "the copy mark is not readable; it stands");
+            return Some("another infobase".to_owned());
+        }
+    };
+    Some(
+        serde_json::from_slice::<CopiedFrom>(&text)
+            .map(|copied| format!("the infobase '{}' ({})", copied.source, copied.since))
+            .unwrap_or_else(|_| "another infobase".to_owned()),
+    )
+}
+
 /// Положение базы, от которого зависят выходы отказа.
 struct Standing {
     /// Копия взяла базу без метки или сменила ушедшего владельца и ещё не отправляла.
     new_owner: Option<String>,
+    /// База создана копией другой базы, и в неё ещё не отправляли: из какой.
+    copied: Option<String>,
     /// База в кластере или на автономном сервере: метки у неё нет.
     server: bool,
     /// Общая база (`shared: true`): остальные её владельцы из метки.
@@ -124,6 +255,7 @@ impl Standing {
     fn of(config: &AppConfig) -> Self {
         Self {
             new_owner: new_owner_since(config),
+            copied: copied_from(config),
             server: config.target_kind() != TargetKind::File,
             shared_with: crate::use_cases::infobase_owner::shared_base_owners(config),
         }
@@ -132,13 +264,22 @@ impl Standing {
     /// Выгрузку предлагают всем, кроме нового владельца до первой отправки. Общей базе
     /// (`shared: true`) — всегда: решение владельца продукта от 06.10.2026 даёт ей оба выхода,
     /// и её меняют другие копии по согласию, а не захват.
+    ///
+    /// Копии базы до первой отправки выгрузку не предлагают никогда, и общей тоже: её
+    /// конфигурация принадлежит ветке источника
+    /// (`INV.USE-CASES.A-COPIED-BASE-OFFERS-NO-PULL-BEFORE-ITS-FIRST-PUSH`).
     fn offers_pull(&self) -> bool {
-        self.shared_with.is_some() || self.new_owner.is_none()
+        self.copied.is_none() && (self.shared_with.is_some() || self.new_owner.is_none())
     }
 
     /// Почему выгрузка не предложена и кто ещё мог менять базу.
     fn caveats(&self) -> String {
         let mut text = String::new();
+        if let Some(source) = &self.copied {
+            text.push_str(&format!(
+                " The infobase is a copy of {source} and nothing has been pushed into it since: its configuration belongs to the branch of the source, and taking it into this directory would bring that branch here, so only the overwrite is offered."
+            ));
+        }
         if let Some(others) = &self.shared_with {
             let others = if others.is_empty() {
                 "none recorded in the owner marker".to_owned()
@@ -287,7 +428,8 @@ fn remembers(set: &SourceSetContext, work_path: &Path) -> bool {
 
 /// Что копия помнит о базе для набора — единственное определение памяти: по нему отказывает
 /// `push` и отвечает `status`. Своя хеш-память решает первой; без неё — запись журнала
-/// поколений. Чужая или нечитаемая хеш-память — не память, даже рядом со своей записью.
+/// поколений, а без неё — признак копии базы. Чужая или нечитаемая хеш-память — не память,
+/// даже рядом со своей записью.
 pub(crate) fn memory_of(set: &SourceSetContext, work_path: &Path) -> MemoryState {
     if set.storage_identity().is_none() {
         return MemoryState::Unbound;
@@ -299,6 +441,15 @@ pub(crate) fn memory_of(set: &SourceSetContext, work_path: &Path) -> MemoryState
         SnapshotMemory::Nothing => match GenerationLedger::of(set, work_path).map(|l| l.read()) {
             Some(Recorded::Ours(_)) => MemoryState::Remembered,
             Some(Recorded::Foreign { .. }) => MemoryState::Foreign,
+            // Копия базы до первой отправки: память — признак копии с поколением новой базы
+            // (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
+            Some(Recorded::Nothing) | None
+                if copied_from_file_of(set, work_path)
+                    .and_then(|file| read_copied_from(&file))
+                    .is_some() =>
+            {
+                MemoryState::Remembered
+            }
             Some(Recorded::Nothing) | None => MemoryState::Missing,
         },
     }
@@ -786,6 +937,7 @@ pub(crate) fn remember_created_base(
         })
         .chain(assembled.and_then(|memory| remember_edt_source(config, memory)))
         .chain(forget_new_owner(config))
+        .chain(forget_copied_base(config))
         .collect();
     (!failures.is_empty()).then(|| {
         format!(
