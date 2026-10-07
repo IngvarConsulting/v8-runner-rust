@@ -103,7 +103,7 @@ pub struct McpLaunchAppRequest {
     pub wait_ready: Option<bool>,
     /// Which address opens the base: web or connection. Thin client only.
     #[schemars(
-        description = "Which address opens the base: web for infobase.web.url, connection for infobase.connection. Thin client only; the default follows the target kind."
+        description = "Which address opens the base: web for infobase.web.url, connection for infobase.connection. Thin client only; the default is infobase.connection, or infobase.web.url when no connection string is declared."
     )]
     pub via: Option<String>,
 }

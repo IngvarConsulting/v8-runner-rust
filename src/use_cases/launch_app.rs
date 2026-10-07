@@ -9,14 +9,14 @@ use crate::domain::launch::{
 use crate::domain::next_step::NextStep;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
-    build_launch_args, normalize_launch_payload_path, LaunchAddress, LaunchClientMode,
+    build_launch_args, normalize_launch_payload_path, LaunchClientMode,
 };
 use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
 use crate::platform::secrets::{mask_preview_args, mask_url_userinfo};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::support::error::CapabilityReason;
+use crate::use_cases::client_address;
 use crate::use_cases::client_mcp_readiness;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
@@ -25,8 +25,8 @@ use crate::use_cases::request::{
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, EnterpriseLaunchTarget,
     LaunchRequest as LaunchArgs, LaunchTargetRequest,
 };
+use crate::use_cases::result::UseCaseError;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
-use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::tool_extension;
 use tracing::debug;
 
@@ -78,20 +78,26 @@ fn run_launch(
         }
     };
 
-    // Прямой шлюз автономной цели раннер пока не использует (#205), поэтому её
-    // открывает только клиентский адрес — а по нему ходит только тонкий клиент.
-    // Конфигуратор, толстый и обычный отказывают здесь ровно так же, как отказывали до
-    // появления второго пути.
-    let standalone = config.target_kind() == crate::domain::capability::TargetKind::Standalone;
-    if standalone && !matches!(client_mode, LaunchClientMode::Thin) {
-        return Err(UseCaseFailure::without_payload(
-            UseCaseError::new(
-                UseCaseErrorKind::Capability(CapabilityReason::Target),
-                "a standalone server is opened by its web address: use `launch web` with infobase.web.url; a client is not launched against the gate",
-            )
-            .with_next(NextStep::command("launch web")),
-        ));
-    }
+    // Толстый клиент и обычное приложение против автономной цели не запускаются. Отказ
+    // называет выход полем: тонкий клиент того же вида запуска.
+    client_address::refuse_a_thick_client_on_a_standalone_target(config, client_mode).map_err(
+        |error| {
+            UseCaseFailure::without_payload(UseCaseError::from(error).with_next(NextStep::command(
+                match args.target {
+                    LaunchTargetRequest::Enterprise(EnterpriseLaunchTarget::ClientMcp {
+                        ..
+                    }) => "launch mcp",
+                    LaunchTargetRequest::Enterprise(
+                        EnterpriseLaunchTarget::ThickClient
+                        | EnterpriseLaunchTarget::OrdinaryApplication
+                        | EnterpriseLaunchTarget::ThinClient,
+                    )
+                    | LaunchTargetRequest::Designer
+                    | LaunchTargetRequest::Web => "launch thin",
+                },
+            )))
+        },
+    )?;
 
     if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
         context,
@@ -102,20 +108,14 @@ fn run_launch(
 
     // Путь и адрес разрешаются до поиска утилиты: искать платформу, когда адреса нет,
     // незачем, а отказ про адрес человеку понятнее отказа про платформу.
-    let via = resolve_launch_via(args.via, client_mode, standalone)
+    let address = client_address::resolve(config, client_mode, args.via)
         .map_err(UseCaseFailure::without_payload)?;
-    let web_url = match via {
-        LaunchVia::Connection => None,
-        LaunchVia::Web => Some(
-            client_address(config)
-                .map_err(UseCaseFailure::without_payload)?
-                .to_owned(),
-        ),
-    };
+    let via = address.via();
+    let web_url = address.web_url();
 
     // В ответ и в план адрес идёт без пароля из userinfo: argv несёт настоящий,
     // отчёт — замаскированный.
-    let reported_url = web_url.as_deref().map(mask_url_userinfo);
+    let reported_url = web_url.map(mask_url_userinfo);
 
     let launch = effective_launch_options(config, args).map_err(UseCaseFailure::without_payload)?;
     let external_epf_wait =
@@ -148,18 +148,15 @@ fn run_launch(
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     let platform_resolution = Some(platform_resolution(&location));
     let connection = config.v8_connection();
-    let address = match &web_url {
-        None => LaunchAddress::Connection(&connection),
-        // У автономной цели `infobase.user`/`password` — учётные данные SSH-шлюза, а не
-        // базы: клиенту они не принадлежат и в его командную строку не попадают.
-        Some(url) => LaunchAddress::Web {
-            url,
-            credentials: (!standalone).then_some(&connection),
-        },
-    };
     let process_request = ProcessRequest {
         program: location.path.clone(),
-        args: build_launch_args(client_mode, address, &additional_launch_keys, &launch),
+        args: build_launch_args(
+            client_mode,
+            &address,
+            &connection,
+            &additional_launch_keys,
+            &launch,
+        ),
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: external_epf_wait
@@ -574,7 +571,7 @@ fn execute_web(
     config: &AppConfig,
     args: &LaunchArgs,
 ) -> UseCaseResult<LaunchResult> {
-    let url = client_address(config).map_err(UseCaseFailure::without_payload)?;
+    let url = client_address::web_address(config).map_err(UseCaseFailure::without_payload)?;
     if args.client_mcp.is_some() || args.launch.external_epf_wait.is_some() {
         return Err(UseCaseFailure::without_payload(AppError::Validation(
             "launch web opens a browser and takes no client launch options".to_owned(),
@@ -645,54 +642,6 @@ fn execute_web(
         mcp_readiness: None,
         external_epf_wait: None,
     })
-}
-
-/// Клиентский адрес цели. Один текст отказа на оба пути: `launch web` и тонкий клиент по
-/// вебу отказывают одинаково, потому что не хватает им одного и того же.
-fn client_address(config: &AppConfig) -> Result<&str, AppError> {
-    config
-        .infobase
-        .web
-        .as_ref()
-        .and_then(|web| web.url.as_deref())
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .ok_or_else(|| {
-            AppError::Validation(
-                "infobase.web.url is not declared: the client address appears after `publish` on a web server or is set by hand in infobase.web.url"
-                    .to_owned(),
-            )
-        })
-}
-
-/// Каким адресом открывать базу: то, что попросили, иначе умолчание по виду цели.
-///
-/// Вид цели берётся объявленным, а не разобранным из строки подключения. Строку прямого
-/// шлюза автономной цели раннер пока не использует (#205), поэтому умолчание для неё — веб.
-fn resolve_launch_via(
-    requested: Option<LaunchVia>,
-    client_mode: LaunchClientMode,
-    standalone: bool,
-) -> Result<LaunchVia, AppError> {
-    let default = if standalone {
-        LaunchVia::Web
-    } else {
-        LaunchVia::Connection
-    };
-    let Some(requested) = requested else {
-        return Ok(default);
-    };
-    if !matches!(client_mode, LaunchClientMode::Thin) {
-        return Err(AppError::Validation(
-            "--via selects the address for the thin client; the other launch modes have only one address".to_owned(),
-        ));
-    }
-    if requested == LaunchVia::Connection && standalone {
-        return Err(AppError::Validation(
-            "the direct gate address of a standalone server is not used by the runner yet (#205): the thin client goes by infobase.web.url — use --via web or launch web".to_owned(),
-        ));
-    }
-    Ok(requested)
 }
 
 fn client_mcp_launch_shape(mode: ClientMcpMode) -> (LaunchMode, UtilityType, LaunchClientMode) {

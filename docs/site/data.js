@@ -221,7 +221,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'test') || needEdt(ctx); },
       today: function (ctx) { return { chain: [P.client], config: ['tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'сначала отправка, как у push; test --no-push её пропускает' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tests.yaxunit.* или tests.va.*'], note: 'тонкий клиент по прямому шлюзу или по HTTP с --via web; тесты в толстом клиенте недоступны — прямой шлюз его не пускает; сначала push, --no-push пропускает' };
+        if (ctx.target === 'standalone') return { chain: [P.client], config: ['connection', 'web.url — когда строки прямого шлюза нет', 'tests.yaxunit.* или tests.va.*'], note: 'тонкий клиент по прямому шлюзу, без строки — по HTTP сервера (web.url); ключа выбора адреса у test нет; тесты в толстом клиенте недоступны — прямой шлюз его не пускает; сначала push, --no-push пропускает' };
         return { chain: [P.client], config: ['connection', 'tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'сначала push, затем прогон; --no-push пропускает отправку' };
       }
     },
@@ -301,7 +301,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'extensions'); },
       today: function (ctx) { return { chain: ctx.tools.ibcmd ? [P.ibcmd] : [], config: ['connection'].concat(ctx.target === 'cluster' ? ['dbms.*'] : []), note: 'состав базы умеет только ibcmd: у Конфигуратора нет пакетного списка' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent, P.designer], config: ['standalone.gate', 'connection — для имён'], note: 'свойства — группой config extensions по SSH-шлюзу; имена — /DumpDBCfgList по прямому шлюзу' };
+        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['standalone.gate'], note: 'состав и свойства — группой config extensions по SSH-шлюзу; Конфигуратора для extensions у раннера нет' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection'], note: 'Конфигуратор перечислит имена (/DumpDBCfgList), свойства — только агент; ibcmd к базе под кластером не применяется' };
         return { chain: [P.ibcmd, P.agent], config: ['connection'], note: 'состав и свойства — ibcmd; агент — по ключу' };
       }
@@ -340,11 +340,12 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return null; },
       today: function (ctx) { return this.target(ctx); },
       target: function (ctx) {
-        // У цели два адреса, и тонкий клиент открывается любым; умолчание задаёт вид цели.
+        // У цели два адреса, и тонкий клиент открывается любым; умолчание — строка
+        // подключения, а без неё — web.url.
         // Клиент запускается локально в любом случае — платформа нужна и для веб-пути.
         if (ctx.target === 'standalone') {
-          return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
-                   note: 'designer, thin и mcp по прямому шлюзу; thick и ordinary отказывают: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает; --via web ведёт тонкий клиент по HTTP сервера' };
+          return { chain: [P.client], config: ['connection', 'web.url — для --via web или когда строки прямого шлюза нет', 'tools.enterprise.additional-launch-keys (необязательно)'],
+                   note: 'designer, thin и mcp по прямому шлюзу; без строки прямого шлюза тонкий клиент идёт по web.url, без реквизитов базы до замера; thick и ordinary отказывают: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает; --via web ведёт тонкий клиент по HTTP сервера' };
         }
         return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
                  note: 'умолчание — строка подключения; --via web открывает ту же базу по опубликованному адресу ws-соединением' };
@@ -367,12 +368,17 @@ window.RUNNER_DATA = (function () {
     },
     {
       id: 'convert', verb: 'convert', title: 'Перевести исходники между форматами',
-      what: 'Переводит исходники между EDT и XML.',
+      what: 'Переводит исходники между EDT и XML, наборы — в пакет, пакет — в XML.',
       cmd: function (ctx) { return 'v8-runner convert'; },
       applies: function (ctx) { return null; },
-      today: function (ctx) { return ctx.tools.edt ? { chain: [P.edt], config: ['format', 'source-set[]', 'tools.edt_cli.path'], note: 'только между EDT и XML; только CLI, в MCP не публикуется' } : { chain: [], config: [], note: 'нет' }; },
+      today: function (ctx) {
+        var chain = [];
+        if (ctx.tools.edt) chain.push(P.edt);
+        if (ctx.tools.ibcmd) chain.push(P.ibcmd);
+        return { chain: chain, config: ctx.tools.edt ? ['format', 'source-set[]', 'tools.edt_cli.path'] : ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd во временной базе раннера, база проекта не нужна; ibcmd-rs — после замера (#413); только CLI, в MCP не публикуется' };
+      },
       target: function (ctx) {
-        return { chain: [P.edt, P.ibcmd, P.rs], config: ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd или ibcmd-rs без базы проекта; ibcmd собирает пакет во временной базе раннера' };
+        return { chain: [P.edt, P.ibcmd, P.rs], config: ['format', 'source-set[]', 'tools.edt_cli.path'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd или ibcmd-rs без базы проекта; ibcmd собирает пакет во временной базе раннера' };
       }
     }
   ];

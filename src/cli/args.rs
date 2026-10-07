@@ -92,7 +92,7 @@ pub enum Command {
     Download(InfobaseConfigurationExportArgs),
     /// Export configuration packages or a full DT snapshot from the configured infobase
     Infobase(InfobaseArgs),
-    /// Convert configured source-sets between EDT and Designer file formats
+    /// Convert source-sets between EDT, Designer files and .cf/.cfe packages, or a package to Designer files
     Convert(ConvertArgs),
     /// Export release artifacts via Designer batch commands
     #[command(name = "make", visible_alias = "artifacts")]
@@ -676,13 +676,44 @@ pub struct InfobaseRestoreArgs {
     pub replace: bool,
 }
 
-#[derive(Args, Debug)]
-#[command(next_help_heading = "Command options")]
-pub struct ConvertArgs {
-    #[command(flatten)]
-    pub source_set: SourceSetArg,
+/// Разбор `--to`: значения и справка — из перечня запроса, иное значение — ошибка разбора.
+fn convert_to_parser(
+) -> impl clap::builder::TypedValueParser<Value = crate::use_cases::request::ConvertTo> {
+    use crate::use_cases::request::ConvertTo;
+    use clap::builder::TypedValueParser as _;
+    clap::builder::PossibleValuesParser::new(ConvertTo::ALL.map(ConvertTo::as_str)).map(|value| {
+        ConvertTo::ALL
+            .into_iter()
+            .find(|to| to.as_str() == value)
+            .expect("the parser accepts only listed values")
+    })
+}
 
-    /// Target root for converted source-set layout. Defaults to workPath/convert/out
+#[derive(Args, Debug)]
+#[command(
+    next_help_heading = "Command options",
+    after_help = "<SET|FILE>: a value ending in .cf or .cfe names a package file, anything else a source set; without it every set is converted. --to picks the target: xml (Designer files), edt (EDT project) or package (.cf/.cfe). Without --to a set goes to the format the project is not in, and a package file goes to xml. Sets in Designer format go to edt or package, sets in EDT format go to xml or package (through xml), a package file goes to xml. A package direction needs no infobase: ibcmd works in a throwaway infobase of the runner under workPath, and the answer names the executor in data.provider; without ibcmd the command is refused with kind environment. --to package takes the configuration and extension sets: one named external set is refused, and without <SET> external sets are left out."
+)]
+pub struct ConvertArgs {
+    /// Source set declared in v8project.yaml, or a .cf/.cfe package file
+    #[arg(value_name = "SET|FILE")]
+    pub input: Option<String>,
+
+    /// Previous spelling of the positional source set; hidden from help
+    #[arg(
+        long = "source-set",
+        value_name = "SET",
+        hide = true,
+        conflicts_with = "input"
+    )]
+    pub previous_source_set: Option<String>,
+
+    /// Target format: xml, edt or package
+    #[arg(long, value_name = "FORMAT", value_parser = convert_to_parser())]
+    pub to: Option<crate::use_cases::request::ConvertTo>,
+
+    /// Target root for converted source-set layout, defaults to workPath/convert/out; for a
+    /// package file, the directory of its XML files
     #[arg(long)]
     pub output: Option<String>,
 
@@ -771,7 +802,8 @@ pub struct LaunchArgs {
     pub launch: DirectLaunchOptionsArgs,
 
     /// Which address opens the base: `web` for infobase.web.url, `connection` for
-    /// infobase.connection. Thin client only; the default follows the target kind
+    /// infobase.connection. Thin client only; the default is infobase.connection, or
+    /// infobase.web.url when no connection string is declared
     #[arg(long = "via", value_parser = ["web", "connection"])]
     pub via: Option<String>,
 
@@ -935,9 +967,9 @@ pub struct DesignerModulesSyntaxArgs {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactsArgs, Cli, Command, ConvertArgs, DirectLaunchOptionsArgs, ExtensionsArgs,
-        InfobaseArgs, InfobaseCommand, LaunchArgs, LoadArgs, McpCommand, McpServeTransport,
-        SyntaxTarget, TestLaunchOptionsArgs, TestRunner, TestScope,
+        ArtifactsArgs, Cli, Command, DirectLaunchOptionsArgs, ExtensionsArgs, InfobaseArgs,
+        InfobaseCommand, LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget,
+        TestLaunchOptionsArgs, TestRunner, TestScope,
     };
     use clap::Parser;
 
@@ -1494,14 +1526,12 @@ mod tests {
         let cli = Cli::try_parse_from(["v8-runner", "convert"]).expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs {
-                source_set,
-                output,
-                discard_uncommitted,
-            }) => {
-                assert!(!discard_uncommitted);
-                assert!(source_set.name().is_none());
-                assert!(output.is_none());
+            Command::Convert(args) => {
+                assert!(!args.discard_uncommitted);
+                assert!(args.input.is_none());
+                assert!(args.previous_source_set.is_none());
+                assert!(args.to.is_none());
+                assert!(args.output.is_none());
             }
             _ => panic!("unexpected command"),
         }
@@ -1513,14 +1543,11 @@ mod tests {
             .expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs {
-                source_set,
-                output,
-                discard_uncommitted,
-            }) => {
-                assert!(!discard_uncommitted);
-                assert_eq!(source_set.name(), Some("ext-sales"));
-                assert!(output.is_none());
+            Command::Convert(args) => {
+                assert!(!args.discard_uncommitted);
+                assert!(args.input.is_none());
+                assert_eq!(args.previous_source_set.as_deref(), Some("ext-sales"));
+                assert!(args.output.is_none());
             }
             _ => panic!("unexpected command"),
         }
@@ -1532,17 +1559,31 @@ mod tests {
             .expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs {
-                source_set,
-                output,
-                discard_uncommitted,
-            }) => {
-                assert!(!discard_uncommitted);
-                assert!(source_set.name().is_none());
-                assert_eq!(output.as_deref(), Some("tests/fixtures/edt"));
+            Command::Convert(args) => {
+                assert!(!args.discard_uncommitted);
+                assert!(args.input.is_none());
+                assert_eq!(args.output.as_deref(), Some("tests/fixtures/edt"));
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    /// `--to` принимает ровно три значения; иное — отказ разбора.
+    #[test]
+    fn convert_to_takes_xml_edt_or_package() {
+        for value in ["xml", "edt", "package"] {
+            let cli = Cli::try_parse_from(["v8-runner", "convert", "main.cf", "--to", value])
+                .expect("parse convert --to");
+            match cli.command {
+                Command::Convert(args) => {
+                    assert_eq!(args.input.as_deref(), Some("main.cf"));
+                    assert_eq!(args.to.map(|to| to.as_str()), Some(value));
+                }
+                _ => panic!("unexpected command"),
+            }
+        }
+        Cli::try_parse_from(["v8-runner", "convert", "--to", "cf"])
+            .expect_err("cf is not a target format");
     }
 
     #[test]

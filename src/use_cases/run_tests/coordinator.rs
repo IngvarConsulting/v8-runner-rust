@@ -1,6 +1,5 @@
 use super::helpers::{build_prerequisite_failure, EnterpriseFailure};
 use super::*;
-use crate::support::error::CapabilityReason;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::TestBuildPolicy;
 
@@ -48,6 +47,33 @@ pub(super) fn run_tests(
     }
     let runner_id = match validate_runner_profile_id(&args.execution.profile.id) {
         Ok(runner_id) => runner_id,
+        Err(error) => {
+            let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
+                .with_diagnostics(vec![error.to_string()])
+                .with_errors(vec![test_execution_error(
+                    TestErrorKind::TestSetupFailed,
+                    error.to_string(),
+                )]);
+            let result = make_test_result(
+                target,
+                mode,
+                outcome,
+                warnings,
+                steps,
+                started.elapsed().as_millis() as u64,
+            );
+            return Err(TestExecutionFailure::with_payload(error, result));
+        }
+    };
+
+    // Адрес клиента и его режим проверяются до сборки: отправлять исходники в базу, которую
+    // клиент тестов не откроет, незачем.
+    let client_mode = args
+        .execution
+        .client_mode
+        .unwrap_or(LaunchClientModeRequest::Thin);
+    let client_address = match super::helpers::test_client_address(config, client_mode.into()) {
+        Ok(address) => address,
         Err(error) => {
             let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
                 .with_diagnostics(vec![error.to_string()])
@@ -279,9 +305,8 @@ pub(super) fn run_tests(
         &prepared_run,
         &platform_launch,
         &enterprise_runner,
-        args.execution
-            .client_mode
-            .unwrap_or(LaunchClientModeRequest::Thin),
+        client_mode,
+        client_address,
         args.execution.timeouts.total_ms,
     ) {
         Ok(dsl) => dsl,
@@ -530,22 +555,13 @@ pub(super) fn run_tests(
 
 /// Что можно доказать о готовой базе, не запуская платформу.
 ///
-/// Автономная цель отказывается сразу: тесты поднимают клиент предприятия по строке
-/// подключения, а прямой шлюз автономного сервера раннер пока не использует.
-///
-/// Дальше проверка строгая только у файловой базы: каталог обязан нести `1Cv8.1CD`.
-/// У серверной такой проверки нет, и это принятая уступка по переносимости — публичный
-/// контракт подключения не несёт учётных данных администрирования кластера, поэтому
+/// Проверка строгая только у файловой базы: каталог обязан нести `1Cv8.1CD`.
+/// У серверной и автономной такой проверки нет, и это принятая уступка по переносимости —
+/// публичный контракт подключения не несёт учётных данных администрирования кластера, поэтому
 /// доказать существование именованной серверной базы заранее нечем, кроме
 /// ложноположительной проверки TCP или новой внешней зависимости. Её доступность
 /// устанавливает само подключение движка тестов и его типизированные ошибки процесса.
 fn validate_prepared_infobase(config: &AppConfig) -> Result<(), AppError> {
-    if config.target_kind() == crate::domain::capability::TargetKind::Standalone {
-        return Err(AppError::capability_for(
-            CapabilityReason::Soon,
-            "tests start an enterprise client by the connection string; the direct gate of a standalone server is not used by the runner yet (#205) — run tests against a File= or Srvr= target",
-        ));
-    }
     let connection = config.v8_connection();
     let Some(file_path) = connection.file_path() else {
         return Ok(());

@@ -79,6 +79,8 @@ infobases:
     connection: "File=/absolute/path/to/ib"
 ```
 
+A standalone server (`ibsrv`) is declared by an `infobases.<name>.standalone` section; the runner never starts or creates it. Declare its direct gate `connection: 'Srvr=<host>:<--direct-regport, 1541>;Ref=<--name>'` (with `standalone: {}` when there is no SSH gate): the Designer then serves `push`, `pull`, `download` (also `--state db`), `upload`, `check`, `infobase dump|restore` with files on the runner's side. `standalone.gate: host:port` adds the agent through the SSH gate (second in the chain, the only one for `extensions`) and needs `standalone.exchange` (`sftp` or `{ dir: … }`) when no direct gate is declared. An operation with no declared way is refused as `validation` naming the key to add.
+
 `infobase:` in either file is a one-cycle synonym for `infobases.origin` and warns. `init` in a project whose `v8project.yaml` still has `infobase:` treats it as the declared `origin` (merged field by field with the local one) and never edits the project file; `--infobase` moves that effective section to `upstream` in the local layer and warns (key names only) when the project section has fields besides `connection`, since the loader still merges them into the new `origin`: move `infobase:` to `v8project.local.yaml`.
 
 Useful setup commands:
@@ -141,6 +143,10 @@ v8-runner infobase create
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
   way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the
   step instead of parsing the message.
+- Through `agent`, a reply that is not a JSON message array (a non-JSON bracket, an unknown
+  message type, a cut-off array, or prose after the first JSON reply, when the session ended) answers `error.code: invalid_output`, exit 4 (MCP:
+  `platform_failure`), and nothing the agent wrote reaches the target; the agent's own `error`
+  message stays `platform_failure`.
 - A busy `workPath` (another run holds its lock) answers at once with `error.kind: workspace`,
   `error.code: workspace_busy`, step `workspace lock` and exit 3 for every CLI command; MCP
   answers `runtime_failure`. Wait for the other run and retry.
@@ -244,7 +250,7 @@ v8-runner infobase create
   rather than guessed: `upload` reports `compatibility_state: not_probed` because the probe is
   itself a Designer run, and `infobase create` against a server infobase cannot tell "created" from
   "already existed" without creating it.
-- Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
+- Source files need conversion between Designer and EDT, a set into a `.cf`/`.cfe` (`convert <SET> --to package`) or a package into XML (`convert main.cf --to xml`): use `v8-runner convert`; this is CLI-only, never selects the project infobase (`--infobase` is refused) and runs `ibcmd` in a throwaway base for packages.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner upload ...`.
 - Release artifacts need to be built or external artifacts published: use `v8-runner make ...` or the `artifacts` alias. `make` builds from the sources in a throwaway runner base under `workPath` (`ibcmd`, else Designer) and never opens the project base: no `origin` needed, `--infobase` and `providers.make: agent` are refused. Unexported Designer edits do not reach the package: `pull` first, or take the base's package with `download`.
 - Need to know which extensions are installed in an infobase, or to change that composition:
@@ -261,7 +267,7 @@ v8-runner infobase create
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
   Launch uses the configured infobase and client settings; no source-set is required.
-- Need the thin client against a published base: `launch thin --via web` opens `infobase.web.url` as a ws connection. A standalone-server target takes that path by default — its direct gate address, when declared, is not used by the runner yet — while `launch web` still opens the same address in a browser. `--via` is accepted only where the client is thin.
+- Client address: `launch thin`, `launch mcp` and the `test` client go by `infobase.connection`, or by `infobase.web.url` as a ws connection when no connection string is declared; `launch thin --via web|connection` picks one explicitly, and `--via` is accepted only where the client is thin. On a standalone server the connection string is the direct gate (`/S host:port\name` with `/N`/`/P` from `infobase.user`/`password`; its `web.url` gets no credentials until #184 measures them), `launch designer` goes by it too, and `thick`/`ordinary` (also `test --client-mode`) are refused with code `target`. A `/IBConnectionString` in `tools.enterprise.additional-launch-keys` lands after the runner's address, though the platform wants it before `/S` — declare the address in `infobase.*`, not there.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,
   `pid=null`, and a `plan` with the selected `program` and the composed `args`; credential values

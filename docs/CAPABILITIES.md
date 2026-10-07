@@ -26,18 +26,18 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `tools download <tool>` | CLI-only загрузка выпусков (по умолчанию latest; у vanessa есть `--prerelease`) | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
 | `infobase create` | провайдер `designer` (умолчание) или `ibcmd` | Конфигуратор создаёт файловую ИБ, серверную оставляет ручной предпосылкой; `providers.infobase.create: ibcmd` создаёт файловую или серверную через `ibcmd infobase create` (серверной нужна `infobase.dbms`); при `format=EDT` дополнительно импортирует EDT workspace |
 | `extensions` | `format=DESIGNER` или `format=EDT`; провайдер `ibcmd`, `agent` только по `providers.extensions: agent` | Обновляет свойства extension `source-set` или установленного расширения, названного платформенным именем (`--installed-name`); `list`/`info`/`create`/`delete`/`activate` — состав расширений ИБ; у `agent` всё это группа `config extensions` одной сессией на команду, состав читается из структурного ответа `properties get`, синоним при `create` уходит в форме `NStr()` |
-| `push` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.push: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — только `agent` через SSH-шлюз сервера, платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
+| `push` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.push: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — `designer` по прямому шлюзу (строка `Srvr=…;Ref=…` в `connection`) → `agent` через SSH-шлюз сервера; агенту платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
 | `test` | Та же матрица, что и у `push` | По умолчанию запускает `push` |
 | `test --no-push` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без `push` |
-| `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER` | Инкрементальная (без ключей), object-scoped partial (`--object`) или полная (`--force`) выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `incremental` агент, Конфигуратор или `ibcmd` спрашивают поколение конфигурации, и равное записанному тем же инструментом после последней сборки или выгрузки означает «выгружать нечего» (`up_to_date`, выгрузка не запускается); при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; до запуска платформы любая выгрузка без `--force` — и поверх каталога, и с заменой — спрашивает git, что в каталоге цели не восстановить, и найдя незафиксированное, файл вне учёта или в игноре (кроме `ConfigDumpInfo.xml` в корне цели выгрузки в формате Конфигуратора — она пишет его заново; у reverse sync EDT и у `convert` исключения нет), отказывает и называет потери; каталог вне системы контроля версий (git не отвечает) с файлами — такой же отказ с перечнем каждого файла; `pull --force` — само согласие: уничтожает найденное без копии и перечисляет его в `data.losses`; превью (`--dry-run`) перечисляет потери поимённо |
-| `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent`; `--state db` — `designer` → `ibcmd`, без `agent`; у автономного сервера (`infobase.standalone`) — `agent` через SSH-шлюз, только рабочее состояние | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; конфигурацию базы данных (`--state db`) выгружают `designer` (`/DumpDBCfg`) и `ibcmd` (`config save --db`), а `providers.download: agent` при ней отказывает с `capability_unavailable` до запуска; у `agent` только `working` (`config dump-cfg`), файл пишется в каталог агента и переносится в staging |
-| `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent`; у автономного сервера (`infobase.standalone`) строки нет | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
-| `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
-| `upload` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
+| `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER`; у автономного сервера — `designer` по прямому шлюзу → `agent` через SSH-шлюз | Инкрементальная (без ключей), object-scoped partial (`--object`) или полная (`--force`) выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `incremental` агент, Конфигуратор или `ibcmd` спрашивают поколение конфигурации, и равное записанному тем же инструментом после последней сборки или выгрузки означает «выгружать нечего» (`up_to_date`, выгрузка не запускается); при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; до запуска платформы любая выгрузка без `--force` — и поверх каталога, и с заменой — спрашивает git, что в каталоге цели не восстановить, и найдя незафиксированное, файл вне учёта или в игноре (кроме `ConfigDumpInfo.xml` в корне цели выгрузки в формате Конфигуратора — она пишет его заново; у reverse sync EDT и у `convert` исключения нет), отказывает и называет потери; каталог вне системы контроля версий (git не отвечает) с файлами — такой же отказ с перечнем каждого файла; `pull --force` — само согласие: уничтожает найденное без копии и перечисляет его в `data.losses`; превью (`--dry-run`) перечисляет потери поимённо |
+| `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent`; `--state db` — `designer` → `ibcmd`, без `agent`; у автономного сервера (`infobase.standalone`) — `designer` по прямому шлюзу → `agent` через SSH-шлюз, `--state db` — только `designer` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; конфигурацию базы данных (`--state db`) выгружают `designer` (`/DumpDBCfg`) и `ibcmd` (`config save --db`), а `providers.download: agent` при ней отказывает с `capability_unavailable` до запуска; у `agent` только `working` (`config dump-cfg`), файл пишется в каталог агента и переносится в staging |
+| `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/DumpIB`): через SSH-шлюз `dump-ib` роняет `ibsrv` 8.3.27 | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
+| `convert` | EDT ↔ XML — `1cedtcli`, без строки в матрице; направления с пакетом — строка `convert`: `ibcmd` при любом виде базы и без неё; `ibcmd-rs` — после замера ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)); живой замер разбора пакета — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416) | CLI-only; переводит наборы проекта между XML и EDT, наборы — в `.cf`/`.cfe`, файл `.cf`/`.cfe` — в XML; база проекта не нужна; `ibcmd` работает во временной базе раннера под `workPath`: `config import --out` для сборки, `config export --file` для разбора |
+| `upload` | `format=DESIGNER`, провайдер только `designer`; у автономного сервера — по прямому шлюзу | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | цепочка `ibcmd` → `designer` при любом виде базы и без неё; любой `format`; `.epf`/`.erf` — только `designer`; `ibcmd-rs` и `agent` не принимаются; живой замер последовательностей — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416) | Собирает `.cf` / `.cfe` из исходников во временной базе раннера под `workPath` и публикует `.epf` / `.erf`; база проекта не открывается и не нужна; `ibcmd` — `infobase create` со своим `--data`, затем `config import --out`; Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles` (без `-updateConfigDumpInfo` и `/UpdateDBCfg`), `/DumpCfg`, расширение — поверх основной конфигурации; исходники EDT сперва переводит в XML `1cedtcli` |
-| `check` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
-| `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore`; `agent` только по `providers.infobase.restore: agent`; у автономного сервера (`infobase.standalone`) строки нет — снимок снимают средствами сервера | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
-| `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
+| `check` | `format=DESIGNER` или `format=EDT`; у автономного сервера — `designer` по прямому шлюзу | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
+| `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore`; `agent` только по `providers.infobase.restore: agent`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/RestoreIB`, только `--replace`; при открытых сеансах платформа отказывает, ключа их завершения у `/RestoreIB` нет) | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
+| `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
 | `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr` |
 | `status` | CLI-only; без `--deep` платформа не нужна | Состояние пары «каталог ↔ база» по памяти под `workPath`; `--all` — каждая объявленная база; `--deep` спрашивает поколение исполнителем `push`, состав расширений исполнителем `extensions` и называет копии из метки владельца |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
@@ -62,10 +62,31 @@ CLI help, доверяйте текущему коду и затем синхр�
 Экспериментальный исполнитель не откатывается на следующего по цепочке: если он не готов,
 команда отказывает. Сейчас экспериментальны `agent` у `push`, `pull`, `extensions`,
 `download`, `infobase dump` и `infobase restore` на файловой базе и кластере, а также `ibcmd`
-у `infobase dump` и `infobase restore`. У автономного сервера `agent` — единственный
-исполнитель `push`, `pull`, `extensions` и `download`, ключ ему не нужен и не
-разрешён; `make` автономный сервер не касается — он собирает пакет во временной базе раннера; `infobase dump` и `infobase restore` у такой цели строки не имеют. Подробнее — раздел «Эксперименты» на
+у `infobase dump` и `infobase restore`. У автономного сервера `agent` не экспериментален: у `push`, `pull` и `download` он идёт
+вторым после Конфигуратора по прямому шлюзу, у `extensions` — единственный; ключ
+`providers.*` выбирает между ними, но назначить исполнителя, путь которого не объявлен
+(строка прямого шлюза у `designer`, `standalone.gate` у `agent`), нельзя; `make` автономный
+сервер не касается — он собирает пакет во временной базе раннера; `upload`, `check`,
+`infobase dump` и `infobase restore` у такой цели исполняет только Конфигуратор по прямому
+шлюзу. Подробнее — раздел «Эксперименты» на
 [сайте](https://ingvarconsulting.github.io/v8-runner-rust/architecture.html).
+
+С #205 конфиг, где объявлены оба шлюза, при найденной платформе идёт к Конфигуратору, а не к
+агенту, и инкрементальный `pull` теряет ответ о поколении (#184); отказ `infobase dump|restore`
+автономному серверу без строки прямого шлюза теперь ошибка валидации (`invalid_argument`, в
+MCP — ошибка валидации вместо `runtime_failure`), а не `capability_unavailable`. Подробнее —
+[`CONFIGURATION.md`](CONFIGURATION.md#infobasestandalone).
+
+Ответ агента раннер читает только как JSON: итог решают тип итогового сообщения и
+`error-type`. Нечитаемый ответ — проза со скобкой, за которой не JSON, сообщение неизвестного
+типа или без типа, оборванный массив или проза после первого ответа JSON, на которых сессия кончилась, — отказ
+`invalid_output` с выходом 4 (у MCP — `platform_failure`), и сделанное агентом в цель не
+переносится; прежде такой ответ давал `platform_failure`. Сообщение агента `error` и ответ без
+итогового сообщения остаются `platform_failure`. Проза без скобки при открытой сессии успехом
+не становится: команда ждёт массива дальше — до срока шага, отмены или конца сессии. Выгрузка основной конфигурации агентом побайтно совпала с `ibcmd`, выгрузка всех
+расширений — с Конфигуратором; побайтовое сравнение файлов основной конфигурации и пакета
+`.cf` агента с Конфигуратором одной базы ещё не сделано
+([#420](https://github.com/IngvarConsulting/v8-runner-rust/issues/420)).
 
 ## Превью у глаголов, работающих с платформой
 
@@ -93,7 +114,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 |---|---|
 | `clone` | четыре пути, которые были бы написаны, и найденную утилиту выгрузки |
 | `launch` | `plan.program` и составленный `plan.args` с замаскированными credential |
-| `convert` | `outputs` — что и куда было бы сконвертировано |
+| `convert` | `outputs` — что и куда было бы сконвертировано; у направления с пакетом — квитанция `provider` |
 | `infobase create` | по шагу `status: planned` с тем, что было бы создано и чем |
 | `push` | по набору исходников планируемый `mode` и причину |
 | `upload` | артефакт, режим, расширение; `compatibility_state: not_probed` |
@@ -174,6 +195,10 @@ CLI help, доверяйте текущему коду и затем синхр�
 как `runtime_failure`. Код шага в `data.execution.errors[]` у `download`, `infobase dump` и
 `infobase restore` следует за родом: `environment_unavailable`, а не прежний
 `platform_failure`.
+
+Ответ агента, который не читается как массив его JSON-сообщений, — род и код `invalid_output`,
+выход 4; прежде он отвечал `platform_failure`. Отказ, который агент сообщил сам (`error`), — по-
+прежнему `platform_failure`. У MCP оба приходят как `platform_failure`.
 
 Занятый рабочий каталог у любой команды командной строки отвечает `workspace_busy` на шаге
 `workspace lock`, одним конвертом. Инструменты MCP на том же отказе отвечают
@@ -896,12 +921,35 @@ v8-runner pull --all [--dry-run] [--force]
 ### `convert`
 
 ```bash
-v8-runner convert [<SET>] [--output <DIR>] [--dry-run] [--force]
+v8-runner convert [<SET>] [--to xml|edt|package] [--output <DIR>] [--dry-run] [--force]
+v8-runner convert <FILE.cf|FILE.cfe> [--to xml] [--output <DIR>] [--dry-run] [--force]
 ```
 
-- Позиционный аргумент — набор исходников; без него конвертируются все наборы. Значение,
-  которое набором не является, — validation error. Прежний ключ `--source-set` принимается
-  скрыто.
+- Позиционный аргумент — набор исходников или файл пакета: значение с расширением `.cf` или
+  `.cfe` (в любом регистре) — файл, иначе набор; без него конвертируются все наборы.
+  Значение, которое набором не является, — validation error. Прежний ключ `--source-set`
+  принимается скрыто и всегда называет набор: набор, чьё имя оканчивается на `.cf` или
+  `.cfe`, называют им (`convert --source-set legacy.cf`).
+- `--to` задаёт направление: наборы формата Конфигуратора — в `edt` (умолчание) или
+  `package`, наборы формата EDT — в `xml` (умолчание) или `package` (через XML: сперва
+  `1cedtcli`), файл пакета — только в `xml` (умолчание). `--to` в тот формат, в котором
+  исходники уже лежат, и файл пакета в `edt` или `package` — validation error до замка.
+  Направление называет `data.direction`: `DESIGNER_TO_EDT`, `EDT_TO_DESIGNER`,
+  `DESIGNER_TO_PACKAGE`, `EDT_TO_PACKAGE`, `PACKAGE_TO_DESIGNER`.
+- Направления с пакетом исполняет строка `convert` матрицы — сейчас `ibcmd`; квитанция
+  `data.provider` называет исполнителя. `ibcmd` работает во временной базе раннера под
+  `workPath/temp/throwaway-infobases/` со своим `--data`: набор собирается
+  `config import --out`, файл разбирается `config export --file`; база убирается после
+  прогона. Без `ibcmd` — отказ рода `environment`, и квитанция называет его пропущенным.
+  `ibcmd-rs` в цепочку войдёт после замера ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413));
+  живой замер разбора пакета во временной базе — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416).
+- `--to package` без набора берёт основную конфигурацию и расширения порядком обхода; набор
+  внешних файлов с `--to package` — validation error (внешние обработки собирает `make`).
+- База проекта не нужна: проект без базы и без местного слоя переводит, `--infobase` —
+  validation error.
+- **Несовместимо с 0.13.0:** `convert --infobase …` больше не принимается; в `data`
+  `workspace_path` есть только у направлений с `1cedtcli`, а `outputs[].source_set` — только
+  у наборов (форма `CTR.WIRE.CONVERT-DATA` версии 2).
 
 - CLI-only; не публикуется как MCP tool.
 - Перед заменой целевого каталога команда спрашивает git, что нельзя вернуть:
@@ -911,11 +959,17 @@ v8-runner convert [<SET>] [--output <DIR>] [--dry-run] [--force]
   системы контроля версий (git не отвечает) с файлами — такой же отказ с перечнем каждого
   файла. Превью (`--dry-run`) называет те же потери. Вывод по умолчанию под `workPath` —
   каталог раннера: его сторож не спрашивает, спрашивает только каталог, названный `--output`.
-- Работает от текущего `v8project.yaml`, а не по arbitrary source/target paths.
-- Направление определяется из `format` (до [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
-- Файл пакета на месте позиционного аргумента и ключ `--to xml|edt|package` — разрыв [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236).
-- Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`.
-- `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога primary config.
+- Наборы берёт из текущего `v8project.yaml`; произвольный путь принимается только как файл пакета.
+- Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`,
+  пакеты — под `workPath/convert/out/packages/<SET>.cf|.cfe`, XML файла пакета — под
+  `workPath/convert/out/from-package/<имя файла с суффиксом>/` (`a.cf` и `a.cfe` каталог не
+  делят).
+- `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога
+  primary config. У `--to package` он читается как у `make`: без набора — каталог для
+  `<SET>.cf|.cfe`, а путь файла — validation error с `next` (`convert <основной набор>
+  --output x.cf`); с набором — сам файл пакета (суффикс обязан совпасть с видом набора) или
+  каталог для него. У файла пакета `--output` — сам каталог XML. Пакет заменяет файл без вопроса к git, как у `make`; каталог XML
+  спрашивает git, как остальные каталоги `convert`.
 - Публикация остаётся staged full replacement с overlap guardrails.
 
 ### `download`
@@ -960,9 +1014,10 @@ v8-runner download [--state db] --output <DIR> [--dry-run]
   цепочки; `providers.download` может назначить любого из них. У агента команды для
   конфигурации базы данных нет: `providers.download: agent` при `--state db` отказывает с
   `capability_unavailable` и в превью, и в работе, до запуска платформы и до сессии агента.
-  У автономного сервера в цепочке только агент, поэтому `--state db` там отказывает тем же
-  кодом и советует выгрузить рабочую конфигурацию; через SSH-шлюз `download` отдаёт основную
-  конфигурацию в рабочем состоянии (`config dump-cfg`).
+  У автономного сервера `--state db` выгружает Конфигуратор по прямому шлюзу; без строки
+  прямого шлюза в цепочке только агент, и `--state db` там отказывает тем же кодом и советует
+  объявить строку или выгрузить рабочую конфигурацию; через SSH-шлюз `download` отдаёт
+  основную конфигурацию в рабочем состоянии (`config dump-cfg`).
 - Переключение допустимо только во время pure preflight; после первого spawn provider не меняется.
 - Публикация идёт через sibling staging и target-specific lock; `published=true` означает, что
   финальный файл уже заменён атомарно.
@@ -1213,13 +1268,21 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - `designer` использует `1cv8`.
 - `thin` использует `1cv8c`.
 - `--via` выбирает, каким из двух адресов цели открыть базу: `connection` —
-  `infobase.connection`, `web` — `infobase.web.url` как ws-соединение. Умолчание задаёт вид
-  цели: у автономного сервера — `web` (объявленная строка прямого шлюза раннером пока не
-  используется, #205), у файловой и кластерной —
-  `connection`. Ключ принимается только там, где клиент тонкий (`launch thin` и
-  `launch mcp --mode thin`); у остальных режимов адрес один, и ключ отвергается. У
-  автономного сервера отвергается и `--via connection`: объявленная строка прямого шлюза
-  раннером пока не используется (#205).
+  `infobase.connection`, `web` — `infobase.web.url` как ws-соединение. Без ключа клиент идёт
+  по `infobase.connection`, а когда строка не объявлена (автономный сервер только с
+  SSH-шлюзом) — по `infobase.web.url`. Ключ принимается только там, где клиент тонкий
+  (`launch thin` и `launch mcp --mode thin`); у остальных режимов адрес один, и ключ
+  отвергается. Клиент `test` выбирает адрес тем же правилом без ключа.
+- У автономного сервера строка подключения — строка прямого шлюза: `designer`, `thin` и
+  `mcp` идут по ней ключом `/S <host>:<port>\<name>` с `/N`/`/P` из
+  `infobase.user`/`infobase.password`; по `infobase.web.url` автономного сервера реквизиты
+  не передаются, пока их приём по `/WS` не замерен (#184); `thick`, `ordinary` и
+  `mcp --mode thick|ordinary` отказывают (`capability`, код `target`, `next` —
+  `launch thin` или `launch mcp`). Что изменилось с #208 —
+  [`CONFIGURATION.md`](CONFIGURATION.md#infobasestandalone).
+- Пользовательский `/IBConnectionString` из `tools.enterprise.additional-launch-keys`
+  встаёт после адреса раннера (`/S` или `/IBConnectionString`), хотя справка платформы
+  требует его раньше `/S`: известный предел, раннер порядок не меняет.
 - Ответ несёт `via` у каждого режима, а `url` — там, где адрес клиентский. Пароль из
   userinfo в показанном адресе замаскирован; в процесс уходит настоящий.
 - `thick` и `ordinary` используют `1cv8`.
@@ -1348,8 +1411,11 @@ v8-runner mcp serve http
   адреса памяти нет (например, веб-клиента `ws=…`), отвергает проверка конфигурации.
 - `workPath/infobases/<база>/new-owner.json`: признак, что копия взяла базу без метки или
   сменила ушедшего владельца; снимает его первая удачная загрузка набора.
-- `workPath/edt-workspace/`: общий EDT workspace всех EDT-сценариев, кроме `convert`.
-- `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert`.
+- `workPath/edt-workspace/`: общий EDT workspace всех EDT-сценариев, кроме `convert`
+  между форматами исходников; `convert --to package` из набора EDT переводит его в XML здесь
+  же и называет этот каталог в `data.workspace_path`.
+- `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert` между форматами
+  исходников.
 - `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD dump; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/logs/platform/`: platform logs.
 - `workPath/logs/mcp/actions.log`: журнал действий; пишется при выводе JSON — у MCP-сервера и
@@ -1364,7 +1430,8 @@ v8-runner mcp serve http
 - `check` через `ibcmd`.
 - `make` через `ibcmd-rs`: сборка пакета из XML без базы только по ключу `providers.make: ibcmd-rs` ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
 - `extensions` через `designer`.
-- `convert` с пакетом: файл `.cf`/`.cfe` на входе, `--to package` и цепочка `ibcmd` → `ibcmd-rs` ([#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
+- `convert` через `ibcmd-rs`: пакет ↔ XML без платформы ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
+- `convert` файла пакета в `edt` и внешних наборов в пакет.
 - `apply` отдельной командой и `push --no-apply` ([#210](https://github.com/IngvarConsulting/v8-runner-rust/issues/210)); `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).
 - Сверка версии формата файла версий до запуска платформы: чужая версия делает выгрузку полной, загрузка из формата новее платформы отказывает ([#403](https://github.com/IngvarConsulting/v8-runner-rust/issues/403)).
 - Прогноз режима выгрузки перед `pull` (`-getChanges`, `config export status`) и

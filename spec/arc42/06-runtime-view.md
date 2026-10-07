@@ -56,8 +56,10 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [`capability.rs`](../../src/domain/capability.rs):
 
 1. План. Ключ `providers.<операция>` назначает одного исполнителя без отката к умолчанию;
-   без ключа — цепочка умолчаний строки матрицы для вида цели. Ключа командной строки или
-   поля вызова MCP для выбора нет.
+   без ключа — цепочка умолчаний строки матрицы для вида цели. У автономного сервера в
+   цепочке остаются те, кому объявлен путь: Конфигуратору — строка прямого шлюза, агенту —
+   `standalone.gate` (`AppConfig::provider_plan`); не остаётся никого — отказ называет, что
+   объявить. Ключа командной строки или поля вызова MCP для выбора нет.
 2. Готовность — найдена утилита исполнителя. Подключённому агенту и шлюзу локальная
    утилита не требуется. Первый готовый выбран, прежние попадают в `skipped` с причиной.
 3. Квитанция `provider` — `selected`, `origin`, `skipped` — входит в ответ при успехе и в
@@ -133,14 +135,16 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 
 [`agent_session.rs`](../../src/use_cases/agent_session.rs), [`platform/agent.rs`](../../src/platform/agent.rs):
 
-1. На том конце: у автономной цели — шлюз `infobase.standalone.gate`; с ключом
+1. На том конце: у автономной цели — SSH-шлюз `infobase.standalone.gate`; с ключом
    `tools.designer_agent.attach` — чужой агент; иначе раннер запускает агента сам и ждёт
    успешной аутентификации.
 2. SSH встроенным клиентом. Ключ хоста сверяется с объявленным, а у своего агента — с
    файлом ключа, который раннер отдал платформе. Ключа для сверки нет — принимается любой, и
    его отпечаток называется, чтобы ключ можно было закрепить; подмену хоста в сети раннер
    тогда не заметит — [11](11-risks-and-technical-debt.md). Первая команда переводит сессию
-   в JSON, затем подключение к базе.
+   в JSON, затем подключение к базе. Ответ на команду — JSON-массивы до итогового
+   сообщения; проза до массива уходит в журнал сессии, а массив, который не разбирается как
+   сообщения известного типа, — отказ.
 3. Сессия одна на команду: `push` открывает её при первой настоящей загрузке и ведёт через
    все наборы, остальные команды — одну на операцию.
 4. Файлы идут каналом: общим каталогом или SFTP шлюза. В общий каталог раннер выставляет
@@ -164,6 +168,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 
 Правила: [готовность — аутентификация](../rules/platform/agent-readiness-is-authentication.md),
 [сессия открывается в JSON](../rules/platform/agent-session-opens-in-json-mode.md),
+[ответ читается только как JSON](../rules/platform/an-agent-reply-is-read-only-as-json.md),
+[выгрузка сравнена с Конфигуратором](../rules/platform/an-agent-dump-is-compared-with-the-designer-dump.md),
 [сессия не живёт дольше замка](../rules/platform/agent-session-lives-with-the-lock.md),
 [файлы удалённой цели — объявленным каналом](../rules/platform/remote-files-travel-by-a-declared-channel.md),
 [неизменившееся поколение не выгружается](../rules/use-cases/an-unchanged-generation-is-not-dumped.md),
@@ -238,7 +244,8 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    `workPath/temp/throwaway-infobases/base-<запуск>` с описанием, затем `ibcmd infobase
    create` со своим `--data` или `CREATEINFOBASE`.
 3. Исходники формата EDT переводит в XML шаг `push` (`build_project::execute_edt_export_step`)
-   в каталог временной базы.
+   в каталог временной базы — через `ThrowawayInfobase::xml_from_edt`, общий у `make` и
+   `convert`.
 4. Конфигуратор загружает исходники без файла версий (безопасная точка перед загрузкой),
    расширение — поверх основной конфигурации, которую база получает один раз за прогон, и
    выгружает пакет (безопасная точка перед выгрузкой); `ibcmd` собирает пакет `config import
@@ -247,6 +254,15 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    git; цель сверяется при разрешении и заново перед публикацией.
 6. После прогона — `make <SET>` или всего обхода без набора — база убирается; неудачная
    уборка — предупреждение в ответе последнего набора.
+
+`convert` с пакетом ([`convert_sources/package.rs`](../../src/use_cases/convert_sources/package.rs))
+идёт тем же путём, что `make`, но исполнителя выбирает по строке `convert` матрицы — сейчас
+только `ibcmd`, — и базу проекта не выбирает вовсе: загрузчик настроек её не читает. Направление
+решает `convert_sources::resolve_direction` из `--to`, формата и вида входа до замка. Одна
+временная база служит прогону: набор собирается `config import --out` (исходники EDT сперва
+переводит `1cedtcli`), файл пакета разбирается `config export --file` в промежуточный каталог
+рядом с целью. Пакет публикуется заменой файла, XML — заменой каталога со сторожем
+незафиксированной работы; цель перепроверяется после работы исполнителя.
 
 `make` и `download` без набора — обходы поверх своих сценариев одного набора, с каталогом
 вместо файла (`SourceSetInventory::packages_directory`, путь пакета —
@@ -277,7 +293,9 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [`pull --all` объявляет набор каждому расширению базы](../rules/cli/pull-all-declares-a-set-for-each-installed-extension.md),
 [`make` и `download` без набора пишут в каталог](../rules/cli/make-and-download-without-a-set-write-into-a-directory.md),
 [`make` собирает пакет из исходников во временной базе](../rules/use-cases/make-builds-packages-from-sources-in-a-throwaway-base.md),
-[временная база служит одному прогону](../rules/use-cases/a-throwaway-base-serves-one-run-and-is-removed.md).
+[временная база служит одному прогону](../rules/use-cases/a-throwaway-base-serves-one-run-and-is-removed.md),
+[направление `convert` задаёт `--to`](../rules/cli/convert-direction-is-set-by-to.md),
+[направление с пакетом исполняет цепочка](../rules/cli/a-package-direction-of-convert-has-an-executor-chain.md).
 
 ### 6.7 EDT-проверка по MCP
 

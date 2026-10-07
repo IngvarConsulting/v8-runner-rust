@@ -607,6 +607,9 @@ pub struct AgentSession {
     deferred_interruption: Option<ProcessInterruptionReason>,
     /// Прерывание, которое отложила последняя команда, — и когда её ответ не дочитан.
     command_deferral: Option<ProcessInterruptionReason>,
+    /// Пришёл ли от агента хоть один JSON-массив. До него проза — баннер и приглашение
+    /// shell, а не ответ: конец сессии после неё — закрытая сессия, а не неверный ответ.
+    json_seen: bool,
 }
 
 impl AgentSession {
@@ -720,6 +723,7 @@ impl AgentSession {
             ended: false,
             deferred_interruption: None,
             command_deferral: None,
+            json_seen: false,
         };
         // Режим ответа и подключение к базе — служебные команды открытия сессии: работы
         // команды они не отмечают.
@@ -752,11 +756,7 @@ impl AgentSession {
         let mut messages = Vec::new();
         loop {
             let raw = self.read_reply(command, policy)?;
-            let batch: Vec<AgentMessage> =
-                serde_json::from_slice(&raw).map_err(|error| AgentError::InvalidReply {
-                    detail: error.to_string(),
-                    head: head_of(&raw),
-                })?;
+            let batch = parse_batch(&raw)?;
             let done = batch.iter().any(AgentMessage::is_terminal);
             messages.extend(batch);
             if done {
@@ -785,6 +785,7 @@ impl AgentSession {
     /// блокировку Конфигуратора и после разрыва SSH — и саму сессию. Ответ не важен, работы
     /// команды это не отмечает.
     pub fn release(mut self, policy: &WaitPolicy) {
+        self.discard_stale();
         let _ = self.run(DISCONNECT_COMMAND, &policy.cleanup().without_work());
         self.disconnect();
     }
@@ -1074,10 +1075,22 @@ impl AgentSession {
         // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
         // дольше короткого срока незачем, даже если бюджет команды не ограничен.
         let capped = policy.cleanup().without_work();
+        self.discard_stale();
         // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
         self.disconnect();
         reply
+    }
+
+    /// Недочитанное от прежней команды — например, неверный ответ, на котором она
+    /// кончилась, — ответом на служебную команду (`disconnect-ib`, `shutdown`) не является:
+    /// без сброса разбор упал бы на нём сразу (`InvalidReply`), не дождавшись ответа агента.
+    /// Сброшенное остаётся в журнале сессии.
+    fn discard_stale(&mut self) {
+        let stale = std::mem::take(&mut self.pending);
+        if let Some(log) = self.transcript.as_mut() {
+            let _ = log.write_all(&stale);
+        }
     }
 
     fn disconnect(&mut self) {
@@ -1157,10 +1170,7 @@ impl AgentSession {
                 return Ok(reply);
             }
             if self.ended {
-                return Err(AgentError::SessionClosed {
-                    endpoint: self.endpoint.to_string(),
-                    stderr: self.stderr_text(),
-                });
+                return Err(self.ended_without_reply());
             }
             if policy.cancellation.is_cancelled() {
                 if !critical {
@@ -1213,29 +1223,27 @@ impl AgentSession {
     }
 
     fn take_complete_array(&mut self) -> Result<Option<Vec<u8>>, AgentError> {
-        let Some(start) = self.pending.iter().position(|byte| *byte == b'[') else {
-            return Ok(None);
-        };
-        if start > 0 {
-            let skipped = self.pending.drain(..start).collect::<Vec<_>>();
-            if let Some(log) = self.transcript.as_mut() {
-                let _ = log.write_all(&skipped);
-            }
+        let skipped = skip_to_array(&mut self.pending);
+        if let Some(log) = self.transcript.as_mut() {
+            let _ = log.write_all(&skipped);
         }
-        let mut stream = serde_json::Deserializer::from_slice(&self.pending)
-            .into_iter::<serde::de::IgnoredAny>();
-        match stream.next() {
-            Some(Ok(_)) => {
-                let end = stream.byte_offset();
-                let reply = self.pending.drain(..end).collect::<Vec<_>>();
-                Ok(Some(reply))
-            }
-            Some(Err(error)) if error.is_eof() => Ok(None),
-            Some(Err(error)) => Err(AgentError::InvalidReply {
-                detail: error.to_string(),
+        let reply = take_array(&mut self.pending)?;
+        self.json_seen |= reply.is_some();
+        Ok(reply)
+    }
+
+    /// Канал кончился, а полного массива нет. Недочитанные байты — проза вместо массива или
+    /// оборванный массив — неверный ответ; без них сессия просто закрылась.
+    fn ended_without_reply(&self) -> AgentError {
+        match unread_reply(&self.pending, self.json_seen) {
+            Some(detail) => AgentError::InvalidReply {
+                detail: detail.to_owned(),
                 head: head_of(&self.pending),
-            }),
-            None => Ok(None),
+            },
+            None => AgentError::SessionClosed {
+                endpoint: self.endpoint.to_string(),
+                stderr: self.stderr_text(),
+            },
         }
     }
 
@@ -1248,6 +1256,61 @@ impl Drop for AgentSession {
     fn drop(&mut self) {
         self.disconnect();
     }
+}
+
+/// Снимает с начала буфера всё до открывающей скобки. Эти байты — не ответ (баннер или
+/// приглашение до JSON-режима): они идут только в журнал и итогом команды не становятся.
+/// Без скобки буфер остаётся как есть: массив может прийти следующим пакетом.
+fn skip_to_array(pending: &mut Vec<u8>) -> Vec<u8> {
+    match pending.iter().position(|byte| *byte == b'[') {
+        Some(start) => pending.drain(..start).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Снимает с буфера, начатого скобкой, первый полный JSON-массив. Скобка, за которой не
+/// JSON, — неверный ответ, а не повод читать дальше.
+fn take_array(pending: &mut Vec<u8>) -> Result<Option<Vec<u8>>, AgentError> {
+    if pending.first() != Some(&b'[') {
+        return Ok(None);
+    }
+    let mut stream =
+        serde_json::Deserializer::from_slice(pending).into_iter::<serde::de::IgnoredAny>();
+    match stream.next() {
+        Some(Ok(_)) => {
+            let end = stream.byte_offset();
+            Ok(Some(pending.drain(..end).collect()))
+        }
+        Some(Err(error)) if error.is_eof() => Ok(None),
+        Some(Err(error)) => Err(AgentError::InvalidReply {
+            detail: error.to_string(),
+            head: head_of(pending),
+        }),
+        None => Ok(None),
+    }
+}
+
+/// Что осталось в буфере, когда канал кончился: оборванный массив — неверный ответ, проза —
+/// тоже, но только после первого JSON-массива сессии (`json_seen`): до него это баннер и
+/// приглашение shell. Пустота и пробельные байты ответом не были.
+fn unread_reply(pending: &[u8], json_seen: bool) -> Option<&'static str> {
+    if pending.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else if pending.first() == Some(&b'[') {
+        Some("the reply was cut off when the session ended")
+    } else if json_seen {
+        Some("the session ended after text that is not a message array")
+    } else {
+        None
+    }
+}
+
+/// Массив ответа — только массив сообщений известного типа: всё иное — неверный ответ.
+fn parse_batch(raw: &[u8]) -> Result<Vec<AgentMessage>, AgentError> {
+    serde_json::from_slice(raw).map_err(|error| AgentError::InvalidReply {
+        detail: error.to_string(),
+        head: head_of(raw),
+    })
 }
 
 fn head_of(bytes: &[u8]) -> String {
@@ -1576,6 +1639,119 @@ mod tests {
         match reply.outcome() {
             Err(AgentError::Command { error_type, .. }) => {
                 assert_eq!(error_type, AgentErrorType::InfoBaseNotFound)
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    /// Проза, в которой встретилась скобка, — неверный ответ, а не успех и не повод ждать.
+    #[test]
+    fn prose_in_place_of_a_message_array_is_an_invalid_reply() {
+        for prose in [
+            "Выгрузка конфигурации успешно завершена [100%]\n",
+            "Configuration dumped successfully [OK]\n",
+            "[success]\n",
+        ] {
+            let mut pending = prose.as_bytes().to_vec();
+            skip_to_array(&mut pending);
+            match take_array(&mut pending) {
+                Err(AgentError::InvalidReply { .. }) => {}
+                other => panic!("{prose:?} gave {other:?}"),
+            }
+        }
+    }
+
+    /// Проза без массива ответом не становится: она уходит в журнал, а итога нет.
+    #[test]
+    fn prose_without_an_array_is_not_a_reply() {
+        for prose in [
+            "Выгрузка конфигурации успешно завершена\n",
+            "Success\n",
+            "{\"type\":\"success\"}\n",
+        ] {
+            let mut pending = prose.as_bytes().to_vec();
+            assert!(skip_to_array(&mut pending).is_empty(), "{prose:?}");
+            let reply = take_array(&mut pending).expect("no bracket, no verdict");
+            assert!(reply.is_none(), "{prose:?}");
+        }
+
+        let mut pending = b"designer> Success\n[{\"type\":\"error\"}]".to_vec();
+        assert_eq!(skip_to_array(&mut pending), b"designer> Success\n");
+        let reply = take_array(&mut pending).expect("array after prose");
+        let messages = parse_batch(&reply.expect("the array")).expect("messages");
+        let reply = AgentReply { messages };
+        assert!(
+            matches!(reply.outcome(), Err(AgentError::Command { .. })),
+            "the prose before the array decides nothing"
+        );
+    }
+
+    /// Конец канала посреди массива или после прозы, пришедшей вслед за JSON, — неверный
+    /// ответ; пустой конец и баннер до первого массива — закрытая сессия.
+    #[test]
+    fn a_reply_cut_off_or_left_as_prose_at_the_end_of_the_session_is_an_invalid_reply() {
+        let cut_off = br#"[{"type":"progress"},{"type":"succ"#;
+        let prose = "Выгрузка успешно завершена\n".as_bytes();
+        for json_seen in [false, true] {
+            assert_eq!(unread_reply(b"", json_seen), None);
+            assert_eq!(unread_reply(b" \r\n", json_seen), None);
+            assert!(unread_reply(cut_off, json_seen).is_some());
+        }
+        assert!(unread_reply(prose, true).is_some());
+    }
+
+    /// Баннер и приглашение shell до JSON-режима — не ответ: сессия, закрытая после них,
+    /// остаётся закрытой сессией, а не неверным ответом.
+    #[test]
+    fn a_banner_before_the_first_array_then_the_end_of_the_session_is_a_closed_session() {
+        assert_eq!(unread_reply(b"1C Designer Shell\ndesigner> ", false), None);
+    }
+
+    /// Сообщение неизвестного типа или без типа и массив не из сообщений — неверный ответ.
+    #[test]
+    fn a_message_of_an_unknown_or_missing_type_is_an_invalid_reply() {
+        for raw in [
+            r#"[{"type":"done","message":"Успешно"}]"#,
+            r#"[{"message":"Успешно"}]"#,
+            r#"[{"type":"success","error-type":42}]"#,
+            r#"["Успешно"]"#,
+            r#"[true]"#,
+        ] {
+            match parse_batch(raw.as_bytes()) {
+                Err(AgentError::InvalidReply { .. }) => {}
+                other => panic!("{raw} gave {other:?}"),
+            }
+        }
+    }
+
+    /// Ответ без итогового сообщения — отказ, а не успех, о чём бы ни говорил журнал.
+    #[test]
+    fn a_reply_without_a_terminal_message_is_a_refusal() {
+        for raw in [
+            "[]",
+            r#"[{"type":"log","message":"Успешно"}]"#,
+            r#"[{"type":"progress","message":"100%"},{"type":"log","message":"Success"}]"#,
+        ] {
+            let reply = AgentReply {
+                messages: parse_batch(raw.as_bytes()).expect("messages"),
+            };
+            match reply.outcome() {
+                Err(AgentError::NoTerminalMessage { .. }) => {}
+                other => panic!("{raw} gave {other:?}"),
+            }
+        }
+    }
+
+    /// Ошибка без `error-type` остаётся отказом: рода у неё нет, а успехом она не становится.
+    #[test]
+    fn an_error_without_an_error_type_is_still_a_refusal() {
+        let reply = AgentReply {
+            messages: parse_batch(r#"[{"type":"error","message":"Успешно"}]"#.as_bytes())
+                .expect("messages"),
+        };
+        match reply.outcome() {
+            Err(AgentError::Command { error_type, .. }) => {
+                assert_eq!(error_type, AgentErrorType::UnknownError)
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
