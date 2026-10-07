@@ -506,6 +506,14 @@ fn gate_commands_carry_target_side_relative_paths() {
         !lines.iter().any(|line| line == "common shutdown"),
         "a server the runner did not start is never shut down: {lines:?}"
     );
+    // Журнал, который называет ответ, — журнал сессии на машине раннера, а не на стороне цели.
+    let log = payload["data"]["platform_log_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{payload}"));
+    assert!(
+        Path::new(log).starts_with(harness.dir.path().join("work")) && Path::new(log).is_file(),
+        "{payload}"
+    );
 }
 
 /// Сборка через шлюз: исходники выставляются в каталог пользователя шлюза, загрузка и
@@ -703,6 +711,37 @@ fn a_standalone_server_without_a_declared_channel_is_refused_before_any_session(
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 }
 
+/// Канал обмена конфигурация требует только у SSH-шлюза без строки прямого шлюза. Когда
+/// строка объявлена, но команду исполняет агент — Конфигуратора на машине нет, — сессия
+/// без канала не открывается: отказ называет ключ до обращения к шлюзу.
+#[test]
+fn an_agent_chosen_next_to_the_direct_gate_without_a_channel_is_refused_before_any_session() {
+    let harness = harness();
+    write_config(
+        &harness,
+        &format!(
+            "  connection: 'Srvr=127.0.0.1:1541;Ref=demo'\n  user: {GATE_USER}\n  password: '{password}'\n  standalone:\n    gate: 127.0.0.1:{port}\n",
+            password = AGENT_PASSWORD,
+            port = harness.port
+        ),
+        "",
+    );
+
+    let (code, payload) = run(&harness, &["dump", "--force"]);
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(
+        error_message(&payload).contains("infobase.standalone.exchange"),
+        "{payload}"
+    );
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+}
+
 /// Рабочий каталог раннера не назначается на сторону цели: `workPath` внутри
 /// каталога обмена — отказ валидации.
 #[test]
@@ -830,7 +869,7 @@ fn a_file_address_next_to_the_standalone_section_is_refused() {
 
 /// Без строки прямого шлюза автономному серверу остаётся агент: ключ `providers.*`,
 /// назначивший Конфигуратор, — ошибка, называющая строку; агента назначить можно.
-/// Операции, которые исполняет только Конфигуратор (`upload`), отказывают с тем же
+/// Операции, которые исполняет только Конфигуратор (`upload`, `check`), отказывают с тем же
 /// выходом и сессии не открывают; `infobase create` раннер не делает никогда.
 #[test]
 fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
@@ -872,6 +911,16 @@ fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
     assert_eq!(
         error_message(&payload),
         "upload reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "{payload}"
+    );
+    assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
+
+    let (code, payload) = run(&harness, &["check"]);
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert_eq!(
+        error_message(&payload),
+        "syntax reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
         "{payload}"
     );
     assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
