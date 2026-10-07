@@ -10,6 +10,6 @@
 #
 # <операция> <цель> | сайт: <исполнители> | матрица: <исполнители> | #<задача>
 
-extensions cluster | сайт: agent designer | матрица: agent | #206
+extensions cluster | сайт: agent designer | матрица: agent | #428
 infobase.create file | сайт: ibcmd designer | матрица: designer ibcmd | #204
 infobase.create cluster | сайт: designer | матрица: designer ibcmd | #204
