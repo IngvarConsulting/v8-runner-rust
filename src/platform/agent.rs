@@ -1216,11 +1216,11 @@ impl AgentSession {
     }
 
     fn take_complete_array(&mut self) -> Result<Option<Vec<u8>>, AgentError> {
-        let (skipped, reply) = split_array(&mut self.pending)?;
+        let skipped = skip_to_array(&mut self.pending);
         if let Some(log) = self.transcript.as_mut() {
             let _ = log.write_all(&skipped);
         }
-        Ok(reply)
+        take_array(&mut self.pending)
     }
 
     fn stderr_text(&self) -> String {
@@ -1234,28 +1234,35 @@ impl Drop for AgentSession {
     }
 }
 
-/// Отделяет от начала буфера первый полный JSON-массив. Байты до открывающей скобки —
-/// не ответ (баннер или приглашение до JSON-режима): они возвращаются отдельно, только для
-/// журнала, и итогом команды не становятся. Скобка, за которой не JSON, — неверный ответ,
-/// а не повод читать дальше.
-fn split_array(pending: &mut Vec<u8>) -> Result<(Vec<u8>, Option<Vec<u8>>), AgentError> {
-    let Some(start) = pending.iter().position(|byte| *byte == b'[') else {
-        return Ok((Vec::new(), None));
-    };
-    let skipped = pending.drain(..start).collect::<Vec<_>>();
+/// Снимает с начала буфера всё до открывающей скобки. Эти байты — не ответ (баннер или
+/// приглашение до JSON-режима): они идут только в журнал и итогом команды не становятся.
+/// Без скобки буфер остаётся как есть: массив может прийти следующим пакетом.
+fn skip_to_array(pending: &mut Vec<u8>) -> Vec<u8> {
+    match pending.iter().position(|byte| *byte == b'[') {
+        Some(start) => pending.drain(..start).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Снимает с буфера, начатого скобкой, первый полный JSON-массив. Скобка, за которой не
+/// JSON, — неверный ответ, а не повод читать дальше.
+fn take_array(pending: &mut Vec<u8>) -> Result<Option<Vec<u8>>, AgentError> {
+    if pending.first() != Some(&b'[') {
+        return Ok(None);
+    }
     let mut stream =
         serde_json::Deserializer::from_slice(pending).into_iter::<serde::de::IgnoredAny>();
     match stream.next() {
         Some(Ok(_)) => {
             let end = stream.byte_offset();
-            Ok((skipped, Some(pending.drain(..end).collect())))
+            Ok(Some(pending.drain(..end).collect()))
         }
-        Some(Err(error)) if error.is_eof() => Ok((skipped, None)),
+        Some(Err(error)) if error.is_eof() => Ok(None),
         Some(Err(error)) => Err(AgentError::InvalidReply {
             detail: error.to_string(),
             head: head_of(pending),
         }),
-        None => Ok((skipped, None)),
+        None => Ok(None),
     }
 }
 
@@ -1607,7 +1614,8 @@ mod tests {
             "[success]\n",
         ] {
             let mut pending = prose.as_bytes().to_vec();
-            match split_array(&mut pending) {
+            skip_to_array(&mut pending);
+            match take_array(&mut pending) {
                 Err(AgentError::InvalidReply { .. }) => {}
                 other => panic!("{prose:?} gave {other:?}"),
             }
@@ -1623,13 +1631,14 @@ mod tests {
             "{\"type\":\"success\"}\n",
         ] {
             let mut pending = prose.as_bytes().to_vec();
-            let (skipped, reply) = split_array(&mut pending).expect("no bracket, no verdict");
-            assert!(skipped.is_empty() && reply.is_none(), "{prose:?}");
+            assert!(skip_to_array(&mut pending).is_empty(), "{prose:?}");
+            let reply = take_array(&mut pending).expect("no bracket, no verdict");
+            assert!(reply.is_none(), "{prose:?}");
         }
 
         let mut pending = b"designer> Success\n[{\"type\":\"error\"}]".to_vec();
-        let (skipped, reply) = split_array(&mut pending).expect("array after prose");
-        assert_eq!(skipped, b"designer> Success\n");
+        assert_eq!(skip_to_array(&mut pending), b"designer> Success\n");
+        let reply = take_array(&mut pending).expect("array after prose");
         let messages = parse_batch(&reply.expect("the array")).expect("messages");
         let reply = AgentReply { messages };
         assert!(
