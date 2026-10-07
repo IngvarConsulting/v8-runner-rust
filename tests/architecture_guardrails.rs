@@ -1566,27 +1566,22 @@ struct PathFinder<'a> {
 
 impl<'ast> syn::visit::Visit<'ast> for PathFinder<'_> {
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        match self
+        let hit = match self
             .index
             .resolve_target(self.module, &self.local_uses, &node.path)
         {
-            Some(path) => {
-                if path == self.target {
-                    self.found = true;
-                }
-            }
+            Some(path) => path == self.target,
             None if node.path.segments.len() == 1 => {
                 let name = node.path.segments[0].ident.to_string();
-                if self.globs.iter().any(|glob| {
+                self.globs.iter().any(|glob| {
                     self.index
                         .function_at([glob.as_slice(), std::slice::from_ref(&name)].concat())
                         .is_some_and(|path| path == self.target)
-                }) {
-                    self.found = true;
-                }
+                })
             }
-            None => {}
-        }
+            None => false,
+        };
+        self.found |= hit;
         syn::visit::visit_expr_path(self, node);
     }
 }
