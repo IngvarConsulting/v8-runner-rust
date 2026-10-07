@@ -666,7 +666,12 @@ fn build_package_in(
     let (base, xml) = session_base(context, config, bases, builder, runner).map_err(fail)?;
     let inventory = SourceSetInventory::new(config);
     let source_set = inventory.named(&resolved.source_set_name).map_err(fail)?;
-    let configuration = configuration_source_set(&inventory).map_err(fail)?;
+    // Пакет конфигурации — сам набор: база запомнит загруженным именно его. Основная
+    // конфигурация под расширением — первый набор конфигурации проекта.
+    let configuration = match resolved.extension.as_deref() {
+        None => source_set,
+        Some(_) => configuration_source_set(&inventory).map_err(fail)?,
+    };
     let log_file = designer_log_file(
         config,
         base.provider(),
@@ -2816,6 +2821,65 @@ mod tests {
             position(&calls, "/LoadConfigFromFiles").len(),
             1,
             "{calls:?}"
+        );
+    }
+
+    /// Второй набор конфигурации, собранный в общей базе Конфигуратора, запоминается под своим
+    /// именем: расширение после него загружает основную конфигурацию заново, а не собирается
+    /// поверх чужой.
+    #[test]
+    fn an_extension_after_another_configuration_set_reloads_the_main_one() {
+        let dir = tempdir().expect("tempdir");
+        let (mut config, _work) = project(dir.path());
+        fs::create_dir_all(config.base_path.join("second")).expect("second");
+        config.source_sets.push(SourceSetConfig {
+            name: "second".to_owned(),
+            purpose: SourceSetPurpose::Configuration,
+            path: PathBuf::from("second"),
+        });
+        let runner = Recorder::new();
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        let mut bases = SessionBases::default();
+        let mut second = cf_request(&dir.path().join("dist/second.cf").display().to_string());
+        second.source_set = Some("second".to_owned());
+        let second = resolve_target(&config, &second).expect("second");
+        let extension = ArtifactsRequest {
+            dry_run: false,
+            output_is_directory: false,
+            execution: ArtifactsRequest::default_execution(ArtifactsModeRequest::ExtensionCfe),
+            mode: ArtifactsModeRequest::ExtensionCfe,
+            output_path: dir.path().join("dist/sales.cfe").display().to_string(),
+            source_set: Some("ext-sales".to_owned()),
+            extension: None,
+        };
+        let extension = resolve_target(&config, &extension).expect("extension");
+
+        build_package_in(
+            &context,
+            &config,
+            &second,
+            fake_designer(),
+            &mut bases,
+            &runner,
+        )
+        .expect("second built");
+        build_package_in(
+            &context,
+            &config,
+            &extension,
+            fake_designer(),
+            &mut bases,
+            &runner,
+        )
+        .expect("extension built");
+
+        let calls = runner.calls();
+        let loads = position(&calls, "/LoadConfigFromFiles");
+        assert_eq!(loads.len(), 3, "{calls:?}");
+        let main_root = config.base_path.join("configuration").display().to_string();
+        assert!(
+            calls[loads[1]].iter().any(|arg| arg == &main_root),
+            "the main configuration is loaded again before the extension: {calls:?}"
         );
     }
 

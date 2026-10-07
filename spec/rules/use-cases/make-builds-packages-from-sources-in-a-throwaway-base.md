@@ -3,6 +3,7 @@ id: INV.USE-CASES.MAKE-BUILDS-PACKAGES-FROM-SOURCES-IN-A-THROWAWAY-BASE
 check:
   - src/use_cases/artifacts.rs::designer_builds_a_cf_from_the_sources_in_a_throwaway_base
   - src/use_cases/artifacts.rs::designer_loads_the_configuration_before_the_extension
+  - src/use_cases/artifacts.rs::an_extension_after_another_configuration_set_reloads_the_main_one
   - src/use_cases/artifacts.rs::ibcmd_builds_with_out_and_its_own_data_directory
   - src/use_cases/artifacts.rs::edt_sources_are_converted_to_xml_inside_the_throwaway_base_first
   - src/use_cases/artifacts.rs::an_external_set_is_built_on_top_of_the_configuration
@@ -25,7 +26,9 @@ check:
   расширению не нужна.
 - Конфигуратор создаёт её `CREATEINFOBASE`, загружает исходники `/LoadConfigFromFiles` без
   `-updateConfigDumpInfo` и без `/UpdateDBCfg` и выгружает пакет `/DumpCfg`. Расширение он
-  загружает с `-Extension` поверх основной конфигурации, которую база получает первой.
+  загружает с `-Extension` поверх основной конфигурации, которую база получает первой;
+  если в общей базе перед этим собирался другой набор конфигурации, основная загружается
+  заново.
 - Внешние обработки и отчёты собирает всегда Конфигуратор в базе, которую создал он сам:
   сперва основная конфигурация проекта тем же `/LoadConfigFromFiles`, затем
   `/LoadExternalDataProcessorOrReportFromFiles`. Базу, созданную `ibcmd`, Конфигуратор не
