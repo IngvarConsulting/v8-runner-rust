@@ -698,36 +698,66 @@ pub(crate) fn record_after_dump(
     ))
 }
 
-/// Память о наборе, из которого раннер собирает созданную базу: дерево набора, снятое до
-/// сборки. Правка, сделанная во время неё, остаётся изменением для первой отправки.
+/// Память о наборе, из которого раннер собирает созданную базу: дерево набора в формате
+/// Конфигуратора, а у формата EDT ещё и дерево его исходников EDT. Дерево исходников
+/// снимается до сборки: правка, сделанная во время неё, остаётся изменением для первой
+/// отправки.
 pub(crate) struct AssembledMemory {
     source_set: String,
-    snapshot: analyzer::FullSnapshot,
+    designer: analyzer::FullSnapshot,
+    edt: Option<analyzer::FullSnapshot>,
+}
+
+/// Дерево исходников EDT набора, снятое до их перевода в XML.
+pub(crate) struct EdtSourceMemory(analyzer::FullSnapshot);
+
+impl EdtSourceMemory {
+    /// Снимает дерево исходников EDT набора `source_set` по его контексту памяти.
+    pub(crate) fn prepare(
+        config: &AppConfig,
+        source_set: &crate::config::model::SourceSetConfig,
+    ) -> Result<Self, AppError> {
+        let contexts = SourceSetsService::new(config).edt_contexts();
+        snapshot_of(&contexts, &source_set.name).map(Self)
+    }
 }
 
 impl AssembledMemory {
-    /// Снимает дерево набора `source_set` по его контексту памяти.
+    /// Снимает дерево набора `source_set` в формате Конфигуратора по его контексту памяти: у
+    /// формата Конфигуратора — сами исходники, у формата EDT — их перевод в XML.
     pub(crate) fn prepare(
         config: &AppConfig,
         source_set: &crate::config::model::SourceSetConfig,
     ) -> Result<Self, AppError> {
         let contexts = SourceSetsService::new(config).designer_contexts();
-        let context = contexts
-            .iter()
-            .find(|context| context.name() == source_set.name)
-            .ok_or_else(|| {
-                AppError::Runtime(format!(
-                    "missing change-detection context for source-set '{}'",
-                    source_set.name
-                ))
-            })?;
-        let snapshot = analyzer::prepare_full_snapshot(context, context.path())
-            .map_err(|error| AppError::Runtime(error.to_string()))?;
         Ok(Self {
             source_set: source_set.name.clone(),
-            snapshot,
+            designer: snapshot_of(&contexts, &source_set.name)?,
+            edt: None,
         })
     }
+
+    /// Дерево исходников EDT, из которых переведён набор.
+    pub(crate) fn with_edt_source(mut self, edt: EdtSourceMemory) -> Self {
+        self.edt = Some(edt.0);
+        self
+    }
+}
+
+fn snapshot_of(
+    contexts: &[SourceSetContext],
+    source_set: &str,
+) -> Result<analyzer::FullSnapshot, AppError> {
+    let context = contexts
+        .iter()
+        .find(|context| context.name() == source_set)
+        .ok_or_else(|| {
+            AppError::Runtime(format!(
+                "missing change-detection context for source-set '{source_set}'"
+            ))
+        })?;
+    analyzer::prepare_full_snapshot(context, context.path())
+        .map_err(|error| AppError::Runtime(error.to_string()))
 }
 
 /// Память о базе, которую раннер только что создал: у набора, из которого база собрана
@@ -746,7 +776,7 @@ pub(crate) fn remember_created_base(
         .filter_map(|set| {
             let committed = match assembled {
                 Some(memory) if memory.source_set == set.name() => {
-                    analyzer::commit_full_snapshot(set, &config.work_path, &memory.snapshot)
+                    analyzer::commit_full_snapshot(set, &config.work_path, &memory.designer)
                 }
                 _ => analyzer::commit_empty_snapshot(set, &config.work_path),
             };
@@ -754,6 +784,7 @@ pub(crate) fn remember_created_base(
                 .err()
                 .map(|error| format!("source-set '{}': {error}", set.name()))
         })
+        .chain(assembled.and_then(|memory| remember_edt_source(config, memory)))
         .chain(forget_new_owner(config))
         .collect();
     (!failures.is_empty()).then(|| {
@@ -762,6 +793,18 @@ pub(crate) fn remember_created_base(
             failures.join("; ")
         )
     })
+}
+
+/// Память об исходниках EDT собранного набора: первая отправка не переводит его заново.
+fn remember_edt_source(config: &AppConfig, memory: &AssembledMemory) -> Option<String> {
+    let edt = memory.edt.as_ref()?;
+    let contexts = SourceSetsService::new(config).edt_contexts();
+    let context = contexts
+        .iter()
+        .find(|context| context.name() == memory.source_set)?;
+    analyzer::commit_full_snapshot(context, &config.work_path, edt)
+        .err()
+        .map(|error| format!("EDT sources of source-set '{}': {error}", memory.source_set))
 }
 
 /// Для тестов сценариев: память о базе у каждого набора, о котором её ещё нет, — запись

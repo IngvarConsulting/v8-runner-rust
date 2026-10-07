@@ -170,7 +170,8 @@ fn setup_edt_init_project(
     write_script(
         &edt_path,
         &format!(
-            "printf '%s\\n' \"$*\" >> \"{}\"\nexit 0",
+            "args=\"$*\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--configuration-files\" ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$target\" ]; then\n  mkdir -p \"$target\"\n  printf '<Configuration />\\n' > \"$target/Configuration.xml\"\n  printf '%s\\n' \"$args\" >> \"{}\"\n  exit 0\nfi\nprintf '%s\\n' \"$args\" >> \"{}\"\nexit 0",
+            dir.path().join("edt.export.log").display(),
             edt_calls_log.display()
         ),
     );
@@ -374,8 +375,10 @@ fn init_designer_non_zero_create_exit_stays_fatal_even_when_marker_appears() {
         .contains("designer create failed"));
 }
 
+/// У проекта EDT рабочая область заводится до базы: исходники для неё переводятся оттуда.
+/// Отказ базы идёт в ленте после импорта и не отменяет его.
 #[test]
-fn init_text_reports_infobase_failure_before_continuing_edt_import() {
+fn init_text_reports_the_edt_import_before_the_infobase_failure() {
     let (_dir, config_path, _work_path, _base_path, platform_path, edt_calls_log) =
         setup_edt_init_project("EDT", "DESIGNER", "__AUTO_FILE__");
     write_script(
@@ -403,7 +406,7 @@ fn init_text_reports_infobase_failure_before_continuing_edt_import() {
         .find("importing source-set project")
         .expect("continued edt import");
     let final_summary = stdout.find("Init failed").expect("final summary");
-    assert!(failed_step < edt_import);
+    assert!(edt_import < failed_step);
     assert!(failed_step < final_summary);
     assert!(stdout.contains("✓ edt_workspace: import"));
     assert!(edt_calls_log.exists());
@@ -605,12 +608,12 @@ fn a_standalone_target_is_refused_with_the_recipe() {
     assert!(!dir.path().join("1cv8.calls.log").exists());
 }
 
-/// Проект EDT: базу `ibcmd` создаёт пустой — перевода исходников в XML при создании нет
-/// (разрыв `INV.CLI.A-FILE-BASE-OF-AN-EDT-PROJECT-IS-ASSEMBLED-FROM-ITS-SOURCES`), — и
-/// заводит рабочую область.
+/// Проект EDT: сначала рабочая область, затем основной набор переводится в XML тем же
+/// переводом, что у `push`, и `ibcmd` собирает базу из этого каталога; память знает
+/// собранный набор, и первая отправка его не переводит и не грузит.
 #[test]
-fn init_edt_with_ibcmd_creates_infobase_and_imports_projects_in_order() {
-    let (_dir, config_path, work_path, base_path, platform_path, edt_calls_log) =
+fn a_file_base_of_an_edt_project_is_assembled_by_ibcmd_from_its_sources() {
+    let (dir, config_path, work_path, base_path, platform_path, edt_calls_log) =
         setup_edt_init_project("EDT", "IBCMD", "__AUTO_FILE__");
     let ibcmd_calls = platform_path.with_file_name("ibcmd.calls.log");
     let body = fs::read_to_string(&platform_path).expect("platform");
@@ -658,11 +661,34 @@ fn init_edt_with_ibcmd_creates_infobase_and_imports_projects_in_order() {
     assert_eq!(lines.len(), 2);
     assert!(lines[0].contains(&base_path.join("main").display().to_string()));
     assert!(lines[1].contains(&base_path.join("ext").display().to_string()));
-    let create = fs::read_to_string(ibcmd_calls).expect("ibcmd calls");
+    let exports = fs::read_to_string(dir.path().join("edt.export.log")).expect("edt export");
+    let exports: Vec<_> = exports.lines().collect();
+    assert_eq!(exports.len(), 1, "{exports:?}");
+    assert!(exports[0].contains("--project-name main"), "{exports:?}");
+    let xml = exports[0]
+        .split("--configuration-files ")
+        .nth(1)
+        .expect("export target");
+    assert!(Path::new(xml).join("Configuration.xml").is_file());
+    let create = fs::read_to_string(&ibcmd_calls).expect("ibcmd calls");
     assert!(
-        create.contains(" create") && !create.contains("--import"),
+        create.contains(&format!(" create --import={xml} --apply --force")),
         "{create}"
     );
+
+    let push = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args(["--json-message", "push", "--dry-run"])
+        .output()
+        .expect("push preview");
+    let push: Value = serde_json::from_slice(&push.stdout).expect("push json");
+    let steps = push["data"]["steps"].as_array().expect("steps");
+    let main = steps
+        .iter()
+        .find(|step| step["source_set"] == "main")
+        .unwrap_or_else(|| panic!("main in {push}"));
+    assert_eq!(main["mode"], "skipped", "{push}");
 }
 
 #[test]
@@ -712,12 +738,12 @@ fn init_non_file_connection_keeps_running_workspace_step_and_returns_payload() {
     assert!(!output.status.success());
     let payload = json_of(&output);
     assert_eq!(payload["command"], "infobase create");
-    assert_eq!(payload["data"]["steps"][0]["status"], "failed");
-    assert!(payload["data"]["steps"][0]["message"]
+    assert_eq!(payload["data"]["steps"][1]["status"], "failed");
+    assert!(payload["data"]["steps"][1]["message"]
         .as_str()
         .expect("message")
         .contains("infobase.dbms.kind"));
-    assert_eq!(payload["data"]["steps"][1]["status"], "ok");
+    assert_eq!(payload["data"]["steps"][0]["status"], "ok");
     assert!(work_path.join("edt-workspace").exists());
     let calls = fs::read_to_string(edt_calls_log).expect("calls");
     let lines: Vec<_> = calls.lines().collect();
@@ -749,7 +775,7 @@ fn init_skips_existing_workspace() {
 
     assert!(output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["data"]["steps"][1]["status"], "skipped");
+    assert_eq!(payload["data"]["steps"][0]["status"], "skipped");
     assert!(!edt_calls_log.exists());
 }
 
@@ -758,10 +784,17 @@ fn init_retries_edt_import_when_previous_run_left_incomplete_workspace() {
     let (_dir, config_path, work_path, base_path, _platform_path, edt_calls_log) =
         setup_edt_init_project("EDT", "DESIGNER", "__AUTO_FILE__");
     let edt_path = work_path.parent().expect("parent").join("1cedtcli");
+    // Перевод в XML поддельный EDT делает, импорт проекта в рабочую область — нет.
+    let original = fs::read_to_string(&edt_path).expect("edt script");
+    let original: String = original
+        .lines()
+        .skip_while(|line| line.starts_with("#!"))
+        .collect::<Vec<_>>()
+        .join("\n");
     write_script(
         &edt_path,
         &format!(
-            "printf '%s\\n' \"$*\" >> \"{}\"\nexit 1",
+            "case \"$*\" in *\"-command import\"*) printf '%s\\n' \"$*\" >> \"{}\"; exit 1;; esac\n{original}",
             edt_calls_log.display()
         ),
     );
@@ -780,8 +813,8 @@ fn init_retries_edt_import_when_previous_run_left_incomplete_workspace() {
     assert!(!first.status.success());
     let first_payload: Value = serde_json::from_slice(&first.stdout).expect("json");
     assert_eq!(first_payload["command"], "infobase create");
-    assert_eq!(first_payload["data"]["steps"][0]["status"], "ok");
-    assert_eq!(first_payload["data"]["steps"][1]["status"], "failed");
+    assert_eq!(first_payload["data"]["steps"][1]["status"], "ok");
+    assert_eq!(first_payload["data"]["steps"][0]["status"], "failed");
     assert!(work_path.join("edt-workspace").exists());
     assert!(!work_path
         .join("edt-workspace")
@@ -792,13 +825,7 @@ fn init_retries_edt_import_when_previous_run_left_incomplete_workspace() {
     assert_eq!(first_lines.len(), 1);
     assert!(first_lines[0].contains(&base_path.join("main").display().to_string()));
 
-    write_script(
-        &edt_path,
-        &format!(
-            "printf '%s\\n' \"$*\" >> \"{}\"\nexit 0",
-            edt_calls_log.display()
-        ),
-    );
+    write_script(&edt_path, &original);
 
     let second = v8_runner_command()
         .args([
@@ -814,8 +841,8 @@ fn init_retries_edt_import_when_previous_run_left_incomplete_workspace() {
     // База уже создана первым прогоном: шаг базы отказывает, рабочая область доимпортируется.
     assert!(!second.status.success());
     let payload: Value = serde_json::from_slice(&second.stdout).expect("json");
-    assert_eq!(payload["data"]["steps"][0]["status"], "failed");
-    assert_eq!(payload["data"]["steps"][1]["status"], "ok");
+    assert_eq!(payload["data"]["steps"][1]["status"], "failed");
+    assert_eq!(payload["data"]["steps"][0]["status"], "ok");
     assert!(work_path
         .join("edt-workspace")
         .join(".v8tr-initialized")
@@ -846,8 +873,8 @@ fn init_rejects_workspace_path_that_is_not_a_directory() {
 
     assert!(!output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["data"]["steps"][1]["status"], "failed");
-    assert!(payload["data"]["steps"][1]["message"]
+    assert_eq!(payload["data"]["steps"][0]["status"], "failed");
+    assert!(payload["data"]["steps"][0]["message"]
         .as_str()
         .expect("message")
         .contains("is not a directory"));

@@ -185,6 +185,10 @@ pub(crate) fn connect(
     Ok(handle)
 }
 
+/// Отказ агенту, выбранному рядом с объявленной строкой прямого шлюза, когда канала нет:
+/// строка уже объявлена, и не хватает только канала.
+const GATE_WITHOUT_A_CHANNEL: &str = "the agent works with a standalone server through its SSH gate, and files travel there only by a declared channel: set infobase.standalone.exchange to `sftp` (through the gate) or to `{ dir: … }` — the gate user's directory as the runner sees it";
+
 fn open_handle(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
@@ -198,7 +202,9 @@ fn open_handle(
     let password = connection.password.clone().unwrap_or_default();
 
     // Автономный сервер держит свой шлюз сам: раннер только подключается, и файлы
-    // идут объявленным каналом — каталогом пользователя шлюза.
+    // идут объявленным каналом — каталогом пользователя шлюза. Без канала сессия не
+    // открывается: проверка конфигурации требует его, только когда строки прямого шлюза
+    // нет, а агент мог достаться и при строке — ключом или не найдя Конфигуратора.
     if let Some(standalone) = config.infobase.standalone.as_ref() {
         let (host, port) = standalone.gate_endpoint().map_err(AppError::Validation)?;
         let exchange = if standalone.exchange_is_sftp() {
@@ -207,11 +213,7 @@ fn open_handle(
             Exchange::Dir(
                 standalone
                     .exchange_dir()
-                    .ok_or_else(|| {
-                        AppError::capability(
-                            "files travel to a standalone server only through a declared channel; set infobase.standalone.exchange".to_owned(),
-                        )
-                    })?
+                    .ok_or_else(|| AppError::Validation(GATE_WITHOUT_A_CHANNEL.to_owned()))?
                     .to_path_buf(),
             )
         };
@@ -1023,7 +1025,7 @@ mod tests {
             ("[::1]:1543", "[::1]:1543"),
         ] {
             let (host, port) = crate::config::model::StandaloneConfig {
-                gate: record.to_owned(),
+                gate: Some(record.to_owned()),
                 host_fingerprint: None,
                 exchange: None,
             }

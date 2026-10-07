@@ -1,5 +1,6 @@
 //! Временная база раннера: файловая база под `workPath`, в которой пакет собирается из
-//! исходников (`INV.USE-CASES.MAKE-BUILDS-PACKAGES-FROM-SOURCES-IN-A-THROWAWAY-BASE`).
+//! исходников (`INV.USE-CASES.MAKE-BUILDS-PACKAGES-FROM-SOURCES-IN-A-THROWAWAY-BASE`) и
+//! разбирается в XML (`INV.USE-CASES.IBCMD-EXPORTS-A-PACKAGE-IN-A-THROWAWAY-BASE`).
 //!
 //! База своя у каждого прогона: каталог `workPath/temp/throwaway-infobases/base-<запуск>`
 //! с файлом базы в `ib/`, каталогом данных `ibcmd` в `data/` и исходниками, переведёнными из
@@ -12,25 +13,32 @@
 //! убирается. Пакет собирает исполнитель, который базу создал:
 //!
 //! - `ibcmd` — `infobase create`, затем `config import --out` у каждого пакета; база при
-//!   этом не меняется, поэтому основная конфигурация для расширения не нужна;
+//!   этом не меняется, поэтому основная конфигурация для расширения не нужна. Пакет в XML
+//!   `ibcmd` разбирает `config export --file` той же базы;
 //! - Конфигуратор — `CREATEINFOBASE`, затем `/LoadConfigFromFiles` и `/DumpCfg` без
 //!   `/UpdateDBCfg`; расширение загружается поверх основной конфигурации, которую база
 //!   получает один раз.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use crate::config::model::{AppConfig, SourceSetConfig};
 use crate::domain::capability::Provider;
 use crate::platform::connection::V8Connection;
 use crate::platform::designer::DesignerDsl;
+use crate::platform::edt::EdtDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
+use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::fs::{remove_path_if_exists, write_temp_dir_metadata, TempDirKind};
 use crate::support::temp::temp_root;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::progress::log_live_stage;
+use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::staged_publication::{cleanup_owned_orphan_files, make_run_id};
 
 /// Корень временных баз под `workPath/temp`.
@@ -39,6 +47,12 @@ const ROOT_NAME: &str = "throwaway-infobases";
 const PREFIX: &str = "base-";
 /// Чьи это следы: описание каждой базы называет его вместо цели публикации.
 const IDENTITY: &str = "v8-runner throwaway infobase";
+
+/// Рабочая область EDT, в которой исходники набора переводятся в XML для временной базы: та
+/// же, что у шага сборки `push`, чей перевод здесь и выполняется.
+pub(crate) fn edt_workspace(work_path: &Path) -> PathBuf {
+    work_path.join("edt-workspace")
+}
 
 /// Корень временных баз прогонов под `workPath`.
 pub(crate) fn throwaway_root(work_path: &Path) -> std::io::Result<PathBuf> {
@@ -69,7 +83,7 @@ pub(crate) struct Builder {
     pub binary: PathBuf,
 }
 
-/// Временная база одного прогона `make` — одного набора или всего обхода.
+/// Временная база одного прогона `make` или `convert` — одного набора или всего обхода.
 #[derive(Debug)]
 pub(crate) struct ThrowawayInfobase {
     dir: PathBuf,
@@ -115,7 +129,7 @@ impl ThrowawayInfobase {
             .err()
             .map(|error| {
                 format!(
-                    "stale throwaway infobases were not removed: {error}; the next make retries"
+                    "stale throwaway infobases were not removed: {error}; the next make or convert retries"
                 )
             })
             .into_iter()
@@ -159,7 +173,7 @@ impl ThrowawayInfobase {
             ))
         })?;
         log_live_stage(
-            "make: throwaway infobase",
+            "throwaway infobase",
             "creating a throwaway infobase under workPath",
         );
         let created = match base.builder.provider {
@@ -192,6 +206,20 @@ impl ThrowawayInfobase {
     /// Каталог для исходников набора, переведённых из EDT: он убирается вместе с базой.
     pub(crate) fn xml_dir(&self, source_set: &str) -> PathBuf {
         self.dir.join("xml").join(source_set)
+    }
+
+    /// Переводит исходники набора формата EDT в XML каталога [`Self::xml_dir`] единственным
+    /// переводом [`edt_sources_to_xml`]. Ответ — каталог XML и предупреждения шага.
+    pub(crate) fn xml_from_edt(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        timeout: Option<Duration>,
+    ) -> Result<(PathBuf, Vec<String>), AppError> {
+        let target = self.xml_dir(&source_set.name);
+        let warnings = edt_sources_to_xml(context, config, source_set, &target, timeout)?;
+        Ok((target, warnings))
     }
 
     /// Нужна ли расширению основная конфигурация в базе до его загрузки.
@@ -243,7 +271,7 @@ impl ThrowawayInfobase {
                     return Err(error);
                 }
                 log_live_stage(
-                    "make: build",
+                    "package build",
                     "[ibcmd] building the package from the sources",
                 );
                 self.ibcmd(context, runner)
@@ -267,12 +295,39 @@ impl ThrowawayInfobase {
                 if let Some(error) = interruption_before_safe_point(context, "package dump") {
                     return Err(error);
                 }
-                log_live_stage("make: dump", "[Конфигуратор] dumping the package");
+                log_live_stage("package dump", "[Конфигуратор] dumping the package");
                 self.designer(context, runner, log_file)
                     .dump_cfg(out, package.extension())
                     .map_err(AppError::from)
             }
             other => Err(unsupported(other)),
+        }
+    }
+
+    /// Разбирает файл пакета `.cf` или `.cfe` в XML каталога `target_dir`: `ibcmd config
+    /// export --file` этой базы, сама база при этом не читается. Исход утилиты не судится:
+    /// его проверяет вызывающий. Разбирает пакет только `ibcmd` — строка `convert` матрицы.
+    pub(crate) fn export_package(
+        &self,
+        context: &ExecutionContext,
+        runner: &dyn ProcessRunner,
+        package_file: &Path,
+        target_dir: &Path,
+    ) -> Result<PlatformCommandResult, AppError> {
+        match self.builder.provider {
+            Provider::Ibcmd => {
+                if let Some(error) = interruption_before_safe_point(context, "package export") {
+                    return Err(error);
+                }
+                log_live_stage("package export", "[ibcmd] exporting the package to XML");
+                self.ibcmd(context, runner)
+                    .config_export_file(package_file, target_dir)
+                    .map_err(AppError::from)
+            }
+            other => Err(crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Convert,
+                other,
+            )),
         }
     }
 
@@ -294,7 +349,7 @@ impl ThrowawayInfobase {
             remove_path_if_exists(&self.dir).and_then(|()| remove_path_if_exists(&sidecar));
         removed.err().map(|error| {
             format!(
-                "failed to remove the throwaway infobase '{}': {error}; the next make removes it once it is stale",
+                "failed to remove the throwaway infobase '{}': {error}; the next make or convert removes it once it is stale",
                 self.dir.display()
             )
         })
@@ -382,7 +437,7 @@ impl ThrowawayInfobase {
             return Err(error);
         }
         log_live_stage(
-            "make: load",
+            "sources load",
             "[Конфигуратор] loading the sources into the throwaway infobase",
         );
         self.designer(context, runner, log_file)
@@ -395,6 +450,50 @@ impl Drop for ThrowawayInfobase {
     fn drop(&mut self) {
         let _ = self.remove();
     }
+}
+
+/// Единственный перевод исходников набора формата EDT в XML каталога `target`: `1cedtcli`
+/// шагом сборки `push` (`build_project::execute_edt_export_step`) в рабочей области
+/// [`edt_workspace`]. Его зовут временная база `make` и `convert`
+/// ([`ThrowawayInfobase::xml_from_edt`]) и сборка файловой базы проекта EDT у
+/// `infobase create`. Предел шага задаёт вызывающий: `make` и `infobase create` идут без
+/// предела, как `push`, `convert` — с пределом EDT команды (`ExecutionContext::edt_timeout`).
+/// Ответ — предупреждения шага.
+pub(crate) fn edt_sources_to_xml(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    source_set: &SourceSetConfig,
+    target: &Path,
+    timeout: Option<Duration>,
+) -> Result<Vec<String>, AppError> {
+    let inventory = SourceSetInventory::new(config);
+    let edt_context = inventory.edt_context(&source_set.name).ok_or_else(|| {
+        AppError::Runtime(format!(
+            "missing EDT context for source-set '{}'",
+            source_set.name
+        ))
+    })?;
+    let mut utilities = PlatformUtilities::from_config(config);
+    let location = utilities
+        .locate(UtilityType::EdtCli)
+        .map_err(AppError::from)?;
+    let edt = EdtDsl::new(
+        location.path,
+        edt_workspace(&config.work_path),
+        utilities.runner_for(UtilityType::EdtCli),
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    )
+    .with_timeout(timeout);
+    log_live_stage("edt export", "[EDT] converting the sources to XML");
+    crate::use_cases::build_project::execute_edt_export_step(
+        context,
+        config,
+        &edt,
+        source_set,
+        edt_context,
+        target,
+        context.command().as_str(),
+    )
 }
 
 /// Брошенные базы прошлых прогонов: свои по описанию и имени, старше срока уборки. Чужое и

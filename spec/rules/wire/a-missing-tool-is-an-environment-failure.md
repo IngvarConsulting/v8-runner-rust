@@ -6,6 +6,7 @@ check:
   - src/mcp/error.rs::a_missing_utility_answers_a_runtime_failure_over_mcp
   - src/use_cases/load_artifact.rs::an_extension_load_without_ibcmd_answers_an_environment_failure
   - tests/cli_convert.rs::convert_without_the_edt_cli_answers_an_environment_failure
+  - tests/cli_convert.rs::convert_a_package_direction_without_ibcmd_answers_an_environment_failure
   - src/use_cases/infobase_export.rs::a_dump_without_its_utility_records_an_environment_step_code
   - src/use_cases/infobase_export.rs::the_step_code_follows_the_envelope_kind_for_every_error
   - tests/cli_infobase.rs::infobase_dump_without_its_utility_records_an_environment_step_code

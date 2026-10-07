@@ -19,13 +19,14 @@ use crate::platform::secrets::mask_text;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::{AppError, CapabilityReason};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::exchange_guard::{remember_created_base, AssembledMemory};
+use crate::use_cases::exchange_guard::{remember_created_base, AssembledMemory, EdtSourceMemory};
 use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
 use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStageStatus};
 use crate::use_cases::request::InitRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
+use crate::use_cases::throwaway_infobase::edt_sources_to_xml;
 use crate::use_cases::tool_extension;
 
 pub fn execute(
@@ -73,16 +74,26 @@ fn run_init(
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
 
+    // Исходники EDT переводятся в XML из рабочей области: у формата EDT она заводится до базы.
+    if config.format == SourceFormat::Edt {
+        record_step(
+            &mut steps,
+            &mut first_error,
+            ensure_edt_workspace(context, config, &mut utilities, dry_run),
+        );
+    }
     record_step(
         &mut steps,
         &mut first_error,
         ensure_infobase(context, config, &mut utilities, provider, dry_run),
     );
-    record_step(
-        &mut steps,
-        &mut first_error,
-        ensure_edt_workspace(context, config, &mut utilities, dry_run),
-    );
+    if config.format != SourceFormat::Edt {
+        record_step(
+            &mut steps,
+            &mut first_error,
+            ensure_edt_workspace(context, config, &mut utilities, dry_run),
+        );
+    }
 
     let mut result = init_result(started, steps, first_error.is_none());
     if dry_run {
@@ -301,14 +312,29 @@ fn ensure_file_infobase(
 
     if dry_run {
         // The platform is located here so an absent one refuses during the preview; the
-        // parent directory below is the first thing this step would create.
+        // parent directory below is the first thing this step would create. A set of an EDT
+        // project is converted to XML first, so EDT CLI is located as well.
+        let converter = match assembled.filter(|_| config.format == SourceFormat::Edt) {
+            Some(_) => match utilities.locate(UtilityType::EdtCli) {
+                Ok(location) => format!(" converted to XML by {}", location.path.display()),
+                Err(error) => {
+                    return StepOutcome::failed(
+                        "infobase",
+                        "create",
+                        started,
+                        AppError::from(error),
+                    )
+                }
+            },
+            None => String::new(),
+        };
         return match locate_infobase_creator(provider, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",
                 "create",
                 started,
                 format!(
-                    "would create a file infobase at '{}'{contents} via {}",
+                    "would create a file infobase at '{}'{contents}{converter} via {}",
                     infobase_dir.display(),
                     binary.display()
                 ),
@@ -327,14 +353,12 @@ fn ensure_file_infobase(
         return outcome;
     }
 
-    // Память о наборе снимается до сборки: правка, сделанная во время неё, останется
-    // изменением для первой отправки.
-    let memory = match assembled.map(|set| AssembledMemory::prepare(config, set)) {
-        None => None,
-        Some(Ok(memory)) => Some(memory),
-        Some(Err(error)) => return StepOutcome::failed("infobase", "create", started, error),
-    };
-    let import = assembled.map(|set| set.root_in(&config.base_path));
+    let (memory, import, export_warnings) =
+        match assembled.map(|set| prepare_assembly(context, config, set)) {
+            None => (None, None, Vec::new()),
+            Some(Ok((memory, import, warnings))) => (Some(memory), Some(import), warnings),
+            Some(Err(error)) => return StepOutcome::failed("infobase", "create", started, error),
+        };
 
     log_live_stage("init: infobase create", "[Platform] creating infobase");
     let settled = collecting_deferrals(|deferrals| {
@@ -361,6 +385,7 @@ fn ensure_file_infobase(
             started,
             format!("infobase created{contents}: {}", marker.display()),
         )
+        .with_warnings(&export_warnings)
         .with_warnings(&Vec::from_iter(remember_created_base(
             config,
             memory.as_ref(),
@@ -372,14 +397,43 @@ fn ensure_file_infobase(
     }
 }
 
-/// Набор, из которого файловая база собирается при создании: основная конфигурация
-/// проекта в формате Конфигуратора. Исходники EDT сперва переводятся в XML, и при
-/// создании этого перевода нет — такая база создаётся пустой (разрыв правила
-/// `INV.CLI.A-FILE-BASE-OF-AN-EDT-PROJECT-IS-ASSEMBLED-FROM-ITS-SOURCES`).
+/// Набор, из которого файловая база собирается при создании: основная конфигурация проекта.
 fn assembled_configuration(config: &AppConfig) -> Option<&SourceSetConfig> {
+    SourceSetInventory::new(config).main_configuration()
+}
+
+/// Готовит сборку файловой базы из набора `set`: каталог XML для `--import`, память о
+/// наборе и предупреждения перевода. Дерево исходников снимается до сборки: правка,
+/// сделанная во время неё, останется изменением для первой отправки. Исходники EDT
+/// переводит в XML единственный перевод ([`edt_sources_to_xml`]) в тот же каталог, куда их
+/// переводит `push`, — и память о переводе у первой отправки та же, что после неё
+/// (`INV.CLI.A-FILE-BASE-OF-AN-EDT-PROJECT-IS-ASSEMBLED-FROM-ITS-SOURCES`).
+fn prepare_assembly(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    set: &SourceSetConfig,
+) -> Result<(AssembledMemory, PathBuf, Vec<String>), AppError> {
     match config.format {
-        SourceFormat::Designer => SourceSetInventory::new(config).main_configuration(),
-        SourceFormat::Edt => None,
+        SourceFormat::Designer => Ok((
+            AssembledMemory::prepare(config, set)?,
+            set.root_in(&config.base_path),
+            Vec::new(),
+        )),
+        SourceFormat::Edt => {
+            let source = EdtSourceMemory::prepare(config, set)?;
+            let target = SourceSetInventory::new(config)
+                .designer_context(&set.name)
+                .map(|designer| designer.path().to_path_buf())
+                .ok_or_else(|| {
+                    AppError::Runtime(format!(
+                        "missing change-detection context for source-set '{}'",
+                        set.name
+                    ))
+                })?;
+            let warnings = edt_sources_to_xml(context, config, set, &target, None)?;
+            let memory = AssembledMemory::prepare(config, set)?.with_edt_source(source);
+            Ok((memory, target, warnings))
+        }
     }
 }
 
@@ -1030,6 +1084,14 @@ mod tests {
         }
     }
 
+    fn workspace_step(result: &crate::domain::init::InitResult) -> &crate::domain::init::InitStep {
+        result
+            .steps
+            .iter()
+            .find(|step| step.target == "edt_workspace")
+            .expect("workspace step")
+    }
+
     fn sample_config() -> AppConfig {
         AppConfig {
             base_path: PathBuf::from("/tmp/base"),
@@ -1326,7 +1388,17 @@ mod tests {
     fn a_stop_after_the_creation_leaves_its_deferred_cancellation_in_the_step() {
         let dir = tempdir().expect("tempdir");
         let (mut config, held) = held_designer_create(dir.path(), 0, InfobaseFile::Laid);
-        config.format = SourceFormat::Edt;
+        // Рабочая область после базы — у проекта формата Конфигуратора с расширением-
+        // инструментом формата EDT: безопасная точка её импорта идёт за созданием.
+        let tool_dir = dir.path().join("tool-client-mcp");
+        fs::create_dir_all(&tool_dir).expect("tool dir");
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Source(ToolExtensionSourceConfig {
+                path: tool_dir,
+                format: Some(SourceFormat::Edt),
+            }),
+        });
 
         let failure =
             create_interrupted_while_held(&config, &held).expect_err("stopped at the safe point");
@@ -1521,7 +1593,7 @@ mod tests {
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert!(edt_calls_text.contains("-command import --project"));
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
@@ -1573,7 +1645,7 @@ mod tests {
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             2
@@ -1626,7 +1698,7 @@ mod tests {
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             1
@@ -1681,7 +1753,7 @@ mod tests {
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(
             edt_calls_text.matches("-command import --project").count(),
             1
@@ -1719,7 +1791,7 @@ mod tests {
             false,
         ));
 
-        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert!(
             !edt_calls.exists()
                 || fs::read_to_string(&edt_calls)
@@ -1762,7 +1834,7 @@ mod tests {
         ));
 
         let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
-        assert_eq!(result.steps[1].status, InitStepStatus::Ok);
+        assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(edt_calls_text.matches("START").count(), 1);
         assert_eq!(edt_calls_text.matches("import --project").count(), 2);
     }

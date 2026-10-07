@@ -417,25 +417,30 @@ impl HasClientScopes for DesignerConfigSyntaxArgs {
 }
 
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
-        || config.format != SourceFormat::Designer
-    {
-        Some(AppError::Validation(
-            SUPPORTED_DESIGNER_SYNTAX_ERROR.to_owned(),
-        ))
-    } else {
-        None
-    }
+    validate_supported_matrix(
+        config,
+        SourceFormat::Designer,
+        SUPPORTED_DESIGNER_SYNTAX_ERROR,
+    )
 }
 
 fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
-        || config.format != SourceFormat::Edt
-    {
-        Some(AppError::Validation(SUPPORTED_EDT_SYNTAX_ERROR.to_owned()))
-    } else {
-        None
+    validate_supported_matrix(config, SourceFormat::Edt, SUPPORTED_EDT_SYNTAX_ERROR)
+}
+
+/// Проверку исполняет Конфигуратор своей ветки формата. Автономному серверу без строки
+/// прямого шлюза его не достаётся: отказ называет, что объявить.
+fn validate_supported_matrix(
+    config: &AppConfig,
+    format: SourceFormat,
+    unsupported: &str,
+) -> Option<AppError> {
+    if let Some(undeclared) = config.undeclared_way(Operation::Syntax) {
+        return Some(AppError::Validation(undeclared));
     }
+    (config.default_provider(Operation::Syntax) != Some(Provider::Designer)
+        || config.format != format)
+        .then(|| AppError::Validation(unsupported.to_owned()))
 }
 
 /// Утилита EDT CLI, найденная для проверки проекта. Ветка EDT ищет её напрямую и

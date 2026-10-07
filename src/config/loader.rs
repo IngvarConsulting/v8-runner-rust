@@ -10,8 +10,8 @@ use crate::config::schema::{
     LOCAL_ONLY_INFOBASE_KEYS,
 };
 use crate::config::validate::{
-    validate, validate_infobase_export, validate_launch, validate_make, validate_planned,
-    validate_prepared_test, validate_read_only, validate_tools_download_bootstrap,
+    validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
+    validate_read_only, validate_tools_download_bootstrap, validate_without_infobase,
     ConfigValidationError,
 };
 use crate::support::path::{normalize_windows_verbatim_path, resolve_from};
@@ -136,18 +136,20 @@ pub fn load_config_for_infobase_export(
     )
 }
 
-/// `make`: база проекта не выбирается и не проверяется — пакет собирается во временной базе
-/// раннера. Превью рабочего каталога не создаёт.
-pub fn load_config_for_make(
+/// Команда над исходниками, которой база проекта не нужна (`make`, `convert`): база не
+/// выбирается и не проверяется — пакет собирается и разбирается во временной базе раннера.
+/// Из `providers.*` читается только ключ `operation`. Превью рабочего каталога не создаёт.
+pub fn load_config_without_infobase(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
+    operation: crate::domain::capability::Operation,
     preview: bool,
 ) -> Result<LoadedConfig, ConfigLoadError> {
     load_config_with_mode(
         config_path,
         workdir_override,
         &InfobaseSelector::Default,
-        ConfigValidationMode::Make { preview },
+        ConfigValidationMode::WithoutInfobase { operation, preview },
     )
 }
 
@@ -202,8 +204,9 @@ enum ConfigValidationMode {
     PreparedTest,
     ToolsDownload,
     Launch,
-    /// `make`: базу проекта не выбирает (`select_no_infobase`).
-    Make {
+    /// `make` и `convert`: базу проекта не выбирают (`select_no_infobase`).
+    WithoutInfobase {
+        operation: crate::domain::capability::Operation,
         preview: bool,
     },
 }
@@ -258,8 +261,11 @@ fn build_config(
     reject_local_keys_in_project_file(&root)?;
     let mut warnings = Vec::new();
     reject_mixed_provider_keys(&root, ConfigFile::Project(path))?;
-    // `make` базу проекта не выбирает: о синониме её секции ему говорить нечего.
-    let reads_the_base = !matches!(validation_mode, ConfigValidationMode::Make { .. });
+    // `make` и `convert` базу проекта не выбирают: о синониме её секции им говорить нечего.
+    let reads_the_base = !matches!(
+        validation_mode,
+        ConfigValidationMode::WithoutInfobase { .. }
+    );
     warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(path))?);
     warnings.extend(
         fold_infobase_synonym(&mut root, ConfigFile::Project(path))?.filter(|_| reads_the_base),
@@ -290,7 +296,10 @@ fn build_config(
     // отвергли выше, до границы.
     validate_main_config_schema_boundary(root.clone())
         .map_err(|error| ConfigLoadError::UnsupportedShape(error.to_string()))?;
-    if matches!(validation_mode, ConfigValidationMode::Make { .. }) {
+    if matches!(
+        validation_mode,
+        ConfigValidationMode::WithoutInfobase { .. }
+    ) {
         select_no_infobase(&mut root)?;
     } else {
         select_infobase(&mut root, selector)?;
@@ -320,31 +329,11 @@ fn build_config(
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
         ConfigValidationMode::Launch => validate_launch(&config)?,
-        ConfigValidationMode::Make { preview } => validate_make(&config, preview)?,
+        ConfigValidationMode::WithoutInfobase { operation, preview } => {
+            validate_without_infobase(&config, operation, preview)?
+        }
     }
-    warnings.extend(direct_gate_declared_but_not_used_yet(&config));
     Ok(LoadedConfig { config, warnings })
-}
-
-/// Строка прямого шлюза рядом с секцией `standalone` принимается, но до появления
-/// исполнителя по прямому шлюзу (#205) её никто не читает: команды идут через
-/// `standalone.gate`. Молчать об этом нельзя — сайт обещает Конфигуратор по этой строке.
-///
-/// Секция `cluster` такого предупреждения не получает намеренно: её читатели —
-/// `sessions` (#212), `ras` раннера (#213) и `infobase create` в кластере (#204) — команды,
-/// которых ещё нет, и ни одна существующая команда с ней не ведёт себя иначе, чем без неё.
-/// Предупреждать на каждой команде было бы шумом о том, что и так не обещано.
-fn direct_gate_declared_but_not_used_yet(config: &AppConfig) -> Option<String> {
-    if config.infobase.standalone.is_none() || config.infobase.connection.trim().is_empty() {
-        return None;
-    }
-    let name = config
-        .infobase_name
-        .as_deref()
-        .unwrap_or(DEFAULT_INFOBASE_NAME);
-    Some(format!(
-        "infobases.{name}: the direct gate address in `connection` is declared but not used yet — commands go through standalone.gate until the Designer path arrives (#205)"
-    ))
 }
 
 fn yaml_key(key: &str) -> serde_yaml::Value {

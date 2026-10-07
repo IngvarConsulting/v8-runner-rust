@@ -440,12 +440,14 @@ impl From<AgentError> for AppError {
             | AgentError::Canceled { .. }
             | AgentError::Question { .. }
             | AgentError::NoTerminalMessage { .. }
-            | AgentError::InvalidReply { .. }
             | AgentError::SessionClosed { .. }
             | AgentError::Transport { .. }
             | AgentError::UserDirUnknown { .. }
             | AgentError::UnsafeEntryName { .. }
             | AgentError::Exchange { .. } => Self::Platform(error.to_string()),
+            // Ответ, который не читается как массив сообщений, — неверный вывод инструмента,
+            // а не отказ платформы: отказом платформа отвечает сообщением `error`.
+            AgentError::InvalidReply { .. } => Self::InvalidOutput(error.to_string()),
             AgentError::Workspace { .. } => Self::Runtime(error.to_string()),
             AgentError::Unreachable { .. }
             | AgentError::Handshake { .. }
@@ -588,6 +590,32 @@ mod tests {
             }),
         ] {
             assert_eq!(error.cancellation(), None, "{error:?}");
+        }
+    }
+
+    /// Нечитаемый ответ агента — неверный вывод инструмента; разобранный отказ агента,
+    /// ответ без итога и закрытая без ответа сессия — отказ платформы.
+    #[test]
+    fn an_unreadable_agent_reply_is_invalid_output_and_an_agent_refusal_is_a_platform_failure() {
+        use crate::platform::agent::AgentErrorType;
+        let invalid = AppError::from(AgentError::InvalidReply {
+            detail: "expected value".to_owned(),
+            head: "Успешно".to_owned(),
+        });
+        assert!(matches!(invalid, AppError::InvalidOutput(_)), "{invalid:?}");
+        for error in [
+            AgentError::Command {
+                error_type: AgentErrorType::InfoBaseNotFound,
+                message: String::new(),
+            },
+            AgentError::NoTerminalMessage { count: 1 },
+            AgentError::SessionClosed {
+                endpoint: "127.0.0.1:1543".to_owned(),
+                stderr: String::new(),
+            },
+        ] {
+            let mapped = AppError::from(error);
+            assert!(matches!(mapped, AppError::Platform(_)), "{mapped:?}");
         }
     }
 }

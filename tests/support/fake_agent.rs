@@ -47,6 +47,9 @@ pub enum HoldReply {
     Error,
     /// Канал закрыт без итогового сообщения.
     Close,
+    /// Команда исполнена как обычно, но ответ о ней — проза вместо массива сообщений; с
+    /// `close` двойник после неё закрывает канал.
+    Prose { text: &'static str, close: bool },
 }
 
 /// Запись по SFTP, которую двойник держит, пока тест её не отпустит. Держится только
@@ -772,6 +775,17 @@ impl server::Handler for FakeAgent {
                         session.close(channel)?;
                         // Канал закрыт: остальные строки пакета читать уже некому.
                         break;
+                    }
+                    HoldReply::Prose { text, close } => {
+                        // Работа сделана, как у настоящей команды; ответ о ней — проза.
+                        let _ = self.respond(&line);
+                        session.data(channel, text.as_bytes().to_vec())?;
+                        if close {
+                            session.eof(channel)?;
+                            session.close(channel)?;
+                            break;
+                        }
+                        continue;
                     }
                 }
             }

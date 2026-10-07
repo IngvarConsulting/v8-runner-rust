@@ -580,6 +580,10 @@ struct ProvidersSchema {
     /// Executor for `make`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     make: Option<ProviderSchema>,
+    /// Executor for the package directions of `convert`. Accepted by the schema so validation
+    /// can say the operation has no choice while `ibcmd` is its only executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    convert: Option<ProviderSchema>,
     /// Executor for `publish`. Accepted by the schema so validation can say the operation has no choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     publish: Option<ProviderSchema>,
@@ -605,7 +609,9 @@ struct InfobaseSchema {
     /// Client address and web-server publication settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<InfobaseWebSchema>,
-    /// Standalone server reached through its SSH gate; declares the target kind.
+    /// Standalone server (`ibsrv`); declares the target kind. The Designer reaches it by
+    /// `connection` — the direct gate `Srvr=<host>:<port>;Ref=<name>`; the agent by its SSH
+    /// `gate`. At least one of the two is declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     standalone: Option<InfobaseStandaloneSchema>,
     /// The cluster around a server infobase: the administration server (`ras`) address and
@@ -632,8 +638,15 @@ struct InfobaseSchema {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct InfobaseStandaloneSchema {
     /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
-    /// port is required — `ibsrv` listens on 1543 unless told otherwise.
-    gate: String,
+    /// port is required — `ibsrv` listens on 1543 unless told otherwise. Optional when
+    /// `connection` declares the direct gate: the agent then is not offered.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    gate: Option<String>,
     /// SHA256 fingerprint the gate must present, as `SHA256:<base64>`.
     #[serde(
         default,
@@ -643,7 +656,9 @@ struct InfobaseStandaloneSchema {
     #[schemars(with = "String")]
     host_fingerprint: Option<String>,
     /// How files travel between the runner and the gate user's directory: `sftp` through
-    /// the gate, or `{ dir: … }` — that directory as the runner sees it.
+    /// the gate, or `{ dir: … }` — that directory as the runner sees it. Required when
+    /// `gate` is declared without `connection`; the Designer by the direct gate reads and
+    /// writes files on the runner's side and needs no channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exchange: Option<InfobaseStandaloneExchangeSchema>,
 }

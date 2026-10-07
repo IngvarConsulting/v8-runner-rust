@@ -1,6 +1,26 @@
 {
   "_comment": "Матрица исполнителей из src/domain/capability.rs. Порождается тестом при UPDATE_CAPABILITY_MATRIX=1, руками не правится.",
   "operations": {
+    "convert": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        }
+      ]
+    },
     "download": {
       "cluster": [
         {
@@ -31,6 +51,10 @@
         }
       ],
       "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
         {
           "implemented": true,
           "provider": "agent"
@@ -113,7 +137,12 @@
           "provider": "agent"
         }
       ],
-      "standalone": []
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
     },
     "infobase.restore": {
       "cluster": [
@@ -144,7 +173,12 @@
           "provider": "agent"
         }
       ],
-      "standalone": []
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
     },
     "make": {
       "cluster": [
@@ -225,6 +259,10 @@
       "standalone": [
         {
           "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
           "provider": "agent"
         }
       ]
@@ -261,6 +299,10 @@
       "standalone": [
         {
           "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
           "provider": "agent"
         }
       ]
@@ -278,7 +320,12 @@
           "provider": "designer"
         }
       ],
-      "standalone": []
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
     },
     "upload": {
       "cluster": [
@@ -293,7 +340,12 @@
           "provider": "designer"
         }
       ],
-      "standalone": []
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
     }
   },
   "providers": [

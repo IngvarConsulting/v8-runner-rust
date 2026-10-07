@@ -8,6 +8,7 @@ check:
   - tests/cli_init.rs::a_standalone_target_is_refused_with_the_recipe
   - tests/cli_init.rs::an_existing_file_base_is_refused_and_the_preview_names_it
   - tests/cli_init.rs::init_edt_imports_projects_in_configuration_then_extension_order
+  - tests/cli_init.rs::a_file_base_of_an_edt_project_is_assembled_by_ibcmd_from_its_sources
   - tests/cli_push_generation.rs::a_base_created_by_the_runner_takes_the_first_push
   - tests/cli_infobase_owner.rs::infobase_create_records_the_created_base_for_this_copy
   - src/use_cases/init_project.rs::a_cancellation_deferred_by_the_creation_leaves_an_empty_remembered_base
@@ -15,8 +16,7 @@ check:
 
 # Базу создаёт `infobase create`, и делает это по виду цели
 
-Без `--from` файловую базу проекта формата Конфигуратора `ibcmd` создаёт сразу с основной
-конфигурацией из исходников (`infobase create --import --apply --force`); запасной
+Без `--from` файловую базу `ibcmd` создаёт сразу с основной конфигурацией из исходников (`infobase create --import --apply --force`); запасной
 исполнитель — Конфигуратор: `CREATEINFOBASE`, затем загрузка основной конфигурации и
 обновление базы данных. В кластере Конфигуратор одной командой `CREATEINFOBASE` с
 клиент-серверной строкой регистрирует базу и создаёт базу данных в СУБД, всегда с запретом
@@ -33,9 +33,9 @@ check:
 же правах, что у подъёма из снимка с созданием. Копию другой базы делает `--from`
 (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
 
-Чего правило не держит, держат правила с разрывом: сборка файловой базы проекта EDT
-(`INV.CLI.A-FILE-BASE-OF-AN-EDT-PROJECT-IS-ASSEMBLED-FROM-ITS-SOURCES`), запасной путь
-`rac` (`INV.CLI.A-CLUSTER-BASE-FALLS-BACK-TO-RAC`) и отказ на существующей базе в кластере
+Исходники проекта EDT сперва переводятся в XML
+(`INV.CLI.A-FILE-BASE-OF-AN-EDT-PROJECT-IS-ASSEMBLED-FROM-ITS-SOURCES`). Чего правило не
+держит, держат правила с разрывом: запасной путь `rac` (`INV.CLI.A-CLUSTER-BASE-FALLS-BACK-TO-RAC`) и отказ на существующей базе в кластере
 (`INV.CLI.AN-EXISTING-CLUSTER-BASE-IS-REFUSED-BEFORE-CREATION`).
 
 Источник: [`cli.html#map`](../../../docs/site/cli.html#map),

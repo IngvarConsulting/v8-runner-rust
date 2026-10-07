@@ -125,12 +125,7 @@ impl<'a> SourceSetInventory<'a> {
                     ))
                 })?,
         };
-        let names_a_file = if resolved.exists() {
-            !resolved.is_dir()
-        } else {
-            directory.extension().is_some()
-        };
-        if !names_a_file {
+        if !names_a_file(&directory, &resolved) {
             return Ok(resolved);
         }
         let mut error = UseCaseError::from(AppError::Validation(format!(
@@ -338,6 +333,17 @@ impl<'a> SourceSetInventory<'a> {
 
     pub(crate) fn analyze_contexts(&self, contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
         SourceSetsService::new(self.config).analyze_contexts(contexts)
+    }
+}
+
+/// Называет ли путь `--output` файл, а не каталог: существующий — по тому, что лежит на
+/// диске, несуществующий — по суффиксу в написанном `written`. Одно правило для `make`,
+/// `download` и `convert --to package`.
+pub(crate) fn names_a_file(written: &Path, resolved: &Path) -> bool {
+    if resolved.exists() {
+        !resolved.is_dir()
+    } else {
+        written.extension().is_some()
     }
 }
 
