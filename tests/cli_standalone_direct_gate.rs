@@ -409,3 +409,29 @@ fn infobase_create_is_still_refused_by_the_direct_gate() {
     );
     assert!(project.calls().is_empty(), "{:?}", project.calls());
 }
+
+/// `make` базу проекта не открывает: Конфигуратор его временной базы путь к серверу не
+/// ищет, и без строки прямого шлюза его не теряет.
+#[test]
+fn make_keeps_the_designer_without_the_direct_gate() {
+    let section = format!(
+        "\n      gate: 127.0.0.1:{}\n      exchange: sftp",
+        free_tcp_port()
+    );
+    let project = Project::new("", &section);
+    let package = project.root().join("dist").join("main.cf");
+
+    let payload = succeeded(&project.run(&[
+        "make",
+        "main",
+        "--output",
+        &package.display().to_string(),
+        "--dry-run",
+    ]));
+
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "designer",
+        "{payload}"
+    );
+    assert!(project.calls().is_empty(), "{:?}", project.calls());
+}

@@ -1018,7 +1018,7 @@ fn select_provider(
             let receipt = plan.receipt_for_nobody(skipped);
             return Err((error, receipt));
         }
-        if let Some(skip) = without_a_way(config, provider) {
+        if let Some(skip) = without_a_way(config, operation, provider) {
             skipped.push(skip);
             continue;
         }
@@ -1100,7 +1100,7 @@ fn database_configuration_plan(
         // не объявлен: выход — объявить его или выгрузить рабочую конфигурацию.
         ProviderPlan::Default { .. } => {
             let declare = database_configuration_exporters()
-                .filter_map(|provider| config.missing_way(provider))
+                .filter_map(|provider| config.missing_way(Operation::ConfigurationExport, provider))
                 .map(|way| format!("declare {}", way.key()))
                 .next()
                 .map(|declare| format!("{declare}, or "))

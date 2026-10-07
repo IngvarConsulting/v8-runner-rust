@@ -251,14 +251,15 @@ fn a_foreign_download_provider_is_refused_like_push_before_the_platform_starts()
     assert!(!started.exists(), "no platform utility may start");
 }
 
-/// Семейство переноса читает только свои ключи `providers.*`: ключ сборки, у которой на
-/// автономном сервере выбора нет, не входит в настройки `download` и `infobase dump` и
-/// отказа по себе не даёт. Превью доходит до выбора исполнителя: `download` берёт шлюз,
-/// а снимку автономного сервера отказывает матрица, а не проверка настроек.
+/// Семейство переноса читает только свои ключи `providers.*`: ключ сборки, назначивший
+/// Конфигуратор автономному серверу без строки прямого шлюза, не входит в настройки
+/// `download` и `infobase dump` и отказа по себе не даёт. Превью доходит до выбора
+/// исполнителя: `download` берёт шлюз, а снимку отказывает выбор — у его единственного
+/// исполнителя нет пути к серверу, — а не ключ сборки.
 #[test]
 fn a_foreign_operation_key_does_not_block_the_transfer_family() {
     let dir = temp_workspace();
-    let config_path = write_project(dir.path(), "providers:\n  build: agent\n");
+    let config_path = write_project(dir.path(), "providers:\n  build: designer\n");
     let exchange = dir.path().join("exchange");
     fs::create_dir_all(&exchange).expect("exchange dir");
     let yaml = fs::read_to_string(&config_path).expect("config");
@@ -299,8 +300,9 @@ fn a_foreign_operation_key_does_not_block_the_transfer_family() {
     let (code, payload) = run(&config_path, &dump);
     assert_ne!(code, 0, "{payload}");
     assert_eq!(
-        payload["error"]["code"], "capability_unavailable",
-        "the matrix refuses the snapshot, not the build key: {payload}"
+        payload["error"]["message"],
+        "infobase.dump reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "provider selection refuses the snapshot, not the build key: {payload}"
     );
     assert!(
         !payload["error"]["message"]

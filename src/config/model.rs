@@ -625,11 +625,15 @@ impl AppConfig {
         }
     }
 
-    /// The way to the target this provider lacks, as declared. Only a standalone server
-    /// can lack one: the Designer goes to it by the direct gate in `connection`, the agent
-    /// by `standalone.gate`, and either may be left undeclared. `None` — the way is
-    /// declared, or the target is not a standalone server.
-    pub fn missing_way(&self, provider: Provider) -> Option<StandaloneWay> {
+    /// The way to the target this provider lacks for the operation, as declared. Only a
+    /// standalone server can lack one: the Designer goes to it by the direct gate in
+    /// `connection`, the agent by `standalone.gate`, and either may be left undeclared.
+    /// `None` — the way is declared, the operation does not go to the target (`make`
+    /// builds in a throwaway base of the runner), or the target is not a standalone server.
+    pub fn missing_way(&self, operation: Operation, provider: Provider) -> Option<StandaloneWay> {
+        if capability::needs_no_target(operation) {
+            return None;
+        }
         let standalone = self.infobase.standalone.as_ref()?;
         let way = StandaloneWay::of(provider)?;
         let declared = match way {
@@ -648,14 +652,14 @@ impl AppConfig {
         if row.is_empty()
             || row
                 .iter()
-                .any(|provider| self.missing_way(*provider).is_none())
+                .any(|provider| self.missing_way(operation, *provider).is_none())
         {
             return None;
         }
         let ways = row
             .iter()
             .filter_map(|provider| {
-                self.missing_way(*provider)
+                self.missing_way(operation, *provider)
                     .map(|way| format!("{provider} by {} — declare {}", way.name(), way.key()))
             })
             .collect::<Vec<_>>()
@@ -683,7 +687,7 @@ impl AppConfig {
             None => ProviderPlan::Default {
                 chain: capability::default_chain(operation, self.target_kind())
                     .into_iter()
-                    .filter(|provider| self.missing_way(*provider).is_none())
+                    .filter(|provider| self.missing_way(operation, *provider).is_none())
                     .collect(),
             },
         }

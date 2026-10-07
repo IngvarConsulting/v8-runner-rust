@@ -1306,7 +1306,7 @@ fn validate_providers(
                 implemented,
             });
         }
-        if let Some(way) = config.missing_way(*provider) {
+        if let Some(way) = config.missing_way(*operation, *provider) {
             return Err(ConfigValidationError::ProviderWithoutAWay {
                 operation: operation.as_str(),
                 provider: provider.as_str(),

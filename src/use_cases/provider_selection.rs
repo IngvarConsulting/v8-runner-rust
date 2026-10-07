@@ -81,7 +81,7 @@ pub fn select_from(
     let mut skipped: Vec<SkippedProvider> = Vec::new();
 
     for provider in plan.candidates() {
-        if let Some(skip) = without_a_way(config, provider) {
+        if let Some(skip) = without_a_way(config, operation, provider) {
             skipped.push(skip);
             continue;
         }
@@ -133,11 +133,17 @@ pub(crate) fn no_executor(config: &AppConfig, operation: Operation) -> AppError 
 /// Пропуск исполнителя, которому не объявлен путь к автономному серверу. В цепочку
 /// умолчаний такой исполнитель не попадает вовсе; здесь его встречает только ключ
 /// `providers.*`, назначивший его, — и не подменяется умолчанием.
-pub(crate) fn without_a_way(config: &AppConfig, provider: Provider) -> Option<SkippedProvider> {
-    config.missing_way(provider).map(|way| SkippedProvider {
-        provider,
-        reason: way.undeclared(provider),
-    })
+pub(crate) fn without_a_way(
+    config: &AppConfig,
+    operation: Operation,
+    provider: Provider,
+) -> Option<SkippedProvider> {
+    config
+        .missing_way(operation, provider)
+        .map(|way| SkippedProvider {
+            provider,
+            reason: way.undeclared(provider),
+        })
 }
 
 /// Пропуск исполнителя, у которого в этой сборке нет адаптера для операции.
