@@ -19,8 +19,6 @@ pub enum UseCaseErrorKind {
     WorkspaceBusy,
     /// Файловую базу держит другая команда: занято, как `WorkspaceBusy`, можно повторить.
     InfobaseBusy,
-    /// Файловую базу держит другая рабочая копия: повтор не поможет.
-    InfobaseHeld,
     /// База ушла вперёд записанного поколения: сперва `pull` или перезапись `push --force`.
     NonFastForward,
     /// Памяти о базе у рабочей копии нет: сперва `pull` или перезапись `push --force`.
@@ -40,7 +38,7 @@ impl UseCaseErrorKind {
         match self {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment => VALIDATION_EXIT_CODE,
-            Self::WorkspaceBusy | Self::InfobaseBusy | Self::InfobaseHeld => RUNTIME_EXIT_CODE,
+            Self::WorkspaceBusy | Self::InfobaseBusy => RUNTIME_EXIT_CODE,
             Self::NonFastForward | Self::NoMemory => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
@@ -94,7 +92,6 @@ impl UseCaseErrorKind {
             Self::Environment => "environment_unavailable",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
-            Self::InfobaseHeld => "infobase_held",
             Self::NonFastForward => "non_fast_forward",
             Self::NoMemory => "no_memory",
             Self::InvalidOutput => "invalid_output",
@@ -116,7 +113,6 @@ impl UseCaseErrorKind {
             | Self::Environment
             | Self::WorkspaceBusy
             | Self::InfobaseBusy
-            | Self::InfobaseHeld
             | Self::NonFastForward
             | Self::NoMemory
             | Self::Validation
@@ -131,7 +127,6 @@ impl UseCaseErrorKind {
             Self::Environment => "environment unavailable",
             Self::WorkspaceBusy => "workspace busy",
             Self::InfobaseBusy => "infobase busy",
-            Self::InfobaseHeld => "infobase held",
             Self::NonFastForward => "non-fast-forward",
             Self::NoMemory => "no memory of the infobase",
             Self::InvalidOutput => "invalid output",
@@ -579,7 +574,6 @@ mod tests {
         assert_eq!(UseCaseErrorKind::Environment.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InfobaseBusy.exit_code(), 3);
-        assert_eq!(UseCaseErrorKind::InfobaseHeld.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::NonFastForward.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::NoMemory.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InvalidOutput.exit_code(), 4);

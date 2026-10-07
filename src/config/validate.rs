@@ -333,9 +333,9 @@ pub enum ConfigValidationError {
     InfobasesBelongToTheLocalLayer,
 
     #[error(
-        "`{key}` is declared only in v8project.local.yaml: each working copy gives it for itself, and it is not committed with the project — move `{key}` to infobases.<name> of v8project.local.yaml"
+        "unknown key `shared` in {section} of {file}: shared infobases are gone (incompatible with 0.13.0) — remove `shared`; a write command on an infobase of another working copy now runs and warns whose infobase it changes"
     )]
-    InfobaseKeyBelongsToTheLocalLayer { key: &'static str },
+    SharedInfobaseKeyIsGone { section: String, file: String },
 
     #[error(
         "{file} declares both `infobase` and `infobases`: `infobase` is the one-cycle synonym for `infobases.origin`, keep one of them"
@@ -2993,7 +2993,6 @@ mod tests {
                 web: None,
                 standalone: None,
                 cluster: None,
-                shared: false,
             },
             infobases: Default::default(),
             infobase_name: None,

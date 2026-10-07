@@ -7,7 +7,7 @@ use crate::config::model::{
 };
 use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
-    LOCAL_ONLY_INFOBASE_KEYS,
+    REMOVED_SHARED_INFOBASE_KEY,
 };
 use crate::config::validate::{
     validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
@@ -351,10 +351,9 @@ fn root_mapping_mut(
 }
 
 /// Ключи местного слоя в проектном файле. Карта баз живёт только в местном слое: к какой
-/// базе подключён каталог, знает эта машина, а не проект. Согласие делить базу (`shared`)
-/// даёт каждая рабочая копия за себя, и прежняя секция `infobase:` его не несёт: согласие
-/// одной копии не коммитят. Отказ называет слой до границы схемы, где ключ был бы просто
-/// неизвестным.
+/// базе подключён каталог, знает эта машина, а не проект. Отказ называет слой до границы
+/// схемы, где ключ был бы просто неизвестным. Ушедший ключ `shared` в прежней секции
+/// `infobase:` называется так же, как в местном слое.
 fn reject_local_keys_in_project_file(
     root: &serde_yaml::Value,
 ) -> Result<(), ConfigValidationError> {
@@ -366,19 +365,42 @@ fn reject_local_keys_in_project_file(
     if mapping_contains_key(mapping, "infobases") {
         return Err(ConfigValidationError::InfobasesBelongToTheLocalLayer);
     }
-    let (synonym, _) = INFOBASE_SECTION_SYNONYM;
-    if let Some(section) = mapping
+    reject_gone_shared_key(mapping, DEFAULT_CONFIG_FILE_NAME)
+}
+
+/// Ушедший после 0.13.0 ключ `shared` в секции базы — прежней `infobase:` или любой из
+/// `infobases` — даёт ошибку незнакомого ключа с подсказкой раньше границы схемы: общих баз
+/// больше нет, и переходного чтения ключа нет (решение владельца от 07.10.2026, #437).
+fn reject_gone_shared_key(
+    mapping: &serde_yaml::Mapping,
+    file: &str,
+) -> Result<(), ConfigValidationError> {
+    let (synonym, map) = INFOBASE_SECTION_SYNONYM;
+    let legacy = mapping
         .get(yaml_key(synonym))
         .and_then(serde_yaml::Value::as_mapping)
+        .map(|section| (synonym.to_owned(), section));
+    let declared = mapping
+        .get(yaml_key(map))
+        .and_then(serde_yaml::Value::as_mapping)
+        .into_iter()
+        .flat_map(|infobases| infobases.iter())
+        .filter_map(|(name, section)| {
+            let section = section.as_mapping()?;
+            let name = name.as_str().unwrap_or("<non-string>");
+            Some((format!("{map}.{name}"), section))
+        });
+    match legacy
+        .into_iter()
+        .chain(declared)
+        .find(|(_, section)| mapping_contains_key(section, REMOVED_SHARED_INFOBASE_KEY))
     {
-        if let Some(key) = LOCAL_ONLY_INFOBASE_KEYS
-            .into_iter()
-            .find(|key| mapping_contains_key(section, key))
-        {
-            return Err(ConfigValidationError::InfobaseKeyBelongsToTheLocalLayer { key });
-        }
+        Some((section, _)) => Err(ConfigValidationError::SharedInfobaseKeyIsGone {
+            section,
+            file: file.to_owned(),
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Который из двух файлов свёртывается: от этого зависят имя в отказе и текст
@@ -660,9 +682,9 @@ pub fn load_declared_infobases(
     let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
     if regular_file_exists(&project_path)? {
         let mut project = read_yaml_file(&project_path)?;
-        // Ключи местного слоя в проектном файле владельца — `shared` в прежней секции
-        // `infobase:` или карта `infobases:` — дают ошибку: такой проект не загрузился бы и
-        // сам, и проверка владельца считает его живым и несогласным.
+        // Карта `infobases:` или ушедший ключ `shared` в проектном файле владельца дают
+        // ошибку: такой проект не загрузился бы и сам, и проверка владельца считает его
+        // живым.
         reject_local_keys_in_project_file(&project)?;
         fold_infobase_synonym(&mut project, ConfigFile::Project(&project_path))?;
         if let Some(infobases) = root_mapping_mut(&mut project)?.remove(yaml_key("infobases")) {
@@ -758,6 +780,7 @@ fn reject_local_overlay_keys(root: &serde_yaml::Value) -> Result<(), ConfigLoadE
         ));
     };
 
+    reject_gone_shared_key(mapping, LOCAL_CONFIG_FILE_NAME)?;
     for key in mapping.keys() {
         let Some(key) = key.as_str() else {
             return Err(ConfigLoadError::LocalOverlayUnsupportedKey(

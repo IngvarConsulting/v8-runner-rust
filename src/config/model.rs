@@ -153,12 +153,6 @@ pub struct InfobaseConfig {
     /// `ras` — #213, `infobase create` in a cluster — #204).
     #[serde(default)]
     pub cluster: Option<InfobaseClusterConfig>,
-
-    /// Consent of this working copy to share a file infobase with the other copies that hold
-    /// it (`INV.USE-CASES.A-BASE-IS-SHARED-BY-CONSENT-OF-EVERY-COPY`). Only the local layer
-    /// declares it: the loader refuses the key in the project file.
-    #[serde(default)]
-    pub shared: bool,
 }
 
 /// The cluster section of a server infobase. Every key is optional: each operation asks
@@ -474,7 +468,6 @@ impl InfobaseConfig {
             web: None,
             standalone: None,
             cluster: None,
-            shared: false,
         }
     }
 
@@ -547,7 +540,6 @@ impl InfobaseConfig {
             standalone: None,
             dbms: Some(dbms),
             cluster: None,
-            shared: false,
         }
     }
 }
