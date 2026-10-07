@@ -142,7 +142,7 @@ v8-runner infobase create
   way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the
   step instead of parsing the message.
 - Through `agent`, a reply that is not a JSON message array (a non-JSON bracket, an unknown
-  message type, prose or a cut-off array when the session ended) answers `error.code: invalid_output`, exit 4 (MCP:
+  message type, a cut-off array, or prose after the first JSON reply, when the session ended) answers `error.code: invalid_output`, exit 4 (MCP:
   `platform_failure`), and nothing the agent wrote reaches the target; the agent's own `error`
   message stays `platform_failure`.
 - A busy `workPath` (another run holds its lock) answers at once with `error.kind: workspace`,

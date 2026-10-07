@@ -607,6 +607,9 @@ pub struct AgentSession {
     deferred_interruption: Option<ProcessInterruptionReason>,
     /// Прерывание, которое отложила последняя команда, — и когда её ответ не дочитан.
     command_deferral: Option<ProcessInterruptionReason>,
+    /// Пришёл ли от агента хоть один JSON-массив. До него проза — баннер и приглашение
+    /// shell, а не ответ: конец сессии после неё — закрытая сессия, а не неверный ответ.
+    json_seen: bool,
 }
 
 impl AgentSession {
@@ -720,6 +723,7 @@ impl AgentSession {
             ended: false,
             deferred_interruption: None,
             command_deferral: None,
+            json_seen: false,
         };
         // Режим ответа и подключение к базе — служебные команды открытия сессии: работы
         // команды они не отмечают.
@@ -1217,13 +1221,15 @@ impl AgentSession {
         if let Some(log) = self.transcript.as_mut() {
             let _ = log.write_all(&skipped);
         }
-        take_array(&mut self.pending)
+        let reply = take_array(&mut self.pending)?;
+        self.json_seen |= reply.is_some();
+        Ok(reply)
     }
 
     /// Канал кончился, а полного массива нет. Недочитанные байты — проза вместо массива или
     /// оборванный массив — неверный ответ; без них сессия просто закрылась.
     fn ended_without_reply(&self) -> AgentError {
-        match unread_reply(&self.pending) {
+        match unread_reply(&self.pending, self.json_seen) {
             Some(detail) => AgentError::InvalidReply {
                 detail: detail.to_owned(),
                 head: head_of(&self.pending),
@@ -1278,15 +1284,18 @@ fn take_array(pending: &mut Vec<u8>) -> Result<Option<Vec<u8>>, AgentError> {
     }
 }
 
-/// Что осталось в буфере, когда канал кончился: оборванный массив или проза — неверный
-/// ответ; пустота и пробельные байты ответом не были.
-fn unread_reply(pending: &[u8]) -> Option<&'static str> {
+/// Что осталось в буфере, когда канал кончился: оборванный массив — неверный ответ, проза —
+/// тоже, но только после первого JSON-массива сессии (`json_seen`): до него это баннер и
+/// приглашение shell. Пустота и пробельные байты ответом не были.
+fn unread_reply(pending: &[u8], json_seen: bool) -> Option<&'static str> {
     if pending.iter().all(u8::is_ascii_whitespace) {
         None
     } else if pending.first() == Some(&b'[') {
         Some("the reply was cut off when the session ended")
-    } else {
+    } else if json_seen {
         Some("the session ended after text that is not a message array")
+    } else {
+        None
     }
 }
 
@@ -1671,14 +1680,25 @@ mod tests {
         );
     }
 
-    /// Конец канала после прозы или посреди массива — неверный ответ; пустой конец —
-    /// закрытая сессия.
+    /// Конец канала посреди массива или после прозы, пришедшей вслед за JSON, — неверный
+    /// ответ; пустой конец и баннер до первого массива — закрытая сессия.
     #[test]
     fn a_reply_cut_off_or_left_as_prose_at_the_end_of_the_session_is_an_invalid_reply() {
-        assert_eq!(unread_reply(b""), None);
-        assert_eq!(unread_reply(b" \r\n"), None);
-        assert!(unread_reply(br#"[{"type":"progress"},{"type":"succ"#).is_some());
-        assert!(unread_reply("Выгрузка успешно завершена\n".as_bytes()).is_some());
+        let cut_off = br#"[{"type":"progress"},{"type":"succ"#;
+        let prose = "Выгрузка успешно завершена\n".as_bytes();
+        for json_seen in [false, true] {
+            assert_eq!(unread_reply(b"", json_seen), None);
+            assert_eq!(unread_reply(b" \r\n", json_seen), None);
+            assert!(unread_reply(cut_off, json_seen).is_some());
+        }
+        assert!(unread_reply(prose, true).is_some());
+    }
+
+    /// Баннер и приглашение shell до JSON-режима — не ответ: сессия, закрытая после них,
+    /// остаётся закрытой сессией, а не неверным ответом.
+    #[test]
+    fn a_banner_before_the_first_array_then_the_end_of_the_session_is_a_closed_session() {
+        assert_eq!(unread_reply(b"1C Designer Shell\ndesigner> ", false), None);
     }
 
     /// Сообщение неизвестного типа или без типа и массив не из сообщений — неверный ответ.
