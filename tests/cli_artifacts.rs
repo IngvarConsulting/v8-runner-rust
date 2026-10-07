@@ -8,7 +8,12 @@ use std::path::{Path, PathBuf};
 use support::{temp_workspace, v8_runner_command, write_shell_script as write_script};
 
 fn write_designer_script(path: &Path, fail: bool) {
-    let failure_branch = if fail { "exit 17" } else { "exit 0" };
+    // Отказ — на выгрузке пакета: временная база создаётся и исходники в неё загружаются.
+    let failure_branch = if fail {
+        "case \" $* \" in *' /DumpCfg '*) exit 17 ;; esac\nexit 0"
+    } else {
+        "exit 0"
+    };
     write_script(
         path,
         &format!(

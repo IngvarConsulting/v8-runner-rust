@@ -144,7 +144,7 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 3. Сессия одна на команду: `push` открывает её при первой настоящей загрузке и ведёт через
    все наборы, остальные команды — одну на операцию.
 4. Файлы идут каналом: общим каталогом или SFTP шлюза. В общий каталог раннер выставляет
-   исходники ссылкой, а где ссылки нет и у внешних обработок `make` — копией; файл —
+   исходники ссылкой, а где ссылки нет — копией; файл —
    жёсткой ссылкой или копией. Полную выгрузку агент пишет в отдельный подкаталог;
    инкрементальную и пообъектную — в общем каталоге сквозь ссылку в цель, по SFTP —
    возвратом изменённого поверх цели. Автономной цели без объявленного канала раннер
@@ -226,15 +226,35 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 каталог без записи: следующий прогон снова планирует его, а сторож с советом
 `ForceWayOut::Undeclared` не заменяет в нём незафиксированное.
 
-`make` публикует тем же способом — файл пакета или каталог внешних обработок — и без
-вопроса к git; цель он сверяет при разрешении и заново перед публикацией.
+`make` ([`artifacts.rs`](../../src/use_cases/artifacts.rs)) базу проекта не открывает: ни
+замка базы, ни метки владельца, только замок цели `--output`. Пакет он собирает из исходников
+во временной базе раннера ([`throwaway_infobase.rs`](../../src/use_cases/throwaway_infobase.rs)):
+
+1. Выбор исполнителя по строке `make` — `ibcmd`, затем Конфигуратор; внешние обработки
+   собирает только Конфигуратор, поверх основной конфигурации в своей базе — базу `ibcmd`
+   он не открывает. Безопасная точка перед сборкой.
+2. Временная база прогона, своя у каждого исполнителя: при первой нужде уборка брошенных
+   баз (неудача — предупреждение, а не отказ), безопасная точка, каталог
+   `workPath/temp/throwaway-infobases/base-<запуск>` с описанием, затем `ibcmd infobase
+   create` со своим `--data` или `CREATEINFOBASE`.
+3. Исходники формата EDT переводит в XML шаг `push` (`build_project::execute_edt_export_step`)
+   в каталог временной базы.
+4. Конфигуратор загружает исходники без файла версий (безопасная точка перед загрузкой),
+   расширение — поверх основной конфигурации, которую база получает один раз за прогон, и
+   выгружает пакет (безопасная точка перед выгрузкой); `ibcmd` собирает пакет `config import
+   --out` без загрузки в базу.
+5. Публикация тем же способом — файл пакета или каталог внешних обработок — и без вопроса к
+   git; цель сверяется при разрешении и заново перед публикацией.
+6. После прогона — `make <SET>` или всего обхода без набора — база убирается; неудачная
+   уборка — предупреждение в ответе последнего набора.
 
 `make` и `download` без набора — обходы поверх своих сценариев одного набора, с каталогом
 вместо файла (`SourceSetInventory::packages_directory`, путь пакета —
 `source_inventory::package_in_directory`). До работы цели пакетов сверяются с каталогами
 наборов, `workPath` и друг с другом (`SourceSetInventory::check_package_targets`); накопление
 ответов и остановку ведёт [`set_walk.rs`](../../src/use_cases/set_walk.rs), как у `pull --all`. `make` ([`artifacts/all.rs`](../../src/use_cases/artifacts/all.rs))
-идёт по `SourceSetInventory::ordered_source_sets` сценарием `make <SET>`. `download`
+идёт по `SourceSetInventory::ordered_source_sets` сценарием `make <SET>` в одной временной базе
+(`artifacts::MakeSession`). `download`
 ([`infobase_export/all.rs`](../../src/use_cases/infobase_export/all.rs)) выбирает исполнителя
 один раз, спрашивает им состав базы читателем `pull --all`
 ([`installed_extensions.rs`](../../src/use_cases/installed_extensions.rs)) и выгружает пакеты,
@@ -255,7 +275,9 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [каталог вне системы контроля версий не заменяют](../rules/use-cases/an-untracked-directory-is-refused-not-replaced.md),
 [выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md),
 [`pull --all` объявляет набор каждому расширению базы](../rules/cli/pull-all-declares-a-set-for-each-installed-extension.md),
-[`make` и `download` без набора пишут в каталог](../rules/cli/make-and-download-without-a-set-write-into-a-directory.md).
+[`make` и `download` без набора пишут в каталог](../rules/cli/make-and-download-without-a-set-write-into-a-directory.md),
+[`make` собирает пакет из исходников во временной базе](../rules/use-cases/make-builds-packages-from-sources-in-a-throwaway-base.md),
+[временная база служит одному прогону](../rules/use-cases/a-throwaway-base-serves-one-run-and-is-removed.md).
 
 ### 6.7 EDT-проверка по MCP
 

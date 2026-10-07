@@ -24,9 +24,6 @@ infobase.dump standalone | сайт: designer | матрица: - | #205
 infobase.restore file | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
 infobase.restore cluster | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
 infobase.restore standalone | сайт: designer | матрица: - | #205
-make file | сайт: ibcmd ibcmd-rs designer | матрица: designer agent~ | #207
-make cluster | сайт: ibcmd ibcmd-rs designer | матрица: designer agent~ | #207
-make standalone | сайт: ibcmd ibcmd-rs designer | матрица: agent | #207
 pull file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
 pull cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
 pull standalone | сайт: designer agent | матрица: agent | #205

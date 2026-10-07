@@ -1,15 +1,14 @@
 ---
 id: INV.USE-CASES.IBCMD-BUILDS-A-PACKAGE-IN-A-THROWAWAY-BASE
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/207
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/236
 ---
 
-# `ibcmd` собирает пакет во временной базе раннера
+# `convert` в пакет через `ibcmd` идёт во временной базе раннера
 
 Без существующей базы `ibcmd config import --out` не работает, а без `--out` та же
-команда загружает исходники в базу ([замер](../../../references/1c/confirmed-runtime-measurements.md)). Поэтому `make` и `convert` в пакет,
-выполняемые `ibcmd`, создают временную файловую базу раннера под `workPath` со своим
-каталогом данных `--data`, вызывают импорт всегда с `--out` и убирают базу после шага.
-База проекта в этом не участвует, и для пользователя сборка остаётся сборкой без базы.
-Осиротевшую временную базу уборка узнаёт как свою по
-`INV.USE-CASES.CLEANUP-TOUCHES-ONLY-ITS-OWN-ARTEFACTS`.
+команда загружает исходники в базу ([замер](../../../references/1c/confirmed-runtime-measurements.md)). Поэтому `convert` в пакет,
+выполняемый `ibcmd`, собирает его во временной базе раннера тем же владельцем, что `make`
+(`INV.USE-CASES.MAKE-BUILDS-PACKAGES-FROM-SOURCES-IN-A-THROWAWAY-BASE`): база под
+`workPath` со своим каталогом данных `--data`, импорт всегда с `--out`, база убирается после
+шага. База проекта в этом не участвует, и для пользователя сборка остаётся сборкой без базы.

@@ -194,7 +194,17 @@ runtime snapshot commit только указанным source-set.
 Это materialization сценарии поверх готовых артефактов или publish targets.
 
 - `upload` работает с готовыми `.cf` / `.cfe`.
-- `make` / `artifacts` публикуют final `.cf`, `.cfe`, `.epf`, `.erf`.
+- `make` / `artifacts` собирают final `.cf`, `.cfe`, `.epf`, `.erf` из исходников и
+  публикуют их. База проекта не участвует: пакет собирается во временной базе раннера
+  (`use_cases::throwaway_infobase::ThrowawayInfobase`) под `workPath/temp/throwaway-infobases/`
+  — `ibcmd` (`infobase create` со своим `--data`, затем `config import --out`) или
+  Конфигуратор (`CREATEINFOBASE`, `/LoadConfigFromFiles` без файла версий, `/DumpCfg`;
+  расширение — поверх основной конфигурации). Исходники EDT сперва переводит в XML шаг
+  `build_project::execute_edt_export_step`. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
+  `make <SET>` — своя, обход без набора — общая на все наборы; внешние обработки Конфигуратор
+  собирает поверх основной конфигурации в своей базе; после прогона она убирается, а
+  брошенную описание `TempDirKind::ThrowawayInfobase` выдаёт уборке как свою. Замка базы и
+  метки владельца у `make` нет.
 - Full replacement target publication идёт через staged publication model.
 
 ## Shared EDT

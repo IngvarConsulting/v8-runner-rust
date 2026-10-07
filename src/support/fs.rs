@@ -69,6 +69,8 @@ pub fn clean_dir(dir: &Path) -> std::io::Result<()> {
 pub enum TempDirKind {
     Stage,
     Backup,
+    /// Временная база раннера, в которой `make` собирает пакет из исходников.
+    ThrowawayInfobase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

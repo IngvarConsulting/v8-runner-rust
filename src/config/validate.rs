@@ -164,13 +164,24 @@ pub enum ConfigValidationError {
     },
 
     #[error(
-        "providers.{operation}: '{provider}' does not implement this operation on a {target} infobase; implemented: {implemented}"
+        "providers.{operation}: '{provider}' does not implement this operation{scope}; implemented: {implemented}"
     )]
     ProviderDoesNotImplement {
         operation: &'static str,
         provider: &'static str,
-        target: &'static str,
+        scope: ProviderScope,
         implemented: String,
+    },
+
+    #[error(
+        "providers.{operation}: '{provider}' is no longer accepted: {reason}; remove the key to use the default chain ({implemented}), or run `{way_out}`"
+    )]
+    ProviderRemoved {
+        operation: &'static str,
+        provider: &'static str,
+        reason: &'static str,
+        implemented: String,
+        way_out: &'static str,
     },
 
     #[error(
@@ -362,6 +373,36 @@ pub enum ConfigValidationError {
     },
 }
 
+/// Где исполнитель не реализует операцию: на базе этого вида или, у операции, которой база
+/// проекта не нужна (`make`), вообще.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderScope {
+    Target(&'static str),
+    AnyTarget,
+}
+
+impl std::fmt::Display for ProviderScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Target(target) => write!(f, " on a {target} infobase"),
+            Self::AnyTarget => Ok(()),
+        }
+    }
+}
+
+impl ConfigValidationError {
+    /// Шаг выхода из отказа: у снятого исполнителя — команда, которая делает то, ради чего
+    /// его назначали.
+    pub fn next(&self) -> Option<crate::domain::next_step::NextStep> {
+        match self {
+            Self::ProviderRemoved { way_out, .. } => {
+                Some(crate::domain::next_step::NextStep::command(*way_out))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Validate high-level application configuration consistency and filesystem references.
 pub fn validate(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
@@ -528,6 +569,23 @@ pub fn validate_infobase_export(
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
     validate_mcp_admission_timeout(config)?;
+    Ok(())
+}
+
+/// `make`: сборка из исходников во временной базе раннера. База проекта ей не вход, поэтому
+/// ни адрес базы, ни что-то, что от него зависит, здесь не проверяется; из `providers.*`
+/// читается только ключ `make`. Превью рабочего каталога не создаёт.
+pub fn validate_make(config: &AppConfig, preview: bool) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    if preview {
+        validate_planned_work_path(config)?;
+    } else {
+        validate_work_path(&config.work_path)?;
+    }
+    validate_providers(config, &[Operation::Make])?;
+    validate_source_sets(config, Pending::NONE)?;
+    validate_platform_version(config)?;
+    validate_edt_cli_config(config)?;
     Ok(())
 }
 
@@ -1184,7 +1242,9 @@ fn validate_providers(
     config: &AppConfig,
     operations: &[Operation],
 ) -> Result<(), ConfigValidationError> {
-    use crate::domain::capability::{capabilities, capability_of, has_a_choice};
+    use crate::domain::capability::{
+        capabilities, capability_of, has_a_choice, needs_no_target, removed_provider,
+    };
 
     let target = config.target_kind();
     let checked = config
@@ -1204,10 +1264,23 @@ fn validate_providers(
                 .map(|capability| capability.provider.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            if let Some(removed) = removed_provider(*operation, *provider) {
+                return Err(ConfigValidationError::ProviderRemoved {
+                    operation: operation.as_str(),
+                    provider: provider.as_str(),
+                    reason: removed.reason,
+                    implemented,
+                    way_out: removed.way_out,
+                });
+            }
             return Err(ConfigValidationError::ProviderDoesNotImplement {
                 operation: operation.as_str(),
                 provider: provider.as_str(),
-                target: target.as_str(),
+                scope: if needs_no_target(*operation) {
+                    ProviderScope::AnyTarget
+                } else {
+                    ProviderScope::Target(target.as_str())
+                },
                 implemented,
             });
         }
@@ -2962,6 +3035,82 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `providers.make` принимает только исполнителей сборки во временной базе: снятый агент
+    /// отказывает с выходом `download`, `ibcmd-rs` до замера #413 — как исполнитель без строки,
+    /// и ни тот ни другой отказ не говорит о виде базы — `make` её не выбирает. Отказывает и
+    /// сборка без базы проекта: `make` проверяет только свой ключ.
+    #[test]
+    fn make_accepts_only_the_executors_of_its_throwaway_base() {
+        use crate::domain::capability::{Operation, Provider};
+
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        std::fs::create_dir_all(base.path().join("src")).expect("src");
+        std::fs::write(
+            base.path().join("src/Configuration.xml"),
+            "<MetaDataObject/>",
+        )
+        .expect("marker");
+        let mut config = AppConfig {
+            base_path: base.path().to_path_buf(),
+            work_path: work.path().to_path_buf(),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            // `make` базу не выбирает: загрузчик кладёт пустую секцию.
+            infobase: serde_yaml::from_str("{}").expect("empty infobase"),
+            infobases: Default::default(),
+            infobase_name: None,
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: PathBuf::from("src"),
+            }],
+            tools: ToolsConfig::default(),
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+
+        super::validate_make(&config, true).expect("make needs no infobase");
+        for provider in [Provider::Ibcmd, Provider::Designer] {
+            config.providers = [(Operation::Make, provider)].into();
+            super::validate_make(&config, true).expect("a make executor");
+        }
+
+        config.providers = [(Operation::Make, Provider::Agent)].into();
+        let error = super::validate_make(&config, true).expect_err("the agent is removed");
+        assert!(
+            matches!(
+                error,
+                ConfigValidationError::ProviderRemoved {
+                    operation: "make",
+                    provider: "agent",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            error.next(),
+            Some(crate::domain::next_step::NextStep::command("download"))
+        );
+
+        config.providers = [(Operation::Make, Provider::IbcmdRs)].into();
+        let error = super::validate_make(&config, true).expect_err("ibcmd-rs is not measured");
+        assert!(
+            matches!(
+                error,
+                ConfigValidationError::ProviderDoesNotImplement {
+                    provider: "ibcmd-rs",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("infobase"), "{error}");
+        assert_eq!(error.next(), None);
     }
 
     fn infobase(yaml: &str) -> crate::config::model::InfobaseConfig {

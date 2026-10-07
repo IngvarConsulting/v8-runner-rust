@@ -172,6 +172,109 @@ fn make_without_a_set_builds_every_set_into_the_directory() {
     );
 }
 
+/// Обход `make` собирает все наборы в одной временной базе раннера под `workPath`: она
+/// создаётся один раз, основная конфигурация загружается в неё один раз, расширения — поверх,
+/// база проекта не открывается, а после обхода база убирается.
+#[test]
+fn make_without_a_set_builds_every_package_in_one_throwaway_base() {
+    let project = Project::new(&[]);
+    let output = project.run(&["make", "--output", "out"]);
+    let envelope = envelope(&output);
+    assert!(output.status.success(), "{envelope}");
+    let calls = project.calls();
+    let lines = calls.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("CREATEINFOBASE"))
+            .count(),
+        1,
+        "{calls}"
+    );
+    let configuration_loads = lines
+        .iter()
+        .filter(|line| line.contains("/LoadConfigFromFiles") && !line.contains("-Extension"))
+        .count();
+    assert_eq!(configuration_loads, 1, "{calls}");
+    for extension in ["Sales", "Gone"] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("/LoadConfigFromFiles")
+                    && line.contains(&format!("-Extension {extension}"))),
+            "{calls}"
+        );
+    }
+    let throwaway = project.root.join("work/temp/throwaway-infobases");
+    assert!(
+        lines
+            .iter()
+            .filter(|line| !line.starts_with("CREATEINFOBASE"))
+            .all(|line| line.contains(&throwaway.display().to_string())),
+        "every call goes to the throwaway base: {calls}"
+    );
+    assert!(
+        !calls.contains("File=ib"),
+        "the project base is untouched: {calls}"
+    );
+    assert!(!calls.contains("-updateConfigDumpInfo"), "{calls}");
+    assert_eq!(
+        fs::read_dir(&throwaway)
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0,
+        "the throwaway base is removed after the walk"
+    );
+}
+
+/// `make` базу проекта не выбирает: без местного слоя и без `origin` он собирает пакет, а
+/// `--infobase` отвергает.
+#[test]
+fn make_needs_no_infobase_and_refuses_the_infobase_key() {
+    let project = Project::new(&[]);
+    fs::remove_file(project.root.join("v8project.local.yaml")).expect("local layer");
+    let output = project.run(&["make", "main", "--output", "out/main.cf"]);
+    let built = envelope(&output);
+    assert!(output.status.success(), "{built}");
+    assert!(project.out().join("main.cf").is_file(), "{built}");
+
+    let output = project.run(&[
+        "make",
+        "main",
+        "--output",
+        "out/main.cf",
+        "--infobase",
+        "origin",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let refused = envelope(&output);
+    assert_eq!(refused["error"]["kind"], "validation", "{refused}");
+}
+
+/// `make` базу проекта не читает и о синониме её секции `infobase:` в проектном файле не
+/// предупреждает; `download`, который базу читает, предупреждает.
+#[test]
+fn make_does_not_warn_about_the_infobase_synonym() {
+    let project = Project::new(&[]);
+    fs::remove_file(project.root.join("v8project.local.yaml")).expect("local layer");
+    let file = project.root.join("v8project.yaml");
+    let text = fs::read_to_string(&file).expect("project file");
+    fs::write(&file, format!("{text}infobase:\n  connection: 'File=ib'\n")).expect("synonym");
+
+    let made = envelope(&project.run(&["make", "main", "--output", "out/main.cf", "--dry-run"]));
+    assert_eq!(made["ok"], true, "{made}");
+    assert!(
+        made["warnings"].as_array().is_none_or(Vec::is_empty),
+        "{made}"
+    );
+    let downloaded =
+        envelope(&project.run(&["download", "main", "--output", "out/main.cf", "--dry-run"]));
+    assert!(
+        downloaded["warnings"].to_string().contains("infobase"),
+        "{downloaded}"
+    );
+}
+
 /// Превью `make` без набора планирует каждый набор и ничего не собирает.
 #[test]
 fn make_without_a_set_preview_builds_nothing() {

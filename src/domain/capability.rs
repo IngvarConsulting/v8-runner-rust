@@ -264,12 +264,15 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     // Шлюз прогнан раннером на живом `ibsrv` 8.3.27 15.09.2026: build (полная и частичная
     // загрузка), dump (полная и пропуск по поколению), make cf, export cf, extensions.
     const GATE_ONLY: &[Capability] = &[implemented(Agent, LiveVerified)];
-    // `make`: у агента `dump-cfg` (cf/cfe) и сборка внешней обработки из файлов с
-    // обратной выгрузкой — прогнаны раннером на 8.3.27 15–16.09.2026; `load`: у агента
-    // нет `compare-cfg`, проба совместимости невозможна, строки нет намеренно.
+    // `make` собирает пакет из исходников во временной базе раннера, а не выгружает базу
+    // проекта, поэтому строка от вида цели не зависит. `ibcmd`: `infobase create`, затем
+    // `config import --out` (замер #182, 06.10.2026, 8.3.27.2074); Конфигуратор:
+    // `CREATEINFOBASE`, `/LoadConfigFromFiles`, `/DumpCfg` (тот же замер). Цепочку назначил
+    // владелец (#364). `ibcmd-rs` строки не имеет до замера #413, агент снят: ему нужна база
+    // проекта.
     const MAKE: &[Capability] = &[
-        implemented(Designer, LiveVerified),
-        experimental(Agent, LiveVerified),
+        implemented(Ibcmd, ArgvTested),
+        implemented(Designer, ArgvTested),
     ];
     // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
     // прогнаны раннером на 8.3.27 15.09.2026.
@@ -298,7 +301,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
             DESIGNER_ONLY
         }
-        (Operation::Make, TargetKind::File | TargetKind::Cluster) => MAKE,
+        (Operation::Make, _) => MAKE,
         (Operation::Extensions, TargetKind::File | TargetKind::Cluster) => EXTENSIONS,
         (Operation::ConfigurationExport, TargetKind::File | TargetKind::Cluster) => EXPORT,
         (
@@ -316,7 +319,6 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         (
             Operation::Build
             | Operation::Dump
-            | Operation::Make
             | Operation::Extensions
             | Operation::ConfigurationExport,
             TargetKind::Standalone,
@@ -340,6 +342,37 @@ pub fn default_chain(operation: Operation, target: TargetKind) -> Vec<Provider> 
 /// реализованный исполнитель либо экспериментальный, которого иначе не назначить.
 pub fn has_a_choice(operation: Operation, target: TargetKind) -> bool {
     capabilities(operation, target).len() > 1
+}
+
+/// Не зависит ли строка операции от вида цели: такой операции база проекта не нужна
+/// (`make` собирает пакет во временной базе раннера), и вид цели её не касается.
+pub fn needs_no_target(operation: Operation) -> bool {
+    TargetKind::ALL
+        .into_iter()
+        .all(|target| capabilities(operation, target) == capabilities(operation, TargetKind::File))
+}
+
+/// Исполнитель, которого операция больше не принимает, и выход для того, кто его назначал.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovedProvider {
+    /// Почему исполнитель снят.
+    pub reason: &'static str,
+    /// Команда, которая делает то, ради чего его назначали.
+    pub way_out: &'static str,
+}
+
+/// Снят ли исполнитель с операции. Один владелец перечня: по нему отказывает валидация
+/// конфигурации и называет выход.
+pub const fn removed_provider(operation: Operation, provider: Provider) -> Option<RemovedProvider> {
+    match (operation, provider) {
+        // `make` собирает пакет из исходников во временной базе раннера (#364), а агент
+        // работает только с базой проекта: пакет этой базы выгружает `download`.
+        (Operation::Make, Provider::Agent) => Some(RemovedProvider {
+            reason: "make builds the package from the sources in a throwaway infobase of the runner, and the agent works only with the project infobase",
+            way_out: "download",
+        }),
+        _ => None,
+    }
 }
 
 /// Реализует ли исполнитель операцию на цели хоть как-то.

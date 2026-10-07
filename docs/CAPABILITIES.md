@@ -34,7 +34,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent`; у автономного сервера (`infobase.standalone`) строки нет | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
 | `upload` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
-| `make` / `artifacts` | `format=DESIGNER`, провайдер `designer`; `agent` только по `providers.make: agent` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf`; у `agent` `.cf`/`.cfe` — `config dump-cfg` в каталог агента, `.epf`/`.erf` — исходники копируются в каталог агента (файловые параметры через ссылку агент не разрешает), сборка `load-external-…-from-files` и обратная выгрузка для сверки вида и имени, как у Конфигуратора |
+| `make` / `artifacts` | цепочка `ibcmd` → `designer` при любом виде базы и без неё; любой `format`; `.epf`/`.erf` — только `designer`; `ibcmd-rs` и `agent` не принимаются; живой замер последовательностей — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416) | Собирает `.cf` / `.cfe` из исходников во временной базе раннера под `workPath` и публикует `.epf` / `.erf`; база проекта не открывается и не нужна; `ibcmd` — `infobase create` со своим `--data`, затем `config import --out`; Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles` (без `-updateConfigDumpInfo` и `/UpdateDBCfg`), `/DumpCfg`, расширение — поверх основной конфигурации; исходники EDT сперва переводит в XML `1cedtcli` |
 | `check` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore`; `agent` только по `providers.infobase.restore: agent`; у автономного сервера (`infobase.standalone`) строки нет — снимок снимают средствами сервера | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
@@ -60,11 +60,11 @@ CLI help, доверяйте текущему коду и затем синхр�
 других выключателей (флага CLI, переменной окружения, состояния на диске) нет. Что
 включилось, видно по квитанции ответа: `provider.selected` и `provider.origin.kind: override`.
 Экспериментальный исполнитель не откатывается на следующего по цепочке: если он не готов,
-команда отказывает. Сейчас экспериментальны `agent` у `push`, `pull`, `make`, `extensions`,
+команда отказывает. Сейчас экспериментальны `agent` у `push`, `pull`, `extensions`,
 `download`, `infobase dump` и `infobase restore` на файловой базе и кластере, а также `ibcmd`
 у `infobase dump` и `infobase restore`. У автономного сервера `agent` — единственный
-исполнитель `push`, `pull`, `make`, `extensions` и `download`, ключ ему не нужен и не
-разрешён; `infobase dump` и `infobase restore` у такой цели строки не имеют. Подробнее — раздел «Эксперименты» на
+исполнитель `push`, `pull`, `extensions` и `download`, ключ ему не нужен и не
+разрешён; `make` автономный сервер не касается — он собирает пакет во временной базе раннера; `infobase dump` и `infobase restore` у такой цели строки не имеют. Подробнее — раздел «Эксперименты» на
 [сайте](https://ingvarconsulting.github.io/v8-runner-rust/architecture.html).
 
 ## Превью у глаголов, работающих с платформой
@@ -191,7 +191,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 блокирует, — команда записи (`push`, `upload`, `pull`, `test`, `check` Конфигуратором,
 `launch`, `infobase create`, `infobase restore`, `extensions` с изменениями, `clone`)
 отказывает `runtime_failure` с каталогом и причиной, а команда чтения (`download`,
-`infobase dump`, `make`, `extensions list`, `extensions info`) идёт дальше и пишет
+`infobase dump`, `extensions list`, `extensions info`) идёт дальше и пишет
 предупреждение `infobase lock …`. Поэтому файловая база в корне диска или в каталоге,
 родитель которого закрыт на запись, команде записи недоступна: замку негде лежать, и она
 отказывает. Чтение базы, у которой нет даже каталога-родителя, замок не берёт и ничего не
@@ -238,8 +238,9 @@ MCP:
 - копию в метку записывает только прошедшая проверку команда записи на базе, названной в
   местном слое, и только под замком базы; команда со строкой соединения в `--infobase`
   подчиняется владельцу, но им не становится;
-- команда чтения (`download`, `infobase dump`, `make`, `extensions list`, `extensions info`)
-  проходит на чужой базе и метку не трогает; превью команды записи читает метку без замка и
+- команда чтения (`download`, `infobase dump`, `extensions list`, `extensions info`)
+  проходит на чужой базе и метку не трогает; `make` базу проекта не открывает вовсе — ни
+  замка, ни метки; превью команды записи читает метку без замка и
   называет отказ заранее;
 - метку, которую нельзя прочитать или записать, и метку незнакомой версии команда записи не
   переписывает: она отказывает `runtime_failure` на шаге `infobase owner` и называет каталог и
@@ -1112,8 +1113,45 @@ v8-runner artifacts [<SET>] --output <TARGET> [--extension <NAME>] [--dry-run]
 - `.cf` используется для основной конфигурации.
 - `.cfe` используется для extension export.
 - Каталог output используется для external `.epf` / `.erf` publication.
-- Исполнитель — Конфигуратор; `agent` — по `providers.make: agent`, у автономного сервера —
-  единственный.
+- Пакет собирается **из исходников**, а не выгружается из базы проекта: наборы загружаются во
+  временную файловую базу раннера под `workPath/temp/throwaway-infobases/`, пакет выгружается
+  из неё, и после прогона база убирается. База проекта не нужна: `make` работает без местного
+  слоя и без `origin`, не берёт замок базы и не читает метку владельца; замок цели `--output`
+  остаётся. Обход без набора создаёт одну базу на исполнителя: основная конфигурация
+  загружается в базу Конфигуратора один раз, расширения — поверх; исходники EDT переводятся
+  в XML один раз за прогон. Базу, брошенную оборванным прогоном,
+  следующий `make` убирает как свою, когда она устарела.
+- Исполнители — цепочка `ibcmd` → Конфигуратор, при любом виде базы проекта:
+  - `ibcmd` создаёт базу `infobase create` со своим каталогом данных `--data` (общий
+    `workPath/ibcmd-data` не используется) и собирает пакет `config import --out`; ключ
+    `--out` стоит всегда — без него та же команда загрузила бы исходники в базу;
+  - Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles` без `-updateConfigDumpInfo`
+    (файл версий в исходниках не пишется) и без `/UpdateDBCfg`, затем `/DumpCfg`; расширение
+    он загружает с `-Extension` поверх основной конфигурации;
+  - внешние `.epf` / `.erf` собирает всегда Конфигуратор в своей временной базе: сперва
+    загружает в неё основную конфигурацию проекта (без `-updateConfigDumpInfo` и
+    `/UpdateDBCfg`), затем `/LoadExternalDataProcessorOrReportFromFiles`. В обходе
+    Конфигуратором это та же база, в обходе `ibcmd` — своя: базу `ibcmd` Конфигуратор не
+    открывает. Ключ `providers.make` внешних наборов не касается, и их квитанция называет
+    `designer` с `origin: default` и при назначенном ключе.
+- Последовательности сборки пока проверены на поддельной платформе; живой замер
+  Конфигуратора на свежей базе `CREATEINFOBASE` с `/IBConnectionString`, формы `ibcmd` с
+  `--data` и `--out` и внешних обработок в базе с загруженной, но не применённой
+  конфигурацией — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416).
+- Формат EDT: исходники сперва переводит в XML `1cedtcli` — тем же шагом, что у `push`, — в
+  каталог временной базы.
+- Отмена останавливает сборку на безопасной точке: перед созданием базы, перед загрузкой,
+  перед выгрузкой и перед публикацией; процесс исполнителя снимается мягко, затем
+  принудительно.
+- `providers.make: ibcmd-rs` пока отказывает: замера `ibcmd-rs` нет
+  ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
+- **Несовместимо с прежним `make`:**
+  - пакет собирается из того, что лежит в исходниках, а не в базе разработки: правки,
+    сделанные в Конфигураторе и не выгруженные, в пакет не попадают — для них есть `pull` и
+    `download`;
+  - `providers.make: agent` больше не принимается: валидация отказывает и называет выход
+    `next` — `download`;
+  - `--infobase` у `make` больше не принимается: отказ валидации.
 
 ## `publish`
 
@@ -1323,7 +1361,7 @@ v8-runner mcp serve http
 - Object-scoped partial dump через `ibcmd`.
 - `upload` через `ibcmd`.
 - `check` через `ibcmd`.
-- `make` через `ibcmd`: пакет будет собираться во временной базе раннера, всегда с `--out` ([#207](https://github.com/IngvarConsulting/v8-runner-rust/issues/207)).
+- `make` через `ibcmd-rs`: сборка пакета из XML без базы только по ключу `providers.make: ibcmd-rs` ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
 - `extensions` через `designer`.
 - `convert` с пакетом: файл `.cf`/`.cfe` на входе, `--to package` и цепочка `ibcmd` → `ibcmd-rs` ([#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
 - `apply` отдельной командой и `push --no-apply` ([#210](https://github.com/IngvarConsulting/v8-runner-rust/issues/210)); `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).

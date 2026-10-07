@@ -325,7 +325,9 @@ fn orphan_name_matches_contract(
     backup_prefixes: &[&str],
 ) -> bool {
     match metadata.kind {
-        TempDirKind::Stage => {
+        // Временная база раннера — каталог `<префикс>-<запуск>` под корнем временных баз:
+        // её префикс `throwaway_infobase` передаёт как префикс промежуточных копий.
+        TempDirKind::Stage | TempDirKind::ThrowawayInfobase => {
             stage_prefixes
                 .iter()
                 .any(|prefix| file_name.starts_with(prefix))
@@ -387,7 +389,7 @@ pub(super) fn interruption_before_publish(
     interruption::interruption_before_safe_point(context, safe_point.into())
 }
 
-fn make_run_id() -> String {
+pub(super) fn make_run_id() -> String {
     let timestamp = Utc::now().timestamp_nanos_opt().unwrap_or_default();
     format!("{}-{timestamp:x}", std::process::id())
 }

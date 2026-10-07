@@ -5,6 +5,8 @@
 //! До первой сборки цели всех пакетов сверяются с каталогами наборов и `workPath`
 //! ([`SourceSetInventory::check_package_targets`]). Каждый набор собирается тем же
 //! сценарием, что `make <SET>`, в [`package_in_directory`]; отказ набора останавливает обход.
+//! Временная база у обхода одна ([`super::MakeSession`]): основная конфигурация попадает в
+//! неё один раз, расширения ложатся поверх, и после обхода база убирается.
 
 use std::time::Instant;
 
@@ -45,7 +47,29 @@ fn run_all(
     {
         return Err(set_walk::fail(error, result, started));
     }
-    for source_set in sets {
+    let mut session = super::MakeSession::new(config);
+    let walked = walk(context, config, request, &sets, &mut session, &mut result);
+    // База обхода убирается и после отказа; неудачную уборку называет последний набор.
+    let warning = session.close();
+    if let Some(last) = result.sets.last_mut() {
+        super::note_cleanup_warning(last, warning);
+    }
+    if let Err(error) = walked {
+        return Err(set_walk::fail(error, result, started));
+    }
+    result.ok = true;
+    Ok(set_walk::finish(result, started))
+}
+
+fn walk(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &MakeAllRequest,
+    sets: &[&crate::config::model::SourceSetConfig],
+    session: &mut super::MakeSession,
+    result: &mut MakeAllResult,
+) -> Result<(), crate::use_cases::result::UseCaseError> {
+    for source_set in sets.iter().copied() {
         let mode = ArtifactsModeRequest::for_purpose(source_set.purpose);
         let set_request = ArtifactsRequest {
             execution: ArtifactsRequest::default_execution(mode),
@@ -64,15 +88,12 @@ fn run_all(
                     | ArtifactsModeRequest::ExternalReportErf
             ),
         };
-        if let Err(error) = set_walk::collect_set(
+        set_walk::collect_set(
             &mut result.sets,
-            super::execute(context, config, &set_request),
-        ) {
-            return Err(set_walk::fail(error, result, started));
-        }
+            super::execute_in(context, config, &set_request, session),
+        )?;
     }
-    result.ok = true;
-    Ok(set_walk::finish(result, started))
+    Ok(())
 }
 
 #[cfg(test)]

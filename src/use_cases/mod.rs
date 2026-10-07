@@ -73,6 +73,8 @@ pub(crate) mod source_inventory;
 mod staged_publication;
 /// `status`: состояние пары «каталог ↔ база» по памяти и, с `--deep`, по ответу платформы.
 pub mod status;
+/// Временная база раннера, в которой `make` собирает пакет из исходников.
+pub(crate) mod throwaway_infobase;
 /// Shared internal preparation for tool extensions.
 pub(crate) mod tool_extension;
 /// Supported external tool download use case.

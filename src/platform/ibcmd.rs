@@ -244,6 +244,21 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
+    /// `config import --out=<file> <dir>`: пакет `.cf` или `.cfe` из XML — вид берётся из
+    /// исходников — в файл, а не в базу. База нужна существующая, хоть пустая, и с `--out`
+    /// она не меняется; без `--out` та же команда загрузила бы исходники в базу (замер
+    /// #182), поэтому ключ ставится всегда и отдельного вызова без него здесь нет.
+    pub fn config_import_to_file(
+        &self,
+        source_dir: &Path,
+        out_file: &Path,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "import"]);
+        args.push(format!("--out={}", out_file.display()));
+        args.push(source_dir.display().to_string());
+        self.run(&args)
+    }
+
     /// `config generation-id [--extension <имя>]`: токен поколения — последняя непустая
     /// строка stdout. Чтение базы, а не запись: отмена снимает его, как всякое чтение.
     /// Неудачный выход или строка не из сорока шестнадцатеричных знаков — отсутствие ответа.
@@ -1001,6 +1016,50 @@ mod tests {
                 "export".to_owned(),
                 "--force".to_owned(),
                 dir.path().display().to_string(),
+            ]
+        );
+    }
+
+    /// Сборка пакета из XML всегда несёт `--out`: без него та же команда загрузила бы
+    /// исходники в базу (замер #182).
+    #[cfg(unix)]
+    #[test]
+    fn config_import_to_file_always_passes_out() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let data_path = dir.path().join("own-data");
+        let out = dir.path().join("stage.cf");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        )
+        .with_data_path(data_path.clone());
+
+        dsl.config_import_to_file(Path::new("/src/cf"), &out)
+            .expect("import");
+
+        let args = fs::read_to_string(args_log).expect("args");
+        let args = args.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "infobase".to_owned(),
+                "--data".to_owned(),
+                data_path.display().to_string(),
+                "--db-path".to_owned(),
+                "/ib".to_owned(),
+                "config".to_owned(),
+                "import".to_owned(),
+                format!("--out={}", out.display()),
+                "/src/cf".to_owned(),
             ]
         );
     }

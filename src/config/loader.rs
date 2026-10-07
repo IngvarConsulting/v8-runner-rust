@@ -10,8 +10,9 @@ use crate::config::schema::{
     LOCAL_ONLY_INFOBASE_KEYS,
 };
 use crate::config::validate::{
-    validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
-    validate_read_only, validate_tools_download_bootstrap, ConfigValidationError,
+    validate, validate_infobase_export, validate_launch, validate_make, validate_planned,
+    validate_prepared_test, validate_read_only, validate_tools_download_bootstrap,
+    ConfigValidationError,
 };
 use crate::support::path::{normalize_windows_verbatim_path, resolve_from};
 
@@ -46,6 +47,16 @@ pub enum ConfigLoadError {
 
     #[error("config contains unsupported key or value: {0}")]
     UnsupportedShape(String),
+}
+
+impl ConfigLoadError {
+    /// Шаг, которым вызывающий выходит из отказа, когда он есть.
+    pub fn next(&self) -> Option<crate::domain::next_step::NextStep> {
+        match self {
+            Self::ValidationError(error) => error.next(),
+            _ => None,
+        }
+    }
 }
 
 /// A loaded configuration and what the loader wants the user to hear about it.
@@ -125,6 +136,21 @@ pub fn load_config_for_infobase_export(
     )
 }
 
+/// `make`: база проекта не выбирается и не проверяется — пакет собирается во временной базе
+/// раннера. Превью рабочего каталога не создаёт.
+pub fn load_config_for_make(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    preview: bool,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        &InfobaseSelector::Default,
+        ConfigValidationMode::Make { preview },
+    )
+}
+
 pub fn load_config_for_launch(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
@@ -176,6 +202,10 @@ enum ConfigValidationMode {
     PreparedTest,
     ToolsDownload,
     Launch,
+    /// `make`: базу проекта не выбирает (`select_no_infobase`).
+    Make {
+        preview: bool,
+    },
 }
 
 fn load_config_with_mode(
@@ -228,8 +258,12 @@ fn build_config(
     reject_local_keys_in_project_file(&root)?;
     let mut warnings = Vec::new();
     reject_mixed_provider_keys(&root, ConfigFile::Project(path))?;
+    // `make` базу проекта не выбирает: о синониме её секции ему говорить нечего.
+    let reads_the_base = !matches!(validation_mode, ConfigValidationMode::Make { .. });
     warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(path))?);
-    warnings.extend(fold_infobase_synonym(&mut root, ConfigFile::Project(path))?);
+    warnings.extend(
+        fold_infobase_synonym(&mut root, ConfigFile::Project(path))?.filter(|_| reads_the_base),
+    );
 
     // Переопределение провайдера попадает в квитанцию вместе с именем файла, который
     // его поставил: отличать проектный выбор от машинно-локального эксперимента нужно
@@ -243,7 +277,9 @@ fn build_config(
             .map_err(|error| ConfigLoadError::LocalOverlayUnsupportedShape(error.to_string()))?;
         reject_mixed_provider_keys(&overlay, ConfigFile::Local)?;
         warnings.extend(fold_push_synonym(&mut overlay, ConfigFile::Local)?);
-        warnings.extend(fold_infobase_synonym(&mut overlay, ConfigFile::Local)?);
+        warnings.extend(
+            fold_infobase_synonym(&mut overlay, ConfigFile::Local)?.filter(|_| reads_the_base),
+        );
         provider_origins.extend(provider_override_keys(&overlay, LOCAL_CONFIG_FILE_NAME));
         merge_yaml_values(&mut root, overlay);
     }
@@ -254,7 +290,11 @@ fn build_config(
     // отвергли выше, до границы.
     validate_main_config_schema_boundary(root.clone())
         .map_err(|error| ConfigLoadError::UnsupportedShape(error.to_string()))?;
-    select_infobase(&mut root, selector)?;
+    if matches!(validation_mode, ConfigValidationMode::Make { .. }) {
+        select_no_infobase(&mut root)?;
+    } else {
+        select_infobase(&mut root, selector)?;
+    }
     default_base_path_to_config_dir(&mut root, config_dir)?;
 
     let mut config: AppConfig = serde_yaml::from_value(root)?;
@@ -280,6 +320,7 @@ fn build_config(
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
         ConfigValidationMode::Launch => validate_launch(&config)?,
+        ConfigValidationMode::Make { preview } => validate_make(&config, preview)?,
     }
     warnings.extend(direct_gate_declared_but_not_used_yet(&config));
     Ok(LoadedConfig { config, warnings })
@@ -600,6 +641,19 @@ fn select_infobase(
         yaml_key("infobaseName"),
         name.map_or(serde_yaml::Value::Null, serde_yaml::Value::String),
     );
+    Ok(())
+}
+
+/// Команда, которой база проекта не нужна (`make`), базу не выбирает: в документ ложится
+/// пустая секция без адреса и без имени. Её никто не читает — сценарий работает во временной
+/// базе раннера, — а `origin` может быть и не объявлен.
+fn select_no_infobase(root: &mut serde_yaml::Value) -> Result<(), ConfigValidationError> {
+    let mapping = root_mapping_mut(root)?;
+    mapping.insert(
+        yaml_key("infobase"),
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+    );
+    mapping.insert(yaml_key("infobaseName"), serde_yaml::Value::Null);
     Ok(())
 }
 

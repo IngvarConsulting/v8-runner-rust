@@ -150,7 +150,8 @@ v8-runner infobase create
   the holding command and its `workPath`; MCP answers `runtime_failure`. Retry when it finishes.
   If the lock cannot be taken for another reason (the directory next to the base is read-only),
   a writing command refuses with the directory and the reason, and a reading one (`download`,
-  `infobase dump`, `make`, `extensions list`) goes on with an `infobase lock …` warning.
+  `infobase dump`, `extensions list`) goes on with an `infobase lock …` warning. `make` takes no
+  infobase lock: it builds in its own throwaway base.
 - A development file infobase is held by one working copy, recorded in the owner marker
   `.<dir>.v8-runner.owners.json` next to the base directory. A writing command on a base held by
   another live copy answers `error.code: infobase_held` (kind `workspace`, step `infobase owner`,
@@ -245,7 +246,7 @@ v8-runner infobase create
   "already existed" without creating it.
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner upload ...`.
-- Release artifacts need to be exported or external artifacts published: use `v8-runner make ...` or the `artifacts` alias.
+- Release artifacts need to be built or external artifacts published: use `v8-runner make ...` or the `artifacts` alias. `make` builds from the sources in a throwaway runner base under `workPath` (`ibcmd`, else Designer) and never opens the project base: no `origin` needed, `--infobase` and `providers.make: agent` are refused. Unexported Designer edits do not reach the package: `pull` first, or take the base's package with `download`.
 - Need to know which extensions are installed in an infobase, or to change that composition:
   use `v8-runner extensions list|info|create|delete|activate`. These subcommands address the
   infobase, not the workspace — bare `v8-runner extensions` still means "update the security

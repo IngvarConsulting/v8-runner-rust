@@ -154,7 +154,11 @@ pub fn run() -> i32 {
         }
         Err(e) => {
             let message = e.to_string();
-            let error = UseCaseError::from(AppError::from(e));
+            let next = e.next();
+            let mut error = UseCaseError::from(AppError::from(e));
+            if let Some(next) = next {
+                error = error.with_next(next);
+            }
             if let Command::Infobase(args) = &cli.command {
                 let error = execute::render_infobase_pre_dispatch_failure(
                     args,
@@ -336,6 +340,10 @@ fn load_cli_config(
         load_config_for_infobase_export(config_path, workdir, &selector, operation)
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Artifacts(_)) {
+        // `make` собирает из исходников во временной базе раннера: базу проекта он не
+        // выбирает, а `--infobase` у него отвергнут раньше (`global_flags`).
+        crate::config::loader::load_config_for_make(config_path, workdir, cli.dry_run)
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
     } else if cli.dry_run {

@@ -72,15 +72,37 @@ impl<'a> DesignerDsl<'a> {
         source_dir: &Path,
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, DesignerError> {
+        self.run(&self.load_config_from_files_args(source_dir, true, extension))
+    }
+
+    /// `/LoadConfigFromFiles <dir> [-Extension <name>]` без `-updateConfigDumpInfo`: файл
+    /// версий в каталоге исходников не пишется. Так `make` загружает исходники во временную
+    /// базу раннера — исходники при сборке пакета не меняются (замер #182).
+    pub fn load_config_from_files_untouched(
+        &self,
+        source_dir: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        self.run(&self.load_config_from_files_args(source_dir, false, extension))
+    }
+
+    fn load_config_from_files_args(
+        &self,
+        source_dir: &Path,
+        update_dump_info: bool,
+        extension: Option<&str>,
+    ) -> Vec<String> {
         let mut args = self.base_args();
         args.push("/LoadConfigFromFiles".to_owned());
         args.push(source_dir.display().to_string());
-        args.push("-updateConfigDumpInfo".to_owned());
+        if update_dump_info {
+            args.push("-updateConfigDumpInfo".to_owned());
+        }
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
         }
-        self.run(&args)
+        args
     }
 
     /// `/LoadConfigFromFiles <dir> -partial -listFile <list_file> -updateConfigDumpInfo`
