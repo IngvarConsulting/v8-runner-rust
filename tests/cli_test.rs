@@ -161,7 +161,7 @@ fn write_config(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ntests:\n  execution_timeout_seconds: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         timeout_seconds,
         install_dir.display(),
@@ -354,7 +354,7 @@ fn setup_va_project_with_work_name(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\n        ignore_tags:\n          - '@draft'\n        scenario_filter:\n          - Проверка логина\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\n        ignore_tags:\n          - '@draft'\n        scenario_filter:\n          - Проверка логина\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         va_params.display(),
         features_dir.display(),
@@ -1791,7 +1791,7 @@ fn vanessa_resolves_a_relative_epf_path_from_a_nested_config_directory() {
     fs::write(
         &config_path,
         format!(
-            "workPath: ./work\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: ./va.json\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: ./features\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: ./build/tools/vanessa.epf\n  platform:\n    path: '{}'\n",
+            "workPath: ./work\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: ./va.json\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: ./features\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: ./build/tools/vanessa.epf\n  platform:\n    path: '{}'\n",
             install_dir.display()
         ),
     )

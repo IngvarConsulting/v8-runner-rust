@@ -132,7 +132,8 @@ const MEASURED_INVENTORY: &str = "name                         : \"Проба\"\
 
 /// Исполнителю `ibcmd` секция `infobase.dbms` нужна по-прежнему: в СУБД он идёт сам.
 /// Подключение строится уже после выбора исполнителя, и отказ называет секцию, не
-/// запуская платформу, — у свойств, у состава и у его изменения.
+/// запуская платформу. У кластера `ibcmd` остался только в создании базы (#206): у
+/// `extensions` там один агент, и проверяется `infobase create`.
 #[test]
 fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
     let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
@@ -145,26 +146,18 @@ fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
     let indent = &file_connection[..file_connection.len() - file_connection.trim_start().len()];
     fs::write(
         &config_path,
-        config.replacen(
-            &file_connection,
-            &format!("{indent}connection: 'Srvr=127.0.0.1:1541;Ref=demo'"),
-            1,
+        format!(
+            "providers:\n  infobase.create: ibcmd\n{}",
+            config.replacen(
+                &file_connection,
+                &format!("{indent}connection: 'Srvr=127.0.0.1:1541;Ref=demo'"),
+                1,
+            )
         ),
     )
     .expect("server config");
 
-    for arguments in [
-        vec!["extensions"],
-        vec!["extensions", "list"],
-        vec![
-            "extensions",
-            "create",
-            "--name",
-            "Проба",
-            "--name-prefix",
-            "Пр_",
-        ],
-    ] {
+    for arguments in [vec!["infobase", "create"]] {
         let output = v8_runner_command()
             .args(["--config", config_path.to_str().expect("utf-8 path")])
             .arg("--json-message")

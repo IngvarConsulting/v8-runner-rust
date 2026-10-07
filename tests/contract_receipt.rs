@@ -82,8 +82,10 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     let artifact = dir.path().join("main.cf").display().to_string();
 
     let expectations: Vec<(Vec<&str>, &str)> = vec![
-        (vec!["build", "--dry-run"], "designer"),
-        (vec!["dump", "--force", "--dry-run"], "designer"),
+        // У файловой базы `push` и `pull` первым пробуют агента: его поднимает раннер, и
+        // готов он тогда же, когда найдена платформа.
+        (vec!["build", "--dry-run"], "agent"),
+        (vec!["dump", "--force", "--dry-run"], "agent"),
         (vec!["infobase", "create", "--dry-run"], "designer"),
         // `make` собирает во временной базе раннера: первым в цепочке стоит `ibcmd`.
         (
@@ -115,8 +117,9 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     }
 }
 
-/// Умолчание — цепочка: без Конфигуратора сборка идёт через `ibcmd`, и квитанция
-/// называет пропущенного с причиной.
+/// Умолчание — цепочка: без платформы сборка идёт через `ibcmd`, и квитанция называет
+/// пропущенных с причиной — агента, которого раннер поднимает той же платформой, и
+/// Конфигуратор.
 #[test]
 fn a_default_chain_reports_who_was_skipped_and_why() {
     let dir = temp_workspace();
@@ -127,10 +130,13 @@ fn a_default_chain_reports_who_was_skipped_and_why() {
     assert_eq!(code, 0, "{payload}");
     let receipt = &payload["data"]["provider"];
     assert_eq!(receipt["selected"], "ibcmd");
-    assert_eq!(receipt["skipped"][0]["provider"], "designer");
-    assert!(receipt["skipped"][0]["reason"]
-        .as_str()
-        .is_some_and(|reason| reason.contains("not ready")));
+    assert_eq!(receipt["skipped"][0]["provider"], "agent");
+    assert_eq!(receipt["skipped"][1]["provider"], "designer");
+    for skipped in receipt["skipped"].as_array().expect("skipped") {
+        assert!(skipped["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("not ready")));
+    }
 }
 
 /// Переопределение называет файл, из которого пришло, и не откатывается.

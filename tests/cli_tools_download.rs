@@ -13,13 +13,13 @@ use std::time::Duration;
 use support::command_data::assert_data_matches_its_command_form;
 use support::{temp_workspace, v8_runner_command};
 
-/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
+/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — Конфигуратор первым,
 /// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
 fn providers_yaml(builder: &str) -> &'static str {
     if builder == "IBCMD" {
         "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
     } else {
-        ""
+        support::DESIGNER_LEADS
     }
 }
 

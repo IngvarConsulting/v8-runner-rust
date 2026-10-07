@@ -40,7 +40,7 @@ fn write_config(root: &Path, platform: &Path) -> PathBuf {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File={}'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
             work.display(),
             infobase.display(),
             platform.display(),

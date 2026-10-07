@@ -338,12 +338,17 @@ fn run_build_with(
                 }
 
                 if args.dry_run {
+                    // Тем же путём идут Конфигуратор и агент: превью называет того, кто выбран.
+                    let planned = match loader.tool() {
+                        Provider::Designer => "Designer",
+                        other => other.as_str(),
+                    };
                     push_build_step(
                         &mut steps,
                         &source_set.name,
                         mode,
                         true,
-                        format!("{message}; planned, Designer not dispatched"),
+                        format!("{message}; planned, {planned} not dispatched"),
                         0,
                     );
                     continue;

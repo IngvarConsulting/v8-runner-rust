@@ -145,7 +145,7 @@ fn write_http_designer_config(
     idle_ttl_secs: u64,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\n    allowed_hosts:\n      - runner.test\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\n    allowed_hosts:\n      - runner.test\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         bind_address,
         stateful_sessions,
@@ -730,45 +730,6 @@ async fn mcp_http_initialize_reuses_session_and_lists_tools() {
             "run_module_tests",
         ]
     );
-
-    server.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_http_dump_config_full_ibcmd_server_contract_passes_dbms_and_infobase_credentials() {
-    let (_dir, config_path, url, calls_log) = setup_http_ibcmd_dump_project_with_infobase(
-        None,
-        4,
-        900,
-        "  connection: 'Srvr=server;Ref=main'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: maindb\n    user: postgres\n    password: pg-secret\n",
-    );
-    let mut server = HttpServerProcess::spawn(&config_path, &url).await;
-    let client = reqwest::Client::builder()
-        .timeout(HTTP_CLIENT_TIMEOUT)
-        .build()
-        .expect("http client");
-
-    let (session_id, _) = initialize_session(&client, &url).await;
-    send_initialized(&client, &url, &session_id).await;
-
-    let response = call_tool(
-        &client,
-        &url,
-        &session_id,
-        "dump_config",
-        json!({ "mode": "FULL" }),
-        29,
-    )
-    .await;
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let payload = extract_sse_json(&response.text().await.expect("dump body"));
-    let structured = &payload["result"]["structuredContent"];
-    assert_envelope_success(structured, "pull");
-    assert_eq!(structured["data"]["ok"], true);
-    let calls = fs::read_to_string(calls_log).expect("ibcmd calls");
-    assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
-    assert!(calls.contains("--user Admin --password secret"));
-    assert!(calls.contains("--database-user postgres --database-password pg-secret"));
 
     server.shutdown().await;
 }

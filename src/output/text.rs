@@ -367,10 +367,16 @@ fn drop_repeated_messages(lines: &mut Vec<String>) {
     let mut seen_later = std::collections::HashSet::new();
     let mut kept: Vec<String> = Vec::with_capacity(lines.len());
     for line in lines.iter().rev() {
-        let Some((_, message)) = bracketed_prefix(line) else {
+        let Some((tag, message)) = bracketed_prefix(line) else {
             kept.push(line.clone());
             continue;
         };
+        // Пропуск называет исполнителя пометкой: одна причина у двух исполнителей — два
+        // разных факта, а не повтор (агент и Конфигуратор ждут одну и ту же платформу).
+        if tag.starts_with("[skipped:") {
+            kept.push(line.clone());
+            continue;
+        }
         if seen_later.insert(message.trim().to_owned()) {
             kept.push(line.clone());
         }
@@ -472,6 +478,25 @@ mod tests {
                 "[diagnostic] log -> a.log",
                 "[warning] slow",
                 "[error:dump_failed] no",
+            ]
+        );
+    }
+
+    /// Одна причина пропуска у разных исполнителей — не повтор: печатаются обе строки, а
+    /// тот же текст под другой пометкой по-прежнему схлопывается.
+    #[test]
+    fn skipped_providers_with_one_reason_are_both_printed() {
+        let item = super::TimelineItem::new(super::TimelineStatus::Succeeded, "download")
+            .with_detail(
+                "[skipped:agent] 1cv8 was not found\n[skipped:designer] 1cv8 was not found\n[diagnostic] slow\n[warning] slow",
+            );
+        let ordered = super::ordered_details(&item);
+        assert_eq!(
+            ordered,
+            vec![
+                "[skipped:agent] 1cv8 was not found",
+                "[skipped:designer] 1cv8 was not found",
+                "[warning] slow",
             ]
         );
     }

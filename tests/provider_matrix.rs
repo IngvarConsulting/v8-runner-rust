@@ -232,7 +232,7 @@ fn a_foreign_download_provider_is_refused_like_push_before_the_platform_starts()
             .to_owned();
         assert!(
             message.contains("providers.download: 'webinst' does not implement")
-                && message.contains("implemented: designer, ibcmd, agent"),
+                && message.contains("implemented: agent, designer, ibcmd"),
             "`{shown}` names the key and the executors that implement it: {message}"
         );
         assert!(
