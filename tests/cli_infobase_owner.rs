@@ -2,8 +2,8 @@
 //! копия.
 //!
 //! Каждая копия — свой проект со своим местным слоем, а база у них одна. Метка лежит рядом
-//! с каталогом базы; команда записи на базе другой живой копии отказывает `infobase_held`,
-//! команда чтения проходит и метку не трогает.
+//! с каталогом базы; команда записи на базе другой живой копии идёт с предупреждением и метку
+//! не трогает, команда чтения проходит молча.
 #![cfg(unix)]
 
 mod support;
@@ -30,7 +30,7 @@ const MARKER_NAME: &str = ".ib.v8-runner.owners.json";
 
 struct Stand {
     dir: tempfile::TempDir,
-    /// Каталог файловой базы, общей для копий.
+    /// Каталог файловой базы, к которой подключены копии.
     base: PathBuf,
 }
 
@@ -42,13 +42,13 @@ struct Copy {
 impl Stand {
     fn new() -> Self {
         let dir = temp_workspace();
-        let base = dir.path().join("shared").join("ib");
+        let base = dir.path().join("bases").join("ib");
         fs::create_dir_all(&base).expect("infobase dir");
         fs::write(base.join("1Cv8.1CD"), "database").expect("infobase file");
         Self { dir, base }
     }
 
-    /// Рабочая копия `name`, которая объявляет общую базу как `origin` своего местного слоя.
+    /// Рабочая копия `name`, которая объявляет базу стенда как `origin` своего местного слоя.
     fn copy(&self, name: &str) -> Copy {
         let copy = Copy::at(self.dir.path().join(name));
         copy.declare(&format!("File={}", self.base.display()));
@@ -115,20 +115,6 @@ impl Copy {
         );
     }
 
-    /// Объявляет `origin` местного слоя общей базой стенда: `shared` — согласие этой копии
-    /// делить её.
-    fn declare_shared(&self, stand: &Stand, shared: bool) {
-        fs::write(
-            self.root.join("v8project.local.yaml"),
-            format!(
-                "infobases:\n  origin:\n    connection: 'File={}'\n    shared: {shared}\n",
-                stand.base.display()
-            ),
-        )
-        .expect("local layer");
-        self.remember(&stand.base);
-    }
-
     fn run(&self, args: &[&str]) -> Output {
         v8_runner_command()
             .arg("--config")
@@ -187,63 +173,54 @@ fn warnings(payload: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Отказ на базе другой копии: код, род, шаг, следующий шаг и то, что он называет.
-fn assert_infobase_held(output: &Output, command: &str, owner: &Copy, stand: &Stand) -> String {
-    let payload = envelope(output);
-    assert_eq!(output.status.code(), Some(3), "{payload}");
+/// Предупреждение о базе другой копии в ответе `payload` команды `command`: оно называет
+/// копию-владельца, метку и выходы к своей базе, а общую базу выходом не называет.
+fn another_copy_warning(payload: &Value, command: &str, owner: &Copy, stand: &Stand) -> String {
     assert_eq!(payload["command"], command, "{payload}");
-    assert_eq!(payload["error"]["code"], "infobase_held", "{payload}");
-    assert_eq!(payload["error"]["kind"], "workspace", "{payload}");
-    assert_eq!(
-        payload["error"]["next"]["command"], "infobase create",
-        "{payload}"
-    );
-    assert_eq!(payload["steps"][0]["name"], "infobase owner", "{payload}");
-    assert_eq!(payload["steps"][0]["status"], "failed", "{payload}");
-    let message = payload["error"]["message"]
-        .as_str()
-        .expect("message")
-        .to_owned();
+    let warning = warnings(payload)
+        .into_iter()
+        .find(|warning| warning.contains("of another working copy"))
+        .unwrap_or_else(|| panic!("warns about a base of another copy: {payload}"));
     assert!(
-        message.contains(&owner.canonical_root()),
-        "names the owning copy: {message}"
+        warning.contains(&owner.canonical_root()),
+        "names the owning copy: {warning}"
     );
     assert!(
-        message.contains(&stand.marker().display().to_string())
-            || message.contains(
+        warning.contains(&stand.marker().display().to_string())
+            || warning.contains(
                 &fs::canonicalize(stand.marker())
                     .map(|path| path.display().to_string())
                     .unwrap_or_default()
             ),
-        "names where the marker lies: {message}"
+        "names where the marker lies: {warning}"
     );
     assert!(
-        message.contains("v8project.local.yaml"),
-        "says how to free the base: {message}"
+        warning.contains("changes that working copy's infobase"),
+        "says the command changes the base of another copy: {warning}"
     );
-    // `INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`: своя чистая база, копия
-    // базы и база из эталонного образа; общую базу выходом отказ не называет (#437).
-    let ways = message
-        .split("Ways out for this working copy:")
-        .nth(1)
-        .and_then(|rest| rest.split("To free the infobase").next())
-        .expect("names the ways out");
-    assert!(
-        ways.contains("init --infobase <connection string>")
-            && ways.contains("v8-runner infobase create`")
-            && ways.contains("infobase create --from upstream")
-            && ways.contains("infobase restore --input <reference>.dt --create")
-            && !ways.contains("shared")
-            && !ways.contains("not available yet"),
-        "names the ways out: {message}"
-    );
-    message
+    // Три выхода к своей базе: копия этой базы, база из эталонного образа и голая база.
+    for way in [
+        "init --infobase <connection string>",
+        "infobase create --from upstream",
+        "infobase restore --input <reference>.dt --create",
+        "`v8-runner infobase create`",
+    ] {
+        assert!(warning.contains(way), "{way}: {warning}");
+    }
+    assert!(!warning.contains("shared"), "{warning}");
+    warning
 }
 
-/// Команда записи на базе другой живой копии отказывает и называет владельца; метка не
-/// меняется, а сам владелец работает дальше.
+/// Команда записи на базе другой копии прошла и предупредила.
+fn assert_warned(output: &Output, command: &str, owner: &Copy, stand: &Stand) -> String {
+    another_copy_warning(&succeeded(output), command, owner, stand)
+}
+
+/// Команда записи на базе другой живой копии идёт и предупреждает, чья это база; метка не
+/// меняется — владельцем остаётся прежняя копия, — а сам владелец работает дальше без
+/// предупреждения.
 #[test]
-fn a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner() {
+fn a_write_on_a_base_of_another_copy_runs_with_a_warning_and_names_the_owner() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
@@ -252,11 +229,19 @@ fn a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner() {
     assert_eq!(stand.owners(), [first.canonical_root()]);
     let marker = stand.marker_text();
 
-    let refused = second.run(&["push"]);
+    let pushed = second.run(&["push"]);
 
-    assert_infobase_held(&refused, "push", &first, &stand);
-    assert_eq!(stand.marker_text(), marker, "a refusal leaves the marker");
-    succeeded(&first.run(&["push"]));
+    let payload = succeeded(&pushed);
+    assert!(payload["error"].is_null(), "{payload}");
+    assert_warned(&pushed, "push", &first, &stand);
+    assert_eq!(stand.marker_text(), marker, "the write leaves the marker");
+    let again = succeeded(&first.run(&["push"]));
+    assert!(
+        !warnings(&again)
+            .iter()
+            .any(|warning| warning.contains("of another working copy")),
+        "the owner hears no warning: {again}"
+    );
     assert_eq!(
         stand.marker_text(),
         marker,
@@ -265,25 +250,20 @@ fn a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner() {
 }
 
 /// `pull --all` пишет в проект и в каталоги наборов, а базу берёт как любая выгрузка: на
-/// базе другой копии он отказывает до чтения состава и называет владельца.
+/// базе другой копии он идёт, его ответ — удача или отказ самой выгрузки — несёт
+/// предупреждение, а метка не меняется.
 #[test]
-fn pull_all_on_a_base_of_another_copy_is_refused_and_names_the_owner() {
+fn pull_all_on_a_base_of_another_copy_warns_and_names_the_owner() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
     succeeded(&first.run(&["push"]));
     let marker = stand.marker_text();
-    let project = fs::read_to_string(&second.config).expect("project file");
 
-    let refused = second.run(&["pull", "--all"]);
+    let pulled = envelope(&second.run(&["pull", "--all"]));
 
-    assert_infobase_held(&refused, "pull", &first, &stand);
-    assert_eq!(stand.marker_text(), marker, "a refusal leaves the marker");
-    assert_eq!(
-        fs::read_to_string(&second.config).expect("project file"),
-        project,
-        "nothing is declared"
-    );
+    another_copy_warning(&pulled, "pull", &first, &stand);
+    assert_eq!(stand.marker_text(), marker, "the write leaves the marker");
 }
 
 /// Команда чтения на базе другой копии проходит и метку не трогает.
@@ -325,7 +305,8 @@ fn a_read_of_a_base_without_a_marker_makes_no_owner() {
 }
 
 /// Процессы одной машины, начавшие одновременно на базе без метки: владельцем становится
-/// один, второй получает отказ — занятой базы или базы другой копии.
+/// один, второй либо получает отказ занятой базы, либо идёт после него с предупреждением о
+/// базе другой копии.
 #[test]
 fn processes_racing_for_a_base_without_a_marker_leave_one_owner() {
     for _ in 0..3 {
@@ -350,23 +331,29 @@ fn processes_racing_for_a_base_without_a_marker_leave_one_owner() {
             .map(|runner| runner.wait_with_output().expect("push"))
             .collect();
 
-        let winners: Vec<&Copy> = copies
-            .iter()
-            .zip(&outputs)
-            .filter(|(_, output)| output.status.success())
-            .map(|(copy, _)| copy)
-            .collect();
-        assert_eq!(winners.len(), 1, "exactly one copy wins the base");
-        assert_eq!(stand.owners(), [winners[0].canonical_root()]);
-        let loser = outputs
-            .iter()
-            .find(|output| !output.status.success())
-            .expect("the other copy is refused");
-        let code = envelope(loser)["error"]["code"].clone();
-        assert!(
-            code == "infobase_busy" || code == "infobase_held",
-            "the loser is refused by the base: {code}"
+        let owners = stand.owners();
+        assert_eq!(
+            owners.len(),
+            1,
+            "exactly one copy holds the base: {owners:?}"
         );
+        for (copy, output) in copies.iter().zip(&outputs) {
+            let payload = envelope(output);
+            if copy.canonical_root() == owners[0] {
+                assert!(output.status.success(), "the owner's push: {payload}");
+            } else if output.status.success() {
+                let owner = copies
+                    .iter()
+                    .find(|copy| copy.canonical_root() == owners[0])
+                    .expect("the owner is one of the copies");
+                another_copy_warning(&payload, "push", owner, &stand);
+            } else {
+                assert_eq!(
+                    payload["error"]["code"], "infobase_busy",
+                    "the other copy is refused only by the busy base: {payload}"
+                );
+            }
+        }
     }
 }
 
@@ -401,8 +388,7 @@ fn a_project_copied_whole_leaves_no_live_owner() {
     assert_eq!(owners_of(&copied_marker), [original.canonical_root()]);
 
     // Память в скопированном `work/` описывает прежнюю базу, то есть памяти о новой нет:
-    // `--full` отказал бы `no_memory`, а выход каталога — перезапись `--force`. Отказ по
-    // владельцу шёл бы раньше и выхода не дал бы.
+    // `--full` отказал бы `no_memory`, а выход каталога — перезапись `--force`.
     // Владельца сменяет граница команды, раньше проверки памяти: смену называет уже отказ.
     let refused = envelope(&copied.run(&["push", "main", "--full"]));
     assert_eq!(refused["error"]["code"], "no_memory", "{refused}");
@@ -419,29 +405,22 @@ fn a_project_copied_whole_leaves_no_live_owner() {
     assert_eq!(owners_of(&original_marker), [original.canonical_root()]);
 }
 
-/// Местный слой владельца, который нельзя прочитать, делает его живым и несогласным.
+/// Местный слой владельца, который нельзя прочитать, делает его живым: команда записи другой
+/// копии его не сменяет, а предупреждает о его базе.
 #[test]
 fn an_unreadable_local_layer_of_the_owner_keeps_it_alive() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
-    // Обе копии согласны делить базу: нечитаемый слой владельца — несогласие, и общая база
-    // команду записи всё равно не пропускает.
-    first.declare_shared(&stand, true);
-    second.declare_shared(&stand, true);
     succeeded(&first.run(&["push"]));
     fs::write(first.root.join("v8project.local.yaml"), "infobases: [\n").expect("break layer");
 
-    let refused = second.run(&["push"]);
+    let pushed = second.run(&["push"]);
 
-    let message = assert_infobase_held(&refused, "push", &first, &stand);
+    let warning = assert_warned(&pushed, "push", &first, &stand);
     assert!(
-        message.contains("cannot be read"),
-        "says the owner's layer is unreadable: {message}"
-    );
-    assert!(
-        message.contains("not sharing it"),
-        "an unreadable layer does not consent: {message}"
+        warning.contains("cannot be read"),
+        "says the owner's layer is unreadable: {warning}"
     );
     assert_eq!(stand.owners(), [first.canonical_root()]);
 }
@@ -467,7 +446,7 @@ fn a_marker_of_an_unknown_version_stops_a_write() {
         "names the marker version: {message}"
     );
     assert!(
-        message.contains("version 1"),
+        message.contains("version 2"),
         "names the version this runner knows: {message}"
     );
     assert_eq!(stand.marker_text().as_deref(), Some(foreign));
@@ -574,8 +553,8 @@ fn a_base_without_a_marker_is_taken_and_the_answer_says_so() {
             .any(|warning| warning.contains("now held by this working copy")),
         "{pushed}"
     );
-    // Метка лежит рядом с каталогом базы, а не в нём, и называет машину, каталог проекта и
-    // согласие делить базу.
+    // Метка лежит рядом с каталогом базы, а не в нём, и называет машину и каталог проекта;
+    // согласия делить базу в ней больше нет.
     let mut inside: Vec<String> = fs::read_dir(&stand.base)
         .expect("base dir")
         .map(|entry| {
@@ -589,7 +568,7 @@ fn a_base_without_a_marker_is_taken_and_the_answer_says_so() {
     inside.sort();
     assert_eq!(inside, ["1Cv8.1CD"], "the base directory carries no marker");
     let marker: Value = serde_json::from_str(&stand.marker_text().expect("marker")).expect("json");
-    assert_eq!(marker["version"], 1, "{marker}");
+    assert_eq!(marker["version"], 2, "{marker}");
     let owner = &marker["owners"][0];
     assert!(
         owner["machine"]
@@ -597,7 +576,7 @@ fn a_base_without_a_marker_is_taken_and_the_answer_says_so() {
             .is_some_and(|machine| !machine.is_empty()),
         "{marker}"
     );
-    assert_eq!(owner["shared"], false, "{marker}");
+    assert!(owner.get("shared").is_none(), "{marker}");
     let again = succeeded(&copy.run(&["push"]));
     assert!(
         !warnings(&again)
@@ -607,10 +586,10 @@ fn a_base_without_a_marker_is_taken_and_the_answer_says_so() {
     );
 }
 
-/// Строка соединения в `--infobase` подчиняется владельцу, но им не становится — ни на
-/// базе без метки, ни на базе ушедшего владельца.
+/// Строка соединения в `--infobase` владельцем не становится — ни на базе без метки, ни на
+/// базе ушедшего владельца, — а на базе другой копии идёт с тем же предупреждением.
 #[test]
-fn a_connection_string_obeys_the_owner_and_never_owns() {
+fn a_connection_string_never_owns_and_warns_on_a_base_of_another_copy() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
@@ -620,10 +599,11 @@ fn a_connection_string_obeys_the_owner_and_never_owns() {
     assert_eq!(stand.marker_text(), None, "an ad hoc base is not recorded");
 
     succeeded(&first.run(&["push"]));
-    let refused = second.run(&["--infobase", &connection, "push", "--force"]);
-    assert_infobase_held(&refused, "push", &first, &stand);
-
     let marker = stand.marker_text();
+    let pushed = second.run(&["--infobase", &connection, "push", "--force"]);
+    assert_warned(&pushed, "push", &first, &stand);
+    assert_eq!(stand.marker_text(), marker, "the write leaves the marker");
+
     fs::remove_dir_all(&first.root).expect("remove the first copy");
     succeeded(&second.run(&["--infobase", &connection, "push", "--force"]));
     assert_eq!(
@@ -633,10 +613,10 @@ fn a_connection_string_obeys_the_owner_and_never_owns() {
     );
 }
 
-/// Превью команды записи на базе другой копии отказывает так же, как прогон, и ничего не
+/// Превью команды записи на базе другой копии предупреждает так же, как прогон, и ничего не
 /// пишет; на базе без метки превью её не заводит.
 #[test]
-fn a_preview_names_the_ownership_refusal_and_writes_nothing() {
+fn a_preview_names_the_warning_on_a_base_of_another_copy_and_writes_nothing() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
@@ -646,15 +626,17 @@ fn a_preview_names_the_ownership_refusal_and_writes_nothing() {
 
     succeeded(&first.run(&["push"]));
     let marker = stand.marker_text();
-    let refused = second.run(&["push", "--dry-run"]);
+    let preview = second.run(&["push", "--dry-run"]);
 
-    assert_infobase_held(&refused, "push", &first, &stand);
+    let previewed = assert_warned(&preview, "push", &first, &stand);
     assert_eq!(stand.marker_text(), marker);
+    let run = assert_warned(&second.run(&["push"]), "push", &first, &stand);
+    assert_eq!(previewed, run, "the preview warns as the run does");
 
-    // Превью восстановления возвращается раньше замков, но отказ по владельцу называет и оно.
+    // Превью восстановления возвращается раньше замков, но предупреждает и оно.
     let input = second.root.join("base.dt");
     fs::write(&input, "dt").expect("dt");
-    let refused = second.run(&[
+    let preview = second.run(&[
         "infobase",
         "restore",
         "--input",
@@ -662,75 +644,100 @@ fn a_preview_names_the_ownership_refusal_and_writes_nothing() {
         "--replace",
         "--dry-run",
     ]);
-    assert_infobase_held(&refused, "infobase.restore", &first, &stand);
+    assert_warned(&preview, "infobase.restore", &first, &stand);
     assert_eq!(stand.marker_text(), marker);
 }
 
-/// Инструмент MCP на базе другой копии отказывает так же, как командная строка: кодом
-/// своего словаря, тем же текстом и тем же следующим шагом.
+/// Инструмент MCP на базе другой копии идёт так же, как командная строка, и метку не
+/// меняет. Предупреждение в ответ инструмента пока не попадает — только в журнал сервера
+/// (#404, `INV.MCP.A-BOUNDARY-NOTE-REACHES-THE-TOOL-ANSWER`).
 #[test]
-fn an_mcp_tool_on_a_base_of_another_copy_is_refused_like_the_cli() {
+fn an_mcp_tool_on_a_base_of_another_copy_runs_like_the_cli() {
     let stand = Stand::new();
     let first = stand.copy("first");
     let second = stand.copy("second");
     succeeded(&first.run(&["push"]));
     let marker = stand.marker_text();
-    let cli = envelope(&second.run(&["push"]));
+    assert_warned(&second.run(&["push"]), "push", &first, &stand);
 
     let answer = support::mcp::call_tool(&second.config, "build_project", json!({}));
 
-    assert!(answer.is_error, "{}", answer.envelope);
-    let payload = &answer.envelope;
-    assert_eq!(payload["error"]["code"], "runtime_failure", "{payload}");
-    assert_eq!(payload["error"]["kind"], "runtime", "{payload}");
-    assert_eq!(
-        payload["error"]["next"]["command"], "infobase create",
-        "{payload}"
-    );
-    assert_eq!(
-        payload["error"]["message"], cli["error"]["message"],
-        "the same refusal as the command line"
-    );
+    assert!(!answer.is_error, "{}", answer.envelope);
     assert_eq!(stand.marker_text(), marker);
 }
 
-/// Владелец с другой машины всегда живой: раннер его не сменяет, а отказ называет его
-/// машину и говорит, что освобождают такую базу удалением записи из метки.
+/// Владелец с другой машины всегда живой: раннер его не сменяет и метку не трогает, а
+/// предупреждение называет его каталог и машину.
 #[test]
 fn an_owner_on_another_machine_is_never_replaced() {
     let stand = Stand::new();
     let copy = stand.copy("copy");
     let foreign = json!({
-        "version": 1,
+        "version": 2,
         "owners": [{
             "machine": "a".repeat(64),
             "host": "build-agent",
             "project": "/srv/elsewhere",
-            "shared": false,
             "since": "2026-10-01T00:00:00Z"
         }]
     })
     .to_string();
     fs::write(stand.marker(), &foreign).expect("marker");
 
-    let refused = copy.run(&["push"]);
+    let pushed = succeeded(&copy.run(&["push"]));
 
-    let payload = envelope(&refused);
-    assert_eq!(payload["error"]["code"], "infobase_held", "{payload}");
-    let message = payload["error"]["message"].as_str().expect("message");
-    assert!(message.contains("/srv/elsewhere"), "{message}");
-    assert!(message.contains("build-agent"), "{message}");
-    assert!(
-        message.contains("delete its record"),
-        "says how to free a remote base: {message}"
-    );
+    let warning = warnings(&pushed)
+        .into_iter()
+        .find(|warning| warning.contains("of another working copy"))
+        .unwrap_or_else(|| panic!("warns: {pushed}"));
+    assert!(warning.contains("/srv/elsewhere"), "{warning}");
+    assert!(warning.contains("'build-agent'"), "{warning}");
     assert_eq!(stand.marker_text().as_deref(), Some(foreign.as_str()));
 }
 
-/// Сначала чья база, затем память: копия с памятью о другой базе на базе другой рабочей
-/// копии получает отказ по владельцу, а не отказ чужой памяти.
+/// Метку версии 1, которую пишет 0.13.0, раннер читает: согласие `shared` в ней ничего не
+/// значит, запись в базу её владельца идёт с предупреждением, а метка остаётся как была.
 #[test]
-fn ownership_is_refused_before_foreign_memory() {
+fn a_marker_of_version_one_is_still_read() {
+    let stand = Stand::new();
+    let copy = stand.copy("copy");
+    let legacy = json!({
+        "version": 1,
+        "owners": [{
+            "machine": "a".repeat(64),
+            "host": "build-agent",
+            "project": "/srv/elsewhere",
+            "shared": true,
+            "since": "2026-10-01T00:00:00Z"
+        }]
+    })
+    .to_string();
+    fs::write(stand.marker(), &legacy).expect("marker");
+
+    let pushed = succeeded(&copy.run(&["push"]));
+
+    assert!(
+        warnings(&pushed)
+            .iter()
+            .any(|warning| warning.contains("of another working copy")
+                && warning.contains("/srv/elsewhere")),
+        "{pushed}"
+    );
+    assert_eq!(stand.marker_text().as_deref(), Some(legacy.as_str()));
+    let snapshot = copy.root.join("base.dt");
+    let dump = succeeded(&copy.run(&[
+        "infobase",
+        "dump",
+        "--output",
+        snapshot.to_str().expect("snapshot path"),
+    ]));
+    assert!(warnings(&dump).is_empty(), "a read understands it: {dump}");
+}
+
+/// Сначала чья база, затем память: копия с памятью о другой базе на базе другой рабочей
+/// копии получает отказ чужой памяти, и он уже несёт предупреждение о базе другой копии.
+#[test]
+fn ownership_is_warned_before_foreign_memory() {
     let stand = Stand::new();
     let holder = stand.copy("holder");
     succeeded(&holder.run(&["push"]));
@@ -756,9 +763,11 @@ fn ownership_is_refused_before_foreign_memory() {
     // Память копии описывает базу `original/build/ib`, а слой направлен на базу держателя.
     copied.declare(&format!("File={}", stand.base.display()));
 
-    let refused = copied.run(&["push"]);
+    let refused = envelope(&copied.run(&["push"]));
 
-    assert_infobase_held(&refused, "push", &holder, &stand);
+    assert_eq!(refused["error"]["code"], "no_memory", "{refused}");
+    another_copy_warning(&refused, "push", &holder, &stand);
+    assert_eq!(stand.owners(), [holder.canonical_root()]);
 }
 
 /// Местный слой владельца, который не разобрать, называется без своего текста: в нём бывают
@@ -779,16 +788,15 @@ fn a_secret_in_the_unparsable_layer_of_the_owner_never_reaches_the_answer() {
     )
     .expect("break layer");
 
-    let refused = second.run(&["push"]);
+    let pushed = second.run(&["push"]);
 
-    let message = assert_infobase_held(&refused, "push", &first, &stand);
-    assert!(message.contains("cannot be parsed"), "{message}");
-    let stdout = String::from_utf8_lossy(&refused.stdout);
-    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let warning = assert_warned(&pushed, "push", &first, &stand);
+    assert!(warning.contains("cannot be parsed"), "{warning}");
+    let stdout = String::from_utf8_lossy(&pushed.stdout);
+    let stderr = String::from_utf8_lossy(&pushed.stderr);
     assert!(!stdout.contains(SECRET), "{stdout}");
     assert!(!stderr.contains(SECRET), "{stderr}");
     let answer = support::mcp::call_tool(&second.config, "build_project", json!({}));
-    assert!(answer.is_error, "{}", answer.envelope);
     assert!(
         !answer.envelope.to_string().contains(SECRET),
         "{}",
@@ -832,295 +840,68 @@ fn a_fifo_in_place_of_the_owner_project_file_does_not_hang_the_command() {
     let output = runner.wait_with_output().expect("push");
 
     assert!(finished, "the command hung on the owner's FIFO");
-    let message = assert_infobase_held(&output, "push", &first, &stand);
-    assert!(message.contains("cannot be read"), "{message}");
+    let warning = assert_warned(&output, "push", &first, &stand);
+    assert!(warning.contains("cannot be read"), "{warning}");
 }
 
-/// Записанное в метке согласие каждой копии.
-fn consents_of(marker: &Path) -> Vec<(String, bool)> {
-    let text = fs::read_to_string(marker).expect("marker");
-    let marker: Value = serde_json::from_str(&text).expect("marker json");
-    marker["owners"]
-        .as_array()
-        .expect("owners")
-        .iter()
-        .map(|owner| {
-            (
-                owner["project"].as_str().expect("project").to_owned(),
-                owner["shared"].as_bool().expect("shared"),
-            )
-        })
-        .collect()
-}
-
-/// Общая база с согласием всех держателей: команды записи каждой копии идут, и метка
-/// называет обе копии с их согласием.
-#[test]
-fn a_base_shared_by_every_holder_takes_writes_of_each() {
-    let stand = Stand::new();
-    let first = stand.copy("first");
-    let second = stand.copy("second");
-    first.declare_shared(&stand, true);
-    second.declare_shared(&stand, true);
-
-    succeeded(&first.run(&["push"]));
-    succeeded(&second.run(&["push"]));
-    succeeded(&first.run(&["push"]));
-
-    let mut consents = consents_of(&stand.marker());
-    consents.sort();
-    let mut expected = vec![
-        (first.canonical_root(), true),
-        (second.canonical_root(), true),
-    ];
-    expected.sort();
-    assert_eq!(consents, expected);
-}
-
-/// Без согласия одного из держателей команда записи отказывает и называет его — и тогда,
-/// когда несогласна сама эта копия.
-#[test]
-fn a_base_without_consent_of_one_holder_is_refused_and_names_it() {
-    let stand = Stand::new();
-    let first = stand.copy("first");
-    let second = stand.copy("second");
-    succeeded(&first.run(&["push"]));
-    let marker = stand.marker_text();
-
-    second.declare_shared(&stand, true);
-    let refused = second.run(&["push"]);
-    let message = assert_infobase_held(&refused, "push", &first, &stand);
-    assert!(
-        message.contains(&format!(
-            "'{}' on this machine, which does not share it",
-            first.canonical_root()
-        )),
-        "names the holder without consent: {message}"
-    );
-    assert_eq!(stand.marker_text(), marker, "a refusal records no new copy");
-
-    first.declare_shared(&stand, true);
-    second.declare_shared(&stand, false);
-    let refused = second.run(&["push"]);
-    let message = assert_infobase_held(&refused, "push", &first, &stand);
-    assert!(
-        message.contains("this working copy does not share it"),
-        "names this copy as the one without consent: {message}"
-    );
-}
-
-/// Согласие копий этой машины читается из их местных слоёв в момент команды: отзыв одной
-/// копией останавливает команды записи обеих сразу, без её следующей команды, и отказы
-/// называют друг друга.
-#[test]
-fn a_consent_withdrawn_on_this_machine_stops_every_copy_at_once() {
-    let stand = Stand::new();
-    let first = stand.copy("first");
-    let second = stand.copy("second");
-    first.declare_shared(&stand, true);
-    second.declare_shared(&stand, true);
-    succeeded(&first.run(&["push"]));
-    succeeded(&second.run(&["push"]));
-
-    first.declare_shared(&stand, false);
-
-    let refused = second.run(&["push"]);
-    assert_infobase_held(&refused, "push", &first, &stand);
-    let refused = first.run(&["push"]);
-    assert_infobase_held(&refused, "push", &second, &stand);
-}
-
-/// Копия с другой машины сообщает согласие меткой: с её записанным согласием команда
-/// записи идёт, после отзыва в метке — отказывает и называет её.
-#[test]
-fn a_remote_copy_consents_through_the_marker() {
-    let stand = Stand::new();
-    let copy = stand.copy("copy");
-    copy.declare_shared(&stand, true);
-    let remote = |shared: bool| {
-        json!({
-            "version": 1,
-            "owners": [{
-                "machine": "a".repeat(64),
-                "host": "build-agent",
-                "project": "/srv/elsewhere",
-                "shared": shared,
-                "since": "2026-10-01T00:00:00Z"
-            }]
-        })
-        .to_string()
-    };
-    fs::write(stand.marker(), remote(true)).expect("marker");
-
-    succeeded(&copy.run(&["push"]));
-    assert_eq!(
-        consents_of(&stand.marker()),
-        [
-            ("/srv/elsewhere".to_owned(), true),
-            (copy.canonical_root(), true)
-        ],
-        "the copy joins the remote one with its consent"
-    );
-
-    let mut withdrawn: Value =
-        serde_json::from_str(&stand.marker_text().expect("marker")).expect("json");
-    for owner in withdrawn["owners"].as_array_mut().expect("owners") {
-        if owner["project"] == "/srv/elsewhere" {
-            owner["shared"] = Value::Bool(false);
-        }
-    }
-    fs::write(stand.marker(), withdrawn.to_string()).expect("marker");
-
-    let refused = copy.run(&["push"]);
-    let payload = envelope(&refused);
-    assert_eq!(payload["error"]["code"], "infobase_held", "{payload}");
-    let message = payload["error"]["message"].as_str().expect("message");
-    assert!(
-        message.contains("'/srv/elsewhere' on machine 'build-agent', which does not share it"),
-        "{message}"
-    );
-}
-
-/// Отказ по владельцу на общей базе ведёт к своей базе (`infobase create`), а выгрузку не
-/// предлагает: ни следующим шагом, ни текстом.
-#[test]
-fn a_held_refusal_on_a_shared_base_leads_to_an_own_base() {
-    let stand = Stand::new();
-    let first = stand.copy("first");
-    let second = stand.copy("second");
-    first.declare_shared(&stand, true);
-    second.declare_shared(&stand, true);
-    succeeded(&first.run(&["push"]));
-    succeeded(&second.run(&["push"]));
-    first.declare_shared(&stand, false);
-
-    for refused in [second.run(&["push"]), second.run(&["push", "--dry-run"])] {
-        let payload = envelope(&refused);
-        assert_eq!(payload["error"]["code"], "infobase_held", "{payload}");
-        assert_eq!(
-            payload["error"]["next"]["command"], "infobase create",
-            "{payload}"
-        );
-        let message = payload["error"]["message"].as_str().expect("message");
-        assert!(!message.contains("pull"), "{message}");
-    }
-}
-
-/// Согласие копии — у каждой её секции, которая объявляет базу: вторая секция той же базы
-/// без `shared: true` отзывает согласие копии, и команды записи обеих копий отказывают.
-#[test]
-fn a_second_section_of_the_base_without_consent_withdraws_it() {
-    let stand = Stand::new();
-    let first = stand.copy("first");
-    let second = stand.copy("second");
-    first.declare_shared(&stand, true);
-    second.declare_shared(&stand, true);
-    succeeded(&first.run(&["push"]));
-    succeeded(&second.run(&["push"]));
-
-    fs::write(
-        first.root.join("v8project.local.yaml"),
-        format!(
-            "infobases:\n  origin:\n    connection: 'File={base}'\n    shared: true\n  alt:\n    connection: 'File={base}'\n",
-            base = stand.base.display()
-        ),
+/// Поддельный Конфигуратор с поколением базы: `/GetConfigGenerationID` отвечает токеном из
+/// файла стенда, а каждая загрузка сдвигает его — так меняет базу запись любой копии.
+fn generation_platform(stand: &Stand) -> String {
+    format!(
+        r#"out=''; previous=''
+for arg in "$@"; do
+  if [ "$previous" = '/Out' ]; then out="$arg"; fi
+  previous="$arg"
+done
+case "$*" in
+  *'/GetConfigGenerationID'*)
+    cat '{token}' > "$out"
+    exit 0 ;;
+  *'/LoadConfigFromFiles'*)
+    n=$(cat '{counter}'); n=$((n + 1)); printf '%s\n' "$n" > '{counter}'
+    printf '%040d\n' "$n" > '{token}' ;;
+esac
+if [ -n "$out" ]; then : > "$out"; fi
+exit 0"#,
+        token = stand.dir.path().join("token").display(),
+        counter = stand.dir.path().join("counter").display(),
     )
-    .expect("local layer");
-
-    let refused = first.run(&["push"]);
-    let message = assert_infobase_held(&refused, "push", &second, &stand);
-    assert!(
-        message.contains("this working copy does not share it"),
-        "{message}"
-    );
-    assert!(
-        consents_of(&stand.marker()).contains(&(first.canonical_root(), false)),
-        "the refused copy records its withdrawal"
-    );
-    let refused = second.run(&["push"]);
-    assert_infobase_held(&refused, "push", &first, &stand);
 }
 
-/// Строка соединения в `--infobase` согласия не даёт: на общей базе она отказывает и
-/// просит имя базы.
+/// Запись другой копии не затирается молча: владелец, чья память о базе отстала от неё, на
+/// следующей отправке получает отказ «база ушла вперёд» (#215), а метка остаётся за ним.
 #[test]
-fn a_connection_string_on_a_shared_base_is_refused() {
+fn the_owner_notices_a_write_of_another_copy_by_the_generation() {
     let stand = Stand::new();
+    fs::write(stand.dir.path().join("counter"), "1\n").expect("counter");
+    fs::write(stand.dir.path().join("token"), format!("{:040}\n", 1)).expect("token");
     let first = stand.copy("first");
     let second = stand.copy("second");
-    first.declare_shared(&stand, true);
-    succeeded(&first.run(&["push"]));
-    let marker = stand.marker_text();
+    for copy in [&first, &second] {
+        write_shell_script(&copy.root.join("1cv8"), &generation_platform(&stand));
+    }
 
-    let connection = format!("File={}", stand.base.display());
-    let refused = second.run(&["--infobase", &connection, "push", "--force"]);
+    succeeded(&first.run(&["push", "--force"]));
+    assert_eq!(stand.owners(), [first.canonical_root()]);
+    fs::write(second.root.join("sources").join("Module.bsl"), "second").expect("edit");
+    assert_warned(&second.run(&["push", "--force"]), "push", &first, &stand);
+    assert_eq!(stand.owners(), [first.canonical_root()]);
 
-    let message = assert_infobase_held(&refused, "push", &first, &stand);
-    assert!(
-        message.contains("a connection string does not share an infobase — pass its name"),
-        "{message}"
+    fs::write(first.root.join("sources").join("Module.bsl"), "first").expect("edit");
+    let refused = envelope(&first.run(&["push"]));
+
+    assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
+    assert_eq!(
+        refused["error"]["base_generation"],
+        format!("{:040}", 3),
+        "{refused}"
     );
-    assert_eq!(stand.marker_text(), marker);
-}
-
-/// На общей базе отказ первого знакомства и отказ «база ушла вперёд» предлагают выгрузку
-/// следующим шагом, называют `push --force` текстом, говорят, что базу меняют и другие копии,
-/// и называют остальных владельцев — и тогда, когда эта копия взяла базу без метки.
-#[test]
-fn a_refusal_on_a_shared_base_offers_pull_first_and_names_push_force() {
-    let stand = Stand::new();
-    let first = stand.copy("first");
-    let second = stand.copy("second");
-    first.declare_shared(&stand, true);
-    second.declare_shared(&stand, true);
-    succeeded(&first.run(&["push"]));
-    fs::remove_dir_all(second.root.join("work")).expect("forget the base");
-
-    let refused = second.run(&["push"]);
-    let payload = envelope(&refused);
-
-    assert_eq!(refused.status.code(), Some(3), "{payload}");
-    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
-    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
-    let message = payload["error"]["message"].as_str().expect("message");
-    assert!(message.contains("push --force`"), "{message}");
-    assert!(message.contains("shared"), "{message}");
-    assert!(message.contains(&first.canonical_root()), "{message}");
-
-    // База ушла вперёд записанного поколения той же копии.
-    write_shell_script(
-        &second.root.join("1cv8"),
-        &format!(
-            "out=''; previous=''\nfor a in \"$@\"; do [ \"$previous\" = /Out ] && out=\"$a\"; previous=\"$a\"; done\ncase \"$*\" in *GetConfigGenerationID*) printf '{}\\n' > \"$out\" ;; esac\nexit 0",
-            "2".repeat(40)
-        ),
+    assert_eq!(
+        refused["error"]["local_generation"],
+        format!("{:040}", 2),
+        "{refused}"
     );
-    succeeded(&second.run(&["push", "--force"]));
-    let ledger = second
-        .root
-        .join("work")
-        .join("infobases")
-        .join("origin")
-        .join("generation.json");
-    let mut records: Value =
-        serde_json::from_str(&fs::read_to_string(&ledger).expect("ledger")).expect("json");
-    records["main"] = json!({
-        "token": "1".repeat(40),
-        "tool": "designer",
-        "after": "build",
-        "recorded_at": "2026-10-06T00:00:00Z",
-        "identity": records["main"]["identity"],
-    });
-    fs::write(&ledger, records.to_string()).expect("ledger");
-    fs::write(second.root.join("sources").join("Module.bsl"), "edited").expect("edit");
-
-    let payload = envelope(&second.run(&["push"]));
-
-    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
-    assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
-    let message = payload["error"]["message"].as_str().expect("message");
-    assert!(message.contains("push main --force`"), "{message}");
-    assert!(message.contains(&first.canonical_root()), "{message}");
+    assert_eq!(stand.owners(), [first.canonical_root()]);
 }
 
 /// `infobase create` записывает созданную файловую базу в метку за своей копией.

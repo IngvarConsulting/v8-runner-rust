@@ -1824,7 +1824,7 @@ mod tests {
         std::fs::write(dir.path().join("v8project.yaml"), "existing").expect("existing");
         std::fs::write(
             dir.path().join("v8project.local.yaml"),
-            "workPath: build\ninfobases:\n  origin:\n    connection: 'Srvr=srv;Ref=erp;Pwd=conn-secret'\n    user: Admin\n    password: layer-secret\n    shared: true\n  test:\n    connection: 'File=/srv/test-ib'\n",
+            "workPath: build\ninfobases:\n  origin:\n    connection: 'Srvr=srv;Ref=erp;Pwd=conn-secret'\n    user: Admin\n    password: layer-secret\n  test:\n    connection: 'File=/srv/test-ib'\n",
         )
         .expect("local config");
 
@@ -1864,7 +1864,6 @@ mod tests {
         assert_eq!(upstream["connection"], "Srvr=srv;Ref=erp;Pwd=conn-secret");
         assert_eq!(upstream["user"], "Admin");
         assert_eq!(upstream["password"], "layer-secret");
-        assert_eq!(upstream["shared"], true);
         assert_eq!(
             document["infobases"]["test"]["connection"],
             "File=/srv/test-ib"

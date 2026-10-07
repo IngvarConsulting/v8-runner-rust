@@ -662,7 +662,7 @@ mod tests {
     }
 
     fn base(dir: &Path) -> PathBuf {
-        let base = dir.join("shared").join("ib");
+        let base = dir.join("bases").join("ib");
         fs::create_dir_all(&base).expect("base");
         fs::canonicalize(base).expect("canonical base")
     }

@@ -282,18 +282,23 @@ fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
 
     for preview in previews(dir.path()) {
         let (code, payload) = run(dir.path(), &preview);
+        assert_eq!(
+            code,
+            0,
+            "`{}` did not preview: {payload}",
+            preview.join(" ")
+        );
         if preview.first().map(String::as_str) == Some("clone") {
             // Базу засеяла боевая сборка этой рабочей копии, и она за ней в метке: `clone`
-            // выгрузил бы её в другой проект, поэтому его превью называет отказ по владельцу
-            // (`INV.CLI.A-PREVIEW-NAMES-THE-OWNERSHIP-REFUSAL`). След он оставить не вправе и тут.
-            assert_eq!(code, 3, "`{}`: {payload}", preview.join(" "));
-            assert_eq!(payload["error"]["code"], "infobase_held", "{payload}");
-        } else {
-            assert_eq!(
-                code,
-                0,
-                "`{}` did not preview: {payload}",
-                preview.join(" ")
+            // выгрузил бы её в другой проект, поэтому его превью предупреждает о базе другой
+            // копии (`INV.CLI.A-PREVIEW-NAMES-THE-WARNING-ON-A-BASE-OF-ANOTHER-COPY`).
+            assert!(
+                payload["warnings"]
+                    .as_array()
+                    .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                        .as_str()
+                        .is_some_and(|text| text.contains("of another working copy")))),
+                "{payload}"
             );
         }
         // Сравниваются оба снимка целиком: превью, которое снесло бы засеянный файл, из
