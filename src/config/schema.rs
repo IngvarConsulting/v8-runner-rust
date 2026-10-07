@@ -580,6 +580,10 @@ struct ProvidersSchema {
     /// Executor for `make`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     make: Option<ProviderSchema>,
+    /// Executor for the package directions of `convert`. Accepted by the schema so validation
+    /// can say the operation has no choice while `ibcmd` is its only executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    convert: Option<ProviderSchema>,
     /// Executor for `publish`. Accepted by the schema so validation can say the operation has no choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     publish: Option<ProviderSchema>,

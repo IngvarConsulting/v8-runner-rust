@@ -1463,3 +1463,389 @@ fn a_convert_refusal_does_not_offer_a_truncated_command() {
     assert!(message.contains("discarded on request"), "{message}");
     assert!(message.contains("hand-written.xml"), "{message}");
 }
+
+// --- Направления с пакетом (#236) -----------------------------------------------------
+//
+// Поддельный `ibcmd` записывает каждый вызов, создаёт базу по `infobase create`, пишет пакет
+// по ключу `--out=` и раскладывает XML по `config export --file=`. Проект базы не объявляет:
+// ни `infobase:` в проектном файле, ни местного слоя.
+
+const IBCMD: &str = r#"root="$(dirname "$0")/.."
+printf '%s\n' "$*" >> "$root/ibcmd-calls"
+db=''
+previous=''
+last=''
+for argument in "$@"; do
+  case "$argument" in
+    --out=*) printf 'package' > "${argument#--out=}" ;;
+  esac
+  if [ "$previous" = --db-path ]; then db="$argument"; fi
+  previous="$argument"
+  last="$argument"
+done
+case " $* " in
+  *" create "*) mkdir -p "$db"; : > "$db/1Cv8.1CD" ;;
+  *" export "*) mkdir -p "$last"; printf '<Configuration />' > "$last/Configuration.xml" ;;
+esac
+exit 0"#;
+
+struct PackageProject {
+    dir: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl PackageProject {
+    /// Наборы `main` (конфигурация), `Sales` (расширение) и `tools` (внешние обработки) в
+    /// формате Конфигуратора; `ibcmd` лежит в `platform/bin`, база не объявлена.
+    fn new() -> Self {
+        let dir = temp_workspace();
+        let root = dir.path().join("project");
+        write_designer_source(&root.join("src/cf"), "Main", false);
+        write_designer_source(&root.join("src/sales"), "Sales", true);
+        write_designer_external_source(&root.join("src/tools"), &["Tool"]);
+        fs::write(
+            root.join("v8project.yaml"),
+            "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: src/tools\n  - name: main\n    type: CONFIGURATION\n    path: src/cf\n  - name: Sales\n    type: EXTENSION\n    path: src/sales\ntools:\n  platform:\n    path: platform\n",
+        )
+        .expect("project file");
+        write_script(&root.join("platform/bin/ibcmd"), IBCMD);
+        Self { dir, root }
+    }
+
+    fn run(&self, args: &[&str]) -> (std::process::Output, Value) {
+        let output = v8_runner_command()
+            .current_dir(&self.root)
+            .arg("--json-message")
+            .args(args)
+            .output()
+            .expect("run convert");
+        let envelope = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "one json document expected ({error}):\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output, envelope)
+    }
+
+    fn calls(&self) -> Vec<String> {
+        fs::read_to_string(self.root.join("platform/ibcmd-calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    fn throwaway_root(&self) -> PathBuf {
+        self.root.join("work/temp/throwaway-infobases")
+    }
+
+    fn bases_left(&self) -> usize {
+        fs::read_dir(self.throwaway_root())
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    }
+}
+
+/// Набор в пакет: `ibcmd` создаёт временную базу под `workPath` со своим `--data` и собирает
+/// пакет `config import --out` — база проекта не нужна и не объявлена; база убирается, а
+/// квитанция называет исполнителя.
+#[test]
+fn convert_a_set_to_a_package_builds_it_with_ibcmd_in_a_throwaway_base() {
+    let project = PackageProject::new();
+
+    let (output, envelope) = project.run(&["convert", "Sales", "--to", "package"]);
+
+    assert!(output.status.success(), "{envelope}");
+    let data = &envelope["data"];
+    assert_eq!(data["direction"], "DESIGNER_TO_PACKAGE", "{envelope}");
+    assert_eq!(data["provider_dispatched"], true, "{envelope}");
+    assert_eq!(data["provider"]["selected"], "ibcmd", "{envelope}");
+    assert_eq!(data["provider"]["origin"]["kind"], "default", "{envelope}");
+    let target = project.root.join("work/convert/out/packages/Sales.cfe");
+    assert_eq!(fs::read_to_string(&target).expect("package"), "package");
+    assert_eq!(
+        data["outputs"][0]["target_path"],
+        target.display().to_string()
+    );
+
+    let calls = project.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let throwaway = project.throwaway_root().display().to_string();
+    for call in &calls {
+        assert!(
+            call.starts_with(&format!("infobase --data {throwaway}")),
+            "every call carries its own data directory under the throwaway root: {call}"
+        );
+        assert!(!call.contains("ibcmd-data"), "{call}");
+    }
+    assert!(calls[0].ends_with(" create"), "{calls:?}");
+    assert!(calls[1].contains(" config import --out="), "{calls:?}");
+    assert!(
+        calls[1].ends_with(&project.root.join("src/sales").display().to_string()),
+        "{calls:?}"
+    );
+    assert_eq!(project.bases_left(), 0, "the throwaway base is removed");
+}
+
+/// Без набора `--to package` берёт пакеты конфигурации проекта — основную конфигурацию и
+/// расширения — в одной временной базе; набор внешних обработок в обход не входит.
+#[test]
+fn convert_without_a_set_to_a_package_takes_the_configuration_packages() {
+    let project = PackageProject::new();
+
+    let (output, envelope) = project.run(&["convert", "--to", "package"]);
+
+    assert!(output.status.success(), "{envelope}");
+    let sets: Vec<&str> = envelope["data"]["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .map(|output| output["source_set"].as_str().expect("set"))
+        .collect();
+    assert_eq!(sets, ["main", "Sales"], "{envelope}");
+    let out = project.root.join("work/convert/out/packages");
+    assert!(out.join("main.cf").is_file());
+    assert!(out.join("Sales.cfe").is_file());
+    assert!(!out.join("tools").exists());
+    let calls = project.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.ends_with(" create"))
+            .count(),
+        1,
+        "one throwaway base serves the run: {calls:?}"
+    );
+    assert_eq!(project.bases_left(), 0);
+}
+
+/// Набор внешних файлов пакета конфигурации не называет: отказ до замка и до платформы.
+#[test]
+fn convert_an_external_set_to_a_package_is_refused() {
+    let project = PackageProject::new();
+
+    let (output, envelope) = project.run(&["convert", "tools", "--to", "package"]);
+
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+    assert!(project.calls().is_empty());
+}
+
+/// Файл пакета в XML: `ibcmd` разбирает его `config export --file` во временной базе
+/// раннера со своим `--data`, каталог `--output` получает XML, база убирается.
+#[test]
+fn convert_a_package_file_to_xml_exports_it_in_a_throwaway_base() {
+    let project = PackageProject::new();
+    let package = project.dir.path().join("main.cf");
+    fs::write(&package, "package").expect("package file");
+    let target = project.dir.path().join("xml");
+
+    let (output, envelope) = project.run(&[
+        "convert",
+        &package.display().to_string(),
+        "--to",
+        "xml",
+        "--output",
+        &target.display().to_string(),
+    ]);
+
+    assert!(output.status.success(), "{envelope}");
+    let data = &envelope["data"];
+    assert_eq!(data["direction"], "PACKAGE_TO_DESIGNER", "{envelope}");
+    assert_eq!(data["scope"], "PACKAGE", "{envelope}");
+    assert_eq!(data["provider"]["selected"], "ibcmd", "{envelope}");
+    assert!(data["outputs"][0].get("source_set").is_none(), "{envelope}");
+    assert!(target.join("Configuration.xml").is_file(), "{envelope}");
+
+    let calls = project.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let throwaway = project.throwaway_root().display().to_string();
+    assert!(calls[0].ends_with(" create"), "{calls:?}");
+    assert!(
+        calls[1].starts_with(&format!("config --data {throwaway}")),
+        "{calls:?}"
+    );
+    assert!(
+        calls[1].contains(&format!(" export --file={}", package.display())),
+        "{calls:?}"
+    );
+    assert_eq!(project.bases_left(), 0);
+}
+
+/// Без `--to` файл пакета идёт в XML и по умолчанию ложится под `workPath`.
+#[test]
+fn convert_a_package_file_without_to_goes_to_xml_under_work_path() {
+    let project = PackageProject::new();
+    let package = project.dir.path().join("ext.cfe");
+    fs::write(&package, "package").expect("package file");
+
+    let (output, envelope) = project.run(&["convert", &package.display().to_string()]);
+
+    assert!(output.status.success(), "{envelope}");
+    assert_eq!(envelope["data"]["direction"], "PACKAGE_TO_DESIGNER");
+    assert!(project
+        .root
+        .join("work/convert/out/ext/designer/Configuration.xml")
+        .is_file());
+}
+
+/// Без `ibcmd` направлению с пакетом исполнить некому: отказ рода `environment`, квитанция
+/// называет пропущенного; `ibcmd-rs` строки `convert` не имеет до замера (#413).
+#[test]
+fn convert_a_package_direction_without_ibcmd_answers_an_environment_failure() {
+    let project = PackageProject::new();
+    fs::remove_file(project.root.join("platform/bin/ibcmd")).expect("remove ibcmd");
+    let empty_path = project.dir.path().join("no-tools");
+    fs::create_dir_all(&empty_path).expect("empty PATH");
+
+    let output = v8_runner_command()
+        .current_dir(&project.root)
+        .env("PATH", &empty_path)
+        .args(["--json-message", "convert", "main", "--to", "package"])
+        .output()
+        .expect("run convert");
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("json");
+
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_eq!(envelope["error"]["kind"], "environment", "{envelope}");
+    assert_eq!(
+        envelope["error"]["code"], "environment_unavailable",
+        "{envelope}"
+    );
+    let receipt = &envelope["data"]["provider"];
+    assert!(receipt["selected"].is_null(), "{envelope}");
+    let skipped: Vec<&str> = receipt["skipped"]
+        .as_array()
+        .expect("skipped")
+        .iter()
+        .map(|entry| entry["provider"].as_str().expect("provider"))
+        .collect();
+    assert_eq!(skipped, ["ibcmd"], "{envelope}");
+    assert_eq!(envelope["data"]["provider_dispatched"], false, "{envelope}");
+}
+
+/// Превью направления с пакетом находит `ibcmd` и называет цели, но ничего не запускает и
+/// временной базы не создаёт.
+#[test]
+fn convert_a_package_preview_dispatches_nothing() {
+    let project = PackageProject::new();
+
+    let (output, envelope) = project.run(&["convert", "--to", "package", "--dry-run"]);
+
+    assert!(output.status.success(), "{envelope}");
+    let data = &envelope["data"];
+    assert_eq!(data["provider_dispatched"], false, "{envelope}");
+    assert_eq!(data["provider"]["selected"], "ibcmd", "{envelope}");
+    assert_eq!(data["outputs"].as_array().expect("outputs").len(), 2);
+    assert!(project.calls().is_empty());
+    assert!(!project.root.join("work/temp").exists());
+    assert!(!project.root.join("work/convert").exists());
+}
+
+/// `--to` в тот формат, в котором исходники уже лежат, и файл пакета не в XML — отказ
+/// валидации до замка и до платформы, с выходом в тексте.
+#[test]
+fn convert_refuses_a_direction_that_is_not_a_conversion() {
+    let project = PackageProject::new();
+    let package = project.dir.path().join("main.cf");
+    fs::write(&package, "package").expect("package file");
+    let package = package.display().to_string();
+
+    for (args, way_out) in [
+        (vec!["convert", "--to", "xml"], "--to edt or --to package"),
+        (vec!["convert", &package, "--to", "edt"], "--to xml"),
+        (vec!["convert", &package, "--to", "package"], "--to xml"),
+    ] {
+        let (output, envelope) = project.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {envelope}");
+        assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(way_out)),
+            "{args:?}: {envelope}"
+        );
+    }
+    assert!(project.calls().is_empty());
+    assert!(!project.root.join("work/temp").exists());
+    assert!(!project.root.join("work/convert").exists());
+}
+
+/// `convert` базу проекта не выбирает: проект без базы переводит, а `--infobase` у него —
+/// отказ валидации.
+#[test]
+fn convert_needs_no_infobase_and_refuses_the_infobase_key() {
+    let project = PackageProject::new();
+
+    let (output, envelope) = project.run(&["convert", "main", "--to", "package", "--dry-run"]);
+    assert!(output.status.success(), "{envelope}");
+
+    let (output, envelope) =
+        project.run(&["convert", "main", "--to", "package", "--infobase", "origin"]);
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+    assert!(project.calls().is_empty());
+}
+
+/// Исходники формата EDT в пакет: сперва `1cedtcli` переводит набор в XML в каталог
+/// временной базы, затем `ibcmd` собирает пакет из этого XML `config import --out`.
+#[test]
+fn convert_an_edt_set_to_a_package_goes_through_xml_in_the_throwaway_base() {
+    let (_dir, config_path, base_path, work_path, edt_cli_path, calls_log) = setup_project();
+    write_edt_source(
+        &base_path.join("main"),
+        "MainConfiguration",
+        "<Configuration />",
+    );
+    write_script(&base_path.join("platform/bin/ibcmd"), IBCMD);
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{}'\nformat: EDT\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: platform\n  edt_cli:\n    path: '{}'\n    interactive-mode: false\n",
+            work_path.display(),
+            edt_cli_path.display()
+        ),
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "convert",
+            "main",
+            "--to",
+            "package",
+        ])
+        .output()
+        .expect("run convert");
+
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "json ({error}): {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert!(output.status.success(), "{envelope}");
+    assert_eq!(
+        envelope["data"]["direction"], "EDT_TO_PACKAGE",
+        "{envelope}"
+    );
+    assert!(work_path.join("convert/out/packages/main.cf").is_file());
+    let edt_calls = fs::read_to_string(&calls_log).expect("edt calls");
+    assert!(edt_calls.contains("-command export"), "{edt_calls}");
+    let ibcmd_calls = fs::read_to_string(base_path.join("platform/ibcmd-calls")).expect("calls");
+    let import = ibcmd_calls
+        .lines()
+        .find(|call| call.contains(" config import --out="))
+        .expect("import call");
+    let throwaway = work_path.join("temp/throwaway-infobases");
+    assert!(
+        import.contains(&throwaway.display().to_string()) && import.ends_with("/xml/main"),
+        "the package is built from the XML the EDT CLI wrote into the throwaway base: {import}"
+    );
+}

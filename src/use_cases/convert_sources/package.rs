@@ -61,6 +61,8 @@ struct Item {
     input: Input,
     source_path: PathBuf,
     target_path: PathBuf,
+    /// Сравнимый путь цели при разрешении: перед публикацией он сверяется заново.
+    canonical_target: PathBuf,
     target_identity: String,
 }
 
@@ -170,13 +172,10 @@ fn resolve_source_sets(
             &subject,
             explicit_output_root.is_some(),
         )?;
-        if let Some(other) = items.iter().find(|item| {
-            paths_overlap(
-                &nearest_existing_canonical_path(&item.target_path)
-                    .unwrap_or_else(|_| item.target_path.clone()),
-                &canonical,
-            )
-        }) {
+        if let Some(other) = items
+            .iter()
+            .find(|item| paths_overlap(&item.canonical_target, &canonical))
+        {
             return Err(AppError::Validation(format!(
                 "convert output targets overlap: {} -> {}, {subject} -> {}",
                 other
@@ -194,6 +193,7 @@ fn resolve_source_sets(
             },
             source_path,
             target_path,
+            canonical_target: canonical,
             target_identity,
         });
     }
@@ -259,6 +259,7 @@ fn resolve_package_file(
         input: Input::PackageFile,
         source_path,
         target_path,
+        canonical_target: canonical,
         target_identity,
     })
 }
@@ -567,7 +568,7 @@ fn build_package(
                 )))
             }
         });
-    if let Err(error) = built {
+    if let Err(error) = built.and_then(|()| revalidate_before_publish(item)) {
         return Err(publication.cleanup_failure(error));
     }
     // Неудачная замена оставляет промежуточный файл: в нём может быть единственная копия.
@@ -601,7 +602,7 @@ fn export_package(
             ensure_platform_success(&label, "package-to-designer", &result)?;
             validate_designer_layout(&staging_dir, "Designer convert output")
         });
-    if let Err(error) = exported {
+    if let Err(error) = exported.and_then(|()| revalidate_before_publish(item)) {
         return Err(publication.cleanup_failure(error));
     }
     let published = publication.publish_dir(
@@ -618,4 +619,78 @@ fn export_package(
         published.deferred_interruption,
     ));
     Ok(notes)
+}
+
+/// Цель после работы исполнителя, перед заменой: путь, который за это время стал указывать в
+/// другое место, публикацию останавливает
+/// (`INV.USE-CASES.A-TARGET-IS-RECHECKED-BEFORE-PUBLICATION`). Файл пакета не ложится на
+/// каталог, появившийся на его месте.
+fn revalidate_before_publish(item: &Item) -> Result<(), AppError> {
+    let current = nearest_existing_canonical_path(&item.target_path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to re-canonicalize convert output '{}': {error}",
+            item.target_path.display()
+        ))
+    })?;
+    if current != item.canonical_target {
+        return Err(AppError::Validation(format!(
+            "convert output path changed since the target was resolved: {}",
+            item.target_path.display()
+        )));
+    }
+    if matches!(item.input, Input::SourceSet { .. }) && item.target_path.is_dir() {
+        return Err(AppError::Validation(format!(
+            "convert package output conflicts with existing directory '{}'",
+            item.target_path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{revalidate_before_publish, Input, Item};
+    use crate::support::error::AppError;
+    use crate::support::path::nearest_existing_canonical_path;
+
+    fn package_item(target: &std::path::Path) -> Item {
+        Item {
+            input: Input::SourceSet {
+                name: "main".to_owned(),
+                extension: None,
+            },
+            source_path: target.with_file_name("src"),
+            target_path: target.to_path_buf(),
+            canonical_target: nearest_existing_canonical_path(target).expect("canonical"),
+            target_identity: "identity".to_owned(),
+        }
+    }
+
+    /// Путь цели, который после работы исполнителя стал указывать в другое место, публикацию
+    /// останавливает; каталог на месте файла пакета — тоже.
+    #[cfg(unix)]
+    #[test]
+    fn a_package_target_is_rechecked_before_publication() {
+        let dir = tempfile::tempdir().expect("dir");
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::create_dir_all(&first).expect("first");
+        std::fs::create_dir_all(&second).expect("second");
+        let link = dir.path().join("out");
+        std::os::unix::fs::symlink(&first, &link).expect("link");
+        let item = package_item(&link.join("main.cf"));
+        revalidate_before_publish(&item).expect("the target did not move");
+
+        std::fs::remove_file(&link).expect("unlink");
+        std::os::unix::fs::symlink(&second, &link).expect("relink");
+        let error = revalidate_before_publish(&item).expect_err("the target moved");
+        assert!(matches!(error, AppError::Validation(_)), "{error}");
+        assert!(!second.join("main.cf").exists());
+
+        std::fs::remove_file(&link).expect("unlink");
+        std::os::unix::fs::symlink(&first, &link).expect("relink");
+        std::fs::create_dir_all(first.join("main.cf")).expect("a directory in place");
+        let error = revalidate_before_publish(&item).expect_err("a directory is in the way");
+        assert!(error.to_string().contains("existing directory"), "{error}");
+    }
 }

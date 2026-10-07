@@ -377,7 +377,7 @@ fn convert_help_uses_output_target_root_name() {
     assert!(stdout.contains("Global options:"));
     assert!(stdout.contains("--output <OUTPUT>"));
     assert!(
-        stdout.contains("Usage: v8-runner convert [OPTIONS] [SET]"),
+        stdout.contains("Usage: v8-runner convert [OPTIONS] [SET|FILE]"),
         "{stdout}"
     );
     assert!(!stdout.contains("--source-set"), "{stdout}");

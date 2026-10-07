@@ -92,7 +92,7 @@ pub enum Command {
     Download(InfobaseConfigurationExportArgs),
     /// Export configuration packages or a full DT snapshot from the configured infobase
     Infobase(InfobaseArgs),
-    /// Convert configured source-sets between EDT and Designer file formats
+    /// Convert source-sets between EDT, Designer files and .cf/.cfe packages, or a package to Designer files
     Convert(ConvertArgs),
     /// Export release artifacts via Designer batch commands
     #[command(name = "make", visible_alias = "artifacts")]

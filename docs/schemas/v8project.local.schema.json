@@ -731,6 +731,17 @@
           "deprecated": true,
           "description": "Previous spelling of `push`; accepted for one release cycle."
         },
+        "convert": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for the package directions of `convert`. Accepted by the schema so validation\ncan say the operation has no choice while `ibcmd` is its only executor."
+        },
         "download": {
           "anyOf": [
             {

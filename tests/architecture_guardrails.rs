@@ -3103,6 +3103,8 @@ fn every_staged_publication_rechecks_its_target_first() {
     const SITES: &[&str] = &[
         "crate::use_cases::artifacts::build_external_in",
         "crate::use_cases::artifacts::build_package_in",
+        "crate::use_cases::convert_sources::package::build_package",
+        "crate::use_cases::convert_sources::package::export_package",
         "crate::use_cases::dump_config::finalize_edt_dump",
         "crate::use_cases::dump_config::publish_full_dump",
         "crate::use_cases::infobase_export::run_configuration_export",
