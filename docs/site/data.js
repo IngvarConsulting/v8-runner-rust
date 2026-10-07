@@ -221,7 +221,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'test') || needEdt(ctx); },
       today: function (ctx) { return { chain: [P.client], config: ['tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'сначала отправка, как у push; test --no-push её пропускает' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tests.yaxunit.* или tests.va.*'], note: 'тонкий клиент по прямому шлюзу или по HTTP с --via web; тесты в толстом клиенте недоступны — прямой шлюз его не пускает; сначала push, --no-push пропускает' };
+        if (ctx.target === 'standalone') return { chain: [P.client], config: ['connection', 'web.url — когда строки прямого шлюза нет', 'tests.yaxunit.* или tests.va.*'], note: 'тонкий клиент по прямому шлюзу, без строки — по HTTP сервера (web.url); ключа выбора адреса у test нет; тесты в толстом клиенте недоступны — прямой шлюз его не пускает; сначала push, --no-push пропускает' };
         return { chain: [P.client], config: ['connection', 'tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'сначала push, затем прогон; --no-push пропускает отправку' };
       }
     },

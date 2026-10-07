@@ -10,7 +10,7 @@ use crate::domain::runner::{LaunchClientModeRequest, LaunchOptions, RunnerKind};
 use crate::domain::test::{
     test_execution_error, TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget,
 };
-use crate::platform::enterprise::{EnterpriseDsl, EnterpriseError};
+use crate::platform::enterprise::{ClientAddress, EnterpriseDsl, EnterpriseError};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessError;
 use crate::platform::utilities::PlatformUtilities;
@@ -229,6 +229,10 @@ pub(super) fn prepare_runner_artifacts(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "адрес клиента выбран до сборки и приходит готовым; группировать параметры прогона ради счёта — отдельная правка"
+)]
 pub(super) fn build_enterprise_dsl<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -237,9 +241,9 @@ pub(super) fn build_enterprise_dsl<'a>(
     launch: &LaunchOptions,
     runner: &'a dyn crate::platform::process::ProcessRunner,
     client_mode: LaunchClientModeRequest,
+    address: ClientAddress,
     timeout_override_ms: Option<u64>,
 ) -> Result<EnterpriseDsl<'a>, AppError> {
-    let web = client_web_address(config, client_mode.into())?;
     let mut utilities = PlatformUtilities::from_config(config);
     let utility = match client_mode {
         LaunchClientModeRequest::Designer => UtilityType::V8,
@@ -255,7 +259,7 @@ pub(super) fn build_enterprise_dsl<'a>(
     Ok(EnterpriseDsl::new(
         location.path,
         config.v8_connection(),
-        web,
+        address,
         additional_launch_keys,
         client_mode.into(),
         runner,
@@ -273,14 +277,13 @@ pub(super) fn build_enterprise_dsl<'a>(
 
 /// Адрес клиента тестов — по тому же правилу, что у `launch` без `--via`: строка
 /// подключения, а без неё — `infobase.web.url`; толстый клиент и обычное приложение против
-/// автономной цели отказывают. `None` — клиент идёт по строке подключения.
-pub(super) fn client_web_address(
+/// автономной цели отказывают.
+pub(super) fn test_client_address(
     config: &AppConfig,
     mode: crate::platform::enterprise::LaunchClientMode,
-) -> Result<Option<crate::platform::enterprise::WebAddress>, AppError> {
+) -> Result<ClientAddress, AppError> {
     crate::use_cases::client_address::refuse_a_thick_client_on_a_standalone_target(config, mode)?;
-    let address = crate::use_cases::client_address::resolve(config, mode, None)?;
-    Ok(address.web().cloned())
+    crate::use_cases::client_address::resolve(config, mode, None)
 }
 
 fn effective_enterprise_launch_keys(

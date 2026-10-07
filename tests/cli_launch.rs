@@ -2581,27 +2581,33 @@ fn a_standalone_thin_client_goes_by_the_direct_gate_by_default() {
     }
 }
 
-/// Без строки прямого шлюза тонкий клиент без ключа идёт по клиентскому адресу.
+/// Без строки прямого шлюза тонкий клиент без ключа — и `launch thin`, и `launch mcp` —
+/// идёт по клиентскому адресу.
 #[test]
 fn a_standalone_thin_client_without_the_direct_gate_goes_by_the_web_address() {
     let (_dir, config_path, _log) =
         setup_standalone_project(STANDALONE_WITHOUT_THE_DIRECT_GATE, "");
 
-    let payload = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+    for arguments in [
+        vec!["launch", "thin", "--dry-run"],
+        vec!["launch", "mcp", "--dry-run"],
+    ] {
+        let payload = launch_json(&config_path, &arguments);
 
-    assert_eq!(payload["ok"], true, "{payload}");
-    assert_eq!(payload["data"]["via"], "web", "{payload}");
-    assert_eq!(
-        payload["data"]["url"], "http://localhost/standalone",
-        "{payload}"
-    );
-    let args = planned_args(&payload);
-    let at = args
-        .iter()
-        .position(|arg| arg == "/WS")
-        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
-    assert_eq!(args[at + 1], "http://localhost/standalone", "{args:?}");
-    assert!(!args.iter().any(|arg| arg == "/S"), "{args:?}");
+        assert_eq!(payload["ok"], true, "{arguments:?}: {payload}");
+        assert_eq!(payload["data"]["via"], "web", "{arguments:?}: {payload}");
+        assert_eq!(
+            payload["data"]["url"], "http://localhost/standalone",
+            "{arguments:?}: {payload}"
+        );
+        let args = planned_args(&payload);
+        let at = args
+            .iter()
+            .position(|arg| arg == "/WS")
+            .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+        assert_eq!(args[at + 1], "http://localhost/standalone", "{args:?}");
+        assert!(!args.iter().any(|arg| arg == "/S"), "{args:?}");
+    }
 }
 
 /// Конфигуратор против автономной цели идёт по строке прямого шлюза ключом `/S`.

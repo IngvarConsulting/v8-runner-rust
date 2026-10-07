@@ -1073,6 +1073,10 @@ fn a_thick_test_client_against_a_standalone_server_is_refused_before_the_build()
             payload["error"]["code"], "target",
             "{client_mode}: {payload}"
         );
+        assert!(
+            payload["error"].get("next").is_none_or(Value::is_null),
+            "у test следующего шага нет: {client_mode}: {payload}"
+        );
     }
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 }

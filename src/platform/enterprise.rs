@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::domain::launch::LaunchVia;
 use crate::domain::runner::LaunchClientModeRequest;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::connection::V8Connection;
@@ -27,8 +28,8 @@ pub enum LaunchClientMode {
 pub struct EnterpriseDsl<'a> {
     binary: PathBuf,
     connection: V8Connection,
-    /// Клиентский адрес, когда клиент идёт по нему, а не по строке подключения.
-    web: Option<WebAddress>,
+    /// Каким адресом клиент открывает базу.
+    address: ClientAddress,
     additional_launch_keys: Vec<String>,
     client_mode: LaunchClientMode,
     runner: &'a dyn ProcessRunner,
@@ -40,7 +41,7 @@ impl<'a> EnterpriseDsl<'a> {
     pub fn new(
         binary: PathBuf,
         connection: V8Connection,
-        web: Option<WebAddress>,
+        address: ClientAddress,
         additional_launch_keys: Vec<String>,
         client_mode: LaunchClientMode,
         runner: &'a dyn ProcessRunner,
@@ -50,7 +51,7 @@ impl<'a> EnterpriseDsl<'a> {
         Self {
             binary,
             connection,
-            web,
+            address,
             additional_launch_keys,
             client_mode,
             runner,
@@ -103,13 +104,10 @@ impl<'a> EnterpriseDsl<'a> {
     fn build_args(&self, launch: &LaunchOptions) -> Vec<String> {
         let mut launch = launch.clone();
         launch.internal_out = Some(self.log_file.display().to_string());
-        let address = match &self.web {
-            None => LaunchAddress::Connection(&self.connection),
-            Some(web) => web.launch_address(&self.connection),
-        };
         build_launch_args(
             self.client_mode,
-            address,
+            &self.address,
+            &self.connection,
             &self.additional_launch_keys,
             &launch,
         )
@@ -127,59 +125,55 @@ impl From<LaunchClientModeRequest> for LaunchClientMode {
     }
 }
 
-/// Чем клиент открывает базу в командной строке.
-///
-/// Строка подключения несёт реквизиты базы рядом с собой; клиентский адрес — не всегда.
-/// Давать ли их при нём, решает выбор адреса клиента в `use_cases`, а здесь это
-/// необязательное поле.
-#[derive(Debug, Clone, Copy)]
-pub enum LaunchAddress<'a> {
+/// Каким адресом клиент открывает базу. Реквизиты базы берутся из строки подключения, а
+/// идут ли они, говорит сам вариант адреса: решение принимает выбор адреса клиента в
+/// `use_cases::client_address`, в командную строку его переводит только [`Self::args`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientAddress {
     /// `infobase.connection` вместе с `/N` и `/P`.
-    Connection(&'a V8Connection),
-    /// `infobase.web.url` как ws-соединение; `/N` и `/P` — только из `credentials`.
-    Web {
-        url: &'a str,
-        credentials: Option<&'a V8Connection>,
-    },
+    Connection,
+    /// `infobase.web.url` как ws-соединение с `/N` и `/P`.
+    Web(String),
+    /// `infobase.web.url` как ws-соединение без `/N` и `/P`: приём реквизитов по `/WS`
+    /// автономного сервера не замерен (#184).
+    WebWithoutCredentials(String),
 }
 
-impl LaunchAddress<'_> {
-    fn args(&self) -> Vec<String> {
-        match *self {
-            Self::Connection(connection) => connection.args(),
-            Self::Web { url, credentials } => {
-                let mut args = vec!["/WS".to_owned(), url.to_string()];
-                if let Some(connection) = credentials {
-                    args.extend(connection.credential_args());
-                }
-                args
-            }
+impl ClientAddress {
+    /// Каким адресом открыта база — так его называет ответ.
+    pub const fn via(&self) -> LaunchVia {
+        match self {
+            Self::Connection => LaunchVia::Connection,
+            Self::Web(_) | Self::WebWithoutCredentials(_) => LaunchVia::Web,
         }
     }
-}
 
-/// Выбранный клиентский адрес и решение, идут ли при нём реквизиты базы.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WebAddress {
-    /// `infobase.web.url`.
-    pub url: String,
-    /// Прилагать ли `/N` и `/P` из строки подключения.
-    pub carries_credentials: bool,
-}
+    /// Клиентский адрес, если выбран он.
+    pub fn web_url(&self) -> Option<&str> {
+        match self {
+            Self::Connection => None,
+            Self::Web(url) | Self::WebWithoutCredentials(url) => Some(url),
+        }
+    }
 
-impl WebAddress {
-    /// Адрес командной строки: реквизиты `connection` идут, только если так решено.
-    pub fn launch_address<'a>(&'a self, connection: &'a V8Connection) -> LaunchAddress<'a> {
-        LaunchAddress::Web {
-            url: &self.url,
-            credentials: self.carries_credentials.then_some(connection),
+    /// Адрес в командной строке клиента; реквизиты — из `connection`.
+    fn args(&self, connection: &V8Connection) -> Vec<String> {
+        match self {
+            Self::Connection => connection.args(),
+            Self::Web(url) => {
+                let mut args = vec!["/WS".to_owned(), url.clone()];
+                args.extend(connection.credential_args());
+                args
+            }
+            Self::WebWithoutCredentials(url) => vec!["/WS".to_owned(), url.clone()],
         }
     }
 }
 
 pub fn build_launch_args(
     mode: LaunchClientMode,
-    address: LaunchAddress<'_>,
+    address: &ClientAddress,
+    connection: &V8Connection,
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
 ) -> Vec<String> {
@@ -191,7 +185,7 @@ pub fn build_launch_args(
     }
     .to_owned()];
     args.push("/DisableStartupDialogs".to_owned());
-    args.extend(address.args());
+    args.extend(address.args(connection));
     if matches!(mode, LaunchClientMode::Ordinary) {
         args.push("/RunModeOrdinaryApplication".to_owned());
     }
@@ -275,8 +269,8 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_launch_args, normalize_launch_payload_path, EnterpriseDsl, LaunchAddress,
-        LaunchClientMode, WebAddress,
+        build_launch_args, normalize_launch_payload_path, ClientAddress, EnterpriseDsl,
+        LaunchClientMode,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -298,10 +292,8 @@ mod tests {
         let connection = V8Connection::from_connection_string("File=/tmp/ib");
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            LaunchAddress::Web {
-                url: "http://localhost/base",
-                credentials: Some(&connection),
-            },
+            &ClientAddress::Web("http://localhost/base".to_owned()),
+            &connection,
             &[],
             &LaunchOptions::default(),
         );
@@ -324,21 +316,20 @@ mod tests {
         let mut connection = V8Connection::from_connection_string("Srvr=h:1541;Ref=demo");
         connection.user = Some("Admin".to_owned());
         connection.password = Some("s3cret".to_owned());
-        let args = |carries_credentials| {
-            let web = WebAddress {
-                url: "http://localhost/base".to_owned(),
-                carries_credentials,
-            };
+        let args = |address: ClientAddress| {
             build_launch_args(
                 LaunchClientMode::Thin,
-                web.launch_address(&connection),
+                &address,
+                &connection,
                 &[],
                 &LaunchOptions::default(),
             )
         };
 
-        let with = args(true);
-        let without = args(false);
+        let with = args(ClientAddress::Web("http://localhost/base".to_owned()));
+        let without = args(ClientAddress::WebWithoutCredentials(
+            "http://localhost/base".to_owned(),
+        ));
 
         assert_eq!(
             &with[2..],
@@ -359,7 +350,8 @@ mod tests {
     fn builds_expected_run_unit_tests_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
+            &ClientAddress::Connection,
+            &V8Connection::from_connection_string("File=/tmp/ib"),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 c: Some("RunUnitTests=/tmp/path with space/тест config.json".to_owned()),
@@ -386,7 +378,8 @@ mod tests {
     fn builds_expected_vanessa_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
+            &ClientAddress::Connection,
+            &V8Connection::from_connection_string("File=/tmp/ib"),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 execute: Some("/tmp/va/vanessa automation.epf".to_owned()),
@@ -416,7 +409,8 @@ mod tests {
     fn ordinary_mode_adds_run_mode_and_filters_reserved_raw_keys() {
         let args = build_launch_args(
             LaunchClientMode::Ordinary,
-            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
+            &ClientAddress::Connection,
+            &V8Connection::from_connection_string("File=/tmp/ib"),
             &[
                 "/TESTMANAGER".to_owned(),
                 "/DisableStartupDialogs".to_owned(),
@@ -463,7 +457,8 @@ mod tests {
     fn internal_out_has_priority_over_user_out() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
+            &ClientAddress::Connection,
+            &V8Connection::from_connection_string("File=/tmp/ib"),
             &[],
             &LaunchOptions {
                 out: Some("user.log".to_owned()),
@@ -483,7 +478,7 @@ mod tests {
         let dsl = EnterpriseDsl::new(
             dir.path().join("1cv8c"),
             V8Connection::from_connection_string("File=/tmp/ib"),
-            None,
+            ClientAddress::Connection,
             vec!["/TESTMANAGER".to_owned()],
             LaunchClientMode::Thin,
             &runner as &dyn ProcessRunner,

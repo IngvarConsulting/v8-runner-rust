@@ -72,23 +72,26 @@ pub(super) fn run_tests(
         .execution
         .client_mode
         .unwrap_or(LaunchClientModeRequest::Thin);
-    if let Err(error) = super::helpers::client_web_address(config, client_mode.into()) {
-        let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
-            .with_diagnostics(vec![error.to_string()])
-            .with_errors(vec![test_execution_error(
-                TestErrorKind::TestSetupFailed,
-                error.to_string(),
-            )]);
-        let result = make_test_result(
-            target,
-            mode,
-            outcome,
-            warnings,
-            steps,
-            started.elapsed().as_millis() as u64,
-        );
-        return Err(TestExecutionFailure::with_payload(error, result));
-    }
+    let client_address = match super::helpers::test_client_address(config, client_mode.into()) {
+        Ok(address) => address,
+        Err(error) => {
+            let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
+                .with_diagnostics(vec![error.to_string()])
+                .with_errors(vec![test_execution_error(
+                    TestErrorKind::TestSetupFailed,
+                    error.to_string(),
+                )]);
+            let result = make_test_result(
+                target,
+                mode,
+                outcome,
+                warnings,
+                steps,
+                started.elapsed().as_millis() as u64,
+            );
+            return Err(TestExecutionFailure::with_payload(error, result));
+        }
+    };
 
     let build_started = Instant::now();
     match args.build_policy {
@@ -303,6 +306,7 @@ pub(super) fn run_tests(
         &platform_launch,
         &enterprise_runner,
         client_mode,
+        client_address,
         args.execution.timeouts.total_ms,
     ) {
         Ok(dsl) => dsl,

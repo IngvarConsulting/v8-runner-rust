@@ -10,52 +10,11 @@
 use crate::config::model::{AppConfig, StandaloneWay};
 use crate::domain::capability::{Provider, TargetKind};
 use crate::domain::launch::LaunchVia;
-use crate::platform::connection::V8Connection;
-use crate::platform::enterprise::{LaunchAddress, LaunchClientMode, WebAddress};
+use crate::platform::enterprise::{ClientAddress, LaunchClientMode};
 use crate::support::error::{AppError, CapabilityReason};
 
 /// Кто идёт к автономной цели без объявленного прямого шлюза — так его называет отказ.
 const THIN_CLIENT: &str = "the thin client";
-
-/// Адрес, выбранный для клиента.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ClientAddress {
-    /// `infobase.connection` с реквизитами базы.
-    Connection,
-    /// `infobase.web.url` как ws-соединение; реквизиты — по решению [`web`].
-    Web(WebAddress),
-}
-
-impl ClientAddress {
-    /// Каким адресом открыта база — так его называет ответ.
-    pub(crate) const fn via(&self) -> LaunchVia {
-        match self {
-            Self::Connection => LaunchVia::Connection,
-            Self::Web(_) => LaunchVia::Web,
-        }
-    }
-
-    /// Клиентский адрес, если выбран он.
-    pub(crate) fn web_url(&self) -> Option<&str> {
-        self.web().map(|web| web.url.as_str())
-    }
-
-    /// Клиентский адрес с решением о реквизитах, если выбран он.
-    pub(crate) const fn web(&self) -> Option<&WebAddress> {
-        match self {
-            Self::Connection => None,
-            Self::Web(web) => Some(web),
-        }
-    }
-
-    /// Адрес командной строки клиента с реквизитами из `connection`.
-    pub(crate) fn launch_address<'a>(&'a self, connection: &'a V8Connection) -> LaunchAddress<'a> {
-        match self {
-            Self::Connection => LaunchAddress::Connection(connection),
-            Self::Web(web) => web.launch_address(connection),
-        }
-    }
-}
 
 /// Толстый клиент и обычное приложение против автономной цели не запускаются; остальные
 /// режимы проходят. Отказ — род `capability` с кодом `target`.
@@ -108,13 +67,20 @@ pub(crate) fn resolve(
 /// автономной — нет: приём `/N` и `/P` клиентом по `/WS` автономного сервера не замерен
 /// (#184), а по строке прямого шлюза реквизиты идут, как в кластер.
 fn web(config: &AppConfig, url: &str) -> ClientAddress {
-    ClientAddress::Web(WebAddress {
-        url: url.to_owned(),
-        carries_credentials: config.target_kind() != TargetKind::Standalone,
-    })
+    if config.target_kind() == TargetKind::Standalone {
+        ClientAddress::WebWithoutCredentials(url.to_owned())
+    } else {
+        ClientAddress::Web(url.to_owned())
+    }
 }
 
 /// Кто идёт по строке подключения — так его называет отказ.
+///
+/// Зовётся только без строки подключения, а пустая она лишь у автономной цели. Толстый
+/// клиент и обычное приложение до выбора адреса у неё не доходят: оба вызывающих — `launch`
+/// и `test` — сперва зовут [`refuse_a_thick_client_on_a_standalone_target`]. Их ветки здесь
+/// недостижимы при этом порядке и названы, чтобы нарушение порядка дало понятный отказ, а
+/// не панику.
 fn who(mode: LaunchClientMode) -> &'static str {
     match mode {
         LaunchClientMode::Designer => Provider::Designer.as_str(),

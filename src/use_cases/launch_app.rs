@@ -87,7 +87,13 @@ fn run_launch(
                     LaunchTargetRequest::Enterprise(EnterpriseLaunchTarget::ClientMcp {
                         ..
                     }) => "launch mcp",
-                    _ => "launch thin",
+                    LaunchTargetRequest::Enterprise(
+                        EnterpriseLaunchTarget::ThickClient
+                        | EnterpriseLaunchTarget::OrdinaryApplication
+                        | EnterpriseLaunchTarget::ThinClient,
+                    )
+                    | LaunchTargetRequest::Designer
+                    | LaunchTargetRequest::Web => "launch thin",
                 },
             )))
         },
@@ -142,12 +148,12 @@ fn run_launch(
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     let platform_resolution = Some(platform_resolution(&location));
     let connection = config.v8_connection();
-    let launch_address = address.launch_address(&connection);
     let process_request = ProcessRequest {
         program: location.path.clone(),
         args: build_launch_args(
             client_mode,
-            launch_address,
+            &address,
+            &connection,
             &additional_launch_keys,
             &launch,
         ),
