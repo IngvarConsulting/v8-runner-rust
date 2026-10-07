@@ -1775,3 +1775,65 @@ ibcmd infobase --data <W>/q/data --db-path <W>/q/ib config apply --force --dynam
 загрузку того же содержимого — это «записано, но не применено», а не «отличается по смыслу».
 Цена — два сохранения базы. «Обновлено динамически» как состояние базы платформа наружу не
 отдаёт: признак есть только внутри сеанса, начатого до обновления.
+
+## `ibcmd-rs` 0.4.0: сборка и разборка пакетов без платформы
+
+Замер 07.10.2026. Задача: [#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413).
+Выпуск `v0.4.0` из `github.com/Untru/ibcmd-rs`, архив `ibcmd-rs-0.4.0-x86_64-unknown-linux-gnu.zip`
+(SHA-256 `f9b892cb…888db5` совпал с опубликованным). Запуск — контейнер `ubuntu:24.04`
+linux/amd64 под эмуляцией на macOS, без сети. Входы — выгрузка 8.3.27.2074 той же фикстуры
+`tests/fixtures/designer/*` и пакеты, собранные платформой (раздел «Сборка `make` во временной
+базе»).
+
+**Распространение.** Сборки есть только для Windows x64 и Linux x64; для macOS и arm64 сборок
+нет. Linux-сборке нужна glibc ≥ 2.39: в Ubuntu 22.04 (glibc 2.35, образы стенда) она не
+запускается — «version `GLIBC_2.39' not found». **Лицензии нет**: в репозитории нет файла
+лицензии, GitHub лицензию не определяет (404), у `Cargo.toml` и SBOM выпуска поле лицензии
+пусто. Сам README называет проект экспериментом до версии 1.0.
+
+**CLI.** `ibcmd-rs --version` → `ibcmd-rs 0.4.0`. Сборка `.cf` из XML —
+`cf bootstrap [--platform <8.3.27|8.5.1|сборка>] <каталог> <файл>`; существующий файл не
+перезаписывается. Разборка — `cf export [--platform …] <файл> <каталог>`, тип пакета
+определяется сам. Ответ — JSON в stdout при успехе и в stderr при отказе (`ok`, `errors[]` с
+`code`, `message`, `element`). Коды: 0 — успех, 2 — отказ сборки и ошибка командной строки
+(clap); код 1 «не поддерживается» в замере не встретился. Ключа `--base-free`, описанного в
+README и `docs/COMMANDS.md` ветки `master`, у выпуска 0.4.0 нет: «unexpected argument
+'--base-free'», rc=2.
+
+**Сборка `.cf` из XML не работает на фикстуре.** `cf bootstrap` на дереве, которое выгрузила
+сама платформа 8.3.27.2074 (`--platform` не задан, `8.3.27` или `8.3.27.2214` — одинаково),
+отказывает с rc=2 до записи файла. Ниже — объекты, на которых он отказывал, если по очереди
+убирать каждый следующий:
+
+| объект | отказ |
+| --- | --- |
+| регистры бухгалтерии, накопления и расчёта, бизнес-процесс, справочник, планы счетов, видов расчёта и видов характеристик | `bootstrap_compile_failed`: `InvalidEnvelope("business object property inventory is not exact")` |
+| бот, общий реквизит, общая форма, общий макет | `uses unsupported family \`Bot\`` (`CommonAttribute`, `CommonForm`, `CommonTemplate`) |
+| `Configuration.xml` после удаления объектов | `Missing("uuid")` |
+
+Обычный справочник из выгрузки 8.3.27.2074 не собирается. `.cfe` и `.epf` тем же
+`bootstrap` не мерили: сборка основной конфигурации не прошла.
+
+**Разборка пакета в XML работает частично.** `cf export` пакетов, собранных платформой:
+
+| пакет | rc | итог |
+| --- | --- | --- |
+| `.cfe` (`Расширение1`) | 0 | дерево равно исходникам, кроме `ConfigDumpInfo.xml` |
+| `.epf`, в том числе с реквизитом `CatalogRef.Справочник1`; `.erf` | 0 | побайтно равно выгрузке платформы `/DumpExternalDataProcessorOrReportToFiles` |
+| `.cf` фикстуры | **0, `ok: true`** | 47 файлов из 51: нет `ChartsOfAccounts`, `ChartsOfCalculationTypes`, `FilterCriteria`, `WebSocketClients`; в `Configuration.xml` нет `ChildObjects`; ещё 7 файлов отличаются. Пропуски видны только в `export.storage.entries[]` (`disposition: "opaque"`, `message: "… not written …"`; итог `supported: 46, opaque: 7, failed: 0`). Ни код возврата, ни `ok`, ни `errors` о них не говорят |
+
+```text
+docker run --rm --platform linux/amd64 --network none -v <S>:/s ubuntu:24.04 /s/irs/x/ibcmd-rs-0.4.0-x86_64-unknown-linux-gnu/ibcmd-rs …
+ibcmd-rs cf bootstrap [--platform 8.3.27] /s/w/d0 /s/irs/out/b.cf        # rc=2
+ibcmd-rs cf bootstrap --base-free --platform 8.3.27 /s/w/d0 /s/irs/out/b.cf   # rc=2, нет ключа
+ibcmd-rs cf export --platform 8.3.27 /s/irs/out/d.cf /s/irs/out/x_d.cf    # rc=0, 7 элементов opaque
+ibcmd-rs cf export --platform 8.3.27 /s/irs/out/p.epf /s/irs/out/x_p.epf  # rc=0, равно платформе
+```
+
+**Вывод для потребителей.** Адаптер `make` через `ibcmd-rs` (#413) на выпуске 0.4.0 строить не
+на чем: сборка `.cf` из XML отказывает на обычной конфигурации 8.3.27.2074, ключ `--base-free`
+не выпущен. В `convert` пакет → XML (#236) годятся `.cfe`, `.epf` и `.erf`. Разборку `.cf`
+раннеру без своей проверки полноты принимать нельзя: неполное дерево приходит с rc=0 и
+`ok: true`, пропуски названы только в `opaque`. Без лицензии `tools download ibcmd-rs` и
+распространение исключены; остаётся путь к утилите из настроек. Windows и macOS не мерены:
+macOS-сборки нет, Windows на стенде нет.
