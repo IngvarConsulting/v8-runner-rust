@@ -1632,6 +1632,10 @@ fn convert_an_external_set_to_a_package_is_refused() {
 
     assert_eq!(output.status.code(), Some(2), "{envelope}");
     assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+    assert!(
+        envelope["error"]["next"].to_string().contains("make"),
+        "the refusal names make as the way out: {envelope}"
+    );
     assert!(project.calls().is_empty());
 }
 

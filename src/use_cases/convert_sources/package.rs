@@ -142,7 +142,25 @@ fn resolve_source_sets(
     let inventory = SourceSetInventory::new(config);
     let packages: Vec<(&SourceSetConfig, Option<&str>)> = match &request.scope {
         ConvertScopeRequest::SourceSet { name } => {
-            vec![inventory.configuration_package(name, CommandName::Convert)?]
+            // Набор внешних файлов пакета конфигурации не называет: его собирает `make`, и
+            // отказ называет этот выход в `next`.
+            vec![inventory
+                .configuration_package(name, CommandName::Convert)
+                .map_err(|error| {
+                    if inventory
+                        .source_set(name)
+                        .is_some_and(|source_set| source_set.purpose.is_external())
+                    {
+                        AppError::Refused(Box::new(
+                            crate::use_cases::result::UseCaseError::from(error).with_next(
+                                crate::domain::next_step::NextStep::command("make")
+                                    .for_source_set(name.clone()),
+                            ),
+                        ))
+                    } else {
+                        error
+                    }
+                })?]
         }
         _ => inventory.configuration_packages(),
     };
