@@ -6,6 +6,9 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use support::command_data::assert_data_matches_its_command_form;
+use support::fake_agent::{
+    managed_agent_double, read_or_empty, write_fake_designer, write_fake_designer_for_user,
+};
 use support::{
     hold_workspace_lock, interruptible_stub, temp_workspace, terminate_and_wait, v8_runner_command,
     wait_for_file, write_shell_script as write_script, RunnerGuard,
@@ -64,7 +67,13 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
 
     let output = v8_runner_command()
         .args(bootstrap_args(
@@ -110,8 +119,15 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
         .exists());
 
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("/DumpConfigToFiles"));
+    assert!(read_or_empty(&agent.commands_log).contains("config dump-config-to-files"));
     assert!(calls.contains(&format!("/F {tmp}/source ib")));
+    // Порт агента не объявлен: раннер берёт свободный на этот запуск, а не `1543`.
+    let port = calls
+        .split("/AgentPort ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("agent port");
+    assert_ne!(port, "1543", "{calls}");
 }
 
 /// `--source-dir ./src`: `v8project.yaml` хранит написание пользователя, а argv платформы,
@@ -125,7 +141,13 @@ fn clone_with_a_dotted_source_dir_hands_the_platform_a_clean_path() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
     let mut args = bootstrap_args(
         &project_dir,
         &platform_path,
@@ -157,7 +179,10 @@ fn clone_with_a_dotted_source_dir_hands_the_platform_a_clean_path() {
     assert_eq!(payload["data"]["source_dir"], expected.as_str());
     assert_eq!(payload["data"]["dump_target_path"], expected.as_str());
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("/DumpConfigToFiles"), "{calls}");
+    assert!(
+        read_or_empty(&agent.commands_log).contains("config dump-config-to-files"),
+        "{calls}"
+    );
     assert!(!calls.contains("/./"), "{calls}");
     assert!(project_dir.join("src/Configuration.xml").exists());
 }
@@ -170,7 +195,13 @@ fn bootstrap_unquotes_simple_file_connection_path() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
 
     let output = v8_runner_command()
         .args(bootstrap_args(
@@ -205,7 +236,14 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer_for_user(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+        "Admin",
+    );
     let mut args = bootstrap_args(
         &project_dir,
         &platform_path,
@@ -233,7 +271,11 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
         .output()
         .expect("run command");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "clone");
@@ -259,10 +301,18 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     assert!(local.contains("user: 'Admin'"));
     assert!(local.contains("password: 'super-secret'"));
     let log = fs::read_to_string(action_log).expect("action log");
-    assert!(!log.contains("Admin"));
+    assert!(
+        !log.contains("Admin"),
+        "{}",
+        log.lines()
+            .filter(|line| line.contains("Admin"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     assert!(!log.contains("super-secret"));
-    assert!(log.contains("/N ***"));
-    assert!(log.contains("/P ***"));
+    // Учётные данные уходят агенту входом в сессию, а не ключами запуска: журнал называет
+    // сессию и не называет ни пользователя, ни пароль.
+    assert!(log.contains("opening agent session"), "{log}");
 }
 
 #[test]
@@ -273,7 +323,13 @@ fn bootstrap_preserves_non_secret_connection_attributes() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
 
     let output = v8_runner_command()
         .args(bootstrap_args(
@@ -382,7 +438,13 @@ fn bootstrap_force_overwrites_existing_targets() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
     fs::create_dir_all(project_dir.join("src/configuration")).expect("source dir");
     fs::write(project_dir.join("v8project.yaml"), "existing").expect("config");
     fs::write(project_dir.join("v8project.local.yaml"), "existing").expect("local");
@@ -506,7 +568,17 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 17);
+    let agent = managed_agent_double();
+    write_fake_designer_for_user(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+        "Admin",
+    );
+    agent
+        .fail_dump
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let action_log = dir.path().join("actions.log");
     let mut args = bootstrap_args(
         &project_dir,
@@ -547,7 +619,7 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
     assert_eq!(payload["data"]["dumped"], false);
     // Упавшая выгрузка — не превью: платформа запускалась и отказала. Без этой строки
     // подмена признака на `false` сделала бы отказ неотличимым от плана.
-    assert_eq!(payload["data"]["provider_dispatched"], true);
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     assert!(payload["data"]["path"]
         .as_str()
         .expect("path")
@@ -557,7 +629,14 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
         .expect("target")
         .contains("src/configuration"));
     let log = fs::read_to_string(action_log).expect("action log");
-    assert!(!log.contains("Admin"));
+    assert!(
+        !log.contains("Admin"),
+        "{}",
+        log.lines()
+            .filter(|line| line.contains("Admin"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     assert!(!log.contains("super-secret"));
 }
 
@@ -673,12 +752,7 @@ fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
     // Ответ есть — значит, сигнал раннер не убил, а отменил: выгрузка снята и названа.
     let payload: Value = serde_json::from_str(&stdout).expect("one json document");
     assert_eq!(payload["ok"], false, "{payload}");
-    assert!(
-        payload["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("process cancelled")),
-        "{payload}"
-    );
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
     assert_eq!(status.code(), Some(4), "{payload}");
 }
 
@@ -1212,7 +1286,13 @@ fn clone_preview_text_output_does_not_announce_a_cloned_project() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
     let mut args = bootstrap_args(
         &project_dir,
         &platform_path,
@@ -1267,7 +1347,13 @@ fn clone_resolves_a_symlinked_project_directory_to_its_target() {
     std::os::unix::fs::symlink(&target, &link).expect("symlink");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
     let mut args = bootstrap_args(&link, &platform_path, &format!("File={tmp}/source-ib"));
     args.insert(0, "--json-message".to_owned());
     args.push("--dry-run".to_owned());
@@ -1315,7 +1401,13 @@ fn clone_into_a_subdirectory_of_a_repository_writes_the_project_gitignore() {
     let project_dir = repo.join("apps").join("erp");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
     let mut args = bootstrap_args(
         &project_dir,
         &platform_path,
@@ -1362,7 +1454,13 @@ fn clone_takes_its_source_from_the_from_key() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
 
     let output = v8_runner_command()
         .args([
@@ -1516,7 +1614,13 @@ fn clone_into_a_directory_holding_only_git_writes_the_project() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
     fs::create_dir_all(project_dir.join(".git")).expect("git dir");
     fs::write(project_dir.join(".git/HEAD"), "ref: refs/heads/master\n").expect("head");
 
@@ -1543,7 +1647,13 @@ fn clone_force_writes_the_project_into_a_non_empty_directory() {
     let project_dir = dir.path().join("project");
     let platform_path = dir.path().join("1cv8");
     let calls_log = dir.path().join("calls.log");
-    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
     fs::create_dir_all(&project_dir).expect("project dir");
     fs::write(project_dir.join("notes.txt"), "user file").expect("user file");
     let mut args = bootstrap_args(

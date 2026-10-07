@@ -99,10 +99,11 @@ fn run_cli_json_with_status(config_path: &Path, args: &[&str]) -> (bool, Value) 
 
 fn write_config(path: &Path, _base_path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(path, config).expect("config");
 }
 
@@ -135,12 +136,13 @@ fn write_designer_config_with_options(
     max_concurrent_calls: usize,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
         work_path.display(),
         max_concurrent_calls,
         platform_path.display(),
         command_timeout_ms,
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(path, config).expect("designer config");
 }
 
@@ -271,10 +273,11 @@ fn write_designer_suite_config(
     platform_path: &Path,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=ib'\ntests:\n  execution_timeout_seconds: 5\nmcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\n{designer_leads}infobase:\n  connection: 'File=ib'\ntests:\n  execution_timeout_seconds: 5\nmcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
-    );
+ designer_leads = support::DESIGNER_LEADS,
+);
     fs::write(path, config).expect("designer suite config");
 }
 
@@ -1597,45 +1600,6 @@ async fn mcp_stdio_dump_config_partial_ibcmd_returns_degraded_success() {
     assert!(fs::read_to_string(calls_log)
         .expect("ibcmd calls")
         .contains("--sync"));
-
-    client.cancel().await.expect("cancel client");
-}
-
-#[tokio::test]
-async fn mcp_stdio_dump_config_full_ibcmd_server_contract_passes_dbms_and_infobase_credentials() {
-    let (_dir, config_path, calls_log) = setup_ibcmd_dump_project_with_infobase(
-        None,
-        "  connection: 'Srvr=server;Ref=main'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: maindb\n    user: postgres\n    password: pg-secret\n",
-    );
-    let transport = TokioChildProcess::new(
-        tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
-            cmd.arg("--config")
-                .arg(config_path.as_os_str())
-                .arg("mcp")
-                .arg("serve")
-                .arg("stdio");
-        }),
-    )
-    .expect("spawn stdio transport");
-
-    let client = ().serve(transport).await.expect("connect rmcp client");
-    let response =
-        client
-            .peer()
-            .call_tool(CallToolRequestParams::new("dump_config").with_arguments(
-                serde_json::from_value(json!({ "mode": "FULL" })).expect("arguments"),
-            ))
-            .await
-            .expect("call tool");
-
-    assert_eq!(response.is_error, Some(false));
-    let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "pull");
-    assert_eq!(payload["data"]["ok"], true);
-    let calls = fs::read_to_string(calls_log).expect("ibcmd calls");
-    assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
-    assert!(calls.contains("--user Admin --password secret"));
-    assert!(calls.contains("--database-user postgres --database-password pg-secret"));
 
     client.cancel().await.expect("cancel client");
 }

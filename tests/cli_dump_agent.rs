@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use support::fake_agent::{
-    fingerprint_of, process_is_alive, random_host_key, read_or_empty,
+    fingerprint_of, process_is_alive, random_host_key, read_or_empty, serve_managed_launches,
     start_fake_agent_with_host_key, write_fake_designer, write_host_key_file, FakeAgent,
     FakeExtension, AGENT_PASSWORD,
 };
@@ -47,21 +47,21 @@ fn commit_project(harness: &Harness) {
 }
 
 fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
-    harness_with(with_designer, agent, attach, random_host_key(), |_| {
-        String::new()
-    })
+    harness_with(with_designer, agent, attach, None, |_| String::new())
 }
 
 /// То же, но ключ хоста двойника и добавка к `tools.designer_agent` — от вызывающего.
 /// Так проверяется сверка ключа: двойник держит один ключ, конфигурация называет другой.
+/// `host_key: None` — управляемый двойник держит ключ, который раннер отдал агенту.
 fn harness_with(
     with_designer: bool,
     agent: Option<bool>,
     attach: bool,
-    host_key: russh::keys::PrivateKey,
+    host_key: Option<russh::keys::PrivateKey>,
     agent_extra: impl Fn(&russh::keys::PrivateKey) -> String,
 ) -> Harness {
-    let extra_yaml = agent_extra(&host_key);
+    let key = host_key.clone().unwrap_or_else(random_host_key);
+    let extra_yaml = agent_extra(&key);
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let base_path = root.join("project");
@@ -98,10 +98,15 @@ fn harness_with(
                 designer_pid_file.clone(),
             );
             let extensions = Arc::clone(&agent.extensions);
-            (
-                start_fake_agent_with_host_key(agent, host_key),
-                Some(extensions),
-            )
+            let port = if attach {
+                start_fake_agent_with_host_key(agent, key)
+            } else {
+                // Управляемый двойник поднимается вместе с поддельным `1cv8` на порту и с
+                // ключом, которые раннер передал агенту.
+                serve_managed_launches(agent, host_key);
+                support::free_tcp_port()
+            };
+            (port, Some(extensions))
         }
         None => (support::free_tcp_port(), None),
     };
@@ -151,7 +156,7 @@ fn harness_with(
 fn an_attached_agent_that_presents_another_key_is_refused_by_name() {
     let someone_else = fingerprint_of(&random_host_key());
     let expected = someone_else.clone();
-    let harness = harness_with(false, Some(true), true, random_host_key(), move |_| {
+    let harness = harness_with(false, Some(true), true, None, move |_| {
         format!("    host-fingerprint: '{someone_else}'\n")
     });
 
@@ -170,11 +175,11 @@ fn an_attached_agent_that_presents_another_key_is_refused_by_name() {
 
 /// Управляемый агент закрепляется тем же файлом, который раннер отдаёт платформе.
 ///
-/// Именно это утверждение несёт решение: раннер не занимает порт `1543`, а подключается
-/// к тому, кто ответил. Здесь ответил не тот.
+/// Ответил не тот, кому раннер отдал ключ: сессия к нему не открывается.
 #[test]
 fn a_managed_agent_is_pinned_by_the_host_key_file_it_was_given() {
-    let harness = harness_with(true, Some(true), false, random_host_key(), |_| {
+    // Двойник предъявляет свой ключ, а не тот, что объявлен в `host-key`.
+    let harness = harness_with(true, Some(true), false, Some(random_host_key()), |_| {
         String::new()
     });
     let key_file = harness.dir.path().join("host_key");
@@ -197,6 +202,52 @@ fn a_managed_agent_is_pinned_by_the_host_key_file_it_was_given() {
     );
     let message = payload["error"]["message"].as_str().unwrap_or_default();
     assert!(message.contains("host key"), "{message}");
+}
+
+/// Ключ хоста не объявлен, а на порту агента ответил SSH-сервер с другим ключом: раннер
+/// закрепил сессию на одноразовом ключе, который отдал агенту, и к чужому не подключается.
+#[test]
+fn a_managed_agent_without_a_declared_key_refuses_a_foreign_key_on_its_port() {
+    let harness = harness_with(true, Some(true), false, Some(random_host_key()), |_| {
+        String::new()
+    });
+
+    let (code, payload) = run_dump(&harness, &["--force"]);
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(
+        payload["error"]["code"], "environment_unavailable",
+        "{payload}"
+    );
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("not with the key the runner handed to the agent it launched"),
+        "{message}"
+    );
+    // Одноразовый ключ уходит вместе с агентом и на пути отказа.
+    let keys = harness
+        .dir
+        .path()
+        .join("work")
+        .join("agent")
+        .join("host-keys");
+    let left = fs::read_dir(&keys)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        left.is_empty(),
+        "one-time host keys outlived the refusal: {left:?}"
+    );
+    assert!(
+        commands(&harness).is_empty(),
+        "no command reaches a foreign agent: {:?}",
+        commands(&harness)
+    );
 }
 
 fn run_dump(harness: &Harness, extra: &[&str]) -> (i32, Value) {
@@ -261,7 +312,7 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
         "/AgentMode",
         &format!("/AgentPort {}", harness.port),
         "/AgentListenAddress 127.0.0.1",
-        "/AgentSSHHostKeyAuto",
+        "/AgentSSHHostKey ",
         "/AgentBaseDir ",
     ] {
         assert!(
@@ -270,6 +321,25 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
         );
     }
     assert!(!designer_args.contains("/P "), "{designer_args}");
+    // Ключ хоста не объявлен: раннер создал одноразовый под `workPath` и после сессии его
+    // удалил; ключа платформы (`/AgentSSHHostKeyAuto`) он не берёт.
+    assert!(
+        !designer_args.contains("/AgentSSHHostKeyAuto"),
+        "{designer_args}"
+    );
+    let key_file = designer_args
+        .split("/AgentSSHHostKey ")
+        .nth(1)
+        .and_then(|rest| rest.split(" /").next())
+        .expect("host key argument");
+    assert!(
+        Path::new(key_file).starts_with(harness.dir.path().join("work").join("agent")),
+        "{key_file}"
+    );
+    assert!(
+        !Path::new(key_file).exists(),
+        "the one-time host key outlived its agent: {key_file}"
+    );
     let base_dir = read_or_empty(&harness.base_dir_file);
     assert!(
         Path::new(&base_dir).starts_with(harness.dir.path().join("work")),

@@ -109,6 +109,9 @@ enum DetailKind {
     Artifact,
     /// `[diagnostic] …`, `[detail] …` и прочие пометки-улики.
     Note,
+    /// `[skipped:исполнитель] причина` — кого выбор исполнителя пропустил. Пометка называет
+    /// предмет строки, поэтому одна причина у разных исполнителей — разные строки.
+    Skipped,
     /// `[warning] …` — сделано, но не так, как просили.
     Warning,
     /// `[error] …`, `[error:код] …` — не сделано.
@@ -122,6 +125,7 @@ fn detail_kind(line: &str) -> DetailKind {
         return match label {
             "[warning]" => DetailKind::Warning,
             "[artifact]" => DetailKind::Artifact,
+            _ if label.starts_with("[skipped:") => DetailKind::Skipped,
             _ if label == "[error]" || label.starts_with("[error:") => DetailKind::Error,
             _ => DetailKind::Note,
         };
@@ -194,6 +198,7 @@ pub fn text_output_grammar() -> Value {
             {"kind": "mark", "pattern": "^[✓✗○→] .*$", "description": "шаг со своим исходом"},
             {"kind": "artifact", "pattern": "^\\[artifact\\] .*$", "description": "что легло на диск"},
             {"kind": "note", "pattern": "^\\[[a-z][a-z0-9_-]*\\] .*$", "description": "пометка-улика"},
+            {"kind": "skipped", "pattern": "^\\[skipped:[a-z0-9-]+\\] .*$", "description": "исполнитель, пропущенный выбором, и причина"},
             {"kind": "warning", "pattern": "^\\[warning\\] .*$", "description": "сделано не так, как просили"},
             {"kind": "error", "pattern": "^\\[error(:[a-z0-9_]+)?\\] .*$", "description": "не сделано"}
         ]
@@ -371,6 +376,12 @@ fn drop_repeated_messages(lines: &mut Vec<String>) {
             kept.push(line.clone());
             continue;
         };
+        // Пропуск — свой вид строки: одна причина у двух исполнителей — два разных факта, а
+        // не повтор (агент и Конфигуратор ждут одну и ту же платформу).
+        if detail_kind(line) == DetailKind::Skipped {
+            kept.push(line.clone());
+            continue;
+        }
         if seen_later.insert(message.trim().to_owned()) {
             kept.push(line.clone());
         }
@@ -472,6 +483,25 @@ mod tests {
                 "[diagnostic] log -> a.log",
                 "[warning] slow",
                 "[error:dump_failed] no",
+            ]
+        );
+    }
+
+    /// Одна причина пропуска у разных исполнителей — не повтор: печатаются обе строки, а
+    /// тот же текст под другой пометкой по-прежнему схлопывается.
+    #[test]
+    fn skipped_providers_with_one_reason_are_both_printed() {
+        let item = super::TimelineItem::new(super::TimelineStatus::Succeeded, "download")
+            .with_detail(
+                "[skipped:agent] 1cv8 was not found\n[skipped:designer] 1cv8 was not found\n[diagnostic] slow\n[warning] slow",
+            );
+        let ordered = super::ordered_details(&item);
+        assert_eq!(
+            ordered,
+            vec![
+                "[skipped:agent] 1cv8 was not found",
+                "[skipped:designer] 1cv8 was not found",
+                "[warning] slow",
             ]
         );
     }

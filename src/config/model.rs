@@ -797,12 +797,48 @@ impl AppConfig {
                     .unwrap_or_else(|| crate::config::loader::DEFAULT_CONFIG_FILE_NAME.to_owned()),
             },
             None => ProviderPlan::Default {
-                chain: capability::default_chain(operation, self.target_kind())
-                    .into_iter()
-                    .filter(|provider| self.missing_way(operation, *provider).is_none())
-                    .collect(),
+                chain: self.default_chain_shaped(operation, self.project_shape()),
             },
         }
+    }
+
+    /// Форма проекта, которая сужает цепочки умолчаний (`capability::serves_project`).
+    pub fn project_shape(&self) -> capability::ProjectShape {
+        capability::ProjectShape {
+            edt_sources: self.format == SourceFormat::Edt,
+            tool_extension: self.tools.client_mcp.extension.is_some(),
+        }
+    }
+
+    /// Исполнитель `push` при объявленном расширении-инструменте: так спрашивает тот, кто
+    /// расширение только собирается объявить (`tools download client-mcp`).
+    pub fn push_provider_with_tool_extension(&self) -> Option<Provider> {
+        match self.providers.get(&Operation::Build) {
+            Some(provider) => Some(*provider),
+            None => self
+                .default_chain_shaped(
+                    Operation::Build,
+                    capability::ProjectShape {
+                        tool_extension: true,
+                        ..self.project_shape()
+                    },
+                )
+                .into_iter()
+                .next(),
+        }
+    }
+
+    /// Цепочка умолчаний для проекта данной формы: строка матрицы без исполнителей, которые
+    /// такой проект не обслуживают, и без тех, чей путь к автономному серверу не объявлен.
+    fn default_chain_shaped(
+        &self,
+        operation: Operation,
+        shape: capability::ProjectShape,
+    ) -> Vec<Provider> {
+        capability::default_chain_for(operation, self.target_kind(), shape)
+            .into_iter()
+            .filter(|provider| self.missing_way(operation, *provider).is_none())
+            .collect()
     }
 
     /// The provider an operation would dispatch to, or `None` where the target has no
@@ -1291,10 +1327,12 @@ pub struct DesignerAgentConfig {
     /// Attached mode only; the managed agent always works under `workPath`.
     pub base_dir: Option<PathBuf>,
 
-    /// Port the managed agent listens on. Managed mode; default `1543`.
+    /// Port the managed agent listens on. Managed mode; absent: a free loopback port chosen
+    /// for each launch.
     pub port: Option<u16>,
 
-    /// Private host key for the managed agent. Absent: `/AgentSSHHostKeyAuto`.
+    /// Private host key for the managed agent. Absent: a one-time ED25519 key generated for
+    /// each launch under `workPath`, handed to the agent and pinned for the session.
     pub host_key: Option<PathBuf>,
 
     /// `SHA256:…` fingerprint the attached agent must present. Attached mode only:
@@ -1322,14 +1360,12 @@ impl Default for DesignerAgentConfig {
     }
 }
 
-/// Default SSH port of a Designer agent.
-pub const DEFAULT_DESIGNER_AGENT_PORT: u16 = 1543;
-
 /// The mode the keys of `tools.designer_agent` describe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesignerAgentMode {
     /// The runner launches `1cv8 DESIGNER … /AgentMode` and owns its lifetime.
-    Managed { port: u16 },
+    /// `port: None` — свободный порт на каждый запуск.
+    Managed { port: Option<u16> },
     /// The runner connects to an agent it did not start and never restarts it.
     Attached { host: Host, port: u16 },
 }
@@ -1362,9 +1398,7 @@ impl DesignerAgentConfig {
     /// Mode derived from the keys; `attach` that does not parse is reported as such.
     pub fn mode(&self) -> Result<DesignerAgentMode, String> {
         match self.attach.as_deref() {
-            None => Ok(DesignerAgentMode::Managed {
-                port: self.port.unwrap_or(DEFAULT_DESIGNER_AGENT_PORT),
-            }),
+            None => Ok(DesignerAgentMode::Managed { port: self.port }),
             Some(attach) => {
                 let (host, port) = ssh_endpoint(attach)?;
                 Ok(DesignerAgentMode::Attached { host, port })

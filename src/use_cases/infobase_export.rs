@@ -1139,6 +1139,16 @@ fn readiness(
         }
     } else {
         match intent {
+            // Сессия агента открывается к базе проекта, а `--create` ждёт, что базы ещё
+            // нет: агент такую цель не обслуживает, и цепочка идёт к следующему.
+            InfobaseTransferIntent::SnapshotRestore {
+                expects_absent_target: true,
+            } if provider == Provider::Agent => {
+                return Err(
+                    "the agent restores the infobase its session opens, and --create expects no infobase yet"
+                        .to_owned(),
+                );
+            }
             InfobaseTransferIntent::SnapshotRestore {
                 expects_absent_target: true,
             } => validate_restore_target_connection(config)?,

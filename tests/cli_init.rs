@@ -12,13 +12,14 @@ const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNatu
 const V8_EXTENSION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExtensionNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
 
-/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
-/// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
+/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — Конфигуратор первым,
+/// `IBCMD` — `ibcmd` у создания базы: тесты здесь гоняют только его, а у кластера `ibcmd`
+/// остался только в этой строке.
 fn providers_yaml(builder: &str) -> &'static str {
     if builder == "IBCMD" {
-        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
+        "providers:\n  init: ibcmd\n"
     } else {
-        ""
+        support::DESIGNER_LEADS
     }
 }
 

@@ -80,9 +80,10 @@ impl Project {
         fs::write(
             &config,
             format!(
-                "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\n  - name: ext\n    type: EXTENSION\n    path: ext\ntools:\n  platform:\n    path: '{}'\n",
-                bin.display()
-            ),
+                "workPath: work\nformat: DESIGNER\n{designer_leads}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\n  - name: ext\n    type: EXTENSION\n    path: ext\ntools:\n  platform:\n    path: '{}'\n",
+                bin.display(),
+ designer_leads = support::DESIGNER_LEADS,
+),
         )
         .expect("config");
         fs::write(
@@ -442,8 +443,8 @@ fn status_deep_where_push_does_not_load_with_this_executor_answers_null_with_a_r
     fs::write(
         &project.config,
         config.replace(
-            "format: DESIGNER\n",
-            "format: EDT\nproviders:\n  build: agent\n",
+            "format: DESIGNER\nproviders:\n  push: designer\n",
+            "format: EDT\nproviders:\n  push: agent\n",
         ),
     )
     .expect("EDT project pushed by the agent");

@@ -5,9 +5,9 @@
 //! код: порядок в цепочке назначает владелец проекта, и правка порядка — изменение
 //! поведения, видимое в квитанции.
 //!
-//! На этом шаге цепочки повторяют вчерашний выбор по ключу `builder`: первым стоит тот,
-//! кого раннер брал по умолчанию, вторым — тот, кого можно было назначить ключом. Замер
-//! каждой строки записан как улика и воротами не является.
+//! Порядок цепочек повторяет `target()` сайта (`docs/site/data.js`): у файловой базы
+//! `agent → designer → ibcmd`, у кластера `agent → designer` (#206). Замер каждой строки
+//! записан как улика и воротами не является.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -260,19 +260,21 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     // 8.5.4.1878). `ibcmd` о кластере не знает и строки не имеет; запасной путь `rac` — не
     // исполнитель матрицы и ещё не реализован (#213).
     const CREATE_CLUSTER: &[Capability] = &[implemented(Designer, ArgvTested)];
-    // Агент назначается только ключом `providers.<op>: agent`: его место в цепочке
-    // умолчаний назначает владелец. Путь раннера через агента прогнан вживую
-    // 15.09.2026 на 8.3.27.2074: полная и частичная загрузка с `update-db-cfg` в одной
-    // сессии, полная выгрузка через staging, короткое замыкание по поколению.
-    const DUMP: &[Capability] = &[
+    // Агент стоит первым у файловой базы и у кластера: порядок назначил владелец (#206).
+    // Путь раннера через агента прогнан вживую 15.09.2026 на 8.3.27.2074: полная и
+    // частичная загрузка с `update-db-cfg` в одной сессии, полная выгрузка через staging,
+    // короткое замыкание по поколению. Побайтовое равенство выгрузок агента и
+    // Конфигуратора не замерено (#420); найденные расхождения допустимы и описываются в
+    // `docs/CAPABILITIES.md`. `ibcmd` — только у файловой базы: к базе под кластером
+    // его в умолчаниях нет.
+    const AGENT_DESIGNER_IBCMD: &[Capability] = &[
+        implemented(Agent, LiveVerified),
         implemented(Designer, LiveVerified),
         implemented(Ibcmd, ArgvTested),
-        experimental(Agent, LiveVerified),
     ];
-    const BUILD: &[Capability] = &[
+    const AGENT_DESIGNER: &[Capability] = &[
+        implemented(Agent, LiveVerified),
         implemented(Designer, LiveVerified),
-        implemented(Ibcmd, ArgvTested),
-        experimental(Agent, LiveVerified),
     ];
     const DESIGNER_ONLY: &[Capability] = &[implemented(Designer, LiveVerified)];
     // Шлюз прогнан раннером на живом `ibsrv` 8.3.27 15.09.2026: build (полная и частичная
@@ -306,41 +308,56 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     // строки не имеет.
     const CONVERT: &[Capability] = &[implemented(Ibcmd, ArgvTested)];
     // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
-    // прогнаны раннером на 8.3.27 15.09.2026.
-    const EXTENSIONS: &[Capability] = &[
+    // прогнаны раннером на 8.3.27 15.09.2026. У файловой базы состав и свойства первым
+    // читает `ibcmd`; у кластера — только агент: `ibcmd` к базе под кластером в
+    // умолчаниях нет, а адаптера Конфигуратора у семейства `extensions` нет:
+    // имена он перечисляет (`/DumpDBCfgList`), свойств не отдаёт.
+    const EXTENSIONS_FILE: &[Capability] = &[
         implemented(Ibcmd, LiveVerified),
-        experimental(Agent, LiveVerified),
+        implemented(Agent, LiveVerified),
     ];
+    const EXTENSIONS_CLUSTER: &[Capability] = &[implemented(Agent, LiveVerified)];
     // Агент: `config dump-cfg` для рабочей конфигурации прогнан раннером 15.09.2026.
-    const EXPORT: &[Capability] = &[
+    const EXPORT_FILE: &[Capability] = &[
+        implemented(Agent, LiveVerified),
         implemented(Designer, ArgvTested),
         implemented(Ibcmd, ArgvTested),
-        experimental(Agent, LiveVerified),
+    ];
+    const EXPORT_CLUSTER: &[Capability] = &[
+        implemented(Agent, LiveVerified),
+        implemented(Designer, ArgvTested),
     ];
     // Агент: `infobase-tools dump-ib` и `restore-ib` (с обрывом сессии после загрузки)
-    // прогнаны раннером 15.09.2026.
-    const SNAPSHOT: &[Capability] = &[
+    // прогнаны раннером 15.09.2026. `ibcmd` снимает и возвращает `.dt` файловой базы
+    // только по явному ключу `providers.*` (#226); у кластера его в строке нет.
+    const SNAPSHOT_FILE: &[Capability] = &[
+        implemented(Agent, LiveVerified),
         implemented(Designer, ArgvTested),
         experimental(Ibcmd, Documented),
-        experimental(Agent, LiveVerified),
+    ];
+    const SNAPSHOT_CLUSTER: &[Capability] = &[
+        implemented(Agent, LiveVerified),
+        implemented(Designer, ArgvTested),
     ];
 
     match (operation, target) {
         (Operation::Init, TargetKind::File) => CREATE_FILE,
         (Operation::Init, TargetKind::Cluster) => CREATE_CLUSTER,
-        (Operation::Build, TargetKind::File | TargetKind::Cluster) => BUILD,
-        (Operation::Dump, TargetKind::File | TargetKind::Cluster) => DUMP,
+        (Operation::Build | Operation::Dump, TargetKind::File) => AGENT_DESIGNER_IBCMD,
+        (Operation::Build | Operation::Dump, TargetKind::Cluster) => AGENT_DESIGNER,
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
             DESIGNER_ONLY
         }
         (Operation::Make, _) => MAKE,
         (Operation::Convert, _) => CONVERT,
-        (Operation::Extensions, TargetKind::File | TargetKind::Cluster) => EXTENSIONS,
-        (Operation::ConfigurationExport, TargetKind::File | TargetKind::Cluster) => EXPORT,
-        (
-            Operation::InfobaseDump | Operation::InfobaseRestore,
-            TargetKind::File | TargetKind::Cluster,
-        ) => SNAPSHOT,
+        (Operation::Extensions, TargetKind::File) => EXTENSIONS_FILE,
+        (Operation::Extensions, TargetKind::Cluster) => EXTENSIONS_CLUSTER,
+        (Operation::ConfigurationExport, TargetKind::File) => EXPORT_FILE,
+        (Operation::ConfigurationExport, TargetKind::Cluster) => EXPORT_CLUSTER,
+        (Operation::InfobaseDump | Operation::InfobaseRestore, TargetKind::File) => SNAPSHOT_FILE,
+        (Operation::InfobaseDump | Operation::InfobaseRestore, TargetKind::Cluster) => {
+            SNAPSHOT_CLUSTER
+        }
         (Operation::Publish, TargetKind::File | TargetKind::Cluster) => WEBINST_ONLY,
         // Автономный сервер раннер не запускает и не создаёт, поэтому `init` и `publish`
         // строк не имеют: базу сервера создают до его запуска, HTTP он отдаёт сам.
@@ -370,6 +387,59 @@ pub fn default_chain(operation: Operation, target: TargetKind) -> Vec<Provider> 
         .iter()
         .filter(|capability| capability.implementation == Implementation::Implemented)
         .map(|capability| capability.provider)
+        .collect()
+}
+
+/// Что в проекте сужает цепочку умолчаний.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProjectShape {
+    /// Исходники в формате EDT (`format: EDT`).
+    pub edt_sources: bool,
+    /// Объявлено расширение-инструмент (`tools.client_mcp.extension`), которое ставит `push`.
+    pub tool_extension: bool,
+}
+
+/// Обслуживает ли исполнитель операцию у проекта такой формы.
+///
+/// Строка матрицы говорит, кто реализует операцию на цели; форма проекта сужает её. У
+/// агента нет адаптера для исходников EDT (`push` и `pull` проекта EDT идут через перевод
+/// в XML и Конфигуратор или `ibcmd`) и нет установки расширения-инструмента при `push`.
+pub const fn serves_project(operation: Operation, provider: Provider, shape: ProjectShape) -> bool {
+    match provider {
+        Provider::Agent => match operation {
+            Operation::Build => !shape.edt_sources && !shape.tool_extension,
+            Operation::Dump => !shape.edt_sources,
+            Operation::Init
+            | Operation::Load
+            | Operation::Extensions
+            | Operation::ConfigurationExport
+            | Operation::InfobaseDump
+            | Operation::InfobaseRestore
+            | Operation::Syntax
+            | Operation::Make
+            | Operation::Convert
+            | Operation::Publish => true,
+        },
+        Provider::Designer | Provider::Ibcmd | Provider::IbcmdRs | Provider::Webinst => true,
+    }
+}
+
+/// Цепочка умолчаний проекта: цепочка строки без исполнителей, которые такой проект не
+/// обслуживают (`serves_project`). У автономного сервера цепочка не сужается: её уже сужает
+/// объявленный путь к серверу (`AppConfig::missing_way`), и без агента у SSH-шлюза строка
+/// осталась бы пустой — отказ о форме проекта там даёт сам исполнитель.
+pub fn default_chain_for(
+    operation: Operation,
+    target: TargetKind,
+    shape: ProjectShape,
+) -> Vec<Provider> {
+    let chain = default_chain(operation, target);
+    if target == TargetKind::Standalone {
+        return chain;
+    }
+    chain
+        .into_iter()
+        .filter(|provider| serves_project(operation, *provider, shape))
         .collect()
 }
 
@@ -580,11 +650,20 @@ impl ProviderPlan {
 /// Заменяет прежнее `builder: IBCMD` в конструкторах конфига внутри модульных тестов.
 #[cfg(test)]
 pub fn ibcmd_for_every_choice() -> std::collections::BTreeMap<Operation, Provider> {
+    ibcmd_for_every_choice_on(TargetKind::File)
+}
+
+/// То же для цели данного вида: у кластера `ibcmd` есть только там, где его строка его
+/// называет.
+#[cfg(test)]
+pub fn ibcmd_for_every_choice_on(
+    target: TargetKind,
+) -> std::collections::BTreeMap<Operation, Provider> {
     Operation::ALL
         .into_iter()
         .filter(|operation| {
-            has_a_choice(*operation, TargetKind::File)
-                && capability_of(*operation, TargetKind::File, Provider::Ibcmd).is_some()
+            has_a_choice(*operation, target)
+                && capability_of(*operation, target, Provider::Ibcmd).is_some()
         })
         .map(|operation| (operation, Provider::Ibcmd))
         .collect()
@@ -668,6 +747,114 @@ mod tests {
                         Some(Implementation::Implemented)
                     );
                 }
+            }
+        }
+    }
+
+    /// Порядок цепочек назначил владелец (#206): агент первым, затем Конфигуратор, у
+    /// файловой базы затем `ibcmd`; агент экспериментальным не помечен.
+    #[test]
+    fn the_agent_leads_the_file_and_cluster_chains() {
+        use Provider::{Agent, Designer, Ibcmd};
+        for operation in [
+            Operation::Build,
+            Operation::Dump,
+            Operation::ConfigurationExport,
+        ] {
+            assert_eq!(
+                default_chain(operation, TargetKind::File),
+                [Agent, Designer, Ibcmd],
+                "{operation} on file"
+            );
+            assert_eq!(
+                default_chain(operation, TargetKind::Cluster),
+                [Agent, Designer],
+                "{operation} on cluster"
+            );
+        }
+        for operation in [Operation::InfobaseDump, Operation::InfobaseRestore] {
+            for target in [TargetKind::File, TargetKind::Cluster] {
+                assert_eq!(
+                    default_chain(operation, target),
+                    [Agent, Designer],
+                    "{operation} on {}",
+                    target.as_str()
+                );
+            }
+        }
+        for operation in Operation::ALL {
+            for target in TargetKind::ALL {
+                assert_ne!(
+                    capability_of(operation, target, Agent).map(|row| row.implementation),
+                    Some(Implementation::Experimental),
+                    "{operation} on {} marks the agent experimental",
+                    target.as_str()
+                );
+            }
+        }
+    }
+
+    /// У кластера `ibcmd` нет ни в одной строке, кроме операций, которым база проекта не
+    /// нужна (`make`, `convert`).
+    #[test]
+    fn a_cluster_row_names_ibcmd_only_where_it_does_not_reach_the_cluster_infobase() {
+        for operation in Operation::ALL {
+            if needs_no_target(operation) {
+                continue;
+            }
+            assert_eq!(
+                capability_of(operation, TargetKind::Cluster, Provider::Ibcmd),
+                None,
+                "{operation} on cluster names ibcmd"
+            );
+        }
+    }
+
+    /// Форма проекта сужает цепочку: агент выпадает у EDT из `push` и `pull`, у
+    /// расширения-инструмента — из `push`; остальные строки она не трогает.
+    #[test]
+    fn the_project_shape_drops_the_agent_where_it_has_no_adapter() {
+        use Provider::{Agent, Designer, Ibcmd};
+        let edt = ProjectShape {
+            edt_sources: true,
+            ..ProjectShape::default()
+        };
+        let tool_extension = ProjectShape {
+            tool_extension: true,
+            ..ProjectShape::default()
+        };
+        for operation in [Operation::Build, Operation::Dump] {
+            assert_eq!(
+                default_chain_for(operation, TargetKind::File, edt),
+                [Designer, Ibcmd]
+            );
+            assert_eq!(
+                default_chain_for(operation, TargetKind::Cluster, edt),
+                [Designer]
+            );
+        }
+        assert_eq!(
+            default_chain_for(Operation::Build, TargetKind::File, tool_extension),
+            [Designer, Ibcmd]
+        );
+        assert_eq!(
+            default_chain_for(Operation::Dump, TargetKind::File, tool_extension),
+            [Agent, Designer, Ibcmd]
+        );
+        assert_eq!(
+            default_chain_for(Operation::ConfigurationExport, TargetKind::Cluster, edt),
+            [Agent, Designer]
+        );
+        assert_eq!(
+            default_chain_for(Operation::Build, TargetKind::Standalone, edt),
+            [Designer, Agent]
+        );
+        for operation in Operation::ALL {
+            for target in TargetKind::ALL {
+                assert_eq!(
+                    default_chain_for(operation, target, ProjectShape::default()),
+                    default_chain(operation, target)
+                );
             }
         }
     }

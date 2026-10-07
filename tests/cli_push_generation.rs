@@ -86,9 +86,10 @@ impl Project {
         fs::write(
             &config,
             format!(
-                "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
-                root.join("1cv8").display()
-            ),
+                "workPath: work\nformat: DESIGNER\n{designer_leads}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n",
+                root.join("1cv8").display(),
+ designer_leads = support::DESIGNER_LEADS,
+),
         )
         .expect("config");
         fs::write(
@@ -507,10 +508,7 @@ fn a_generation_of_another_tool_does_not_refuse_a_push() {
         &project.config,
         fs::read_to_string(&project.config)
             .expect("config")
-            .replace(
-                "format: DESIGNER\n",
-                "format: DESIGNER\nproviders:\n  build: ibcmd\n",
-            )
+            .replace("  push: designer\n", "  push: ibcmd\n")
             .replace(
                 &root.join("1cv8").display().to_string(),
                 &root.join("ibcmd").display().to_string(),
