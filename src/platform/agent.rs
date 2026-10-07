@@ -626,7 +626,9 @@ impl AgentSession {
         let endpoint = request.endpoint.clone();
         let named = endpoint.to_string();
         let host = endpoint.host.to_string();
-        debug!(endpoint = %named, user = request.user.as_str(), "opening agent session");
+        // Имя пользователя базы в журнал не идёт, как и у Конфигуратора (`/N ***`): журнал
+        // действий читают те, кому учётных данных базы не давали.
+        debug!(endpoint = %named, "opening agent session");
 
         let expectation = request.host_key.clone();
         let presented: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));

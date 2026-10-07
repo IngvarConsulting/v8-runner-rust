@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -102,6 +102,11 @@ pub struct FakeAgent {
     pub hold: Option<Hold>,
     /// Запись по SFTP, которую двойник держит до знака теста.
     pub sftp_hold: Option<SftpHold>,
+    /// Принимать любой логин и пароль управляемого агента: так двойник обслуживает
+    /// команды, чьи учётные данные называет сам тест (`clone --user --password`).
+    pub any_credentials: bool,
+    /// Выгрузка в файлы отвечает ошибкой агента, пока флаг поднят.
+    pub fail_dump: Arc<AtomicBool>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -159,6 +164,8 @@ impl FakeAgent {
             sftp_read_only: false,
             hold: None,
             sftp_hold: None,
+            any_credentials: false,
+            fail_dump: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -316,6 +323,12 @@ impl FakeAgent {
             );
         }
         if line.starts_with("config dump-config-to-files") {
+            if self.fail_dump.load(Ordering::SeqCst) {
+                return (
+                    "[{\"type\":\"error\",\"error-type\":\"ConfigFilesError\",\"message\":\"Выгрузка не выполнена\"}]\n".to_owned(),
+                    false,
+                );
+            }
             let dir = option("dir").unwrap_or_default();
             let target = self.user_dir().join(&dir);
             fs::create_dir_all(&target).expect("agent output dir");
@@ -649,7 +662,9 @@ impl server::Handler for FakeAgent {
         }
         // Правило агента: база без пользователей принимает пустой логин и пустую или
         // настроенную пару; любое другое имя отвергается.
-        if self.accept_password && user.is_empty() && password == AGENT_PASSWORD {
+        if self.any_credentials
+            || (self.accept_password && user.is_empty() && password == AGENT_PASSWORD)
+        {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
@@ -1110,6 +1125,62 @@ pub fn start_fake_agent(agent: FakeAgent) -> u16 {
 
 /// То же, но ключ хоста называет вызывающий: тесты закрепления сверяют именно его.
 pub fn start_fake_agent_with_host_key(agent: FakeAgent, key: russh::keys::PrivateKey) -> u16 {
+    start_fake_agent_on(agent, key, 0)
+}
+
+/// Порт управляемого агента по умолчанию (`tools.designer_agent.port`).
+pub const DEFAULT_AGENT_PORT: u16 = 1543;
+
+/// Двойник управляемого агента на порту по умолчанию.
+///
+/// `clone` пишет проект сам, и порт агента ему не назначить: раннер поднимает агента на
+/// порту по умолчанию. Порт один на машину, поэтому двойник один на процесс теста, а тест,
+/// которому он нужен, держит его замок весь прогон: раскладку агента двойнику сообщает
+/// файл, общий для всех. Тест, чей раннер может поднять агента без двойника, тоже берёт
+/// замок — иначе он подключился бы к двойнику чужого теста.
+pub struct DefaultPortAgent {
+    pub commands_log: PathBuf,
+    pub base_dir_file: PathBuf,
+    pub pid_file: PathBuf,
+    pub fail_dump: Arc<AtomicBool>,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+pub fn default_port_agent() -> DefaultPortAgent {
+    static LOCK: Mutex<()> = Mutex::new(());
+    static SHARED: std::sync::OnceLock<(PathBuf, Arc<AtomicBool>)> = std::sync::OnceLock::new();
+    let guard = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (root, fail_dump) = SHARED.get_or_init(|| {
+        let root = tempfile::tempdir().expect("agent dir").keep();
+        let mut agent = FakeAgent::new(
+            true,
+            root.join("commands.log"),
+            None,
+            root.join("base-dir.txt"),
+            root.join("designer.pid"),
+        );
+        agent.any_credentials = true;
+        let fail_dump = Arc::clone(&agent.fail_dump);
+        start_fake_agent_on(agent, random_host_key(), DEFAULT_AGENT_PORT);
+        (root, fail_dump)
+    });
+    for name in ["commands.log", "base-dir.txt", "designer.pid"] {
+        let _ = fs::remove_file(root.join(name));
+    }
+    fail_dump.store(false, Ordering::SeqCst);
+    DefaultPortAgent {
+        commands_log: root.join("commands.log"),
+        base_dir_file: root.join("base-dir.txt"),
+        pid_file: root.join("designer.pid"),
+        fail_dump: Arc::clone(fail_dump),
+        _guard: guard,
+    }
+}
+
+/// Поднимает двойника на данном порту (`0` — на свободном) и возвращает порт.
+fn start_fake_agent_on(agent: FakeAgent, key: russh::keys::PrivateKey, port: u16) -> u16 {
     let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1117,7 +1188,7 @@ pub fn start_fake_agent_with_host_key(agent: FakeAgent, key: russh::keys::Privat
             .build()
             .expect("fake agent runtime");
         runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
                 .await
                 .expect("bind fake agent");
             port_tx
@@ -1141,6 +1212,19 @@ pub fn start_fake_agent_with_host_key(agent: FakeAgent, key: russh::keys::Privat
 /// `AgentBaseDir` как платформа и живёт до сигнала.
 #[cfg(unix)]
 pub fn write_fake_designer(path: &Path, args_log: &Path, pid_file: &Path, base_dir_file: &Path) {
+    write_fake_designer_for_user(path, args_log, pid_file, base_dir_file, "");
+}
+
+/// То же, но карта `agentbasedir.json` называет пользователя базы `user`: так платформа
+/// раскладывает каталог агента для базы с пользователями.
+#[cfg(unix)]
+pub fn write_fake_designer_for_user(
+    path: &Path,
+    args_log: &Path,
+    pid_file: &Path,
+    base_dir_file: &Path,
+    user: &str,
+) {
     let body = format!(
         r#"printf '%s\n' "$*" >> "{args_log}"
 printf '%s\n' "$$" > "{pid_file}"
@@ -1152,7 +1236,7 @@ for arg in "$@"; do
 done
 if [ -z "$base" ]; then exit 3; fi
 mkdir -p "$base/0"
-printf '{{"usersInfo":[{{"name":"","dir":"0"}}]}}' > "$base/agentbasedir.json"
+printf '{{"usersInfo":[{{"name":"{user}","dir":"0"}}]}}' > "$base/agentbasedir.json"
 printf '%s' "$base" > "{base_dir_file}"
 trap 'exit 0' TERM INT
 while :; do sleep 1; done"#,
