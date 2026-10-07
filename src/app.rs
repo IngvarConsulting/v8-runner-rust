@@ -340,10 +340,19 @@ fn load_cli_config(
         load_config_for_infobase_export(config_path, workdir, &selector, operation)
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(config_path, workdir, &selector)
-    } else if matches!(&cli.command, Command::Artifacts(_)) {
-        // `make` собирает из исходников во временной базе раннера: базу проекта он не
-        // выбирает, а `--infobase` у него отвергнут раньше (`global_flags`).
-        crate::config::loader::load_config_for_make(config_path, workdir, cli.dry_run)
+    } else if let Some(operation) = match &cli.command {
+        Command::Artifacts(_) => Some(crate::domain::capability::Operation::Make),
+        Command::Convert(_) => Some(crate::domain::capability::Operation::Convert),
+        _ => None,
+    } {
+        // `make` и `convert` работают с исходниками во временной базе раннера: базу проекта
+        // они не выбирают, а `--infobase` у них отвергнут раньше (`global_flags`).
+        crate::config::loader::load_config_without_infobase(
+            config_path,
+            workdir,
+            operation,
+            cli.dry_run,
+        )
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
     } else if cli.dry_run {

@@ -211,7 +211,68 @@ pub enum ForceWayOut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConvertScopeRequest {
     All,
-    SourceSet { name: String },
+    SourceSet {
+        name: String,
+    },
+    /// Файл пакета `.cf` или `.cfe`, названный на месте набора.
+    Package {
+        path: String,
+    },
+}
+
+impl ConvertScopeRequest {
+    /// Охват по аргументам командной строки: позиционное значение с расширением `.cf` или
+    /// `.cfe` (без учёта регистра) — файл пакета, иное — набор; прежний ключ
+    /// `--source-set` всегда называет набор.
+    pub fn from_arguments(positional: Option<&str>, previous_key: Option<&str>) -> Self {
+        match (positional, previous_key) {
+            (Some(value), _) if names_a_package_file(value) => Self::Package {
+                path: value.to_owned(),
+            },
+            (Some(name), _) | (None, Some(name)) => Self::SourceSet {
+                name: name.to_owned(),
+            },
+            (None, None) => Self::All,
+        }
+    }
+}
+
+fn names_a_package_file(value: &str) -> bool {
+    std::path::Path::new(value)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cf") || extension.eq_ignore_ascii_case("cfe")
+        })
+}
+
+/// Куда переводит `convert`: значение `--to`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvertTo {
+    /// XML платформы.
+    Xml,
+    /// Проект EDT.
+    Edt,
+    /// Пакет `.cf` или `.cfe`.
+    Package,
+}
+
+impl ConvertTo {
+    /// Значения `--to` в порядке справки; разбор и справка берут их отсюда.
+    pub const ALL: [Self; 3] = [Self::Xml, Self::Edt, Self::Package];
+
+    /// Значение так, как его пишут после `--to`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Xml => "xml",
+            Self::Edt => "edt",
+            Self::Package => "package",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|to| to.as_str() == value)
+    }
 }
 
 /// Transport-neutral request for the `convert` use case.
@@ -219,9 +280,11 @@ pub enum ConvertScopeRequest {
 pub struct ConvertRequest {
     /// Requested convert scope.
     pub scope: ConvertScopeRequest,
+    /// `--to`; нет — направление берётся из формата проекта, а у файла пакета — XML.
+    pub to: Option<ConvertTo>,
     /// Optional user-facing target root for converted source-set layout.
     pub output_root: Option<String>,
-    /// Resolve, validate and locate the EDT CLI without converting anything.
+    /// Resolve, validate and locate the executor without converting anything.
     pub dry_run: bool,
     /// Replace the target directory although it holds work version control cannot
     /// give back. Only a human can grant this; automated transports never do.
@@ -805,6 +868,39 @@ mod tests {
         SyntaxExtensionScope,
     };
     use crate::use_cases::result::UseCaseErrorKind;
+
+    /// Позиционное значение с расширением `.cf` или `.cfe` — файл пакета, иное — набор;
+    /// прежний ключ `--source-set` называет набор при любом имени.
+    #[test]
+    fn a_cf_or_cfe_argument_names_a_package_file_and_anything_else_a_set() {
+        use super::ConvertScopeRequest;
+        for file in ["main.cf", "build/ext.CFE", "a.b.cfe"] {
+            assert_eq!(
+                ConvertScopeRequest::from_arguments(Some(file), None),
+                ConvertScopeRequest::Package {
+                    path: file.to_owned()
+                }
+            );
+        }
+        for set in ["main", "ext-sales", "main.cfg", "cf"] {
+            assert_eq!(
+                ConvertScopeRequest::from_arguments(Some(set), None),
+                ConvertScopeRequest::SourceSet {
+                    name: set.to_owned()
+                }
+            );
+        }
+        assert_eq!(
+            ConvertScopeRequest::from_arguments(None, Some("legacy.cf")),
+            ConvertScopeRequest::SourceSet {
+                name: "legacy.cf".to_owned()
+            }
+        );
+        assert_eq!(
+            ConvertScopeRequest::from_arguments(None, None),
+            ConvertScopeRequest::All
+        );
+    }
 
     #[test]
     fn config_request_uses_typed_policy_objects() {

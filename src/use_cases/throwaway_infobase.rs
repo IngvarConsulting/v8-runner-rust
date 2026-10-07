@@ -1,5 +1,6 @@
 //! Временная база раннера: файловая база под `workPath`, в которой пакет собирается из
-//! исходников (`INV.USE-CASES.MAKE-BUILDS-PACKAGES-FROM-SOURCES-IN-A-THROWAWAY-BASE`).
+//! исходников (`INV.USE-CASES.MAKE-BUILDS-PACKAGES-FROM-SOURCES-IN-A-THROWAWAY-BASE`) и
+//! разбирается в XML (`INV.USE-CASES.IBCMD-EXPORTS-A-PACKAGE-IN-A-THROWAWAY-BASE`).
 //!
 //! База своя у каждого прогона: каталог `workPath/temp/throwaway-infobases/base-<запуск>`
 //! с файлом базы в `ib/`, каталогом данных `ibcmd` в `data/` и исходниками, переведёнными из
@@ -12,7 +13,8 @@
 //! убирается. Пакет собирает исполнитель, который базу создал:
 //!
 //! - `ibcmd` — `infobase create`, затем `config import --out` у каждого пакета; база при
-//!   этом не меняется, поэтому основная конфигурация для расширения не нужна;
+//!   этом не меняется, поэтому основная конфигурация для расширения не нужна. Пакет в XML
+//!   `ibcmd` разбирает `config export --file` той же базы;
 //! - Конфигуратор — `CREATEINFOBASE`, затем `/LoadConfigFromFiles` и `/DumpCfg` без
 //!   `/UpdateDBCfg`; расширение загружается поверх основной конфигурации, которую база
 //!   получает один раз.
@@ -69,7 +71,7 @@ pub(crate) struct Builder {
     pub binary: PathBuf,
 }
 
-/// Временная база одного прогона `make` — одного набора или всего обхода.
+/// Временная база одного прогона `make` или `convert` — одного набора или всего обхода.
 #[derive(Debug)]
 pub(crate) struct ThrowawayInfobase {
     dir: PathBuf,
@@ -115,7 +117,7 @@ impl ThrowawayInfobase {
             .err()
             .map(|error| {
                 format!(
-                    "stale throwaway infobases were not removed: {error}; the next make retries"
+                    "stale throwaway infobases were not removed: {error}; the next make or convert retries"
                 )
             })
             .into_iter()
@@ -159,7 +161,7 @@ impl ThrowawayInfobase {
             ))
         })?;
         log_live_stage(
-            "make: throwaway infobase",
+            "throwaway infobase",
             "creating a throwaway infobase under workPath",
         );
         let created = match base.builder.provider {
@@ -243,7 +245,7 @@ impl ThrowawayInfobase {
                     return Err(error);
                 }
                 log_live_stage(
-                    "make: build",
+                    "package build",
                     "[ibcmd] building the package from the sources",
                 );
                 self.ibcmd(context, runner)
@@ -267,12 +269,39 @@ impl ThrowawayInfobase {
                 if let Some(error) = interruption_before_safe_point(context, "package dump") {
                     return Err(error);
                 }
-                log_live_stage("make: dump", "[Конфигуратор] dumping the package");
+                log_live_stage("package dump", "[Конфигуратор] dumping the package");
                 self.designer(context, runner, log_file)
                     .dump_cfg(out, package.extension())
                     .map_err(AppError::from)
             }
             other => Err(unsupported(other)),
+        }
+    }
+
+    /// Разбирает файл пакета `.cf` или `.cfe` в XML каталога `target_dir`: `ibcmd config
+    /// export --file` этой базы, сама база при этом не читается. Исход утилиты не судится:
+    /// его проверяет вызывающий. Разбирает пакет только `ibcmd` — строка `convert` матрицы.
+    pub(crate) fn export_package(
+        &self,
+        context: &ExecutionContext,
+        runner: &dyn ProcessRunner,
+        package_file: &Path,
+        target_dir: &Path,
+    ) -> Result<PlatformCommandResult, AppError> {
+        match self.builder.provider {
+            Provider::Ibcmd => {
+                if let Some(error) = interruption_before_safe_point(context, "package export") {
+                    return Err(error);
+                }
+                log_live_stage("package export", "[ibcmd] exporting the package to XML");
+                self.ibcmd(context, runner)
+                    .config_export_file(package_file, target_dir)
+                    .map_err(AppError::from)
+            }
+            other => Err(crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Convert,
+                other,
+            )),
         }
     }
 
@@ -294,7 +323,7 @@ impl ThrowawayInfobase {
             remove_path_if_exists(&self.dir).and_then(|()| remove_path_if_exists(&sidecar));
         removed.err().map(|error| {
             format!(
-                "failed to remove the throwaway infobase '{}': {error}; the next make removes it once it is stale",
+                "failed to remove the throwaway infobase '{}': {error}; the next make or convert removes it once it is stale",
                 self.dir.display()
             )
         })
@@ -382,7 +411,7 @@ impl ThrowawayInfobase {
             return Err(error);
         }
         log_live_stage(
-            "make: load",
+            "sources load",
             "[Конфигуратор] loading the sources into the throwaway infobase",
         );
         self.designer(context, runner, log_file)

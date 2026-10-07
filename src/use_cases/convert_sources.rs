@@ -30,9 +30,11 @@ use crate::use_cases::external_artifacts::{
 };
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
-use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
+use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest, ConvertTo};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
+
+mod package;
 
 const CONVERT_BACKUP_PREFIX: &str = ".convert-backup";
 
@@ -89,7 +91,49 @@ pub fn execute(
 }
 
 pub fn preflight_validate(config: &AppConfig, request: &ConvertRequest) -> Result<(), AppError> {
-    resolve_request(config, request).map(|_| ())
+    let direction = resolve_direction(config, request)?;
+    if direction.involves_a_package() {
+        package::resolve(config, request, direction).map(|_| ())
+    } else {
+        resolve_request(config, request, direction).map(|_| ())
+    }
+}
+
+/// Направление из `--to`, формата проекта и вида входа. У набора без `--to` — тот формат,
+/// в котором проекта нет; у файла пакета — XML. Направление в тот же формат и из пакета в
+/// EDT — отказ до замка, с выходом в тексте.
+fn resolve_direction(
+    config: &AppConfig,
+    request: &ConvertRequest,
+) -> Result<ConvertDirection, AppError> {
+    let package_file = matches!(request.scope, ConvertScopeRequest::Package { .. });
+    match (package_file, config.format, request.to) {
+        (true, _, None | Some(ConvertTo::Xml)) => Ok(ConvertDirection::PackageToDesigner),
+        (true, _, Some(ConvertTo::Package)) => Err(AppError::Validation(
+            "convert <FILE> takes a package file, and --to package names a package again: use --to xml to get its Designer files".to_owned(),
+        )),
+        (true, _, Some(ConvertTo::Edt)) => Err(AppError::Validation(
+            "convert <FILE> converts a package file to Designer files only: use --to xml".to_owned(),
+        )),
+        (false, SourceFormat::Designer, None | Some(ConvertTo::Edt)) => {
+            Ok(ConvertDirection::DesignerToEdt)
+        }
+        (false, SourceFormat::Edt, None | Some(ConvertTo::Xml)) => {
+            Ok(ConvertDirection::EdtToDesigner)
+        }
+        (false, SourceFormat::Designer, Some(ConvertTo::Package)) => {
+            Ok(ConvertDirection::DesignerToPackage)
+        }
+        (false, SourceFormat::Edt, Some(ConvertTo::Package)) => Ok(ConvertDirection::EdtToPackage),
+        (false, SourceFormat::Designer, Some(ConvertTo::Xml)) => Err(AppError::Validation(
+            "the project sources are in Designer format already: use --to edt or --to package"
+                .to_owned(),
+        )),
+        (false, SourceFormat::Edt, Some(ConvertTo::Edt)) => Err(AppError::Validation(
+            "the project sources are in EDT format already: use --to xml or --to package"
+                .to_owned(),
+        )),
+    }
 }
 
 fn run_convert_with_context(
@@ -98,9 +142,17 @@ fn run_convert_with_context(
     request: &ConvertRequest,
 ) -> UseCaseResult<ConvertResult> {
     let started = Instant::now();
-    let direction = direction_from_format(config.format);
     let scope = scope_from_request(request);
     let workspace_path = convert_workspace_path(config);
+    // Отказ направления отвечает формой с направлением по умолчанию: другого у него нет.
+    let resolved_direction = resolve_direction(config, request);
+    let direction = match &resolved_direction {
+        Ok(direction) => *direction,
+        Err(_) if matches!(request.scope, ConvertScopeRequest::Package { .. }) => {
+            ConvertDirection::PackageToDesigner
+        }
+        Err(_) => direction_from_format(config.format),
+    };
 
     if let Some(cancel) =
         interruption::SafePointCancel::noticed(context, interruption::SafePoint::Command)
@@ -114,7 +166,7 @@ fn run_convert_with_context(
                 direction,
                 scope,
                 source_set_from_request(request),
-                workspace_path,
+                Some(workspace_path),
                 Vec::new(),
                 started,
                 Some(message),
@@ -122,7 +174,27 @@ fn run_convert_with_context(
         ));
     }
 
-    let resolved = match resolve_request(config, request) {
+    if let Err(error) = resolved_direction {
+        let message = error.to_string();
+        return Err(ConvertExecutionFailure::with_payload(
+            error,
+            result_snapshot(
+                false,
+                direction,
+                scope,
+                source_set_from_request(request),
+                None,
+                Vec::new(),
+                started,
+                Some(message),
+            ),
+        ));
+    }
+    if direction.involves_a_package() {
+        return package::run(context, config, request, direction, started);
+    }
+
+    let resolved = match resolve_request(config, request, direction) {
         Ok(resolved) => resolved,
         Err(error) => {
             let message = error.to_string();
@@ -133,7 +205,7 @@ fn run_convert_with_context(
                     direction,
                     scope,
                     source_set_from_request(request),
-                    workspace_path,
+                    Some(workspace_path),
                     Vec::new(),
                     started,
                     Some(message),
@@ -155,7 +227,7 @@ fn run_convert_with_context(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     Vec::new(),
                     started,
                     Some(message),
@@ -173,7 +245,7 @@ fn run_convert_with_context(
             .items
             .iter()
             .map(|item| ConvertOutput {
-                source_set: item.source_set_name.clone(),
+                source_set: Some(item.source_set_name.clone()),
                 source_path: item.source_path.clone(),
                 target_path: item.target_path.clone(),
             })
@@ -205,7 +277,7 @@ fn run_convert_with_context(
             resolved.direction,
             resolved.scope,
             resolved.source_set.clone(),
-            resolved.workspace_path.clone(),
+            Some(resolved.workspace_path.clone()),
             outputs,
             started,
             Some(message),
@@ -229,7 +301,7 @@ fn run_convert_with_context(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     Vec::new(),
                     started,
                     Some(message),
@@ -254,7 +326,7 @@ fn run_convert_with_context(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     Vec::new(),
                     started,
                     Some(message),
@@ -302,7 +374,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(message),
@@ -320,7 +392,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -341,7 +413,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -365,7 +437,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -388,7 +460,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -417,7 +489,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(format!(
@@ -445,7 +517,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(message),
@@ -469,7 +541,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(message),
@@ -489,7 +561,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs,
                     started,
                     Some(message),
@@ -514,7 +586,7 @@ fn execute_with_dsl(
                     resolved.direction,
                     resolved.scope,
                     resolved.source_set.clone(),
-                    resolved.workspace_path.clone(),
+                    Some(resolved.workspace_path.clone()),
                     outputs.clone(),
                     started,
                     Some(message),
@@ -543,7 +615,7 @@ fn execute_with_dsl(
                         resolved.direction,
                         resolved.scope,
                         resolved.source_set.clone(),
-                        resolved.workspace_path.clone(),
+                        Some(resolved.workspace_path.clone()),
                         outputs.clone(),
                         started,
                         Some(message),
@@ -569,7 +641,7 @@ fn execute_with_dsl(
             messages.push(message);
         }
         outputs.push(ConvertOutput {
-            source_set: item.source_set_name.clone(),
+            source_set: Some(item.source_set_name.clone()),
             source_path: item.source_path.clone(),
             target_path: item.target_path.clone(),
         });
@@ -581,7 +653,7 @@ fn execute_with_dsl(
         resolved.direction,
         resolved.scope,
         resolved.source_set.clone(),
-        resolved.workspace_path.clone(),
+        Some(resolved.workspace_path.clone()),
         outputs,
         started,
         merge_messages(messages),
@@ -591,14 +663,10 @@ fn execute_with_dsl(
 fn resolve_request(
     config: &AppConfig,
     request: &ConvertRequest,
+    direction: ConvertDirection,
 ) -> Result<ResolvedConvertRequest, AppError> {
-    if config.source_sets.is_empty() {
-        return Err(AppError::Validation(
-            "convert requires at least one source-set in v8project.yaml".to_owned(),
-        ));
-    }
+    require_source_sets(config)?;
 
-    let direction = direction_from_format(config.format);
     let scope = scope_from_request(request);
     let source_set = source_set_from_request(request);
     let explicit_output_root = explicit_output_root(request)?;
@@ -625,7 +693,7 @@ fn resolve_request(
         validate_convert_target(
             config,
             &target_path,
-            &selected_source_set.name,
+            &format!("source-set '{}'", selected_source_set.name),
             explicit_output_root.is_some(),
         )?;
         let canonical_target_path =
@@ -680,6 +748,15 @@ fn resolve_request(
     })
 }
 
+fn require_source_sets(config: &AppConfig) -> Result<(), AppError> {
+    if config.source_sets.is_empty() {
+        return Err(AppError::Validation(
+            "convert requires at least one source-set in v8project.yaml".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn select_source_sets<'a>(
     config: &'a AppConfig,
     request: &ConvertRequest,
@@ -689,6 +766,9 @@ fn select_source_sets<'a>(
         ConvertScopeRequest::SourceSet { name } => SourceSetInventory::new(config)
             .named(name)
             .map(|source_set| vec![source_set]),
+        ConvertScopeRequest::Package { path } => Err(AppError::Validation(format!(
+            "convert between EDT and Designer files takes source-sets, not the package file '{path}'"
+        ))),
     }
 }
 
@@ -790,7 +870,7 @@ fn validate_selected_source(
     validate_directory_path(path, "source-set path")?;
 
     match direction {
-        ConvertDirection::EdtToDesigner => {
+        ConvertDirection::EdtToDesigner | ConvertDirection::EdtToPackage => {
             if source_set.purpose.is_external() {
                 discover_edt_external_projects(&source_set.name, source_set.purpose, path)
                     .map(|_| ())
@@ -804,20 +884,25 @@ fn validate_selected_source(
                 )
             }
         }
-        ConvertDirection::DesignerToEdt => {
+        ConvertDirection::DesignerToEdt | ConvertDirection::DesignerToPackage => {
             if source_set.purpose.is_external() {
                 validate_designer_external_source(&source_set.name, source_set.purpose, path)
             } else {
                 validate_designer_layout(path, "Designer source-set path")
             }
         }
+        ConvertDirection::PackageToDesigner => Err(AppError::Validation(format!(
+            "source-set '{}' is not the input of a package export",
+            source_set.name
+        ))),
     }
 }
 
+/// `subject` называет, чей это вывод: `source-set 'main'` или `package 'main.cf'`.
 fn validate_convert_target(
     config: &AppConfig,
     target_path: &Path,
-    source_set_name: &str,
+    subject: &str,
     is_explicit_output: bool,
 ) -> Result<(), AppError> {
     let target = nearest_existing_canonical_path(target_path).map_err(|error| {
@@ -838,7 +923,7 @@ fn validate_convert_target(
         })?;
         if paths_overlap(&source, &target) {
             return Err(AppError::Validation(format!(
-                "convert output for source-set '{source_set_name}' overlaps source-set '{}' path: source={}, target={}",
+                "convert output for {subject} overlaps source-set '{}' path: source={}, target={}",
                 source_set.name,
                 source_path.display(),
                 target_path.display()
@@ -1334,6 +1419,9 @@ fn run_platform_conversion(
                 ensure_platform_success(&item.source_set_name, "edt-to-designer", &result)
             }
         }
+        ConvertDirection::DesignerToPackage
+        | ConvertDirection::EdtToPackage
+        | ConvertDirection::PackageToDesigner => Err(package_direction_without_edt(direction)),
         ConvertDirection::DesignerToEdt => {
             log_live_stage("convert: designer import", "[EDT] importing Designer files");
             let result = dsl
@@ -1396,6 +1484,9 @@ fn validate_staging_output(
                 validate_designer_layout(staging_dir, "Designer convert output")
             }
         }
+        ConvertDirection::DesignerToPackage
+        | ConvertDirection::EdtToPackage
+        | ConvertDirection::PackageToDesigner => Err(package_direction_without_edt(direction)),
         ConvertDirection::DesignerToEdt => {
             if item.purpose.is_external() {
                 discover_edt_external_projects(&item.source_set_name, item.purpose, staging_dir)
@@ -1413,12 +1504,19 @@ fn validate_staging_output(
     }
 }
 
+/// Направление с пакетом исполняет [`package`], а не `1cedtcli`: сюда оно не доходит.
+fn package_direction_without_edt(direction: ConvertDirection) -> AppError {
+    AppError::Runtime(format!(
+        "convert direction {direction:?} is executed by the package chain, not by the EDT CLI"
+    ))
+}
+
 fn result_snapshot(
     ok: bool,
     direction: ConvertDirection,
     scope: ConvertScope,
     source_set: Option<String>,
-    workspace_path: PathBuf,
+    workspace_path: Option<PathBuf>,
     outputs: Vec<ConvertOutput>,
     started: Instant,
     message: Option<String>,
@@ -1431,6 +1529,7 @@ fn result_snapshot(
         source_set,
         workspace_path,
         outputs,
+        provider: None,
         duration_ms: started.elapsed().as_millis() as u64,
         message,
     }
@@ -1484,8 +1583,9 @@ fn convert_output_path(
         .join("out")
         .join(&source_set.name)
         .join(match direction {
-            ConvertDirection::EdtToDesigner => "designer",
+            ConvertDirection::EdtToDesigner | ConvertDirection::PackageToDesigner => "designer",
             ConvertDirection::DesignerToEdt => "edt",
+            ConvertDirection::DesignerToPackage | ConvertDirection::EdtToPackage => "package",
         }))
 }
 
@@ -1568,8 +1668,8 @@ fn staging_publication_dir(
     staging_root: &Path,
 ) -> PathBuf {
     match direction {
-        ConvertDirection::EdtToDesigner => staging_root.to_path_buf(),
         ConvertDirection::DesignerToEdt => staging_root.join(&item.stable_project_dir_name),
+        _ => staging_root.to_path_buf(),
     }
 }
 
@@ -1584,12 +1684,13 @@ fn scope_from_request(request: &ConvertRequest) -> ConvertScope {
     match request.scope {
         ConvertScopeRequest::All => ConvertScope::All,
         ConvertScopeRequest::SourceSet { .. } => ConvertScope::Single,
+        ConvertScopeRequest::Package { .. } => ConvertScope::Package,
     }
 }
 
 fn source_set_from_request(request: &ConvertRequest) -> Option<String> {
     match &request.scope {
-        ConvertScopeRequest::All => None,
+        ConvertScopeRequest::All | ConvertScopeRequest::Package { .. } => None,
         ConvertScopeRequest::SourceSet { name } => Some(name.clone()),
     }
 }
@@ -1665,6 +1766,7 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Convert).with_cancellation(cancellation);
         let request = ConvertRequest {
             scope: ConvertScopeRequest::All,
+            to: None,
             output_root: None,
             dry_run: true,
             discard_uncommitted: false,

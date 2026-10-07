@@ -184,6 +184,7 @@ carries_receipt!(
     crate::domain::syntax::SyntaxCheckResult,
     crate::domain::load::LoadResult,
     crate::domain::artifacts::ArtifactsResult,
+    crate::domain::convert::ConvertResult,
     crate::domain::publish::PublishResult,
     crate::domain::infobase_export::ExportConfigurationPackageResult,
     crate::domain::infobase_export::DownloadAllResult,

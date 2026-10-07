@@ -572,17 +572,21 @@ pub fn validate_infobase_export(
     Ok(())
 }
 
-/// `make`: сборка из исходников во временной базе раннера. База проекта ей не вход, поэтому
-/// ни адрес базы, ни что-то, что от него зависит, здесь не проверяется; из `providers.*`
-/// читается только ключ `make`. Превью рабочего каталога не создаёт.
-pub fn validate_make(config: &AppConfig, preview: bool) -> Result<(), ConfigValidationError> {
+/// `make` и `convert`: работа с исходниками во временной базе раннера. База проекта им не
+/// вход, поэтому ни адрес базы, ни что-то, что от него зависит, здесь не проверяется; из
+/// `providers.*` читается только ключ `operation`. Превью рабочего каталога не создаёт.
+pub fn validate_without_infobase(
+    config: &AppConfig,
+    operation: Operation,
+    preview: bool,
+) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     if preview {
         validate_planned_work_path(config)?;
     } else {
         validate_work_path(&config.work_path)?;
     }
-    validate_providers(config, &[Operation::Make])?;
+    validate_providers(config, &[operation])?;
     validate_source_sets(config, Pending::NONE)?;
     validate_platform_version(config)?;
     validate_edt_cli_config(config)?;
@@ -3073,14 +3077,17 @@ mod tests {
             tests: TestsConfig::default(),
         };
 
-        super::validate_make(&config, true).expect("make needs no infobase");
+        super::validate_without_infobase(&config, Operation::Make, true)
+            .expect("make needs no infobase");
         for provider in [Provider::Ibcmd, Provider::Designer] {
             config.providers = [(Operation::Make, provider)].into();
-            super::validate_make(&config, true).expect("a make executor");
+            super::validate_without_infobase(&config, Operation::Make, true)
+                .expect("a make executor");
         }
 
         config.providers = [(Operation::Make, Provider::Agent)].into();
-        let error = super::validate_make(&config, true).expect_err("the agent is removed");
+        let error = super::validate_without_infobase(&config, Operation::Make, true)
+            .expect_err("the agent is removed");
         assert!(
             matches!(
                 error,
@@ -3098,7 +3105,8 @@ mod tests {
         );
 
         config.providers = [(Operation::Make, Provider::IbcmdRs)].into();
-        let error = super::validate_make(&config, true).expect_err("ibcmd-rs is not measured");
+        let error = super::validate_without_infobase(&config, Operation::Make, true)
+            .expect_err("ibcmd-rs is not measured");
         assert!(
             matches!(
                 error,

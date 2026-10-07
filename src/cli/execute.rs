@@ -3401,12 +3401,15 @@ fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCa
 
 fn map_convert_request(args: &ConvertArgs, dry_run: bool) -> ConvertRequest {
     ConvertRequest {
-        scope: match args.source_set.name() {
-            Some(name) => ConvertScopeRequest::SourceSet {
-                name: name.to_owned(),
-            },
-            None => ConvertScopeRequest::All,
-        },
+        scope: ConvertScopeRequest::from_arguments(
+            args.input.as_deref(),
+            args.previous_source_set.as_deref(),
+        ),
+        // Значение уже прошло разбор `clap` по тому же перечню.
+        to: args
+            .to
+            .as_deref()
+            .and_then(crate::use_cases::request::ConvertTo::parse),
         output_root: args.output.clone(),
         dry_run,
         discard_uncommitted: args.discard_uncommitted,
@@ -4578,12 +4581,18 @@ fn render_convert_text(result: &ConvertResult, presenter: &Presenter, succeeded:
             "scope: {}",
             render_convert_scope(result.scope, result.source_set.as_deref())
         ),
-        format!("workspace: {}", result.workspace_path.display()),
     ];
+    if let Some(workspace) = result.workspace_path.as_ref() {
+        details.push(format!("workspace: {}", workspace.display()));
+    }
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     for output in &result.outputs {
+        let subject = match output.source_set.as_deref() {
+            Some(source_set) => format!("source-set {source_set}"),
+            None => "package".to_owned(),
+        };
         details.push(format!(
-            "source-set {}: {} -> {}",
-            output.source_set,
+            "{subject}: {} -> {}",
             output.source_path.display(),
             output.target_path.display()
         ));
@@ -4735,6 +4744,9 @@ fn render_convert_direction(direction: ConvertDirection) -> &'static str {
     match direction {
         ConvertDirection::EdtToDesigner => "edt-to-designer",
         ConvertDirection::DesignerToEdt => "designer-to-edt",
+        ConvertDirection::DesignerToPackage => "designer-to-package",
+        ConvertDirection::EdtToPackage => "edt-to-package",
+        ConvertDirection::PackageToDesigner => "package-to-designer",
     }
 }
 
@@ -4743,6 +4755,7 @@ fn render_convert_scope(scope: ConvertScope, source_set: Option<&str>) -> String
         (ConvertScope::All, _) => "all source-sets".to_owned(),
         (ConvertScope::Single, Some(source_set)) => format!("source-set {source_set}"),
         (ConvertScope::Single, None) => "single source-set".to_owned(),
+        (ConvertScope::Package, _) => "package file".to_owned(),
     }
 }
 
