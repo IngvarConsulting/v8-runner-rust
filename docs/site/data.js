@@ -367,10 +367,15 @@ window.RUNNER_DATA = (function () {
     },
     {
       id: 'convert', verb: 'convert', title: 'Перевести исходники между форматами',
-      what: 'Переводит исходники между EDT и XML.',
+      what: 'Переводит исходники между EDT и XML, наборы — в пакет, пакет — в XML.',
       cmd: function (ctx) { return 'v8-runner convert'; },
       applies: function (ctx) { return null; },
-      today: function (ctx) { return ctx.tools.edt ? { chain: [P.edt], config: ['format', 'source-set[]', 'tools.edt_cli.path'], note: 'только между EDT и XML; только CLI, в MCP не публикуется' } : { chain: [], config: [], note: 'нет' }; },
+      today: function (ctx) {
+        var chain = [];
+        if (ctx.tools.edt) chain.push(P.edt);
+        if (ctx.tools.ibcmd) chain.push(P.ibcmd);
+        return { chain: chain, config: ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd во временной базе раннера, база проекта не нужна; ibcmd-rs — после замера (#413); только CLI, в MCP не публикуется' };
+      },
       target: function (ctx) {
         return { chain: [P.edt, P.ibcmd, P.rs], config: ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd или ibcmd-rs без базы проекта; ibcmd собирает пакет во временной базе раннера' };
       }

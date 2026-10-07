@@ -10,13 +10,15 @@ check:
   - src/use_cases/artifacts.rs::a_failed_run_removes_its_throwaway_base
   - src/use_cases/artifacts.rs::a_designer_walk_builds_externals_in_its_own_base
   - src/use_cases/throwaway_infobase.rs::a_stale_base_that_cannot_be_removed_does_not_stop_the_build
+  - tests/cli_convert.rs::convert_without_a_set_to_a_package_takes_the_configuration_packages
 ---
 
 # Временная база служит одному прогону и убирается
 
 `make <SET>` создаёт свою временную базу, а обход `make` без набора — одну на все наборы у
 каждого исполнителя: основная конфигурация попадает в базу Конфигуратора один раз,
-расширения и внешние обработки ложатся поверх. После прогона — удачного, отказавшего или
+расширения и внешние обработки ложатся поверх. `convert` с пакетом создаёт одну базу на
+прогон. После прогона — удачного, отказавшего или
 отменённого — база убирается. Рядом с базой лежит описание её вида, и базу, брошенную
 оборванным прогоном, уборка узнаёт как свою
 (`INV.USE-CASES.CLEANUP-TOUCHES-ONLY-ITS-OWN-ARTEFACTS`). Брошенная база, которую убрать не

@@ -36,8 +36,8 @@ use crate::use_cases::throwaway_infobase::{Builder, Package, ThrowawayInfobase};
 
 use super::{
     convert_workspace_path, deferred_interruption_warning, ensure_platform_success,
-    explicit_output_root, merge_messages, require_source_sets, result_snapshot, scope_from_request,
-    source_set_from_request, validate_convert_target, validate_designer_layout,
+    ensure_success_of, explicit_output_root, merge_messages, require_source_sets, result_snapshot,
+    scope_from_request, source_set_from_request, validate_convert_target, validate_designer_layout,
     validate_selected_source, ConvertExecutionFailure, CONVERT_BACKUP_PREFIX,
 };
 
@@ -310,10 +310,7 @@ pub(super) fn run(
             message,
         )
     };
-    let fail = |error: AppError, outputs: Vec<ConvertOutput>| {
-        let message = error.to_string();
-        ConvertExecutionFailure::with_payload(error, snapshot(false, outputs, Some(message)))
-    };
+    let fail = |error: AppError, outputs: Vec<ConvertOutput>| refusal(&snapshot, error, outputs);
 
     let resolved = resolve(config, request, direction).map_err(|error| fail(error, Vec::new()))?;
     let mut utilities = PlatformUtilities::from_config(config);
@@ -341,6 +338,16 @@ pub(super) fn run(
     provider_selection::attach(outcome, &receipt)
 }
 
+/// Отказ формой `convert` с тем, что уже опубликовано.
+fn refusal(
+    snapshot: &dyn Fn(bool, Vec<ConvertOutput>, Option<String>) -> ConvertResult,
+    error: AppError,
+    outputs: Vec<ConvertOutput>,
+) -> ConvertExecutionFailure {
+    let message = error.to_string();
+    ConvertExecutionFailure::with_payload(error, snapshot(false, outputs, Some(message)))
+}
+
 fn needs_edt(direction: ConvertDirection) -> bool {
     direction == ConvertDirection::EdtToPackage
 }
@@ -356,10 +363,7 @@ fn run_selected(
     utilities: &mut PlatformUtilities,
     snapshot: &dyn Fn(bool, Vec<ConvertOutput>, Option<String>) -> ConvertResult,
 ) -> UseCaseResult<ConvertResult> {
-    let fail = |error: AppError, outputs: Vec<ConvertOutput>| {
-        let message = error.to_string();
-        ConvertExecutionFailure::with_payload(error, snapshot(false, outputs, Some(message)))
-    };
+    let fail = |error: AppError, outputs: Vec<ConvertOutput>| refusal(snapshot, error, outputs);
     let Some(binary) = selected.location.map(|location| location.path) else {
         return Err(fail(
             crate::use_cases::unimplemented_provider(Operation::Convert, selected.provider),
@@ -417,7 +421,7 @@ fn run_selected(
         )
         .with_timeout(context.edt_timeout())
     });
-    let base = ThrowawayInfobase::create(
+    let mut base = ThrowawayInfobase::create(
         context,
         &config.work_path,
         Builder {
@@ -430,7 +434,6 @@ fn run_selected(
 
     let mut outputs = Vec::new();
     let mut messages = Vec::new();
-    let mut base = base;
     for item in &resolved.items {
         let converted = convert_item(
             context,
@@ -475,11 +478,11 @@ fn convert_item(
 ) -> Result<Vec<String>, AppError> {
     match &item.input {
         Input::SourceSet { name, extension } => {
-            let source_dir = match edt {
+            let (source_dir, mut notes) = match edt {
                 Some(edt) => edt_sources_in_xml(context, config, edt, base, name)?,
-                None => item.source_path.clone(),
+                None => (item.source_path.clone(), Vec::new()),
             };
-            build_package(
+            notes.extend(build_package(
                 context,
                 base,
                 runner,
@@ -487,21 +490,22 @@ fn convert_item(
                 name,
                 extension.as_deref(),
                 &source_dir,
-            )
+            )?);
+            Ok(notes)
         }
         Input::PackageFile => export_package(context, base, runner, resolved, item),
     }
 }
 
 /// Исходники EDT в XML: `1cedtcli` шагом сборки `push` в каталог временной базы, как у
-/// `make`.
+/// `make`. Ответ — каталог XML и предупреждения шага.
 fn edt_sources_in_xml(
     context: &ExecutionContext,
     config: &AppConfig,
     edt: &crate::platform::edt::EdtDsl<'_>,
     base: &ThrowawayInfobase,
     name: &str,
-) -> Result<PathBuf, AppError> {
+) -> Result<(PathBuf, Vec<String>), AppError> {
     let inventory = SourceSetInventory::new(config);
     let source_set = inventory.named(name)?;
     let edt_context = inventory
@@ -509,7 +513,7 @@ fn edt_sources_in_xml(
         .ok_or_else(|| AppError::Runtime(format!("missing EDT context for source-set '{name}'")))?;
     let target = base.xml_dir(name);
     log_live_stage("convert: edt export", "[EDT] converting the sources to XML");
-    crate::use_cases::build_project::execute_edt_export_step(
+    let warnings = crate::use_cases::build_project::execute_edt_export_step(
         context,
         config,
         edt,
@@ -518,7 +522,7 @@ fn edt_sources_in_xml(
         &target,
         "convert",
     )?;
-    Ok(target)
+    Ok((target, warnings))
 }
 
 fn build_package(
@@ -588,18 +592,20 @@ fn export_package(
     resolved: &ResolvedPackageRequest,
     item: &Item,
 ) -> Result<Vec<String>, AppError> {
-    let label = item
-        .source_path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let subject = format!(
+        "package '{}'",
+        item.source_path
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default()
+    );
     let publication =
         StagedPublication::prepare_dir(&item.target_path, &item.target_identity, STAGE_PREFIX)?;
     let staging_dir = publication.staging_path().to_path_buf();
     let exported = base
         .export_package(context, runner, &item.source_path, &staging_dir)
         .and_then(|result| {
-            ensure_platform_success(&label, "package-to-designer", &result)?;
+            ensure_success_of(&subject, "package-to-designer", &result)?;
             validate_designer_layout(&staging_dir, "Designer convert output")
         });
     if let Err(error) = exported.and_then(|()| revalidate_before_publish(item)) {

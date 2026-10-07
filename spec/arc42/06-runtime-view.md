@@ -248,6 +248,15 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 6. После прогона — `make <SET>` или всего обхода без набора — база убирается; неудачная
    уборка — предупреждение в ответе последнего набора.
 
+`convert` с пакетом ([`convert_sources/package.rs`](../../src/use_cases/convert_sources/package.rs))
+идёт тем же путём, что `make`, но исполнителя выбирает по строке `convert` матрицы — сейчас
+только `ibcmd`, — и базу проекта не выбирает вовсе: загрузчик настроек её не читает. Направление
+решает `convert_sources::resolve_direction` из `--to`, формата и вида входа до замка. Одна
+временная база служит прогону: набор собирается `config import --out` (исходники EDT сперва
+переводит `1cedtcli`), файл пакета разбирается `config export --file` в промежуточный каталог
+рядом с целью. Пакет публикуется заменой файла, XML — заменой каталога со сторожем
+незафиксированной работы; цель перепроверяется после работы исполнителя.
+
 `make` и `download` без набора — обходы поверх своих сценариев одного набора, с каталогом
 вместо файла (`SourceSetInventory::packages_directory`, путь пакета —
 `source_inventory::package_in_directory`). До работы цели пакетов сверяются с каталогами
@@ -277,7 +286,9 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [`pull --all` объявляет набор каждому расширению базы](../rules/cli/pull-all-declares-a-set-for-each-installed-extension.md),
 [`make` и `download` без набора пишут в каталог](../rules/cli/make-and-download-without-a-set-write-into-a-directory.md),
 [`make` собирает пакет из исходников во временной базе](../rules/use-cases/make-builds-packages-from-sources-in-a-throwaway-base.md),
-[временная база служит одному прогону](../rules/use-cases/a-throwaway-base-serves-one-run-and-is-removed.md).
+[временная база служит одному прогону](../rules/use-cases/a-throwaway-base-serves-one-run-and-is-removed.md),
+[направление `convert` задаёт `--to`](../rules/cli/convert-direction-is-set-by-to.md),
+[направление с пакетом исполняет цепочка](../rules/cli/a-package-direction-of-convert-has-an-executor-chain.md).
 
 ### 6.7 EDT-проверка по MCP
 

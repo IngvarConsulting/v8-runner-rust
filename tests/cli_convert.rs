@@ -570,6 +570,8 @@ fn convert_without_source_set_processes_all_source_sets_into_work_path_out() {
     assert_eq!(payload["command"], "convert");
     assert_eq!(payload["data"]["direction"], "DESIGNER_TO_EDT");
     assert_eq!(payload["data"]["scope"], "ALL");
+    // У перевода между EDT и XML выбора исполнителя нет, и квитанции тоже.
+    assert!(payload["data"].get("provider").is_none(), "{payload}");
     assert_eq!(
         payload["data"]["outputs"]
             .as_array()

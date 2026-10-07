@@ -32,7 +32,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER` | Инкрементальная (без ключей), object-scoped partial (`--object`) или полная (`--force`) выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `incremental` агент, Конфигуратор или `ibcmd` спрашивают поколение конфигурации, и равное записанному тем же инструментом после последней сборки или выгрузки означает «выгружать нечего» (`up_to_date`, выгрузка не запускается); при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; до запуска платформы любая выгрузка без `--force` — и поверх каталога, и с заменой — спрашивает git, что в каталоге цели не восстановить, и найдя незафиксированное, файл вне учёта или в игноре (кроме `ConfigDumpInfo.xml` в корне цели выгрузки в формате Конфигуратора — она пишет его заново; у reverse sync EDT и у `convert` исключения нет), отказывает и называет потери; каталог вне системы контроля версий (git не отвечает) с файлами — такой же отказ с перечнем каждого файла; `pull --force` — само согласие: уничтожает найденное без копии и перечисляет его в `data.losses`; превью (`--dry-run`) перечисляет потери поимённо |
 | `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent`; `--state db` — `designer` → `ibcmd`, без `agent`; у автономного сервера (`infobase.standalone`) — `agent` через SSH-шлюз, только рабочее состояние | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; конфигурацию базы данных (`--state db`) выгружают `designer` (`/DumpDBCfg`) и `ibcmd` (`config save --db`), а `providers.download: agent` при ней отказывает с `capability_unavailable` до запуска; у `agent` только `working` (`config dump-cfg`), файл пишется в каталог агента и переносится в staging |
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent`; у автономного сервера (`infobase.standalone`) строки нет | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
-| `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
+| `convert` | EDT ↔ XML — `1cedtcli`, без строки в матрице; направления с пакетом — строка `convert`: `ibcmd` при любом виде базы и без неё; `ibcmd-rs` — после замера ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)); живой замер разбора пакета — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416) | CLI-only; переводит наборы проекта между XML и EDT, наборы — в `.cf`/`.cfe`, файл `.cf`/`.cfe` — в XML; база проекта не нужна; `ibcmd` работает во временной базе раннера под `workPath`: `config import --out` для сборки, `config export --file` для разбора |
 | `upload` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | цепочка `ibcmd` → `designer` при любом виде базы и без неё; любой `format`; `.epf`/`.erf` — только `designer`; `ibcmd-rs` и `agent` не принимаются; живой замер последовательностей — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416) | Собирает `.cf` / `.cfe` из исходников во временной базе раннера под `workPath` и публикует `.epf` / `.erf`; база проекта не открывается и не нужна; `ibcmd` — `infobase create` со своим `--data`, затем `config import --out`; Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles` (без `-updateConfigDumpInfo` и `/UpdateDBCfg`), `/DumpCfg`, расширение — поверх основной конфигурации; исходники EDT сперва переводит в XML `1cedtcli` |
 | `check` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
@@ -93,7 +93,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 |---|---|
 | `clone` | четыре пути, которые были бы написаны, и найденную утилиту выгрузки |
 | `launch` | `plan.program` и составленный `plan.args` с замаскированными credential |
-| `convert` | `outputs` — что и куда было бы сконвертировано |
+| `convert` | `outputs` — что и куда было бы сконвертировано; у направления с пакетом — квитанция `provider` |
 | `infobase create` | по шагу `status: planned` с тем, что было бы создано и чем |
 | `push` | по набору исходников планируемый `mode` и причину |
 | `upload` | артефакт, режим, расширение; `compatibility_state: not_probed` |
@@ -896,12 +896,34 @@ v8-runner pull --all [--dry-run] [--force]
 ### `convert`
 
 ```bash
-v8-runner convert [<SET>] [--output <DIR>] [--dry-run] [--force]
+v8-runner convert [<SET>] [--to xml|edt|package] [--output <DIR>] [--dry-run] [--force]
+v8-runner convert <FILE.cf|FILE.cfe> [--to xml] [--output <DIR>] [--dry-run] [--force]
 ```
 
-- Позиционный аргумент — набор исходников; без него конвертируются все наборы. Значение,
-  которое набором не является, — validation error. Прежний ключ `--source-set` принимается
-  скрыто.
+- Позиционный аргумент — набор исходников или файл пакета: значение с расширением `.cf` или
+  `.cfe` (в любом регистре) — файл, иначе набор; без него конвертируются все наборы.
+  Значение, которое набором не является, — validation error. Прежний ключ `--source-set`
+  принимается скрыто и всегда называет набор.
+- `--to` задаёт направление: наборы формата Конфигуратора — в `edt` (умолчание) или
+  `package`, наборы формата EDT — в `xml` (умолчание) или `package` (через XML: сперва
+  `1cedtcli`), файл пакета — только в `xml` (умолчание). `--to` в тот формат, в котором
+  исходники уже лежат, и файл пакета в `edt` или `package` — validation error до замка.
+  Направление называет `data.direction`: `DESIGNER_TO_EDT`, `EDT_TO_DESIGNER`,
+  `DESIGNER_TO_PACKAGE`, `EDT_TO_PACKAGE`, `PACKAGE_TO_DESIGNER`.
+- Направления с пакетом исполняет строка `convert` матрицы — сейчас `ibcmd`; квитанция
+  `data.provider` называет исполнителя. `ibcmd` работает во временной базе раннера под
+  `workPath/temp/throwaway-infobases/` со своим `--data`: набор собирается
+  `config import --out`, файл разбирается `config export --file`; база убирается после
+  прогона. Без `ibcmd` — отказ рода `environment`, и квитанция называет его пропущенным.
+  `ibcmd-rs` в цепочку войдёт после замера ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413));
+  живой замер разбора пакета во временной базе — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416).
+- `--to package` без набора берёт основную конфигурацию и расширения порядком обхода; набор
+  внешних файлов с `--to package` — validation error (внешние обработки собирает `make`).
+- База проекта не нужна: проект без базы и без местного слоя переводит, `--infobase` —
+  validation error.
+- **Несовместимо с 0.13.0:** `convert --infobase …` больше не принимается; в `data`
+  `workspace_path` есть только у направлений с `1cedtcli`, а `outputs[].source_set` — только
+  у наборов (форма `CTR.WIRE.CONVERT-DATA` версии 2).
 
 - CLI-only; не публикуется как MCP tool.
 - Перед заменой целевого каталога команда спрашивает git, что нельзя вернуть:
@@ -911,11 +933,14 @@ v8-runner convert [<SET>] [--output <DIR>] [--dry-run] [--force]
   системы контроля версий (git не отвечает) с файлами — такой же отказ с перечнем каждого
   файла. Превью (`--dry-run`) называет те же потери. Вывод по умолчанию под `workPath` —
   каталог раннера: его сторож не спрашивает, спрашивает только каталог, названный `--output`.
-- Работает от текущего `v8project.yaml`, а не по arbitrary source/target paths.
-- Направление определяется из `format` (до [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
-- Файл пакета на месте позиционного аргумента и ключ `--to xml|edt|package` — разрыв [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236).
-- Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`.
-- `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога primary config.
+- Наборы берёт из текущего `v8project.yaml`; произвольный путь принимается только как файл пакета.
+- Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`,
+  пакеты — под `workPath/convert/out/packages/<SET>.cf|.cfe`, XML файла пакета — под
+  `workPath/convert/out/<имя файла>/designer/`.
+- `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога
+  primary config; пакеты ложатся в него как `<SET>.cf|.cfe`, а у файла пакета `--output` —
+  сам каталог XML. Пакет заменяет файл без вопроса к git, как у `make`; каталог XML
+  спрашивает git, как остальные каталоги `convert`.
 - Публикация остаётся staged full replacement с overlap guardrails.
 
 ### `download`
@@ -1363,7 +1388,8 @@ v8-runner mcp serve http
 - `check` через `ibcmd`.
 - `make` через `ibcmd-rs`: сборка пакета из XML без базы только по ключу `providers.make: ibcmd-rs` ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
 - `extensions` через `designer`.
-- `convert` с пакетом: файл `.cf`/`.cfe` на входе, `--to package` и цепочка `ibcmd` → `ibcmd-rs` ([#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
+- `convert` через `ibcmd-rs`: пакет ↔ XML без платформы ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
+- `convert` файла пакета в `edt` и внешних наборов в пакет.
 - `apply` отдельной командой и `push --no-apply` ([#210](https://github.com/IngvarConsulting/v8-runner-rust/issues/210)); `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).
 - Сверка версии формата файла версий до запуска платформы: чужая версия делает выгрузку полной, загрузка из формата новее платформы отказывает ([#403](https://github.com/IngvarConsulting/v8-runner-rust/issues/403)).
 - Прогноз режима выгрузки перед `pull` (`-getChanges`, `config export status`) и
