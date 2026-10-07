@@ -305,11 +305,11 @@ fn debugging_on_a_copy_of_the_base_leaves_the_neighbour_untouched() {
     );
 
     succeeded(&run(&neighbour, &["push", "--force"]));
+    let erp = neighbour.parent().expect("neighbour");
     assert_eq!(
         owners(&neighbour_base),
-        vec![canonical(
-            &neighbour_base.parent().unwrap().parent().unwrap()
-        )]
+        vec![canonical(erp)],
+        "the base of the neighbour stays with it"
     );
 }
 

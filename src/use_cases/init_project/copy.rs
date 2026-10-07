@@ -359,7 +359,12 @@ impl Copy<'_> {
                 .process_policy(InterruptionSafetyClass::GracefulThenKill, None),
         )
         .dump_infobase(self.snapshot)
-        .map_err(AppError::from)?;
+        .map_err(|error| {
+            // Снимок, который не дошёл до кода выхода (отмена, сбой запуска), образа не
+            // оставляет.
+            let _ = remove_snapshot(self.snapshot);
+            AppError::from(error)
+        })?;
         let image = std::fs::metadata(self.snapshot)
             .ok()
             .filter(|metadata| metadata.is_file() && metadata.len() > 0);
