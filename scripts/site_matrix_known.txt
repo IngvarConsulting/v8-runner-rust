@@ -10,6 +10,9 @@
 #
 # <операция> <цель> | сайт: <исполнители> | матрица: <исполнители> | #<задача>
 
+convert cluster | сайт: ibcmd ibcmd-rs | матрица: ibcmd | #413
+convert file | сайт: ibcmd ibcmd-rs | матрица: ibcmd | #413
+convert standalone | сайт: ibcmd ibcmd-rs | матрица: ibcmd | #413
 extensions cluster | сайт: agent designer | матрица: agent | #428
 infobase.create file | сайт: ibcmd designer | матрица: designer ibcmd | #204
 infobase.create cluster | сайт: designer | матрица: designer ibcmd | #204

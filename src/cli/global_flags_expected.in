@@ -61,7 +61,7 @@ const LEAVES_WITH_PREVIEW: &[&str] = &[
 
 /// Листья, объявившие `Base::Ignores`: базы они не выбирают и ключ обязаны отвергнуть.
 #[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
-const LEAVES_IGNORING_THE_BASE: &[&str] = &["version", "clone", "make"];
+const LEAVES_IGNORING_THE_BASE: &[&str] = &["version", "clone", "make", "convert"];
 
 /// Листья, объявившие `Base::Declares`: базу они объявляют сами, поэтому ключ принимает
 /// строку подключения, а имя отвергает.
