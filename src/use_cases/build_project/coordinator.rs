@@ -637,7 +637,7 @@ pub(super) fn run_build_ibcmd(
                         &source_set.name,
                         mode,
                         true,
-                        format!("{message}; planned, ibcmd not dispatched"),
+                        format!("{message}; planned, {} not dispatched", Provider::Ibcmd),
                         0,
                     );
                     continue;
@@ -1360,7 +1360,7 @@ pub(super) fn run_build_edt(
                                 &source_set.name,
                                 mode,
                                 true,
-                                format!("{message}; planned, Designer not dispatched"),
+                                format!("{message}; planned, {provider} not dispatched"),
                                 0,
                             );
                             continue;
@@ -1394,7 +1394,7 @@ pub(super) fn run_build_edt(
                                 &source_set.name,
                                 mode,
                                 true,
-                                format!("{message}; planned, ibcmd not dispatched"),
+                                format!("{message}; planned, {provider} not dispatched"),
                                 0,
                             );
                             continue;

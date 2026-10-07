@@ -27,6 +27,8 @@ struct Harness {
     commands_log: PathBuf,
     designer_args_log: PathBuf,
     sources: PathBuf,
+    /// Порт, объявленный в `tools.designer_agent.port`.
+    port: u16,
 }
 
 fn harness() -> Harness {
@@ -91,6 +93,7 @@ fn harness_holding(hold: Option<Hold>) -> Harness {
         commands_log,
         designer_args_log,
         sources,
+        port,
         dir,
     }
 }
@@ -137,6 +140,12 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
         "{payload}"
     );
     assert_eq!(payload["data"]["steps"][0]["mode"], "full", "{payload}");
+    // Объявленный порт уходит агенту как есть.
+    let designer_args = read_or_empty(&harness.designer_args_log);
+    assert!(
+        designer_args.contains(&format!("/AgentPort {} ", harness.port)),
+        "{designer_args}"
+    );
     let lines = commands(&harness);
     assert_eq!(
         lines.first().map(String::as_str),

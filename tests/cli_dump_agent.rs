@@ -224,6 +224,25 @@ fn a_managed_agent_without_a_declared_key_refuses_a_foreign_key_on_its_port() {
         message.contains("not with the key the runner handed to the agent it launched"),
         "{message}"
     );
+    // Одноразовый ключ уходит вместе с агентом и на пути отказа.
+    let keys = harness
+        .dir
+        .path()
+        .join("work")
+        .join("agent")
+        .join("host-keys");
+    let left = fs::read_dir(&keys)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        left.is_empty(),
+        "one-time host keys outlived the refusal: {left:?}"
+    );
     assert!(
         commands(&harness).is_empty(),
         "no command reaches a foreign agent: {:?}",

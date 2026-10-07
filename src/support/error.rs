@@ -461,6 +461,7 @@ impl From<AgentError> for AppError {
             | AgentError::HostKeyRejected { .. }
             | AgentError::ForeignAgentOnPort { .. }
             | AgentError::PortTaken { .. }
+            | AgentError::NoFreePort { .. }
             | AgentError::Channel { .. }
             | AgentError::Launch(_)
             | AgentError::StartupTimedOut { .. } => Self::EnvironmentUnavailable(error.to_string()),

@@ -336,6 +336,15 @@ pub enum AgentError {
     )]
     PortTaken { port: u16, detail: String },
 
+    /// Система не дала свободного порта на адресе управляемого агента.
+    #[error(
+        "the system gave no free port on {MANAGED_LISTEN_HOST} for the managed agent: {source}; declare tools.designer_agent.port"
+    )]
+    NoFreePort {
+        #[source]
+        source: std::io::Error,
+    },
+
     /// На порту управляемого агента ответил SSH-сервер с чужим ключом хоста: это не тот
     /// агент, которого поднял раннер, и сессия к нему не открывается.
     #[error(
@@ -1340,12 +1349,14 @@ fn head_of(bytes: &[u8]) -> String {
 
 /// Запуск Конфигуратора в агентском режиме. Из ключей базы берётся только адрес:
 /// `/N` и `/P` в этом режиме игнорируются, учётные данные идут через SSH.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AgentLaunch {
     pub v8: PathBuf,
     pub infobase_args: Vec<String>,
     pub port: u16,
-    pub host_key: Option<PathBuf>,
+    /// Ключ хоста, который агент получит в `/AgentSSHHostKey`. Ключа платформы
+    /// (`/AgentSSHHostKeyAuto`) раннер не берёт: сессия закрепляется на отданном ключе.
+    pub host_key: LaunchHostKey,
     pub base_dir: PathBuf,
     /// Куда зеркалится stdout/stderr процесса агента: улика при неудачном запуске.
     pub process_log: PathBuf,
@@ -1360,13 +1371,8 @@ impl AgentLaunch {
         args.push(self.port.to_string());
         args.push("/AgentListenAddress".to_owned());
         args.push(MANAGED_LISTEN_HOST.to_string());
-        match self.host_key.as_ref() {
-            Some(key) => {
-                args.push("/AgentSSHHostKey".to_owned());
-                args.push(key.display().to_string());
-            }
-            None => args.push("/AgentSSHHostKeyAuto".to_owned()),
-        }
+        args.push("/AgentSSHHostKey".to_owned());
+        args.push(self.host_key.path().display().to_string());
         args.push("/AgentBaseDir".to_owned());
         args.push(self.base_dir.display().to_string());
         args
@@ -1385,8 +1391,8 @@ pub struct ManagedAgent {
     process: Option<crate::platform::process::ManagedSpawnResult>,
     session: Option<AgentSession>,
     base_dir: PathBuf,
-    /// Одноразовый ключ хоста этого запуска; `None` — ключ объявлен в `host-key`.
-    host_key: Option<EphemeralHostKey>,
+    /// Ключ хоста этого запуска: одноразовый файл живёт, пока жив агент.
+    _host_key: LaunchHostKey,
 }
 
 impl ManagedAgent {
@@ -1395,7 +1401,7 @@ impl ManagedAgent {
     /// не лечится и останавливает ожидание сразу.
     pub fn launch(
         runner: &dyn ProcessRunner,
-        launch: &AgentLaunch,
+        launch: AgentLaunch,
         session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
@@ -1469,15 +1475,9 @@ impl ManagedAgent {
         Ok(Self {
             process: Some(process),
             session: Some(opened),
-            base_dir: launch.base_dir.clone(),
-            host_key: None,
+            base_dir: launch.base_dir,
+            _host_key: launch.host_key,
         })
-    }
-
-    /// Одноразовый ключ хоста живёт, пока жив агент: файл удаляется вместе с ним.
-    pub fn holding(mut self, host_key: Option<EphemeralHostKey>) -> Self {
-        self.host_key = host_key;
-        self
     }
 
     pub fn session(&mut self) -> &mut AgentSession {
@@ -1524,7 +1524,6 @@ impl Drop for ManagedAgent {
         // Сессия закрывается первой, чтобы процесс не ждал клиента при снятии.
         self.session.take();
         self.process.take();
-        self.host_key.take();
     }
 }
 
@@ -1541,10 +1540,7 @@ pub fn free_managed_port() -> Result<u16, AgentError> {
     std::net::TcpListener::bind((MANAGED_LISTEN_HOST, 0))
         .and_then(|listener| listener.local_addr())
         .map(|address| address.port())
-        .map_err(|error| AgentError::PortTaken {
-            port: 0,
-            detail: format!("no free port on {MANAGED_LISTEN_HOST}: {error}"),
-        })
+        .map_err(|source| AgentError::NoFreePort { source })
 }
 
 /// Одноразовый ключ хоста управляемого агента.
@@ -1553,9 +1549,62 @@ pub fn free_managed_port() -> Result<u16, AgentError> {
 /// агенту тем же `/AgentSSHHostKey`, что и объявленный; ожидание сессии закрепляется на
 /// его отпечатке, поэтому другой SSH-сервер на том же порту отвергается. Файл доступен
 /// только владельцу и удаляется вместе с агентом.
+#[derive(Debug)]
 pub struct EphemeralHostKey {
     path: PathBuf,
     fingerprint: Fingerprint,
+}
+
+/// Ключ хоста, который получает управляемый агент.
+#[derive(Debug)]
+pub enum LaunchHostKey {
+    /// `tools.designer_agent.host-key`: файл владельца, раннер его не трогает.
+    Declared(PathBuf),
+    /// Одноразовый ключ этого запуска.
+    OneTime(EphemeralHostKey),
+}
+
+impl LaunchHostKey {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Declared(path) => path,
+            Self::OneTime(key) => key.path(),
+        }
+    }
+
+    /// Ожидание сессии: открытая часть того самого ключа, что ушёл агенту.
+    pub fn expectation(&self) -> HostKeyExpectation {
+        match self {
+            Self::Declared(path) => HostKeyExpectation::of_host_key_file(path),
+            Self::OneTime(key) => key.expectation(),
+        }
+    }
+}
+
+/// Префикс имени одноразового ключа; за ним — номер процесса раннера, который ключ создал.
+const ONE_TIME_KEY_PREFIX: &str = "host-key-";
+
+/// Убирает одноразовые ключи, чей раннер уже не работает: файл, переживший аварийный выход
+/// (`panic = "abort"`, снятый процесс), не копится в `workPath`. Ключи живых раннеров —
+/// и этого тоже — остаются.
+fn remove_orphaned_keys(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(owner) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(ONE_TIME_KEY_PREFIX))
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !crate::support::machine::is_process_alive(owner) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 impl EphemeralHostKey {
@@ -1587,7 +1636,12 @@ impl EphemeralHostKey {
         let text = key
             .to_openssh(russh::keys::ssh_key::LineEnding::LF)
             .map_err(|error| invalid(error.to_string()))?;
-        let path = dir.join(format!("host-key-{}", uuid::Uuid::new_v4().simple()));
+        remove_orphaned_keys(dir);
+        let path = dir.join(format!(
+            "{ONE_TIME_KEY_PREFIX}{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -2005,13 +2059,49 @@ mod tests {
         );
     }
 
+    /// Одноразовый ключ: файл только для владельца, удаляется вместе с ключом; ключи
+    /// неживых раннеров следующий ключ убирает, ключи живых оставляет.
+    #[test]
+    fn a_one_time_host_key_lives_with_its_owner_and_sweeps_orphans() {
+        let dir = tempfile::tempdir().expect("dir");
+        let orphan = dir
+            .path()
+            .join(format!("{ONE_TIME_KEY_PREFIX}{}-orphan", u32::MAX));
+        let alive = dir
+            .path()
+            .join(format!("{ONE_TIME_KEY_PREFIX}{}-alive", std::process::id()));
+        let foreign = dir.path().join("someone-elses-file");
+        for path in [&orphan, &alive, &foreign] {
+            std::fs::write(path, "key").expect("file");
+        }
+
+        let key = EphemeralHostKey::create(dir.path()).expect("key");
+
+        assert!(!orphan.exists(), "a key of a gone runner stays");
+        assert!(alive.exists() && foreign.exists());
+        assert!(key.path().is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(key.path())
+                .expect("meta")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(matches!(key.expectation(), HostKeyExpectation::Pinned(_)));
+        let path = key.path().to_path_buf();
+        drop(key);
+        assert!(!path.exists(), "the one-time key outlived its owner");
+    }
+
     #[test]
     fn launch_args_carry_only_the_agent_keys_and_the_infobase_address() {
         let launch = AgentLaunch {
             v8: PathBuf::from("/opt/1cv8/1cv8"),
             infobase_args: vec!["/F".to_owned(), "/tmp/ib".to_owned()],
             port: 1543,
-            host_key: None,
+            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
             base_dir: PathBuf::from("/work/agent"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
@@ -2026,7 +2116,8 @@ mod tests {
                 "1543",
                 "/AgentListenAddress",
                 "127.0.0.1",
-                "/AgentSSHHostKeyAuto",
+                "/AgentSSHHostKey",
+                "/work/host_key",
                 "/AgentBaseDir",
                 "/work/agent",
             ]
@@ -2045,7 +2136,7 @@ mod tests {
             v8: PathBuf::from("/opt/1cv8/1cv8"),
             infobase_args: connection.infobase_args(),
             port: 1543,
-            host_key: None,
+            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
             base_dir: PathBuf::from("/work/agent"),
             process_log: PathBuf::from("/work/logs/agent"),
         };

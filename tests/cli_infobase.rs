@@ -2125,3 +2125,51 @@ fn a_managed_agent_that_did_not_start_fails_the_command_without_the_designer() {
     );
     assert!(!output.exists());
 }
+
+/// Объявленный порт агента занят другим процессом, и агент на нём не поднялся: отказ
+/// называет порт занятым и советует другой, Конфигуратор пакетно не вызывается.
+#[test]
+fn a_taken_port_of_the_managed_agent_is_named() {
+    let (_dir, config, base, calls) = setup("DEFAULT");
+    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("hold a port");
+    let port = holder.local_addr().expect("address").port();
+    let text = fs::read_to_string(&config).expect("config");
+    fs::write(
+        &config,
+        format!("{text}  designer_agent:\n    port: {port}\n"),
+    )
+    .expect("declared port");
+    let output = base.join("dist/main.cf");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "download",
+            "main",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .output()
+        .expect("run download");
+
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(
+        envelope["error"]["code"], "environment_unavailable",
+        "{envelope}"
+    );
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&format!(
+            "port {port} of the managed agent is taken by another process"
+        )),
+        "{message}"
+    );
+    let argv = fs::read_to_string(&calls).expect("calls");
+    assert!(
+        argv.lines().all(|line| line.contains("/AgentMode")),
+        "{argv}"
+    );
+    drop(holder);
+}
