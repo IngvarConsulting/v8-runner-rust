@@ -698,17 +698,59 @@ pub(crate) fn record_after_dump(
     ))
 }
 
-/// Память о базе, которую раннер только что создал пустой: у каждого набора, который в неё
-/// пойдёт, — пустая хеш-память этой пары, и первая отправка грузит набор целиком без отказа
+/// Память о наборе, из которого раннер собирает созданную базу: дерево набора, снятое до
+/// сборки. Правка, сделанная во время неё, остаётся изменением для первой отправки.
+pub(crate) struct AssembledMemory {
+    source_set: String,
+    snapshot: analyzer::FullSnapshot,
+}
+
+impl AssembledMemory {
+    /// Снимает дерево набора `source_set` по его контексту памяти.
+    pub(crate) fn prepare(
+        config: &AppConfig,
+        source_set: &crate::config::model::SourceSetConfig,
+    ) -> Result<Self, AppError> {
+        let contexts = SourceSetsService::new(config).designer_contexts();
+        let context = contexts
+            .iter()
+            .find(|context| context.name() == source_set.name)
+            .ok_or_else(|| {
+                AppError::Runtime(format!(
+                    "missing change-detection context for source-set '{}'",
+                    source_set.name
+                ))
+            })?;
+        let snapshot = analyzer::prepare_full_snapshot(context, context.path())
+            .map_err(|error| AppError::Runtime(error.to_string()))?;
+        Ok(Self {
+            source_set: source_set.name.clone(),
+            snapshot,
+        })
+    }
+}
+
+/// Память о базе, которую раннер только что создал: у набора, из которого база собрана
+/// (`assembled`), — его дерево, снятое до сборки, у каждого другого набора, который в неё
+/// пойдёт, — пустая хеш-память этой пары, и первая отправка грузит его целиком без отказа
 /// первого знакомства. Признак нового владельца снимается: база своя с рождения. Сбой —
 /// строка для ответа: база создана, а первая отправка без памяти откажет и назовёт выходы.
-pub(crate) fn remember_created_base(config: &AppConfig) -> Option<String> {
+pub(crate) fn remember_created_base(
+    config: &AppConfig,
+    assembled: Option<&AssembledMemory>,
+) -> Option<String> {
     let failures: Vec<String> = SourceSetsService::new(config)
         .designer_contexts()
         .iter()
         .filter(|set| set.storage_identity().is_some())
         .filter_map(|set| {
-            analyzer::commit_empty_snapshot(set, &config.work_path)
+            let committed = match assembled {
+                Some(memory) if memory.source_set == set.name() => {
+                    analyzer::commit_full_snapshot(set, &config.work_path, &memory.snapshot)
+                }
+                _ => analyzer::commit_empty_snapshot(set, &config.work_path),
+            };
+            committed
                 .err()
                 .map(|error| format!("source-set '{}': {error}", set.name()))
         })
@@ -805,7 +847,7 @@ mod tests {
             UseCaseErrorKind::NoMemory
         );
 
-        assert_eq!(remember_created_base(&config), None);
+        assert_eq!(remember_created_base(&config, None), None);
 
         require(&config).expect("the created base is remembered");
         assert_eq!(new_owner_since(&config), None);
@@ -839,7 +881,7 @@ mod tests {
         assert!(holds_only_new_owner_marks(
             &root.path().join("work/infobases")
         ));
-        remember_created_base(&config);
+        remember_created_base(&config, None);
         assert!(!holds_only_new_owner_marks(
             &root.path().join("work/infobases")
         ));

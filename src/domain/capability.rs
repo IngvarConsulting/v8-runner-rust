@@ -242,10 +242,19 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     // Публикация на веб-сервере: у операции нет развилки, только `webinst`.
     const WEBINST_ONLY: &[Capability] = &[implemented(Webinst, Documented)];
 
-    const DESIGNER_THEN_IBCMD: &[Capability] = &[
-        implemented(Designer, LiveVerified),
+    // Создание файловой базы: `ibcmd infobase create --import --apply --force` собирает
+    // базу сразу с основной конфигурацией (замер 8.3.27.2074 у прямого шлюза #205);
+    // Конфигуратор — запасной: `CREATEINFOBASE`, затем `/LoadConfigFromFiles` и
+    // `/UpdateDBCfg`. Порядок назначил владелец (#204).
+    const CREATE_FILE: &[Capability] = &[
         implemented(Ibcmd, ArgvTested),
+        implemented(Designer, LiveVerified),
     ];
+    // Создание базы в кластере: Конфигуратор `CREATEINFOBASE` с клиент-серверной строкой
+    // регистрирует базу и создаёт базу данных одной командой (замер #181, 06.10.2026,
+    // 8.5.4.1878). `ibcmd` о кластере не знает и строки не имеет; запасной путь `rac` — не
+    // исполнитель матрицы, его ждёт замер вывода `rac cluster list` (#180).
+    const CREATE_CLUSTER: &[Capability] = &[implemented(Designer, ArgvTested)];
     // Агент назначается только ключом `providers.<op>: agent`: его место в цепочке
     // умолчаний назначает владелец. Путь раннера через агента прогнан вживую
     // 15.09.2026 на 8.3.27.2074: полная и частичная загрузка с `update-db-cfg` в одной
@@ -295,7 +304,8 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     ];
 
     match (operation, target) {
-        (Operation::Init, TargetKind::File | TargetKind::Cluster) => DESIGNER_THEN_IBCMD,
+        (Operation::Init, TargetKind::File) => CREATE_FILE,
+        (Operation::Init, TargetKind::Cluster) => CREATE_CLUSTER,
         (Operation::Build, TargetKind::File | TargetKind::Cluster) => BUILD,
         (Operation::Dump, TargetKind::File | TargetKind::Cluster) => DUMP,
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {

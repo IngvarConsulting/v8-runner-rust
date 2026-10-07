@@ -6,26 +6,26 @@ use std::time::Instant;
 use tracing::debug;
 
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
-use crate::domain::capability::{Operation, Provider};
+use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
+use crate::platform::connection::ClusterInfobaseCreation;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
-use crate::platform::ibcmd::{
-    IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateOutcome, IbcmdInfobaseCreateStatus,
-};
+use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
-use crate::platform::process::ProcessError;
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::secrets::mask_text;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, CapabilityReason};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::exchange_guard::remember_created_base;
+use crate::use_cases::exchange_guard::{remember_created_base, AssembledMemory};
 use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
-use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals};
+use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
 use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStageStatus};
 use crate::use_cases::request::InitRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tool_extension;
 
 pub fn execute(
@@ -235,34 +235,43 @@ fn ensure_infobase(
     provider: Provider,
     dry_run: bool,
 ) -> StepOutcome {
-    // Автономный сервер поднимает человек: раннер его не создаёт и не запускает.
-    if config.infobase.standalone.is_some() {
-        return StepOutcome::skipped(
-            "infobase",
-            "create",
-            Instant::now(),
-            "a standalone server is started by hand and is never created by the runner: infobase.standalone names an existing gate".to_owned(),
-        );
-    }
-    let Some(infobase_dir) = config.v8_connection().file_path().map(PathBuf::from) else {
-        return match provider {
-            Provider::Ibcmd => {
-                ensure_server_infobase(context, config, utilities, provider, dry_run)
+    let started = Instant::now();
+    match config.target_kind() {
+        // Базу автономного сервера создают до его запуска, на его машине: раннер к серверу
+        // только подключается (`INV.CLI.INFOBASE-CREATE-FOLLOWS-THE-TARGET-KIND`).
+        TargetKind::Standalone => {
+            StepOutcome::failed("infobase", "create", started, standalone_refusal())
+        }
+        TargetKind::Cluster => ensure_cluster_infobase(context, config, utilities, dry_run),
+        TargetKind::File => match config.v8_connection().file_path().map(PathBuf::from) {
+            Some(infobase_dir) => {
+                ensure_file_infobase(context, config, utilities, provider, &infobase_dir, dry_run)
             }
-            // Конфигуратор серверную базу не создаёт: шаг пропускается, как и раньше,
-            // а выбрать ibcmd можно ключом providers.init.
-            other => StepOutcome::skipped(
+            None => StepOutcome::failed(
                 "infobase",
                 "create",
-                Instant::now(),
-                format!(
-                    "server infobase connection detected; automatic creation is not supported by the {other} provider, set providers.init: ibcmd"
-                ),
+                started,
+                AppError::Runtime("a file target names no infobase path".to_owned()),
             ),
-        };
-    };
+        },
+    }
+}
 
-    ensure_file_infobase(context, config, utilities, provider, &infobase_dir, dry_run)
+/// Отказ автономной цели с рецептом создания базы на машине сервера.
+fn standalone_refusal() -> AppError {
+    AppError::capability_for(
+        CapabilityReason::Target,
+        "infobase create does not create the infobase of a standalone server: it is created on the server machine before the server starts — `ibcmd server config init`, then `ibcmd infobase create` (with --import, --load or --restore for the configuration); the runner attaches to the running gate named by infobase.standalone",
+    )
+}
+
+/// Существующая файловая база — отказ, как у подъёма из снимка с созданием: команда
+/// создаёт новую базу и чужую не трогает.
+fn existing_file_infobase(infobase_dir: &Path) -> AppError {
+    AppError::Validation(format!(
+        "the file infobase '{}' already exists: infobase create creates a new infobase and leaves an existing one untouched; push loads the sources into it",
+        infobase_dir.display()
+    ))
 }
 
 fn ensure_file_infobase(
@@ -277,13 +286,18 @@ fn ensure_file_infobase(
     let marker = infobase_marker_path(infobase_dir);
     debug!("[Инфобаза] Подготовка: {}", infobase_dir.display());
     if marker.exists() {
-        return StepOutcome::skipped(
+        return StepOutcome::failed(
             "infobase",
             "create",
             started,
-            format!("infobase already exists: {}", marker.display()),
+            existing_file_infobase(infobase_dir),
         );
     }
+    let assembled = assembled_configuration(config);
+    let contents = match assembled {
+        Some(set) => format!(" with the main configuration of source-set '{}'", set.name),
+        None => " empty".to_owned(),
+    };
 
     if dry_run {
         // The platform is located here so an absent one refuses during the preview; the
@@ -294,7 +308,7 @@ fn ensure_file_infobase(
                 "create",
                 started,
                 format!(
-                    "would create a file infobase at '{}' via {}",
+                    "would create a file infobase at '{}'{contents} via {}",
                     infobase_dir.display(),
                     binary.display()
                 ),
@@ -313,72 +327,185 @@ fn ensure_file_infobase(
         return outcome;
     }
 
+    // Память о наборе снимается до сборки: правка, сделанная во время неё, останется
+    // изменением для первой отправки.
+    let memory = match assembled.map(|set| AssembledMemory::prepare(config, set)) {
+        None => None,
+        Some(Ok(memory)) => Some(memory),
+        Some(Err(error)) => return StepOutcome::failed("infobase", "create", started, error),
+    };
+    let import = assembled.map(|set| set.root_in(&config.base_path));
+
     log_live_stage("init: infobase create", "[Platform] creating infobase");
-    infobase_create_step(
-        context,
-        config,
-        utilities,
-        provider,
-        started,
-        |created| match created.status {
-            IbcmdInfobaseCreateStatus::Created if marker.exists() => Ok(StepOutcome::ok(
-                "infobase",
-                "create",
-                started,
-                format!("infobase created: {}", marker.display()),
-            )
-            // Созданную раннером базу он помнит с рождения
-            // (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`).
-            .with_warnings(&Vec::from_iter(remember_created_base(config)))),
-            IbcmdInfobaseCreateStatus::Created => Err(missing_infobase_marker_error(
+    let settled = collecting_deferrals(|deferrals| {
+        let created = create_file_infobase(
+            context,
+            config,
+            utilities,
+            provider,
+            import.as_deref(),
+            deferrals,
+        )?;
+        if !marker.exists() {
+            return Err(missing_infobase_marker_error(
                 "infobase creation did not produce marker file",
                 &marker,
-                &created.result,
-            )),
-            IbcmdInfobaseCreateStatus::AlreadyExists if marker.exists() => {
-                Ok(StepOutcome::skipped(
-                    "infobase",
-                    "create",
-                    started,
-                    format!("infobase already exists: {}", marker.display()),
-                ))
-            }
-            IbcmdInfobaseCreateStatus::AlreadyExists => Err(missing_infobase_marker_error(
-                "infobase create reported an existing file infobase but marker file is missing",
-                &marker,
-                &created.result,
-            )),
-            IbcmdInfobaseCreateStatus::Failed => Err(failed_create(&created.result)),
-            IbcmdInfobaseCreateStatus::Unconfirmed(error) => {
-                Err(unconfirmed_create(error, &created.result))
-            }
-        },
-    )
+                &created,
+            ));
+        }
+        // Созданную раннером базу он помнит с рождения: собранный набор — его деревом,
+        // остальные — пустой памятью (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
+        Ok(StepOutcome::ok(
+            "infobase",
+            "create",
+            started,
+            format!("infobase created{contents}: {}", marker.display()),
+        )
+        .with_warnings(&Vec::from_iter(remember_created_base(
+            config,
+            memory.as_ref(),
+        ))))
+    });
+    match settled {
+        Ok((step, warnings)) => step.with_warnings(&warnings),
+        Err(error) => StepOutcome::failed("infobase", "create", started, error),
+    }
 }
 
-fn ensure_server_infobase(
+/// Набор, из которого файловая база собирается при создании: основная конфигурация
+/// проекта в формате Конфигуратора. Исходники EDT сперва переводятся в XML, и при
+/// создании этого перевода нет — такая база создаётся пустой (разрыв правила
+/// `INV.CLI.A-FILE-BASE-OF-AN-EDT-PROJECT-IS-ASSEMBLED-FROM-ITS-SOURCES`).
+fn assembled_configuration(config: &AppConfig) -> Option<&SourceSetConfig> {
+    match config.format {
+        SourceFormat::Designer => SourceSetInventory::new(config).main_configuration(),
+        SourceFormat::Edt => None,
+    }
+}
+
+/// Создаёт файловую базу исполнителем; с `import` — сразу с конфигурацией из этого
+/// каталога. Возвращает итог создания самой базы.
+fn create_file_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     provider: Provider,
+    import: Option<&Path>,
+    deferrals: &mut Deferrals,
+) -> Result<PlatformCommandResult, AppError> {
+    let policy = context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
+    match provider {
+        Provider::Ibcmd => {
+            let binary = utilities
+                .locate(UtilityType::Ibcmd)
+                .map_err(AppError::from)?
+                .path;
+            let connection =
+                IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
+            let created = IbcmdDsl::new(
+                binary,
+                connection,
+                utilities.runner_for(UtilityType::Ibcmd),
+                policy,
+            )
+            .infobase_create(import)
+            .map_err(AppError::from)?;
+            deferrals.note_result(INFOBASE_CREATE, &created);
+            ensure_created(&created)?;
+            Ok(created)
+        }
+        Provider::Designer => {
+            let binary = utilities
+                .locate(UtilityType::V8)
+                .map_err(AppError::from)?
+                .path;
+            let runner = utilities.runner_for(UtilityType::V8);
+            let created = DesignerDsl::new(
+                binary.clone(),
+                config.v8_connection(),
+                runner,
+                None,
+                policy.clone(),
+            )
+            .create_infobase()
+            .map_err(AppError::from)?;
+            deferrals.note_result(INFOBASE_CREATE, &created);
+            ensure_created(&created)?;
+            let Some(import) = import else {
+                return Ok(created);
+            };
+            // Запасной исполнитель собирает базу теми же шагами, что отправка: загрузка
+            // исходников без записи файла версий в каталог, затем обновление базы данных.
+            let log_file = designer_log_file(config)?;
+            let designer = DesignerDsl::new(
+                binary,
+                config.v8_connection(),
+                runner,
+                Some(log_file),
+                policy,
+            );
+            let loaded = designer
+                .load_config_from_files_untouched(import, None)
+                .map_err(AppError::from)?;
+            deferrals.note_result(INFOBASE_CREATE, &loaded);
+            ensure_platform_success("load the main configuration", "infobase", &loaded)?;
+            let updated = designer.update_db_cfg(None).map_err(AppError::from)?;
+            deferrals.note_result(INFOBASE_CREATE, &updated);
+            ensure_platform_success("update the database configuration", "infobase", &updated)?;
+            Ok(created)
+        }
+        other => Err(crate::use_cases::unimplemented_provider(
+            Operation::Init,
+            other,
+        )),
+    }
+}
+
+fn ensure_created(result: &PlatformCommandResult) -> Result<(), AppError> {
+    result
+        .process
+        .outcome()
+        .map_err(|_code| failed_create(result))
+}
+
+/// Журнал `/Out` Конфигуратора, собирающего созданную базу.
+fn designer_log_file(config: &AppConfig) -> Result<PathBuf, AppError> {
+    crate::support::temp::platform_logs_dir(&config.work_path)
+        .map(|dir| dir.join("infobase-create-designer.log"))
+        .map_err(|error| AppError::Runtime(format!("failed to create platform logs dir: {error}")))
+}
+
+/// Базу в кластере Конфигуратор создаёт одной командой — регистрация в кластере и база
+/// данных в СУБД, — пустой: память знает только, что база есть, и первая отправка полная.
+fn ensure_cluster_infobase(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
     // Строка подключения из конфигурации бывает с `Usr=`/`Pwd=`: базу называет
     // `describe_target`, а не строка как есть (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
     let target = config.v8_connection().describe_target();
+    let requisites = match ClusterRequisites::of(config) {
+        Ok(requisites) => requisites,
+        Err(error) => return StepOutcome::failed("infobase", "create", started, error),
+    };
+    let database = format!(
+        "the database '{}' on '{}'",
+        requisites.database_name, requisites.database_server
+    );
     if dry_run {
-        // A server infobase cannot be observed without acting: `ibcmd infobase create`
-        // is what distinguishes created from already-present. The preview therefore names
-        // the target and the binary and stops short of that distinction.
-        return match locate_infobase_creator(provider, utilities) {
+        // Есть ли база уже, без действия не узнать: CREATEINFOBASE отвечает на это кодом,
+        // которым отвечает и на любой другой отказ, а вопрос `rac` к кластеру ждёт замера.
+        return match locate_infobase_creator(Provider::Designer, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",
                 "create",
                 started,
                 format!(
-                    "would ensure {target} via {binary}; whether it already exists is not observable without creating it",
-                    binary = binary.display()
+                    "would create {target} in the cluster with {database} via {}; whether it already exists is not observable before the creation",
+                    binary.display()
                 ),
             ),
             Err(error) => StepOutcome::failed("infobase", "create", started, error),
@@ -389,56 +516,131 @@ fn ensure_server_infobase(
     {
         return outcome;
     }
-    log_live_stage("init: infobase create", "[ibcmd] ensuring server infobase");
-    infobase_create_step(
-        context,
-        config,
-        utilities,
-        provider,
-        started,
-        |created| match created.status {
-            IbcmdInfobaseCreateStatus::Created => Ok(StepOutcome::ok(
-                "infobase",
-                "create",
-                started,
-                format!("{target} ensured via ibcmd"),
-            )
-            // Созданную раннером базу он помнит с рождения
-            // (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`).
-            .with_warnings(&Vec::from_iter(remember_created_base(config)))),
-            IbcmdInfobaseCreateStatus::AlreadyExists => Ok(StepOutcome::skipped(
-                "infobase",
-                "create",
-                started,
-                format!("{target} already exists"),
-            )),
-            IbcmdInfobaseCreateStatus::Failed => Err(failed_create(&created.result)),
-            IbcmdInfobaseCreateStatus::Unconfirmed(error) => {
-                Err(unconfirmed_create(error, &created.result))
-            }
-        },
-    )
-}
-
-/// Шаг создания базы. Создание и учёт отмены, которую оно отложило, у любой базы идут
-/// здесь; `settle` решает, что исход создания значит для этой базы. Удача несёт отложенную
-/// отмену в сообщении шага, отказ открывает ею свой текст.
-fn infobase_create_step(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    utilities: &mut PlatformUtilities,
-    provider: Provider,
-    started: Instant,
-    settle: impl FnOnce(IbcmdInfobaseCreateOutcome) -> Result<StepOutcome, AppError>,
-) -> StepOutcome {
+    log_live_stage(
+        "init: infobase create",
+        "[Конфигуратор] creating the infobase in the cluster",
+    );
     let settled = collecting_deferrals(|deferrals| {
-        let created = create_infobase(context, config, utilities, provider)?;
-        deferrals.note_result(INFOBASE_CREATE, &created.result);
-        settle(created)
+        let binary = utilities
+            .locate(UtilityType::V8)
+            .map_err(AppError::from)?
+            .path;
+        let created = DesignerDsl::new(
+            binary,
+            config.v8_connection(),
+            utilities.runner_for(UtilityType::V8),
+            None,
+            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+        )
+        .create_cluster_infobase(&requisites.creation())
+        .map_err(AppError::from)?;
+        deferrals.note_result(INFOBASE_CREATE, &created);
+        if created.process.outcome().is_err() {
+            return Err(requisites.failure(&created, &database));
+        }
+        Ok(StepOutcome::ok(
+            "infobase",
+            "create",
+            started,
+            format!("{target} created in the cluster with {database}; the first push loads every source-set in full"),
+        )
+        .with_warnings(&Vec::from_iter(remember_created_base(config, None))))
     });
     match settled {
         Ok((step, warnings)) => step.with_warnings(&warnings),
         Err(error) => StepOutcome::failed("infobase", "create", started, error),
+    }
+}
+
+/// Реквизиты создания базы в кластере из секций `dbms` и `cluster`.
+struct ClusterRequisites<'a> {
+    dbms: &'a str,
+    database_server: &'a str,
+    database_name: &'a str,
+    database_user: Option<&'a str>,
+    database_password: Option<&'a str>,
+    locale: &'a str,
+    cluster_user: Option<&'a str>,
+    cluster_password: Option<&'a str>,
+}
+
+impl<'a> ClusterRequisites<'a> {
+    /// Обязательные реквизиты — вид СУБД, сервер, имя базы данных и национальные
+    /// настройки: без `Locale` платформа оставляет в СУБД брошенную базу данных (замер
+    /// #181). Нехватка — отказ до запуска платформы с ключом, которого нет.
+    fn of(config: &'a AppConfig) -> Result<Self, AppError> {
+        let dbms = config.infobase.dbms.as_ref();
+        let required = |field: &'static str, value: Option<&'a String>| {
+            value
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    AppError::Validation(format!(
+                        "infobase create in a cluster requires infobase.dbms.{field}: the CREATEINFOBASE string takes the DBMS, its server, the database name and the locale from the dbms section{}",
+                        if field == "locale" {
+                            " — without Locale the platform leaves an abandoned database in the DBMS"
+                        } else {
+                            ""
+                        }
+                    ))
+                })
+        };
+        let optional =
+            |value: Option<&'a String>| value.map(String::as_str).filter(|value| !value.is_empty());
+        let cluster = config.infobase.cluster.as_ref();
+        Ok(Self {
+            dbms: required("kind", dbms.and_then(|dbms| dbms.kind.as_ref()))?,
+            database_server: required("server", dbms.and_then(|dbms| dbms.server.as_ref()))?,
+            database_name: required("name", dbms.and_then(|dbms| dbms.name.as_ref()))?,
+            locale: required("locale", dbms.and_then(|dbms| dbms.locale.as_ref()))?,
+            database_user: optional(dbms.and_then(|dbms| dbms.user.as_ref())),
+            database_password: optional(dbms.and_then(|dbms| dbms.password.as_ref())),
+            cluster_user: optional(cluster.and_then(|cluster| cluster.user.as_ref())),
+            cluster_password: optional(cluster.and_then(|cluster| cluster.password.as_ref())),
+        })
+    }
+
+    fn creation(&self) -> ClusterInfobaseCreation<'a> {
+        ClusterInfobaseCreation {
+            dbms: self.dbms,
+            database_server: self.database_server,
+            database_name: self.database_name,
+            database_user: self.database_user,
+            database_password: self.database_password,
+            locale: self.locale,
+            cluster_user: self.cluster_user,
+            cluster_password: self.cluster_password,
+        }
+    }
+
+    /// Отказ создания. Причину по прозе платформы раннер не угадывает
+    /// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно
+    /// без неё: без администратора кластера — этот уровень и его ключи; и что неудача может
+    /// оставить базу данных в СУБД. Пароли в выводе платформы скрыты.
+    fn failure(&self, result: &PlatformCommandResult, database: &str) -> AppError {
+        let secrets: Vec<&str> = [self.database_password, self.cluster_password]
+            .into_iter()
+            .flatten()
+            .collect();
+        let mut message = format_failure_evidence(
+            format!(
+                "create infobase failed for 'infobase' with exit code {}",
+                result.process.exit_code
+            ),
+            &mask_text(&result.process.stdout, &secrets),
+            &mask_text(&result.process.stderr, &secrets),
+            None,
+            None,
+        );
+        if self.cluster_user.is_none() {
+            message.push_str(
+                "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
+            );
+        }
+        message.push_str(&format!(
+            "; a failed creation may leave {database} in the DBMS, and a retry over it registers the infobase on that database — check the DBMS before retrying"
+        ));
+        AppError::Platform(message)
     }
 }
 
@@ -642,56 +844,9 @@ fn edt_workspace_initialized_message(workspace: &Path, imported_projects: &[Stri
     message
 }
 
-fn create_infobase_via_designer(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    utilities: &mut PlatformUtilities,
-) -> Result<IbcmdInfobaseCreateOutcome, AppError> {
-    let binary = utilities
-        .locate(UtilityType::V8)
-        .map_err(AppError::from)?
-        .path;
-    DesignerDsl::new(
-        binary,
-        config.v8_connection(),
-        utilities.runner_for(UtilityType::V8),
-        None,
-        context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-    )
-    .create_infobase()
-    .map(|result| IbcmdInfobaseCreateOutcome {
-        status: match result.process.outcome() {
-            Ok(()) => IbcmdInfobaseCreateStatus::Created,
-            Err(_code) => IbcmdInfobaseCreateStatus::Failed,
-        },
-        result,
-    })
-    .map_err(AppError::from)
-}
-
-fn create_infobase_via_ibcmd(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    utilities: &mut PlatformUtilities,
-) -> Result<IbcmdInfobaseCreateOutcome, AppError> {
-    let binary = utilities
-        .locate(UtilityType::Ibcmd)
-        .map_err(AppError::from)?
-        .path;
-    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-    IbcmdDsl::new(
-        binary,
-        connection,
-        utilities.runner_for(UtilityType::Ibcmd),
-        context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-    )
-    .ensure_infobase_create()
-    .map_err(AppError::from)
-}
-
 /// Locates the utility that would create the infobase, without creating it.
 ///
-/// Mirrors the `builder` dispatch of [`create_infobase`] so a preview refuses on the same
+/// Mirrors the dispatch of [`create_file_infobase`] so a preview refuses on the same
 /// missing platform the apply would.
 fn locate_infobase_creator(
     provider: Provider,
@@ -711,22 +866,6 @@ fn locate_infobase_creator(
         .locate(utility)
         .map(|location| location.path)
         .map_err(AppError::from)
-}
-
-fn create_infobase(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    utilities: &mut PlatformUtilities,
-    provider: Provider,
-) -> Result<IbcmdInfobaseCreateOutcome, AppError> {
-    match provider {
-        Provider::Designer => create_infobase_via_designer(context, config, utilities),
-        Provider::Ibcmd => create_infobase_via_ibcmd(context, config, utilities),
-        other => Err(crate::use_cases::unimplemented_provider(
-            Operation::Init,
-            other,
-        )),
-    }
 }
 
 fn interruption_step_outcome(
@@ -822,15 +961,6 @@ fn ensure_platform_success(
 /// Создание базы не удалось.
 fn failed_create(result: &PlatformCommandResult) -> AppError {
     AppError::Platform(failure_details("create infobase", "infobase", result))
-}
-
-/// Создание не удалось, а вопрос, есть ли база уже, остался без ответа. Род ответа — у
-/// вопроса: отмена остаётся отменой; улики создания идут рядом.
-fn unconfirmed_create(error: ProcessError, result: &PlatformCommandResult) -> AppError {
-    AppError::from(error).with_context(format!(
-        "{}; whether the infobase already existed went unanswered",
-        failure_details("create infobase", "infobase", result)
-    ))
 }
 
 /// Что не удалось и с каким кодом; вывод и журнал за ним пишет владелец улик.

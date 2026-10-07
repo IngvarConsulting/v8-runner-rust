@@ -316,6 +316,24 @@ impl<'a> IbcmdDsl<'a> {
         Ok(IbcmdInfobaseCreateOutcome { status, result })
     }
 
+    /// `infobase create [--import=<каталог> --apply --force]`: новая база, с `import` — сразу с
+    /// конфигурацией из XML-исходников, применённой к базе данных (замер 8.3.27.2074 у #205).
+    /// Исход — по коду выхода, у вызывающего: о базе, которой до вызова не было, второй
+    /// вопрос не задаётся — неудача импорта оставляет базу, и вопрос назвал бы её «уже
+    /// была».
+    pub fn infobase_create(
+        &self,
+        import: Option<&Path>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.create_infobase_args();
+        if let Some(import) = import {
+            args.push(format!("--import={}", import.display()));
+            args.push("--apply".to_owned());
+            args.push("--force".to_owned());
+        }
+        self.run(&args)
+    }
+
     /// Updates extension security properties in the target infobase.
     pub fn infobase_extension_update_properties(
         &self,

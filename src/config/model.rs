@@ -511,6 +511,10 @@ pub struct InfobaseDbmsConfig {
     /// Optional DBMS password passed as `--database-password`.
     #[serde(default)]
     pub password: Option<String>,
+
+    /// National settings of a new infobase in a cluster: `Locale=` of `CREATEINFOBASE`.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 impl InfobaseDbmsConfig {
@@ -527,6 +531,7 @@ impl InfobaseDbmsConfig {
             name: Some(name.into()),
             user: None,
             password: None,
+            locale: None,
         }
     }
 

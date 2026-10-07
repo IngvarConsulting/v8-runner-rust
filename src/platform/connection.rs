@@ -168,6 +168,58 @@ impl V8Connection {
             .map(|path| format!("File='{}'", path.replace('\'', "''")))
     }
 
+    /// Строка `CREATEINFOBASE` базы в кластере: адрес из этой строки подключения
+    /// (`Srvr`, `Ref`) и реквизиты СУБД и администратора кластера из `creation`. Порядок
+    /// и состав — как в замере #181 (8.5.4.1878): `Srvr;Ref;DBMS;DBSrvr;DB[;DBUID][;DBPwd];
+    /// CrSQLDB=Y;Locale[;SUsr][;SPwd]`. `None` — строка подключения не называет сервер и
+    /// базу.
+    pub fn create_cluster_infobase_arg(
+        &self,
+        creation: &ClusterInfobaseCreation<'_>,
+    ) -> Option<String> {
+        let (server, reference) = self.cluster_address()?;
+        let mut parts = vec![
+            connection_segment("Srvr", &server),
+            connection_segment("Ref", &reference),
+            connection_segment("DBMS", creation.dbms),
+            connection_segment("DBSrvr", creation.database_server),
+            connection_segment("DB", creation.database_name),
+        ];
+        let optional = [
+            ("DBUID", creation.database_user),
+            ("DBPwd", creation.database_password),
+        ];
+        parts.extend(
+            optional
+                .into_iter()
+                .filter_map(|(key, value)| Some(connection_segment(key, value?))),
+        );
+        parts.push("CrSQLDB=Y".to_owned());
+        parts.push(connection_segment("Locale", creation.locale));
+        let administrator = [
+            ("SUsr", creation.cluster_user),
+            ("SPwd", creation.cluster_password),
+        ];
+        parts.extend(
+            administrator
+                .into_iter()
+                .filter_map(|(key, value)| Some(connection_segment(key, value?))),
+        );
+        Some(parts.join(";"))
+    }
+
+    /// Сервер и имя базы в кластере: `Srvr` и `Ref` объявленной строки или части `/S
+    /// <сервер>\<база>`.
+    fn cluster_address(&self) -> Option<(String, String)> {
+        if let Some(address) = declared_server_address(&self.raw) {
+            return Some((address.server, address.reference));
+        }
+        let (server, reference) = self.server_arg()?.split_once('\\')?;
+        let (server, reference) = (server.trim(), reference.trim());
+        (!server.is_empty() && !reference.is_empty())
+            .then(|| (server.to_owned(), reference.to_owned()))
+    }
+
     /// Базу и учётную запись называет без секретов: сырая строка бывает с `Pwd=`, поэтому
     /// файловая база названа путём, серверная — именем в кластере и сервером, иная форма
     /// строки — общим словом.
@@ -183,6 +235,31 @@ impl V8Connection {
             "the infobase".to_owned()
         };
         name_the_account(&target, self.user.as_deref())
+    }
+}
+
+/// Реквизиты создания базы в кластере, которых нет в строке подключения: СУБД, её
+/// учётная запись, национальные настройки и администратор кластера.
+#[derive(Debug, Clone, Copy)]
+pub struct ClusterInfobaseCreation<'a> {
+    pub dbms: &'a str,
+    pub database_server: &'a str,
+    pub database_name: &'a str,
+    pub database_user: Option<&'a str>,
+    pub database_password: Option<&'a str>,
+    pub locale: &'a str,
+    pub cluster_user: Option<&'a str>,
+    pub cluster_password: Option<&'a str>,
+}
+
+/// Часть `ключ=значение` строки подключения. Значение с `;`, кавычкой или пробелом по
+/// краям берётся в двойные кавычки, внутренняя кавычка удваивается; остальное идёт как есть.
+fn connection_segment(key: &str, value: &str) -> String {
+    let needs_quotes = value.contains([';', '"']) || value.trim() != value;
+    if needs_quotes {
+        format!("{key}=\"{}\"", value.replace('"', "\"\""))
+    } else {
+        format!("{key}={value}")
     }
 }
 

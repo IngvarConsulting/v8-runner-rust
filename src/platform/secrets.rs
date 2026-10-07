@@ -43,13 +43,15 @@ const IDENTITY_FLAGS: &[&str] = &[
     "target-db-user",
 ];
 
-/// Секретные параметры строки соединения: пароль базы и пароли веб-сервера и прокси
-/// (`IBConnectionString`, «Связи»). Набор отдельный от ключей командной строки —
+/// Секретные параметры строки соединения: пароль базы, пароли веб-сервера и прокси
+/// (`IBConnectionString`, «Связи»), пароль СУБД и администратора кластера в строке
+/// `CREATEINFOBASE` (`DBPwd`, `SPwd`). Набор отдельный от ключей командной строки —
 /// иначе `p=` или `user=` внутри чужого значения маскировались бы зря.
-const SECRET_SEGMENTS: &[&str] = &["pwd", "wsp", "wsppwd", "password"];
+const SECRET_SEGMENTS: &[&str] = &["pwd", "wsp", "wsppwd", "password", "dbpwd", "spwd"];
 
-/// Параметры строки соединения, называющие пользователя.
-const IDENTITY_SEGMENTS: &[&str] = &["usr", "wsn", "wspuser"];
+/// Параметры строки соединения, называющие пользователя, — и в строке `CREATEINFOBASE`
+/// (`DBUID`, `SUsr`).
+const IDENTITY_SEGMENTS: &[&str] = &["usr", "wsn", "wspuser", "dbuid", "susr"];
 
 /// Что именно скрывает показ аргументов.
 #[derive(Clone, Copy)]

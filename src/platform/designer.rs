@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::domain::syntax::SyntaxCheckStatus;
-use crate::platform::connection::V8Connection;
+use crate::platform::connection::{ClusterInfobaseCreation, V8Connection};
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
@@ -215,6 +215,30 @@ impl<'a> DesignerDsl<'a> {
         })?;
         args.push(connection);
         self.run(&args)
+    }
+
+    /// `CREATEINFOBASE <клиент-серверная строка> /DisableStartupDialogs`: регистрация базы в
+    /// кластере и база данных в СУБД одной командой (замер #181, 8.5.4.1878). Без
+    /// `/DisableStartupDialogs` при заполненном списке администраторов кластера и без `SUsr`
+    /// клиент спросил бы пароль окном. `/Out` не ставится: строка успеха в нём повторяет всю
+    /// строку соединения вместе с `DBPwd` и `SPwd`.
+    pub fn create_cluster_infobase(
+        &self,
+        creation: &ClusterInfobaseCreation<'_>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let connection = self
+            .connection
+            .create_cluster_infobase_arg(creation)
+            .ok_or_else(|| {
+                DesignerError::UtilityNotFound(
+                    "a cluster connection Srvr=…;Ref=… is required".to_owned(),
+                )
+            })?;
+        self.run(&[
+            "CREATEINFOBASE".to_owned(),
+            connection,
+            "/DisableStartupDialogs".to_owned(),
+        ])
     }
 
     /// `/DumpConfigToFiles <dir> [-Extension <name>]`

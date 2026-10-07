@@ -1346,11 +1346,7 @@ fn designer_log_file(
 fn configuration_source_set<'a>(
     inventory: &SourceSetInventory<'a>,
 ) -> Result<&'a SourceSetConfig, AppError> {
-    inventory
-        .source_sets_with_purpose(SourceSetPurpose::Configuration)
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
+    inventory.main_configuration().ok_or_else(|| {
             AppError::Validation(
                 "make requires a configuration source-set: an extension package is built on top of its configuration".to_owned(),
             )
