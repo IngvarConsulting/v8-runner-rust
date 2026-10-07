@@ -171,7 +171,8 @@ impl V8Connection {
     /// Строка `CREATEINFOBASE` базы в кластере: адрес из этой строки подключения
     /// (`Srvr`, `Ref`) и реквизиты СУБД и администратора кластера из `creation`. Порядок
     /// и состав — как в замере #181 (8.5.4.1878): `Srvr;Ref;DBMS;DBSrvr;DB[;DBUID][;DBPwd];
-    /// CrSQLDB=Y;Locale[;SUsr][;SPwd]`. `None` — строка подключения не называет сервер и
+    /// CrSQLDB=Y;Locale;SchJobDn=Y[;SUsr][;SPwd]`. `SchJobDn=Y` стоит всегда: созданная раннером
+    /// база в кластере — с запретом регламентных заданий (решение владельца, #204). `None` — строка подключения не называет сервер и
     /// базу.
     pub fn create_cluster_infobase_arg(
         &self,
@@ -196,6 +197,7 @@ impl V8Connection {
         );
         parts.push("CrSQLDB=Y".to_owned());
         parts.push(connection_segment("Locale", creation.locale));
+        parts.push("SchJobDn=Y".to_owned());
         let administrator = [
             ("SUsr", creation.cluster_user),
             ("SPwd", creation.cluster_password),
@@ -445,13 +447,13 @@ mod tests {
             connection
                 .create_cluster_infobase_arg(&creation(Some("cadm"), Some("c")))
                 .as_deref(),
-            Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru;SUsr=cadm;SPwd=c")
+            Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru;SchJobDn=Y;SUsr=cadm;SPwd=c")
         );
         assert_eq!(
             connection
                 .create_cluster_infobase_arg(&creation(None, None))
                 .as_deref(),
-            Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru")
+            Some("Srvr=srv:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=\"pg;pass\"\"word\";CrSQLDB=Y;Locale=ru;SchJobDn=Y")
         );
     }
 

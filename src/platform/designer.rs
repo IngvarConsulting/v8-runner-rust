@@ -810,7 +810,7 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args log");
         assert_eq!(
             args,
-            "CREATEINFOBASE\nSrvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;CrSQLDB=Y;Locale=ru\n/DisableStartupDialogs\n"
+            "CREATEINFOBASE\nSrvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;CrSQLDB=Y;Locale=ru;SchJobDn=Y\n/DisableStartupDialogs\n"
         );
     }
 

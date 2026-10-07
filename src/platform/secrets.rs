@@ -671,10 +671,10 @@ mod tests {
     /// превью прячет пароли, показ отказа — ещё и имена (#204).
     #[test]
     fn masks_the_dbms_and_cluster_passwords_of_a_creation_string() {
-        let string = "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;DBUID=postgres;DBPwd=pg;CrSQLDB=Y;Locale=ru;SUsr=cadm;SPwd=c";
+        let string = "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;DBUID=postgres;DBPwd=pg;CrSQLDB=Y;Locale=ru;SchJobDn=Y;SUsr=cadm;SPwd=c";
         assert_eq!(
             preview(&["CREATEINFOBASE", string], &[])[1],
-            "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;DBUID=postgres;DBPwd=***;CrSQLDB=Y;Locale=ru;SUsr=cadm;SPwd=***"
+            "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;DBUID=postgres;DBPwd=***;CrSQLDB=Y;Locale=ru;SchJobDn=Y;SUsr=cadm;SPwd=***"
         );
         let shown = rendered(&["CREATEINFOBASE", string]);
         for hidden in ["postgres", "DBPwd=pg", "cadm", "SPwd=c;", "SPwd=c\n"] {

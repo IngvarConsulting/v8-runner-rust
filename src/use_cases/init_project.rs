@@ -521,7 +521,7 @@ fn ensure_cluster_infobase(
     );
     if dry_run {
         // Есть ли база уже, без действия не узнать: CREATEINFOBASE отвечает на это кодом,
-        // которым отвечает и на любой другой отказ, а вопрос `rac` к кластеру ждёт замера.
+        // которым отвечает и на любой другой отказ, а вопроса `rac` к кластеру ещё нет (#213).
         return match locate_infobase_creator(Provider::Designer, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",

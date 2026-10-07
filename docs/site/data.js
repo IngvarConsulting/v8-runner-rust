@@ -138,7 +138,7 @@ window.RUNNER_DATA = (function () {
       cmd: function (ctx) { return 'v8-runner infobase create'; },
       applies: function (ctx) { return standaloneRefuses(ctx, 'базу автономного сервера создают ibcmd до запуска сервера, на его машине; раннер к нему подключается, ничего не запуская') || needEdt(ctx); },
       today: function (ctx) {
-        if (ctx.target === 'cluster') return { chain: builderChoice(ctx, true, false), config: ['connection', 'dbms.* с locale', 'cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой; запасного rac нет, «уже есть» до создания не различается (#180)' };
+        if (ctx.target === 'cluster') return { chain: builderChoice(ctx, true, false), config: ['connection', 'dbms.* с locale', 'cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой; SchJobDn=Y — с запретом регламентных заданий; запасного rac нет, «уже есть» до создания не различается (#213)' };
         var chain = [];
         if (ctx.tools.ibcmd) chain.push(P.ibcmd);
         if (ctx.tools.designer) chain.push(P.designer);

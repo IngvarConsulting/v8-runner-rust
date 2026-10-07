@@ -216,7 +216,8 @@ infobase create --import --apply --force` или Конфигуратор (`CREA
 `exchange_guard::remember_created_base` пишет собранному набору его дерево, остальным —
 пустую память. Сборка Конфигуратором, остановленная после создания, оставляет пустую память.
 База в кластере: строку `CREATEINFOBASE` собирает `V8Connection::create_cluster_infobase_arg`
-из `Srvr`/`Ref` подключения и реквизитов `dbms`/`cluster`; `/Out` не ставится, а вывод
+из `Srvr`/`Ref` подключения и реквизитов `dbms`/`cluster`, всегда с `CrSQLDB=Y` и
+`SchJobDn=Y` (база создаётся с запретом регламентных заданий); `/Out` не ставится, а вывод
 платформы в отказе проходит `mask_text` с паролями СУБД и кластера. `DBPwd` и `SPwd`
 маскирует `platform::secrets`, `DBUID` и `SUsr` прячутся в показе отказа. Все процессы
 создания — критическая фаза; отсрочку отмены называет `collecting_deferrals`.

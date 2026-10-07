@@ -135,8 +135,8 @@ CLI help, доверяйте текущему коду и затем синхр�
   разные факты для того, кто решает, применять ли.
 - `infobase create` для базы в кластере не различает «создана» и «уже была»: код выхода
   `CREATEINFOBASE` у «уже существует» тот же, что у любого другого отказа, а вопрос к кластеру
-  через `rac` ждёт замера его вывода
-  ([#180](https://github.com/IngvarConsulting/v8-runner-rust/issues/180)). Превью называет цель,
+  через `rac` ещё не реализован
+  ([#213](https://github.com/IngvarConsulting/v8-runner-rust/issues/213)). Превью называет цель,
   базу данных и утилиту и на этом останавливается; существующая база получает отказ самой
   платформы.
 - `push` в формате EDT планирует шаг экспорта целиком: выгрузка в файлы
@@ -432,7 +432,8 @@ v8-runner infobase create [--dry-run]
 ```
 
 - Всегда разделяет шаг подготовки ИБ и шаг EDT workspace; отказ шага базы рабочую область
-  не останавливает.
+  не останавливает: повтор `infobase create` после упавшего импорта рабочей области отказывает
+  на уже созданной базе, но импорт рабочей области доделывает.
 - Файловая база проекта формата DESIGNER: первым `ibcmd infobase create --import=<основная
   конфигурация> --apply --force`, без `ibcmd` — Конфигуратор: `CREATEINFOBASE`,
   `/LoadConfigFromFiles` основной конфигурации без `-updateConfigDumpInfo`, `/UpdateDBCfg`.
@@ -444,14 +445,15 @@ v8-runner infobase create [--dry-run]
   полный.
 - Существующая файловая база (`1Cv8.1CD` на месте) — отказ `validation` до запуска платформы,
   и в превью тоже.
-- База в кластере: Конфигуратор `CREATEINFOBASE "Srvr=…;Ref=…;DBMS=…;DBSrvr=…;DB=…[;DBUID=…][;DBPwd=…];CrSQLDB=Y;Locale=…[;SUsr=…;SPwd=…]" /DisableStartupDialogs`
-  (замер #181). Реквизиты — `infobase.dbms` (`kind`, `server`, `name`, `locale` обязательны,
+- База в кластере: Конфигуратор `CREATEINFOBASE "Srvr=…;Ref=…;DBMS=…;DBSrvr=…;DB=…[;DBUID=…][;DBPwd=…];CrSQLDB=Y;Locale=…;SchJobDn=Y[;SUsr=…;SPwd=…]" /DisableStartupDialogs`
+  (замер #181). Созданная раннером база в кластере — с запретом регламентных заданий
+  (`SchJobDn=Y` всегда); снять его можно консолью кластера или `rac infobase update`. Реквизиты — `infobase.dbms` (`kind`, `server`, `name`, `locale` обязательны,
   `user`, `password` — если есть) и `infobase.cluster.user`/`password`. Без обязательного
   реквизита — отказ `validation` до запуска с именем ключа. `/Out` не ставится: строка успеха
   в нём повторяет пароли. Отказ платформы называет, что неудача могла оставить базу данных в
   СУБД; без объявленного администратора кластера он называет уровень администратора кластера и
   его ключи. База создаётся пустой, и первый `push` полный. Запасной путь `rac infobase create`
-  пока не реализован ([#180](https://github.com/IngvarConsulting/v8-runner-rust/issues/180)).
+  пока не реализован ([#213](https://github.com/IngvarConsulting/v8-runner-rust/issues/213)).
 - Автономный сервер: отказ `capability` с кодом `target` и рецептом — `ibcmd server config init`,
   затем `ibcmd infobase create` на машине сервера до его запуска.
 - Созданную файловую базу команда записывает в метку владельца за своей рабочей копией.

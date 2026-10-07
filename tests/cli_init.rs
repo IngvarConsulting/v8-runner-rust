@@ -885,7 +885,7 @@ fn a_cluster_base_is_created_by_the_designer_with_the_client_server_string() {
         calls,
         [
             "CREATEINFOBASE",
-            "Srvr=cluster:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=pg-s3cret;CrSQLDB=Y;Locale=ru;SUsr=cadm;SPwd=c-s3cret",
+            "Srvr=cluster:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=pg-s3cret;CrSQLDB=Y;Locale=ru;SchJobDn=Y;SUsr=cadm;SPwd=c-s3cret",
             "/DisableStartupDialogs",
         ]
     );
