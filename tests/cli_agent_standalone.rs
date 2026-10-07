@@ -575,8 +575,9 @@ fn a_download_through_the_gate_exports_the_main_configuration() {
 }
 
 /// `download --state db` шлюзу не адресуется: конфигурацию базы данных выгружают
-/// Конфигуратор и `ibcmd`, а в цепочке `download` автономного сервера только агент. Отказ
-/// приходит до сессии и называет это.
+/// Конфигуратор и `ibcmd`, а автономному серверу без строки прямого шлюза в цепочке
+/// `download` остаётся только агент. Отказ приходит до сессии и называет оба выхода:
+/// объявить прямой шлюз или выгрузить рабочую конфигурацию.
 #[test]
 fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
     let harness = harness();
@@ -603,7 +604,7 @@ fn a_download_of_the_database_configuration_is_refused_before_the_gate() {
         );
         assert_eq!(
             error_message(&payload),
-            "download --state db takes the database configuration, which only designer or ibcmd exports: agent has no command for it; a standalone target serves download only through the agent: omit --state db to export the working configuration",
+            "download --state db takes the database configuration, which only designer or ibcmd exports: agent has no command for it; a standalone target as declared serves download only through the agent: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>, or omit --state db to export the working configuration",
             "{payload}"
         );
         assert_eq!(payload["data"]["provider"]["selected"], Value::Null);
@@ -756,10 +757,11 @@ fn launch_keys_do_not_apply_to_a_standalone_server() {
 }
 
 /// Секция `standalone` первична, строка рядом с ней — адрес прямого шлюза: конфиг
-/// принимается, команда идёт через SSH-шлюз, как раньше, а строку никто не читает — об
-/// этом предупреждает загрузчик, пока исполнителя по прямому шлюзу нет (#205).
+/// принимается без предупреждений, и Конфигуратор стоит в цепочке первым. Платформы на
+/// машине раннера нет, поэтому квитанция называет его пропущенным, и команду исполняет
+/// агент через SSH-шлюз; строка прямого шлюза шлюзу не уходит ни в каком виде.
 #[test]
-fn a_direct_gate_address_next_to_the_standalone_section_is_accepted_but_not_used_yet() {
+fn a_direct_gate_address_next_to_the_ssh_gate_puts_the_designer_first() {
     let harness = harness();
     let infobase = format!(
         "  connection: 'Srvr=127.0.0.1:1541;Ref=demo'\n{}",
@@ -770,6 +772,14 @@ fn a_direct_gate_address_next_to_the_standalone_section_is_accepted_but_not_used
     let (code, payload) = run(&harness, &["dump", "--force"]);
 
     assert_eq!(code, 0, "{payload}");
+    let receipt = &payload["data"]["provider"];
+    assert_eq!(receipt["selected"], "agent", "{payload}");
+    assert_eq!(receipt["skipped"][0]["provider"], "designer", "{payload}");
+    assert_eq!(
+        receipt["skipped"].as_array().map(Vec::len),
+        Some(1),
+        "{payload}"
+    );
     let commands = commands(&harness);
     assert!(
         !commands.is_empty(),
@@ -784,17 +794,14 @@ fn a_direct_gate_address_next_to_the_standalone_section_is_accepted_but_not_used
         }),
         "the direct gate address never reaches the gate in any form: {commands:?}"
     );
-    let warnings = payload["warnings"]
-        .as_array()
-        .expect("warnings")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>();
     assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("declared but not used yet")),
-        "{warnings:?}"
+        payload["warnings"]
+            .as_array()
+            .is_none_or(|warnings| warnings
+                .iter()
+                .filter_map(Value::as_str)
+                .all(|warning| !warning.contains("direct gate"))),
+        "{payload}"
     );
 }
 
@@ -821,21 +828,39 @@ fn a_file_address_next_to_the_standalone_section_is_refused() {
     assert!(commands(&harness).is_empty(), "no gate session was opened");
 }
 
-/// У автономного сервера один исполнитель: ключ `providers.*` — ошибка, а операции без
-/// строки в матрице (`load`, `init`) отказывают типизированно и сессии не открывают.
+/// Без строки прямого шлюза автономному серверу остаётся агент: ключ `providers.*`,
+/// назначивший Конфигуратор, — ошибка, называющая строку; агента назначить можно.
+/// Операции, которые исполняет только Конфигуратор (`upload`), отказывают с тем же
+/// выходом и сессии не открывают; `infobase create` раннер не делает никогда.
 #[test]
-fn a_standalone_server_has_one_executor_and_no_load() {
+fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
     let harness = harness();
     let infobase = standalone_infobase(&harness);
-    write_config(&harness, &infobase, "providers:\n  dump: agent\n");
+    write_config(&harness, &infobase, "providers:\n  pull: designer\n");
     let (code, payload) = run(&harness, &["dump", "--force"]);
     assert_ne!(code, 0, "{payload}");
-    assert!(
-        error_message(&payload).contains("providers.pull is not allowed"),
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert_eq!(
+        error_message(&payload),
+        "config validation failed: providers.pull: 'designer' reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>, or remove the key",
+        "{payload}"
+    );
+    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+
+    write_config(&harness, &infobase, "providers:\n  pull: agent\n");
+    let (code, payload) = run(&harness, &["dump", "--force"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["data"]["provider"]["origin"]["kind"], "override",
         "{payload}"
     );
 
     write_config(&harness, &infobase, "");
+    let before = commands(&harness).len();
     let artifact = harness.dir.path().join("in.cf");
     fs::write(&artifact, "cf").expect("cf");
     let (code, payload) = run(
@@ -844,11 +869,12 @@ fn a_standalone_server_has_one_executor_and_no_load() {
     );
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
-    assert!(
-        error_message(&payload).contains("Designer provider"),
+    assert_eq!(
+        error_message(&payload),
+        "upload reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
         "{payload}"
     );
-    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+    assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
 
     let (code, payload) = run(&harness, &["infobase", "create"]);
     assert_eq!(code, 0, "{payload}");
@@ -862,13 +888,14 @@ fn a_standalone_server_has_one_executor_and_no_load() {
             .is_some_and(|message| message.contains("never created by the runner")),
         "{payload}"
     );
-    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+    assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
 }
 
-/// Снимок автономного сервера через шлюз не снимается: `dump-ib` роняет `ibsrv` 8.3.27
-/// (живой прогон 15.09.2026), поэтому строки нет и отказ приходит до сессии.
+/// Снимок автономного сервера через SSH-шлюз не снимается: `dump-ib` роняет `ibsrv` 8.3.27
+/// (живой прогон 15.09.2026), и снимок снимает только Конфигуратор по прямому шлюзу. Без
+/// строки прямого шлюза отказ приходит до сессии и называет, что объявить.
 #[test]
-fn a_standalone_snapshot_is_refused_before_any_session() {
+fn a_standalone_snapshot_without_the_direct_gate_is_refused_before_any_session() {
     let harness = harness();
     let dt = harness.dir.path().join("out").join("base.dt");
 
@@ -878,13 +905,17 @@ fn a_standalone_snapshot_is_refused_before_any_session() {
     );
 
     assert_ne!(code, 0, "{payload}");
-    assert_eq!(payload["error"]["kind"], "capability", "{payload}");
-    assert!(error_message(&payload).contains("standalone"), "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert_eq!(
+        error_message(&payload),
+        "infobase.dump reaches a standalone server only through designer by the direct gate — declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "{payload}"
+    );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 }
 
-/// Прямой шлюз автономного сервера раннер пока не использует (#205): тонкий клиент идёт
-/// по клиентскому адресу без всякого ключа. Не объявлен адрес — отказ называет именно его, а не платформу: платформы
+/// Тонкий клиент по прямому шлюзу автономного сервера раннер пока не запускает (#208): он
+/// идёт по клиентскому адресу без всякого ключа. Не объявлен адрес — отказ называет именно его, а не платформу: платформы
 /// на этой машине нет вовсе, и до её поиска дело не доходит.
 #[test]
 fn a_thin_client_against_a_standalone_server_asks_for_the_web_address() {
@@ -901,7 +932,8 @@ fn a_thin_client_against_a_standalone_server_asks_for_the_web_address() {
 }
 
 /// Второй путь открыли только тонкому клиенту. Остальные режимы против автономной цели
-/// отказывают ровно как до его появления: прямой шлюз пока не используется (#205), а по
+/// отказывают ровно как до его появления: клиентов по прямому шлюзу раннер пока не
+/// запускает (#208), а по
 /// клиентскому адресу ходит только тонкий.
 #[test]
 fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
@@ -963,13 +995,13 @@ fn a_test_run_against_a_standalone_server_refuses_with_the_soon_code() {
     assert_eq!(payload["error"]["kind"], "capability", "{payload}");
     assert_eq!(payload["error"]["code"], "soon", "{payload}");
     assert!(
-        error_message(&payload).contains("not used by the runner yet"),
+        error_message(&payload).contains("standalone server yet (#208)"),
         "{payload}"
     );
 }
 
-/// Прямой шлюз автономной цели раннер пока не использует, поэтому просить его — ошибка
-/// конфигурации, а не пустой запуск.
+/// Тонкий клиент по прямому шлюзу автономной цели раннер пока не запускает (#208),
+/// поэтому просить его — ошибка конфигурации, а не пустой запуск.
 #[test]
 fn via_connection_against_a_standalone_server_is_refused() {
     let harness = harness();
@@ -982,7 +1014,7 @@ fn via_connection_against_a_standalone_server_is_refused() {
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert!(
-        error_message(&payload).contains("not used by the runner yet"),
+        error_message(&payload).contains("standalone server yet (#208)"),
         "{payload}"
     );
 }

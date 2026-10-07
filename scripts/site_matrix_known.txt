@@ -12,23 +12,16 @@
 
 download file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
 download cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
-download standalone | сайт: designer agent | матрица: agent | #205
 extensions file | сайт: ibcmd agent | матрица: ibcmd agent~ | #206
 extensions cluster | сайт: agent designer | матрица: ibcmd agent~ | #206
-extensions standalone | сайт: agent designer | матрица: agent | #205
+extensions standalone | сайт: agent designer | матрица: agent | #206
 infobase.create file | сайт: ibcmd designer | матрица: designer ibcmd | #204
 infobase.create cluster | сайт: designer | матрица: designer ibcmd | #204
 infobase.dump file | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
 infobase.dump cluster | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
-infobase.dump standalone | сайт: designer | матрица: - | #205
 infobase.restore file | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
 infobase.restore cluster | сайт: agent designer | матрица: designer ibcmd~ agent~ | #206
-infobase.restore standalone | сайт: designer | матрица: - | #205
 pull file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
 pull cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
-pull standalone | сайт: designer agent | матрица: agent | #205
 push file | сайт: agent designer ibcmd | матрица: designer ibcmd agent~ | #206
 push cluster | сайт: agent designer | матрица: designer ibcmd agent~ | #206
-push standalone | сайт: designer agent | матрица: agent | #205
-syntax standalone | сайт: designer | матрица: - | #205
-upload standalone | сайт: designer | матрица: - | #205

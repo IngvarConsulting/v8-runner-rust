@@ -417,6 +417,9 @@ impl HasClientScopes for DesignerConfigSyntaxArgs {
 }
 
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
+    if let Some(undeclared) = config.undeclared_way(Operation::Syntax) {
+        return Some(AppError::Validation(undeclared));
+    }
     if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
         || config.format != SourceFormat::Designer
     {
@@ -429,6 +432,9 @@ fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
 }
 
 fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {
+    if let Some(undeclared) = config.undeclared_way(Operation::Syntax) {
+        return Some(AppError::Validation(undeclared));
+    }
     if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
         || config.format != SourceFormat::Edt
     {

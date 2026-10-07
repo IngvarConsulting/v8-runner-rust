@@ -81,6 +81,10 @@ pub fn select_from(
     let mut skipped: Vec<SkippedProvider> = Vec::new();
 
     for provider in plan.candidates() {
+        if let Some(skip) = without_a_way(config, provider) {
+            skipped.push(skip);
+            continue;
+        }
         let Some(needed) = utilities_of(provider, config) else {
             skipped.push(no_adapter(provider, operation));
             continue;
@@ -113,12 +117,27 @@ pub fn select_from(
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 
-/// Отказ, когда у операции на цели этого вида нет ни одного исполнителя.
+/// Отказ, когда у операции на цели этого вида нет ни одного исполнителя. У автономного
+/// сервера строка бывает пуста потому, что исполнителям её не объявлен путь: тогда отказ
+/// — ошибка конфигурации и называет, что объявить.
 pub(crate) fn no_executor(config: &AppConfig, operation: Operation) -> AppError {
+    if let Some(undeclared) = config.undeclared_way(operation) {
+        return AppError::Validation(undeclared);
+    }
     AppError::capability(format!(
         "no executor implements {operation} on a {} target",
         config.target_kind().as_str()
     ))
+}
+
+/// Пропуск исполнителя, которому не объявлен путь к автономному серверу. В цепочку
+/// умолчаний такой исполнитель не попадает вовсе; здесь его встречает только ключ
+/// `providers.*`, назначивший его, — и не подменяется умолчанием.
+pub(crate) fn without_a_way(config: &AppConfig, provider: Provider) -> Option<SkippedProvider> {
+    config.missing_way(provider).map(|way| SkippedProvider {
+        provider,
+        reason: way.undeclared(provider),
+    })
 }
 
 /// Пропуск исполнителя, у которого в этой сборке нет адаптера для операции.
