@@ -1650,7 +1650,12 @@ impl EphemeralHostKey {
             options.mode(0o600);
         }
         let mut file = options.open(&path).map_err(workspace)?;
-        file.write_all(text.as_bytes()).map_err(workspace)?;
+        if let Err(error) = file.write_all(text.as_bytes()) {
+            // Файл уже создан, а владельца, который удалит его при сбросе, ещё нет.
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(workspace(error));
+        }
         Ok(Self {
             path,
             fingerprint: key.public_key().fingerprint(HashAlg::Sha256),
