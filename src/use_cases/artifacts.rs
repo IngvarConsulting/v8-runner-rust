@@ -73,20 +73,29 @@ const ARTIFACTS_BACKUP_PREFIX: &str = ".artifacts-backup";
 /// `ibcmd`, у внешних своя база Конфигуратора — базу `ibcmd` Конфигуратор не открывает.
 pub struct MakeSession {
     utilities: PlatformUtilities,
+    bases: SessionBases,
+}
+
+/// Временные базы прогона и исходники EDT, уже переведённые в XML: перевод набора делается
+/// один раз за прогон и живёт в каталоге той базы, где сделан, до её уборки.
+#[derive(Default)]
+struct SessionBases {
     bases: Vec<ThrowawayInfobase>,
+    xml: std::collections::BTreeMap<String, PathBuf>,
 }
 
 impl MakeSession {
     pub(super) fn new(config: &AppConfig) -> Self {
         Self {
             utilities: PlatformUtilities::from_config(config),
-            bases: Vec::new(),
+            bases: SessionBases::default(),
         }
     }
 
     /// Убирает временные базы прогона. Неудачи — предупреждения для ответа.
     pub(super) fn close(self) -> Vec<String> {
         self.bases
+            .bases
             .into_iter()
             .flat_map(ThrowawayInfobase::close)
             .collect()
@@ -480,10 +489,11 @@ type PublicationAttempt = Result<
 fn session_base<'s>(
     context: &ExecutionContext,
     config: &AppConfig,
-    bases: &'s mut Vec<ThrowawayInfobase>,
+    session: &'s mut SessionBases,
     builder: Builder,
     runner: &dyn ProcessRunner,
-) -> Result<&'s mut ThrowawayInfobase, AppError> {
+) -> Result<(&'s mut ThrowawayInfobase, &'s mut XmlCache), AppError> {
+    let SessionBases { bases, xml } = session;
     let index = match bases
         .iter()
         .position(|base| base.provider() == builder.provider)
@@ -499,17 +509,20 @@ fn session_base<'s>(
             bases.len() - 1
         }
     };
-    Ok(&mut bases[index])
+    Ok((&mut bases[index], xml))
 }
+
+/// Исходники EDT, переведённые в XML за прогон, по имени набора.
+type XmlCache = std::collections::BTreeMap<String, PathBuf>;
 
 /// Основная конфигурация во временной базе Конфигуратора: расширения и внешние обработки
 /// он собирает поверх неё. База её получает один раз за прогон; `ibcmd` её не загружает.
 fn ensure_configuration_in(
     context: &ExecutionContext,
     config: &AppConfig,
+    xml: &mut XmlCache,
     base: &mut ThrowawayInfobase,
     runner: &dyn ProcessRunner,
-    log_file: Option<PathBuf>,
 ) -> Result<(), (AppError, Option<PathBuf>)> {
     let inventory = SourceSetInventory::new(config);
     let configuration = configuration_source_set(&inventory).map_err(|error| (error, None))?;
@@ -517,15 +530,32 @@ fn ensure_configuration_in(
         return Ok(());
     }
     let parent_dir =
-        sources_in_xml(context, config, base, configuration).map_err(|error| (error, None))?;
-    if let Some(loaded) = base
-        .ensure_configuration(context, runner, &configuration.name, &parent_dir, log_file)
-        .map_err(|error| (error, None))?
-    {
-        ensure_platform_success(&configuration.name, &loaded)
-            .map_err(|error| (error, loaded.platform_log_path.clone()))?;
-    }
-    Ok(())
+        sources_in_xml(context, config, xml, base, configuration).map_err(|error| (error, None))?;
+    // Свой журнал `/Out`: загрузка основной конфигурации не затирается журналом набора.
+    let log_file = platform_logs_dir(&config.work_path)
+        .map(|dir| {
+            dir.join(format!(
+                "artifacts-{}-configuration.log",
+                configuration.name
+            ))
+        })
+        .map_err(|error| {
+            (
+                AppError::Runtime(format!("failed to create platform logs dir: {error}")),
+                None,
+            )
+        })?;
+    let loaded = base
+        .load_configuration(
+            context,
+            runner,
+            &configuration.name,
+            &parent_dir,
+            Some(log_file),
+        )
+        .map_err(|error| (error, None))?;
+    ensure_platform_success(&configuration.name, &loaded)
+        .map_err(|error| (error, loaded.platform_log_path.clone()))
 }
 
 /// Исполнитель процессов для утилиты исполнителя; исполнителю без утилиты `make` нечего
@@ -547,12 +577,18 @@ fn runner_of<'u>(
 fn sources_in_xml(
     context: &ExecutionContext,
     config: &AppConfig,
+    xml: &mut XmlCache,
     base: &ThrowawayInfobase,
     source_set: &SourceSetConfig,
 ) -> Result<PathBuf, AppError> {
     let inventory = SourceSetInventory::new(config);
     match config.format {
         SourceFormat::Designer => Ok(inventory.source_path(source_set)),
+        // Перевод одного набора за прогон делается один раз: в обходе `ibcmd` с внешними
+        // наборами основная конфигурация нужна и базе `ibcmd`, и базе Конфигуратора.
+        SourceFormat::Edt if xml.contains_key(&source_set.name) => {
+            Ok(xml[&source_set.name].clone())
+        }
         SourceFormat::Edt => {
             let edt_context = inventory.edt_context(&source_set.name).ok_or_else(|| {
                 AppError::Runtime(format!(
@@ -581,6 +617,7 @@ fn sources_in_xml(
                 &target,
                 "make",
             )?;
+            xml.insert(source_set.name.clone(), target.clone());
             Ok(target)
         }
     }
@@ -622,11 +659,11 @@ fn build_package_in(
     config: &AppConfig,
     resolved: &ResolvedArtifactsTarget,
     builder: Builder,
-    bases: &mut Vec<ThrowawayInfobase>,
+    bases: &mut SessionBases,
     runner: &dyn ProcessRunner,
 ) -> PublicationAttempt {
     let fail = |error: AppError| (error, ArtifactSet::default(), None);
-    let base = session_base(context, config, bases, builder, runner).map_err(fail)?;
+    let (base, xml) = session_base(context, config, bases, builder, runner).map_err(fail)?;
     let inventory = SourceSetInventory::new(config);
     let source_set = inventory.named(&resolved.source_set_name).map_err(fail)?;
     let configuration = configuration_source_set(&inventory).map_err(fail)?;
@@ -644,10 +681,10 @@ fn build_package_in(
 
     // Конфигуратор загружает расширение поверх основной конфигурации.
     if matches!(package, Package::Extension(_)) {
-        ensure_configuration_in(context, config, base, runner, log_file.clone())
+        ensure_configuration_in(context, config, xml, base, runner)
             .map_err(|(error, log)| (error, ArtifactSet::default(), log))?;
     }
-    let source_dir = sources_in_xml(context, config, base, source_set).map_err(fail)?;
+    let source_dir = sources_in_xml(context, config, xml, base, source_set).map_err(fail)?;
 
     let publication = StagedPublication::prepare_file(
         &resolved.output_path,
@@ -793,20 +830,13 @@ fn build_external_in(
     config: &AppConfig,
     resolved: &ResolvedArtifactsTarget,
     builder: Builder,
-    bases: &mut Vec<ThrowawayInfobase>,
+    bases: &mut SessionBases,
     runner: &dyn ProcessRunner,
 ) -> PublicationAttempt {
     let binary = builder.binary.clone();
-    let base = session_base(context, config, bases, builder, runner)
+    let (base, xml) = session_base(context, config, bases, builder, runner)
         .map_err(|error| (error, ArtifactSet::default(), None))?;
-    let configuration_log = designer_log_file(
-        config,
-        Provider::Designer,
-        &resolved.source_set_name,
-        resolved.mode,
-    )
-    .map_err(|error| (error, ArtifactSet::default(), None))?;
-    ensure_configuration_in(context, config, base, runner, configuration_log)
+    ensure_configuration_in(context, config, xml, base, runner)
         .map_err(|(error, log)| (error, ArtifactSet::default(), log))?;
 
     let publication = StagedPublication::prepare_dir(
@@ -1543,7 +1573,7 @@ mod tests {
         build_external_in, build_package_in, cleanup_orphan_files, export_refusal,
         publication_message, publication_warning, published_execution, resolve_target,
         run_artifacts, validate_supported_matrix, MakeSession, ResolvedArtifactsTarget,
-        StagedPublicationOutcome, ThrowawayInfobase,
+        SessionBases, StagedPublicationOutcome, ThrowawayInfobase,
     };
     use crate::config::model::{
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
@@ -2016,7 +2046,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut Vec::new(),
+            &mut SessionBases::default(),
             &DumpThen::new(|policy: &ProcessExecutionPolicy| policy.cancellation.cancel()),
         )
         .expect_err("interrupted before publish");
@@ -2065,7 +2095,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut Vec::new(),
+            &mut SessionBases::default(),
             &runner,
         )
         .expect_err("a moved target must stop the publication");
@@ -2117,7 +2147,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut Vec::new(),
+            &mut SessionBases::default(),
             &runner,
         )
         .expect_err("the export failed");
@@ -2346,7 +2376,7 @@ mod tests {
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
         let resolved = resolve_target(&config, &request).expect("resolved");
         let runner = Recorder::new();
-        let mut base = Vec::new();
+        let mut base = SessionBases::default();
 
         build_package_in(
             &ExecutionContext::cli(CommandName::Artifacts),
@@ -2395,6 +2425,7 @@ mod tests {
         assert!(resolved.output_path.is_file());
 
         let warnings = base
+            .bases
             .into_iter()
             .flat_map(ThrowawayInfobase::close)
             .collect::<Vec<_>>();
@@ -2421,7 +2452,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut Vec::new(),
+            &mut SessionBases::default(),
             &runner,
         )
         .expect("built");
@@ -2464,7 +2495,7 @@ mod tests {
         let (config, _work) = project(dir.path());
         let runner = Recorder::new();
         let context = ExecutionContext::cli(CommandName::Artifacts);
-        let mut base = Vec::new();
+        let mut base = SessionBases::default();
         let cf = resolve_target(
             &config,
             &cf_request(&dir.path().join("dist/main.cf").display().to_string()),
@@ -2520,7 +2551,7 @@ mod tests {
             &config,
             &resolved,
             ibcmd,
-            &mut Vec::new(),
+            &mut SessionBases::default(),
             &runner,
         )
         .expect("built");
@@ -2570,7 +2601,7 @@ mod tests {
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
         let resolved = resolve_target(&config, &request).expect("resolved");
         let runner = Recorder::cancelling_on("CREATEINFOBASE");
-        let mut base = Vec::new();
+        let mut base = SessionBases::default();
 
         let (error, _, _) = build_package_in(
             &ExecutionContext::cli(CommandName::Artifacts)
@@ -2606,7 +2637,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut Vec::new(),
+            &mut SessionBases::default(),
             &runner,
         )
         .expect_err("cancelled");
@@ -2645,7 +2676,7 @@ mod tests {
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
         let resolved = resolve_target(&config, &request).expect("resolved");
         let runner = Recorder::new();
-        let mut base = Vec::new();
+        let mut base = SessionBases::default();
 
         build_package_in(
             &ExecutionContext::cli(CommandName::Artifacts),
@@ -2714,7 +2745,7 @@ mod tests {
             &config,
             &resolved,
             fake_designer(),
-            &mut Vec::new(),
+            &mut SessionBases::default(),
             &runner,
         )
         .expect("built");
@@ -2736,6 +2767,14 @@ mod tests {
         for flag in ["-updateConfigDumpInfo", "/UpdateDBCfg", "-Extension"] {
             assert!(!calls[1].iter().any(|arg| arg == flag), "{calls:?}");
         }
+        // Загрузка основной конфигурации пишет свой журнал: журнал набора его не затирает.
+        let configuration_log = after(&calls[1], "/Out").expect("configuration log");
+        assert!(
+            configuration_log.ends_with("-configuration.log"),
+            "{configuration_log}"
+        );
+        let external_log = after(&calls[2], "/Out").expect("external log");
+        assert_ne!(configuration_log, external_log);
         assert_eq!(
             position(&calls, "/LoadExternalDataProcessorOrReportFromFiles"),
             [2],
@@ -2752,7 +2791,7 @@ mod tests {
         let (config, _work, external) = external_project(dir.path());
         let runner = Recorder::new();
         let context = ExecutionContext::cli(CommandName::Artifacts);
-        let mut bases = Vec::new();
+        let mut bases = SessionBases::default();
         let cf = resolve_target(
             &config,
             &cf_request(&dir.path().join("dist/main.cf").display().to_string()),
@@ -2771,7 +2810,7 @@ mod tests {
         .expect("external built");
 
         let calls = runner.calls();
-        assert_eq!(bases.len(), 1);
+        assert_eq!(bases.bases.len(), 1);
         assert_eq!(position(&calls, "CREATEINFOBASE").len(), 1, "{calls:?}");
         assert_eq!(
             position(&calls, "/LoadConfigFromFiles").len(),
@@ -2788,7 +2827,7 @@ mod tests {
         let (config, _work, external) = external_project(dir.path());
         let runner = Recorder::new();
         let context = ExecutionContext::cli(CommandName::Artifacts);
-        let mut bases = Vec::new();
+        let mut bases = SessionBases::default();
         let cf = resolve_target(
             &config,
             &cf_request(&dir.path().join("dist/main.cf").display().to_string()),
@@ -2810,7 +2849,7 @@ mod tests {
         .expect("external built");
 
         let calls = runner.calls();
-        assert_eq!(bases.len(), 2);
+        assert_eq!(bases.bases.len(), 2);
         let ibcmd_base = after(&calls[0], "--db-path")
             .expect("ibcmd base")
             .to_owned();
@@ -2938,6 +2977,57 @@ mod tests {
             receipt.origin,
             crate::domain::capability::ProviderOrigin::Default
         );
+    }
+
+    /// Перевод набора EDT в XML делается один раз за прогон: база `ibcmd` и база
+    /// Конфигуратора берут один и тот же каталог.
+    #[cfg(unix)]
+    #[test]
+    fn an_edt_set_is_converted_once_per_run() {
+        let dir = tempdir().expect("tempdir");
+        let (mut config, _work) = project(dir.path());
+        config.format = SourceFormat::Edt;
+        fs::write(
+            config.base_path.join("configuration/.project"),
+            "<projectDescription><name>main-project</name></projectDescription>",
+        )
+        .expect("project");
+        let edt = dir.path().join("1cedtcli");
+        let edt_calls = dir.path().join("edt-calls");
+        write_script(
+            &edt,
+            &format!(
+                "target=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '--configuration-files' ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nmkdir -p \"$target\"\nprintf '<Configuration />' > \"$target/Configuration.xml\"\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0",
+                edt_calls.display()
+            ),
+        );
+        config.tools.edt_cli = crate::config::model::EdtCliConfig {
+            path: Some(edt),
+            auto_start: false,
+            ..Default::default()
+        };
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        let runner = Recorder::new();
+        let mut bases = SessionBases::default();
+        let configuration = config.source_sets[0].clone();
+        let ibcmd = crate::use_cases::throwaway_infobase::Builder {
+            provider: crate::domain::capability::Provider::Ibcmd,
+            binary: PathBuf::from("/tmp/fake-ibcmd"),
+        };
+
+        let (ibcmd_base, xml) =
+            super::session_base(&context, &config, &mut bases, ibcmd, &runner).expect("ibcmd");
+        let first = super::sources_in_xml(&context, &config, xml, ibcmd_base, &configuration)
+            .expect("converted");
+        let (designer_base, xml) =
+            super::session_base(&context, &config, &mut bases, fake_designer(), &runner)
+                .expect("designer");
+        let second = super::sources_in_xml(&context, &config, xml, designer_base, &configuration)
+            .expect("reused");
+
+        assert_eq!(first, second);
+        let edt_calls = fs::read_to_string(&edt_calls).expect("edt calls");
+        assert_eq!(edt_calls.lines().count(), 1, "{edt_calls}");
     }
 
     /// `make <SET>` убирает свою временную базу и после успеха.

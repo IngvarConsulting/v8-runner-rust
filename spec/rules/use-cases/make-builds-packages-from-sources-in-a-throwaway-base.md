@@ -7,6 +7,7 @@ check:
   - src/use_cases/artifacts.rs::edt_sources_are_converted_to_xml_inside_the_throwaway_base_first
   - src/use_cases/artifacts.rs::an_external_set_is_built_on_top_of_the_configuration
   - src/use_cases/artifacts.rs::an_ibcmd_walk_gives_externals_a_designer_base_of_their_own
+  - src/use_cases/artifacts.rs::an_edt_set_is_converted_once_per_run
   - src/platform/ibcmd.rs::config_import_to_file_always_passes_out
   - tests/cli_make_download_all.rs::make_without_a_set_builds_every_package_in_one_throwaway_base
 ---
@@ -30,7 +31,7 @@ check:
   `/LoadExternalDataProcessorOrReportFromFiles`. Базу, созданную `ibcmd`, Конфигуратор не
   открывает: в обходе `ibcmd` у внешних наборов своя база.
 - Исходники формата EDT сперва переводит в XML `1cedtcli` — шагом сборки `push` — в
-  каталог временной базы.
+  каталог временной базы, один раз за прогон: другая база прогона берёт тот же перевод.
 
 Эти последовательности проверены на поддельной платформе; живой замер —
 `INV.USE-CASES.MAKE-SEQUENCES-ARE-MEASURED-ON-A-LIVE-PLATFORM`.

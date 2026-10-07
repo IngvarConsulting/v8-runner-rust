@@ -169,10 +169,12 @@ impl ThrowawayInfobase {
         };
         if let Err(error) = created {
             // Убрать сразу: база, которую не создали, не нужна ни этому прогону, ни уборке.
-            for warning in base.close() {
-                tracing::debug!("{warning}");
+            // Неудачная уборка — своя или брошенных баз — едет с отказом, а не теряется.
+            let warnings = base.close();
+            if warnings.is_empty() {
+                return Err(error);
             }
-            return Err(error);
+            return Err(error.with_context(warnings.join("; ")));
         }
         Ok(base)
     }
@@ -198,19 +200,17 @@ impl ThrowawayInfobase {
             && self.configuration_loaded.as_deref() != Some(configuration_set)
     }
 
-    /// Загружает основную конфигурацию, если её в базе ещё нет: у Конфигуратора расширение
-    /// загружается поверх неё. `ibcmd` с `--out` базу не меняет, и загружать нечего.
-    pub(crate) fn ensure_configuration(
+    /// Загружает основную конфигурацию Конфигуратором: расширение и внешние обработки он
+    /// загружает поверх неё. Нужна ли она, решает вызывающий по [`Self::needs_configuration`];
+    /// удачную загрузка запоминает.
+    pub(crate) fn load_configuration(
         &mut self,
         context: &ExecutionContext,
         runner: &dyn ProcessRunner,
         configuration_set: &str,
         source_dir: &Path,
         log_file: Option<PathBuf>,
-    ) -> Result<Option<PlatformCommandResult>, AppError> {
-        if !self.needs_configuration(configuration_set) {
-            return Ok(None);
-        }
+    ) -> Result<PlatformCommandResult, AppError> {
         let result = self.load_with_designer(
             context,
             runner,
@@ -221,12 +221,12 @@ impl ThrowawayInfobase {
         if result.process.outcome().is_ok() {
             self.configuration_loaded = Some(configuration_set.to_owned());
         }
-        Ok(Some(result))
+        Ok(result)
     }
 
     /// Собирает пакет набора из `source_dir` в файл `out`. Исход утилиты не судится: его
     /// проверяет вызывающий, как у любой выгрузки. Расширению у Конфигуратора основная
-    /// конфигурация нужна раньше — [`Self::ensure_configuration`].
+    /// конфигурация нужна раньше — [`Self::load_configuration`].
     pub(crate) fn build_package(
         &mut self,
         context: &ExecutionContext,
@@ -479,6 +479,47 @@ mod tests {
             "{warnings:?}"
         );
         assert!(!dir.exists());
+    }
+
+    /// Неудачная уборка брошенных баз не теряется и тогда, когда своя база не создалась:
+    /// отказ называет её.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_creation_names_the_failed_orphan_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().expect("work");
+        let designer = work.path().join("1cv8");
+        std::fs::write(&designer, "#!/bin/sh\nexit 1\n").expect("script");
+        std::fs::set_permissions(&designer, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let runner = crate::platform::process::ProcessExecutor;
+
+        let error = super::ThrowawayInfobase::create_after(
+            &crate::use_cases::context::ExecutionContext::cli(
+                crate::use_cases::context::CommandName::Artifacts,
+            ),
+            work.path(),
+            super::Builder {
+                provider: crate::domain::capability::Provider::Designer,
+                binary: designer,
+            },
+            &runner,
+            |_| {
+                Err(crate::support::error::AppError::Runtime(
+                    "failed to remove stale publication temp: locked".to_owned(),
+                ))
+            },
+        )
+        .expect_err("creation failed");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("stale throwaway infobases were not removed"),
+            "{message}"
+        );
+        assert!(
+            message.contains("failed to create the throwaway infobase"),
+            "{message}"
+        );
     }
 
     /// Уборка узнаёт брошенную базу по описанию и имени и убирает её; свежую, чужую и
