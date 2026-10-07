@@ -71,7 +71,7 @@ pub(crate) fn resolve(
             "--via selects the address for the thin client; the other launch modes have only one address".to_owned(),
         ));
     }
-    let connection_declared = !config.infobase.connection.trim().is_empty();
+    let connection_declared = config.connection_declared();
     match requested {
         Some(LaunchVia::Web) => web_address(config).map(ClientAddress::Web),
         Some(LaunchVia::Connection) if connection_declared => Ok(ClientAddress::Connection),
