@@ -676,6 +676,19 @@ pub struct InfobaseRestoreArgs {
     pub replace: bool,
 }
 
+/// Разбор `--to`: значения и справка — из перечня запроса, иное значение — ошибка разбора.
+fn convert_to_parser(
+) -> impl clap::builder::TypedValueParser<Value = crate::use_cases::request::ConvertTo> {
+    use crate::use_cases::request::ConvertTo;
+    use clap::builder::TypedValueParser as _;
+    clap::builder::PossibleValuesParser::new(ConvertTo::ALL.map(ConvertTo::as_str)).map(|value| {
+        ConvertTo::ALL
+            .into_iter()
+            .find(|to| to.as_str() == value)
+            .expect("the parser accepts only listed values")
+    })
+}
+
 #[derive(Args, Debug)]
 #[command(
     next_help_heading = "Command options",
@@ -696,14 +709,8 @@ pub struct ConvertArgs {
     pub previous_source_set: Option<String>,
 
     /// Target format: xml, edt or package
-    #[arg(
-        long,
-        value_name = "FORMAT",
-        value_parser = clap::builder::PossibleValuesParser::new(
-            crate::use_cases::request::ConvertTo::ALL.map(crate::use_cases::request::ConvertTo::as_str)
-        ),
-    )]
-    pub to: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_parser = convert_to_parser())]
+    pub to: Option<crate::use_cases::request::ConvertTo>,
 
     /// Target root for converted source-set layout, defaults to workPath/convert/out; for a
     /// package file, the directory of its XML files
@@ -1569,7 +1576,7 @@ mod tests {
             match cli.command {
                 Command::Convert(args) => {
                     assert_eq!(args.input.as_deref(), Some("main.cf"));
-                    assert_eq!(args.to.as_deref(), Some(value));
+                    assert_eq!(args.to.map(|to| to.as_str()), Some(value));
                 }
                 _ => panic!("unexpected command"),
             }

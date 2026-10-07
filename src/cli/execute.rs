@@ -3405,11 +3405,7 @@ fn map_convert_request(args: &ConvertArgs, dry_run: bool) -> ConvertRequest {
             args.input.as_deref(),
             args.previous_source_set.as_deref(),
         ),
-        // Значение уже прошло разбор `clap` по тому же перечню.
-        to: args
-            .to
-            .as_deref()
-            .and_then(crate::use_cases::request::ConvertTo::parse),
+        to: args.to,
         output_root: args.output.clone(),
         dry_run,
         discard_uncommitted: args.discard_uncommitted,

@@ -903,7 +903,8 @@ v8-runner convert <FILE.cf|FILE.cfe> [--to xml] [--output <DIR>] [--dry-run] [--
 - Позиционный аргумент — набор исходников или файл пакета: значение с расширением `.cf` или
   `.cfe` (в любом регистре) — файл, иначе набор; без него конвертируются все наборы.
   Значение, которое набором не является, — validation error. Прежний ключ `--source-set`
-  принимается скрыто и всегда называет набор.
+  принимается скрыто и всегда называет набор: набор, чьё имя оканчивается на `.cf` или
+  `.cfe`, называют им (`convert --source-set legacy.cf`).
 - `--to` задаёт направление: наборы формата Конфигуратора — в `edt` (умолчание) или
   `package`, наборы формата EDT — в `xml` (умолчание) или `package` (через XML: сперва
   `1cedtcli`), файл пакета — только в `xml` (умолчание). `--to` в тот формат, в котором
@@ -936,10 +937,13 @@ v8-runner convert <FILE.cf|FILE.cfe> [--to xml] [--output <DIR>] [--dry-run] [--
 - Наборы берёт из текущего `v8project.yaml`; произвольный путь принимается только как файл пакета.
 - Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`,
   пакеты — под `workPath/convert/out/packages/<SET>.cf|.cfe`, XML файла пакета — под
-  `workPath/convert/out/<имя файла>/designer/`.
+  `workPath/convert/out/from-package/<имя файла с суффиксом>/` (`a.cf` и `a.cfe` каталог не
+  делят).
 - `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога
-  primary config; пакеты ложатся в него как `<SET>.cf|.cfe`, а у файла пакета `--output` —
-  сам каталог XML. Пакет заменяет файл без вопроса к git, как у `make`; каталог XML
+  primary config. У `--to package` он читается как у `make`: без набора — каталог для
+  `<SET>.cf|.cfe`, а путь файла — validation error с `next` (`convert <основной набор>
+  --output x.cf`); с набором — сам файл пакета (суффикс обязан совпасть с видом набора) или
+  каталог для него. У файла пакета `--output` — сам каталог XML. Пакет заменяет файл без вопроса к git, как у `make`; каталог XML
   спрашивает git, как остальные каталоги `convert`.
 - Публикация остаётся staged full replacement с overlap guardrails.
 

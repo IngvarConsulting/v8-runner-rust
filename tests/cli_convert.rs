@@ -1469,11 +1469,18 @@ fn a_convert_refusal_does_not_offer_a_truncated_command() {
 // --- Направления с пакетом (#236) -----------------------------------------------------
 //
 // Поддельный `ibcmd` записывает каждый вызов, создаёт базу по `infobase create`, пишет пакет
-// по ключу `--out=` и раскладывает XML по `config export --file=`. Проект базы не объявляет:
-// ни `infobase:` в проектном файле, ни местного слоя.
+// по ключу `--out=` и раскладывает XML по `config export --file=`. Файл `fail` рядом с ним
+// роняет импорт и разбор кодом 17, файл `cancel` присылает раннеру SIGTERM во время импорта.
+// Проект базы не объявляет: ни `infobase:` в проектном файле, ни местного слоя.
 
 const IBCMD: &str = r#"root="$(dirname "$0")/.."
 printf '%s\n' "$*" >> "$root/ibcmd-calls"
+case " $* " in
+  *" import "*|*" export "*)
+    if [ -f "$root/fail" ]; then exit 17; fi
+    if [ -f "$root/cancel" ]; then kill -TERM "$PPID"; sleep 5; fi
+    ;;
+esac
 db=''
 previous=''
 last=''
@@ -1691,9 +1698,11 @@ fn convert_a_package_file_without_to_goes_to_xml_under_work_path() {
 
     assert!(output.status.success(), "{envelope}");
     assert_eq!(envelope["data"]["direction"], "PACKAGE_TO_DESIGNER");
+    // Каталог назван файлом целиком: `ext.cf` и `ext.cfe` его не делят, а каталог набора
+    // `ext` под `convert/out` с ним не совпадает.
     assert!(project
         .root
-        .join("work/convert/out/ext/designer/Configuration.xml")
+        .join("work/convert/out/from-package/ext.cfe/Configuration.xml")
         .is_file());
 }
 
@@ -1853,5 +1862,209 @@ fn convert_an_edt_set_to_a_package_goes_through_xml_in_the_throwaway_base() {
     assert!(
         import.contains(&throwaway.display().to_string()) && import.ends_with("/xml/main"),
         "the package is built from the XML the EDT CLI wrote into the throwaway base: {import}"
+    );
+}
+
+impl PackageProject {
+    fn marker(&self, name: &str) {
+        fs::write(self.root.join("platform").join(name), "").expect("marker");
+    }
+}
+
+/// `ibcmd` выбран и упал: отказ рода `platform` несёт квитанцию, временная база убрана,
+/// цель не тронута.
+#[test]
+fn convert_a_failed_ibcmd_step_removes_the_base_and_keeps_the_receipt() {
+    let project = PackageProject::new();
+    project.marker("fail");
+
+    let (output, envelope) = project.run(&["convert", "main", "--to", "package"]);
+
+    assert!(!output.status.success(), "{envelope}");
+    assert_eq!(envelope["error"]["kind"], "platform", "{envelope}");
+    assert_eq!(
+        envelope["data"]["provider"]["selected"], "ibcmd",
+        "{envelope}"
+    );
+    assert_eq!(envelope["data"]["provider_dispatched"], true, "{envelope}");
+    assert_eq!(project.bases_left(), 0, "the throwaway base is removed");
+    assert!(!project
+        .root
+        .join("work/convert/out/packages/main.cf")
+        .exists());
+}
+
+/// Отмена во время работы `ibcmd` останавливает прогон, и временная база убирается.
+#[test]
+fn convert_a_cancelled_run_removes_the_throwaway_base() {
+    let project = PackageProject::new();
+    project.marker("cancel");
+
+    let (output, envelope) = project.run(&["convert", "main", "--to", "package"]);
+
+    assert!(!output.status.success(), "{envelope}");
+    assert_eq!(envelope["error"]["code"], "cancelled", "{envelope}");
+    assert_eq!(project.bases_left(), 0, "the throwaway base is removed");
+    assert!(!project
+        .root
+        .join("work/convert/out/packages/main.cf")
+        .exists());
+}
+
+/// `--output` файла пакета, лежащий в каталоге набора, под `basePath` или под `workPath`, —
+/// отказ до замка и до платформы.
+#[test]
+fn convert_a_package_file_output_inside_the_project_is_refused() {
+    let project = PackageProject::new();
+    let package = project.dir.path().join("main.cf");
+    fs::write(&package, "package").expect("package file");
+    for output in [
+        project.root.join("src/cf/xml"),
+        project.root.join("xml"),
+        project.root.join("work/xml"),
+    ] {
+        let (status, envelope) = project.run(&[
+            "convert",
+            &package.display().to_string(),
+            "--output",
+            &output.display().to_string(),
+        ]);
+        assert_eq!(status.status.code(), Some(2), "{envelope}");
+        assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+        assert!(!output.exists(), "{}", output.display());
+    }
+    assert!(project.calls().is_empty());
+}
+
+/// `--output` у `--to package` читается как у `make`: без набора путь файла — отказ с
+/// выходом `next`, с набором — сам файл пакета или каталог для него.
+#[test]
+fn convert_to_package_reads_the_output_as_make_does() {
+    let project = PackageProject::new();
+    let out = project.dir.path().join("out");
+
+    let (output, envelope) = project.run(&[
+        "convert",
+        "--to",
+        "package",
+        "--output",
+        &out.join("all.cf").display().to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+    assert!(
+        envelope["error"]["next"].to_string().contains("main"),
+        "{envelope}"
+    );
+
+    let file = out.join("sales.cfe");
+    let (output, envelope) = project.run(&[
+        "convert",
+        "Sales",
+        "--to",
+        "package",
+        "--output",
+        &file.display().to_string(),
+    ]);
+    assert!(output.status.success(), "{envelope}");
+    assert!(file.is_file(), "{envelope}");
+
+    let (output, envelope) = project.run(&[
+        "convert",
+        "Sales",
+        "--to",
+        "package",
+        "--output",
+        &out.join("sales.cf").display().to_string(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a .cf for an extension: {envelope}"
+    );
+
+    let (output, envelope) = project.run(&[
+        "convert",
+        "main",
+        "--to",
+        "package",
+        "--output",
+        &out.join("dir").display().to_string(),
+    ]);
+    assert!(output.status.success(), "{envelope}");
+    assert!(out.join("dir/main.cf").is_file(), "{envelope}");
+}
+
+/// Таблица направлений без файла пакета: `--to` с направлением по умолчанию даёт его же, а
+/// `--to edt` у наборов формата EDT — отказ.
+#[test]
+fn convert_to_names_the_default_direction_explicitly() {
+    let (_dir, config_path, base_path, work_path, edt_cli_path, _calls) = setup_project();
+    write_config(
+        &config_path,
+        &base_path,
+        &work_path,
+        &edt_cli_path,
+        "DESIGNER",
+        &[SourceSetSpec {
+            name: "main",
+            kind: "CONFIGURATION",
+            path: "main",
+        }],
+        None,
+    );
+    write_designer_source(&base_path.join("main"), "BaseProject", false);
+    let run = |args: &[&str]| -> (std::process::Output, Value) {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+            ])
+            .args(args)
+            .output()
+            .expect("run convert");
+        let envelope = serde_json::from_slice(&output.stdout).expect("json");
+        (output, envelope)
+    };
+    let (output, envelope) = run(&["convert", "--to", "edt", "--dry-run"]);
+    assert!(output.status.success(), "{envelope}");
+    assert_eq!(
+        envelope["data"]["direction"], "DESIGNER_TO_EDT",
+        "{envelope}"
+    );
+
+    write_config(
+        &config_path,
+        &base_path,
+        &work_path,
+        &edt_cli_path,
+        "EDT",
+        &[SourceSetSpec {
+            name: "edt-main",
+            kind: "CONFIGURATION",
+            path: "edt-main",
+        }],
+        None,
+    );
+    write_edt_source(
+        &base_path.join("edt-main"),
+        "MainConfiguration",
+        "<Configuration />",
+    );
+    let (output, envelope) = run(&["convert", "--to", "xml", "--dry-run"]);
+    assert!(output.status.success(), "{envelope}");
+    assert_eq!(
+        envelope["data"]["direction"], "EDT_TO_DESIGNER",
+        "{envelope}"
+    );
+    let (output, envelope) = run(&["convert", "--to", "edt"]);
+    assert_eq!(output.status.code(), Some(2), "{envelope}");
+    assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--to xml or --to package")),
+        "{envelope}"
     );
 }

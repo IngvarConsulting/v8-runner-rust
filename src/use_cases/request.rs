@@ -246,7 +246,9 @@ fn names_a_package_file(value: &str) -> bool {
         })
 }
 
-/// Куда переводит `convert`: значение `--to`.
+/// Куда переводит `convert`: значение `--to`. Сценарий `clap` не знает
+/// (`INV.USE-CASES.NO-TRANSPORT-TYPES-IN-THE-USE-CASE-LAYER`): разбор командной строки
+/// берёт значения из [`ConvertTo::ALL`], и иное значение — ошибка разбора.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConvertTo {
     /// XML платформы.
@@ -258,7 +260,7 @@ pub enum ConvertTo {
 }
 
 impl ConvertTo {
-    /// Значения `--to` в порядке справки; разбор и справка берут их отсюда.
+    /// Значения `--to` в порядке справки.
     pub const ALL: [Self; 3] = [Self::Xml, Self::Edt, Self::Package];
 
     /// Значение так, как его пишут после `--to`.
@@ -268,10 +270,6 @@ impl ConvertTo {
             Self::Edt => "edt",
             Self::Package => "package",
         }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|to| to.as_str() == value)
     }
 }
 

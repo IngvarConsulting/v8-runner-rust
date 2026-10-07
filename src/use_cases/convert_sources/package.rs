@@ -4,7 +4,7 @@
 //! называет его в ответе. `ibcmd` работает во временной базе раннера под `workPath`
 //! ([`ThrowawayInfobase`]) — тем же владельцем, что у `make`: сборка — `config import --out`,
 //! разбор — `config export --file`. База проекта не выбирается и не открывается. Исходники
-//! формата EDT сперва переводит в XML `1cedtcli` шагом сборки `push` в каталог временной базы.
+//! формата EDT сперва переводит в XML тот же владелец (`ThrowawayInfobase::xml_from_edt`).
 //!
 //! Пакет публикуется заменой файла, как у `make`; каталог XML — заменой каталога со
 //! сторожем незафиксированной работы, как у перевода между EDT и XML.
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::config::model::{AppConfig, SourceSetConfig};
-use crate::domain::capability::Operation;
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::convert::{ConvertDirection, ConvertOutput, ConvertResult};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
@@ -22,22 +22,23 @@ use crate::support::error::AppError;
 use crate::support::path::{
     is_filesystem_root, nearest_existing_canonical_path, stable_path_identity,
 };
-use crate::use_cases::context::{CommandName, ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::context::{CommandName, ExecutionContext};
 use crate::use_cases::destruction_guard::{
     discard_note, losses_in, preview_note, Destruction, DestructionConsent, WaysOut,
 };
-use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::provider_selection::{self, SelectedProvider};
 use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
 use crate::use_cases::result::UseCaseResult;
-use crate::use_cases::source_inventory::{package_in_directory, paths_overlap, SourceSetInventory};
+use crate::use_cases::source_inventory::{
+    names_a_file, package_in_directory, paths_overlap, SourceSetInventory,
+};
 use crate::use_cases::staged_publication::StagedPublication;
-use crate::use_cases::throwaway_infobase::{Builder, Package, ThrowawayInfobase};
+use crate::use_cases::throwaway_infobase::{edt_workspace, Builder, Package, ThrowawayInfobase};
 
 use super::{
-    convert_workspace_path, deferred_interruption_warning, ensure_platform_success,
-    ensure_success_of, explicit_output_root, merge_messages, require_source_sets, result_snapshot,
-    scope_from_request, source_set_from_request, validate_convert_target, validate_designer_layout,
+    deferred_interruption_warning, ensure_platform_success, ensure_success_of,
+    explicit_output_root, merge_messages, require_source_sets, result_snapshot, scope_from_request,
+    source_set_from_request, validate_convert_target, validate_designer_layout,
     validate_selected_source, ConvertExecutionFailure, CONVERT_BACKUP_PREFIX,
 };
 
@@ -169,20 +170,12 @@ fn resolve_source_sets(
             "convert --to package takes configuration and extension source-sets, and the project declares none".to_owned(),
         ));
     }
-    let root = explicit_output_root
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| {
-            config
-                .work_path
-                .join("convert")
-                .join("out")
-                .join("packages")
-        });
+    let targets = package_targets(config, request, &inventory, explicit_output_root)?;
     let mut items: Vec<Item> = Vec::with_capacity(packages.len());
     for (source_set, extension) in packages {
         let source_path = source_set.root_in(&config.base_path);
         validate_selected_source(source_set, direction, &source_path)?;
-        let target_path = package_in_directory(&root, source_set);
+        let target_path = targets.of(source_set)?;
         let subject = format!("source-set '{}'", source_set.name);
         let (canonical, target_identity) = checked_target(
             config,
@@ -218,8 +211,77 @@ fn resolve_source_sets(
     Ok(items)
 }
 
+/// Куда ложатся пакеты наборов.
+enum PackageTargets {
+    /// Каталог: пакет набора — `<каталог>/<SET>.cf|.cfe`, как у `make` без набора.
+    Directory(PathBuf),
+    /// Файл, названный `--output` у одного набора, как у `make <SET>`.
+    File(PathBuf),
+}
+
+impl PackageTargets {
+    fn of(&self, source_set: &SourceSetConfig) -> Result<PathBuf, AppError> {
+        match self {
+            Self::Directory(directory) => Ok(package_in_directory(directory, source_set)),
+            Self::File(file) => {
+                let expected = package_in_directory(Path::new(""), source_set);
+                let suffix = |path: &Path| {
+                    path.extension()
+                        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+                };
+                if suffix(file) == suffix(&expected) {
+                    Ok(file.clone())
+                } else {
+                    Err(AppError::Validation(format!(
+                        "convert --to package writes source-set '{}' as {}, and --output '{}' names another kind of file",
+                        source_set.name,
+                        expected.display(),
+                        file.display()
+                    )))
+                }
+            }
+        }
+    }
+}
+
+/// `--output` у `--to package` читается так же, как у `make`: без набора — каталог, а путь,
+/// называющий файл, — отказ с выходом `next` (`SourceSetInventory::packages_directory`); с
+/// набором — файл пакета или каталог для него. Без `--output` пакеты ложатся в
+/// `workPath/convert/out/packages`.
+fn package_targets(
+    config: &AppConfig,
+    request: &ConvertRequest,
+    inventory: &SourceSetInventory<'_>,
+    explicit_output_root: Option<&Path>,
+) -> Result<PackageTargets, AppError> {
+    let Some(output) = explicit_output_root else {
+        return Ok(PackageTargets::Directory(
+            config
+                .work_path
+                .join("convert")
+                .join("out")
+                .join("packages"),
+        ));
+    };
+    match request.scope {
+        ConvertScopeRequest::SourceSet { .. } => {
+            if names_a_file(output, output) {
+                Ok(PackageTargets::File(output.to_path_buf()))
+            } else {
+                Ok(PackageTargets::Directory(output.to_path_buf()))
+            }
+        }
+        _ => inventory
+            .packages_directory(CommandName::Convert, &output.display().to_string(), None)
+            .map(PackageTargets::Directory)
+            .map_err(|error| AppError::Refused(Box::new(error))),
+    }
+}
+
 /// Файл пакета в XML: файл есть и это файл; каталог XML — `--output` или
-/// `workPath/convert/out/<имя файла>/designer`, и сам файл в него не попадает.
+/// `workPath/convert/out/from-package/<имя файла>`, и сам файл в него не попадает. Имя файла
+/// берётся целиком, с суффиксом: `a.cf` и `a.cfe` не делят каталог, а каталоги наборов
+/// `workPath/convert/out/<SET>` с ним не совпадают.
 fn resolve_package_file(
     config: &AppConfig,
     path: &str,
@@ -245,18 +307,12 @@ fn resolve_package_file(
         .unwrap_or_else(|| trimmed.to_owned());
     let target_path = match explicit_output_root {
         Some(root) => root.to_path_buf(),
-        None => {
-            let stem = source_path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| name.clone());
-            config
-                .work_path
-                .join("convert")
-                .join("out")
-                .join(stem)
-                .join("designer")
-        }
+        None => config
+            .work_path
+            .join("convert")
+            .join("out")
+            .join("from-package")
+            .join(&name),
     };
     let subject = format!("package '{name}'");
     let (canonical, target_identity) = checked_target(
@@ -306,115 +362,130 @@ fn checked_target(
     Ok((canonical, identity))
 }
 
-/// Направление с пакетом: разрешение, выбор исполнителя по строке `convert`, превью или
-/// работа во временной базе раннера. Квитанция едет и в ответе, и в отказе после выбора.
-pub(super) fn run(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    request: &ConvertRequest,
+/// Исход ответа `convert`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Done,
+    Refused,
+}
+
+/// Неизменное у одного прогона направления с пакетом: из него строится ответ.
+struct Run<'a> {
+    context: &'a ExecutionContext,
+    config: &'a AppConfig,
+    request: &'a ConvertRequest,
     direction: ConvertDirection,
     started: Instant,
-) -> UseCaseResult<ConvertResult> {
-    let workspace_path = needs_edt(direction).then(|| convert_workspace_path(config));
-    let snapshot = |ok: bool, outputs: Vec<ConvertOutput>, message: Option<String>| {
+}
+
+impl Run<'_> {
+    fn answer(
+        &self,
+        outcome: Outcome,
+        outputs: Vec<ConvertOutput>,
+        message: Option<String>,
+    ) -> ConvertResult {
         result_snapshot(
-            ok,
-            direction,
-            scope_from_request(request),
-            source_set_from_request(request),
-            workspace_path.clone(),
+            outcome == Outcome::Done,
+            self.direction,
+            scope_from_request(self.request),
+            source_set_from_request(self.request),
+            // Рабочая область EDT — у направления, которое переводит исходники EDT.
+            needs_edt(self.direction).then(|| edt_workspace(&self.config.work_path)),
             outputs,
-            started,
+            self.started,
             message,
         )
-    };
-    let fail = |error: AppError, outputs: Vec<ConvertOutput>| refusal(&snapshot, error, outputs);
+    }
 
-    let resolved = resolve(config, request, direction).map_err(|error| fail(error, Vec::new()))?;
-    let mut utilities = PlatformUtilities::from_config(config);
-    let selected = match provider_selection::select(config, &mut utilities, Operation::Convert) {
-        Ok(selected) => selected,
-        Err((error, receipt)) => {
-            let mut failure = fail(error, Vec::new());
-            if let Some(payload) = failure.payload.as_mut() {
-                payload.provider = Some(receipt);
-            }
-            return Err(failure);
-        }
-    };
-    let receipt = selected.receipt.clone();
-    let outcome = run_selected(
-        context,
-        config,
-        request,
-        direction,
-        &resolved,
-        selected,
-        &mut utilities,
-        &snapshot,
-    );
-    provider_selection::attach(outcome, &receipt)
-}
+    /// Отказ формой `convert` с тем, что уже опубликовано.
+    fn refusal(&self, error: AppError, outputs: Vec<ConvertOutput>) -> ConvertExecutionFailure {
+        let message = error.to_string();
+        ConvertExecutionFailure::with_payload(
+            error,
+            self.answer(Outcome::Refused, outputs, Some(message)),
+        )
+    }
 
-/// Отказ формой `convert` с тем, что уже опубликовано.
-fn refusal(
-    snapshot: &dyn Fn(bool, Vec<ConvertOutput>, Option<String>) -> ConvertResult,
-    error: AppError,
-    outputs: Vec<ConvertOutput>,
-) -> ConvertExecutionFailure {
-    let message = error.to_string();
-    ConvertExecutionFailure::with_payload(error, snapshot(false, outputs, Some(message)))
-}
-
-fn needs_edt(direction: ConvertDirection) -> bool {
-    direction == ConvertDirection::EdtToPackage
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_selected(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    request: &ConvertRequest,
-    direction: ConvertDirection,
-    resolved: &ResolvedPackageRequest,
-    selected: SelectedProvider,
-    utilities: &mut PlatformUtilities,
-    snapshot: &dyn Fn(bool, Vec<ConvertOutput>, Option<String>) -> ConvertResult,
-) -> UseCaseResult<ConvertResult> {
-    let fail = |error: AppError, outputs: Vec<ConvertOutput>| refusal(snapshot, error, outputs);
-    let Some(binary) = selected.location.map(|location| location.path) else {
-        return Err(fail(
-            crate::use_cases::unimplemented_provider(Operation::Convert, selected.provider),
-            Vec::new(),
-        ));
-    };
-    // Исходники EDT сперва переводит `1cedtcli`: без него превью отказывает так же, как
-    // отказал бы прогон.
-    let edt_cli = if needs_edt(direction) {
-        Some(
+    fn selected(
+        &self,
+        resolved: &ResolvedPackageRequest,
+        selected: SelectedProvider,
+        utilities: &mut PlatformUtilities,
+    ) -> UseCaseResult<ConvertResult> {
+        let Some(binary) = selected.location.map(|location| location.path) else {
+            return Err(self.refusal(
+                crate::use_cases::unimplemented_provider(Operation::Convert, selected.provider),
+                Vec::new(),
+            ));
+        };
+        // Исходники EDT сперва переводит `1cedtcli`: без него превью отказывает так же, как
+        // отказал бы прогон.
+        if needs_edt(self.direction) {
             utilities
                 .locate(UtilityType::EdtCli)
-                .map_err(|error| fail(AppError::from(error), Vec::new()))?
-                .path,
-        )
-    } else {
-        None
-    };
+                .map_err(|error| self.refusal(AppError::from(error), Vec::new()))?;
+        }
 
-    if request.dry_run {
-        let mut message = format!(
-            "previewed conversion via {} {}; {} not dispatched",
-            selected.provider,
-            binary.display(),
-            selected.provider
-        );
+        if self.request.dry_run {
+            return Ok(self.preview(resolved, selected.provider, &binary));
+        }
+
+        let runner = utilities.runner_for(UtilityType::Ibcmd);
+        let mut base = ThrowawayInfobase::create(
+            self.context,
+            &self.config.work_path,
+            Builder {
+                provider: selected.provider,
+                binary,
+            },
+            runner,
+        )
+        .map_err(|error| self.refusal(error, Vec::new()))?;
+
+        let mut outputs = Vec::new();
+        let mut messages = Vec::new();
         for item in &resolved.items {
-            if matches!(item.input, Input::PackageFile)
-                && !matches!(resolved.consent, DestructionConsent::RunnerOwned)
-            {
+            match self.convert_item(&mut base, runner, resolved, item) {
+                Ok(notes) => {
+                    messages.extend(notes);
+                    outputs.push(item.output());
+                }
+                Err(error) => {
+                    // База убирается и после отказа; неудачная уборка едет с отказом.
+                    let warnings = base.close();
+                    let error = if warnings.is_empty() {
+                        error
+                    } else {
+                        error.with_context(warnings.join("; "))
+                    };
+                    return Err(self.refusal(error, outputs));
+                }
+            }
+        }
+        messages.extend(base.close());
+        Ok(self.answer(Outcome::Done, outputs, merge_messages(messages)))
+    }
+
+    /// Превью: исполнитель найден, цели названы, ничего не запущено и не создано.
+    fn preview(
+        &self,
+        resolved: &ResolvedPackageRequest,
+        provider: Provider,
+        binary: &Path,
+    ) -> ConvertResult {
+        let mut message = format!(
+            "previewed conversion via {provider} {}; {provider} not dispatched",
+            binary.display()
+        );
+        if !matches!(resolved.consent, DestructionConsent::RunnerOwned) {
+            for item in &resolved.items {
+                if !matches!(item.input, Input::PackageFile) {
+                    continue;
+                }
                 let losses = losses_in(&item.target_path, &[]);
                 if let Some(note) = preview_note(
-                    context,
+                    self.context,
                     &item.target_path,
                     &resolved.consent,
                     &losses,
@@ -426,121 +497,78 @@ fn run_selected(
             }
         }
         let outputs = resolved.items.iter().map(Item::output).collect();
-        return Ok(snapshot(true, outputs, Some(message)));
+        self.answer(Outcome::Done, outputs, Some(message))
     }
 
-    let runner = utilities.runner_for(UtilityType::Ibcmd);
-    let edt = edt_cli.map(|path| {
-        crate::platform::edt::EdtDsl::new(
-            path,
-            convert_workspace_path(config),
-            utilities.runner_for(UtilityType::EdtCli),
-            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        )
-        .with_timeout(context.edt_timeout())
-    });
-    let mut base = ThrowawayInfobase::create(
-        context,
-        &config.work_path,
-        Builder {
-            provider: selected.provider,
-            binary,
-        },
-        runner,
-    )
-    .map_err(|error| fail(error, Vec::new()))?;
-
-    let mut outputs = Vec::new();
-    let mut messages = Vec::new();
-    for item in &resolved.items {
-        let converted = convert_item(
-            context,
-            config,
-            &mut base,
-            runner,
-            edt.as_ref(),
-            resolved,
-            item,
-        );
-        match converted {
-            Ok(notes) => {
-                messages.extend(notes);
-                outputs.push(item.output());
-            }
-            Err(error) => {
-                // База убирается и после отказа; неудачная уборка едет с отказом.
-                let warnings = base.close();
-                let error = if warnings.is_empty() {
-                    error
+    /// Один вход: сборка пакета или разбор пакета во временной базе и публикация. Ответ —
+    /// предупреждения перевода EDT и публикации.
+    fn convert_item(
+        &self,
+        base: &mut ThrowawayInfobase,
+        runner: &dyn ProcessRunner,
+        resolved: &ResolvedPackageRequest,
+        item: &Item,
+    ) -> Result<Vec<String>, AppError> {
+        match &item.input {
+            Input::SourceSet { name, extension } => {
+                let (source_dir, mut notes) = if needs_edt(self.direction) {
+                    let source_set = SourceSetInventory::new(self.config).named(name)?;
+                    base.xml_from_edt(self.context, self.config, source_set)?
                 } else {
-                    error.with_context(warnings.join("; "))
+                    (item.source_path.clone(), Vec::new())
                 };
-                return Err(fail(error, outputs));
+                notes.extend(build_package(
+                    self.context,
+                    base,
+                    runner,
+                    item,
+                    name,
+                    extension.as_deref(),
+                    &source_dir,
+                )?);
+                Ok(notes)
             }
+            Input::PackageFile => export_package(self.context, base, runner, resolved, item),
         }
-    }
-    messages.extend(base.close());
-    Ok(snapshot(true, outputs, merge_messages(messages)))
-}
-
-/// Один вход: сборка пакета или разбор пакета во временной базе и публикация. Ответ —
-/// предупреждения публикации.
-fn convert_item(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    base: &mut ThrowawayInfobase,
-    runner: &dyn ProcessRunner,
-    edt: Option<&crate::platform::edt::EdtDsl<'_>>,
-    resolved: &ResolvedPackageRequest,
-    item: &Item,
-) -> Result<Vec<String>, AppError> {
-    match &item.input {
-        Input::SourceSet { name, extension } => {
-            let (source_dir, mut notes) = match edt {
-                Some(edt) => edt_sources_in_xml(context, config, edt, base, name)?,
-                None => (item.source_path.clone(), Vec::new()),
-            };
-            notes.extend(build_package(
-                context,
-                base,
-                runner,
-                item,
-                name,
-                extension.as_deref(),
-                &source_dir,
-            )?);
-            Ok(notes)
-        }
-        Input::PackageFile => export_package(context, base, runner, resolved, item),
     }
 }
 
-/// Исходники EDT в XML: `1cedtcli` шагом сборки `push` в каталог временной базы, как у
-/// `make`. Ответ — каталог XML и предупреждения шага.
-fn edt_sources_in_xml(
+/// Направление с пакетом: разрешение, выбор исполнителя по строке `convert`, превью или
+/// работа во временной базе раннера. Квитанция едет и в ответе, и в отказе после выбора.
+pub(super) fn run(
     context: &ExecutionContext,
     config: &AppConfig,
-    edt: &crate::platform::edt::EdtDsl<'_>,
-    base: &ThrowawayInfobase,
-    name: &str,
-) -> Result<(PathBuf, Vec<String>), AppError> {
-    let inventory = SourceSetInventory::new(config);
-    let source_set = inventory.named(name)?;
-    let edt_context = inventory
-        .edt_context(name)
-        .ok_or_else(|| AppError::Runtime(format!("missing EDT context for source-set '{name}'")))?;
-    let target = base.xml_dir(name);
-    log_live_stage("convert: edt export", "[EDT] converting the sources to XML");
-    let warnings = crate::use_cases::build_project::execute_edt_export_step(
+    request: &ConvertRequest,
+    direction: ConvertDirection,
+    started: Instant,
+) -> UseCaseResult<ConvertResult> {
+    let run = Run {
         context,
         config,
-        edt,
-        source_set,
-        edt_context,
-        &target,
-        "convert",
-    )?;
-    Ok((target, warnings))
+        request,
+        direction,
+        started,
+    };
+    let resolved =
+        resolve(config, request, direction).map_err(|error| run.refusal(error, Vec::new()))?;
+    let mut utilities = PlatformUtilities::from_config(config);
+    let selected = match provider_selection::select(config, &mut utilities, Operation::Convert) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
+            let mut failure = run.refusal(error, Vec::new());
+            if let Some(payload) = failure.payload.as_mut() {
+                payload.provider = Some(receipt);
+            }
+            return Err(failure);
+        }
+    };
+    let receipt = selected.receipt.clone();
+    let outcome = run.selected(&resolved, selected, &mut utilities);
+    provider_selection::attach(outcome, &receipt)
+}
+
+fn needs_edt(direction: ConvertDirection) -> bool {
+    direction == ConvertDirection::EdtToPackage
 }
 
 fn build_package(

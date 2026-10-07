@@ -9,6 +9,7 @@ check:
   - tests/cli_convert.rs::convert_a_package_file_to_xml_exports_it_in_a_throwaway_base
   - tests/cli_convert.rs::convert_a_package_file_without_to_goes_to_xml_under_work_path
   - tests/cli_convert.rs::convert_refuses_a_direction_that_is_not_a_conversion
+  - tests/cli_convert.rs::convert_to_names_the_default_direction_explicitly
 ---
 
 # Направление `convert` задаёт `--to`

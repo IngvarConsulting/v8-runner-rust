@@ -21,18 +21,23 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::model::{AppConfig, SourceSetConfig};
 use crate::domain::capability::Provider;
 use crate::platform::connection::V8Connection;
 use crate::platform::designer::DesignerDsl;
+use crate::platform::edt::EdtDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
+use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::fs::{remove_path_if_exists, write_temp_dir_metadata, TempDirKind};
 use crate::support::temp::temp_root;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::progress::log_live_stage;
+use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::staged_publication::{cleanup_owned_orphan_files, make_run_id};
 
 /// Корень временных баз под `workPath/temp`.
@@ -41,6 +46,12 @@ const ROOT_NAME: &str = "throwaway-infobases";
 const PREFIX: &str = "base-";
 /// Чьи это следы: описание каждой базы называет его вместо цели публикации.
 const IDENTITY: &str = "v8-runner throwaway infobase";
+
+/// Рабочая область EDT, в которой исходники набора переводятся в XML для временной базы: та
+/// же, что у шага сборки `push`, чей перевод здесь и выполняется.
+pub(crate) fn edt_workspace(work_path: &Path) -> PathBuf {
+    work_path.join("edt-workspace")
+}
 
 /// Корень временных баз прогонов под `workPath`.
 pub(crate) fn throwaway_root(work_path: &Path) -> std::io::Result<PathBuf> {
@@ -194,6 +205,49 @@ impl ThrowawayInfobase {
     /// Каталог для исходников набора, переведённых из EDT: он убирается вместе с базой.
     pub(crate) fn xml_dir(&self, source_set: &str) -> PathBuf {
         self.dir.join("xml").join(source_set)
+    }
+
+    /// Переводит исходники набора формата EDT в XML каталога [`Self::xml_dir`] — один
+    /// владелец перевода для `make` и `convert`: `1cedtcli` шагом сборки `push`
+    /// (`build_project::execute_edt_export_step`) в рабочей области [`edt_workspace`] с
+    /// пределом EDT команды (`ExecutionContext::edt_timeout`). Ответ — каталог XML и
+    /// предупреждения шага.
+    pub(crate) fn xml_from_edt(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+    ) -> Result<(PathBuf, Vec<String>), AppError> {
+        let inventory = SourceSetInventory::new(config);
+        let edt_context = inventory.edt_context(&source_set.name).ok_or_else(|| {
+            AppError::Runtime(format!(
+                "missing EDT context for source-set '{}'",
+                source_set.name
+            ))
+        })?;
+        let mut utilities = PlatformUtilities::from_config(config);
+        let location = utilities
+            .locate(UtilityType::EdtCli)
+            .map_err(AppError::from)?;
+        let edt = EdtDsl::new(
+            location.path,
+            edt_workspace(&config.work_path),
+            utilities.runner_for(UtilityType::EdtCli),
+            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+        )
+        .with_timeout(context.edt_timeout());
+        let target = self.xml_dir(&source_set.name);
+        log_live_stage("edt export", "[EDT] converting the sources to XML");
+        let warnings = crate::use_cases::build_project::execute_edt_export_step(
+            context,
+            config,
+            &edt,
+            source_set,
+            edt_context,
+            &target,
+            context.command().as_str(),
+        )?;
+        Ok((target, warnings))
     }
 
     /// Нужна ли расширению основная конфигурация в базе до его загрузки.

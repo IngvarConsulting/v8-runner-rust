@@ -1683,7 +1683,10 @@ fn staging_publication_dir(
 ) -> PathBuf {
     match direction {
         ConvertDirection::DesignerToEdt => staging_root.join(&item.stable_project_dir_name),
-        _ => staging_root.to_path_buf(),
+        ConvertDirection::EdtToDesigner
+        | ConvertDirection::DesignerToPackage
+        | ConvertDirection::EdtToPackage
+        | ConvertDirection::PackageToDesigner => staging_root.to_path_buf(),
     }
 }
 

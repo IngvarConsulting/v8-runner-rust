@@ -5,6 +5,7 @@ check:
   - tests/cli_convert.rs::convert_a_package_file_to_xml_exports_it_in_a_throwaway_base
   - tests/cli_convert.rs::convert_a_package_preview_dispatches_nothing
   - tests/cli_convert.rs::convert_a_package_direction_without_ibcmd_answers_an_environment_failure
+  - tests/cli_convert.rs::convert_a_failed_ibcmd_step_removes_the_base_and_keeps_the_receipt
   - tests/cli_convert.rs::convert_without_source_set_processes_all_source_sets_into_work_path_out
   - src/config/validate.rs::convert_has_no_executor_choice_until_ibcmd_rs_is_measured
 ---

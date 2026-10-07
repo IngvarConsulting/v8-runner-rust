@@ -196,7 +196,7 @@ runtime snapshot commit только указанным source-set.
   `data.provider`), затем `ThrowawayInfobase` под `workPath/temp/throwaway-infobases/` —
   тот же владелец, что у `make`: `build_package` (`config import --out`) и `export_package`
   (`config export --file`). Исходники EDT сперва переводит в XML
-  `build_project::execute_edt_export_step` в каталог временной базы. Пакет публикуется
+  `ThrowawayInfobase::xml_from_edt` в каталог временной базы. Пакет публикуется
   заменой файла, XML — заменой каталога со сторожем незафиксированной работы; цель
   перепроверяется после работы исполнителя.
 
@@ -210,8 +210,10 @@ runtime snapshot commit только указанным source-set.
   (`use_cases::throwaway_infobase::ThrowawayInfobase`) под `workPath/temp/throwaway-infobases/`
   — `ibcmd` (`infobase create` со своим `--data`, затем `config import --out`) или
   Конфигуратор (`CREATEINFOBASE`, `/LoadConfigFromFiles` без файла версий, `/DumpCfg`;
-  расширение — поверх основной конфигурации). Исходники EDT сперва переводит в XML шаг
-  `build_project::execute_edt_export_step`. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
+  расширение — поверх основной конфигурации). Исходники EDT сперва переводит в XML
+  `ThrowawayInfobase::xml_from_edt` — один владелец у `make` и `convert`: шаг сборки
+  `build_project::execute_edt_export_step` в рабочей области `workPath/edt-workspace` с
+  пределом EDT команды. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
   `make <SET>` — своя, обход без набора — общая на все наборы; внешние обработки Конфигуратор
   собирает поверх основной конфигурации в своей базе; после прогона она убирается, а
   брошенную описание `TempDirKind::ThrowawayInfobase` выдаёт уборке как свою. Замка базы и

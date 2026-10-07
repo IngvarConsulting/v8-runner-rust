@@ -11,6 +11,8 @@ check:
   - src/use_cases/artifacts.rs::a_designer_walk_builds_externals_in_its_own_base
   - src/use_cases/throwaway_infobase.rs::a_stale_base_that_cannot_be_removed_does_not_stop_the_build
   - tests/cli_convert.rs::convert_without_a_set_to_a_package_takes_the_configuration_packages
+  - tests/cli_convert.rs::convert_a_failed_ibcmd_step_removes_the_base_and_keeps_the_receipt
+  - tests/cli_convert.rs::convert_a_cancelled_run_removes_the_throwaway_base
 ---
 
 # Временная база служит одному прогону и убирается

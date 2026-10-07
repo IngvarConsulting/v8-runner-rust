@@ -374,10 +374,10 @@ window.RUNNER_DATA = (function () {
         var chain = [];
         if (ctx.tools.edt) chain.push(P.edt);
         if (ctx.tools.ibcmd) chain.push(P.ibcmd);
-        return { chain: chain, config: ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd во временной базе раннера, база проекта не нужна; ibcmd-rs — после замера (#413); только CLI, в MCP не публикуется' };
+        return { chain: chain, config: ctx.tools.edt ? ['format', 'source-set[]', 'tools.edt_cli.path'] : ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd во временной базе раннера, база проекта не нужна; ibcmd-rs — после замера (#413); только CLI, в MCP не публикуется' };
       },
       target: function (ctx) {
-        return { chain: [P.edt, P.ibcmd, P.rs], config: ['format', 'source-set[]'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd или ibcmd-rs без базы проекта; ibcmd собирает пакет во временной базе раннера' };
+        return { chain: [P.edt, P.ibcmd, P.rs], config: ['format', 'source-set[]', 'tools.edt_cli.path'], note: 'EDT ↔ XML делает 1cedtcli; пакет ↔ XML — ibcmd или ibcmd-rs без базы проекта; ibcmd собирает пакет во временной базе раннера' };
       }
     }
   ];

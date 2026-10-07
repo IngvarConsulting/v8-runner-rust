@@ -572,8 +572,7 @@ fn runner_of<'u>(
 }
 
 /// Каталог XML набора: у формата Конфигуратора — сами исходники, у формата EDT — их перевод
-/// `1cedtcli` шагом сборки (`build_project::execute_edt_export_step`) в каталог временной
-/// базы.
+/// в каталог временной базы ([`ThrowawayInfobase::xml_from_edt`]).
 fn sources_in_xml(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -590,33 +589,8 @@ fn sources_in_xml(
             Ok(xml[&source_set.name].clone())
         }
         SourceFormat::Edt => {
-            let edt_context = inventory.edt_context(&source_set.name).ok_or_else(|| {
-                AppError::Runtime(format!(
-                    "missing EDT context for source-set '{}'",
-                    source_set.name
-                ))
-            })?;
-            let mut utilities = PlatformUtilities::from_config(config);
-            let location = utilities
-                .locate(UtilityType::EdtCli)
-                .map_err(AppError::from)?;
-            let edt = crate::platform::edt::EdtDsl::new(
-                location.path,
-                config.work_path.join("edt-workspace"),
-                utilities.runner_for(UtilityType::EdtCli),
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-            );
-            let target = base.xml_dir(&source_set.name);
-            log_live_stage("make: edt export", "[EDT] converting the sources to XML");
-            crate::use_cases::build_project::execute_edt_export_step(
-                context,
-                config,
-                &edt,
-                source_set,
-                edt_context,
-                &target,
-                "make",
-            )?;
+            // Предупреждения шага `make` прежде не возвращал и не возвращает.
+            let (target, _warnings) = base.xml_from_edt(context, config, source_set)?;
             xml.insert(source_set.name.clone(), target.clone());
             Ok(target)
         }
