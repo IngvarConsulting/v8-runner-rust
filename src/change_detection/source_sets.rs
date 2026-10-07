@@ -535,11 +535,41 @@ mod tests {
             .standalone
             .as_mut()
             .expect("standalone")
-            .gate = "host:1544".to_owned();
+            .gate = Some("host:1544".to_owned());
         let moved = SourceSetsService::new(&config)
             .designer_contexts()
             .remove(0);
         assert_ne!(before.storage_identity(), moved.storage_identity());
+    }
+
+    /// Автономный сервер помнится по SSH-шлюзу и тогда, когда рядом объявлена строка
+    /// прямого шлюза: память, записанная до строки, её появление переживает. Без шлюза
+    /// сервер помнится по строке прямого шлюза — без учётных данных и с именами без учёта
+    /// регистра, как база в кластере.
+    #[test]
+    fn a_standalone_server_is_remembered_by_its_gate_and_without_it_by_the_direct_gate() {
+        let identity = |connection: &str, standalone: &str| {
+            let mut config = single_set_config(SourceFormat::Designer, "/tmp/work");
+            config.infobase.connection = connection.to_owned();
+            config.infobase.standalone =
+                Some(serde_yaml::from_str(standalone).expect("standalone"));
+            SourceSetsService::new(&config)
+                .designer_contexts()
+                .remove(0)
+                .storage_identity()
+                .expect("identity")
+                .to_owned()
+        };
+        let gate_only = identity("", "gate: 'HOST:1543'\n");
+        let both = identity("Srvr=srv:1541;Ref=demo", "gate: 'HOST:1543'\n");
+        assert_eq!(gate_only, both);
+        let direct = identity("Srvr=SRV:1541;Ref=Demo", "{}");
+        assert!(
+            direct.contains("standalone:server:srv:1541\\demo"),
+            "{direct}"
+        );
+        assert_ne!(direct, both);
+        assert_eq!(direct, identity("Srvr=srv:1541;Ref=demo;Usr=a;Pwd=b", "{}"));
     }
     #[cfg(unix)]
     #[test]

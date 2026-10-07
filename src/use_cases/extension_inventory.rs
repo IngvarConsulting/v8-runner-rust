@@ -462,7 +462,7 @@ impl Executor {
                 v8: location.map(|l| l.path),
             }),
             (Provider::Ibcmd, Some(location)) => {
-                // У автономного сервера строки подключения нет: туда ходит шлюз, и
+                // `ibcmd` к автономному серверу не ходит: строки у него в матрице нет, и
                 // жалоба на секцию `dbms` назвала бы не ту причину.
                 if config.infobase.standalone.is_some() {
                     return Err(AppError::Runtime(
@@ -497,8 +497,15 @@ impl Executor {
     pub(crate) fn target_label(&self, config: &AppConfig) -> String {
         match self {
             Self::Ibcmd { connection, .. } => connection.describe_target(),
-            Self::Agent { .. } => match config.infobase.standalone.as_ref() {
-                Some(standalone) => format!("standalone server at {}", standalone.gate),
+            // Агента автономному серверу назначают только при объявленном SSH-шлюзе
+            // (`AppConfig::missing_way`), так что шлюз есть всегда, когда есть секция.
+            Self::Agent { .. } => match config
+                .infobase
+                .standalone
+                .as_ref()
+                .and_then(|standalone| standalone.gate.as_deref())
+            {
+                Some(gate) => format!("standalone server at {gate}"),
                 None => config.v8_connection().describe_target(),
             },
         }

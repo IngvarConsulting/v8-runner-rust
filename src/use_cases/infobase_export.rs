@@ -986,7 +986,7 @@ fn select_provider(
     intent: InfobaseTransferIntent,
 ) -> Result<PreparedTransferProvider, (AppError, ProviderReceipt)> {
     use crate::use_cases::provider_selection::{
-        no_adapter, no_executor, nobody_ready, utilities_of,
+        no_adapter, no_executor, nobody_ready, utilities_of, without_a_way,
     };
 
     // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
@@ -1017,6 +1017,10 @@ fn select_provider(
         if let Some(error) = pending_interruption_error(context, "during provider selection") {
             let receipt = plan.receipt_for_nobody(skipped);
             return Err((error, receipt));
+        }
+        if let Some(skip) = without_a_way(config, operation, provider) {
+            skipped.push(skip);
+            continue;
         }
         let Some(needed) = utilities_of(provider, config) else {
             skipped.push(no_adapter(provider, operation));
@@ -1092,10 +1096,21 @@ fn database_configuration_plan(
         ProviderPlan::Override { provider, file } => format!(
             "{reason}; providers.{operation} in {file} assigns {provider}: remove the key or assign {named}"
         ),
-        ProviderPlan::Default { .. } => format!(
-            "{reason}; a {} target serves {operation} only through the agent: omit --state db to export the working configuration",
-            config.target_kind().as_str()
-        ),
+        // Цепочка без экспортёров бывает только у автономного сервера, которому прямой шлюз
+        // не объявлен: выход — объявить его или выгрузить рабочую конфигурацию.
+        ProviderPlan::Default { .. } => {
+            let declare = database_configuration_exporters()
+                .find_map(|provider| {
+                    config
+                        .missing_way(Operation::ConfigurationExport, provider)
+                        .map(|way| format!("{}, or ", way.undeclared(provider)))
+                })
+                .unwrap_or_default();
+            format!(
+                "{reason}; a {} target as declared serves {operation} only through the agent: {declare}omit --state db to export the working configuration",
+                config.target_kind().as_str()
+            )
+        }
     };
     let receipt = plan.receipt_for_nobody(skipped);
     Err((AppError::capability(refusal), receipt))

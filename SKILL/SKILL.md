@@ -79,6 +79,8 @@ infobases:
     connection: "File=/absolute/path/to/ib"
 ```
 
+A standalone server (`ibsrv`) is declared by an `infobases.<name>.standalone` section; the runner never starts or creates it. Declare its direct gate `connection: 'Srvr=<host>:<--direct-regport, 1541>;Ref=<--name>'` (with `standalone: {}` when there is no SSH gate): the Designer then serves `push`, `pull`, `download` (also `--state db`), `upload`, `check`, `infobase dump|restore` with files on the runner's side. `standalone.gate: host:port` adds the agent through the SSH gate (second in the chain, the only one for `extensions`) and needs `standalone.exchange` (`sftp` or `{ dir: … }`) when no direct gate is declared. An operation with no declared way is refused as `validation` naming the key to add.
+
 `infobase:` in either file is a one-cycle synonym for `infobases.origin` and warns. `init` in a project whose `v8project.yaml` still has `infobase:` treats it as the declared `origin` (merged field by field with the local one) and never edits the project file; `--infobase` moves that effective section to `upstream` in the local layer and warns (key names only) when the project section has fields besides `connection`, since the loader still merges them into the new `origin`: move `infobase:` to `v8project.local.yaml`.
 
 Useful setup commands:
@@ -265,7 +267,7 @@ v8-runner infobase create
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
   Launch uses the configured infobase and client settings; no source-set is required.
-- Need the thin client against a published base: `launch thin --via web` opens `infobase.web.url` as a ws connection. A standalone-server target takes that path by default — its direct gate address, when declared, is not used by the runner yet — while `launch web` still opens the same address in a browser. `--via` is accepted only where the client is thin.
+- Need the thin client against a published base: `launch thin --via web` opens `infobase.web.url` as a ws connection. A standalone-server target takes that path by default — the runner does not start a client by its direct gate address yet (#208) — while `launch web` still opens the same address in a browser. `--via` is accepted only where the client is thin.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,
   `pid=null`, and a `plan` with the selected `program` and the composed `args`; credential values

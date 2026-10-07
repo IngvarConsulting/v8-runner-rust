@@ -116,8 +116,9 @@ impl InfobaseSelector {
 /// Connection and credentials for the target infobase.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InfobaseConfig {
-    /// Connection string to the infobase: `File=…` or `Srvr=…;Ref=…`. Empty when the
-    /// target is a standalone server, which `standalone` declares instead.
+    /// Connection string to the infobase: `File=…` or `Srvr=…;Ref=…`. Next to
+    /// `standalone` it is the server's direct gate, by which the Designer reaches it, or
+    /// empty.
     #[serde(default)]
     pub connection: String,
 
@@ -139,8 +140,9 @@ pub struct InfobaseConfig {
     #[serde(default)]
     pub web: Option<InfobaseWebConfig>,
 
-    /// Standalone server (`ibsrv`) reached through its SSH gate. Its presence declares
-    /// the target kind; the runner never starts the server.
+    /// Standalone server (`ibsrv`): the Designer reaches it by the direct gate in
+    /// `connection`, the agent by its SSH gate. Its presence declares the target kind; the
+    /// runner never starts the server.
     #[serde(default)]
     pub standalone: Option<StandaloneConfig>,
 
@@ -198,14 +200,18 @@ pub struct InfobaseClusterAgentConfig {
     pub password: Option<String>,
 }
 
-/// A standalone server as the target: the runner attaches to its SSH gate and exchanges
-/// files through a declared channel, never through a path it assumes to be shared.
+/// A standalone server as the target. The Designer goes to its direct gate, declared by
+/// `InfobaseConfig::connection`, and keeps its files on the runner's side; the agent
+/// attaches to its SSH gate and exchanges files through a declared channel, never through
+/// a path it assumes to be shared.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct StandaloneConfig {
     /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
-    /// port is required — `ibsrv` listens on 1543 unless told otherwise.
-    pub gate: String,
+    /// port is required — `ibsrv` listens on 1543 unless told otherwise. Absent: the agent
+    /// has no way to the server, and only the Designer serves it.
+    #[serde(default)]
+    pub gate: Option<String>,
 
     /// `SHA256:…` fingerprint the gate must present. Absent: the key is accepted and named.
     #[serde(default)]
@@ -236,9 +242,13 @@ pub enum StandaloneExchangeChannel {
 }
 
 impl StandaloneConfig {
-    /// The gate as `(host, port)`.
+    /// The gate as `(host, port)`; an undeclared gate is an error, for the caller asked
+    /// for a way the declaration does not give.
     pub fn gate_endpoint(&self) -> Result<(Host, u16), String> {
-        ssh_endpoint(&self.gate)
+        match self.gate.as_deref() {
+            Some(gate) => ssh_endpoint(gate),
+            None => Err("the SSH gate of the standalone server is not declared".to_owned()),
+        }
     }
 
     /// The declared directory channel, if that is the channel.
@@ -256,6 +266,54 @@ impl StandaloneConfig {
             Some(StandaloneExchangeConfig::Named(
                 StandaloneExchangeChannel::Sftp
             ))
+        )
+    }
+}
+
+/// The way a provider goes to a standalone server, and the key that declares it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandaloneWay {
+    /// The Designer goes to the direct gate as to a cluster: `Srvr=<host>:<port>;Ref=<name>`
+    /// in `infobase.connection`; its files stay on the runner's side.
+    DirectGate,
+    /// The agent attaches to the SSH gate `infobase.standalone.gate`; its files travel
+    /// through the declared exchange channel.
+    SshGate,
+}
+
+impl StandaloneWay {
+    /// The way a provider of the standalone rows takes; `None` for a provider without one.
+    pub const fn of(provider: Provider) -> Option<Self> {
+        match provider {
+            Provider::Designer => Some(Self::DirectGate),
+            Provider::Agent => Some(Self::SshGate),
+            Provider::Ibcmd | Provider::IbcmdRs | Provider::Webinst => None,
+        }
+    }
+
+    /// The way as the refusal names it.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::DirectGate => "the direct gate",
+            Self::SshGate => "the SSH gate",
+        }
+    }
+
+    /// What the configuration declares for this way.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::DirectGate => "infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+            Self::SshGate => "infobase.standalone.gate",
+        }
+    }
+
+    /// The one wording of a missing way: whom it lacks, which way and what to declare.
+    /// Every refusal and skip reason about an undeclared way is built from it.
+    pub fn undeclared(self, provider: Provider) -> String {
+        format!(
+            "{provider} reaches a standalone server by {}, which is not declared: declare {}",
+            self.name(),
+            self.key()
         )
     }
 }
@@ -389,14 +447,18 @@ impl InfobaseConfig {
     /// (`INV.CONFIG.AN-ACCEPTED-TARGET-HAS-A-MEMORY-ADDRESS`); `None` — только у формы, которую
     /// проверка отвергает: такая цель память ни с кем не делит.
     pub fn memory_address(&self, base_path: &Path) -> Option<String> {
+        // Автономный сервер помнится по SSH-шлюзу, если он объявлен: так память,
+        // записанная до прямого шлюза, переживает появление строки рядом с секцией. Без
+        // шлюза сервер помнится по строке прямого шлюза.
+        let connection =
+            || V8Connection::from_connection_string(&self.connection).snapshot_identity(base_path);
         match &self.standalone {
-            Some(standalone) => standalone
+            Some(standalone) if standalone.gate.is_some() => standalone
                 .gate_endpoint()
                 .ok()
                 .map(|(host, port)| format!("standalone:{host}:{port}")),
-            None => {
-                V8Connection::from_connection_string(&self.connection).snapshot_identity(base_path)
-            }
+            Some(_) => connection().map(|identity| format!("standalone:{identity}")),
+            None => connection(),
         }
     }
 
@@ -564,10 +626,55 @@ impl AppConfig {
         }
     }
 
+    /// The way to the target this provider lacks for the operation, as declared. Only a
+    /// standalone server can lack one: the Designer goes to it by the direct gate in
+    /// `connection`, the agent by `standalone.gate`, and either may be left undeclared.
+    /// `None` — the way is declared, the operation does not go to the target (`make`
+    /// builds in a throwaway base of the runner), or the target is not a standalone server.
+    pub fn missing_way(&self, operation: Operation, provider: Provider) -> Option<StandaloneWay> {
+        if capability::needs_no_target(operation) {
+            return None;
+        }
+        let standalone = self.infobase.standalone.as_ref()?;
+        let way = StandaloneWay::of(provider)?;
+        let declared = match way {
+            StandaloneWay::DirectGate => !self.infobase.connection.trim().is_empty(),
+            StandaloneWay::SshGate => standalone.gate.is_some(),
+        };
+        (!declared).then_some(way)
+    }
+
+    /// Why the matrix row of an operation is left empty on this standalone server: every
+    /// provider of the row lacks its way, and the refusal names what to declare. `None` —
+    /// the row has a provider with a declared way, the row is empty in the matrix itself,
+    /// or the target is not a standalone server.
+    pub fn undeclared_way(&self, operation: Operation) -> Option<String> {
+        let row = capability::default_chain(operation, self.target_kind());
+        if row.is_empty()
+            || row
+                .iter()
+                .any(|provider| self.missing_way(operation, *provider).is_none())
+        {
+            return None;
+        }
+        let ways = row
+            .iter()
+            .filter_map(|provider| {
+                self.missing_way(operation, *provider)
+                    .map(|way| way.undeclared(*provider))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(format!(
+            "{operation} has no executor with a declared way to the standalone server: {ways}"
+        ))
+    }
+
     /// Who is assigned to an operation on this target, before any readiness check.
     ///
     /// An override names one provider and never falls back; a default is the matrix
-    /// chain, from which the caller takes the first ready one.
+    /// chain, from which the caller takes the first ready one. On a standalone server the
+    /// chain keeps only the providers whose way to it is declared.
     pub fn provider_plan(&self, operation: Operation) -> ProviderPlan {
         match self.providers.get(&operation) {
             Some(provider) => ProviderPlan::Override {
@@ -579,7 +686,10 @@ impl AppConfig {
                     .unwrap_or_else(|| crate::config::loader::DEFAULT_CONFIG_FILE_NAME.to_owned()),
             },
             None => ProviderPlan::Default {
-                chain: capability::default_chain(operation, self.target_kind()),
+                chain: capability::default_chain(operation, self.target_kind())
+                    .into_iter()
+                    .filter(|provider| self.missing_way(operation, *provider).is_none())
+                    .collect(),
             },
         }
     }

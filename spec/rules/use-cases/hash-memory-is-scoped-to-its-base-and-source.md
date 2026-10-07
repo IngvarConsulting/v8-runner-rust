@@ -7,6 +7,7 @@ check:
   - src/config/loader.rs::spaced_file_parameters_use_the_project_directory_for_runtime_and_memory
   - tests/cli_pull_memory.rs::relative_file_address_uses_the_project_directory_and_matches_absolute_memory
   - src/change_detection/source_sets.rs::standalone_snapshot_uses_gate_address_without_secrets_or_transport_settings
+  - src/change_detection/source_sets.rs::a_standalone_server_is_remembered_by_its_gate_and_without_it_by_the_direct_gate
   - src/platform/connection.rs::snapshot_address_identity_ignores_credentials_and_canonicalizes_file_paths
 ---
 
@@ -19,3 +20,7 @@ check:
 с переданным платформе, включая допустимые пробелы вокруг `=` у `File`. Канонический
 путь сравнивается по точному представлению ОС, без потери байтов и сведения регистра:
 консервативное объединение имён для замка не является равенством исходников.
+
+Адрес автономного сервера — его SSH-шлюз, и строка прямого шлюза рядом с ним адреса не
+меняет; без SSH-шлюза адрес — строка прямого шлюза без учётных данных, с именами без учёта
+регистра.

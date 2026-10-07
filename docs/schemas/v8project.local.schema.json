@@ -288,7 +288,7 @@
               "type": "null"
             }
           ],
-          "description": "Standalone server reached through its SSH gate; declares the target kind."
+          "description": "Standalone server (`ibsrv`); declares the target kind. The Designer reaches it by\n`connection` — the direct gate `Srvr=<host>:<port>;Ref=<name>`; the agent by its SSH\n`gate`. At least one of the two is declared."
         },
         "user": {
           "description": "Optional infobase user name passed to platform utilities.",
@@ -353,10 +353,10 @@
               "type": "null"
             }
           ],
-          "description": "How files travel between the runner and the gate user's directory: `sftp` through\nthe gate, or `{ dir: … }` — that directory as the runner sees it."
+          "description": "How files travel between the runner and the gate user's directory: `sftp` through\nthe gate, or `{ dir: … }` — that directory as the runner sees it. Required when\n`gate` is declared without `connection`; the Designer by the direct gate reads and\nwrites files on the runner's side and needs no channel."
         },
         "gate": {
-          "description": "`host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the\nport is required — `ibsrv` listens on 1543 unless told otherwise.",
+          "description": "`host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the\nport is required — `ibsrv` listens on 1543 unless told otherwise. Optional when\n`connection` declares the direct gate: the agent then is not offered.",
           "type": "string"
         },
         "host-fingerprint": {
@@ -364,9 +364,6 @@
           "type": "string"
         }
       },
-      "required": [
-        "gate"
-      ],
       "type": "object"
     },
     "InfobaseWebSchema": {

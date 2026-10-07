@@ -264,6 +264,17 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     // Шлюз прогнан раннером на живом `ibsrv` 8.3.27 15.09.2026: build (полная и частичная
     // загрузка), dump (полная и пропуск по поколению), make cf, export cf, extensions.
     const GATE_ONLY: &[Capability] = &[implemented(Agent, LiveVerified)];
+    // Автономный сервер: Конфигуратор первым — по прямому шлюзу, как в кластер, агент
+    // вторым — по SSH-шлюзу. Команды Конфигуратора через прямой шлюз замерены вручную
+    // (#178, #179, 06.10.2026, 8.3.27.2074): `/LoadConfigFromFiles`, `/DumpConfigToFiles`,
+    // `/UpdateDBCfg`, `/CheckConfig`, `/CompareCfg`, `/DumpDBCfg`, `/DumpIB`, `/RestoreIB`;
+    // путь раннера проверен по командной строке. Кому из них путь объявлен, решает
+    // конфигурация (`AppConfig::missing_way`), а не строка матрицы.
+    const DIRECT_GATE_THEN_GATE: &[Capability] = &[
+        implemented(Designer, ArgvTested),
+        implemented(Agent, LiveVerified),
+    ];
+    const DIRECT_GATE_ONLY: &[Capability] = &[implemented(Designer, ArgvTested)];
     // `make` собирает пакет из исходников во временной базе раннера, а не выгружает базу
     // проекта, поэтому строка от вида цели не зависит. `ibcmd`: `infobase create`, затем
     // `config import --out` (замер #182, 06.10.2026, 8.3.27.2074); Конфигуратор:
@@ -309,21 +320,25 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
             TargetKind::File | TargetKind::Cluster,
         ) => SNAPSHOT,
         (Operation::Publish, TargetKind::File | TargetKind::Cluster) => WEBINST_ONLY,
-        // Автономный сервер: единственная точка входа — его SSH-шлюз, тот же агентский
-        // shell (`DEC.2026-09-14.ONLY-A-STANDALONE-SERVER-ANSWERS-WITHOUT-BEING-STARTED`).
-        // Раннер к нему подключается, ничего не запуская, поэтому `init`, `publish`,
-        // `load` (нет `compare-cfg`) и `syntax` строк не имеют. `infobase dump|restore`
-        // строк не имеют намеренно: `infobase-tools dump-ib` через шлюз роняет `ibsrv`
-        // 8.3.27 (SIGSEGV, живой прогон 15.09.2026), а `restore-ib` завершает сеанс
-        // сервера по документации — снимок автономного сервера снимают его средствами.
+        // Автономный сервер раннер не запускает и не создаёт, поэтому `init` и `publish`
+        // строк не имеют: базу сервера создают до его запуска, HTTP он отдаёт сам.
+        // `load`, `syntax` и снимок — только Конфигуратор по прямому шлюзу: у SSH-шлюза нет
+        // `compare-cfg` и `check-config`, а `infobase-tools dump-ib` через него роняет
+        // `ibsrv` 8.3.27 (живой прогон 15.09.2026, #189). Состав расширений — только агент:
+        // Конфигуратора для `extensions` у раннера нет ни у какой цели (#206).
         (
-            Operation::Build
-            | Operation::Dump
-            | Operation::Extensions
-            | Operation::ConfigurationExport,
+            Operation::Build | Operation::Dump | Operation::ConfigurationExport,
             TargetKind::Standalone,
-        ) => GATE_ONLY,
-        (_, TargetKind::Standalone) => &[],
+        ) => DIRECT_GATE_THEN_GATE,
+        (
+            Operation::Load
+            | Operation::Syntax
+            | Operation::InfobaseDump
+            | Operation::InfobaseRestore,
+            TargetKind::Standalone,
+        ) => DIRECT_GATE_ONLY,
+        (Operation::Extensions, TargetKind::Standalone) => GATE_ONLY,
+        (Operation::Init | Operation::Publish, TargetKind::Standalone) => &[],
     }
 }
 
