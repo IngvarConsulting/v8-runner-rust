@@ -461,6 +461,7 @@ mod tests {
         let dsl = EnterpriseDsl::new(
             dir.path().join("1cv8c"),
             V8Connection::from_connection_string("File=/tmp/ib"),
+            None,
             vec!["/TESTMANAGER".to_owned()],
             LaunchClientMode::Thin,
             &runner as &dyn ProcessRunner,

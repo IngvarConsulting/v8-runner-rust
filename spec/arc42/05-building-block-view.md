@@ -87,6 +87,7 @@ flowchart TB
 | [`throwaway_infobase.rs`](../../src/use_cases/throwaway_infobase.rs) | Временная база раннера под `workPath`, в которой `make` собирает пакет из исходников: создание исполнителем (`ibcmd` со своим `--data` или Конфигуратор), загрузка основной конфигурации один раз за прогон, сборка пакета, уборка своей и брошенных баз — [правило](../rules/use-cases/make-builds-packages-from-sources-in-a-throwaway-base.md) |
 | [`set_walk.rs`](../../src/use_cases/set_walk.rs) | Общее у обходов наборов: ответ каждого набора в `sets`, остановка на первом отказе, закрытие ответа обхода |
 | [`tool_extension.rs`](../../src/use_cases/tool_extension.rs) | Расширение-инструмент клиентского MCP |
+| [`client_address.rs`](../../src/use_cases/client_address.rs) | Адрес клиента у `launch` и у клиента `test`: строка подключения, без неё — `infobase.web.url`, ключ `--via`; отказ толстому клиенту и обычному приложению у автономной цели — [правило](../rules/cli/a-client-goes-by-the-connection-string-before-the-web-address.md) |
 
 ### 5.5 `platform`
 

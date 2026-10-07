@@ -72,26 +72,23 @@ pub(super) fn run_tests(
         .execution
         .client_mode
         .unwrap_or(LaunchClientModeRequest::Thin);
-    let web_url = match client_address(config, client_mode.into()) {
-        Ok(web_url) => web_url,
-        Err(error) => {
-            let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
-                .with_diagnostics(vec![error.to_string()])
-                .with_errors(vec![test_execution_error(
-                    TestErrorKind::TestSetupFailed,
-                    error.to_string(),
-                )]);
-            let result = make_test_result(
-                target,
-                mode,
-                outcome,
-                warnings,
-                steps,
-                started.elapsed().as_millis() as u64,
-            );
-            return Err(TestExecutionFailure::with_payload(error, result));
-        }
-    };
+    if let Err(error) = super::helpers::client_web_url(config, client_mode.into()) {
+        let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
+            .with_diagnostics(vec![error.to_string()])
+            .with_errors(vec![test_execution_error(
+                TestErrorKind::TestSetupFailed,
+                error.to_string(),
+            )]);
+        let result = make_test_result(
+            target,
+            mode,
+            outcome,
+            warnings,
+            steps,
+            started.elapsed().as_millis() as u64,
+        );
+        return Err(TestExecutionFailure::with_payload(error, result));
+    }
 
     let build_started = Instant::now();
     match args.build_policy {
@@ -306,7 +303,6 @@ pub(super) fn run_tests(
         &platform_launch,
         &enterprise_runner,
         client_mode,
-        web_url,
         args.execution.timeouts.total_ms,
     ) {
         Ok(dsl) => dsl,
@@ -551,18 +547,6 @@ pub(super) fn run_tests(
         steps,
         started.elapsed().as_millis() as u64,
     ))
-}
-
-/// Адрес клиента тестов — по тому же правилу, что у `launch` без `--via`: строка
-/// подключения, а без неё — `infobase.web.url`. Толстый клиент и обычное приложение против
-/// автономной цели отказывают.
-fn client_address(
-    config: &AppConfig,
-    mode: crate::platform::enterprise::LaunchClientMode,
-) -> Result<Option<String>, AppError> {
-    crate::use_cases::client_address::refuse_a_thick_client_on_a_standalone_target(config, mode)?;
-    let address = crate::use_cases::client_address::resolve(config, mode, None)?;
-    Ok(address.web_url().map(str::to_owned))
 }
 
 /// Что можно доказать о готовой базе, не запуская платформу.

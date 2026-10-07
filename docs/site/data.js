@@ -340,7 +340,8 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return null; },
       today: function (ctx) { return this.target(ctx); },
       target: function (ctx) {
-        // У цели два адреса, и тонкий клиент открывается любым; умолчание задаёт вид цели.
+        // У цели два адреса, и тонкий клиент открывается любым; умолчание — строка
+        // подключения, а без неё — web.url.
         // Клиент запускается локально в любом случае — платформа нужна и для веб-пути.
         if (ctx.target === 'standalone') {
           return { chain: [P.client], config: ['connection', 'web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],

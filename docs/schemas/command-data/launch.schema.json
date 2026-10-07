@@ -79,7 +79,7 @@
       "type": "object"
     },
     "LaunchVia": {
-      "description": "Which of the target's two addresses opens the base.\n\nA target has an administrative address and a client one, and a client can be opened by\neither. The target kind sets the default; `--via` overrides it.",
+      "description": "Which of the target's two addresses opens the base.\n\nA target has an administrative address and a client one, and a client can be opened by\neither. The connection string is the default, the client address when no connection\nstring is declared; `--via` overrides it.",
       "oneOf": [
         {
           "const": "connection",

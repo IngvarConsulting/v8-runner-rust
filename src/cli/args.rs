@@ -771,7 +771,8 @@ pub struct LaunchArgs {
     pub launch: DirectLaunchOptionsArgs,
 
     /// Which address opens the base: `web` for infobase.web.url, `connection` for
-    /// infobase.connection. Thin client only; the default follows the target kind
+    /// infobase.connection. Thin client only; the default is infobase.connection, or
+    /// infobase.web.url when no connection string is declared
     #[arg(long = "via", value_parser = ["web", "connection"])]
     pub via: Option<String>,
 

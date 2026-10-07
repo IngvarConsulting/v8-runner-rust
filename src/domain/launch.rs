@@ -49,7 +49,8 @@ pub struct LaunchResult {
 /// Which of the target's two addresses opens the base.
 ///
 /// A target has an administrative address and a client one, and a client can be opened by
-/// either. The target kind sets the default; `--via` overrides it.
+/// either. The connection string is the default, the client address when no connection
+/// string is declared; `--via` overrides it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchVia {

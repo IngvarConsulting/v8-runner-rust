@@ -37,7 +37,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `make` / `artifacts` | цепочка `ibcmd` → `designer` при любом виде базы и без неё; любой `format`; `.epf`/`.erf` — только `designer`; `ibcmd-rs` и `agent` не принимаются; живой замер последовательностей — [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416) | Собирает `.cf` / `.cfe` из исходников во временной базе раннера под `workPath` и публикует `.epf` / `.erf`; база проекта не открывается и не нужна; `ibcmd` — `infobase create` со своим `--data`, затем `config import --out`; Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles` (без `-updateConfigDumpInfo` и `/UpdateDBCfg`), `/DumpCfg`, расширение — поверх основной конфигурации; исходники EDT сперва переводит в XML `1cedtcli` |
 | `check` | `format=DESIGNER` или `format=EDT`; у автономного сервера — `designer` по прямому шлюзу | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore`; `agent` только по `providers.infobase.restore: agent`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/RestoreIB`, только `--replace`; при открытых сеансах платформа отказывает, ключа их завершения у `/RestoreIB` нет) | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
-| `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
+| `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
 | `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr` |
 | `status` | CLI-only; без `--deep` платформа не нужна | Состояние пары «каталог ↔ база» по памяти под `workPath`; `--all` — каждая объявленная база; `--deep` спрашивает поколение исполнителем `push`, состав расширений исполнителем `extensions` и называет копии из метки владельца |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
@@ -1238,13 +1238,20 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - `designer` использует `1cv8`.
 - `thin` использует `1cv8c`.
 - `--via` выбирает, каким из двух адресов цели открыть базу: `connection` —
-  `infobase.connection`, `web` — `infobase.web.url` как ws-соединение. Умолчание задаёт вид
-  цели: у автономного сервера — `web` (клиент по строке прямого шлюза раннер пока не
-  запускает, #208), у файловой и кластерной —
-  `connection`. Ключ принимается только там, где клиент тонкий (`launch thin` и
-  `launch mcp --mode thin`); у остальных режимов адрес один, и ключ отвергается. У
-  автономного сервера отвергается и `--via connection`: клиент по строке прямого шлюза
-  раннер пока не запускает (#208).
+  `infobase.connection`, `web` — `infobase.web.url` как ws-соединение. Без ключа клиент идёт
+  по `infobase.connection`, а когда строка не объявлена (автономный сервер только с
+  SSH-шлюзом) — по `infobase.web.url`. Ключ принимается только там, где клиент тонкий
+  (`launch thin` и `launch mcp --mode thin`); у остальных режимов адрес один, и ключ
+  отвергается. Клиент `test` выбирает адрес тем же правилом без ключа.
+- У автономного сервера строка подключения — строка прямого шлюза: `designer`, `thin` и
+  `mcp` идут по ней ключом `/S <host>:<port>\<name>` с `/N`/`/P` из
+  `infobase.user`/`infobase.password`; `thick`, `ordinary` и `mcp --mode thick|ordinary`
+  отказывают (`capability`, код `target`, `next` — `launch thin` или `launch mcp`). Приём
+  реквизитов клиентом автономного сервера не замерен (#184). Что изменилось с #208 —
+  [`CONFIGURATION.md`](CONFIGURATION.md#infobasestandalone).
+- Пользовательский `/IBConnectionString` из `tools.enterprise.additional-launch-keys`
+  встаёт после адреса раннера (`/S` или `/IBConnectionString`), хотя справка платформы
+  требует его раньше `/S`: известный предел, раннер порядок не меняет.
 - Ответ несёт `via` у каждого режима, а `url` — там, где адрес клиентский. Пароль из
   userinfo в показанном адресе замаскирован; в процесс уходит настоящий.
 - `thick` и `ordinary` используют `1cv8`.
