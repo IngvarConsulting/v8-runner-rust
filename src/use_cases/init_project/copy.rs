@@ -222,7 +222,7 @@ impl Copy<'_> {
         if dry_run {
             let creation = match &creator {
                 Creator::File { ibcmd, .. } => format!(
-                    "a file infobase {target} from it via {} infobase restore --create-database",
+                    "{target} from it via {} infobase restore --create-database",
                     ibcmd.display()
                 ),
                 Creator::Cluster => format!(

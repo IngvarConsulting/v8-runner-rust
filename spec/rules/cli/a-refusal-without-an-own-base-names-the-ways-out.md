@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/330
+check:
+  - tests/cli_infobases.rs::a_refusal_without_origin_names_the_ways_out
+  - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_is_refused_and_names_the_owner
 ---
 
 # Отказ без своей базы называет выходы

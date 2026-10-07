@@ -492,3 +492,45 @@ fn a_preview_names_the_snapshot_and_a_wrong_source_is_refused() {
     }
     assert!(calls(stand.root()).is_empty(), "{}", calls(stand.root()));
 }
+
+/// База в кластере из образа: Конфигуратор создаёт её `CREATEINFOBASE`, затем загружает образ
+/// `/RestoreIB`; память — признак копии, и первая отправка полная.
+#[test]
+fn a_cluster_copy_is_created_by_the_designer_and_loaded_from_the_image() {
+    let stand = Stand::new();
+    let (_neighbour, neighbour_base) = stand.neighbour();
+    let wt = stand.root().join("wt");
+    let worktree = write_copy(
+        &wt,
+        &stand.platform,
+        &format!(
+            "infobases:\n  origin:\n    connection: 'Srvr=cluster:1541;Ref=wt'\n    dbms:\n      kind: PostgreSQL\n      server: db\n      name: wt_db\n      user: postgres\n      password: pg-s3cret\n      locale: ru\n  upstream:\n    connection: 'File={}'\n",
+            neighbour_base.display()
+        ),
+    );
+
+    let copied = succeeded(&run(
+        &worktree,
+        &["infobase", "create", "--from", "upstream"],
+    ));
+
+    assert_eq!(copied["data"]["source"]["infobase"], "upstream", "{copied}");
+    let log = calls(stand.root());
+    let order: Vec<&str> = log
+        .lines()
+        .filter_map(|line| {
+            ["/DumpIB", "CREATEINFOBASE", "/RestoreIB"]
+                .into_iter()
+                .find(|call| line.contains(call))
+        })
+        .collect();
+    assert_eq!(order, ["/DumpIB", "CREATEINFOBASE", "/RestoreIB"], "{log}");
+    let restore = log
+        .lines()
+        .find(|line| line.contains("/RestoreIB"))
+        .expect("restore");
+    assert!(restore.contains("upstream.dt"), "{restore}");
+    assert!(!copied.to_string().contains("pg-s3cret"), "{copied}");
+    let memory = wt.join("work").join("infobases").join("origin");
+    assert!(memory.join("copied-from.json").exists());
+}

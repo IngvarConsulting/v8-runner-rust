@@ -239,8 +239,9 @@ MCP:
   `workspace` на шаге `infobase owner`, выход 3, — повтор не поможет. Отказ называет
   копию-владельца, как освободить базу (убрать её из `v8project.local.yaml` той копии; у копии
   с другой машины — удалить её запись из метки) и где лежит метка; `error.next` —
-  `infobase create`, своя чистая база. Копию базы (`infobase create --from`, её пока нет, #330)
-  и общую базу (`shared: true`) отказ называет текстом. MCP отвечает `runtime_failure` с тем
+  `infobase create`, своя чистая база. Своя база заводится `init --infobase <строка>`, копия
+  базы — тем же `init --infobase`, затем `infobase create --from upstream`; их и общую базу
+  (`shared: true`) отказ называет текстом. MCP отвечает `runtime_failure` с тем
   же текстом и тем же `next`;
 - общая база: если `shared: true` стоит в `v8project.local.yaml` этой копии и каждой живой
   копии-владельца — у каждой секции, которая объявляет эту базу, — команда записи проходит, и копия записывается в метку рядом с
@@ -453,7 +454,7 @@ v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir 
 ### `infobase create`
 
 ```bash
-v8-runner infobase create [--dry-run]
+v8-runner infobase create [--from <INFOBASE>] [--dry-run]
 ```
 
 - Всегда разделяет шаг подготовки ИБ и шаг EDT workspace; отказ шага базы рабочую область
@@ -495,7 +496,27 @@ v8-runner infobase create [--dry-run]
   `EXTENSION`.
 - Если настроен `tools.client_mcp.extension.source.format=EDT`, импортирует этот tool extension
   project в EDT workspace, не добавляя его в project `source-set`.
-- Копию другой базы с данными (`--from <база>`) команда пока не делает ([#330](https://github.com/IngvarConsulting/v8-runner-rust/issues/330)).
+- `--from <база>` создаёт базу этой рабочей копии как копию другой базы, объявленной по имени
+  в `v8project.local.yaml`, с её данными и конфигурацией. С источника Конфигуратор снимает
+  образ `/DumpIB` в `workPath/copies/<база>.dt` под замком источника; в метку источника копия
+  не пишется, новая база записывается в метку за этой копией. Файловую базу из образа создаёт
+  `ibcmd infobase restore --create-database`, базу в кластере — Конфигуратор: `CREATEINFOBASE`
+  (реквизиты как выше), затем `/RestoreIB` образа; шаблон .dt у `CREATEINFOBASE` ждёт замера
+  ([#434](https://github.com/IngvarConsulting/v8-runner-rust/issues/434)). Неудача
+  `/RestoreIB` оставляет базу в кластере пустой, и отказ называет
+  `infobase restore --input <образ> --replace`. Ответ называет источник в `data.source`:
+  `infobase` и `snapshot`.
+- Сеансы источника раннер не завершает: снимок требует свободного источника. Неудачный снимок —
+  отказ `platform` с рецептом: у файловой базы закрыть Конфигуратор и клиенты копии-владельца
+  (отказ называет её по метке), у базы в кластере — окно обслуживания `sessions deny`,
+  `sessions terminate`, а после снимка `sessions allow`. Источник на автономном сервере —
+  отказ `capability` с кодом `target` до снимка и рецептом: образ снимают на машине сервера,
+  затем `infobase restore --create` и `push --force`. Источник, не объявленный в местном слое,
+  и сама создаваемая база — отказ `validation`.
+- Память копии — только признак копии с поколением новой базы: прежние хеш-память, файл версий
+  и журнал поколений под её именем стираются. Первый `push` идёт полным (`--full` сам), отказом
+  первого знакомства не останавливается и снимает признак; до него ни один отказ не предлагает
+  `pull` — выход только `push --force`.
 
 ### `tools download`
 
