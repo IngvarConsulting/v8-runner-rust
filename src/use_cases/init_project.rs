@@ -438,23 +438,17 @@ fn create_file_infobase(
             // исходников без записи файла версий в каталог, затем обновление базы данных.
             // Сборка, которая не дошла до конца — отказ, отмена, — оставляет базу созданной
             // пустой: память говорит это, и первая отправка полная.
-            let assembled = (|| {
-                let designer = DesignerDsl::new(
+            let assembled = assemble_with_designer(
+                DesignerDsl::new(
                     binary,
                     config.v8_connection(),
                     runner,
                     Some(designer_log_file(config)?),
                     policy,
-                );
-                let loaded = designer
-                    .load_config_from_files_untouched(import, None)
-                    .map_err(AppError::from)?;
-                deferrals.note_result(INFOBASE_CREATE, &loaded);
-                ensure_platform_success("load the main configuration", "infobase", &loaded)?;
-                let updated = designer.update_db_cfg(None).map_err(AppError::from)?;
-                deferrals.note_result(INFOBASE_CREATE, &updated);
-                ensure_platform_success("update the database configuration", "infobase", &updated)
-            })();
+                ),
+                import,
+                deferrals,
+            );
             match assembled {
                 Ok(()) => Ok(created),
                 Err(error) => {
@@ -472,6 +466,23 @@ fn create_file_infobase(
             other,
         )),
     }
+}
+
+/// Сборка созданной Конфигуратором базы: загрузка основной конфигурации без записи файла
+/// версий в каталог исходников, затем обновление базы данных.
+fn assemble_with_designer(
+    designer: DesignerDsl<'_>,
+    import: &Path,
+    deferrals: &mut Deferrals,
+) -> Result<(), AppError> {
+    let loaded = designer
+        .load_config_from_files_untouched(import, None)
+        .map_err(AppError::from)?;
+    deferrals.note_result(INFOBASE_CREATE, &loaded);
+    ensure_platform_success("load the main configuration", "infobase", &loaded)?;
+    let updated = designer.update_db_cfg(None).map_err(AppError::from)?;
+    deferrals.note_result(INFOBASE_CREATE, &updated);
+    ensure_platform_success("update the database configuration", "infobase", &updated)
 }
 
 fn ensure_created(result: &PlatformCommandResult) -> Result<(), AppError> {
@@ -500,13 +511,13 @@ fn ensure_cluster_infobase(
     // Строка подключения из конфигурации бывает с `Usr=`/`Pwd=`: базу называет
     // `describe_target`, а не строка как есть (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
     let target = config.v8_connection().describe_target();
-    let requisites = match ClusterRequisites::of(config) {
-        Ok(requisites) => requisites,
+    let creation = match cluster_creation(config) {
+        Ok(creation) => creation,
         Err(error) => return StepOutcome::failed("infobase", "create", started, error),
     };
     let database = format!(
         "the database '{}' on '{}'",
-        requisites.database_name, requisites.database_server
+        creation.database_name, creation.database_server
     );
     if dry_run {
         // Есть ли база уже, без действия не узнать: CREATEINFOBASE отвечает на это кодом,
@@ -545,11 +556,11 @@ fn ensure_cluster_infobase(
             None,
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
         )
-        .create_cluster_infobase(&requisites.creation())
+        .create_cluster_infobase(&creation)
         .map_err(AppError::from)?;
         deferrals.note_result(INFOBASE_CREATE, &created);
         if created.process.outcome().is_err() {
-            return Err(requisites.failure(&created, &database));
+            return Err(cluster_create_failure(&creation, &created, &database));
         }
         Ok(StepOutcome::ok(
             "infobase",
@@ -565,96 +576,75 @@ fn ensure_cluster_infobase(
     }
 }
 
-/// Реквизиты создания базы в кластере из секций `dbms` и `cluster`.
-struct ClusterRequisites<'a> {
-    dbms: &'a str,
-    database_server: &'a str,
-    database_name: &'a str,
-    database_user: Option<&'a str>,
-    database_password: Option<&'a str>,
-    locale: &'a str,
-    cluster_user: Option<&'a str>,
-    cluster_password: Option<&'a str>,
+/// Реквизиты создания базы в кластере из секций `dbms` и `cluster`. Обязательные — вид
+/// СУБД, сервер, имя базы данных и национальные настройки: без `Locale` платформа оставляет
+/// в СУБД брошенную базу данных (замер #181). Нехватка — отказ до запуска платформы с
+/// ключом, которого нет.
+fn cluster_creation<'a>(config: &'a AppConfig) -> Result<ClusterInfobaseCreation<'a>, AppError> {
+    let dbms = config.infobase.dbms.as_ref();
+    let required = |field: &'static str, value: Option<&'a String>| -> Result<&'a str, AppError> {
+        value
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::Validation(format!(
+                    "infobase create in a cluster requires infobase.dbms.{field}: the CREATEINFOBASE string takes the DBMS, its server, the database name and the locale from the dbms section{}",
+                    if field == "locale" {
+                        " — without Locale the platform leaves an abandoned database in the DBMS"
+                    } else {
+                        ""
+                    }
+                ))
+            })
+    };
+    let optional = |value: Option<&'a String>| -> Option<&'a str> {
+        value.map(String::as_str).filter(|value| !value.is_empty())
+    };
+    let cluster = config.infobase.cluster.as_ref();
+    Ok(ClusterInfobaseCreation {
+        dbms: required("kind", dbms.and_then(|dbms| dbms.kind.as_ref()))?,
+        database_server: required("server", dbms.and_then(|dbms| dbms.server.as_ref()))?,
+        database_name: required("name", dbms.and_then(|dbms| dbms.name.as_ref()))?,
+        locale: required("locale", dbms.and_then(|dbms| dbms.locale.as_ref()))?,
+        database_user: optional(dbms.and_then(|dbms| dbms.user.as_ref())),
+        database_password: optional(dbms.and_then(|dbms| dbms.password.as_ref())),
+        cluster_user: optional(cluster.and_then(|cluster| cluster.user.as_ref())),
+        cluster_password: optional(cluster.and_then(|cluster| cluster.password.as_ref())),
+    })
 }
 
-impl<'a> ClusterRequisites<'a> {
-    /// Обязательные реквизиты — вид СУБД, сервер, имя базы данных и национальные
-    /// настройки: без `Locale` платформа оставляет в СУБД брошенную базу данных (замер
-    /// #181). Нехватка — отказ до запуска платформы с ключом, которого нет.
-    fn of(config: &'a AppConfig) -> Result<Self, AppError> {
-        let dbms = config.infobase.dbms.as_ref();
-        let required = |field: &'static str, value: Option<&'a String>| {
-            value
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    AppError::Validation(format!(
-                        "infobase create in a cluster requires infobase.dbms.{field}: the CREATEINFOBASE string takes the DBMS, its server, the database name and the locale from the dbms section{}",
-                        if field == "locale" {
-                            " — without Locale the platform leaves an abandoned database in the DBMS"
-                        } else {
-                            ""
-                        }
-                    ))
-                })
-        };
-        let optional =
-            |value: Option<&'a String>| value.map(String::as_str).filter(|value| !value.is_empty());
-        let cluster = config.infobase.cluster.as_ref();
-        Ok(Self {
-            dbms: required("kind", dbms.and_then(|dbms| dbms.kind.as_ref()))?,
-            database_server: required("server", dbms.and_then(|dbms| dbms.server.as_ref()))?,
-            database_name: required("name", dbms.and_then(|dbms| dbms.name.as_ref()))?,
-            locale: required("locale", dbms.and_then(|dbms| dbms.locale.as_ref()))?,
-            database_user: optional(dbms.and_then(|dbms| dbms.user.as_ref())),
-            database_password: optional(dbms.and_then(|dbms| dbms.password.as_ref())),
-            cluster_user: optional(cluster.and_then(|cluster| cluster.user.as_ref())),
-            cluster_password: optional(cluster.and_then(|cluster| cluster.password.as_ref())),
-        })
-    }
-
-    fn creation(&self) -> ClusterInfobaseCreation<'a> {
-        ClusterInfobaseCreation {
-            dbms: self.dbms,
-            database_server: self.database_server,
-            database_name: self.database_name,
-            database_user: self.database_user,
-            database_password: self.database_password,
-            locale: self.locale,
-            cluster_user: self.cluster_user,
-            cluster_password: self.cluster_password,
-        }
-    }
-
-    /// Отказ создания. Причину по прозе платформы раннер не угадывает
-    /// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно
-    /// без неё: без администратора кластера — этот уровень и его ключи; и что неудача может
-    /// оставить базу данных в СУБД. Пароли в выводе платформы скрыты.
-    fn failure(&self, result: &PlatformCommandResult, database: &str) -> AppError {
-        let secrets: Vec<&str> = [self.database_password, self.cluster_password]
-            .into_iter()
-            .flatten()
-            .collect();
-        let mut message = format_failure_evidence(
-            format!(
-                "create infobase failed for 'infobase' with exit code {}",
-                result.process.exit_code
-            ),
-            &mask_text(&result.process.stdout, &secrets),
-            &mask_text(&result.process.stderr, &secrets),
-            None,
-            None,
+/// Отказ создания базы в кластере. Причину по прозе платформы раннер не угадывает
+/// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно без неё:
+/// без администратора кластера — этот уровень и его ключи; и что неудача может оставить базу
+/// данных в СУБД. Пароли в выводе платформы скрыты.
+fn cluster_create_failure(
+    creation: &ClusterInfobaseCreation<'_>,
+    result: &PlatformCommandResult,
+    database: &str,
+) -> AppError {
+    let secrets: Vec<&str> = [creation.database_password, creation.cluster_password]
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut message = format_failure_evidence(
+        format!(
+            "create infobase failed for 'infobase' with exit code {}",
+            result.process.exit_code
+        ),
+        &mask_text(&result.process.stdout, &secrets),
+        &mask_text(&result.process.stderr, &secrets),
+        None,
+        None,
+    );
+    if creation.cluster_user.is_none() {
+        message.push_str(
+            "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
         );
-        if self.cluster_user.is_none() {
-            message.push_str(
-                "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
-            );
-        }
-        message.push_str(&format!(
-            "; a failed creation may leave {database} in the DBMS, and a retry over it registers the infobase on that database — check the DBMS before retrying"
-        ));
-        AppError::Platform(message)
     }
+    message.push_str(&format!(
+        "; a failed creation may leave {database} in the DBMS, and a retry over it registers the infobase on that database — check the DBMS before retrying"
+    ));
+    AppError::Platform(message)
 }
 
 fn ensure_edt_workspace(
