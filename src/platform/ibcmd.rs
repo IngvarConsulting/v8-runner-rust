@@ -16,6 +16,13 @@ pub enum IbcmdError {
 
     #[error("failed to execute ibcmd process: {0}")]
     Spawn(ProcessError),
+
+    /// `config export --sync --force` that falls back to a full export clears the whole
+    /// directory, `.git` included (measured on 8.3.27, #425); the runner never sends it.
+    #[error(
+        "refusing to run 'ibcmd config export --sync --force': on a full fallback it deletes everything in the target directory, '.git' included"
+    )]
+    DirectoryWipingExport,
 }
 
 /// Connection contract passed to `ibcmd infobase ...` commands.
@@ -561,6 +568,9 @@ impl<'a> IbcmdDsl<'a> {
     }
 
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, IbcmdError> {
+        if wipes_the_export_directory(args) {
+            return Err(IbcmdError::DirectoryWipingExport);
+        }
         self.run_with(args, &self.execution_policy)
             .map_err(IbcmdError::Spawn)
     }
@@ -601,9 +611,22 @@ fn push_option_value(args: &mut Vec<String>, key: &str, value: impl ToString) {
     args.push(value.to_string());
 }
 
+/// `config export` with both `--sync` and `--force`: when the platform falls back to a full
+/// export it deletes everything in the target directory, foreign files and `.git` included.
+fn wipes_the_export_directory(args: &[String]) -> bool {
+    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    let exports = args
+        .windows(2)
+        .any(|pair| pair[0] == "config" && pair[1] == "export");
+    exports && has("--sync") && has("--force")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
+    use super::{
+        wipes_the_export_directory, DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdError,
+        IbcmdInfobaseCreateStatus,
+    };
     use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
     #[cfg(unix)]
     use crate::platform::process::ProcessInterruptionSafety;
@@ -1125,6 +1148,42 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("export"));
         assert!(args.contains("--sync"));
+        assert!(!args.contains("--force"), "{args}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sync_export_with_force_is_never_started() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let started = dir.path().join("started");
+        write_script(&script, &format!("touch \"{}\"\nexit 0", started.display()));
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        let mut args = dsl.authenticated_infobase_args(&["config", "export"]);
+        args.extend(["--sync", "--force", "/target"].map(str::to_owned));
+        let error = dsl.run(&args).expect_err("the wiping export is refused");
+
+        assert!(
+            matches!(error, IbcmdError::DirectoryWipingExport),
+            "{error}"
+        );
+        assert!(!started.exists(), "ibcmd must not be started");
+        assert!(!wipes_the_export_directory(
+            &["infobase", "config", "export", "--sync", "/t"].map(str::to_owned)
+        ));
+        assert!(!wipes_the_export_directory(
+            &["infobase", "config", "export", "--force", "/t"].map(str::to_owned)
+        ));
+        assert!(!wipes_the_export_directory(
+            &["infobase", "config", "import", "--sync", "--force"].map(str::to_owned)
+        ));
     }
 
     #[cfg(unix)]
