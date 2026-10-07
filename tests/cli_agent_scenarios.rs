@@ -884,3 +884,55 @@ fn the_awaited_log_lines_are_the_runners_own() {
         );
     }
 }
+
+/// Ответ агента — только его JSON: проза об успехе, сообщение неизвестного типа и проза,
+/// после которой сессия кончилась, дают отказ команды, а не успех. Двойник при этом
+/// выгрузку сделал — файл у него лежит, — но без итогового сообщения раннер его не
+/// переносит в цель.
+#[test]
+fn a_prose_reply_of_the_agent_fails_the_command_instead_of_succeeding() {
+    for (text, close) in [
+        ("Выгрузка информационной базы успешно завершена [100%]\n", false),
+        (
+            "[{\"type\":\"done\",\"message\":\"Выгрузка информационной базы успешно завершена\"}]\n",
+            false,
+        ),
+        ("Выгрузка информационной базы успешно завершена\n", true),
+    ] {
+        let marks = temp_workspace();
+        let held = hold(
+            &marks,
+            "infobase-tools dump-ib",
+            HoldReply::Prose { text, close },
+        );
+        fs::write(&held.release, "").expect("release before the command");
+        let harness = harness_holding(None, EVERY_AGENT_PROVIDER, Some(held));
+        let output = harness.dir.path().join("out").join("base.dt");
+
+        let (code, payload) = run(
+            &harness,
+            &[
+                "infobase",
+                "dump",
+                "--output",
+                &output.display().to_string(),
+            ],
+        );
+
+        assert_eq!(code, 4, "{text:?}: {payload}");
+        assert_eq!(payload["ok"], false, "{text:?}: {payload}");
+        assert_eq!(
+            payload["error"]["code"], "platform_failure",
+            "{text:?}: {payload}"
+        );
+        assert_eq!(payload["data"]["published"], false, "{text:?}: {payload}");
+        assert_eq!(
+            payload["data"]["target_state"], "unchanged",
+            "{text:?}: {payload}"
+        );
+        assert!(
+            !output.exists(),
+            "{text:?}: a prose reply published the dump: {payload}"
+        );
+    }
+}
