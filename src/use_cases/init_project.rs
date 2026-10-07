@@ -241,7 +241,7 @@ fn ensure_infobase(
             "infobase",
             "create",
             Instant::now(),
-            "a standalone server is started by hand and is never created by the runner: infobase.standalone names an existing gate".to_owned(),
+            "a standalone server is started by hand and is never created by the runner: infobase.standalone names an existing server".to_owned(),
         );
     }
     let Some(infobase_dir) = config.v8_connection().file_path().map(PathBuf::from) else {

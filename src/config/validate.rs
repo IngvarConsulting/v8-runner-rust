@@ -75,11 +75,16 @@ pub enum ConfigValidationError {
     #[error("infobase.standalone.gate: {0}")]
     StandaloneGateInvalid(String),
 
+    #[error(
+        "infobase.standalone names a standalone server with no way to it: declare infobase.connection as its direct gate `Srvr=<host>:<port>;Ref=<name>` for the Designer, infobase.standalone.gate for the agent, or both"
+    )]
+    StandaloneDeclaresNoWay,
+
     #[error("{key} must be an SSH key fingerprint like `SHA256:<base64>`: {value}")]
     InvalidHostFingerprint { key: &'static str, value: String },
 
     #[error(
-        "files travel between the runner and a standalone server only through a declared channel: set infobase.standalone.exchange to `sftp` (through the gate) or to `{{ dir: … }}` — the gate user's directory (`<users-data>/<user>` of ibsrv) as the runner sees it"
+        "files travel between the runner and a standalone server through its SSH gate only by a declared channel: set infobase.standalone.exchange to `sftp` (through the gate) or to `{{ dir: … }}` — the gate user's directory (`<users-data>/<user>` of ibsrv) as the runner sees it; or declare infobase.connection as the direct gate, and the Designer keeps the files on the runner's side"
     )]
     StandaloneExchangeMissing,
 
@@ -89,7 +94,7 @@ pub enum ConfigValidationError {
     WorkPathOverlapsTargetSideDir { work_path: String, dir: String },
 
     #[error(
-        "tools.designer_agent.{keys} do not apply to a standalone server: it is reached through infobase.standalone.gate and is never started by the runner"
+        "tools.designer_agent.{keys} do not apply to a standalone server: it is reached through its gates and is never started by the runner"
     )]
     DesignerAgentDoesNotApplyToStandalone { keys: String },
 
@@ -171,6 +176,13 @@ pub enum ConfigValidationError {
         provider: &'static str,
         scope: ProviderScope,
         implemented: String,
+    },
+
+    #[error("providers.{operation}: {}, or remove the key", .way.undeclared(*.provider))]
+    ProviderWithoutAWay {
+        operation: &'static str,
+        provider: crate::domain::capability::Provider,
+        way: crate::config::model::StandaloneWay,
     },
 
     #[error(
@@ -1097,13 +1109,18 @@ fn validate_host_fingerprint(
 }
 
 /// Автономный сервер: секция первична, строка рядом с ней — адрес прямого шлюза
-/// (серверной формы) или пусто, файлового адреса у сервера нет; шлюз назван, канал
-/// обмена объявлен.
+/// (серверной формы) или пусто, файлового адреса у сервера нет. Путь к серверу объявлен
+/// хотя бы один: строка прямого шлюза для Конфигуратора или SSH-шлюз для агента. Канал
+/// обмена нужен SSH-шлюзу, когда строки нет: Конфигуратор по прямому шлюзу держит файлы у
+/// раннера, а агенту без канала исполнять нечего.
 fn validate_standalone_target_form(
     infobase: &crate::config::model::InfobaseConfig,
     standalone: &crate::config::model::StandaloneConfig,
 ) -> Result<(), ConfigValidationError> {
     let connection = infobase.connection.trim();
+    if connection.is_empty() && standalone.gate.is_none() {
+        return Err(ConfigValidationError::StandaloneDeclaresNoWay);
+    }
     if !connection.is_empty() {
         let parsed = V8Connection::from_connection_string(connection);
         if parsed.file_path().is_some() || !parsed.has_supported_shape() {
@@ -1116,14 +1133,16 @@ fn validate_standalone_target_form(
     if infobase.cluster.is_some() {
         return Err(ConfigValidationError::ClusterNotAllowedForStandalone);
     }
-    standalone
-        .gate_endpoint()
-        .map_err(ConfigValidationError::StandaloneGateInvalid)?;
+    if standalone.gate.is_some() {
+        standalone
+            .gate_endpoint()
+            .map_err(ConfigValidationError::StandaloneGateInvalid)?;
+    }
     validate_host_fingerprint(
         "infobase.standalone.host-fingerprint",
         standalone.host_fingerprint.as_deref(),
     )?;
-    if standalone.exchange.is_none() {
+    if standalone.gate.is_some() && connection.is_empty() && standalone.exchange.is_none() {
         return Err(ConfigValidationError::StandaloneExchangeMissing);
     }
     Ok(())
@@ -1287,6 +1306,13 @@ fn validate_providers(
                 provider: provider.as_str(),
                 scope,
                 implemented,
+            });
+        }
+        if let Some(way) = config.missing_way(*operation, *provider) {
+            return Err(ConfigValidationError::ProviderWithoutAWay {
+                operation: operation.as_str(),
+                provider: *provider,
+                way,
             });
         }
     }
@@ -3205,6 +3231,9 @@ mod tests {
             "standalone:\n  gate: srv:1543\n  exchange: sftp\n",
             "standalone:\n  gate: 'srv'\n  exchange: sftp\n",
             "connection: 'Srvr=srv;Ref=demo'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n",
+            "connection: 'Srvr=srv:1541;Ref=demo'\nstandalone: {}\n",
+            "connection: '/S srv:1541\\demo'\nstandalone: {}\n",
+            "standalone: {}\n",
         ] {
             let section = infobase(yaml);
             if super::validate_infobase_form(&section).is_ok() {
@@ -3336,6 +3365,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Автономной цели достаточно любого из двух путей: строки прямого шлюза или
+    /// SSH-шлюза. Канал обмена обязателен только SSH-шлюзу без строки: Конфигуратору по
+    /// прямому шлюзу он не нужен. Секция без обоих путей — отказ, называющий оба ключа.
+    #[test]
+    fn a_standalone_target_takes_either_way_and_refuses_neither() {
+        for yaml in [
+            "connection: 'Srvr=srv:1541;Ref=demo'\nstandalone: {}\n",
+            "standalone:\n  gate: srv:1543\n  exchange: sftp\n",
+            "connection: 'Srvr=srv:1541;Ref=demo'\nstandalone:\n  gate: srv:1543\n",
+            "connection: 'Srvr=srv:1541;Ref=demo'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n",
+        ] {
+            assert!(
+                super::validate_infobase_form(&infobase(yaml)).is_ok(),
+                "{yaml}"
+            );
+        }
+        for yaml in [
+            "standalone: {}\n",
+            "connection: ''\nstandalone:\n  exchange: sftp\n",
+        ] {
+            let error = super::validate_infobase_form(&infobase(yaml)).expect_err(yaml);
+            assert!(
+                matches!(error, ConfigValidationError::StandaloneDeclaresNoWay),
+                "{yaml}: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("infobase.connection")
+                    && message.contains("infobase.standalone.gate"),
+                "{message}"
+            );
+        }
+        assert!(matches!(
+            super::validate_infobase_form(&infobase("standalone:\n  gate: srv:1543\n")),
+            Err(ConfigValidationError::StandaloneExchangeMissing)
+        ));
     }
 
     /// Три вопроса по порядку: секция первична, строка рядом с ней — серверный адрес.

@@ -122,13 +122,16 @@
 Кто исполняет операцию, решает пара «операция и вид цели». Матрица — данные в
 [`domain/capability.rs`](../../src/domain/capability.rs): строка — цепочка в порядке
 умолчания, у записи — реализован исполнитель или экспериментален и чем подтверждено.
-Исполнители: `designer`, `ibcmd`, `agent` — агент Конфигуратора или шлюз, `webinst`;
+Исполнители: `designer` — пакетный Конфигуратор, у автономного сервера по его прямому
+шлюзу; `ibcmd`; `agent` — агент Конфигуратора или SSH-шлюз; `webinst`;
 объявленный `ibcmd-rs` строк и адаптера не имеет.
 Экспериментальный идёт только по ключу `providers.*`. Выбор и квитанция — [6.2](06-runtime-view.md). Таблица
 для пользователя в [`docs/CAPABILITIES.md`](../../docs/CAPABILITIES.md) написана руками.
 
 Правила: [умолчания живут в коде](../rules/use-cases/provider-defaults-live-in-code.md),
-[у кластерной цели исполнитель есть у каждой операции](../rules/use-cases/a-cluster-target-is-served-by-every-operation.md).
+[у кластерной цели исполнитель есть у каждой операции](../rules/use-cases/a-cluster-target-is-served-by-every-operation.md),
+[автономный сервер: Конфигуратор первым](../rules/use-cases/a-standalone-target-goes-to-the-designer-first.md),
+[исполнителю автономной цели нужен объявленный путь](../rules/config/a-standalone-executor-needs-its-declared-way.md).
 
 ### 8.5 Анализ изменений
 

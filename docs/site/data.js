@@ -301,7 +301,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'extensions'); },
       today: function (ctx) { return { chain: ctx.tools.ibcmd ? [P.ibcmd] : [], config: ['connection'].concat(ctx.target === 'cluster' ? ['dbms.*'] : []), note: 'состав базы умеет только ibcmd: у Конфигуратора нет пакетного списка' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent, P.designer], config: ['standalone.gate', 'connection — для имён'], note: 'свойства — группой config extensions по SSH-шлюзу; имена — /DumpDBCfgList по прямому шлюзу' };
+        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['standalone.gate'], note: 'состав и свойства — группой config extensions по SSH-шлюзу; Конфигуратора для extensions у раннера нет' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection'], note: 'Конфигуратор перечислит имена (/DumpDBCfgList), свойства — только агент; ibcmd к базе под кластером не применяется' };
         return { chain: [P.ibcmd, P.agent], config: ['connection'], note: 'состав и свойства — ibcmd; агент — по ключу' };
       }

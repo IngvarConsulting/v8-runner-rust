@@ -1,6 +1,6 @@
 ---
 id: CTR.CONFIG.V8PROJECT-SCHEMA
-version: 10
+version: 11
 artifact: docs/schemas/v8project.schema.json
 check:
   - src/config/schema.rs::generated_schema_artifacts_are_current
@@ -22,6 +22,11 @@ check:
 порождаются из типизированной модели и обязаны совпадать с ней: расхождение
 валит проверку, а не обнаруживается в редакторе пользователя. Артефакт обновляется
 командой `UPDATE_CONFIG_SCHEMAS=1 cargo test generated_schema_artifacts_are_current`.
+
+**Что изменила версия 11.** Ключ `standalone.gate` необязателен: автономный сервер
+объявлен строкой прямого шлюза в `connection`, SSH-шлюзом или строкой и шлюзом вместе
+(`INV.CONFIG.A-STANDALONE-TARGET-ACCEPTS-EITHER-GATE-KEY`). Описание `standalone.exchange`
+называет канал нужным SSH-шлюзу без строки.
 
 **Что изменила версия 10.** Секция базы местного слоя принимает `shared` — согласие этой
 рабочей копии делить файловую базу с остальными держателями

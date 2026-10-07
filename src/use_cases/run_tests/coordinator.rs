@@ -543,7 +543,7 @@ fn validate_prepared_infobase(config: &AppConfig) -> Result<(), AppError> {
     if config.target_kind() == crate::domain::capability::TargetKind::Standalone {
         return Err(AppError::capability_for(
             CapabilityReason::Soon,
-            "tests start an enterprise client by the connection string; the direct gate of a standalone server is not used by the runner yet (#205) — run tests against a File= or Srvr= target",
+            "tests start an enterprise client by the connection string; the client does not go by the direct gate of a standalone server yet (#208) — run tests against a File= or Srvr= target",
         ));
     }
     let connection = config.v8_connection();

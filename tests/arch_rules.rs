@@ -662,10 +662,6 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
         "config/a-providers-key-is-named-after-its-command.md",
         "тринадцать",
     ),
-    (
-        "config/a-standalone-target-accepts-either-gate-key.md",
-        "двух,оба",
-    ),
     ("config/target-declarations-are-exclusive.md", "три"),
     ("mcp/admission-is-shared-by-both-transports.md", "обоих"),
     ("mcp/published-tool-surface.md", "восемь,три"),

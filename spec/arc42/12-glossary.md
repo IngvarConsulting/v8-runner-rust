@@ -17,6 +17,7 @@
 | Агент Конфигуратора | Конфигуратор в режиме агента, команды по SSH | `platform::agent`, `AgentSession` |
 | Свой и чужой агент | Запущенный раннером и объявленный ключом `attach` | `DesignerAgentMode::Managed`, `Attached` |
 | Шлюз | Вход SSH автономного сервера | `infobase.standalone.gate` |
+| Прямой шлюз | Вход Конфигуратора и клиентов в автономный сервер, как в кластер | `infobase.connection` рядом с `standalone`, `StandaloneWay` |
 | Канал обмена | Как файлы идут к агенту и шлюзу | `Exchange` |
 | Поколение | Ответ `config generation-id`, по которому видно, менялась ли база | `infobases/<база>/generation.json` |
 | Превью | Показ плана без запуска | `--dry-run` |

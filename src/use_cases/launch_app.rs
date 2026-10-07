@@ -78,10 +78,11 @@ fn run_launch(
         }
     };
 
-    // Прямой шлюз автономной цели раннер пока не использует (#205), поэтому её
-    // открывает только клиентский адрес — а по нему ходит только тонкий клиент.
+    // Клиенты по прямому шлюзу автономной цели раннер пока не запускает (#208), поэтому
+    // её открывает только клиентский адрес — а по нему ходит только тонкий клиент.
     // Конфигуратор, толстый и обычный отказывают здесь ровно так же, как отказывали до
-    // появления второго пути.
+    // появления второго пути. Пакетные команды Конфигуратора по прямому шлюзу идут
+    // (#205), но это не `launch`.
     let standalone = config.target_kind() == crate::domain::capability::TargetKind::Standalone;
     if standalone && !matches!(client_mode, LaunchClientMode::Thin) {
         return Err(UseCaseFailure::without_payload(
@@ -668,7 +669,7 @@ fn client_address(config: &AppConfig) -> Result<&str, AppError> {
 /// Каким адресом открывать базу: то, что попросили, иначе умолчание по виду цели.
 ///
 /// Вид цели берётся объявленным, а не разобранным из строки подключения. Строку прямого
-/// шлюза автономной цели раннер пока не использует (#205), поэтому умолчание для неё — веб.
+/// шлюза автономной цели `launch` пока не берёт (#208), поэтому умолчание для неё — веб.
 fn resolve_launch_via(
     requested: Option<LaunchVia>,
     client_mode: LaunchClientMode,
@@ -689,7 +690,7 @@ fn resolve_launch_via(
     }
     if requested == LaunchVia::Connection && standalone {
         return Err(AppError::Validation(
-            "the direct gate address of a standalone server is not used by the runner yet (#205): the thin client goes by infobase.web.url — use --via web or launch web".to_owned(),
+            "the thin client does not go by the direct gate address of a standalone server yet (#208): it goes by infobase.web.url — use --via web or launch web".to_owned(),
         ));
     }
     Ok(requested)

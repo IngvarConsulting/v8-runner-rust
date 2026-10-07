@@ -788,6 +788,9 @@ fn validate_probe_mode_compatibility(
 }
 
 fn validate_supported_matrix(config: &AppConfig) -> Option<AppError> {
+    if let Some(undeclared) = config.undeclared_way(Operation::Load) {
+        return Some(AppError::Validation(undeclared));
+    }
     if config.default_provider(Operation::Load) == Some(Provider::Designer)
         && config.format == SourceFormat::Designer
     {

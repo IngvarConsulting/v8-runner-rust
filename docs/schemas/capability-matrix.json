@@ -53,6 +53,10 @@
       "standalone": [
         {
           "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
           "provider": "agent"
         }
       ]
@@ -137,7 +141,12 @@
           "provider": "agent"
         }
       ],
-      "standalone": []
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
     },
     "infobase.restore": {
       "cluster": [
@@ -168,7 +177,12 @@
           "provider": "agent"
         }
       ],
-      "standalone": []
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
     },
     "make": {
       "cluster": [
@@ -249,6 +263,10 @@
       "standalone": [
         {
           "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
           "provider": "agent"
         }
       ]
@@ -285,6 +303,10 @@
       "standalone": [
         {
           "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
           "provider": "agent"
         }
       ]
@@ -302,7 +324,12 @@
           "provider": "designer"
         }
       ],
-      "standalone": []
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
     },
     "upload": {
       "cluster": [
@@ -317,7 +344,12 @@
           "provider": "designer"
         }
       ],
-      "standalone": []
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
     }
   },
   "providers": [
