@@ -1121,7 +1121,6 @@ mod tests {
     use crate::support::error::CancelledAt;
     #[cfg(unix)]
     use crate::use_cases::context::{CommandName, ExecutionContext};
-    #[cfg(unix)]
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
