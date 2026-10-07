@@ -17,9 +17,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 use support::fake_agent::{
-    fingerprint_of, process_is_alive, random_host_key, read_or_empty, serve_managed_launches,
-    start_fake_agent_with_host_key, write_fake_designer, write_host_key_file, FakeAgent,
-    FakeExtension, AGENT_PASSWORD,
+    fingerprint_of, process_is_alive, random_host_key, read_or_empty,
+    serve_managed_launches_on_a_reserved_port, start_fake_agent_with_host_key, write_fake_designer,
+    write_host_key_file, FakeAgent, FakeExtension, AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command, wait_until};
 
@@ -101,10 +101,9 @@ fn harness_with(
             let port = if attach {
                 start_fake_agent_with_host_key(agent, key)
             } else {
-                // Управляемый двойник поднимается вместе с поддельным `1cv8` на порту и с
-                // ключом, которые раннер передал агенту.
-                serve_managed_launches(agent, host_key);
-                support::free_tcp_port()
+                // Управляемый двойник держит объявленный порт занятым весь прогон и
+                // отвечает ключом, который раннер передал агенту.
+                serve_managed_launches_on_a_reserved_port(agent, host_key)
             };
             (port, Some(extensions))
         }
