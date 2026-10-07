@@ -100,23 +100,24 @@ runner waits for the platform and reports the deferred interruption in
 
 ## Convert
 
-`convert` is repo-aware file conversion between Designer and EDT source formats.
+`convert` is repo-aware conversion between Designer XML, EDT projects and `.cf`/`.cfe` packages.
 
 ```bash
-v8-runner convert
-v8-runner convert <NAME>
+v8-runner convert                      # every set into the other source format
+v8-runner convert <NAME> --to package  # a set into <NAME>.cf/.cfe
+v8-runner convert main.cf --to xml     # a package file into Designer XML
 v8-runner convert --output <DIR>
 ```
 
 It is not a `pull` alias:
 
-- it does not use an infobase;
-- it takes no `providers` key;
-- direction is derived from configured `format`;
-- without `--output`, results are published under `workPath/convert/out/<sourceSetName>/<designer|edt>/`;
-- `--output` is a target root and mirrors `source-set.path` relative to the primary config directory.
-
-`convert` is a CLI file workflow and does not run through an infobase.
+- it never selects the project infobase: a project without one converts, `--infobase` is refused;
+- a positional value ending in `.cf`/`.cfe` is a package file, anything else a set; a set whose name ends in `.cf`/`.cfe` is named with `--source-set <NAME>`;
+- `--to xml|edt|package`; without it a set goes to the other source format and a package file to xml; Designer sets go to edt/package, EDT sets to xml/package (through xml), a package file only to xml — any other pair is refused before the lock;
+- package directions run `ibcmd` in a throwaway runner base under `workPath` (`config import --out` / `config export --file`); `data.provider` names it; no `ibcmd` → kind `environment`; `providers.convert` is refused while `ibcmd` is the only executor (`ibcmd-rs` waits for #413);
+- `--to package` without a set takes the configuration and extension sets; an external set is refused (use `make`);
+- without `--output`, results go under `workPath/convert/out/<sourceSetName>/<designer|edt>/`, packages under `workPath/convert/out/packages/`, a package file's XML under `workPath/convert/out/from-package/<file name>/`;
+- `--output` is a target root and mirrors `source-set.path` relative to the primary config directory; with `--to package` it reads like `make`: without a set a directory for `<SET>.cf|.cfe` (a file path is refused with `next`), with a set the package file itself or its directory; for a package file `--output` is the XML directory itself.
 
 ## Upload
 

@@ -380,15 +380,16 @@ providers:
   команда отказывает при загрузке настроек с `invalid_argument` до запуска платформы и
   перечисляет допустимых исполнителей;
 - какие ключи проверяет команда: `download`, `infobase configuration export`,
-  `infobase dump` и `infobase restore` — только ключ своей операции (`download`,
-  `infobase.dump` или `infobase.restore`), ключ другой операции им не мешает; `test --no-push` и `launch` —
+  `infobase dump`, `infobase restore`, `make` и `convert` — только ключ своей операции
+  (`download`, `infobase.dump`, `infobase.restore`, `make` или `convert`), ключ другой
+  операции им не мешает; `test --no-push` и `launch` —
   ни одного; остальные команды, читающие проект, — все;
 - ключ принимается только для операции, у которой на этой базе есть выбор; для
   операции с одним исполнителем это ошибка конфигурации, а не подтверждение очевидного;
 - переопределение строгое: если названный исполнитель не готов, команда отказывает с
   причиной и на умолчание не откатывается;
 - допустимые ключи: `infobase.create`, `push`, `upload`, `pull`, `extensions`,
-  `download`, `infobase.dump`, `infobase.restore`, `syntax`, `make`;
+  `download`, `infobase.dump`, `infobase.restore`, `syntax`, `make`, `convert`;
 - ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
   квитанции ответа видно, из какого файла он пришёл.
 
@@ -402,6 +403,12 @@ providers:
 называет выход `download` (`next`), — а `ibcmd-rs` отказывает до замера
 ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)). Валидация `make`
 базу проекта не требует и из `providers.*` читает только этот ключ.
+
+`convert` с пакетом (`--to package` или файл `.cf`/`.cfe` на входе) исполняет `ibcmd` во
+временной базе раннера при любом виде базы проекта и без неё. Пока `ibcmd-rs` не замерен
+([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)), в строке один `ibcmd`, и `providers.convert` с любым значением — ошибка
+конфигурации: выбирать не из чего. Перевод между EDT и XML делает `1cedtcli`, ключа у него нет.
+Валидация `convert` базу проекта не требует и из `providers.*` читает только ключ `convert`.
 
 Ключ `builder` снят: конфиг с ним не проходит валидацию, а ошибка называет замену.
 
