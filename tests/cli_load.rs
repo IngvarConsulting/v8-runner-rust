@@ -662,7 +662,7 @@ fn upload_of_a_transfer_file_names_infobase_restore() {
 /// по нему, а не по секции.
 #[test]
 fn a_cluster_extension_upload_needs_no_dbms_section() {
-    let (dir, config_path, _binary_path, base_path, _calls_log) = setup_project();
+    let (dir, config_path, _binary_path, base_path, calls_log) = setup_project();
     fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
     let ibcmd_started = dir.path().join("ibcmd-started");
     write_script(
@@ -694,6 +694,8 @@ fn a_cluster_extension_upload_needs_no_dbms_section() {
         .expect("run command");
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert!(!output.status.success(), "{payload}");
+    assert_eq!(payload["error"]["kind"], "environment", "{payload}");
     assert!(
         !payload["error"]["message"]
             .as_str()
@@ -702,4 +704,6 @@ fn a_cluster_extension_upload_needs_no_dbms_section() {
         "{payload}"
     );
     assert!(!ibcmd_started.exists(), "ibcmd must not be started");
+    let calls = fs::read_to_string(&calls_log).unwrap_or_default();
+    assert!(!calls.contains("/LoadCfg"), "nothing is loaded: {calls}");
 }

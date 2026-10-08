@@ -638,11 +638,12 @@ enum ExtensionPresence {
     NotEstablished(String),
 }
 
-/// Asks the infobase whether the extension is installed, by its own keyed list.
+/// Asks the infobase whether the extension is installed, by its own keyed list: `ibcmd` at a
+/// file base, the `extensions` executor of the target (the agent) elsewhere (#431).
 ///
 /// `NotEstablished` is kept for one case only: the platform was asked and did not answer.
 /// Everything that stops the question before it is asked keeps its own kind as `Err` — a
-/// missing or unsuitable `ibcmd` is the environment's
+/// missing or unsuitable `ibcmd` or agent is the environment's
 /// (INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE), an incomplete connection config and an
 /// unnamed extension are the request's — and so does a cancellation of the list read.
 fn installed_extension_state(
@@ -658,17 +659,26 @@ fn installed_extension_state(
             CFE_REQUIRES_EXTENSION_ERROR.to_owned(),
         ));
     };
-    // У кластера `ibcmd` в строках нет (`INV.USE-CASES.A-CLUSTER-ROW-DOES-NOT-NAME-IBCMD`):
-    // список спрашивает исполнитель `extensions` этой цели — агент (#431).
-    if config.target_kind() == crate::domain::capability::TargetKind::Cluster {
+    // У кластера и автономного сервера `ibcmd` в строке `extensions` нет
+    // (`INV.USE-CASES.A-CLUSTER-ROW-DOES-NOT-NAME-IBCMD`): список спрашивает исполнитель
+    // `extensions` этой цели — агент (#431).
+    if config.target_kind() != crate::domain::capability::TargetKind::File {
         let (_, read) = crate::use_cases::extension_inventory::read_installed(context, config);
-        return read.map(|extensions| {
-            if extensions.iter().any(|extension| extension.name == name) {
-                ExtensionPresence::Present
-            } else {
-                ExtensionPresence::Absent
+        return match read {
+            Ok(extensions) => Ok(
+                if extensions.iter().any(|extension| extension.name == name) {
+                    ExtensionPresence::Present
+                } else {
+                    ExtensionPresence::Absent
+                },
+            ),
+            // Исполнитель получил вопрос и не ответил — наличие не установлено, как у
+            // `ibcmd` ниже; отказ до вопроса и отмена сохраняют свой род.
+            Err(error) if context.work().given() && error.cancellation().is_none() => {
+                Ok(ExtensionPresence::NotEstablished(error.to_string()))
             }
-        });
+            Err(error) => Err(error),
+        };
     }
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
     let binary = utilities.locate(UtilityType::Ibcmd)?.path;
@@ -2391,11 +2401,20 @@ mod tests {
             extension: Some("ExistingExt".to_owned()),
         };
 
-        let _ = execute(&ExecutionContext::cli(CommandName::Load), &config, &request);
+        let failure = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("no agent: the list is not read");
 
         assert!(
             !ibcmd_calls.exists(),
             "ibcmd must not run against a cluster infobase"
+        );
+        let calls = fs::read_to_string(&calls).unwrap_or_default();
+        assert!(!calls.contains("/LoadCfg"), "nothing is loaded: {calls}");
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Environment,
+            "{}",
+            failure.error
         );
     }
 
