@@ -139,6 +139,14 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 запись остаётся, а после неудачной загрузки — отказ `non_fast_forward`; нет ответа — запись
 стирается.
 
+`reset` ([`reset.rs`](../../src/use_cases/reset.rs)) — обратный ход `apply`: цель одна —
+основная конфигурация без набора или расширение набора (для него — сверка с составом базы);
+признак непринятого исполнителем `reset` (нет — конец без отката; не получен — отказ); своя
+хеш-память набора заменяется пустой; откат владельцем акта
+([`reset/act.rs`](../../src/use_cases/reset/act.rs)) критической фазой; поколение после него
+читает инструмент записи набора, и запись переписывается с прежней операцией и без
+`applied: false`, а без ответа стирается.
+
 Частичную загрузку делает полной `--full`, порог, изменённый `Configuration.xml`,
 удаление, сомнительный путь, расширение формата EDT или восстановимый сбой хранилища и
 обхода. Полный режим виден в ответе; причину он называет у `--full`, расширения EDT и сбоя
@@ -149,6 +157,7 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [`push --force` перезаписывает базу](../rules/cli/push-force-overwrites-the-base.md),
 [применение — отдельный шаг](../rules/cli/apply-is-a-separate-step.md),
 [загрузка без применения помнится непринятой](../rules/use-cases/a-load-without-apply-is-remembered-as-unapplied.md),
+[`reset` отбрасывает непринятое](../rules/cli/reset-discards-the-unapplied.md),
 [файл версий отдельно — при доказанном совпадении](../rules/use-cases/a-version-file-alone-is-dumped-only-when-the-directory-matches-the-base.md),
 [изменения ищет та команда, которой нужен ответ](../rules/use-cases/changes-are-detected-on-demand.md),
 [у EDT две ступени состояния](../rules/use-cases/edt-keeps-two-change-contexts.md),

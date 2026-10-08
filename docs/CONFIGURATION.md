@@ -388,7 +388,7 @@ providers:
   операции с одним исполнителем это ошибка конфигурации, а не подтверждение очевидного;
 - переопределение строгое: если названный исполнитель не готов, команда отказывает с
   причиной и на умолчание не откатывается;
-- допустимые ключи: `infobase.create`, `push`, `apply`, `upload`, `pull`, `extensions`,
+- допустимые ключи: `infobase.create`, `push`, `apply`, `reset`, `upload`, `pull`, `extensions`,
   `download`, `infobase.dump`, `infobase.restore`, `syntax`, `make`, `convert`;
 - ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
   квитанции ответа видно, из какого файла он пришёл.
@@ -399,7 +399,9 @@ providers:
 `format: EDT` агент из цепочки `push` и `pull` выпадает, при объявленном
 `tools.client_mcp.extension` — из цепочки `push`. `apply` идёт строкой `push`, но форма
 проекта её не сужает: агент применяет и проект EDT, и расширение-инструмент; отдельно от
-`push` его назначает `providers.apply`. `infobase dump` и `infobase restore` —
+`push` его назначает `providers.apply`. `reset` у файловой базы — Конфигуратор, затем
+`ibcmd`, у кластера и автономного сервера — только Конфигуратор: у агента команды отката нет.
+`infobase dump` и `infobase restore` —
 агент, затем Конфигуратор (`ibcmd` для DT файловой базы остаётся экспериментальным и
 назначается только явно; у кластера его нет). `infobase.create` у файловой базы — `ibcmd`, затем
 Конфигуратор, у базы в кластере — только Конфигуратор, поэтому ключ
@@ -588,7 +590,7 @@ infobases:
 | --- | --- |
 | `push`, `apply`, `pull`, `download` | `designer` по прямому шлюзу → `agent` по SSH-шлюзу |
 | `download --state db` | `designer` по прямому шлюзу: у агента команды для конфигурации базы данных нет |
-| `upload`, `check`, `infobase dump`, `infobase restore` | `designer` по прямому шлюзу |
+| `upload`, `check`, `reset`, `infobase dump`, `infobase restore` | `designer` по прямому шлюзу |
 | `extensions` | `agent` по SSH-шлюзу |
 
 Исполнитель, путь которого не объявлен, в цепочку не входит; ключ `providers.*`, назначивший
