@@ -2283,13 +2283,17 @@ fn the_owner_of_a_file_base_is_checked_in_one_place() {
 /// эталонного образа вне формирователя ловится здесь под любым именем вызывающего.
 #[test]
 fn the_ways_to_an_own_infobase_have_one_builder() {
+    const WAY_FROM_A_REFERENCE: &str = "restore --input <reference>.dt --create";
     let owner = repo_path("src/domain/next_step.rs");
+    assert!(
+        production_source(&owner).contains(WAY_FROM_A_REFERENCE),
+        "the builder no longer names the way from a reference image: update this guard"
+    );
     let offenders: Vec<String> = collect_rust_files(&repo_path("src"))
         .into_iter()
         .filter(|file| file != &owner)
         .filter(|file| {
-            without_doc_comments(&production_source(file))
-                .contains("restore --input <reference>.dt --create")
+            without_doc_comments(&production_source(file)).contains(WAY_FROM_A_REFERENCE)
         })
         .map(|file| file.display().to_string())
         .collect();

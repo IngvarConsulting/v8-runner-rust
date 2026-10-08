@@ -570,7 +570,8 @@ fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
 }
 
 /// Метка прежней версии в нынешней форме: у записей остаются только поля нынешней формы,
-/// остальное раннер пропускает; проверяет запись затем нынешняя форма.
+/// остальное раннер пропускает; проверяет запись затем нынешняя форма. Поля повторяют
+/// `OwnerRecord`: форма версии 1 закрыта, и список читает только её.
 fn keep_fields_of_this_version(value: &mut serde_json::Value) {
     const FIELDS: [&str; 4] = ["machine", "host", "project", "since"];
     if let Some(owners) = value
