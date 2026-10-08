@@ -545,6 +545,16 @@ fn an_external_set_is_published_to_a_bare_relative_output() {
     let again = project.run(&["make", "tools", "--output", "Deploy"]);
     assert!(again.status.success(), "{}", envelope(&again));
     assert!(deploy.is_dir());
+    // Ни в каталоге, ни рядом с ним не остаётся служебных меток промежуточных копий.
+    for dir in [&deploy, &project.root] {
+        let leftovers: Vec<_> = fs::read_dir(dir)
+            .expect("listing")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".meta.json") || name.starts_with(".v8-runner"))
+            .collect();
+        assert!(leftovers.is_empty(), "{}: {leftovers:?}", dir.display());
+    }
 
     // Файл пакета с голым именем — замена файла в текущем каталоге.
     let package = project.run(&["make", "main", "--output", "main.cf"]);
