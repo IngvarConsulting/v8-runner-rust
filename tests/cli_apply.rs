@@ -515,6 +515,15 @@ fn an_apply_after_a_failed_extension_load_is_refused_even_with_an_unchanged_gene
 
     assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
     assert_eq!(payload["error"]["next"]["command"], "push", "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&format!("matches the record {FIRST}")),
+        "{message}"
+    );
+    assert!(
+        message.contains("does not prove that the failed load left the infobase untouched"),
+        "{message}"
+    );
     assert!(
         !project.calls().contains("/UpdateDBCfg"),
         "{}",
@@ -578,4 +587,93 @@ fn a_push_with_nothing_to_load_applies_an_unapplied_designer_extension() {
         serde_json::from_str(&fs::read_to_string(file).expect("ledger")).expect("json");
     assert_eq!(ledger["ext"]["token"], SECOND, "{ledger}");
     assert!(ledger["ext"].get("applied").is_none(), "{ledger}");
+}
+
+/// Запись «не применено» сделал другой инструмент: его токен несравним с исполнителем этой
+/// отправки, и она не применяет, а называет непринятое и выход `apply`.
+#[test]
+fn a_push_with_nothing_to_load_names_an_unapplied_load_of_another_tool() {
+    let project = Project::new();
+    write_shell_script(
+        &project.root().join("ibcmd"),
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\nexit 0",
+            project.root().join("ibcmd.log").display()
+        ),
+    );
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    succeeded(&project.run(&["push", "--no-apply"]));
+    fs::write(
+        &project.config,
+        fs::read_to_string(&project.config)
+            .expect("config")
+            .replace("  push: designer\n", "  push: ibcmd\n"),
+    )
+    .expect("config");
+    project.forget_calls();
+
+    let pushed = succeeded(&project.run(&["push"]));
+
+    let step = &pushed["data"]["steps"][0];
+    assert_eq!(step["mode"], "skipped", "{pushed}");
+    assert_eq!(step["applied"], false, "{pushed}");
+    let message = step["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("was loaded without apply earlier by designer"),
+        "{message}"
+    );
+    assert!(message.contains("apply main"), "{message}");
+    assert!(!project.root().join("ibcmd.log").exists());
+    assert!(project.calls().is_empty(), "{}", project.calls());
+}
+
+/// Инструмент не ответил поколением после загрузки без применения: записи «не применено»
+/// нет, и память исходников не фиксируется — следующая отправка загружает набор снова.
+#[test]
+fn a_push_without_apply_and_without_a_generation_leaves_no_hash_memory() {
+    let project = Project::new();
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    fs::remove_file(project.root().join("token")).expect("no generation");
+
+    let pushed = succeeded(&project.run(&["push", "--no-apply"]));
+
+    let message = pushed["data"]["steps"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(message.contains("is not remembered"), "{message}");
+    project.base_generation(FIRST);
+    project.forget_calls();
+    let again = succeeded(&project.run(&["push"]));
+    assert_ne!(again["data"]["steps"][0]["mode"], "skipped", "{again}");
+    assert!(
+        project.calls().contains("/LoadConfigFromFiles"),
+        "{}",
+        project.calls()
+    );
+}
+
+/// Превью отправки без изменений называет предстоящее применение своего непринятого и
+/// ничего не запускает.
+#[test]
+fn a_push_preview_names_the_pending_apply_of_its_own_unapplied() {
+    let project = Project::new();
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    succeeded(&project.run(&["push", "--no-apply"]));
+    project.forget_calls();
+
+    let planned = succeeded(&project.run(&["--dry-run", "push"]));
+
+    assert_eq!(planned["data"]["provider_dispatched"], false, "{planned}");
+    let step = &planned["data"]["steps"][0];
+    assert_eq!(step["mode"], "skipped", "{planned}");
+    assert_eq!(step["applied"], false, "{planned}");
+    let message = step["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("would apply the configuration loaded earlier without apply via designer"),
+        "{message}"
+    );
+    assert!(project.calls().is_empty(), "{}", project.calls());
 }

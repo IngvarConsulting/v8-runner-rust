@@ -39,7 +39,7 @@
       "additionalProperties": false,
       "properties": {
         "applied": {
-          "description": "Дошёл ли шаг до конфигурации базы данных: загруженное применено, или применено\nнепринятое прежней загрузки. `false` — шаг ничего не применял: пропуск, превью,\n`push --no-apply`, отказ (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).",
+          "description": "Дошёл ли шаг до конфигурации базы данных: загруженное применено, или применено\nнепринятое прежней загрузки. `false` — шаг ничего не применял: пропуск, который ничего\nне применил, превью, `push --no-apply`, отказ (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).",
           "type": "boolean"
         },
         "duration_ms": {

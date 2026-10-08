@@ -4,6 +4,7 @@ check:
   - tests/cli_apply.rs::a_push_without_apply_loads_and_apply_applies_it
   - tests/cli_apply.rs::a_push_after_an_apply_that_changed_the_generation_is_not_refused
   - tests/cli_apply.rs::a_pull_after_a_push_without_apply_is_up_to_date
+  - tests/cli_apply.rs::a_push_without_apply_and_without_a_generation_leaves_no_hash_memory
   - src/use_cases/build_project.rs::execute_ibcmd_build_honors_interruption_before_apply_safe_point
   - tests/cli_apply.rs::an_extension_whose_generation_moves_only_on_apply_is_pushed_again_without_refusal
   - src/use_cases/agent_session.rs::a_record_without_the_applied_mark_reads_as_applied

@@ -341,46 +341,32 @@ fn run_build_with(
                     message = message.as_str(),
                     "skipping build step"
                 );
-                let unapplied = ok
-                    .then(|| {
-                        unapplied_record(context, config, args, &source_context, loader.tool())
-                    })
-                    .flatten();
-                let record = match unapplied {
-                    Some(Unapplied::Ours(record)) => record,
-                    other => {
-                        let message = match other {
-                            Some(Unapplied::OtherTool(note)) => append_warnings(message, &[note]),
-                            Some(Unapplied::Ours(_)) | None => message,
-                        };
-                        push_build_step(
-                            &mut steps,
-                            &source_set.name,
-                            BuildMode::Skipped,
-                            ok,
-                            message,
-                            0,
-                        );
-                        continue;
-                    }
-                };
-                let step_started = Instant::now();
-                let applied =
-                    loader.locate().and_then(|()| {
-                        apply_unapplied(context, config, &source_context, &record, &mut |op| {
-                            match op {
-                                UnappliedOp::Read => {
-                                    loader.read_generation(context, config, source_set, index)
+                let settled = skip_or_apply_unapplied(
+                    &mut steps,
+                    context,
+                    config,
+                    args,
+                    &source_context,
+                    &source_set.name,
+                    loader.tool(),
+                    message,
+                    ok,
+                    |record| {
+                        loader.locate().and_then(|()| {
+                            apply_unapplied(context, config, &source_context, record, &mut |op| {
+                                match op {
+                                    UnappliedOp::Read => {
+                                        loader.read_generation(context, config, source_set, index)
+                                    }
+                                    UnappliedOp::Apply(deferrals) => loader
+                                        .apply_only(context, config, source_set, index, deferrals)
+                                        .map(|()| None),
                                 }
-                                UnappliedOp::Apply(deferrals) => loader
-                                    .apply_only(context, config, source_set, index, deferrals)
-                                    .map(|()| None),
-                            }
+                            })
                         })
-                    });
-                if let Err(error) =
-                    settle_unapplied(&mut steps, &source_set.name, message, applied, step_started)
-                {
+                    },
+                );
+                if let Err(error) = settled {
                     let result = fail_from_source_set_index(
                         started,
                         steps,
@@ -704,45 +690,32 @@ pub(super) fn run_build_ibcmd(
                     message = message.as_str(),
                     "skipping build step"
                 );
-                let unapplied = ok
-                    .then(|| {
-                        unapplied_record(context, config, args, &source_context, Provider::Ibcmd)
-                    })
-                    .flatten();
-                let record = match unapplied {
-                    Some(Unapplied::Ours(record)) => record,
-                    other => {
-                        let message = match other {
-                            Some(Unapplied::OtherTool(note)) => append_warnings(message, &[note]),
-                            Some(Unapplied::Ours(_)) | None => message,
-                        };
-                        push_build_step(
-                            &mut steps,
-                            &source_set.name,
-                            BuildMode::Skipped,
-                            ok,
-                            message,
-                            0,
-                        );
-                        continue;
-                    }
-                };
-                let step_started = Instant::now();
-                let applied = locate_designer_loader(
+                let settled = skip_or_apply_unapplied(
+                    &mut steps,
+                    context,
+                    config,
+                    args,
+                    &source_context,
+                    &source_set.name,
                     Provider::Ibcmd,
-                    &mut utilities,
-                    &mut None,
-                    &mut ibcmd_binary,
-                )
-                .and_then(|binary| {
-                    let runner = utilities.runner_for(UtilityType::Ibcmd);
-                    apply_unapplied(context, config, &source_context, &record, &mut |op| {
-                        ibcmd_unapplied_op(context, config, &binary, runner, source_set, op)
-                    })
-                });
-                if let Err(error) =
-                    settle_unapplied(&mut steps, &source_set.name, message, applied, step_started)
-                {
+                    message,
+                    ok,
+                    |record| {
+                        locate_designer_loader(
+                            Provider::Ibcmd,
+                            &mut utilities,
+                            &mut None,
+                            &mut ibcmd_binary,
+                        )
+                        .and_then(|binary| {
+                            let runner = utilities.runner_for(UtilityType::Ibcmd);
+                            apply_unapplied(context, config, &source_context, record, &mut |op| {
+                                ibcmd_unapplied_op(context, config, &binary, runner, source_set, op)
+                            })
+                        })
+                    },
+                );
+                if let Err(error) = settled {
                     let result = fail_from_source_set_index(
                         started,
                         steps,
@@ -1487,66 +1460,57 @@ pub(super) fn run_build_edt(
 
         match designer_stage {
             StepPlan::Skip { message, ok } => {
-                let unapplied = ok
-                    .then(|| unapplied_record(context, config, args, &designer_context, provider))
-                    .flatten();
-                let record = match unapplied {
-                    Some(Unapplied::Ours(record)) => record,
-                    other => {
-                        let message = match other {
-                            Some(Unapplied::OtherTool(note)) => append_warnings(message, &[note]),
-                            Some(Unapplied::Ours(_)) | None => message,
-                        };
-                        push_build_step(
-                            &mut steps,
-                            &source_set.name,
-                            BuildMode::Skipped,
-                            ok,
-                            message,
-                            0,
-                        );
-                        continue;
-                    }
-                };
-                let step_started = Instant::now();
-                let applied = locate_designer_loader(
+                let settled = skip_or_apply_unapplied(
+                    &mut steps,
+                    context,
+                    config,
+                    args,
+                    &designer_context,
+                    &source_set.name,
                     provider,
-                    &mut utilities,
-                    &mut designer_binary,
-                    &mut ibcmd_binary,
-                )
-                .and_then(|binary| {
-                    apply_unapplied(context, config, &designer_context, &record, &mut |op| {
-                        match provider {
-                            Provider::Ibcmd => ibcmd_unapplied_op(
-                                context,
-                                config,
-                                &binary,
-                                utilities.runner_for(UtilityType::Ibcmd),
-                                source_set,
-                                op,
-                            ),
-                            Provider::Designer => designer_unapplied_op(
-                                context,
-                                config,
-                                &binary,
-                                utilities.runner_for(UtilityType::V8),
-                                source_set,
-                                index,
-                                op,
-                            ),
-                            other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => {
-                                Err(crate::use_cases::unimplemented_provider(
-                                    Operation::Build,
-                                    other,
-                                ))
-                            }
-                        }
-                    })
-                });
-                if let Err(error) =
-                    settle_unapplied(&mut steps, &source_set.name, message, applied, step_started)
-                {
+                    message,
+                    ok,
+                    |record| {
+                        locate_designer_loader(
+                            provider,
+                            &mut utilities,
+                            &mut designer_binary,
+                            &mut ibcmd_binary,
+                        )
+                        .and_then(|binary| {
+                            apply_unapplied(context, config, &designer_context, record, &mut |op| {
+                                match provider {
+                                    Provider::Ibcmd => ibcmd_unapplied_op(
+                                        context,
+                                        config,
+                                        &binary,
+                                        utilities.runner_for(UtilityType::Ibcmd),
+                                        source_set,
+                                        op,
+                                    ),
+                                    Provider::Designer => designer_unapplied_op(
+                                        context,
+                                        config,
+                                        &binary,
+                                        utilities.runner_for(UtilityType::V8),
+                                        source_set,
+                                        index,
+                                        op,
+                                    ),
+                                    other @ (Provider::Agent
+                                    | Provider::IbcmdRs
+                                    | Provider::Webinst) => {
+                                        Err(crate::use_cases::unimplemented_provider(
+                                            Operation::Build,
+                                            other,
+                                        ))
+                                    }
+                                }
+                            })
+                        })
+                    },
+                );
+                if let Err(error) = settled {
                     let result = fail_from_source_set_index(
                         started,
                         steps,
@@ -1768,7 +1732,7 @@ fn remember_unapplied(
             commit()?;
             Ok(Vec::new())
         }
-        LoadRecord::Erased(_) | LoadRecord::NoLedger => {
+        LoadRecord::Erased(_) | LoadRecord::NotErased(_) | LoadRecord::NoLedger => {
             let mut notes: Vec<String> = recorded.into_note().into_iter().collect();
             notes.push(
                 "the load without apply is not remembered: no generation record could be kept for it, so the next push loads the set again and applies it".to_owned(),
@@ -1819,7 +1783,8 @@ enum Unapplied {
     OtherTool(String),
 }
 
-/// Непринятая запись набора по плану отправки. У превью и `--no-apply` применять нечего.
+/// Непринятая запись набора по плану отправки; у `--no-apply` применять нечего. Превью запись
+/// читает — это файл, — а исполнителя не зовёт.
 fn unapplied_record(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -1827,7 +1792,7 @@ fn unapplied_record(
     set: &SourceSetContext,
     tool: Provider,
 ) -> Option<Unapplied> {
-    if args.dry_run || args.apply == ApplyPolicy::Defer {
+    if args.apply == ApplyPolicy::Defer {
         return None;
     }
     let record = crate::use_cases::exchange_guard::recorded_generation(set, &config.work_path)
@@ -1881,7 +1846,7 @@ fn apply_unapplied(
             advised_apply(context, set.name())
         )));
     }
-    let ((), mut warnings) =
+    let ((), deferrals) =
         collecting_deferrals(|deferrals| run(UnappliedOp::Apply(deferrals)).map(|_| ())).map_err(
             |error| crate::use_cases::apply::load_kept_unapplied(context, set.name(), error),
         )?;
@@ -1891,13 +1856,75 @@ fn apply_unapplied(
         record,
         run(UnappliedOp::Read),
     )?;
-    warnings.extend(note);
-    if warnings.is_empty() {
-        warnings.extend(
-            crate::use_cases::interruption::deferred_interruption_warning_after(context, "apply"),
-        );
-    }
-    Ok(UnappliedStep::Applied(warnings))
+    let cancelled = crate::use_cases::apply::cancellation_after_apply(context, &deferrals);
+    Ok(UnappliedStep::Applied(
+        deferrals.into_iter().chain(note).chain(cancelled).collect(),
+    ))
+}
+
+/// Шаг набора, которому нечего грузить: пропуск, а если запись этого же инструмента
+/// помечена «не применено» — применение её непринятого
+/// (`INV.USE-CASES.A-PUSH-WITH-NOTHING-TO-LOAD-APPLIES-ITS-OWN-UNAPPLIED`). Одно место у всех
+/// исполнителей: каждый передаёт только `apply` — найти себя и применить через
+/// [`apply_unapplied`]. Превью исполнителя не зовёт и только называет предстоящее
+/// применение.
+#[allow(clippy::too_many_arguments)]
+fn skip_or_apply_unapplied(
+    steps: &mut Vec<crate::domain::build::BuildStep>,
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+    set: &SourceSetContext,
+    name: &str,
+    tool: Provider,
+    message: String,
+    ok: bool,
+    apply: impl FnOnce(
+        &crate::use_cases::agent_session::GenerationRecord,
+    ) -> Result<UnappliedStep, AppError>,
+) -> Result<(), AppError> {
+    let unapplied = if ok {
+        unapplied_record(context, config, args, set, tool)
+    } else {
+        None
+    };
+    let record = match unapplied {
+        Some(Unapplied::Ours(record)) if args.dry_run => {
+            push_build_step(
+                steps,
+                name,
+                BuildMode::Skipped,
+                ok,
+                append_warnings(
+                    message,
+                    &[format!(
+                        "would apply the configuration loaded earlier without apply via {}, if the infobase generation still matches the record; planned, nothing dispatched",
+                        record.tool
+                    )],
+                ),
+                0,
+            );
+            return Ok(());
+        }
+        Some(Unapplied::Ours(record)) => record,
+        Some(Unapplied::OtherTool(note)) => {
+            push_build_step(
+                steps,
+                name,
+                BuildMode::Skipped,
+                ok,
+                append_warnings(message, &[note]),
+                0,
+            );
+            return Ok(());
+        }
+        None => {
+            push_build_step(steps, name, BuildMode::Skipped, ok, message, 0);
+            return Ok(());
+        }
+    };
+    let started = Instant::now();
+    settle_unapplied(steps, name, message, apply(&record), started)
 }
 
 /// Шаг отправки без изменений после попытки применить непринятое.

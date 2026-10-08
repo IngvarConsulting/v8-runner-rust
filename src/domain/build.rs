@@ -26,8 +26,8 @@ pub struct BuildStep {
     pub mode: BuildMode,
     pub ok: bool,
     /// Дошёл ли шаг до конфигурации базы данных: загруженное применено, или применено
-    /// непринятое прежней загрузки. `false` — шаг ничего не применял: пропуск, превью,
-    /// `push --no-apply`, отказ (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).
+    /// непринятое прежней загрузки. `false` — шаг ничего не применял: пропуск, который ничего
+    /// не применил, превью, `push --no-apply`, отказ (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).
     pub applied: bool,
     pub message: Option<String>,
     pub duration_ms: u64,

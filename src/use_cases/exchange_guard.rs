@@ -545,8 +545,11 @@ pub(crate) enum BeforeLoad {
 pub(crate) enum LoadRecord {
     /// Поколение записано.
     Recorded,
-    /// Записи нет: ответа не было или запись не удалась; прежняя стёрта, строка — для ответа.
+    /// Записи нет: ответа не было или запись не удалась, и прежняя запись стёрта (её могло и
+    /// не быть); строка — для ответа.
     Erased(Option<String>),
+    /// Записи нет, а прежнюю стереть не удалось: она описывает базу до загрузки.
+    NotErased(String),
     /// У набора нет памяти о базе, и журнала поколений нет.
     NoLedger,
 }
@@ -556,6 +559,7 @@ impl LoadRecord {
     pub(crate) fn into_note(self) -> Option<String> {
         match self {
             Self::Erased(note) => note,
+            Self::NotErased(note) => Some(note),
             Self::Recorded | Self::NoLedger => None,
         }
     }
@@ -735,28 +739,28 @@ impl<'a> GenerationGate<'a> {
             return LoadRecord::NoLedger;
         };
         let name = set.name();
-        LoadRecord::Erased(match token {
+        match token {
             Some(token) => match ledger.record_as(tool, token, GenerationAfter::Build, mark) {
-                Ok(()) => return LoadRecord::Recorded,
-                Err(error) => Some(match ledger.forget() {
-                    Ok(_) => format!(
+                Ok(()) => LoadRecord::Recorded,
+                Err(error) => match ledger.forget() {
+                    Ok(_) => LoadRecord::Erased(Some(format!(
                         "the configuration generation of source-set '{name}' was not recorded: {error}; its previous record is erased, so the next push does not check whether the infobase moved ahead"
-                    ),
-                    Err(forget) => format!(
+                    ))),
+                    Err(forget) => LoadRecord::NotErased(format!(
                         "the configuration generation of source-set '{name}' was not recorded: {error}; its previous record was not erased either ({forget}), so the next push may take this load for a change made elsewhere"
-                    ),
-                }),
+                    )),
+                },
             },
             None => match ledger.forget() {
-                Ok(false) => None,
-                Ok(true) => Some(format!(
+                Ok(false) => LoadRecord::Erased(None),
+                Ok(true) => LoadRecord::Erased(Some(format!(
                     "the configuration generation of source-set '{name}' is not known after the load: its previous record is erased, so the next push does not check whether the infobase moved ahead"
-                )),
-                Err(error) => Some(format!(
+                ))),
+                Err(error) => LoadRecord::NotErased(format!(
                     "the configuration generation of source-set '{name}' is not known after the load, and its previous record was not erased: {error}; the next push may take this load for a change made elsewhere"
                 )),
             },
-        })
+        }
     }
 
     /// После неудачной загрузки набора: поколение не записывается — неизвестно, что
@@ -853,9 +857,11 @@ impl<'a> GenerationGate<'a> {
     }
 }
 
-/// Отказ `apply` набора, чья запись помечена как сделанная перед неудачной загрузкой, а
-/// поколение базы с ней разошлось: применение перестроило бы базу данных по наполовину
-/// загруженной основной конфигурации. Первый выход — повторить загрузку перезаписью
+/// Отказ `apply` набора, чья запись помечена как сделанная перед неудачной загрузкой, — при
+/// любом поколении базы: разошедшемся с записью, равном ей (Конфигуратор читает поколение
+/// применённого расширения, и загрузка его не сдвигает) или без ответа (`base: None`).
+/// Применение перестроило бы базу данных по наполовину загруженной основной конфигурации.
+/// Первый выход — повторить загрузку перезаписью
 /// (`INV.USE-CASES.AN-APPLY-AFTER-A-FAILED-LOAD-IS-REFUSED`).
 pub(crate) fn apply_after_failed_load(
     context: &ExecutionContext,
@@ -867,17 +873,21 @@ pub(crate) fn apply_after_failed_load(
     let target = config.v8_connection().describe_target();
     let push_force = context.advised_command(&format!("push {} --force", shell_word(set)));
     let pull = context.advised_command(&format!("pull {}", shell_word(set)));
+    let (token, recorded_at) = (&record.token, &record.recorded_at);
     let generation = match base {
-        Some(base) => format!("the configuration generation of {target} is {base}, not"),
+        Some(base) if base == token => format!(
+            "the configuration generation of {target} matches the record {token}, but the record was made before the last push of this working copy failed ({recorded_at}), and an equal generation does not prove that the failed load left the infobase untouched"
+        ),
+        Some(base) => format!(
+            "the configuration generation of {target} is {base}, not {token} that was recorded before the last push of this working copy failed ({recorded_at})"
+        ),
         None => format!(
-            "{} gives no configuration generation of {target} to compare with",
+            "{} gives no configuration generation of {target} to compare with {token} that was recorded before the last push of this working copy failed ({recorded_at})",
             record.tool
         ),
     };
     let message = format!(
-        "cannot apply source-set '{set}': {generation} {} that was recorded before the last push of this working copy failed ({}); the main configuration may hold a half-finished load, and applying it would rebuild the database configuration from it. Load the directory again with {push_force}; if someone else changed the infobase, take their changes first with {pull}.{}",
-        record.token,
-        record.recorded_at,
+        "cannot apply source-set '{set}': {generation}; the main configuration may hold a half-finished load, and applying it would rebuild the database configuration from it. Load the directory again with {push_force}; if someone else changed the infobase, take their changes first with {pull}.{}",
         Standing::of(config).caveats()
     );
     let refusal = UseCaseError::new(UseCaseErrorKind::NonFastForward, message)

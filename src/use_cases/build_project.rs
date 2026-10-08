@@ -4037,6 +4037,68 @@ mod tests {
         assert!(tool.ok && !tool.applied, "{tool:?}");
     }
 
+    /// Отправка без изменений, применившая своё непринятое, называет отмену, которую отложило
+    /// применение, один раз — и рядом со стёртой записью поколения.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancellation_deferred_by_applying_the_unapplied_is_named_once() {
+        use crate::domain::capability::Provider;
+        use crate::domain::status::GenerationAfter;
+        use crate::use_cases::agent_session::{ApplyMark, GenerationLedger};
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        let held = HeldCommand::in_dir(dir.path());
+        write_designer_script_with(
+            &script,
+            &calls,
+            &format!(
+                "{}case \"$args\" in *GetConfigGenerationID*) printf '{ZERO_GENERATION}' > \"$out\" ;; esac",
+                held.script_branch("/UpdateDBCfg", 0)
+            ),
+        );
+        let mut config = build_config(
+            &base,
+            &work,
+            &script,
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        config.source_sets.truncate(1);
+        prime_snapshots(&config);
+        let set = SourceSetsService::new(&config)
+            .designer_contexts()
+            .into_iter()
+            .find(|set| set.name() == "main")
+            .expect("main");
+        GenerationLedger::of(&set, &config.work_path)
+            .expect("ledger")
+            .record_as(
+                Provider::Designer,
+                ZERO_GENERATION,
+                GenerationAfter::Build,
+                ApplyMark::Unapplied,
+            )
+            .expect("record");
+
+        let result = push_interrupted_while_held(&config, &held, &build_args(false))
+            .expect("the push ran to its end");
+
+        let step = &result.steps[0];
+        assert!(step.applied, "{step:?}");
+        let message = step.message.as_deref().unwrap_or_default();
+        assert_eq!(
+            message
+                .matches("unsafe interruption was not performed")
+                .count(),
+            1,
+            "{message}"
+        );
+    }
+
     #[test]
     fn build_result_stays_json_serializable() {
         let result = crate::domain::build::BuildResult {

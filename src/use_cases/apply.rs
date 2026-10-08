@@ -134,6 +134,8 @@ fn walk(
     };
     let mut result = empty(started);
     let mut failure = None;
+    // Отмены, которые отложило последнее применение: их уже назвал его шаг.
+    let mut last_deferrals: Vec<String> = Vec::new();
     for (index, target) in targets.iter().enumerate() {
         let step_started = Instant::now();
         let mut step = ApplyStep {
@@ -157,9 +159,12 @@ fn walk(
             ));
         } else {
             match apply_target(context, config, executor, target, index) {
-                Ok((generation, warnings)) => {
+                Ok(done) => {
                     step.outcome = ApplyOutcome::Applied;
-                    step.generation = generation;
+                    step.generation = done.generation;
+                    let warnings: Vec<String> =
+                        done.deferrals.iter().cloned().chain(done.notes).collect();
+                    last_deferrals = done.deferrals;
                     step.message = Some(append_warnings(
                         "applied the main configuration to the database configuration".to_owned(),
                         &warnings,
@@ -191,11 +196,7 @@ fn walk(
             // Отмена, пришедшая после последнего применения, исход не меняет — применение
             // состоялось, — но ответ её называет
             // (`INV.USE-CASES.AN-INTERRUPTION-STATUS-MEANS-A-TERMINAL-OUTCOME`).
-            if let Some(warning) =
-                crate::use_cases::interruption::deferred_interruption_warning_after(
-                    context, "apply",
-                )
-            {
+            if let Some(warning) = cancellation_after_apply(context, &last_deferrals) {
                 if let Some(step) = result
                     .steps
                     .iter_mut()
@@ -301,21 +302,25 @@ fn targets<'a>(
 /// (`INV.USE-CASES.A-LOAD-WITHOUT-APPLY-IS-REMEMBERED-AS-UNAPPLIED`). Поколение до и после
 /// читает инструмент, которым сделана запись: токены разных инструментов несравнимы. Совпало
 /// с записью — запись переносится на ответ после применения; разошлось — применение идёт,
-/// запись остаётся, и следующая отправка это назовёт; разошлось после неудачной загрузки —
-/// отказ до применения; ответа нет — запись после применения стирается.
+/// запись остаётся, и следующая отправка это назовёт; ответа нет — запись после применения
+/// стирается. Запись перед неудачной загрузкой — отказ до применения при любом поколении.
 fn apply_target(
     context: &ExecutionContext,
     config: &AppConfig,
     executor: &mut Executor,
     target: &Target<'_>,
     index: usize,
-) -> Result<(Option<ApplyGeneration>, Vec<String>), AppError> {
+) -> Result<TargetApplied, AppError> {
     let record = target.memory.and_then(|set| {
         crate::use_cases::exchange_guard::recorded_generation(set, &config.work_path)
     });
     let (Some(set), Some(record)) = (target.memory, record) else {
-        let warnings = applied(context, config, executor, target, index)?;
-        return Ok((target.memory.map(|_| ApplyGeneration::Unchecked), warnings));
+        let deferrals = applied(context, config, executor, target, index)?;
+        return Ok(TargetApplied {
+            generation: target.memory.map(|_| ApplyGeneration::Unchecked),
+            deferrals,
+            notes: Vec::new(),
+        });
     };
     // Запись перед неудачной загрузкой не доказывает ничего и при равном поколении:
     // Конфигуратор читает поколение применённого расширения, и наполовину загруженное оно не
@@ -328,7 +333,11 @@ fn apply_target(
         ) {
             return Err(error);
         }
-        let before = executor.read_generation(context, config, record.tool, target, index)?;
+        // Поколение здесь нужно только тексту отказа: сбой чтения отказ не подменяет.
+        let before = executor
+            .read_generation(context, config, record.tool, target, index)
+            .ok()
+            .flatten();
         return Err(crate::use_cases::exchange_guard::apply_after_failed_load(
             context,
             config,
@@ -340,23 +349,29 @@ fn apply_target(
     let before = executor.read_generation(context, config, record.tool, target, index)?;
     match before {
         Some(token) if token == record.token => {
-            let mut warnings = applied(context, config, executor, target, index)?;
+            let deferrals = applied(context, config, executor, target, index)?;
             let after = executor.read_generation(context, config, record.tool, target, index);
             let (generation, note) =
                 record::carry_after_apply(set, &config.work_path, &record, after)?;
-            warnings.extend(note);
-            Ok((Some(generation), warnings))
+            Ok(TargetApplied {
+                generation: Some(generation),
+                deferrals,
+                notes: note.into_iter().collect(),
+            })
         }
         Some(token) => {
-            let mut warnings = applied(context, config, executor, target, index)?;
-            warnings.push(format!(
-                "the infobase moved ahead of the record of source-set '{}' before the apply: its configuration generation was {token}, the record after the last {} is {}; the record is kept, so the next push is refused until the infobase is pulled or overwritten",
-                target.name, record.after, record.token
-            ));
-            Ok((Some(ApplyGeneration::Kept), warnings))
+            let deferrals = applied(context, config, executor, target, index)?;
+            Ok(TargetApplied {
+                generation: Some(ApplyGeneration::Kept),
+                deferrals,
+                notes: vec![format!(
+                    "the infobase moved ahead of the record of source-set '{}' before the apply: its configuration generation was {token}, the record after the last {} is {}; the record is kept, so the next push that loads is refused until the infobase is pulled or overwritten",
+                    target.name, record.after, record.token
+                )],
+            })
         }
         None => {
-            let mut warnings = applied(context, config, executor, target, index)?;
+            let deferrals = applied(context, config, executor, target, index)?;
             let (generation, note) = record::erase_after_apply(
                 set,
                 &config.work_path,
@@ -365,10 +380,35 @@ fn apply_target(
                     record.tool
                 ),
             );
-            warnings.extend(note);
-            Ok((Some(generation), warnings))
+            Ok(TargetApplied {
+                generation: Some(generation),
+                deferrals,
+                notes: note.into_iter().collect(),
+            })
         }
     }
+}
+
+/// Применённый шаг: что стало с записью, отмены, которые отложил акт, и прочие
+/// предупреждения — порознь, чтобы отмену после применения называть ровно раз.
+struct TargetApplied {
+    generation: Option<ApplyGeneration>,
+    deferrals: Vec<String>,
+    notes: Vec<String>,
+}
+
+/// Отмена, пришедшая после применения, которое её не отложило: исход она не меняет —
+/// применение состоялось, — но ответ её называет. Отложенную самим актом уже назвал его шаг
+/// (`deferrals`), и второй раз она не называется. Одно правило у `apply` и у отправки без
+/// изменений.
+pub(crate) fn cancellation_after_apply(
+    context: &ExecutionContext,
+    deferrals: &[String],
+) -> Option<String> {
+    if !deferrals.is_empty() {
+        return None;
+    }
+    crate::use_cases::interruption::deferred_interruption_warning_after(context, "apply")
 }
 
 /// Сам акт применения: отмену, которую он отложил, называет и удача, и отказ.
@@ -566,17 +606,22 @@ impl Executor {
             context,
             config,
             || {
-                Ok(match tool {
-                    Provider::Ibcmd => GenerationProcess::Ibcmd {
+                Ok(match utility {
+                    UtilityType::Ibcmd => GenerationProcess::Ibcmd {
                         binary: &binary,
                         runner,
                         data_path: None,
                     },
-                    _ => GenerationProcess::Designer {
+                    UtilityType::V8 => GenerationProcess::Designer {
                         binary: &binary,
                         runner,
                         log_file: designer_log_file(config, &name)?,
                     },
+                    other => {
+                        return Err(AppError::Runtime(format!(
+                            "{other:?} does not read the configuration generation"
+                        )))
+                    }
                 })
             },
             target.extension,
@@ -785,6 +830,43 @@ mod tests {
         let result = failure.payload.expect("payload");
         assert_eq!(result.steps[0].outcome, ApplyOutcome::Failed);
         assert_eq!(result.steps[1].outcome, ApplyOutcome::NotRun);
+    }
+
+    /// Отмену, которую отложило само применение, шаг называет один раз: предупреждение
+    /// команды о пришедшей отмене к нему не добавляется.
+    #[test]
+    fn a_cancellation_deferred_by_the_last_apply_is_named_once() {
+        let dir = tempdir().expect("tempdir");
+        let (tool, calls) = (dir.path().join("ibcmd"), dir.path().join("calls.log"));
+        let held = HeldCommand::in_dir(dir.path());
+        write_tool(
+            &tool,
+            &calls,
+            &dir.path().join("token"),
+            &held.script_branch("config apply", 0),
+        );
+        let config = config(dir.path(), &tool, Provider::Ibcmd);
+        let cancellation = CancellationToken::new();
+
+        let result = held
+            .interrupt_during(cancellation.clone(), || {
+                execute(
+                    &ExecutionContext::cli(CommandName::Apply).with_cancellation(cancellation),
+                    &config,
+                    &all_sets(),
+                )
+            })
+            .expect("the apply ran to its end");
+
+        let message = result.steps[0].message.as_deref().unwrap_or_default();
+        assert_eq!(result.steps[0].outcome, ApplyOutcome::Applied);
+        assert_eq!(
+            message
+                .matches("unsafe interruption was not performed")
+                .count(),
+            1,
+            "{message}"
+        );
     }
 
     /// Инструмент записи не ответил поколением: применение идёт, запись стирается, и ответ
