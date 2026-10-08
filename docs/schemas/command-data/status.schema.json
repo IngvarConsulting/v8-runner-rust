@@ -31,10 +31,25 @@
             }
           ],
           "description": "Инструмент, которым спрошено поколение: исполнитель `push` для этой базы. `null` —\nготового исполнителя нет."
+        },
+        "unapplied": {
+          "description": "Есть ли в базе непринятое: основная конфигурация (у набора расширения — само\nрасширение) отличается от конфигурации базы данных. `null` — исполнитель не ответил,\nпричина в `unapplied_reason`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "unapplied_reason": {
+          "description": "Почему `unapplied` не известно, если не известно.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "comparison"
+        "comparison",
+        "unapplied"
       ],
       "type": "object"
     },
