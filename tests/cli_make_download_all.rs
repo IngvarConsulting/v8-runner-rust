@@ -526,6 +526,22 @@ fn an_external_set_with_a_dot_in_its_name_is_built_into_its_directory() {
     );
 }
 
+/// Внешний набор с голым относительным `--output` (`Deploy`) публикуется в каталог от
+/// текущего: родитель пустого пути — текущий каталог, а не ошибка fsync (#443).
+#[test]
+fn an_external_set_is_published_to_a_bare_relative_output() {
+    let project = Project::new(&[]);
+    let output = project.run(&["make", "tools", "--output", "Deploy"]);
+    let envelope = envelope(&output);
+    assert!(output.status.success(), "{envelope}");
+    let deploy = project.root.join("Deploy");
+    assert!(deploy.is_dir(), "{envelope}");
+    assert!(
+        fs::read_dir(&deploy).expect("deploy dir").next().is_some(),
+        "{envelope}"
+    );
+}
+
 /// Два набора, чьи пакеты (файл или каталог) на файловой системе без регистра назвались бы
 /// одним именем, и набор с именем устройства Windows — отказ до работы.
 #[test]

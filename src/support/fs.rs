@@ -620,6 +620,13 @@ where
 pub fn best_effort_fsync_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
+        // Родитель голого относительного пути (`Deploy`) — пустой путь, то есть текущий
+        // каталог (#443).
+        let path = if path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path
+        };
         let dir = File::open(path)?;
 
         // SAFETY: `dir` owns a valid file descriptor for the duration of the call,
@@ -1988,5 +1995,11 @@ mod tests {
         let error =
             super::write_file_atomically(Path::new("/"), |_| Ok(())).expect_err("no file name");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    /// Пустой путь — родитель голого относительного имени — означает текущий каталог (#443).
+    #[test]
+    fn an_empty_parent_is_the_current_directory_for_fsync() {
+        super::best_effort_fsync_dir(std::path::Path::new("")).expect("fsync of the current dir");
     }
 }
