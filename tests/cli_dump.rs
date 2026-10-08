@@ -1596,3 +1596,42 @@ fn an_mcp_advice_never_repeats_the_connection_string_of_the_server() {
     assert!(!rendered.contains(CONNECTION_SECRET), "{rendered}");
     assert!(!rendered.contains("staging-ib"), "{rendered}");
 }
+
+/// Платформа из таблицы замеров (8.3.27 пишет 2.20, #403) видит чужой файл версий 2.17 до
+/// запуска: выгрузка идёт полной, без `-update`, и ответ называет обе версии.
+#[test]
+fn a_foreign_format_version_turns_the_pull_full_before_the_platform_starts() {
+    let (dir, config_path, _binary_path, work_path, _base_path, _calls_log) =
+        setup_project_with_a_version_file_in_a_repository();
+    let designer = dir
+        .path()
+        .join("platform")
+        .join("8.3.27.2074")
+        .join("bin")
+        .join("1cv8");
+    fs::create_dir_all(designer.parent().expect("bin")).expect("platform dir");
+    let calls = dir.path().join("designer-calls.log");
+    write_designer_dump_script_for_edt(&designer, &calls);
+    write_designer_config(&config_path, &work_path, &designer);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "pull",
+            "main",
+        ])
+        .output()
+        .expect("run command");
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(payload["data"]["mode"], "FULL", "{payload}");
+    let message = payload["data"]["message"].as_str().expect("message");
+    assert!(message.contains("format 2.17"), "{message}");
+    assert!(message.contains("8.3.27.2074 writes 2.20"), "{message}");
+    let calls = fs::read_to_string(calls).expect("calls");
+    assert!(calls.contains("/DumpConfigToFiles"), "{calls}");
+    assert!(!calls.contains("-update"), "{calls}");
+}

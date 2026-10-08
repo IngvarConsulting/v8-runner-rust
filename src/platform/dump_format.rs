@@ -47,11 +47,25 @@ impl fmt::Display for FormatVersion {
 /// по замеру (`references/1c/confirmed-runtime-measurements.md`, раздел о версии формата
 /// файла версий, #403); платформы вне таблицы раннер не угадывает. Конфигуратор, `ibcmd` и
 /// агент одной платформы пишут одну и ту же версию, а выгрузка по изменившемуся принимает
-/// только её.
-const WRITTEN_FORMATS: &[((u32, u32, u32), FormatVersion)] = &[
-    ((8, 3, 27), FormatVersion::new(2, 20)),
-    ((8, 5, 4), FormatVersion::new(2, 22)),
+/// только её. Строка — выпуск, а не сборка: замерены 8.3.27.2074 и 8.5.4.1306, .1683,
+/// .1878, остальные сборки выпуска считаются пишущими ту же версию.
+const WRITTEN_FORMATS: &[WrittenFormat] = &[
+    WrittenFormat::new((8, 3, 27), FormatVersion::new(2, 20)),
+    WrittenFormat::new((8, 5, 4), FormatVersion::new(2, 22)),
 ];
+
+/// Строка таблицы замеров: выпуск платформы (старшая, младшая версия и выпуск) и версия
+/// формата, которую он пишет.
+struct WrittenFormat {
+    release: (u32, u32, u32),
+    format: FormatVersion,
+}
+
+impl WrittenFormat {
+    const fn new(release: (u32, u32, u32), format: FormatVersion) -> Self {
+        Self { release, format }
+    }
+}
 
 /// Платформа и версия формата, которую она пишет по таблице замеров; `None`, если версия
 /// платформы раннеру не видна или её нет в таблице.
@@ -63,16 +77,11 @@ pub fn known_format(
     })
 }
 
-fn written_in(
-    table: &[((u32, u32, u32), FormatVersion)],
-    platform: &PlatformVersion,
-) -> Option<FormatVersion> {
+fn written_in(table: &[WrittenFormat], platform: &PlatformVersion) -> Option<FormatVersion> {
     table
         .iter()
-        .find(|((major, minor, patch), _)| {
-            (platform.major, platform.minor, platform.patch) == (*major, *minor, *patch)
-        })
-        .map(|(_, format)| *format)
+        .find(|row| row.release == (platform.major, platform.minor, platform.patch))
+        .map(|row| row.format)
 }
 
 /// Что сказано о версии формата в файле версий.
@@ -130,6 +139,7 @@ fn root_version(head: &str) -> Option<FormatVersion> {
 mod tests {
     use super::{
         known_format, read_recorded, root_version, written_in, FormatVersion, RecordedFormat,
+        WrittenFormat,
     };
     use crate::platform::locator::PlatformVersion;
 
@@ -183,7 +193,7 @@ mod tests {
             patch,
             build: 2074,
         };
-        let table = [((8, 3, 27), FormatVersion::new(2, 20))];
+        let table = [WrittenFormat::new((8, 3, 27), FormatVersion::new(2, 20))];
         assert_eq!(
             written_in(&table, &platform(27)),
             Some(FormatVersion::new(2, 20))

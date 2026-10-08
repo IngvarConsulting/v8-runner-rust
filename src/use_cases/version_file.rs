@@ -444,7 +444,7 @@ mod tests {
     /// версиями, не новее — загрузка идёт; нет файла или версия не распознана — пропуск
     /// назван. Платформа из таблицы замеров (#403) сверяется и без версии из теста.
     #[test]
-    fn the_load_format_is_read_from_the_runner_copy_when_the_directory_has_none() {
+    fn a_load_from_a_newer_format_is_refused_and_the_format_is_read_from_the_runner_copy() {
         let root = tempfile::tempdir().expect("root");
         let file = version_file(root.path(), "base-a");
         let context = SourceSetContext::new("main", root.path().join("sources"), "designer-main")
