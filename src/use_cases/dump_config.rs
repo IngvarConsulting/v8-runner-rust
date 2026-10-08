@@ -525,8 +525,12 @@ fn run_whole_dump_through_stage_ibcmd(
         Ok(result) => result,
         Err(error) => return Err(publication.cleanup_failure(error)),
     };
-    publication.lay_over_dir(context, "failed to lay the staged dump over the directory")?;
-    Ok((dump_result, DumpNotes::default()))
+    let cleanup_warning = publication.lay_over_dir(
+        context,
+        "failed to lay the staged dump over the directory",
+        VERSION_FILE_NAME,
+    )?;
+    Ok((dump_result, DumpNotes::message(cleanup_warning)))
 }
 
 fn run_full_dump_ibcmd(
@@ -3273,6 +3277,103 @@ exit 0"#,
         assert_eq!(leftovers, 0, "the stage is removed");
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(!calls.contains("--sync"), "{calls}");
+    }
+
+    /// Скрипт как настоящий `ibcmd`: в непустой каталог не пишет, в пустой кладёт
+    /// `Configuration.xml`, `Catalogs/Items.xml` и файл версий; `fail` — отказ выгрузки.
+    fn write_staging_ibcmd_script(script: &Path, calls: &Path, fail: bool) {
+        let failure = if fail { "exit 3\n" } else { "" };
+        write_script(
+            script,
+            &format!(
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; esac\n{failure}for last; do :; done\nif [ -d \"$last\" ] && [ -n \"$(ls -A \"$last\")\" ]; then exit 255; fi\nmkdir -p \"$last/Catalogs\"\nprintf 'new\\n' > \"$last/Configuration.xml\"\nprintf 'item\\n' > \"$last/Catalogs/Items.xml\"\nprintf '<ConfigDumpInfo version=\\\"2.20\\\"/>\\n' > \"$last/ConfigDumpInfo.xml\"\nexit 0",
+                calls.display()
+            ),
+        );
+    }
+
+    fn stage_leftovers(base: &Path) -> usize {
+        fs::read_dir(base)
+            .expect("base")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".dump-stage"))
+            .count()
+    }
+
+    fn incremental_main() -> DumpArgs {
+        DumpArgs {
+            dry_run: false,
+            discard_uncommitted: false,
+            force_way_out: ForceWayOut::PullForce,
+            mode: DumpModeRequest::Incremental,
+            source_set: Some("main".to_owned()),
+            extension: None,
+            objects: vec![],
+        }
+    }
+
+    /// Отказ выгрузки в промежуточный каталог набор не трогает, а промежуточный убирает.
+    #[test]
+    fn a_failed_ibcmd_stage_dump_leaves_the_directory_untouched() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_staging_ibcmd_script(&script, &calls, true);
+        let config = build_config_with_builder(
+            &base,
+            &dir.path().join("work"),
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+        let target = base.join("main");
+        fs::write(target.join("Configuration.xml"), "old").expect("old");
+        commit_sources(&base);
+
+        let failed = run_dump(&config, &incremental_main());
+
+        assert!(failed.is_err(), "the platform refused");
+        assert_eq!(
+            fs::read_to_string(target.join("Configuration.xml")).expect("old"),
+            "old"
+        );
+        assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
+    }
+
+    /// Оборванный перенос удаляет файл версий набора: следующая выгрузка снова полная, а
+    /// не `--sync` по файлу, под которым лежат не все объекты.
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_overlay_removes_the_version_file_so_the_next_dump_is_full() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_staging_ibcmd_script(&script, &calls, false);
+        let config = build_config_with_builder(
+            &base,
+            &dir.path().join("work"),
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+        let target = base.join("main");
+        // Файл на месте каталога, куда должен лечь `Catalogs/Items.xml`: перенос обрывается.
+        fs::write(target.join("Catalogs"), "a file, not a directory").expect("blocker");
+        fs::write(target.join("ConfigDumpInfo.xml"), "<ConfigDumpInfo/>").expect("unrecognized");
+        fs::write(base.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("ignore");
+        commit_sources(&base);
+
+        let failed = run_dump(&config, &incremental_main());
+
+        let error = format!("{:?}", failed.expect_err("the overlay broke"));
+        assert!(error.contains("lay the staged dump"), "{error}");
+        assert!(
+            !target.join("ConfigDumpInfo.xml").exists(),
+            "no version file over a half-laid dump"
+        );
+        assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
     }
 
     #[test]
