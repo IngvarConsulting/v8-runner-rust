@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.STATUS-DEEP-NAMES-THE-UNAPPLIED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/412
+check:
+  - tests/cli_status.rs::status_deep_names_the_unapplied
+  - tests/cli_status.rs::status_deep_without_a_platform_answers_null_with_a_reason
 ---
 
 # `status --deep` называет непринятое
@@ -10,7 +11,10 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/412
 конфигурации базы данных. Признак берётся из структурного ответа платформы, а не из её прозы:
 побайтное неравенство основной конфигурации и конфигурации базы данных, сохранённых в файл
 ([замер](../../../references/1c/confirmed-runtime-measurements.md), раздел о признаках
-непринятого). Пока признак не реализован, поля в форме `CTR.WIRE.STATUS-DATA` нет.
+непринятого). Признак называет поле `base.unapplied` формы `CTR.WIRE.STATUS-DATA`: у набора
+расширения — для самого расширения. Спрашивает тот же исполнитель, что поколение (исполнитель
+`push`): Конфигуратор — `/DumpCfg` и `/DumpDBCfg`, `ibcmd` — `config save` и `config save --db`.
+Сохранение у агента не замерено: у него `unapplied` — `null` с причиной.
 
 Состояние «обновлено динамически» `status --deep` не называет: на 8.3.27 Конфигуратор и `ibcmd`
 не отдают его снаружи сеанса, а внутри сеанса оно видно только тому, кто был подключён до

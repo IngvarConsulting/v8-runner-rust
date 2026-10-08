@@ -1,7 +1,9 @@
 //! `status`, `status --all` и `status --deep` (#216).
 //!
 //! Поддельный Конфигуратор отвечает `/GetConfigGenerationID` токеном из файла `token` рядом
-//! с собой; поддельный `ibcmd` отвечает `config extension list` текстом из файла `extensions`.
+//! с собой, а `/DumpCfg` и `/DumpDBCfg` сохраняет содержимым файлов `main-cfg` и `db-cfg`
+//! (по умолчанию одинаковым); поддельный `ibcmd` отвечает `config extension list` текстом из
+//! файла `extensions`.
 //! Оба пишут свои вызовы в общий журнал, по которому видно, запускалась ли платформа.
 #![cfg(unix)]
 
@@ -30,15 +32,29 @@ for arg in "$@"; do
   if [ "$previous" = '/Out' ]; then out="$arg"; fi
   previous="$arg"
 done
+target=''
+previous=''
+for arg in "$@"; do
+  if [ "$previous" = '/DumpCfg' ] || [ "$previous" = '/DumpDBCfg' ]; then target="$arg"; fi
+  previous="$arg"
+done
 case "$*" in
   *'/GetConfigGenerationID'*)
     if [ -f '{token}' ]; then cat '{token}' > "$out"; fi
+    exit 0 ;;
+  *'/DumpDBCfg'*)
+    if [ -f '{db}' ]; then cat '{db}' > "$target"; else printf 'same' > "$target"; fi
+    exit 0 ;;
+  *'/DumpCfg'*)
+    if [ -f '{main}' ]; then cat '{main}' > "$target"; else printf 'same' > "$target"; fi
     exit 0 ;;
 esac
 if [ -n "$out" ]; then : > "$out"; fi
 exit 0"#,
         calls = root.join("calls.log").display(),
         token = root.join("token").display(),
+        main = root.join("main-cfg").display(),
+        db = root.join("db-cfg").display(),
     )
 }
 
@@ -307,6 +323,31 @@ fn status_deep_predicts_the_push_generation_check() {
     assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
 }
 
+/// `status --deep` называет непринятое: основная конфигурация, сохранённая в файл, не равна
+/// конфигурации базы данных (#412). Равны — непринятого нет.
+#[test]
+fn status_deep_names_the_unapplied() {
+    let project = Project::new();
+    project.remember(FIRST);
+
+    let applied = succeeded(&project.run(&["status", "--deep"]));
+    assert_data_matches_its_command_form(&applied, "status --deep");
+    let main = set(&applied["data"]["infobases"][0], "main");
+    assert_eq!(main["base"]["unapplied"], false, "{applied}");
+    assert!(main["base"]["unapplied_reason"].is_null(), "{applied}");
+
+    fs::write(project.root().join("main-cfg"), "loaded, not applied").expect("main");
+    fs::write(project.root().join("db-cfg"), "applied").expect("db");
+    let pending = succeeded(&project.run(&["status", "--deep"]));
+    let main = set(&pending["data"]["infobases"][0], "main");
+    assert_eq!(main["base"]["unapplied"], true, "{pending}");
+    let calls = fs::read_to_string(project.root().join("calls.log")).expect("calls");
+    assert!(
+        calls.contains("/DumpCfg") && calls.contains("/DumpDBCfg"),
+        "{calls}"
+    );
+}
+
 /// `status --deep` называет расширение базы, которого нет в проекте, и набор проекта,
 /// которого нет в базе.
 #[test]
@@ -430,6 +471,8 @@ fn status_deep_without_a_platform_answers_null_with_a_reason() {
     assert_eq!(main["base"]["token"], Value::Null, "{status}");
     assert_eq!(main["base"]["comparison"], "no_answer", "{status}");
     assert!(main["base"]["reason"].is_string(), "{status}");
+    assert_eq!(main["base"]["unapplied"], Value::Null, "{status}");
+    assert!(main["base"]["unapplied_reason"].is_string(), "{status}");
     assert_eq!(base["extensions"]["installed"], Value::Null, "{status}");
     assert!(base["extensions"]["reason"].is_string(), "{status}");
 }

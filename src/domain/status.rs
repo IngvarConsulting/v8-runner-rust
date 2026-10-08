@@ -140,6 +140,14 @@ pub struct BaseGeneration {
     /// Почему ответа нет, если его нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Есть ли в базе непринятое: основная конфигурация (у набора расширения — само
+    /// расширение) отличается от конфигурации базы данных. `null` — исполнитель не ответил,
+    /// причина в `unapplied_reason`.
+    #[schemars(required, extend("type" = ["boolean", "null"]))]
+    pub unapplied: Option<bool>,
+    /// Почему `unapplied` не известно, если не известно.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unapplied_reason: Option<String>,
 }
 
 /// Сверка ответа с записью — та же, что сделает `push` перед загрузкой.
