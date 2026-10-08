@@ -656,12 +656,13 @@ fn upload_of_a_transfer_file_names_infobase_restore() {
     }
 }
 
-/// `ibcmd` идёт в СУБД сам, поэтому ему секция `infobase.dbms` нужна и у серверной базы.
-/// У кластера остался один такой вызов — список расширений перед `upload .cfe` (#431):
-/// без секции он отказывает, называя её, до запуска `ibcmd` и до загрузки Конфигуратором.
+/// Секция `infobase.dbms` — доступ к СУБД. У кластера в СУБД раннер перед `upload .cfe` не
+/// ходит: список расширений спрашивает агент (#431), поэтому без секции загрузка не
+/// отказывает из-за неё и `ibcmd` не запускает. Агента в тесте нет — команда отказывает
+/// по нему, а не по секции.
 #[test]
-fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
-    let (dir, config_path, _binary_path, base_path, calls_log) = setup_project();
+fn a_cluster_extension_upload_needs_no_dbms_section() {
+    let (dir, config_path, _binary_path, base_path, _calls_log) = setup_project();
     fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
     let ibcmd_started = dir.path().join("ibcmd-started");
     write_script(
@@ -674,7 +675,7 @@ fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
         config.replace(
             "connection: 'File=ib'",
             "connection: 'Srvr=127.0.0.1:1541;Ref=demo'",
-        ),
+        ) + "  designer_agent:\n    startup_timeout_ms: 200\n",
     )
     .expect("server config");
 
@@ -693,14 +694,12 @@ fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
         .expect("run command");
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(output.status.code(), Some(2), "{payload}");
     assert!(
-        payload["error"]["message"]
+        !payload["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("infobase.dbms")),
+            .unwrap_or_default()
+            .contains("infobase.dbms"),
         "{payload}"
     );
     assert!(!ibcmd_started.exists(), "ibcmd must not be started");
-    let calls = fs::read_to_string(&calls_log).unwrap_or_default();
-    assert!(!calls.contains("/LoadCfg"), "{calls}");
 }

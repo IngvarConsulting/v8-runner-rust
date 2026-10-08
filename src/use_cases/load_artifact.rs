@@ -658,6 +658,18 @@ fn installed_extension_state(
             CFE_REQUIRES_EXTENSION_ERROR.to_owned(),
         ));
     };
+    // У кластера `ibcmd` в строках нет (`INV.USE-CASES.A-CLUSTER-ROW-DOES-NOT-NAME-IBCMD`):
+    // список спрашивает исполнитель `extensions` этой цели — агент (#431).
+    if config.target_kind() == crate::domain::capability::TargetKind::Cluster {
+        let (_, read) = crate::use_cases::extension_inventory::read_installed(context, config);
+        return read.map(|extensions| {
+            if extensions.iter().any(|extension| extension.name == name) {
+                ExtensionPresence::Present
+            } else {
+                ExtensionPresence::Absent
+            }
+        });
+    }
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
     let binary = utilities.locate(UtilityType::Ibcmd)?.path;
     let dsl = IbcmdDsl::new(
@@ -1763,34 +1775,6 @@ mod tests {
         assert!(!calls.exists(), "nothing may be applied: {calls:?}");
     }
 
-    /// Серверная база без `infobase.dbms` — ошибка конфигурации, как и везде, где строится
-    /// подключение `ibcmd`: род `validation`, а не `platform`.
-    #[cfg(unix)]
-    #[test]
-    fn an_incomplete_ibcmd_connection_answers_a_validation_failure() {
-        let dir = tempdir().expect("tempdir");
-        let calls = dir.path().join("calls.log");
-        let mut infobase = crate::config::model::InfobaseConfig::server(
-            "Srvr=demo;Ref=test",
-            crate::config::model::InfobaseDbmsConfig::new("PostgreSQL", "localhost", "demo"),
-        );
-        infobase.dbms = None;
-        let failure = load_an_extension_without_asking(dir.path(), &calls, infobase);
-
-        assert_eq!(
-            failure.error.kind(),
-            UseCaseErrorKind::Validation,
-            "{}",
-            failure.error
-        );
-        assert!(
-            failure.error.message().contains("infobase.dbms"),
-            "{}",
-            failure.error
-        );
-        assert!(!calls.exists(), "nothing may be applied: {calls:?}");
-    }
-
     #[cfg(unix)]
     #[test]
     fn merge_of_absent_extension_returns_first_installation_hint() {
@@ -2364,6 +2348,55 @@ mod tests {
         let payload = failure.payload.expect("the refusal carries the form");
         assert!(!payload.provider_dispatched, "no process was started");
         assert!(!calls.exists(), "the platform never ran");
+    }
+
+    /// У кластера список расширений перед `upload .cfe` спрашивает агент, а не `ibcmd`
+    /// (#431): без платформы для агента — отказ выбора, `ibcmd` не запускается.
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_upload_on_a_cluster_never_runs_ibcmd() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        let ibcmd_calls = root.join("ibcmd.calls.log");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        write_designer_script(&binary, &calls);
+        let ibcmd = root.join("ibcmd");
+        fs::write(
+            &ibcmd,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+                ibcmd_calls.display()
+            ),
+        )
+        .expect("ibcmd script");
+        std::fs::set_permissions(&ibcmd, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        let mut config = sample_config(root, &binary);
+        config.infobase = crate::config::model::InfobaseConfig::server(
+            "Srvr=cluster:1541;Ref=demo",
+            crate::config::model::InfobaseDbmsConfig::new("PostgreSQL", "localhost", "demo")
+                .with_credentials(Some("postgres".to_owned()), Some("pg-secret".to_owned())),
+        );
+        // Поддельный Конфигуратор агентом не станет: короткое ожидание вместо двух минут.
+        config.tools.designer_agent.startup_timeout_ms = 200;
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("ExistingExt".to_owned()),
+        };
+
+        let _ = execute(&ExecutionContext::cli(CommandName::Load), &config, &request);
+
+        assert!(
+            !ibcmd_calls.exists(),
+            "ibcmd must not run against a cluster infobase"
+        );
     }
 
     #[cfg(unix)]

@@ -20,4 +20,4 @@ check:
 
 Правило говорит о строках матрицы — исполнителях операций. Вспомогательный вызов `ibcmd`
 перед `upload .cfe` у кластера держит отдельное правило
-`INV.USE-CASES.AN-EXTENSION-UPLOAD-ON-A-CLUSTER-ASKS-NO-IBCMD` (#431).
+`INV.USE-CASES.AN-EXTENSION-UPLOAD-ON-A-CLUSTER-ASKS-NO-IBCMD`.

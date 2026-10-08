@@ -143,7 +143,7 @@ v8-runner infobase create
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
   `pull`, `download`; `upload`/`check` — Designer only; `extensions` — file `ibcmd → agent`,
   cluster agent only. The agent drops out of `push`/`pull` for `format: EDT` and out of `push`
-  with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared; if it does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster still lists installed extensions through `ibcmd` (needs `dbms`, #431). `providers.<op>: designer` restores the Designer-first choice;
+  with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared; if it does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster lists installed extensions through the agent, so it needs neither `ibcmd` nor `dbms`. `providers.<op>: designer` restores the Designer-first choice;
   a cluster base refuses `providers.<op>: ibcmd` for these operations.
 - `error.kind` and `error.code` are closed enumerations. Within `capability`, the code says why:
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
