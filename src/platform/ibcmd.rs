@@ -453,6 +453,21 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
+    /// `config reset [--extension=<name>]`: основная конфигурация (или расширение)
+    /// возвращается к конфигурации базы данных. Своих ключей, кроме `--extension`, у команды
+    /// нет; учётные данные обязательны у базы с пользователями — без них `ibcmd` спрашивает
+    /// имя бесконечно (замер 08.10.2026, 8.3.27.2074).
+    pub fn config_reset(
+        &self,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "reset"]);
+        if let Some(extension) = extension {
+            push_option_value(&mut args, "--extension", extension);
+        }
+        self.run(&args)
+    }
+
     /// Exports a full configuration or extension snapshot from the infobase.
     pub fn config_export_full(
         &self,
@@ -814,6 +829,39 @@ mod tests {
         assert!(args.contains("apply"));
         assert!(args.contains("--force"));
         assert!(args.contains("--dynamic\nauto"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_reset_builds_expected_args() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let conn = file_connection("File=/ib");
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.config_reset(Some("Patch")).expect("reset");
+
+        let args = fs::read_to_string(args_log).expect("args");
+        let lines: Vec<&str> = args.lines().collect();
+        assert_eq!(lines.first(), Some(&"infobase"), "{args}");
+        let config = lines
+            .iter()
+            .position(|line| *line == "config")
+            .expect("config");
+        assert_eq!(lines.get(config + 1), Some(&"reset"), "{args}");
+        assert!(args.contains("--extension\nPatch"), "{args}");
+        assert!(!args.contains("--force"), "{args}");
     }
 
     #[cfg(unix)]

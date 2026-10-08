@@ -50,6 +50,9 @@
     "push": [
       "push"
     ],
+    "reset": [
+      "reset"
+    ],
     "status": [
       "status"
     ],

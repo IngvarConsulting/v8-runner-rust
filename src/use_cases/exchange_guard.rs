@@ -31,6 +31,7 @@ use crate::change_detection::source_sets::SourceSetsService;
 use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider, TargetKind};
 use crate::domain::next_step::NextStep;
+use crate::domain::reset::HashMemoryFate;
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::{GenerationAfter, GenerationVerdict, MemoryState};
 use crate::support::error::AppError;
@@ -1058,6 +1059,32 @@ pub(crate) fn remember_created_base(
             failures.join("; ")
         )
     })
+}
+
+/// Хеш-память набора перед откатом непринятого (`reset`): своя непустая хеш-память этой
+/// пары заменяется пустой, и следующая отправка грузит отброшенное заново. Хеш-памяти нет,
+/// она пуста, чужая или нечитаемая — ничего не пишется: откат памяти о базе не создаёт и
+/// чужую пару не трогает (`INV.CLI.RESET-DISCARDS-THE-UNAPPLIED`,
+/// `INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`). Память набора о базе — его контекст
+/// Конфигуратора; у формата EDT это копия под памятью базы, а контекст `edt-` помнит перевод
+/// исходников в эту копию, а не базу, и остаётся.
+pub(crate) fn empty_hash_memory_before_reset(
+    set: &SourceSetContext,
+    work_path: &Path,
+) -> Result<HashMemoryFate, AppError> {
+    match analyzer::snapshot_memory(set, work_path) {
+        SnapshotMemory::Own => analyzer::commit_empty_snapshot(set, work_path)
+            .map(|()| HashMemoryFate::Replaced)
+            .map_err(|error| {
+                AppError::Runtime(format!(
+                    "the hash memory of source-set '{}' was not replaced with an empty one before the reset: {error}",
+                    set.name()
+                ))
+            }),
+        SnapshotMemory::Nothing | SnapshotMemory::Foreign | SnapshotMemory::Unreadable => {
+            Ok(HashMemoryFate::Absent)
+        }
+    }
 }
 
 /// Память об исходниках EDT собранного набора: первая отправка не переводит его заново.

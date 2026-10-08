@@ -8,6 +8,8 @@ check:
   - src/use_cases/exchange_guard.rs::a_created_base_remembers_the_set_it_was_assembled_from
   - tests/cli_pull_memory.rs::first_full_pull_establishes_the_baseline_for_all_exporters
   - src/use_cases/exchange_guard.rs::a_copy_mark_is_memory_and_offers_no_pull
+  - tests/cli_reset.rs::reset_creates_no_memory_of_the_base
+  - tests/cli_reset.rs::reset_leaves_the_memory_of_another_pair
 ---
 
 # Что считается памятью о базе
@@ -23,6 +25,8 @@ check:
 каждого другого набора пустую хеш-память (`INV.CLI.INFOBASE-CREATE-FOLLOWS-THE-TARGET-KIND`),
 у копии базы признак копии (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`), —
 полный `pull` (`INV.USE-CASES.FULL-PULL-RECORDS-THE-PUBLISHED-TREE`), выгрузка, о которой
-инструмент ответил поколением, и удачный `push`.
+инструмент ответил поколением, и удачный `push`. `reset` память не создаёт, а заменяет: свою
+непустую хеш-память набора — пустой, перед откатом; чужую и нечитаемую не трогает
+(`INV.CLI.RESET-DISCARDS-THE-UNAPPLIED`).
 
 Решение владельца от 06.10.2026: чужая и нечитаемая память — отсутствие памяти.

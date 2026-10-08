@@ -36,6 +36,8 @@ pub mod next_step;
 pub mod partial_dump_selector;
 /// Web publication domain models.
 pub mod publish;
+/// Ответ команды `reset`.
+pub mod reset;
 /// Shared runner models.
 pub mod runner;
 /// Source set domain models.

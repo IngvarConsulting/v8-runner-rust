@@ -142,6 +142,22 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
+    /// `/RollbackCfg [-Extension <name>]`: основная конфигурация (или расширение) возвращается
+    /// к конфигурации базы данных. Одна команда — одна цель; пустой откат по ответу не
+    /// отличить от настоящего (замер 08.10.2026, 8.3.27.2074).
+    pub fn rollback_cfg(
+        &self,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/RollbackCfg".to_owned());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        self.run(&args)
+    }
+
     /// `/LoadCfg <file> [-Extension <name>]`
     pub fn load_cfg(
         &self,
@@ -569,6 +585,47 @@ mod tests {
         fs::write(&staged, format!("#!/bin/sh\n{body}\n")).expect("write script");
         make_executable(&staged);
         fs::rename(&staged, path).expect("rename script");
+    }
+
+    /// Откат называет цель ключом `-Extension` только у расширения; учётные данные базы идут
+    /// теми же `/N` и `/P`, что у прочих команд.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_cfg_names_the_extension_only_for_an_extension() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        let args_log = dir.path().join("args.log");
+        write_script(
+            &script,
+            &format!(
+                "printf '%s\\n' \"$@\" >> \"{}\"\nexit 0",
+                args_log.display()
+            ),
+        );
+        let runner = ProcessExecutor;
+        let mut connection = V8Connection::from_connection_string("File=/tmp/ib");
+        connection.user = Some("Admin".to_owned());
+        connection.password = Some("secret".to_owned());
+        let dsl = DesignerDsl::new(
+            script,
+            connection,
+            &runner as &dyn ProcessRunner,
+            None,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.rollback_cfg(None).expect("main");
+        dsl.rollback_cfg(Some("Patch")).expect("extension");
+
+        let args = fs::read_to_string(args_log).expect("args");
+        let runs: Vec<&str> = args.split("/RollbackCfg\n").collect();
+        assert_eq!(runs.len(), 3, "{args}");
+        assert!(!runs[1].contains("-Extension"), "{args}");
+        assert!(runs[2].starts_with("-Extension\nPatch\n"), "{args}");
+        assert!(
+            args.contains("/N\nAdmin\n") && args.contains("/P\nsecret\n"),
+            "{args}"
+        );
     }
 
     #[cfg(unix)]

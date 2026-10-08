@@ -270,6 +270,23 @@ fn pull_all_on_a_base_of_another_copy_warns_and_names_the_owner() {
     assert_eq!(stand.marker_text(), marker, "the write leaves the marker");
 }
 
+/// `reset` пишет в основную конфигурацию базы: на базе другой копии он идёт, его ответ —
+/// здесь отказ: признака непринятого поддельная платформа не даёт — несёт предупреждение, а
+/// метка не меняется.
+#[test]
+fn reset_on_a_base_of_another_copy_warns_and_names_the_owner() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+    succeeded(&first.run(&["push"]));
+    let marker = stand.marker_text();
+
+    let reset = envelope(&second.run(&["reset"]));
+
+    another_copy_warning(&reset, "reset", &first, &stand);
+    assert_eq!(stand.marker_text(), marker, "the write leaves the marker");
+}
+
 /// Команда чтения на базе другой копии проходит и метку не трогает.
 #[test]
 fn a_read_on_a_base_of_another_copy_passes_and_leaves_the_marker() {

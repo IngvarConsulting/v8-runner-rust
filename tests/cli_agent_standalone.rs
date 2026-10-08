@@ -938,6 +938,25 @@ fn without_the_direct_gate_a_standalone_server_has_only_the_agent() {
     assert_eq!(commands(&harness).len(), before, "{:?}", commands(&harness));
 }
 
+/// Откат непринятого у автономного сервера — только Конфигуратором по прямому шлюзу: у
+/// агента команды отката нет. Без строки прямого шлюза отказ приходит до сессии и называет,
+/// что объявить (#235).
+#[test]
+fn a_standalone_reset_without_the_direct_gate_is_refused_before_any_session() {
+    let harness = harness();
+
+    let (code, payload) = run(&harness, &["reset"]);
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert_eq!(
+        error_message(&payload),
+        "reset has no executor with a declared way to the standalone server: designer reaches a standalone server by the direct gate, which is not declared: declare infobase.connection as Srvr=<host>:<port>;Ref=<name>",
+        "{payload}"
+    );
+    assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
+}
+
 /// Снимок автономного сервера через SSH-шлюз не снимается: `dump-ib` роняет `ibsrv` 8.3.27
 /// (живой прогон 15.09.2026), и снимок снимает только Конфигуратор по прямому шлюзу. Без
 /// строки прямого шлюза отказ приходит до сессии и называет, что объявить.

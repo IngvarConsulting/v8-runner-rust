@@ -66,6 +66,8 @@ pub mod provider_selection;
 pub mod publish_infobase;
 /// Transport-neutral request DTOs consumed by use cases.
 pub mod request;
+/// `reset` и владелец акта отката.
+pub mod reset;
 /// Transport-neutral use-case error and failure contracts.
 pub mod result;
 /// Test orchestration use case.

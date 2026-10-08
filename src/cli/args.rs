@@ -82,6 +82,9 @@ pub enum Command {
     /// Apply the main configuration to the database configuration: the second half of
     /// push, after `push --no-apply` or a push whose apply failed
     Apply(ApplyArgs),
+    /// Discard the unapplied changes: roll the main configuration (or an extension) back to
+    /// the database configuration; the database configuration stays as it is
+    Reset(ResetArgs),
     /// Upload a built package (.cf/.cfe) into the infobase
     #[command(name = "upload", alias = "load")]
     Load(LoadArgs),
@@ -321,6 +324,15 @@ pub struct ApplyArgs {
     /// Source set declared in v8project.yaml (never an infobase); without it every set in
     /// order — the configuration, then the extensions installed in the infobase — and the
     /// client MCP tool extension
+    #[arg(value_name = "SET")]
+    pub set: Option<String>,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ResetArgs {
+    /// Source set declared in v8project.yaml (never an infobase); without it the main
+    /// configuration — an extension is reset only by its set
     #[arg(value_name = "SET")]
     pub set: Option<String>,
 }

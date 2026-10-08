@@ -174,7 +174,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 31,
+        report.accepted, 32,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -377,6 +377,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
         (
             "crate::use_cases::apply::act::apply",
             "применение, когда его ведёт `ibcmd`, выбранный для `push` или `apply`",
+        ),
+        (
+            "crate::use_cases::reset::act::roll_back",
+            "откат непринятого, когда `reset` ведёт `ibcmd`",
         ),
     ];
     let expected = BUILT_FOR_IBCMD
@@ -5723,6 +5727,7 @@ fn installed_extensions_are_matched_in_one_place() {
         "src/use_cases/dump_config/all.rs",
         "src/use_cases/infobase_export/all.rs",
         "src/use_cases/apply.rs",
+        "src/use_cases/reset.rs",
     ] {
         let tokens = production_tokens(&repo_path(walk));
         assert!(
@@ -5752,6 +5757,30 @@ fn installed_extensions_are_matched_in_one_place() {
         readers.is_empty(),
         "these modules read the installed extensions on their own:\n{}",
         readers.join("\n")
+    );
+}
+
+/// Откат непринятого делает один владелец — `reset::act`: точка безопасности, критическая
+/// фаза и учёт отложенной отмены (#235). Корень, от которого он стережёт, — тот же, что у
+/// применения (#210): копия записи в базу у каждого исполнителя расходится в защите от
+/// отмены. Страж ловит вызов `/RollbackCfg` и `config reset` вне владельца под любым
+/// именем функции.
+#[test]
+fn the_rollback_act_has_one_owner() {
+    let owner = repo_path("src/use_cases/reset/act.rs");
+    let offenders = collect_rust_files(&repo_path("src/use_cases"))
+        .into_iter()
+        .filter(|file| *file != owner)
+        .filter(|file| {
+            let tokens = production_tokens(file);
+            tokens.contains(".rollback_cfg(") || tokens.contains(".config_reset(")
+        })
+        .map(|file| file.display().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "these modules roll the configuration back on their own instead of through reset::act:\n{}",
+        offenders.join("\n")
     );
 }
 

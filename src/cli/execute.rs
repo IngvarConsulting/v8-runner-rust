@@ -148,6 +148,15 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::Reset(args) => execute_reset(
+            config,
+            args,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Load(args) => execute_load(
             config,
             args,
@@ -624,6 +633,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Extensions(_) => CommandName::Extensions,
         Command::Build(_) => CommandName::Build,
         Command::Apply(_) => CommandName::Apply,
+        Command::Reset(_) => CommandName::Reset,
         Command::Load(_) => CommandName::Load,
         Command::Test(_) => CommandName::Test,
         Command::Dump(_) => CommandName::Dump,
@@ -1276,6 +1286,66 @@ fn execute_apply(
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
                         render_apply_text(result, presenter, false);
+                    }
+                    presenter.print_error(&error.to_string());
+                }
+                Err(error)
+            }
+        },
+    )
+}
+
+/// `reset`: команда записи — замок `workPath`, затем замок файловой базы и проверка, чья
+/// она; на базе другой копии идёт с предупреждением, превью ничего не запускает.
+fn execute_reset(
+    config: &AppConfig,
+    args: &crate::cli::args::ResetArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    let request = crate::use_cases::request::ResetRequest {
+        source_set: args.set.clone(),
+        dry_run,
+    };
+    let context = cli_context(config, CommandName::Reset, cancellation)
+        .with_command_line(command_line.clone());
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        CommandName::Reset,
+        BaseAccess::Writes,
+        clean_before_execution,
+        dry_run,
+        || match crate::use_cases::reset::execute(&context, config, &request) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        CommandName::Reset.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    render_reset_text(&result, presenter, true);
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    // Отказ до выбора цели формы не несёт: предмета ещё нет.
+                    print_failure(
+                        presenter,
+                        CommandName::Reset,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
+                } else {
+                    if let Some(result) = failure.payload.as_ref() {
+                        render_reset_text(result, presenter, false);
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -4181,6 +4251,22 @@ fn render_apply_text(
         summary
     } else {
         summary.with_detail(receipt.join("\n"))
+    };
+    presenter.print_timeline(&[summary]);
+}
+
+fn render_reset_text(
+    result: &crate::domain::reset::ResetResult,
+    presenter: &Presenter,
+    succeeded: bool,
+) {
+    let mut details: Vec<String> = result.message.iter().cloned().collect();
+    details.extend(provider_receipt_details(result.provider.as_ref()));
+    let summary = TimelineItem::outcome(timeline_status(succeeded), "Reset");
+    let summary = if details.is_empty() {
+        summary
+    } else {
+        summary.with_detail(details.join("\n"))
     };
     presenter.print_timeline(&[summary]);
 }
