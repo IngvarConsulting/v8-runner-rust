@@ -182,7 +182,7 @@ window.RUNNER_DATA = (function () {
     {
       id: 'reset', verb: 'reset', title: 'Отбросить непринятое в базе',
       what: 'Возвращает основную конфигурацию к конфигурации базы данных; без набора — основную, расширение — своим набором.',
-      cmd: function (ctx) { return 'v8-runner reset'; },
+      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner reset my-ext' : 'v8-runner reset'); },
       applies: function (ctx) { return notExternal(ctx, 'reset'); },
       today: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer], config: ['connection — прямой шлюз', 'providers.reset'], note: '/RollbackCfg по прямому шлюзу; у SSH-шлюза и агента отката нет; не замерено' };

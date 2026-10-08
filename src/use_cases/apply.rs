@@ -472,13 +472,12 @@ impl Executor {
         self.binary.as_deref()
     }
 
-    fn located(&self) -> Result<&std::path::Path, AppError> {
-        self.binary.as_deref().ok_or_else(|| {
-            AppError::Runtime(format!(
-                "{} was not located before the apply",
-                self.provider
-            ))
-        })
+    /// Исполнитель и его утилита — в том виде, что знает общий читатель поколения.
+    fn tool(&self) -> LocatedTool<'_> {
+        LocatedTool {
+            provider: self.provider,
+            binary: self.binary.as_deref(),
+        }
     }
 
     fn session(
@@ -516,7 +515,7 @@ impl Executor {
     ) -> Result<(), AppError> {
         match self.provider {
             Provider::Designer => {
-                let binary = self.located()?.to_path_buf();
+                let binary = self.tool().path(context)?.to_path_buf();
                 let log_file = designer_log_file(
                     config,
                     &format!("apply-{index:02}-{}", subject.timeline.replace(':', "-")),
@@ -534,7 +533,7 @@ impl Executor {
                 )
             }
             Provider::Ibcmd => {
-                let binary = self.located()?.to_path_buf();
+                let binary = self.tool().path(context)?.to_path_buf();
                 act::apply(
                     context,
                     config,

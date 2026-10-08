@@ -209,18 +209,24 @@ fn discard(
     // Поколение до отката сверяется с записью, как у `apply`: запись переписывается, только
     // когда база не ушла от неё, — иначе откат спрятал бы чужую загрузку от проверки
     // `non_fast_forward` следующей отправки.
-    let before = match &record {
-        Some((_, record)) if record.after != GenerationAfter::FailedBuild => {
-            match executor.read_generation(context, config, record.tool, set, extension) {
-                Ok(before) => Some(before),
-                Err(error) if error.cancellation().is_some() => return Err(error),
-                Err(error) => {
-                    tracing::debug!(%error, "the generation before the reset is not known");
-                    Some(None)
+    let record = match record {
+        Some((memory, record)) => {
+            let before = if record.after == GenerationAfter::FailedBuild {
+                Before::FailedLoad
+            } else {
+                match executor.read_generation(context, config, record.tool, set, extension) {
+                    Ok(Some(token)) => Before::Token(token),
+                    Ok(None) => Before::NoAnswer,
+                    Err(error) if error.cancellation().is_some() => return Err(error),
+                    Err(error) => {
+                        tracing::debug!(%error, "the generation before the reset is not known");
+                        Before::NoAnswer
+                    }
                 }
-            }
+            };
+            Some((memory, record, before))
         }
-        _ => None,
+        None => None,
     };
     // Пришедшая отмена останавливает до памяти: пустая память без отката заставила бы
     // следующую отправку грузить набор целиком зря.
@@ -240,43 +246,47 @@ fn discard(
     let ((), deferrals) = collecting_deferrals(|deferrals| {
         executor.roll_back(context, config, set, extension, deferrals)
     })?;
-    let (generation, note) = match (record, before) {
-        (None, _) => (GenerationRecordFate::Unchecked, None),
-        // Запись перед неудачной загрузкой остаётся: что та загрузка сделала с базой,
-        // неизвестно, и её сверку делает следующая отправка.
-        (Some(_), None) => (
-            GenerationRecordFate::Kept,
-            Some(format!(
-                "the generation record of source-set '{}' was made before a failed load and is kept, so the next push compares the infobase with it",
-                set.name
-            )),
-        ),
-        (Some((memory, record)), Some(Some(token))) if token == record.token => {
-            let after = executor.read_generation(context, config, record.tool, set, extension);
-            generation_record::carry_record(
+    let (generation, note) = match record {
+        None => (GenerationRecordFate::Unchecked, None),
+        Some((memory, record, before)) => match before {
+            // Запись перед неудачной загрузкой остаётся: что та загрузка сделала с базой,
+            // неизвестно, и её сверку делает следующая отправка.
+            Before::FailedLoad => (
+                GenerationRecordFate::Kept,
+                Some(format!(
+                    "the generation record of source-set '{}' was made before a failed load and is kept, so the next push compares the infobase with it",
+                    set.name
+                )),
+            ),
+            Before::Token(token) if token == record.token => {
+                let after = executor.read_generation(context, config, record.tool, set, extension);
+                generation_record::carry_record(
+                    RecordStep::Reset,
+                    memory,
+                    &config.work_path,
+                    &record,
+                    after,
+                )?
+            }
+            // После отката поколение может вернуться к записи (правили в Конфигураторе, не
+            // применив) — тогда отправка пройдёт; иначе она откажет.
+            Before::Token(token) => (
+                GenerationRecordFate::Kept,
+                Some(format!(
+                    "the infobase moved away from the record of source-set '{}' before the reset: its configuration generation was {token}, the record after the last {} is {}; the record is kept, so the next push that loads is refused if the infobase still differs from the record",
+                    set.name, record.after, record.token
+                )),
+            ),
+            Before::NoAnswer => generation_record::erase_record(
                 RecordStep::Reset,
                 memory,
                 &config.work_path,
-                &record,
-                after,
-            )?
-        }
-        (Some((_, record)), Some(Some(token))) => (
-            GenerationRecordFate::Kept,
-            Some(format!(
-                "the infobase moved ahead of the record of source-set '{}' before the reset: its configuration generation was {token}, the record after the last {} is {}; the record is kept, so the next push that loads is refused until the infobase is pulled or overwritten",
-                set.name, record.after, record.token
-            )),
-        ),
-        (Some((memory, record)), Some(None)) => generation_record::erase_record(
-            RecordStep::Reset,
-            memory,
-            &config.work_path,
-            &format!(
-                "could not be read by {}, the tool of its record",
-                record.tool
+                &format!(
+                    "could not be read by {}, the tool of its record",
+                    record.tool
+                ),
             ),
-        ),
+        },
     };
     result.generation = Some(generation);
     result.outcome = ResetOutcome::Discarded;
@@ -290,6 +300,15 @@ fn discard(
         &warnings,
     ));
     Ok(())
+}
+
+/// Поколение базы до отката, сверяемое с записью набора.
+enum Before {
+    /// Запись сделана перед неудачной загрузкой: поколение не спрашивается.
+    FailedLoad,
+    /// Инструмент записи не ответил.
+    NoAnswer,
+    Token(String),
 }
 
 /// Исполнитель команды: процесс платформы на каждое действие.

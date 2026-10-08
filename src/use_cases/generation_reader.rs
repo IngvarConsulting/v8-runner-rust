@@ -115,9 +115,15 @@ pub(crate) fn read_by_record_tool(
     name: &str,
     extension: Option<&str>,
 ) -> Result<Option<String>, AppError> {
-    let utility = match tool {
-        Provider::Designer => UtilityType::V8,
-        Provider::Ibcmd => UtilityType::Ibcmd,
+    /// Инструмент записи, который отвечает процессом платформы.
+    #[derive(Clone, Copy)]
+    enum Process {
+        Designer,
+        Ibcmd,
+    }
+    let (process, utility) = match tool {
+        Provider::Designer => (Process::Designer, UtilityType::V8),
+        Provider::Ibcmd => (Process::Ibcmd, UtilityType::Ibcmd),
         Provider::Agent | Provider::IbcmdRs | Provider::Webinst => return Ok(None),
     };
     let binary = if tool == executor.provider {
@@ -136,19 +142,17 @@ pub(crate) fn read_by_record_tool(
         context,
         config,
         || {
-            // `tool` здесь — Конфигуратор или `ibcmd`: прочие ответили выше.
-            Ok(if tool == Provider::Ibcmd {
-                GenerationProcess::Ibcmd {
+            Ok(match process {
+                Process::Ibcmd => GenerationProcess::Ibcmd {
                     binary: &binary,
                     runner,
                     data_path: None,
-                }
-            } else {
-                GenerationProcess::Designer {
+                },
+                Process::Designer => GenerationProcess::Designer {
                     binary: &binary,
                     runner,
                     log_file: designer_log_file(config, name)?,
-                }
+                },
             })
         },
         extension,

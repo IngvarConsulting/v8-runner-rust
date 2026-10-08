@@ -62,6 +62,7 @@ case "$*" in
       exit 1
     fi
     cp "$state/db$suffix" "$state/main$suffix"
+    if [ -f "$state/rollback-forgets" ]; then rm -f "$state/token$suffix"; fi
     if [ -f "$state/rollback-token" ]; then mv "$state/rollback-token" "$state/token$suffix"; fi
     if [ -f "$state/ibcmd-rollback-token" ]; then mv "$state/ibcmd-rollback-token" "$state/ibcmd-token$suffix"; fi ;;
 esac
@@ -598,8 +599,8 @@ fn reset_rewrites_the_record_with_the_tool_that_made_it() {
     );
 }
 
-/// Инструмент записи не ответил поколением после отката: запись стёрта и названа, а
-/// следующая отправка не отказывает `no_memory` — память набора есть, пустая.
+/// Инструмент записи не ответил поколением до отката: запись стёрта и названа, а следующая
+/// отправка не отказывает `no_memory` — память набора есть, пустая.
 #[test]
 fn reset_without_an_answer_erases_the_record() {
     let project = Project::new();
@@ -850,7 +851,7 @@ fn reset_into_a_base_that_moved_keeps_the_record_and_the_next_push_is_refused() 
         reset["data"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("moved ahead of the record"),
+            .contains("moved away from the record"),
         "{reset}"
     );
     assert_eq!(project.ledger(), ledger);
@@ -918,4 +919,27 @@ fn reset_erases_a_record_made_by_the_agent() {
 
     let pushed = succeeded(&project.run(&["push"]));
     assert_eq!(pushed["data"]["steps"][0]["mode"], "full", "{pushed}");
+}
+
+/// Поколение до отката совпало с записью, а после отката инструмент записи не ответил:
+/// запись стёрта и названа.
+#[test]
+fn reset_without_an_answer_after_the_rollback_erases_the_record() {
+    let project = Project::new();
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    succeeded(&project.run(&["push", "--no-apply"]));
+    project.mark("rollback-forgets");
+
+    let reset = succeeded(&project.run(&["reset"]));
+
+    assert_eq!(reset["data"]["generation"], "erased", "{reset}");
+    assert!(
+        reset["data"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is not known after the reset"),
+        "{reset}"
+    );
+    assert!(project.record().is_null(), "{}", project.ledger());
 }
