@@ -237,11 +237,13 @@ mod tests {
         let margin = Duration::from_nanos(COARSE_MARGIN_NS);
         let watermark = SystemTime::now() - 10 * margin;
         let old = watermark - 2 * margin;
+        let near = watermark - margin / 2;
         write_touched(&root.join("Old.bsl"), "old", old);
-        write_touched(&root.join("Near.bsl"), "near", watermark - margin / 2);
+        write_touched(&root.join("Near.bsl"), "near", near);
         write_touched(&root.join("New.bsl"), "new", old);
         let at = |time| mtime_nanos(time, root).expect("mtime");
-        let known: HashMap<String, u64> = [("Old.bsl", at(old)), ("Near.bsl", at(old))]
+        // Near.bsl запомнен со своим временем: кандидат он только по запасу у отметки.
+        let known: HashMap<String, u64> = [("Old.bsl", at(old)), ("Near.bsl", at(near))]
             .map(|(name, mtime)| (name.to_owned(), mtime))
             .into();
 

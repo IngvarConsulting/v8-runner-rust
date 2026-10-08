@@ -578,14 +578,7 @@ mod tests {
         let work_path = dir.path().join("work");
         std::fs::create_dir_all(&source_root).expect("source");
         let module = source_root.join("Tests.bsl");
-        std::fs::write(&module, "Процедура Тест() КонецПроцедуры").expect("saved copy");
         let saved_at = SystemTime::now() - std::time::Duration::from_secs(600);
-        File::options()
-            .write(true)
-            .open(&module)
-            .expect("open")
-            .set_modified(saved_at)
-            .expect("set mtime");
         std::fs::write(&module, "Процедура ВременныйТест() КонецПроцедуры").expect("temporary");
         let context = SourceSetContext::new("main", source_root, "designer-main");
         rescan_and_commit_full(&context, &work_path).expect("prime");
