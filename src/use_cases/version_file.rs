@@ -186,8 +186,7 @@ impl RunnerVersionFile {
 /// Перед загрузкой: версия формата файла версий не новее той, что пишет платформа.
 ///
 /// Версию, которую пишет платформа, раннер берёт из таблицы замеров
-/// ([`known_format`]); для платформы вне таблицы сверки нет и примечания тоже — пока таблица
-/// пуста (#403), сверки нет ни у одной платформы.
+/// ([`known_format`]); для платформы вне таблицы сверки нет и примечания тоже.
 pub(crate) fn check_load_format(
     work_path: &Path,
     context: &SourceSetContext,
@@ -443,7 +442,7 @@ mod tests {
     /// Механизм сверки на версии формата, переданной тестом: нет файла в каталоге — версия
     /// берётся из копии раннера той же пары; формат новее платформы — отказ с обеими
     /// версиями, не новее — загрузка идёт; нет файла или версия не распознана — пропуск
-    /// назван. Таблица замеров пуста (#403), и без неё сверки нет вовсе.
+    /// назван. Платформа из таблицы замеров (#403) сверяется и без версии из теста.
     #[test]
     fn the_load_format_is_read_from_the_runner_copy_when_the_directory_has_none() {
         let root = tempfile::tempdir().expect("root");
@@ -468,9 +467,17 @@ mod tests {
             refusal.contains("2.20 that platform 8.3.27.2074 writes"),
             "{refusal}"
         );
+        let measured = super::check_load_format(&work, &context, Some(&platform))
+            .expect_err("8.3.27 writes 2.20 by measurement")
+            .to_string();
+        assert!(measured.contains("format 2.21"), "{measured}");
+        let unmeasured = crate::platform::locator::PlatformVersion {
+            patch: 26,
+            ..platform.clone()
+        };
         assert_eq!(
-            super::check_load_format(&work, &context, Some(&platform))
-                .expect("no measured format, no check"),
+            super::check_load_format(&work, &context, Some(&unmeasured))
+                .expect("a platform outside the table is not checked"),
             None
         );
 

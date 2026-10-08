@@ -2587,8 +2587,8 @@ exit 0"#,
     }
 
     /// Файл без распознанной версии формата чужой, и выгрузка по изменившемуся становится
-    /// полной. Прочитанную версию чужой делает только таблица замеров, а она пуста (#403):
-    /// без неё никакая версия чужой не считается. Механизм сверки — на версии из теста.
+    /// полной. Прочитанную версию чужой делает только таблица замеров (#403): для платформы
+    /// вне таблицы никакая версия чужой не считается.
     #[test]
     fn an_unrecognized_format_turns_the_dump_full_and_a_version_is_foreign_only_by_measurement() {
         use super::{
@@ -2613,18 +2613,42 @@ exit 0"#,
         fs::write(&file, "<ConfigDumpInfo format=\"Hierarchical\">").expect("no version");
         assert_eq!(plan(Some(&file)), whole(WholeReason::Unrecognized));
         assert_eq!(plan(Some(&file)).mode(), DumpMode::Full);
-        for version in ["2.17", "2.20", "9.99"] {
+        let write_version = |version: &str| {
             fs::write(
                 &file,
                 format!("<ConfigDumpInfo format=\"Hierarchical\" version=\"{version}\">"),
             )
             .expect("version file");
+        };
+        write_version("2.20");
+        assert_eq!(
+            plan(Some(&file)),
+            DumpPlan::OverDirectory(OverDirectory::ByVersionFile)
+        );
+        for (version, found) in [
+            ("2.17", FormatVersion::new(2, 17)),
+            ("9.99", FormatVersion::new(9, 99)),
+        ] {
+            write_version(version);
             assert_eq!(
                 plan(Some(&file)),
-                DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
-                "{version}"
+                whole(WholeReason::Foreign {
+                    found,
+                    platform: platform.clone(),
+                    written: FormatVersion::new(2, 20),
+                }),
+                "{version}: 8.3.27 writes 2.20 by measurement"
             );
         }
+        let unmeasured = crate::platform::locator::PlatformVersion {
+            patch: 26,
+            ..platform.clone()
+        };
+        assert_eq!(
+            plan_dump(&DumpMode::Incremental, Some(&file), Some(&unmeasured)).expect("plan"),
+            DumpPlan::OverDirectory(OverDirectory::ByVersionFile),
+            "a platform outside the table has no foreign version"
+        );
         assert_eq!(
             plan_dump(&DumpMode::Full, None, None).expect("full"),
             DumpPlan::Full

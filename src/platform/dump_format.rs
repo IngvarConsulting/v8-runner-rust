@@ -24,13 +24,6 @@ pub struct FormatVersion {
 }
 
 impl FormatVersion {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "строки таблицы замеров WRITTEN_FORMATS появятся по #403"
-        )
-    )]
     pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
     }
@@ -51,10 +44,14 @@ impl fmt::Display for FormatVersion {
 }
 
 /// Версии формата, которые пишут известные раннеру платформы. Строка попадает сюда только
-/// по замеру (`references/1c/confirmed-runtime-measurements.md`); платформы вне таблицы
-/// раннер не угадывает. Замеренных строк пока нет — #403, и до них никакая прочитанная
-/// версия по таблице чужой не считается, а загрузка по ней не отказывает.
-const WRITTEN_FORMATS: &[((u32, u32, u32), FormatVersion)] = &[];
+/// по замеру (`references/1c/confirmed-runtime-measurements.md`, раздел о версии формата
+/// файла версий, #403); платформы вне таблицы раннер не угадывает. Конфигуратор, `ibcmd` и
+/// агент одной платформы пишут одну и ту же версию, а выгрузка по изменившемуся принимает
+/// только её.
+const WRITTEN_FORMATS: &[((u32, u32, u32), FormatVersion)] = &[
+    ((8, 3, 27), FormatVersion::new(2, 20)),
+    ((8, 5, 4), FormatVersion::new(2, 22)),
+];
 
 /// Платформа и версия формата, которую она пишет по таблице замеров; `None`, если версия
 /// платформы раннеру не видна или её нет в таблице.
@@ -131,7 +128,9 @@ fn root_version(head: &str) -> Option<FormatVersion> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_recorded, root_version, written_in, FormatVersion, RecordedFormat};
+    use super::{
+        known_format, read_recorded, root_version, written_in, FormatVersion, RecordedFormat,
+    };
     use crate::platform::locator::PlatformVersion;
 
     #[test]
@@ -190,5 +189,27 @@ mod tests {
             Some(FormatVersion::new(2, 20))
         );
         assert_eq!(written_in(&table, &platform(26)), None);
+    }
+
+    /// Строки таблицы — замеры #403: 8.3.27 пишет 2.20, 8.5.4 — 2.22.
+    #[test]
+    fn the_table_holds_the_measured_platforms() {
+        let platform = |minor, patch, build| PlatformVersion {
+            major: 8,
+            minor,
+            patch,
+            build,
+        };
+        let written = |version: PlatformVersion| known_format(Some(&version)).map(|(_, f)| f);
+        assert_eq!(
+            written(platform(3, 27, 2074)),
+            Some(FormatVersion::new(2, 20))
+        );
+        assert_eq!(
+            written(platform(5, 4, 1878)),
+            Some(FormatVersion::new(2, 22))
+        );
+        assert_eq!(written(platform(5, 1, 1519)), None);
+        assert_eq!(known_format(None), None);
     }
 }

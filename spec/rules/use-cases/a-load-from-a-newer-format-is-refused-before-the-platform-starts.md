@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.A-LOAD-FROM-A-NEWER-FORMAT-IS-REFUSED-BEFORE-THE-PLATFORM-STARTS
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/403
+check:
+  - src/use_cases/version_file.rs::the_load_format_is_read_from_the_runner_copy_when_the_directory_has_none
+  - src/platform/dump_format.rs::the_table_holds_the_measured_platforms
 ---
 
 # Загрузка из формата новее платформы получает отказ до её запуска

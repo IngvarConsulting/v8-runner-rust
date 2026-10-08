@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.A-FOREIGN-FORMAT-VERSION-TURNS-THE-DUMP-FULL
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/403
+check:
+  - src/use_cases/dump_config.rs::an_unrecognized_format_turns_the_dump_full_and_a_version_is_foreign_only_by_measurement
+  - src/platform/dump_format.rs::the_table_holds_the_measured_platforms
 ---
 
 # Чужая версия формата делает выгрузку полной
