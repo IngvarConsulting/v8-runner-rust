@@ -526,6 +526,44 @@ fn an_external_set_with_a_dot_in_its_name_is_built_into_its_directory() {
     );
 }
 
+/// Внешний набор с голым относительным `--output` (`Deploy`) публикуется в каталог от
+/// текущего: родитель пустого пути — текущий каталог, а не ошибка fsync (#443).
+#[test]
+fn an_external_set_is_published_to_a_bare_relative_output() {
+    let project = Project::new(&[]);
+    let output = project.run(&["make", "tools", "--output", "Deploy"]);
+    let first = envelope(&output);
+    assert!(output.status.success(), "{first}");
+    let deploy = project.root.join("Deploy");
+    assert!(deploy.is_dir(), "{first}");
+    assert!(
+        fs::read_dir(&deploy).expect("deploy dir").next().is_some(),
+        "{first}"
+    );
+
+    // Повторная сборка заменяет существующий каталог — путь с резервной копией.
+    let again = project.run(&["make", "tools", "--output", "Deploy"]);
+    assert!(again.status.success(), "{}", envelope(&again));
+    assert!(deploy.is_dir());
+    // Ни в каталоге, ни рядом с ним не остаётся служебных меток промежуточных копий.
+    for dir in [&deploy, &project.root] {
+        let leftovers: Vec<_> = fs::read_dir(dir)
+            .expect("listing")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".meta.json") || name.starts_with(".v8-runner"))
+            .collect();
+        assert!(leftovers.is_empty(), "{}: {leftovers:?}", dir.display());
+    }
+
+    // Файл пакета с голым именем — замена файла в текущем каталоге.
+    let package = project.run(&["make", "main", "--output", "main.cf"]);
+    assert!(package.status.success(), "{}", envelope(&package));
+    assert!(project.root.join("main.cf").is_file());
+    let replaced = project.run(&["make", "main", "--output", "main.cf"]);
+    assert!(replaced.status.success(), "{}", envelope(&replaced));
+}
+
 /// Два набора, чьи пакеты (файл или каталог) на файловой системе без регистра назвались бы
 /// одним именем, и набор с именем устройства Windows — отказ до работы.
 #[test]
