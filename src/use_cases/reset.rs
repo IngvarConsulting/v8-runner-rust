@@ -243,8 +243,21 @@ fn discard(
         )?,
         None => HashMemoryFate::Absent,
     });
+    let memory_emptied = result.hash_memory == Some(HashMemoryFate::Replaced);
     let ((), deferrals) = collecting_deferrals(|deferrals| {
         executor.roll_back(context, config, set, extension, deferrals)
+    })
+    .map_err(|error| {
+        // Память набора уже пуста: следующая отправка грузит его целиком — это видно и в
+        // тексте, а не только в поле `hash_memory`.
+        if memory_emptied {
+            error.with_context(format!(
+                "the source memory of source-set '{}' was emptied before the rollback, so the next push loads it in full",
+                set.name
+            ))
+        } else {
+            error
+        }
     })?;
     let (generation, note) = match record {
         None => (GenerationRecordFate::Unchecked, None),

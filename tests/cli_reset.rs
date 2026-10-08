@@ -551,6 +551,10 @@ fn a_failed_rollback_answers_a_platform_failure_and_the_next_push_loads_everythi
         message.contains("close it and run reset again"),
         "{message}"
     );
+    assert!(
+        message.contains("was emptied before the rollback, so the next push loads it in full"),
+        "the text names the emptied memory, not only `hash_memory`: {message}"
+    );
     assert_eq!(rollbacks(&project.calls()).len(), 1, "{}", project.calls());
 
     fs::remove_file(project.state("rollback-fails")).expect("unmark");
