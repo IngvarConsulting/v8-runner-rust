@@ -217,7 +217,9 @@ impl AppError {
             Self::ValidationIbcmd(source) | Self::ValidationIbcmdContext { source, .. } => {
                 match source {
                     IbcmdError::Spawn(error) => process_cancellation(error),
-                    IbcmdError::MissingServerDbmsField(_) => None,
+                    IbcmdError::MissingServerDbmsField(_) | IbcmdError::DirectoryWipingExport => {
+                        None
+                    }
                 }
             }
             Self::PlatformEdt(source) | Self::PlatformEdtContext { source, .. } => match source {
@@ -386,6 +388,7 @@ impl From<IbcmdError> for AppError {
         match error {
             IbcmdError::MissingServerDbmsField(_) => Self::ValidationIbcmd(error),
             IbcmdError::Spawn(error) => Self::PlatformProcess(error),
+            IbcmdError::DirectoryWipingExport => Self::Runtime(error.to_string()),
         }
     }
 }
