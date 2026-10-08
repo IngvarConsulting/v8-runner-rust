@@ -2,6 +2,8 @@
 id: INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT
 check:
   - tests/cli_infobases.rs::a_refusal_without_origin_names_the_ways_out
+  - src/use_cases/infobase_owner.rs::the_refusal_and_the_warning_name_the_same_ways_out
+  - tests/architecture_guardrails.rs::the_ways_to_an_own_infobase_have_one_builder
 ---
 
 # Отказ без своей базы называет выходы

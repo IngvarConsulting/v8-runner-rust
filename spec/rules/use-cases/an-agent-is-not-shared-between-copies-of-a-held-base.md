@@ -8,5 +8,4 @@ check:
 
 Сессия агента Конфигуратора живёт одной командой одной рабочей копии и не обслуживает
 разные рабочие копии базы, у которой есть владелец
-(`INV.USE-CASES.A-DEVELOPMENT-BASE-IS-HELD-BY-ONE-WORKING-COPY`), — в том числе когда копия
-пишет в базу другой копии.
+(`INV.USE-CASES.A-DEVELOPMENT-BASE-IS-HELD-BY-ONE-WORKING-COPY`).

@@ -207,6 +207,11 @@ fn another_copy_warning(payload: &Value, command: &str, owner: &Copy, stand: &St
     ] {
         assert!(warning.contains(way), "{way}: {warning}");
     }
+    assert!(
+        warning.contains("To free the infobase: remove the infobase from v8project.local.yaml of")
+            || warning.contains("To free the infobase: delete the record of"),
+        "says how to free the base: {warning}"
+    );
     assert!(!warning.contains("shared"), "{warning}");
     warning
 }

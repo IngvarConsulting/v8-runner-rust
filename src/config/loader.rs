@@ -373,7 +373,7 @@ fn reject_local_keys_in_project_file(
 /// больше нет, и переходного чтения ключа нет (решение владельца от 07.10.2026, #437).
 fn reject_gone_shared_key(
     mapping: &serde_yaml::Mapping,
-    file: &str,
+    file: &'static str,
 ) -> Result<(), ConfigValidationError> {
     let (synonym, map) = INFOBASE_SECTION_SYNONYM;
     let legacy = mapping
@@ -395,10 +395,7 @@ fn reject_gone_shared_key(
         .chain(declared)
         .find(|(_, section)| mapping_contains_key(section, REMOVED_SHARED_INFOBASE_KEY))
     {
-        Some((section, _)) => Err(ConfigValidationError::SharedInfobaseKeyIsGone {
-            section,
-            file: file.to_owned(),
-        }),
+        Some((section, _)) => Err(ConfigValidationError::SharedInfobaseKeyIsGone { section, file }),
         None => Ok(()),
     }
 }

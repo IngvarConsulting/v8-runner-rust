@@ -303,6 +303,7 @@ origin: File="/srv/ib/demo"
 <pre class="sh"><code>$ v8-runner push --dry-run
 ▲ push пишет в базу File=/work/erp/build/ib другой рабочей копии: её держит /work/erp на этой машине
   команда меняет базу этой копии; владельцем в метке остаётся /work/erp
+  освободить базу:  убрать её из местного слоя /work/erp
   копия с данными:  v8-runner init --infobase File=build/ib
                     v8-runner infobase create --from upstream
   из эталона .dt:   v8-runner init --infobase File=build/ib

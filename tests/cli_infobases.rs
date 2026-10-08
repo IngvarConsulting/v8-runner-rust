@@ -410,6 +410,10 @@ fn a_refusal_without_origin_names_the_ways_out() {
     ] {
         assert!(message.contains(way), "{way}: {message}");
     }
+    assert!(
+        !message.contains("shared"),
+        "a shared infobase is no way out: {message}"
+    );
     assert!(!project.platform_calls.exists());
 }
 

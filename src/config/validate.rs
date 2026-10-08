@@ -333,9 +333,10 @@ pub enum ConfigValidationError {
     InfobasesBelongToTheLocalLayer,
 
     #[error(
-        "unknown key `shared` in {section} of {file}: shared infobases are gone (incompatible with 0.13.0) — remove `shared`; a write command on an infobase of another working copy now runs and warns whose infobase it changes"
+        "unknown key `{key}` in {section} of {file}: shared infobases are gone (incompatible with 0.13.0) — remove `{key}`; a write command on an infobase of another working copy now runs and warns whose infobase it changes",
+        key = crate::config::schema::REMOVED_SHARED_INFOBASE_KEY
     )]
-    SharedInfobaseKeyIsGone { section: String, file: String },
+    SharedInfobaseKeyIsGone { section: String, file: &'static str },
 
     #[error(
         "{file} declares both `infobase` and `infobases`: `infobase` is the one-cycle synonym for `infobases.origin`, keep one of them"
@@ -367,7 +368,8 @@ pub enum ConfigValidationError {
     InfobaseNotDeclared { name: String, declared: String },
 
     #[error(
-        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`). Ways out for a working copy without an infobase of its own: its own clean infobase — `v8-runner init --infobase <connection string>`, then `v8-runner infobase create`; a copy of a declared infobase with its data — `v8-runner init --infobase <connection string>`, then `v8-runner infobase create --from <infobase>`; an infobase deployed from a reference image — `v8-runner init --infobase <connection string>`, then `v8-runner infobase restore --input <reference>.dt --create`"
+        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`). Ways out for a working copy without an infobase of its own: {ways}",
+        ways = crate::domain::next_step::ways_to_an_own_infobase("<infobase>")
     )]
     OriginNotDeclared { declared: String },
 

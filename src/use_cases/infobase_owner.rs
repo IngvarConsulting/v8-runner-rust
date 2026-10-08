@@ -207,6 +207,9 @@ fn check_as(
             Standing::This | Standing::Gone(_) => None,
         })
         .collect();
+    let recorded = owners
+        .iter()
+        .any(|(_, standing)| matches!(standing, Standing::This));
     // База другой живой копии: команда идёт с предупреждением, а метку не трогает — ни
     // прогон, ни превью. Владельцем остаётся прежняя копия, и её следующая команда сама
     // увидит, что база ушла вперёд её памяти.
@@ -216,6 +219,7 @@ fn check_as(
             &base_dir,
             &marker_path,
             &alive,
+            recorded,
         )]);
     }
     // Превью ничего не берёт, а строка соединения владельцем не становится — даже на базе
@@ -231,9 +235,6 @@ fn check_as(
             Standing::This | Standing::Alive(_) => None,
         })
         .collect();
-    let recorded = owners
-        .iter()
-        .any(|(_, standing)| matches!(standing, Standing::This));
     if recorded && gone.is_empty() {
         return Ok(Vec::new());
     }
@@ -439,13 +440,18 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
 }
 
 /// Предупреждение команды записи на базе другой копии: чья база, что команда её меняет,
-/// где метка и как завести свою базу. Метку команда не меняет: владельцем остаётся прежняя
-/// копия.
+/// где метка, как освободить базу и как завести свою. Метку команда не меняет: владельцем
+/// остаётся прежняя копия.
+///
+/// `this_recorded` — эта копия тоже записана в метке: наследие общей базы 0.13.0, где
+/// владельцев было несколько. Тогда предупреждение говорит об этом и называет, как сделать
+/// базу только своей: без этого каждая её команда записи предупреждала бы всегда.
 fn another_copy_warning(
     command_name: &str,
     base_dir: &Path,
     marker_path: &Path,
     alive: &[(&OwnerRecord, &Alive)],
+    this_recorded: bool,
 ) -> String {
     let holders = alive
         .iter()
@@ -460,7 +466,7 @@ fn another_copy_warning(
             ),
             Alive::Remote { maybe_this_machine } => {
                 let maybe = if *maybe_this_machine {
-                    " (its record names this project and this host name with another machine identifier — perhaps it is this machine whose identifier changed: then delete that record from the owner marker)"
+                    " (its record names this project and this host name with another machine identifier — perhaps it is this machine whose identifier changed)"
                 } else {
                     ""
                 };
@@ -473,14 +479,39 @@ fn another_copy_warning(
         })
         .collect::<Vec<_>>()
         .join("; ");
+    let release = alive
+        .iter()
+        .map(|(owner, why)| match why {
+            Alive::Declares | Alive::Unreadable(_) => format!(
+                "remove the infobase from v8project.local.yaml of '{}' or remove that working copy",
+                owner.project.display()
+            ),
+            Alive::Remote { .. } => format!(
+                "delete the record of '{}' from the owner marker by hand",
+                owner.project.display()
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let marker = marker_path.display();
+    let whose = if this_recorded {
+        format!(
+            "{command_name} writes the infobase '{}', which the owner marker '{marker}' records for this working copy and also for {holders} — a leftover of a shared infobase of 0.13.0, and shared infobases are gone. \
+             The command changes the infobase of those working copies too, and the marker stays as it is. \
+             To make the infobase this working copy's own: {release}",
+            base_dir.display()
+        )
+    } else {
+        format!(
+            "{command_name} writes the infobase '{}' of another working copy: it is held by {holders}. \
+             The command changes that working copy's infobase, and its owner stays as it is in the owner marker '{marker}'. \
+             To free the infobase: {release}",
+            base_dir.display()
+        )
+    };
     format!(
-        "{command_name} writes the infobase '{}' of another working copy: it is held by {holders}. \
-         The command changes that working copy's infobase, and its owner stays as it is in the owner marker '{}'. \
-         Ways to an infobase of this working copy's own: a copy of this infobase with its data — `v8-runner init --infobase <connection string>` points infobases.origin at an infobase of its own (the previous section stays as upstream), then `v8-runner infobase create --from upstream`; \
-         an infobase deployed from a reference image — the same `init --infobase <connection string>`, then `v8-runner infobase restore --input <reference>.dt --create`; \
-         a bare infobase built from the sources — the same `init --infobase <connection string>`, then `v8-runner infobase create`",
-        base_dir.display(),
-        marker_path.display()
+        "{whose}. Ways to an infobase of this working copy's own (`init --infobase` keeps the previous section as upstream): {}",
+        crate::domain::next_step::ways_to_an_own_infobase("upstream")
     )
 }
 
@@ -1074,6 +1105,97 @@ mod tests {
         let validator =
             jsonschema::validator_for(&generated_owner_marker_schema()).expect("schema");
         assert!(validator.is_valid(&written), "{written}");
+    }
+
+    /// Наследие общей базы 0.13.0: эта копия и другая живая записаны в метке обе. Запись идёт с
+    /// особым предупреждением — эта копия тоже владелец, общих баз нет — и называет, как сделать
+    /// базу своей; метка не меняется.
+    #[test]
+    fn a_shared_leftover_names_how_to_make_the_base_own() {
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let config = project(&dir.path().join("copy"), &base);
+        let marker_path = owner_marker_path(&base).expect("marker path");
+        let legacy = serde_json::json!({
+            "version": 1,
+            "owners": [
+                {"machine": super::machine_hash("machine-a"), "host": "host", "project": config.base_path, "shared": true, "since": "2026-10-01T00:00:00Z"},
+                {"machine": super::machine_hash("machine-b"), "host": "build-agent", "project": "/srv/elsewhere", "shared": true, "since": "2026-10-01T00:00:00Z"}
+            ]
+        })
+        .to_string();
+        fs::write(&marker_path, &legacy).expect("marker");
+
+        let warned = check_as(
+            &on("machine-a", "host", &config),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("the write runs");
+
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        for part in [
+            "records for this working copy and also for",
+            "leftover of a shared infobase of 0.13.0",
+            "To make the infobase this working copy's own",
+            "delete the record of '/srv/elsewhere' from the owner marker",
+            &marker_path.display().to_string(),
+        ] {
+            assert!(warned[0].contains(part), "{part}: {warned:?}");
+        }
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), legacy);
+    }
+
+    /// Отказ копии без своей базы и предупреждение о базе другой копии называют одни и те же
+    /// выходы: их текст строит один формирователь, и каждый из двух его берёт.
+    #[test]
+    fn the_refusal_and_the_warning_name_the_same_ways_out() {
+        use crate::domain::next_step::ways_to_an_own_infobase;
+        let refusal = crate::config::validate::ConfigValidationError::OriginNotDeclared {
+            declared: "test".to_owned(),
+        }
+        .to_string();
+        assert!(
+            refusal.contains(&ways_to_an_own_infobase("<infobase>")),
+            "{refusal}"
+        );
+
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let first = project(&dir.path().join("first"), &base);
+        let second = project(&dir.path().join("second"), &base);
+        check_as(
+            &on("machine-a", "host", &first),
+            &first,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("the first copy takes the base");
+        let warned = check_as(
+            &on("machine-a", "host", &second),
+            &second,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("the write runs");
+        assert!(
+            warned[0].contains(&ways_to_an_own_infobase("upstream")),
+            "{warned:?}"
+        );
+        assert!(
+            warned[0].contains(&format!(
+                "remove the infobase from v8project.local.yaml of '{}'",
+                first.base_path.display()
+            )),
+            "{warned:?}"
+        );
+        for text in [&refusal, &warned[0]] {
+            assert!(!text.contains("shared"), "{text}");
+        }
     }
 
     /// Превью команды записи на базе другой копии говорит то же предупреждение, что прогон, и
