@@ -239,8 +239,9 @@ fn attest_applied_prefixes(
     if extensions.is_empty() {
         return Ok(());
     }
-    let temp = crate::support::temp::private_temp_dir(&config.work_path)
-        .map_err(|error| AppError::Runtime(format!("cannot create inventory temp: {error}")))?;
+    let temp =
+        crate::support::temp::private_temp_dir(&config.work_path, "applied-extension-inventory-")
+            .map_err(|error| AppError::Runtime(format!("cannot create inventory temp: {error}")))?;
 
     let result = (|| -> Result<(), AppError> {
         for (index, extension) in extensions.iter_mut().enumerate() {

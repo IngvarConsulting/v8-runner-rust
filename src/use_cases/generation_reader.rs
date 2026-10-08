@@ -96,31 +96,30 @@ fn ibcmd_dsl<'a>(
 /// Есть ли непринятое: основная конфигурация (или расширение `extension`) отличается от
 /// конфигурации базы данных. Признак — побайтное неравенство двух сохранений: `/DumpCfg` и
 /// `/DumpDBCfg` у Конфигуратора, `config save` и `config save --db` у `ibcmd` (замер #412:
-/// у принятой базы сохранения равны и детерминированы, у непринятой расходятся). `None` —
-/// ответа нет: отмена до запуска или сохранение не удалось.
+/// у принятой базы сохранения равны и детерминированы, у непринятой расходятся). Ошибка
+/// называет, почему ответа нет: отмена, отказ сохранения или нечитаемый файл.
 pub(crate) fn read_unapplied<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
     process: impl FnOnce() -> Result<GenerationProcess<'a>, AppError>,
     extension: Option<&str>,
-) -> Result<Option<bool>, AppError> {
-    let pending = || {
+) -> Result<bool, AppError> {
+    let interrupted = || {
         crate::use_cases::interruption::pending_interruption_error(context, "the unapplied check")
-            .is_some()
+            .map_or(Ok(()), Err)
     };
-    if pending() {
-        return Ok(None);
-    }
-    let root = crate::support::temp::temp_root(&config.work_path)
-        .map_err(|error| AppError::Runtime(format!("failed to create temp dir: {error}")))?;
-    let dir = tempfile::Builder::new()
-        .prefix("unapplied-")
-        .tempdir_in(root)
+    let saved = |label: &str, outcome: Result<(), std::num::NonZeroI32>| {
+        outcome
+            .map_err(|code| AppError::Runtime(format!("the {label} save exited with code {code}")))
+    };
+    interrupted()?;
+    // Сохранения — полная конфигурация: каталог закрыт для других пользователей.
+    let dir = crate::support::temp::private_temp_dir(&config.work_path, "unapplied-")
         .map_err(|error| AppError::Runtime(format!("failed to create temp dir: {error}")))?;
     let main = dir.path().join("main.cf");
     let database = dir.path().join("database.cf");
     let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
-    let saved = match process()? {
+    match process()? {
         GenerationProcess::Designer {
             binary,
             runner,
@@ -134,11 +133,12 @@ pub(crate) fn read_unapplied<'a>(
                 policy,
             );
             let first = dsl.dump_cfg(&main, extension).map_err(AppError::from)?;
-            if first.process.outcome().is_err() || pending() {
-                return Ok(None);
-            }
-            dsl.dump_db_cfg(&database, extension)
-                .map_err(AppError::from)?
+            saved("configuration", first.process.outcome())?;
+            interrupted()?;
+            let second = dsl
+                .dump_db_cfg(&database, extension)
+                .map_err(AppError::from)?;
+            saved("database configuration", second.process.outcome())?;
         }
         GenerationProcess::Ibcmd {
             binary,
@@ -149,19 +149,44 @@ pub(crate) fn read_unapplied<'a>(
             let first = dsl
                 .config_save(&main, false, extension)
                 .map_err(AppError::from)?;
-            if first.process.outcome().is_err() || pending() {
-                return Ok(None);
-            }
-            dsl.config_save(&database, true, extension)
-                .map_err(AppError::from)?
+            saved("configuration", first.process.outcome())?;
+            interrupted()?;
+            let second = dsl
+                .config_save(&database, true, extension)
+                .map_err(AppError::from)?;
+            saved("database configuration", second.process.outcome())?;
         }
-    };
-    if saved.process.outcome().is_err() {
-        return Ok(None);
     }
-    match (std::fs::read(&main), std::fs::read(&database)) {
-        (Ok(main), Ok(database)) => Ok(Some(main != database)),
-        _ => Ok(None),
+    let differ = files_differ(&main, &database)
+        .map_err(|error| AppError::Runtime(format!("failed to compare the saves: {error}")));
+    let closed = dir
+        .close()
+        .map_err(|error| AppError::Runtime(format!("failed to remove the saves: {error}")));
+    let differ = differ?;
+    closed?;
+    Ok(differ)
+}
+
+/// Побайтное неравенство файлов: длины, затем блоки — сохранения бывают в сотни мегабайт.
+fn files_differ(left: &Path, right: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+
+    if std::fs::metadata(left)?.len() != std::fs::metadata(right)?.len() {
+        return Ok(true);
+    }
+    let mut left = std::io::BufReader::new(std::fs::File::open(left)?);
+    let mut right = std::io::BufReader::new(std::fs::File::open(right)?);
+    let mut left_block = vec![0u8; 64 * 1024];
+    let mut right_block = vec![0u8; 64 * 1024];
+    loop {
+        let read = left.read(&mut left_block)?;
+        if read == 0 {
+            return Ok(false);
+        }
+        right.read_exact(&mut right_block[..read])?;
+        if left_block[..read] != right_block[..read] {
+            return Ok(true);
+        }
     }
 }
 

@@ -186,11 +186,14 @@ fn deepen(
                         .map(Option::as_deref),
                     record.as_ref(),
                 );
-                with_unapplied(base, asker.unapplied(context, config, *extension))
+                let unapplied = asker
+                    .unapplied(context, config, *extension)
+                    .map_err(|error| error.to_string());
+                with_unapplied(base, unapplied)
             }
             Err(error) => with_unapplied(
                 base_generation(tool, Err(&*error), record.as_ref()),
-                Err(AppError::Runtime(error.to_string())),
+                Err(error.to_string()),
             ),
         });
     }
@@ -206,17 +209,10 @@ fn deepen(
 }
 
 /// Признак непринятого рядом с поколением; чего исполнитель не ответил — `null` с причиной.
-fn with_unapplied(
-    mut base: BaseGeneration,
-    answer: Result<Option<bool>, AppError>,
-) -> BaseGeneration {
+fn with_unapplied(mut base: BaseGeneration, answer: Result<bool, String>) -> BaseGeneration {
     (base.unapplied, base.unapplied_reason) = match answer {
-        Ok(Some(unapplied)) => (Some(unapplied), None),
-        Ok(None) => (
-            None,
-            Some("the tool did not save both configurations".to_owned()),
-        ),
-        Err(error) => (None, Some(error.to_string())),
+        Ok(unapplied) => (Some(unapplied), None),
+        Err(reason) => (None, Some(reason)),
     };
     base
 }
@@ -437,7 +433,7 @@ impl Asker {
         context: &ExecutionContext,
         config: &AppConfig,
         extension: Option<&str>,
-    ) -> Result<Option<bool>, AppError> {
+    ) -> Result<bool, AppError> {
         match &mut self.how {
             How::Designer { binary, utilities } => read_unapplied(
                 context,

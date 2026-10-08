@@ -2,7 +2,7 @@
 //!
 //! Поддельный Конфигуратор отвечает `/GetConfigGenerationID` токеном из файла `token` рядом
 //! с собой, а `/DumpCfg` и `/DumpDBCfg` сохраняет содержимым файлов `main-cfg` и `db-cfg`
-//! (по умолчанию одинаковым); поддельный `ibcmd` отвечает `config extension list` текстом из
+//! (по умолчанию одинаковым; `/DumpDBCfg` отказывает, если есть `db-cfg.fails`); поддельный `ibcmd` отвечает `config extension list` текстом из
 //! файла `extensions`.
 //! Оба пишут свои вызовы в общий журнал, по которому видно, запускалась ли платформа.
 #![cfg(unix)]
@@ -43,6 +43,7 @@ case "$*" in
     if [ -f '{token}' ]; then cat '{token}' > "$out"; fi
     exit 0 ;;
   *'/DumpDBCfg'*)
+    if [ -f '{db}.fails' ]; then exit 1; fi
     if [ -f '{db}' ]; then cat '{db}' > "$target"; else printf 'same' > "$target"; fi
     exit 0 ;;
   *'/DumpCfg'*)
@@ -346,6 +347,34 @@ fn status_deep_names_the_unapplied() {
         calls.contains("/DumpCfg") && calls.contains("/DumpDBCfg"),
         "{calls}"
     );
+    assert!(
+        calls
+            .lines()
+            .any(|line| line.contains("/DumpDBCfg") && line.contains("-Extension")),
+        "the extension set saves its own configuration: {calls}"
+    );
+
+    fs::write(project.root().join("db-cfg.fails"), "").expect("failing save");
+    let failed = succeeded(&project.run(&["status", "--deep"]));
+    let main = set(&failed["data"]["infobases"][0], "main");
+    assert!(main["base"]["unapplied"].is_null(), "{failed}");
+    assert!(
+        main["base"]["unapplied_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("exited with code 1")),
+        "{failed}"
+    );
+    let temp = project.root().join("work").join("temp");
+    let left: Vec<_> = fs::read_dir(&temp)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("unapplied-"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(left.is_empty(), "the saves are removed: {left:?}");
 }
 
 /// `status --deep` называет расширение базы, которого нет в проекте, и набор проекта,
