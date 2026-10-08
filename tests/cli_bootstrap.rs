@@ -354,7 +354,10 @@ fn clone_from_a_base_of_another_copy_runs_with_a_warning() {
     );
     args.insert(0, "--json-message".to_owned());
 
-    let output = v8_runner_command().args(args).output().expect("run command");
+    let output = v8_runner_command()
+        .args(args)
+        .output()
+        .expect("run command");
 
     assert!(
         output.status.success(),
