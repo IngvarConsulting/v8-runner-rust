@@ -322,6 +322,14 @@ impl FakeAgent {
                 false,
             );
         }
+        // Прогноз, как у настоящего агента: список пишется, каталог не трогается.
+        if line.starts_with("config dump-config-to-files") && option("get-changes").is_some() {
+            let list = self
+                .user_dir()
+                .join(option("get-changes").unwrap_or_default());
+            fs::write(&list, "\u{feff}").expect("forecast list");
+            return (success(), false);
+        }
         if line.starts_with("config dump-config-to-files") {
             if self.fail_dump.load(Ordering::SeqCst) {
                 return (

@@ -14,9 +14,9 @@ use crate::platform::locator::UtilityLocation;
 use crate::platform::process::ProcessResult;
 use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
-    argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
-    run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir, write_text, AgentHandle,
-    Exchange, GenerationLedger, Recorded,
+    argument, collect_dir, collect_file, collect_into_dir, connect, expose_dir, generation_id,
+    make_output_dir, run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir,
+    write_text, AgentHandle, Exchange, GenerationLedger, Recorded,
 };
 
 /// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
@@ -153,6 +153,20 @@ fn dump_through(
                 Exchange::Dir(user_dir) => {
                     let target =
                         expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
+                    let forecast = forecast_for(how, || {
+                        forecast_through(
+                            context,
+                            config,
+                            handle,
+                            &exchange,
+                            &ForecastRequest {
+                                target: &target,
+                                extension,
+                                run: &run,
+                            },
+                            wait,
+                        )
+                    })?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={}{update}",
@@ -163,7 +177,13 @@ fn dump_through(
                     log_live_stage(stage, "[агент] exporting configuration files");
                     let outcome = run_command(handle, &command, wait);
                     withdraw_dir(user_dir, &target);
-                    (outcome?, DumpNotes::default())
+                    (
+                        outcome?,
+                        DumpNotes {
+                            forecast,
+                            ..DumpNotes::default()
+                        },
+                    )
                 }
                 // По сети цель целиком не возится: точке входа хватает описи выгрузки
                 // (`ConfigDumpInfo.xml`), чтобы выгрузить только изменённое; обратно
@@ -179,6 +199,20 @@ fn dump_through(
                             &dump_info,
                         )?;
                     }
+                    let forecast = forecast_for(how, || {
+                        forecast_through(
+                            context,
+                            config,
+                            handle,
+                            &exchange,
+                            &ForecastRequest {
+                                target: &target_relative,
+                                extension,
+                                run: &run,
+                            },
+                            wait,
+                        )
+                    })?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={}{update}",
@@ -199,7 +233,13 @@ fn dump_through(
                     tidy(handle, &exchange, &target_relative);
                     let transcript = outcome?;
                     collected.transpose()?;
-                    (transcript, DumpNotes::default())
+                    (
+                        transcript,
+                        DumpNotes {
+                            forecast,
+                            ..DumpNotes::default()
+                        },
+                    )
                 }
             }
         }
@@ -289,6 +329,66 @@ fn dump_through(
     let mut notes = cleanup.after(foreign_note);
     notes.message = merge_optional_messages(notes.message, changed_note);
     Ok((transcript, notes, false))
+}
+
+/// Прогноз нужен только выгрузке по изменившемуся.
+fn forecast_for(
+    how: &OverDirectory,
+    ask: impl FnOnce() -> Result<DumpForecast, AppError>,
+) -> Result<Option<DumpForecast>, AppError> {
+    match how {
+        OverDirectory::ByVersionFile => ask().map(Some),
+        OverDirectory::Whole(_) => Ok(None),
+    }
+}
+
+/// Куда агент кладёт прогноз и что спросить: цель выгрузки и расширение.
+struct ForecastRequest<'r> {
+    target: &'r str,
+    extension: Option<&'r str>,
+    run: &'r str,
+}
+
+/// Прогноз агента: `--get-changes` в той же сессии перед `--update` (замер #166). Список
+/// агент пишет в корень своего каталога пользователя, как в замере; раннер его забирает.
+/// Отказ агента и список вне словаря — «неизвестен», выгрузка идёт как просили; обрыв
+/// сессии, предел ожидания и отмена — ошибка, как у любой команды.
+fn forecast_through(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    request: &ForecastRequest<'_>,
+    wait: &WaitPolicy,
+) -> Result<DumpForecast, AppError> {
+    let list_relative = format!("dump-forecast-{}.txt", request.run);
+    let command = with_extension(
+        format!(
+            "config dump-config-to-files --dir={} --update --get-changes={}",
+            argument(request.target),
+            argument(&list_relative)
+        ),
+        request.extension,
+    );
+    log_live_stage("dump: forecast", "[агент] asking what the dump will do");
+    let reply = handle
+        .session()
+        .run(&command, wait)
+        .map_err(AppError::from)?;
+    ensure_interruption_clear(context, "after the dump forecast")?;
+    if reply.outcome().is_err() {
+        return Ok(DumpForecast::Unknown);
+    }
+    let local = crate::support::temp::dump_forecast_file(&config.work_path).map_err(|error| {
+        AppError::Runtime(format!("failed to create the dump forecast file: {error}"))
+    })?;
+    let read = collect_file(handle, exchange, &list_relative, local.path())
+        .ok()
+        .and_then(|()| std::fs::read(local.path()).ok());
+    tidy(handle, exchange, &list_relative);
+    Ok(read.map_or(DumpForecast::Unknown, |bytes| {
+        crate::platform::dump_forecast::read_changes_list(&bytes)
+    }))
 }
 
 fn with_extension(mut command: String, extension: Option<&str>) -> String {

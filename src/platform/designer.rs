@@ -244,6 +244,28 @@ impl<'a> DesignerDsl<'a> {
         ])
     }
 
+    /// `/DumpConfigToFiles <dir> -update -getChanges <file> [-Extension <name>]`: прогноз
+    /// выгрузки по изменившемуся. Каталог не трогается, список пишется в `list_file`
+    /// (замер #173).
+    pub fn dump_changes_list(
+        &self,
+        target_dir: &Path,
+        list_file: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/DumpConfigToFiles".to_owned());
+        args.push(target_dir.display().to_string());
+        args.push("-update".to_owned());
+        args.push("-getChanges".to_owned());
+        args.push(list_file.display().to_string());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        self.run(&args)
+    }
+
     /// `/DumpConfigToFiles <dir> [-Extension <name>]`
     pub fn dump_config_to_files(
         &self,

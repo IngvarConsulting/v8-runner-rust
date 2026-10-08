@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PULL-ALL-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/pull-all.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -25,6 +25,9 @@ check:
 набор не объявлен, полями `name` и `reason`. Пустые `not_installed`, `not_declared` и
 `if_installed` не пишутся.
 
+**Что изменила версия 2.** Каждая запись `sets` несёт форму `CTR.WIRE.PULL-DATA` версии 6:
+`requested_mode`, случившийся `mode` со значением `UNKNOWN` и необязательное `mode_reason`.
+
 ## Пример
 
 ```json
@@ -41,6 +44,7 @@ check:
       "provider_dispatched": true,
       "up_to_date": false,
       "source_set": "main",
+      "requested_mode": "INCREMENTAL",
       "mode": "INCREMENTAL",
       "target_path": "src/cf",
       "duration_ms": 2900,
@@ -53,7 +57,9 @@ check:
       "up_to_date": false,
       "source_set": "Sales",
       "extension": "Sales",
+      "requested_mode": "INCREMENTAL",
       "mode": "FULL",
+      "mode_reason": "version_file",
       "target_path": "src/ext/Sales",
       "duration_ms": 3100,
       "message": "dump completed successfully"

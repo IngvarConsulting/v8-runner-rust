@@ -5,6 +5,8 @@ pub mod browser;
 pub mod connection;
 pub mod designer;
 pub mod download;
+/// Прогноз режима выгрузки по изменившемуся: что платформа сделает с `-update`.
+pub mod dump_forecast;
 /// Версия формата иерархической выгрузки в файле версий и у платформы.
 pub mod dump_format;
 pub mod edt;

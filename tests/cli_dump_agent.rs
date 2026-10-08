@@ -477,6 +477,12 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
         dumps_after_second, 1,
         "the second command must ask for the generation and stop there"
     );
+    assert!(
+        !commands(&harness)
+            .iter()
+            .any(|line| line.contains("--get-changes")),
+        "a skipped dump asks for no forecast"
+    );
 }
 
 /// Токен, записанный другим инструментом или записью без имени инструмента (журнал
@@ -497,10 +503,13 @@ fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
         serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
     assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
 
+    // Прогноз (`--get-changes`) — вопрос, а не выгрузка.
     let dumps = |harness: &Harness| {
         commands(harness)
             .iter()
-            .filter(|line| line.starts_with("config dump-config-to-files"))
+            .filter(|line| {
+                line.starts_with("config dump-config-to-files") && !line.contains("--get-changes")
+            })
             .count()
     };
     fn another_tool(record: &mut Value) {
@@ -524,6 +533,14 @@ fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
         assert_eq!(code, 0, "{payload}");
         assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
         assert_eq!(dumps(&harness), expected_dumps, "{payload}");
+        // Прогноз в той же сессии перед выгрузкой по изменившемуся; пустой список — изменившееся.
+        assert!(
+            commands(&harness)
+                .iter()
+                .any(|line| line.contains("--update --get-changes=")),
+            "{payload}"
+        );
+        assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
         let ledger: Value =
             serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
         assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");

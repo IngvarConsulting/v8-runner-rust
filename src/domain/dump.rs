@@ -30,7 +30,16 @@ pub struct DumpResult {
     pub extension: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selectors: Option<Vec<DumpSelectorResult>>,
-    pub mode: DumpMode,
+    /// Режим, который просили.
+    pub requested_mode: DumpMode,
+    /// Режим, который случился: по плану раннера и прогнозу платформы
+    /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). У превью — режим плана.
+    pub mode: ReportedDumpMode,
+    /// Почему случившийся режим не тот, что просили, или не известен. Поля нет, когда
+    /// режим тот, что просили, и у выборки `ibcmd`, которая выгружает изменившееся: это
+    /// называет предупреждение в `message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_reason: Option<DumpModeReason>,
     pub target_path: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform_log_path: Option<PathBuf>,
@@ -52,12 +61,48 @@ pub struct DumpSelectorResult {
     pub normalized: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DumpMode {
     Full,
     Incremental,
     Partial,
+}
+
+/// Случившийся режим выгрузки в ответе. В отличие от [`DumpMode`] знает «неизвестен»:
+/// прогноз платформы не распознан или не получен, и обещать «по изменившемуся» нельзя.
+/// Плана с таким режимом не бывает, поэтому значение живёт только в ответе.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReportedDumpMode {
+    Full,
+    Incremental,
+    Partial,
+    Unknown,
+}
+
+impl From<DumpMode> for ReportedDumpMode {
+    fn from(mode: DumpMode) -> Self {
+        match mode {
+            DumpMode::Full => Self::Full,
+            DumpMode::Incremental => Self::Incremental,
+            DumpMode::Partial => Self::Partial,
+        }
+    }
+}
+
+/// Почему случившийся режим не тот, что просили.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DumpModeReason {
+    /// Файла версий нет или версия формата в нём не распознана: выгрузка полная.
+    VersionFile,
+    /// Версия формата в файле версий не та, что пишет платформа: выгрузка полная.
+    ForeignFormat,
+    /// Платформа предсказала полную выгрузку (`FullDump`, `modified: all`).
+    PlatformForecast,
+    /// Прогноз не распознан или не получен: режим не известен.
+    Unknown,
 }
 
 /// Ответ `pull --all`: наборы по составу базы.

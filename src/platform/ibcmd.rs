@@ -506,6 +506,21 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
+    /// `config export status --base=<file> [--extension=<name>]`: прогноз выгрузки по
+    /// изменившемуся относительно файла версий; ответ — в stdout (замер #166).
+    pub fn config_export_status(
+        &self,
+        version_file: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "export", "status"]);
+        if let Some(extension) = extension {
+            push_option_value(&mut args, "--extension", extension);
+        }
+        args.push(format!("--base={}", version_file.display()));
+        self.run_with(&args, &self.execution_policy.for_reading())
+    }
+
     /// Exports changes in sync mode (`--sync`) relative to the version file of an existing
     /// target directory.
     pub fn config_export_incremental(

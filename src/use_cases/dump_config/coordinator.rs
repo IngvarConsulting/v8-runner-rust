@@ -247,8 +247,9 @@ fn run_dump_selected(
         ) {
             let _ = write!(message, "; {note}");
         }
+        let (reported, mode_reason) = plan.reported(None);
         let mut preview = empty_result(
-            planned,
+            mode,
             started,
             Some(resolved.source_set_name.clone()),
             resolved.extension.clone(),
@@ -257,6 +258,8 @@ fn run_dump_selected(
             Some(message),
         );
         preview.ok = true;
+        preview.mode = reported;
+        preview.mode_reason = mode_reason;
         preview.losses = losses.into_paths();
         return Ok(preview);
     }
@@ -466,7 +469,7 @@ fn run_dump_selected(
             whole_consequences(context, config, &resolved)
         )
     });
-    let mode = plan.mode();
+    let requested = mode;
 
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
@@ -737,6 +740,7 @@ fn run_dump_selected(
         let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
         // Уничтоженное называет вопрос к сторожу при публикации замены.
         let discarded = notes.discarded;
+        let forecast = notes.forecast;
         let message = merge_optional_messages(
             whole_note,
             merge_optional_messages(
@@ -744,29 +748,36 @@ fn run_dump_selected(
                 merge_optional_messages(notes.message, copy_warning),
             ),
         );
-        (platform_log_path, message, discarded.into_paths())
+        (platform_log_path, message, discarded.into_paths(), forecast)
     });
     drop(lock_guard);
 
     match result {
-        Ok((platform_log_path, cleanup_message, losses)) => Ok(DumpResult {
-            provider: None,
-            provider_dispatched: false,
-            up_to_date,
-            ok: true,
-            source_set: Some(resolved.source_set_name),
-            extension: resolved.extension,
-            selectors,
-            mode,
-            target_path: resolved.target_path,
-            platform_log_path,
-            duration_ms: started.elapsed().as_millis() as u64,
-            message: cleanup_message
-                .or_else(|| Some(crate::domain::dump::DUMP_SUCCESS_MESSAGE.to_owned())),
-            losses,
-        }),
+        Ok((platform_log_path, cleanup_message, losses, forecast)) => {
+            let (reported, mode_reason) = plan.reported(forecast);
+            Ok(DumpResult {
+                provider: None,
+                provider_dispatched: false,
+                up_to_date,
+                ok: true,
+                source_set: Some(resolved.source_set_name),
+                extension: resolved.extension,
+                selectors,
+                requested_mode: requested,
+                mode: reported,
+                mode_reason,
+                target_path: resolved.target_path,
+                platform_log_path,
+                duration_ms: started.elapsed().as_millis() as u64,
+                message: cleanup_message
+                    .or_else(|| Some(crate::domain::dump::DUMP_SUCCESS_MESSAGE.to_owned())),
+                losses,
+            })
+        }
         Err(error) => {
             let message = error.to_string();
+            // Отказ называет режим плана и его причину: прогноз до ответа не дошёл.
+            let (reported, mode_reason) = plan.reported(None);
             Err(DumpExecutionFailure::with_payload(
                 error,
                 DumpResult {
@@ -777,7 +788,9 @@ fn run_dump_selected(
                     source_set: Some(resolved.source_set_name),
                     extension: resolved.extension,
                     selectors,
-                    mode,
+                    requested_mode: requested,
+                    mode: reported,
+                    mode_reason,
                     target_path: resolved.target_path,
                     platform_log_path: None,
                     duration_ms: started.elapsed().as_millis() as u64,

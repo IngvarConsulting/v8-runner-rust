@@ -1592,7 +1592,8 @@ async fn mcp_stdio_dump_config_partial_ibcmd_returns_degraded_success() {
     let payload: Value = response.structured_content.expect("structured payload");
     assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
-    assert_eq!(payload["data"]["mode"], "PARTIAL");
+    assert_eq!(payload["data"]["requested_mode"], "PARTIAL");
+    assert_eq!(payload["data"]["mode"], "INCREMENTAL");
     assert!(payload["data"]["message"]
         .as_str()
         .expect("message")

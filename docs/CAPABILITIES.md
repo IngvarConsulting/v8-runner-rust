@@ -962,9 +962,17 @@ v8-runner pull --all [--dry-run] [--force]
   из каталога проекта вместо `--config`. Значения закавычены для POSIX-оболочки, на Windows —
   двойными кавычками для PowerShell и `cmd`. У `convert` — повторить тот же вызов с
   добавленным `--force`. У `clone`
-  ключа согласия на уничтожение нет: выход — только закоммитить или спрятать. Какой режим
-  выгрузки случился на самом деле, ответ пока не называет —
-  [#166](https://github.com/IngvarConsulting/v8-runner-rust/issues/166).
+  ключа согласия на уничтожение нет: выход — только закоммитить или спрятать.
+- Ответ `pull` называет запрошенный режим (`requested_mode`) и случившийся (`mode`). Перед
+  выгрузкой по изменившемуся раннер в той же команде спрашивает прогноз: Конфигуратор —
+  `-getChanges`, агент — `--get-changes`, `ibcmd` — `config export status`; выгрузка,
+  пропущенная по неизменному поколению, его не спрашивает. Прогноз «полная» даёт `mode: FULL`
+  и `mode_reason: platform_forecast`; `ibcmd` тогда выгружает через промежуточный каталог, а
+  не `--sync`, который после удаления объекта отказывает. Прогноз вне замеренного словаря или
+  отказ прогноза дают `mode: UNKNOWN` и `mode_reason: unknown`. Полная выгрузка вместо
+  запрошенной по изменившемуся без файла версий — `mode_reason: version_file`, с чужой
+  версией формата — `foreign_format`. Превью называет режим плана. Выборка `ibcmd` называет
+  случившимся режимом `INCREMENTAL`.
 - Опись версий `ConfigDumpInfo.xml` принадлежит одной базе и в git не хранится: если `ConfigDumpInfo.xml` в каталоге набора лежит в индексе git, команда отказывает до запуска платформы с кодом выхода 2 (`validation`), называет путь и рецепт `git rm --cached <путь> && git commit …`; превью (`--dry-run`) отказывает так же. Там, где git не отвечает, эта проверка описи молчит; каталог набора с файлами выгрузку всё равно остановит — отказом сторожа (ниже).
 - Файл версий `ConfigDumpInfo.xml` набора принадлежит раннеру: копия лежит в
   `workPath/infobases/<база>/dump-info/<набор>/` (у формата EDT файл лежит в снимке
@@ -1536,8 +1544,6 @@ v8-runner mcp serve http
 - `convert` через `ibcmd-rs`: пакет ↔ XML без платформы ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
 - `convert` файла пакета в `edt` и внешних наборов в пакет.
 - `apply` отдельной командой и `push --no-apply` ([#210](https://github.com/IngvarConsulting/v8-runner-rust/issues/210)); `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).
-- Прогноз режима выгрузки перед `pull` (`-getChanges`, `config export status`) и
-  случившийся режим с причиной в ответе ([#166](https://github.com/IngvarConsulting/v8-runner-rust/issues/166)).
 - Переименование расширения на месте по совпавшему внутреннему идентификатору и
   `push --delete` с отключением перед удалением ([#218](https://github.com/IngvarConsulting/v8-runner-rust/issues/218)).
 - Отдельная пользовательская настройка EDT `working-directory`.
