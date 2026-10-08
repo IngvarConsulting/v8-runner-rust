@@ -11,11 +11,12 @@ use std::time::Instant;
 
 use self::act::{Applier, Subject};
 use crate::config::model::{AppConfig, SourceSetConfig};
-use crate::domain::apply::{ApplyGeneration, ApplyOutcome, ApplyResult, ApplyStep};
+use crate::domain::apply::{ApplyOutcome, ApplyResult, ApplyStep};
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::next_step::NextStep;
 use crate::domain::source_set::{SourceSetContext, SourceSetPurpose};
 use crate::domain::status::GenerationAfter;
+use crate::domain::status::GenerationRecordFate;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
@@ -23,7 +24,9 @@ use crate::support::error::AppError;
 use crate::use_cases::agent_session::{self, AgentHandle};
 use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::extension_identity::extension_name_key;
-use crate::use_cases::generation_reader::{designer_log_file, read_generation, GenerationProcess};
+use crate::use_cases::generation_reader::{
+    designer_log_file, read_by_record_tool, Executor as ReaderExecutor,
+};
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 use crate::use_cases::request::ApplyRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
@@ -196,7 +199,7 @@ fn walk(
             // Отмена, пришедшая после последнего применения, исход не меняет — применение
             // состоялось, — но ответ её называет
             // (`INV.USE-CASES.AN-INTERRUPTION-STATUS-MEANS-A-TERMINAL-OUTCOME`).
-            if let Some(warning) = cancellation_after_apply(context, &last_deferrals) {
+            if let Some(warning) = cancellation_after(context, &last_deferrals, "apply") {
                 if let Some(step) = result
                     .steps
                     .iter_mut()
@@ -317,7 +320,7 @@ fn apply_target(
     let (Some(set), Some(record)) = (target.memory, record) else {
         let deferrals = applied(context, config, executor, target, index)?;
         return Ok(TargetApplied {
-            generation: target.memory.map(|_| ApplyGeneration::Unchecked),
+            generation: target.memory.map(|_| GenerationRecordFate::Unchecked),
             deferrals,
             notes: Vec::new(),
         });
@@ -352,7 +355,7 @@ fn apply_target(
             let deferrals = applied(context, config, executor, target, index)?;
             let after = executor.read_generation(context, config, record.tool, target, index);
             let (generation, note) =
-                record::carry_after_apply(set, &config.work_path, &record, after)?;
+                record::carry_record("apply", set, &config.work_path, &record, after)?;
             Ok(TargetApplied {
                 generation: Some(generation),
                 deferrals,
@@ -362,7 +365,7 @@ fn apply_target(
         Some(token) => {
             let deferrals = applied(context, config, executor, target, index)?;
             Ok(TargetApplied {
-                generation: Some(ApplyGeneration::Kept),
+                generation: Some(GenerationRecordFate::Kept),
                 deferrals,
                 notes: vec![format!(
                     "the infobase moved ahead of the record of source-set '{}' before the apply: its configuration generation was {token}, the record after the last {} is {}; the record is kept, so the next push that loads is refused until the infobase is pulled or overwritten",
@@ -372,7 +375,8 @@ fn apply_target(
         }
         None => {
             let deferrals = applied(context, config, executor, target, index)?;
-            let (generation, note) = record::erase_after_apply(
+            let (generation, note) = record::erase_record(
+                "apply",
                 set,
                 &config.work_path,
                 &format!(
@@ -392,7 +396,7 @@ fn apply_target(
 /// Применённый шаг: что стало с записью, отмены, которые отложил акт, и прочие
 /// предупреждения — порознь, чтобы отмену после применения называть ровно раз.
 struct TargetApplied {
-    generation: Option<ApplyGeneration>,
+    generation: Option<GenerationRecordFate>,
     deferrals: Vec<String>,
     notes: Vec<String>,
 }
@@ -400,15 +404,16 @@ struct TargetApplied {
 /// Отмена, пришедшая после применения, которое её не отложило: исход она не меняет —
 /// применение состоялось, — но ответ её называет. Отложенную самим актом уже назвал его шаг
 /// (`deferrals`), и второй раз она не называется. Одно правило у `apply` и у отправки без
-/// изменений.
-pub(crate) fn cancellation_after_apply(
+/// изменений, и у `reset` — после отката.
+pub(crate) fn cancellation_after(
     context: &ExecutionContext,
     deferrals: &[String],
+    step: &str,
 ) -> Option<String> {
     if !deferrals.is_empty() {
         return None;
     }
-    crate::use_cases::interruption::deferred_interruption_warning_after(context, "apply")
+    crate::use_cases::interruption::deferred_interruption_warning_after(context, step)
 }
 
 /// Сам акт применения: отмену, которую он отложил, называет и удача, и отказ.
@@ -557,9 +562,9 @@ impl Executor {
         }
     }
 
-    /// Поколение инструментом `tool` — тем, что записал запись набора. Свой инструмент
-    /// спрашивает сам; Конфигуратор и `ibcmd` ищутся, если исполнитель другой; агент другого
-    /// исполнителя не спрашивается. `None` — ответа нет.
+    /// Поколение инструментом `tool` — тем, что записал запись набора: процесс платформы
+    /// спрашивает общий читатель; агент отвечает, только когда он — исполнитель `apply`, своей
+    /// сессией. `None` — ответа нет.
     fn read_generation(
         &mut self,
         context: &ExecutionContext,
@@ -568,10 +573,7 @@ impl Executor {
         target: &Target<'_>,
         index: usize,
     ) -> Result<Option<String>, AppError> {
-        if tool == Provider::Agent {
-            if self.provider != Provider::Agent {
-                return Ok(None);
-            }
+        if tool == Provider::Agent && self.provider == Provider::Agent {
             if crate::use_cases::interruption::pending_interruption_error(
                 context,
                 "the configuration generation",
@@ -584,46 +586,16 @@ impl Executor {
             return agent_session::generation_id(handle.session(), target.extension, &wait)
                 .map(Some);
         }
-        let utility = match tool {
-            Provider::Designer => UtilityType::V8,
-            Provider::Ibcmd => UtilityType::Ibcmd,
-            Provider::Agent | Provider::IbcmdRs | Provider::Webinst => return Ok(None),
-        };
-        let binary = if tool == self.provider {
-            self.located()?.to_path_buf()
-        } else {
-            match self.utilities.locate(utility) {
-                Ok(location) => location.path,
-                Err(error) => {
-                    tracing::debug!(%error, %tool, "the tool of the generation record is not found");
-                    return Ok(None);
-                }
-            }
-        };
-        let runner = self.utilities.runner_for(utility);
-        let name = format!("apply-{index:02}-{}-generation", target.name);
-        read_generation(
+        read_by_record_tool(
             context,
             config,
-            || {
-                Ok(match utility {
-                    UtilityType::Ibcmd => GenerationProcess::Ibcmd {
-                        binary: &binary,
-                        runner,
-                        data_path: None,
-                    },
-                    UtilityType::V8 => GenerationProcess::Designer {
-                        binary: &binary,
-                        runner,
-                        log_file: designer_log_file(config, &name)?,
-                    },
-                    other => {
-                        return Err(AppError::Runtime(format!(
-                            "{other:?} does not read the configuration generation"
-                        )))
-                    }
-                })
+            tool,
+            ReaderExecutor {
+                provider: self.provider,
+                binary: self.binary.as_deref(),
             },
+            &mut self.utilities,
+            &format!("apply-{index:02}-{}-generation", target.name),
             target.extension,
         )
     }
@@ -650,9 +622,10 @@ mod tests {
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
         TestsConfig, ToolsConfig,
     };
-    use crate::domain::apply::{ApplyGeneration, ApplyOutcome};
+    use crate::domain::apply::ApplyOutcome;
     use crate::domain::capability::{Operation, Provider};
     use crate::domain::status::GenerationAfter;
+    use crate::domain::status::GenerationRecordFate;
     use crate::platform::process::HeldCommand;
     use crate::support::error::CancelledAt;
     use crate::use_cases::agent_session::{ApplyMark, GenerationLedger, Recorded};
@@ -757,7 +730,10 @@ mod tests {
                 ("epf", ApplyOutcome::Skipped)
             ]
         );
-        assert_eq!(result.steps[0].generation, Some(ApplyGeneration::Unchecked));
+        assert_eq!(
+            result.steps[0].generation,
+            Some(GenerationRecordFate::Unchecked)
+        );
         let calls = fs::read_to_string(&calls).expect("calls");
         assert_eq!(calls.matches("/UpdateDBCfg").count(), 1, "{calls}");
     }
@@ -893,7 +869,10 @@ mod tests {
         )
         .expect("apply");
 
-        assert_eq!(result.steps[0].generation, Some(ApplyGeneration::Erased));
+        assert_eq!(
+            result.steps[0].generation,
+            Some(GenerationRecordFate::Erased)
+        );
         assert!(result.steps[0]
             .message
             .as_deref()
@@ -997,7 +976,10 @@ mod tests {
         )
         .expect("apply");
 
-        assert_eq!(result.steps[0].generation, Some(ApplyGeneration::Recorded));
+        assert_eq!(
+            result.steps[0].generation,
+            Some(GenerationRecordFate::Recorded)
+        );
         let Recorded::Ours(record) = ledger(&config).read() else {
             panic!("the record is carried over");
         };

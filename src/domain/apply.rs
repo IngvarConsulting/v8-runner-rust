@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::source_set::SourceSetPurpose;
+use crate::domain::status::GenerationRecordFate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ApplyResult {
@@ -28,7 +29,7 @@ pub struct ApplyStep {
     pub duration_ms: u64,
     /// Что стало с записью журнала поколений набора; нет поля — набор не применялся.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation: Option<ApplyGeneration>,
+    pub generation: Option<GenerationRecordFate>,
 }
 
 /// Исход шага. Удача шага — `applied`, `planned` или `skipped`; отдельного `ok` у шага нет.
@@ -45,23 +46,4 @@ pub enum ApplyOutcome {
     Failed,
     /// Не запускался: команда остановилась раньше.
     NotRun,
-}
-
-/// Запись журнала поколений набора после применения.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ApplyGeneration {
-    /// Поколение до применения совпало с записью; после него записано то, что ответил
-    /// инструмент записи, и снят признак «не применено».
-    Recorded,
-    /// База ушла от записи до применения: запись не тронута, следующая отправка это назовёт.
-    Kept,
-    /// Инструмент записи не ответил поколением: запись стёрта, и следующая отправка базу не
-    /// сверяет.
-    Erased,
-    /// Записи этой пары нет: сверять не с чем.
-    Unchecked,
-    /// Инструмент записи не ответил, а стереть запись не удалось: она осталась прежней и
-    /// может принять это применение за чужую правку; ответ называет причину.
-    Unerased,
 }
