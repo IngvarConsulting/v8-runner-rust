@@ -110,7 +110,7 @@ pub(super) fn run_tests(
                     source_set: None,
                     // Клиент тестов работает с конфигурацией базы данных: сборка перед ним
                     // применяет всегда.
-                    apply: true,
+                    apply: crate::use_cases::request::ApplyPolicy::Apply,
                 },
             ) {
                 Ok(result) => result,

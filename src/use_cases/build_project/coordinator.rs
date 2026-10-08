@@ -3,6 +3,7 @@ use super::*;
 use crate::domain::capability::{Operation, Provider};
 use crate::use_cases::context::shell_word;
 use crate::use_cases::exchange_guard::{GenerationGate, LoadExtent};
+use crate::use_cases::request::ApplyPolicy;
 use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 
 /// Кто грузит набор исходников в базу: пакетный Конфигуратор или его агент.
@@ -47,7 +48,7 @@ pub(super) trait SourceSetLoader {
         step_index: usize,
         partial_paths: Option<&[PathBuf]>,
         commit: &StepCommit,
-        apply: bool,
+        apply: ApplyPolicy,
     ) -> Result<Loaded, AppError>;
 
     /// Только применение: отправка, которой нечего грузить, применяет непринятое своей
@@ -148,7 +149,7 @@ impl SourceSetLoader for DesignerLoader {
         step_index: usize,
         partial_paths: Option<&[PathBuf]>,
         commit: &StepCommit,
-        apply: bool,
+        apply: ApplyPolicy,
     ) -> Result<Loaded, AppError> {
         let binary = self.binary()?;
         execute_source_set_step(
@@ -341,18 +342,27 @@ fn run_build_with(
                     "skipping build step"
                 );
                 let unapplied = ok
-                    .then(|| unapplied_record(config, args, &source_context, loader.tool()))
+                    .then(|| {
+                        unapplied_record(context, config, args, &source_context, loader.tool())
+                    })
                     .flatten();
-                let Some(record) = unapplied else {
-                    push_build_step(
-                        &mut steps,
-                        &source_set.name,
-                        BuildMode::Skipped,
-                        ok,
-                        message,
-                        0,
-                    );
-                    continue;
+                let record = match unapplied {
+                    Some(Unapplied::Ours(record)) => record,
+                    other => {
+                        let message = match other {
+                            Some(Unapplied::OtherTool(note)) => append_warnings(message, &[note]),
+                            Some(Unapplied::Ours(_)) | None => message,
+                        };
+                        push_build_step(
+                            &mut steps,
+                            &source_set.name,
+                            BuildMode::Skipped,
+                            ok,
+                            message,
+                            0,
+                        );
+                        continue;
+                    }
                 };
                 let step_started = Instant::now();
                 let applied =
@@ -481,13 +491,13 @@ fn run_build_with(
                     });
                 match loaded {
                     Ok((before, mut warnings, token, apply)) => {
-                        warnings.extend(gate.after_load(
+                        let recorded = gate.after_load(
                             &source_context,
                             loader.tool(),
                             token.as_deref(),
-                            apply.applied(),
-                        ));
-                        let remembered = remember_unapplied(&apply, token.as_deref(), || {
+                            apply.mark(),
+                        );
+                        let remembered = remember_unapplied(&apply, recorded, || {
                             commit_step_state(
                                 source_set,
                                 &source_context,
@@ -496,7 +506,7 @@ fn run_build_with(
                             )
                         });
                         match remembered {
-                            Ok(note) => warnings.extend(note),
+                            Ok(notes) => warnings.extend(notes),
                             Err(error) => {
                                 let result = fail_from_source_set_index(
                                     started,
@@ -695,18 +705,27 @@ pub(super) fn run_build_ibcmd(
                     "skipping build step"
                 );
                 let unapplied = ok
-                    .then(|| unapplied_record(config, args, &source_context, Provider::Ibcmd))
+                    .then(|| {
+                        unapplied_record(context, config, args, &source_context, Provider::Ibcmd)
+                    })
                     .flatten();
-                let Some(record) = unapplied else {
-                    push_build_step(
-                        &mut steps,
-                        &source_set.name,
-                        BuildMode::Skipped,
-                        ok,
-                        message,
-                        0,
-                    );
-                    continue;
+                let record = match unapplied {
+                    Some(Unapplied::Ours(record)) => record,
+                    other => {
+                        let message = match other {
+                            Some(Unapplied::OtherTool(note)) => append_warnings(message, &[note]),
+                            Some(Unapplied::Ours(_)) | None => message,
+                        };
+                        push_build_step(
+                            &mut steps,
+                            &source_set.name,
+                            BuildMode::Skipped,
+                            ok,
+                            message,
+                            0,
+                        );
+                        continue;
+                    }
                 };
                 let step_started = Instant::now();
                 let applied = locate_designer_loader(
@@ -1469,18 +1488,25 @@ pub(super) fn run_build_edt(
         match designer_stage {
             StepPlan::Skip { message, ok } => {
                 let unapplied = ok
-                    .then(|| unapplied_record(config, args, &designer_context, provider))
+                    .then(|| unapplied_record(context, config, args, &designer_context, provider))
                     .flatten();
-                let Some(record) = unapplied else {
-                    push_build_step(
-                        &mut steps,
-                        &source_set.name,
-                        BuildMode::Skipped,
-                        ok,
-                        message,
-                        0,
-                    );
-                    continue;
+                let record = match unapplied {
+                    Some(Unapplied::Ours(record)) => record,
+                    other => {
+                        let message = match other {
+                            Some(Unapplied::OtherTool(note)) => append_warnings(message, &[note]),
+                            Some(Unapplied::Ours(_)) | None => message,
+                        };
+                        push_build_step(
+                            &mut steps,
+                            &source_set.name,
+                            BuildMode::Skipped,
+                            ok,
+                            message,
+                            0,
+                        );
+                        continue;
+                    }
                 };
                 let step_started = Instant::now();
                 let applied = locate_designer_loader(
@@ -1716,31 +1742,40 @@ fn guarded_load(
     gate.before_load(set, tool, &read)?;
     let Loaded { warnings, apply } = load().inspect_err(|_| gate.after_failed_load(set, tool))?;
     let (mut warnings, token) = generation_after_load(gate, set, tool, warnings, read())?;
-    warnings.extend(gate.after_load(set, tool, token.as_deref(), apply.applied()));
-    warnings.extend(remember_unapplied(&apply, token.as_deref(), commit)?);
+    let recorded = gate.after_load(set, tool, token.as_deref(), apply.mark());
+    warnings.extend(remember_unapplied(&apply, recorded, commit)?);
     Ok(Loaded { warnings, apply })
 }
 
 /// Загрузка без применения помнится памятью исходников только вместе с записью поколения
-/// `applied: false`: без неё отправка, которой нечего грузить, не узнала бы о непринятом и
-/// не применила бы его (`INV.USE-CASES.A-PUSH-WITH-NOTHING-TO-LOAD-APPLIES-ITS-OWN-UNAPPLIED`).
-/// Поколения нет — память не фиксируется, следующая отправка загрузит и применит набор снова;
-/// строка — для ответа. Применённую загрузку фиксирует сам шаг.
+/// `applied: false`, которая действительно легла в журнал: без неё отправка, которой нечего
+/// грузить, не узнала бы о непринятом и не применила бы его
+/// (`INV.USE-CASES.A-LOAD-WITHOUT-APPLY-IS-REMEMBERED-AS-UNAPPLIED`). Записи нет — ответа не
+/// было, запись не удалась или журнала нет — память не фиксируется, и следующая отправка
+/// загрузит и применит набор снова. Применённую загрузку фиксирует сам шаг. Строки — для
+/// ответа.
 fn remember_unapplied(
     apply: &AfterLoad,
-    token: Option<&str>,
+    recorded: crate::use_cases::exchange_guard::LoadRecord,
     commit: impl FnOnce() -> Result<(), AppError>,
-) -> Result<Option<String>, AppError> {
+) -> Result<Vec<String>, AppError> {
+    use crate::use_cases::exchange_guard::LoadRecord;
     if apply.applied() {
-        return Ok(None);
+        return Ok(recorded.into_note().into_iter().collect());
     }
-    if token.is_some() {
-        commit()?;
-        return Ok(None);
+    match recorded {
+        LoadRecord::Recorded => {
+            commit()?;
+            Ok(Vec::new())
+        }
+        LoadRecord::Erased(_) | LoadRecord::NoLedger => {
+            let mut notes: Vec<String> = recorded.into_note().into_iter().collect();
+            notes.push(
+                "the load without apply is not remembered: no generation record could be kept for it, so the next push loads the set again and applies it".to_owned(),
+            );
+            Ok(notes)
+        }
     }
-    Ok(Some(
-        "the configuration generation after the load is not known, so the load is not remembered as unapplied: the next push loads the set again and applies it".to_owned(),
-    ))
 }
 
 /// Шаг удачной загрузки по исходу применения: применено — удача; `--no-apply` — удача,
@@ -1775,19 +1810,42 @@ pub(super) fn settle_loaded(
     }
 }
 
-/// Запись набора, загруженная этим же инструментом без применения: только её применяет
-/// отправка, которой нечего грузить. У превью и `--no-apply` применять нечего.
+/// Непринятая запись набора, которую видит отправка без изменений.
+enum Unapplied {
+    /// Запись этого же инструмента: её применяет отправка, если поколение базы ей равно.
+    Ours(crate::use_cases::agent_session::GenerationRecord),
+    /// Запись другого инструмента: его токен с этим несравним, и отправка только называет
+    /// непринятое и выход `apply`.
+    OtherTool(String),
+}
+
+/// Непринятая запись набора по плану отправки. У превью и `--no-apply` применять нечего.
 fn unapplied_record(
+    context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
     set: &SourceSetContext,
     tool: Provider,
-) -> Option<crate::use_cases::agent_session::GenerationRecord> {
-    if args.dry_run || !args.apply {
+) -> Option<Unapplied> {
+    if args.dry_run || args.apply == ApplyPolicy::Defer {
         return None;
     }
-    crate::use_cases::exchange_guard::recorded_generation(set, &config.work_path)
-        .filter(|record| !record.applied && record.tool == tool)
+    let record = crate::use_cases::exchange_guard::recorded_generation(set, &config.work_path)
+        .filter(|record| !record.applied)?;
+    Some(if record.tool == tool {
+        Unapplied::Ours(record)
+    } else {
+        Unapplied::OtherTool(format!(
+            "source-set '{}' was loaded without apply earlier by {}, and this push reads the generation with {tool}, so it does not apply it; apply it with {}",
+            set.name(),
+            record.tool,
+            advised_apply(context, set.name())
+        ))
+    })
+}
+
+fn advised_apply(context: &ExecutionContext, set: &str) -> String {
+    context.advised_command(&format!("apply {}", shell_word(set)))
 }
 
 /// Что спрашивают у исполнителя при применении непринятого: поколение или само применение.
@@ -1796,26 +1854,32 @@ pub(super) enum UnappliedOp<'d> {
     Apply(&'d mut crate::use_cases::interruption::Deferrals),
 }
 
+/// Исход попытки отправки без изменений применить своё непринятое.
+enum UnappliedStep {
+    /// Применено; строки — предупреждения шага.
+    Applied(Vec<String>),
+    /// База ушла от записи: признаку не верят, шаг остаётся пропуском и называет выход.
+    NotTrusted(String),
+}
+
 /// Применение непринятого набора отправкой, которой нечего грузить
 /// (`INV.USE-CASES.A-PUSH-WITH-NOTHING-TO-LOAD-APPLIES-ITS-OWN-UNAPPLIED`): только если
-/// поколение базы равно записи — иначе признаку не верят, и шаг остаётся пропуском
-/// (`None`). После применения запись переносится на ответ того же инструмента, без ответа
-/// стирается. Отказ применения называет выход `apply`.
+/// поколение базы равно записи. После применения запись переносится на ответ того же
+/// инструмента, без ответа стирается; отмена, пришедшая после применения, называется.
+/// Отказ применения называет выход `apply`.
 fn apply_unapplied(
     context: &ExecutionContext,
     config: &AppConfig,
     set: &SourceSetContext,
     record: &crate::use_cases::agent_session::GenerationRecord,
     run: &mut dyn FnMut(UnappliedOp<'_>) -> Result<Option<String>, AppError>,
-) -> Result<Option<Result<Vec<String>, String>>, AppError> {
+) -> Result<UnappliedStep, AppError> {
     if run(UnappliedOp::Read)?.as_deref() != Some(record.token.as_str()) {
-        // Признаку не верят: база ушла от записи. Шаг остаётся пропуском, но непринятое он
-        // называет — его применит только `apply`.
-        return Ok(Some(Err(format!(
+        return Ok(UnappliedStep::NotTrusted(format!(
             "source-set '{}' was loaded without apply earlier, and the infobase moved away from that record, so this push does not apply it; apply it with {}",
             set.name(),
-            context.advised_command(&format!("apply {}", shell_word(set.name())))
-        ))));
+            advised_apply(context, set.name())
+        )));
     }
     let ((), mut warnings) =
         collecting_deferrals(|deferrals| run(UnappliedOp::Apply(deferrals)).map(|_| ())).map_err(
@@ -1828,7 +1892,12 @@ fn apply_unapplied(
         run(UnappliedOp::Read),
     )?;
     warnings.extend(note);
-    Ok(Some(Ok(warnings)))
+    if warnings.is_empty() {
+        warnings.extend(
+            crate::use_cases::interruption::deferred_interruption_warning_after(context, "apply"),
+        );
+    }
+    Ok(UnappliedStep::Applied(warnings))
 }
 
 /// Шаг отправки без изменений после попытки применить непринятое.
@@ -1836,12 +1905,11 @@ fn settle_unapplied(
     steps: &mut Vec<crate::domain::build::BuildStep>,
     set: &str,
     message: String,
-    applied: Result<Option<Result<Vec<String>, String>>, AppError>,
+    applied: Result<UnappliedStep, AppError>,
     started: Instant,
 ) -> Result<(), AppError> {
     match applied? {
-        None => push_build_step(steps, set, BuildMode::Skipped, true, message, 0),
-        Some(Err(warning)) => push_build_step(
+        UnappliedStep::NotTrusted(warning) => push_build_step(
             steps,
             set,
             BuildMode::Skipped,
@@ -1849,7 +1917,7 @@ fn settle_unapplied(
             append_warnings(message, &[warning]),
             0,
         ),
-        Some(Ok(warnings)) => push_loaded_step(
+        UnappliedStep::Applied(warnings) => push_loaded_step(
             steps,
             set,
             BuildMode::Skipped,
@@ -1929,7 +1997,15 @@ pub(super) fn generation_after_load(
     match read {
         Ok(token) => Ok((warnings, token)),
         Err(error) if error.cancellation().is_some() => {
-            warnings.extend(gate.after_load(set, tool, None, true));
+            warnings.extend(
+                gate.after_load(
+                    set,
+                    tool,
+                    None,
+                    crate::use_cases::agent_session::ApplyMark::Applied,
+                )
+                .into_note(),
+            );
             Err(if warnings.is_empty() {
                 error
             } else {

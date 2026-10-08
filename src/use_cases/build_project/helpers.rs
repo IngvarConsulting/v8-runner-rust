@@ -13,11 +13,9 @@ use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::support::error::AppError;
-use crate::support::temp::platform_logs_dir;
 use crate::use_cases::build_progress::log_build_step_timeline;
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{shell_word, ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption;
 use tracing::debug;
 
@@ -42,6 +40,15 @@ pub(super) enum AfterLoad {
 impl AfterLoad {
     pub(super) const fn applied(&self) -> bool {
         matches!(self, Self::Applied)
+    }
+
+    /// Признак записи поколения после этой загрузки.
+    pub(super) const fn mark(&self) -> crate::use_cases::agent_session::ApplyMark {
+        if self.applied() {
+            crate::use_cases::agent_session::ApplyMark::Applied
+        } else {
+            crate::use_cases::agent_session::ApplyMark::Unapplied
+        }
     }
 }
 
@@ -562,12 +569,10 @@ pub(super) fn designer_log_file(
     step_index: usize,
     action: &str,
 ) -> Result<PathBuf, AppError> {
-    let log_dir = platform_logs_dir(&config.work_path).map_err(|error| {
-        AppError::Runtime(format!("failed to create platform logs dir: {error}"))
-    })?;
-    Ok(log_dir.join(format!(
-        "build-{step_index:02}-{source_set_name}-{action}.log"
-    )))
+    crate::use_cases::generation_reader::designer_log_file(
+        config,
+        &format!("build-{step_index:02}-{source_set_name}-{action}"),
+    )
 }
 
 pub(super) fn build_ibcmd_dsl<'a>(
@@ -623,20 +628,12 @@ pub(crate) fn ensure_platform_success(
     source_set: &SourceSetConfig,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    let Err(code) = result.process.outcome() else {
-        return Ok(());
-    };
-
-    Err(AppError::Platform(format_ibcmd_failure_details(
+    crate::use_cases::ibcmd_diagnostics::ensure_succeeded(
         action,
         "source-set",
         &source_set.name,
-        code.get(),
-        &result.process.stdout,
-        &result.process.stderr,
-        result.platform_log.as_deref(),
-        result.platform_log_path.as_deref(),
-    )))
+        result,
+    )
 }
 
 pub(super) fn fail_with_remaining_steps(

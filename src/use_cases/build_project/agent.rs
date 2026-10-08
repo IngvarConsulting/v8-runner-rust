@@ -112,7 +112,7 @@ impl SourceSetLoader for AgentLoader {
         step_index: usize,
         partial_paths: Option<&[PathBuf]>,
         commit: &StepCommit,
-        apply: bool,
+        apply: ApplyPolicy,
     ) -> Result<Loaded, AppError> {
         // Всё, что идёт после отложенной отмены, — провал следующей команды, безопасная
         // точка, фиксация состояния, — выходит через учёт, который её называет.
@@ -222,7 +222,7 @@ fn load_and_update(
     source_context: &SourceSetContext,
     extension: Option<&str>,
     partial_paths: Option<&[PathBuf]>,
-    apply: bool,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<AfterLoad, AppError> {
     // Обе команды меняют базу: загрузка переписывает конфигурацию, а `update-db-cfg`
@@ -271,7 +271,7 @@ fn load_and_update(
     }
     loaded?;
 
-    if !apply {
+    if apply == ApplyPolicy::Defer {
         return Ok(AfterLoad::Deferred);
     }
     Ok(

@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::domain::apply::ApplyGeneration;
 use crate::domain::source_set::SourceSetContext;
 use crate::support::error::AppError;
-use crate::use_cases::agent_session::{GenerationLedger, GenerationRecord};
+use crate::use_cases::agent_session::{ApplyMark, GenerationLedger, GenerationRecord};
 
 /// После применения, перед которым поколение совпало с записью: ответ инструмента записи
 /// становится записью — с прежней операцией и снятым признаком «не применено». Без ответа
@@ -46,7 +46,7 @@ pub(crate) fn carry_after_apply(
         return Ok(erase(set, &ledger, "is not known after the apply"));
     };
     Ok(
-        match ledger.record_as(record.tool, &after, record.after, true) {
+        match ledger.record_as(record.tool, &after, record.after, ApplyMark::Applied) {
             Ok(()) => (ApplyGeneration::Recorded, None),
             Err(error) => erase(
                 set,
@@ -82,10 +82,9 @@ fn erase(
                 "the configuration generation of source-set '{name}' {why}: its record is erased, so the next push does not check whether the infobase moved ahead"
             )),
         ),
-        // Стереть не вышло: запись осталась прежней, и ответ называет это предупреждением —
-        // значение `kept` занято за базой, ушедшей от записи.
+        // Стереть не вышло: запись осталась прежней, и ответ называет это предупреждением.
         Err(error) => (
-            ApplyGeneration::Erased,
+            ApplyGeneration::Unerased,
             Some(format!(
                 "the configuration generation of source-set '{name}' {why}, and its record was not erased: {error}; the next push may take this apply for a change made elsewhere"
             )),

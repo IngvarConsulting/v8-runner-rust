@@ -188,6 +188,24 @@ fn walk(
     result.duration_ms = started.elapsed().as_millis() as u64;
     match failure {
         None => {
+            // Отмена, пришедшая после последнего применения, исход не меняет — применение
+            // состоялось, — но ответ её называет
+            // (`INV.USE-CASES.AN-INTERRUPTION-STATUS-MEANS-A-TERMINAL-OUTCOME`).
+            if let Some(warning) =
+                crate::use_cases::interruption::deferred_interruption_warning_after(
+                    context, "apply",
+                )
+            {
+                if let Some(step) = result
+                    .steps
+                    .iter_mut()
+                    .rev()
+                    .find(|step| step.outcome == ApplyOutcome::Applied)
+                {
+                    let message = step.message.take().unwrap_or_default();
+                    step.message = Some(append_warnings(message, &[warning]));
+                }
+            }
             result.ok = true;
             Ok(result)
         }
@@ -299,6 +317,26 @@ fn apply_target(
         let warnings = applied(context, config, executor, target, index)?;
         return Ok((target.memory.map(|_| ApplyGeneration::Unchecked), warnings));
     };
+    // Запись перед неудачной загрузкой не доказывает ничего и при равном поколении:
+    // Конфигуратор читает поколение применённого расширения, и наполовину загруженное оно не
+    // показывает (замер 8.3.27.2074). Отмена, которая уже пришла, отвечает отменой, а не
+    // отказом (`INV.USE-CASES.AN-APPLY-AFTER-A-FAILED-LOAD-IS-REFUSED`).
+    if record.after == GenerationAfter::FailedBuild {
+        if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
+            context,
+            format!("apply for source-set '{}'", target.name),
+        ) {
+            return Err(error);
+        }
+        let before = executor.read_generation(context, config, record.tool, target, index)?;
+        return Err(crate::use_cases::exchange_guard::apply_after_failed_load(
+            context,
+            config,
+            &target.name,
+            before.as_deref(),
+            &record,
+        ));
+    }
     let before = executor.read_generation(context, config, record.tool, target, index)?;
     match before {
         Some(token) if token == record.token => {
@@ -308,17 +346,6 @@ fn apply_target(
                 record::carry_after_apply(set, &config.work_path, &record, after)?;
             warnings.extend(note);
             Ok((Some(generation), warnings))
-        }
-        // Ответа нет — расхождение после неудачной загрузки не исключено, и применять по
-        // возможно наполовину загруженной конфигурации нельзя.
-        before if record.after == GenerationAfter::FailedBuild => {
-            Err(crate::use_cases::exchange_guard::apply_after_failed_load(
-                context,
-                config,
-                &target.name,
-                before.as_deref(),
-                &record,
-            ))
         }
         Some(token) => {
             let mut warnings = applied(context, config, executor, target, index)?;
@@ -358,11 +385,11 @@ fn applied(
         } else {
             act::SubjectKind::ToolExtension
         },
-        name: target
-            .memory
-            .map_or(target.extension.unwrap_or(target.name.as_str()), |_| {
-                target.name.as_str()
-            }),
+        // Набор называется своим именем, расширение-инструмент — именем расширения.
+        name: match (target.memory, target.extension) {
+            (None, Some(extension)) => extension,
+            (Some(_), _) | (None, None) => target.name.as_str(),
+        },
         extension: target.extension,
         timeline: &target.name,
     };
@@ -583,7 +610,7 @@ mod tests {
     use crate::domain::status::GenerationAfter;
     use crate::platform::process::HeldCommand;
     use crate::support::error::CancelledAt;
-    use crate::use_cases::agent_session::{GenerationLedger, Recorded};
+    use crate::use_cases::agent_session::{ApplyMark, GenerationLedger, Recorded};
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::ApplyRequest;
     use crate::use_cases::result::UseCaseErrorKind;
@@ -769,7 +796,12 @@ mod tests {
         write_tool(&tool, &calls, &dir.path().join("token"), "");
         let config = config(dir.path(), &tool, Provider::Designer);
         ledger(&config)
-            .record_as(Provider::Designer, FIRST, GenerationAfter::Build, false)
+            .record_as(
+                Provider::Designer,
+                FIRST,
+                GenerationAfter::Build,
+                ApplyMark::Unapplied,
+            )
             .expect("record");
 
         let result = execute(
@@ -802,7 +834,7 @@ mod tests {
                 Provider::Designer,
                 FIRST,
                 GenerationAfter::FailedBuild,
-                true,
+                ApplyMark::Applied,
             )
             .expect("record");
 
@@ -822,6 +854,40 @@ mod tests {
         assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
     }
 
+    /// Пришедшая отмена отвечает отменой, а не отказом `non_fast_forward`, и у записи перед
+    /// неудачной загрузкой.
+    #[test]
+    fn a_pending_cancellation_before_a_failed_load_refusal_answers_the_cancellation() {
+        let dir = tempdir().expect("tempdir");
+        let (tool, calls) = (dir.path().join("1cv8"), dir.path().join("calls.log"));
+        write_tool(&tool, &calls, &dir.path().join("token"), "");
+        let config = config(dir.path(), &tool, Provider::Designer);
+        ledger(&config)
+            .record_as(
+                Provider::Designer,
+                FIRST,
+                GenerationAfter::FailedBuild,
+                ApplyMark::Applied,
+            )
+            .expect("record");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let failure = execute(
+            &ExecutionContext::cli(CommandName::Apply).with_cancellation(cancellation),
+            &config,
+            &all_sets(),
+        )
+        .expect_err("cancelled");
+
+        assert!(
+            matches!(failure.error.kind(), UseCaseErrorKind::Cancelled(_)),
+            "{}",
+            failure.error
+        );
+        assert!(fs::read_to_string(&calls).unwrap_or_default().is_empty());
+    }
+
     /// Запись сделана другим инструментом: поколение до и после читает он, а применяет
     /// исполнитель `apply`; совпавшая запись переносится с его ответом и снятым признаком.
     #[test]
@@ -834,7 +900,12 @@ mod tests {
         write_tool(&dir.path().join("ibcmd"), &calls, &token, "");
         let config = config(dir.path(), &dir.path().join("1cv8"), Provider::Ibcmd);
         ledger(&config)
-            .record_as(Provider::Designer, FIRST, GenerationAfter::Build, false)
+            .record_as(
+                Provider::Designer,
+                FIRST,
+                GenerationAfter::Build,
+                ApplyMark::Unapplied,
+            )
             .expect("record");
 
         let result = execute(

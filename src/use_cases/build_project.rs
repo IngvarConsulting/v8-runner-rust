@@ -26,7 +26,7 @@ use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
 use crate::use_cases::ignored_files::refuse_tracked_version_file;
-use crate::use_cases::request::{BuildRequest as BuildArgs, PushMode};
+use crate::use_cases::request::{ApplyPolicy, BuildRequest as BuildArgs, PushMode};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tool_extension;
@@ -611,7 +611,7 @@ fn execute_source_set_step(
     step_index: usize,
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
-    apply: bool,
+    apply: ApplyPolicy,
 ) -> Result<Loaded, AppError> {
     // Отмену, которую отложила критическая команда, шаг отмечает сразу по её исходу, до
     // проверки итога: так её называет и отказ этой команды, и всё, что идёт после, —
@@ -697,7 +697,7 @@ fn execute_source_set_step(
             ensure_platform_success("load", source_set, &result)?;
         }
 
-        let apply = if apply {
+        let apply = if apply == ApplyPolicy::Apply {
             settle_apply(crate::use_cases::apply::act::apply(
                 context,
                 config,
@@ -793,7 +793,7 @@ fn execute_source_set_step_ibcmd(
     commit_context: &SourceSetContext,
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
-    apply: bool,
+    apply: ApplyPolicy,
 ) -> Result<Loaded, AppError> {
     // Версия формата сверяется до запуска платформы: формат новее неё — отказ.
     let format_notice = crate::use_cases::version_file::check_load_format(
@@ -856,7 +856,7 @@ fn execute_source_set_step_ibcmd(
         deferrals.note_result("ibcmd_import", &load_result);
         ensure_platform_success("load", source_set, &load_result)?;
 
-        let apply = if apply {
+        let apply = if apply == ApplyPolicy::Apply {
             settle_apply(crate::use_cases::apply::act::apply(
                 context,
                 config,
@@ -1276,7 +1276,7 @@ mod tests {
                 PushMode::Changes
             },
             source_set: None,
-            apply: true,
+            apply: crate::use_cases::request::ApplyPolicy::Apply,
         }
     }
 
@@ -3687,7 +3687,7 @@ mod tests {
                 dry_run: false,
                 load: PushMode::Changes,
                 source_set: Some("ext".to_owned()),
-                apply: true,
+                apply: crate::use_cases::request::ApplyPolicy::Apply,
             },
         )
         .expect("build");
@@ -3739,7 +3739,7 @@ mod tests {
                 dry_run: false,
                 load: PushMode::Changes,
                 source_set: Some("ext".to_owned()),
-                apply: true,
+                apply: crate::use_cases::request::ApplyPolicy::Apply,
             },
         )
         .expect("build");
@@ -3778,7 +3778,7 @@ mod tests {
                 dry_run: false,
                 load: PushMode::Changes,
                 source_set: Some("missing".to_owned()),
-                apply: true,
+                apply: crate::use_cases::request::ApplyPolicy::Apply,
             },
         )
         .expect_err("unknown source-set must fail");
@@ -3931,7 +3931,7 @@ mod tests {
     }
 
     fn without_apply(mut args: BuildArgs) -> BuildArgs {
-        args.apply = false;
+        args.apply = crate::use_cases::request::ApplyPolicy::Defer;
         args
     }
 

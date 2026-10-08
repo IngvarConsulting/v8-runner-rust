@@ -76,7 +76,7 @@ where
             source_set: request.source_set.clone(),
             // `push --no-apply` — ключ только командной строки: `build_project` применяет
             // всегда (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).
-            apply: true,
+            apply: crate::use_cases::request::ApplyPolicy::Apply,
         };
 
         match self

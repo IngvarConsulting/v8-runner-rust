@@ -494,3 +494,88 @@ fn an_extension_whose_generation_moves_only_on_apply_is_pushed_again_without_ref
     let pushed = succeeded(&project.run(&["push", "ext"]));
     assert_eq!(pushed["data"]["steps"][0]["applied"], true, "{pushed}");
 }
+
+/// Конфигуратор читает поколение применённого расширения, и неудачная загрузка его не
+/// сдвигает. Равенство поколения поэтому ничего не доказывает: `apply` после неудачной
+/// загрузки отказывает всегда.
+#[test]
+fn an_apply_after_a_failed_extension_load_is_refused_even_with_an_unchanged_generation() {
+    let project = Project::new().with_extension();
+    fs::write(project.root().join("token-ext"), format!("{FIRST}\r\n")).expect("token");
+    succeeded(&project.run(&["push", "--force"]));
+    let module = project.root().join("ext").join("Module.bsl");
+    fs::write(&module, "Procedure B()\n// edited\nEndProcedure\n").expect("edit");
+    project.mark("fail");
+    assert!(!project.run(&["push", "ext"]).status.success());
+    project.unmark("fail");
+    project.forget_calls();
+
+    let refused = project.run(&["apply", "ext"]);
+    let payload = envelope(&refused);
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(payload["error"]["next"]["command"], "push", "{payload}");
+    assert!(
+        !project.calls().contains("/UpdateDBCfg"),
+        "{}",
+        project.calls()
+    );
+}
+
+/// База ушла от записи «не применено»: отправка без изменений не применяет и называет
+/// непринятое с выходом `apply`.
+#[test]
+fn a_push_with_nothing_to_load_names_an_unapplied_load_the_base_moved_away_from() {
+    let project = Project::new();
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    succeeded(&project.run(&["push", "--no-apply"]));
+    project.base_generation(SECOND);
+    project.forget_calls();
+
+    let pushed = succeeded(&project.run(&["push"]));
+
+    let step = &pushed["data"]["steps"][0];
+    assert_eq!(step["mode"], "skipped", "{pushed}");
+    assert_eq!(step["applied"], false, "{pushed}");
+    let message = step["message"].as_str().unwrap_or_default();
+    assert!(message.contains("moved away from that record"), "{message}");
+    assert!(message.contains("apply main"), "{message}");
+    assert!(
+        !project.calls().contains("/UpdateDBCfg"),
+        "{}",
+        project.calls()
+    );
+}
+
+/// Расширение через Конфигуратор: после `push --no-apply` его поколение прежнее, и отправка
+/// без изменений применяет его, перенося запись на новое поколение.
+#[test]
+fn a_push_with_nothing_to_load_applies_an_unapplied_designer_extension() {
+    let project = Project::new().with_extension();
+    fs::write(project.root().join("token-ext"), format!("{FIRST}\r\n")).expect("token");
+    succeeded(&project.run(&["push", "--force"]));
+    let module = project.root().join("ext").join("Module.bsl");
+    fs::write(&module, "Procedure B()\n// edited\nEndProcedure\n").expect("edit");
+    succeeded(&project.run(&["push", "ext", "--no-apply"]));
+    fs::write(
+        project.root().join("apply-token-ext"),
+        format!("{SECOND}\r\n"),
+    )
+    .expect("token");
+    project.forget_calls();
+
+    let pushed = succeeded(&project.run(&["push", "ext"]));
+
+    assert_eq!(pushed["data"]["steps"][0]["applied"], true, "{pushed}");
+    assert!(
+        project.calls().contains("/UpdateDBCfg -Extension ext"),
+        "{}",
+        project.calls()
+    );
+    let file = project.root().join("work/infobases/origin/generation.json");
+    let ledger: Value =
+        serde_json::from_str(&fs::read_to_string(file).expect("ledger")).expect("json");
+    assert_eq!(ledger["ext"]["token"], SECOND, "{ledger}");
+    assert!(ledger["ext"].get("applied").is_none(), "{ledger}");
+}

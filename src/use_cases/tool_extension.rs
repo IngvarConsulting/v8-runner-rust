@@ -24,8 +24,8 @@ use crate::support::temp::{platform_logs_dir, tool_extension_export_dir};
 use crate::use_cases::apply::act::Applier;
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
+use crate::use_cases::request::ApplyPolicy;
 
 #[derive(Debug)]
 pub(crate) struct ToolExtensionFailure {
@@ -54,7 +54,7 @@ pub(crate) fn prepare_client_mcp_extension(
     config: &AppConfig,
     full_rebuild: bool,
     dry_run: bool,
-    apply: bool,
+    apply: ApplyPolicy,
 ) -> Result<Option<BuildStep>, ToolExtensionFailure> {
     let Some(extension) = client_mcp_extension(config) else {
         return Ok(None);
@@ -76,7 +76,7 @@ fn prepare_extension(
     extension: &ToolExtensionConfig,
     full_rebuild: bool,
     dry_run: bool,
-    apply: bool,
+    apply: ApplyPolicy,
 ) -> Result<BuildStep, AppError> {
     let started = Instant::now();
 
@@ -118,7 +118,7 @@ fn prepare_extension(
                 extension,
                 prepared(extension, "from .cfe artifact", apply),
                 started.elapsed().as_millis() as u64,
-                apply,
+                apply == ApplyPolicy::Apply,
             )
         }),
     })?;
@@ -250,7 +250,7 @@ fn prepare_source_extension(
     utilities: &mut PlatformUtilities,
     started: Instant,
     full_rebuild: bool,
-    apply: bool,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<BuildStep, AppError> {
     let source_context = tool_extension_source_context(config, extension, source)?;
@@ -258,14 +258,14 @@ fn prepare_source_extension(
     // загрузит и применит его снова, а `apply` применит его сам. Иначе отправка без
     // изменений оставила бы его непринятым — записи поколения у расширения-инструмента нет.
     let loaded = |commit: &dyn Fn() -> Result<(), AppError>| {
-        if apply {
+        if apply == ApplyPolicy::Apply {
             commit()?;
         }
         Ok(successful_build_step(
             extension,
             prepared(extension, "from sources", apply),
             started.elapsed().as_millis() as u64,
-            apply,
+            apply == ApplyPolicy::Apply,
         ))
     };
     if full_rebuild {
@@ -320,7 +320,7 @@ fn prepare_source_extension_full(
     extension: &ToolExtensionConfig,
     source: &ToolExtensionSourceConfig,
     utilities: &mut PlatformUtilities,
-    apply: bool,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     match source.format.unwrap_or(config.format) {
@@ -423,7 +423,7 @@ fn prepare_designer_source_extension(
     extension: &ToolExtensionConfig,
     source_path: &Path,
     utilities: &mut PlatformUtilities,
-    apply: bool,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     match config.selected_provider(Operation::Build) {
@@ -452,7 +452,7 @@ fn prepare_designer_source_extension(
                 .load_config_from_files_full(source_path, Some(&extension.name))
                 .map_err(AppError::from)?;
             ensure_written("load", extension, &load, deferrals)?;
-            if !apply {
+            if apply == ApplyPolicy::Defer {
                 return Ok(());
             }
             apply_extension(
@@ -487,7 +487,7 @@ fn prepare_designer_source_extension(
                 .config_import_full(source_path, Some(&extension.name))
                 .map_err(AppError::from)?;
             ensure_written("ibcmd_import", extension, &import, deferrals)?;
-            if !apply {
+            if apply == ApplyPolicy::Defer {
                 return Ok(());
             }
             apply_extension(
@@ -533,7 +533,7 @@ fn prepare_artifact_extension(
     extension: &ToolExtensionConfig,
     artifact_path: &Path,
     utilities: &mut PlatformUtilities,
-    apply: bool,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     let binary = utilities
@@ -557,7 +557,7 @@ fn prepare_artifact_extension(
         .load_cfg(artifact_path, Some(&extension.name))
         .map_err(AppError::from)?;
     ensure_written("load_cfg", extension, &load, deferrals)?;
-    if !apply {
+    if apply == ApplyPolicy::Defer {
         return Ok(());
     }
     apply_extension(
@@ -654,10 +654,10 @@ fn designer_log_file(
     extension: &ToolExtensionConfig,
     action: &str,
 ) -> Result<PathBuf, AppError> {
-    let log_dir = platform_logs_dir(&config.work_path).map_err(|error| {
-        AppError::Runtime(format!("failed to create platform logs dir: {error}"))
-    })?;
-    Ok(log_dir.join(format!("build-tool-{}-{action}.log", extension.name)))
+    crate::use_cases::generation_reader::designer_log_file(
+        config,
+        &format!("build-tool-{}-{action}", extension.name),
+    )
 }
 
 fn build_ibcmd_dsl<'a>(
@@ -768,20 +768,12 @@ fn ensure_tool_extension_success(
     extension: &ToolExtensionConfig,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    let Err(code) = result.process.outcome() else {
-        return Ok(());
-    };
-
-    Err(AppError::Platform(format_ibcmd_failure_details(
+    crate::use_cases::ibcmd_diagnostics::ensure_succeeded(
         action,
         "tool extension",
         &extension.name,
-        code.get(),
-        &result.process.stdout,
-        &result.process.stderr,
-        result.platform_log.as_deref(),
-        result.platform_log_path.as_deref(),
-    )))
+        result,
+    )
 }
 
 fn interruption_before_safe_point(
@@ -796,8 +788,8 @@ fn interruption_before_safe_point(
 }
 
 /// Сообщение удачного шага: подготовлено и применено или только загружено.
-fn prepared(extension: &ToolExtensionConfig, from: &str, applied: bool) -> String {
-    if applied {
+fn prepared(extension: &ToolExtensionConfig, from: &str, apply: ApplyPolicy) -> String {
+    if apply == ApplyPolicy::Apply {
         format!("prepared extension '{}' {from}", extension.name)
     } else {
         format!(

@@ -18,6 +18,7 @@
 //! принимает: параметр без исполнителя был бы мёртвым кодом. Когда #211 придёт, он ляжет
 //! сюда — в [`Applier`] или рядом с ним, — и все пути получат его разом.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::config::model::AppConfig;
@@ -26,12 +27,11 @@ use crate::platform::agent::WaitPolicy;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{DynamicUpdateMode, IbcmdConnection, IbcmdDsl};
 use crate::platform::process::ProcessRunner;
-use crate::platform::result::PlatformCommandResult;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{argument, run_critical, AgentHandle};
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
+use crate::use_cases::ibcmd_diagnostics::ensure_succeeded;
 use crate::use_cases::interruption::{self, Deferrals};
 
 /// Чем применяется: процесс платформы или команда в открытой сессии агента. Процессы
@@ -153,7 +153,12 @@ pub(crate) fn apply(
             .update_db_cfg(subject.extension)
             .map_err(AppError::from)?;
             deferrals.note_result("update_db_cfg", &result);
-            ensure_applied("update_db_cfg", subject, &result)
+            ensure_succeeded(
+                "update_db_cfg",
+                subject.kind.as_str(),
+                subject.name,
+                &result,
+            )
         }
         Applier::Ibcmd { binary, runner } => {
             let connection =
@@ -162,34 +167,15 @@ pub(crate) fn apply(
                 .config_apply(subject.extension, DynamicUpdateMode::Auto)
                 .map_err(AppError::from)?;
             deferrals.note_result("apply", &result);
-            ensure_applied("apply", subject, &result)
+            ensure_succeeded("apply", subject.kind.as_str(), subject.name, &result)
         }
         Applier::Agent { handle, wait } => {
             let mut command = String::from("config update-db-cfg");
             if let Some(extension) = subject.extension {
-                command.push_str(&format!(" --extension={}", argument(extension)));
+                // Запись в `String` не отказывает.
+                let _ = write!(command, " --extension={}", argument(extension));
             }
             run_critical(handle, "update_db_cfg", &command, wait, deferrals).map(|_| ())
         }
     }
-}
-
-fn ensure_applied(
-    action: &str,
-    subject: &Subject<'_>,
-    result: &PlatformCommandResult,
-) -> Result<(), AppError> {
-    let Err(code) = result.process.outcome() else {
-        return Ok(());
-    };
-    Err(AppError::Platform(format_ibcmd_failure_details(
-        action,
-        subject.kind.as_str(),
-        subject.name,
-        code.get(),
-        &result.process.stdout,
-        &result.process.stderr,
-        result.platform_log.as_deref(),
-        result.platform_log_path.as_deref(),
-    )))
 }

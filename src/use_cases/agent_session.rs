@@ -865,6 +865,25 @@ const fn is_applied(applied: &bool) -> bool {
     *applied
 }
 
+/// Применена ли загрузка, после которой пишется запись поколения.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyMark {
+    Applied,
+    /// Загружено без применения: запись несёт `applied: false`.
+    Unapplied,
+}
+
+impl GenerationRecord {
+    /// Признак применения записи.
+    pub(crate) const fn mark(&self) -> ApplyMark {
+        if self.applied {
+            ApplyMark::Applied
+        } else {
+            ApplyMark::Unapplied
+        }
+    }
+}
+
 /// Ответ записи на вопрос «менялась ли база с прошлого чтения».
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GenerationComparison {
@@ -973,7 +992,7 @@ impl GenerationLedger {
         token: &str,
         after: GenerationAfter,
     ) -> Result<(), AppError> {
-        self.record_as(tool, token, after, true)
+        self.record_as(tool, token, after, ApplyMark::Applied)
     }
 
     /// Записывает поколение с признаком применения: `applied: false` — загружено без
@@ -983,7 +1002,7 @@ impl GenerationLedger {
         tool: Provider,
         token: &str,
         after: GenerationAfter,
-        applied: bool,
+        mark: ApplyMark,
     ) -> Result<(), AppError> {
         let dir = self.file.parent().ok_or_else(|| {
             AppError::Runtime(format!(
@@ -1001,7 +1020,7 @@ impl GenerationLedger {
             token: token.to_owned(),
             tool,
             after,
-            applied,
+            applied: mark == ApplyMark::Applied,
             recorded_at: chrono::Utc::now().to_rfc3339(),
             identity: self.identity.clone(),
         })
@@ -1139,8 +1158,13 @@ mod tests {
         assert!(!text.contains("applied"), "{text}");
         assert!(recorded(&main).applied);
 
-        main.record_as(Provider::Designer, "def", GenerationAfter::Build, false)
-            .expect("record");
+        main.record_as(
+            Provider::Designer,
+            "def",
+            GenerationAfter::Build,
+            ApplyMark::Unapplied,
+        )
+        .expect("record");
         let text =
             std::fs::read_to_string(root.path().join("work/infobases/origin/generation.json"))
                 .expect("ledger");

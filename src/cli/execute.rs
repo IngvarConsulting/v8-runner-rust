@@ -3123,7 +3123,11 @@ fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
             PushMode::Changes
         },
         source_set: args.source_set.name().map(str::to_owned),
-        apply: !args.no_apply,
+        apply: if args.no_apply {
+            crate::use_cases::request::ApplyPolicy::Defer
+        } else {
+            crate::use_cases::request::ApplyPolicy::Apply
+        },
     }
 }
 
