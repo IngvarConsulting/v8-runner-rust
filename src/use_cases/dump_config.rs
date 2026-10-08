@@ -3,13 +3,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::model::{AppConfig, SourceFormat, SourceSetPurpose};
-use crate::domain::dump::{DumpMode, DumpResult, DumpSelectorResult};
+use crate::domain::dump::{
+    DumpMode, DumpModeReason, DumpResult, DumpSelectorResult, ReportedDumpMode,
+};
 use crate::domain::partial_dump_selector::PartialDumpSelector;
 #[cfg(test)]
 use crate::domain::partial_dump_selector::{
     PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
 };
 use crate::platform::designer::DesignerDsl;
+use crate::platform::dump_forecast::DumpForecast;
 use crate::platform::dump_format::{known_format, read_recorded, FormatVersion, RecordedFormat};
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -130,13 +133,15 @@ struct DumpNotes {
     message: Option<String>,
     /// Что публикация уничтожила по согласию.
     discarded: Losses,
+    /// Прогноз платформы перед выгрузкой по изменившемуся; `None` — прогноза не было.
+    forecast: Option<DumpForecast>,
 }
 
 impl DumpNotes {
     fn message(message: Option<String>) -> Self {
         Self {
             message,
-            discarded: Losses::default(),
+            ..Self::default()
         }
     }
 
@@ -144,7 +149,7 @@ impl DumpNotes {
     fn after(self, earlier: Option<String>) -> Self {
         Self {
             message: merge_optional_messages(earlier, self.message),
-            discarded: self.discarded,
+            ..self
         }
     }
 }
@@ -227,6 +232,7 @@ fn publish_full_dump(
             dump_publication_warning(context.command(), published.deferred_interruption),
         ),
         discarded: published.discarded,
+        forecast: None,
     })
 }
 
@@ -313,6 +319,33 @@ impl DumpPlan {
             Self::Full | Self::OverDirectory(OverDirectory::Whole(_)) => DumpMode::Full,
             Self::Partial => DumpMode::Partial,
             Self::OverDirectory(OverDirectory::ByVersionFile) => DumpMode::Incremental,
+        }
+    }
+
+    /// Случившийся режим для ответа и почему он не тот, что просили. Прогноз есть только у
+    /// выгрузки по изменившемуся (и у выборки `ibcmd`, которая идёт ею): «полная» — полная по
+    /// прогнозу, нераспознанный — «неизвестен», изменившееся — по изменившемуся.
+    pub(super) fn reported(
+        &self,
+        forecast: Option<DumpForecast>,
+    ) -> (ReportedDumpMode, Option<DumpModeReason>) {
+        match (self, forecast) {
+            (Self::OverDirectory(OverDirectory::Whole(reason)), _) => (
+                ReportedDumpMode::Full,
+                Some(match reason {
+                    WholeReason::Missing | WholeReason::Unrecognized => DumpModeReason::VersionFile,
+                    WholeReason::Foreign { .. } => DumpModeReason::ForeignFormat,
+                }),
+            ),
+            (_, Some(DumpForecast::Full)) => (
+                ReportedDumpMode::Full,
+                Some(DumpModeReason::PlatformForecast),
+            ),
+            (_, Some(DumpForecast::Unknown)) => {
+                (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
+            }
+            (_, Some(DumpForecast::Changes)) => (ReportedDumpMode::Incremental, None),
+            (plan, None) => ((&plan.mode()).into(), None),
         }
     }
 
@@ -407,6 +440,13 @@ fn run_dump_over_directory_designer(
         &resolved.source_set_name,
         label,
     )?;
+    // Прогноз меняет только ответ: при «полной» `-update` сам выгрузит всё (замер #173).
+    let forecast = match how {
+        OverDirectory::ByVersionFile => Some(forecast_designer(
+            context, config, resolved, binary, runner,
+        )?),
+        OverDirectory::Whole(_) => None,
+    };
     let dump_result = match how {
         OverDirectory::ByVersionFile => dsl.dump_config_to_files_incremental(
             &resolved.platform_target_path,
@@ -419,7 +459,75 @@ fn run_dump_over_directory_designer(
     }
     .map_err(AppError::from)?;
     ensure_platform_success("dump", resolved, &dump_result)?;
-    Ok((dump_result, DumpNotes::default()))
+    Ok((
+        dump_result,
+        DumpNotes {
+            forecast,
+            ..DumpNotes::default()
+        },
+    ))
+}
+
+/// Прогноз Конфигуратора перед выгрузкой по изменившемуся: `-getChanges` в той же команде,
+/// под тем же замком (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). Отказ
+/// платформы и ответ вне словаря — «неизвестен»; выгрузка идёт как просили.
+fn forecast_designer(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+) -> Result<DumpForecast, AppError> {
+    let list = crate::support::temp::dump_forecast_file(&config.work_path).map_err(|error| {
+        AppError::Runtime(format!("failed to create the dump forecast file: {error}"))
+    })?;
+    let dsl = build_designer_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        &resolved.source_set_name,
+        "forecast",
+    )?;
+    log_live_stage(
+        "dump: forecast",
+        "[Конфигуратор] asking what the dump will do",
+    );
+    let result = dsl
+        .dump_changes_list(
+            &resolved.platform_target_path,
+            list.path(),
+            resolved.extension.as_deref(),
+        )
+        .map_err(AppError::from)?;
+    ensure_interruption_clear(context, "after the dump forecast")?;
+    Ok(match result.process.outcome() {
+        Ok(()) => std::fs::read(list.path()).map_or(DumpForecast::Unknown, |bytes| {
+            crate::platform::dump_forecast::read_changes_list(&bytes)
+        }),
+        Err(_) => DumpForecast::Unknown,
+    })
+}
+
+/// Прогноз `ibcmd` перед выгрузкой по изменившемуся: `config export status` по файлу версий
+/// каталога. Отказ и ответ вне словаря — «неизвестен».
+fn forecast_ibcmd(
+    context: &ExecutionContext,
+    resolved: &ResolvedDumpTarget,
+    dsl: &crate::platform::ibcmd::IbcmdDsl<'_>,
+) -> Result<DumpForecast, AppError> {
+    log_live_stage("dump: forecast", "[ibcmd] asking what the dump will do");
+    let result = dsl
+        .config_export_status(
+            &resolved.platform_target_path.join(VERSION_FILE_NAME),
+            resolved.extension.as_deref(),
+        )
+        .map_err(map_ibcmd_error)?;
+    ensure_interruption_clear(context, "after the dump forecast")?;
+    Ok(match result.process.outcome() {
+        Ok(()) => crate::platform::dump_forecast::read_export_status(&result.process.stdout),
+        Err(_) => DumpForecast::Unknown,
+    })
 }
 
 fn run_full_dump_designer(
@@ -484,21 +592,39 @@ fn run_dump_over_directory_ibcmd(
         .map_err(|error| AppError::Runtime(format!("failed to create target dir: {error}")))?;
 
     let dsl = build_ibcmd_dsl(context, config, binary, runner)?;
-    let dump_result = match how {
-        OverDirectory::ByVersionFile => {
-            log_live_stage("dump: incremental", "[ibcmd] exporting configuration files");
-            dsl.config_export_incremental(
-                &resolved.platform_target_path,
-                resolved.extension.as_deref(),
-            )
-        }
+    let forecast = match how {
         OverDirectory::Whole(_) => {
-            return run_whole_dump_through_stage_ibcmd(context, resolved, &dsl);
+            return run_whole_dump_through_stage_ibcmd(context, resolved, &dsl)
         }
+        OverDirectory::ByVersionFile => forecast_ibcmd(context, resolved, &dsl)?,
+    };
+    // `--sync` полную выгрузку сам не делает и отказывает (замер #403, #424): при прогнозе
+    // «полная» выгрузка идёт через промежуточный каталог.
+    if forecast == DumpForecast::Full {
+        let (dump_result, notes) = run_whole_dump_through_stage_ibcmd(context, resolved, &dsl)?;
+        return Ok((
+            dump_result,
+            DumpNotes {
+                forecast: Some(forecast),
+                ..notes
+            },
+        ));
     }
-    .map_err(map_ibcmd_error)?;
+    log_live_stage("dump: incremental", "[ibcmd] exporting configuration files");
+    let dump_result = dsl
+        .config_export_incremental(
+            &resolved.platform_target_path,
+            resolved.extension.as_deref(),
+        )
+        .map_err(map_ibcmd_error)?;
     ensure_platform_success("dump", resolved, &dump_result)?;
-    Ok((dump_result, DumpNotes::default()))
+    Ok((
+        dump_result,
+        DumpNotes {
+            forecast: Some(forecast),
+            ..DumpNotes::default()
+        },
+    ))
 }
 
 /// Полная выгрузка `ibcmd` поверх каталога набора. В непустой каталог `config export`
@@ -625,7 +751,13 @@ fn run_partial_dump_ibcmd(
         runner,
         &OverDirectory::ByVersionFile,
     ) {
-        Ok((dump_result, _)) => Ok((dump_result, DumpNotes::message(Some(warning)))),
+        Ok((dump_result, notes)) => Ok((
+            dump_result,
+            DumpNotes {
+                message: merge_optional_messages(Some(warning), notes.message),
+                ..notes
+            },
+        )),
         Err(error) => Err(decorate_ibcmd_partial_error(error, &warning)),
     }
 }
@@ -663,6 +795,7 @@ fn run_incremental_dump_edt_designer(
         runner,
         &OverDirectory::ByVersionFile,
     )?;
+    let forecast = dump_notes.forecast;
     finalize_edt_dump(
         context,
         config,
@@ -673,6 +806,7 @@ fn run_incremental_dump_edt_designer(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
+    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
 }
 
 fn run_full_dump_edt_designer(
@@ -721,6 +855,7 @@ fn run_partial_dump_edt_designer(
     )?;
     let (dump_result, dump_notes) =
         run_partial_dump_designer(context, config, resolved, binary, runner, objects)?;
+    let forecast = dump_notes.forecast;
     finalize_edt_dump(
         context,
         config,
@@ -731,6 +866,7 @@ fn run_partial_dump_edt_designer(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
+    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
 }
 
 fn run_incremental_dump_edt_ibcmd(
@@ -762,6 +898,7 @@ fn run_incremental_dump_edt_ibcmd(
         runner,
         &OverDirectory::ByVersionFile,
     )?;
+    let forecast = dump_notes.forecast;
     finalize_edt_dump(
         context,
         config,
@@ -772,6 +909,7 @@ fn run_incremental_dump_edt_ibcmd(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
+    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
 }
 
 fn run_full_dump_edt_ibcmd(
@@ -819,6 +957,7 @@ fn run_partial_dump_edt_ibcmd(
     )?;
     let (dump_result, dump_notes) =
         run_partial_dump_ibcmd(context, config, resolved, binary, runner, objects)?;
+    let forecast = dump_notes.forecast;
     finalize_edt_dump(
         context,
         config,
@@ -829,6 +968,7 @@ fn run_partial_dump_edt_ibcmd(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
+    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
 }
 
 /// Полная выгрузка, переданная как значение: обратная синхронизация EDT сеет снимок
@@ -937,6 +1077,7 @@ fn finalize_edt_dump(
                 dump_publication_warning(context.command(), publish_phase.deferred_interruption),
             ),
             discarded: publish_phase.discarded,
+            forecast: None,
         }
         .after(inherited_message),
     ))
@@ -1302,7 +1443,7 @@ mod tests {
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
         TestsConfig, ToolsConfig,
     };
-    use crate::domain::dump::{DumpMode, DumpSelectorResult};
+    use crate::domain::dump::{DumpMode, DumpSelectorResult, ReportedDumpMode};
     use crate::domain::partial_dump_selector::PartialDumpSelector;
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
@@ -2601,7 +2742,7 @@ exit 0"#,
 
         assert!(result.ok);
         assert!(base.join("main").exists());
-        assert_eq!(result.mode, DumpMode::Full);
+        assert_eq!(result.mode, ReportedDumpMode::Full);
         let message = result.message.expect("the reason is named");
         assert!(
             message.contains("no version file ConfigDumpInfo.xml"),
@@ -2834,7 +2975,7 @@ exit 0"#,
         .expect("dump");
 
         assert!(result.ok);
-        assert_eq!(result.mode, DumpMode::Partial);
+        assert_eq!(result.mode, ReportedDumpMode::Partial);
         let expected_selectors = [
             DumpSelectorResult {
                 requested: "Catalog:Items".to_owned(),
@@ -2920,7 +3061,10 @@ exit 0"#,
         .expect_err("failure");
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
-        assert_eq!(failure.payload.expect("payload").mode, DumpMode::Partial);
+        assert_eq!(
+            failure.payload.expect("payload").mode,
+            ReportedDumpMode::Partial
+        );
         assert!(partial_list_paths(&work).is_empty());
     }
 
@@ -2955,7 +3099,9 @@ exit 0"#,
         .expect("dump");
 
         assert!(result.ok);
-        assert_eq!(result.mode, DumpMode::Partial);
+        // `ibcmd` выборку не умеет: идёт выгрузка по изменившемуся, и ответ называет её.
+        assert_eq!(result.requested_mode, DumpMode::Partial);
+        assert_eq!(result.mode, ReportedDumpMode::Incremental);
         assert!(result
             .message
             .as_deref()
@@ -2996,7 +3142,9 @@ exit 0"#,
         .expect("dump");
 
         assert!(result.ok);
-        assert_eq!(result.mode, DumpMode::Partial);
+        // `ibcmd` выборку не умеет: идёт выгрузка по изменившемуся, и ответ называет её.
+        assert_eq!(result.requested_mode, DumpMode::Partial);
+        assert_eq!(result.mode, ReportedDumpMode::Incremental);
         assert!(result
             .message
             .as_deref()
@@ -3046,7 +3194,9 @@ exit 0"#,
         .expect("dump");
 
         assert!(result.ok);
-        assert_eq!(result.mode, DumpMode::Partial);
+        // `ibcmd` выборку не умеет: идёт выгрузка по изменившемуся, и ответ называет её.
+        assert_eq!(result.requested_mode, DumpMode::Partial);
+        assert_eq!(result.mode, ReportedDumpMode::Incremental);
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("--sync"));
         assert!(calls.contains("--extension ext"));
@@ -3093,7 +3243,7 @@ exit 0"#,
             .message()
             .contains("IBCMD does not support object-scoped partial dump"));
         let payload = failure.payload.expect("payload");
-        assert_eq!(payload.mode, DumpMode::Partial);
+        assert_eq!(payload.mode, ReportedDumpMode::Partial);
         assert!(payload
             .message
             .as_deref()
@@ -3255,7 +3405,7 @@ exit 0"#,
         .expect("dump");
 
         assert!(result.ok, "{result:?}");
-        assert_eq!(result.mode, DumpMode::Full);
+        assert_eq!(result.mode, ReportedDumpMode::Full);
         assert_eq!(
             fs::read_to_string(target.join("Configuration.xml")).expect("dumped"),
             "new\n"
@@ -3374,6 +3524,173 @@ exit 0"#,
             "no version file over a half-laid dump"
         );
         assert_eq!(stage_leftovers(&base), 0, "the stage is removed");
+    }
+
+    /// Набор с годным файлом версий в игноре и закоммиченными исходниками: выгрузка идёт по
+    /// изменившемуся, и перед ней — прогноз.
+    fn project_with_a_version_file(base: &Path) {
+        create_source_tree(base);
+        fs::write(
+            base.join("main/ConfigDumpInfo.xml"),
+            "<ConfigDumpInfo version=\"2.20\"/>",
+        )
+        .expect("version file");
+        fs::write(base.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("ignore");
+        commit_sources(base);
+    }
+
+    /// Конфигуратор: `-getChanges` пишет в файл списка `forecast` (`printf %b`).
+    fn write_forecasting_designer_script(script: &Path, calls: &Path, forecast: &str) {
+        write_script(
+            script,
+            &format!(
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" /GetConfigGenerationID\"*) exit 0;; esac\nprev=\"\"\nlist=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then : > \"$a\"; fi\n  if [ \"$prev\" = \"-getChanges\" ]; then list=\"$a\"; fi\n  prev=\"$a\"\ndone\nif [ -n \"$list\" ]; then printf '%b' '{forecast}' > \"$list\"; fi\nexit 0",
+                calls.display()
+            ),
+        );
+    }
+
+    /// `ibcmd`: `export status` отвечает `status`; выгрузка без `--sync` пишет в пустой каталог.
+    fn write_forecasting_ibcmd_script(script: &Path, calls: &Path, status: &str) {
+        write_script(
+            script,
+            &format!(
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; *\" export status \"*) printf '%b' '{status}'; exit 0;; *\" --sync \"*) exit 0;; esac\nfor last; do :; done\nif [ -d \"$last\" ] && [ -n \"$(ls -A \"$last\")\" ]; then exit 255; fi\nmkdir -p \"$last\"\nprintf 'new\\n' > \"$last/Configuration.xml\"\nprintf '<ConfigDumpInfo version=\\\"2.20\\\"/>\\n' > \"$last/ConfigDumpInfo.xml\"\nexit 0",
+                calls.display()
+            ),
+        );
+    }
+
+    /// Конфигуратор предсказал полную выгрузку: `-update` идёт как есть (платформа выгрузит
+    /// всё сама), а ответ называет случившийся режим и причину.
+    #[test]
+    fn a_designer_full_forecast_is_reported_as_full_by_the_platform() {
+        use crate::domain::dump::DumpModeReason;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        project_with_a_version_file(&base);
+        write_forecasting_designer_script(&script, &calls, "\\xEF\\xBB\\xBFFullDump\\r\\n");
+        let config = build_config(&base, &dir.path().join("work"), &script);
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.requested_mode, DumpMode::Incremental);
+        assert_eq!(result.mode, ReportedDumpMode::Full);
+        assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformForecast));
+        let calls = fs::read_to_string(calls).expect("calls");
+        let forecast = calls.find("-getChanges").expect("the forecast ran");
+        let update = calls.rfind("-update").expect("the dump ran with -update");
+        assert!(forecast < update, "{calls}");
+        assert_eq!(calls.matches("-getChanges").count(), 1, "{calls}");
+    }
+
+    /// Ответ прогноза вне словаря — режим «неизвестен», выгрузка идёт как просили.
+    #[test]
+    fn an_unrecognized_forecast_reports_the_mode_as_unknown() {
+        use crate::domain::dump::DumpModeReason;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        project_with_a_version_file(&base);
+        write_forecasting_designer_script(&script, &calls, "Deleted: Catalog.Items\\r\\n");
+        let config = build_config(&base, &dir.path().join("work"), &script);
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.mode, ReportedDumpMode::Unknown);
+        assert_eq!(result.mode_reason, Some(DumpModeReason::Unknown));
+        assert!(fs::read_to_string(calls)
+            .expect("calls")
+            .contains("-update"));
+    }
+
+    /// Изменившееся по прогнозу — по изменившемуся, без причины.
+    #[test]
+    fn a_changes_forecast_keeps_the_incremental_mode() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        project_with_a_version_file(&base);
+        write_forecasting_designer_script(
+            &script,
+            &calls,
+            "\\xEF\\xBB\\xBFModified: Catalog.Items\\r\\n",
+        );
+        let config = build_config(&base, &dir.path().join("work"), &script);
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.mode, ReportedDumpMode::Incremental);
+        assert_eq!(result.mode_reason, None);
+    }
+
+    /// `ibcmd` предсказал полную выгрузку: `--sync` её не сделает (#424), поэтому выгрузка
+    /// идёт через промежуточный каталог, и ответ называет причину.
+    #[test]
+    fn an_ibcmd_full_forecast_dumps_through_the_stage_without_sync() {
+        use crate::domain::dump::DumpModeReason;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        project_with_a_version_file(&base);
+        write_forecasting_ibcmd_script(&script, &calls, "modified: all\\n");
+        let config = build_config_with_builder(
+            &base,
+            &dir.path().join("work"),
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.mode, ReportedDumpMode::Full);
+        assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformForecast));
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(calls.contains("export status"), "{calls}");
+        assert!(!calls.contains("--sync"), "{calls}");
+        assert!(calls.contains(".dump-stage-"), "{calls}");
+        assert_eq!(
+            fs::read_to_string(base.join("main/Configuration.xml")).expect("dumped"),
+            "new\n"
+        );
+    }
+
+    /// Выборка `ibcmd` идёт `--sync` и тоже спрашивает прогноз: после удаления объекта она
+    /// уходит в промежуточный каталог, а не падает на `--sync` (#424).
+    #[test]
+    fn an_ibcmd_partial_dump_follows_a_full_forecast_too() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        project_with_a_version_file(&base);
+        write_forecasting_ibcmd_script(&script, &calls, "modified: all\\n");
+        let config = build_config_with_builder(
+            &base,
+            &dir.path().join("work"),
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+
+        let result = run_dump(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Partial,
+                objects: vec!["Catalog.Items".to_owned()],
+                ..incremental_main()
+            },
+        )
+        .expect("dump");
+
+        assert_eq!(result.requested_mode, DumpMode::Partial);
+        assert_eq!(result.mode, ReportedDumpMode::Full);
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(!calls.contains("--sync"), "{calls}");
     }
 
     #[test]
@@ -3495,7 +3812,7 @@ exit 0"#,
         let result = run_dump(&config, &args).expect("dump");
 
         assert!(result.ok);
-        assert_eq!(result.mode, DumpMode::Incremental);
+        assert_eq!(result.mode, ReportedDumpMode::Incremental);
         let synced = fs::read_to_string(&calls).expect("calls");
         assert!(synced.contains("--sync"));
         assert!(synced.contains(base.join("main").display().to_string().as_str()));
@@ -3505,7 +3822,7 @@ exit 0"#,
         fs::remove_file(&calls).expect("reset calls");
         let result = run_dump(&config, &args).expect("dump");
         assert!(result.ok);
-        assert_eq!(result.mode, DumpMode::Full);
+        assert_eq!(result.mode, ReportedDumpMode::Full);
         let full = fs::read_to_string(&calls).expect("calls");
         assert!(!full.contains("--sync"), "{full}");
         assert!(full.contains(".dump-stage-"), "{full}");
@@ -3657,7 +3974,7 @@ exit 0"#,
             .collect::<Vec<_>>();
         assert_eq!(dump_calls.len(), 1);
         assert!(!dump_calls[0].contains("-update"));
-        assert_eq!(result.mode, DumpMode::Full);
+        assert_eq!(result.mode, ReportedDumpMode::Full);
 
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
         assert_eq!(edt_calls.matches("-command import").count(), 1);
@@ -4448,7 +4765,9 @@ exit 0"#,
             source_set: Some("main".to_owned()),
             extension: Some("ext".to_owned()),
             selectors: None,
-            mode: DumpMode::Incremental,
+            requested_mode: DumpMode::Incremental,
+            mode: ReportedDumpMode::Incremental,
+            mode_reason: None,
             target_path: PathBuf::from("/tmp/main"),
             platform_log_path: Some(PathBuf::from("/tmp/platform.log")),
             duration_ms: 5,

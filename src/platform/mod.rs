@@ -6,6 +6,7 @@ pub mod connection;
 pub mod designer;
 pub mod download;
 /// Версия формата иерархической выгрузки в файле версий и у платформы.
+pub mod dump_forecast;
 pub mod dump_format;
 pub mod edt;
 pub mod edt_session;

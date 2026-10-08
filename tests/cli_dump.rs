@@ -563,7 +563,8 @@ fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     let data = &payload["data"];
     assert_eq!(payload["ok"], true);
-    assert_eq!(data["mode"], "PARTIAL");
+    assert_eq!(data["requested_mode"], "PARTIAL");
+    assert_eq!(data["mode"], "INCREMENTAL");
     assert!(data["message"]
         .as_str()
         .expect("message")

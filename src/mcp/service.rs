@@ -219,7 +219,8 @@ where
                 |error| {
                     let mut envelope =
                         fallback_error_envelope(CommandName::Dump, "dump_config", error)?;
-                    envelope.data["mode"] = json!(render_dump_mode(use_case_request.mode));
+                    envelope.data["requested_mode"] =
+                        json!(render_dump_mode(use_case_request.mode));
                     Ok(envelope)
                 },
             )),
@@ -1124,7 +1125,7 @@ mod tests {
         TestsConfig, ToolsConfig,
     };
     use crate::domain::build::{BuildMode, BuildResult, BuildStep};
-    use crate::domain::dump::{DumpMode, DumpResult};
+    use crate::domain::dump::{DumpMode, DumpResult, ReportedDumpMode};
     use crate::domain::execution::{ExecutionStepKind, StepResult};
     use crate::domain::issue::{Issue, IssueSeverity, ModuleIssue};
     use crate::domain::launch::{
@@ -1625,7 +1626,9 @@ mod tests {
             source_set: Some("main".to_owned()),
             extension: None,
             selectors: None,
-            mode: DumpMode::Incremental,
+            requested_mode: DumpMode::Incremental,
+            mode: ReportedDumpMode::Incremental,
+            mode_reason: None,
             target_path: PathBuf::from("/tmp/out"),
             platform_log_path: None,
             duration_ms: 33,
@@ -1670,7 +1673,9 @@ mod tests {
                     source_set: Some("main".to_owned()),
                     extension: None,
                     selectors: None,
-                    mode: DumpMode::Incremental,
+                    requested_mode: DumpMode::Incremental,
+                    mode: ReportedDumpMode::Incremental,
+                    mode_reason: None,
                     target_path: PathBuf::from("/tmp/out"),
                     platform_log_path: None,
                     duration_ms: 3,
@@ -1730,7 +1735,7 @@ mod tests {
         match error {
             McpServiceError::Business(failure) => {
                 assert_eq!(failure.response.command, "pull");
-                assert_eq!(failure.response.data["mode"], "INCREMENTAL");
+                assert_eq!(failure.response.data["requested_mode"], "INCREMENTAL");
                 assert_eq!(failure.response.data["message"], "dump failed");
                 assert_eq!(failure.response.data["tool"], "dump_config");
             }
@@ -1751,7 +1756,9 @@ mod tests {
                 source_set: None,
                 extension: None,
                 selectors: None,
-                mode: DumpMode::Incremental,
+                requested_mode: DumpMode::Incremental,
+                mode: ReportedDumpMode::Incremental,
+                mode_reason: None,
                 target_path: PathBuf::from("/tmp/out"),
                 platform_log_path: None,
                 duration_ms: 1,
@@ -1803,7 +1810,9 @@ mod tests {
             source_set: Some("main".to_owned()),
             extension: None,
             selectors: None,
-            mode: DumpMode::Partial,
+            requested_mode: DumpMode::Partial,
+            mode: ReportedDumpMode::Partial,
+            mode_reason: None,
             target_path: PathBuf::from("/tmp/out"),
             platform_log_path: None,
             duration_ms: 14,
@@ -1856,7 +1865,9 @@ mod tests {
                     source_set: Some("main".to_owned()),
                     extension: None,
                     selectors: None,
-                    mode: DumpMode::Partial,
+                    requested_mode: DumpMode::Partial,
+                    mode: ReportedDumpMode::Partial,
+                    mode_reason: None,
                     target_path: PathBuf::from("/tmp/out"),
                     platform_log_path: None,
                     duration_ms: 3,

@@ -615,6 +615,7 @@ fn version_writing_platform(root: &Path) -> String {
     let fail = root.join("fail");
     format!(
         r#"printf '%s\n' "$*" >> '{calls}'
+case " $* " in *" -getChanges "*|*" export status "*) exit 0;; esac
 target=''
 load=''
 update=''

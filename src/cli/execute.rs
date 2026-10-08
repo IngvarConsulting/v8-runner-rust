@@ -29,7 +29,7 @@ use crate::domain::artifacts::{
 use crate::domain::build::{BuildMode, BuildResult};
 use crate::domain::capability::ProviderReceipt;
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
-use crate::domain::dump::{DumpMode, DumpResult, PullAllResult};
+use crate::domain::dump::{DumpResult, PullAllResult, ReportedDumpMode};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,
     ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStepStatus, StepResult,
@@ -4533,9 +4533,10 @@ fn is_designer_edt_workspace_noop(step: &InitStep) -> bool {
 
 fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool) {
     let mode = match result.mode {
-        DumpMode::Full => "full",
-        DumpMode::Incremental => "incremental",
-        DumpMode::Partial => "partial",
+        ReportedDumpMode::Full => "full",
+        ReportedDumpMode::Incremental => "incremental",
+        ReportedDumpMode::Partial => "partial",
+        ReportedDumpMode::Unknown => "unknown",
     };
     let source_set = result.source_set.as_deref().unwrap_or("<unresolved>");
     let show_signals = !succeeded || dump_has_warning(result);

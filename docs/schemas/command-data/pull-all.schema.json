@@ -28,6 +28,31 @@
       ],
       "type": "string"
     },
+    "DumpModeReason": {
+      "description": "Почему случившийся режим не тот, что просили.",
+      "oneOf": [
+        {
+          "const": "version_file",
+          "description": "Файла версий нет или версия формата в нём не распознана: выгрузка полная.",
+          "type": "string"
+        },
+        {
+          "const": "foreign_format",
+          "description": "Версия формата в файле версий не та, что пишет платформа: выгрузка полная.",
+          "type": "string"
+        },
+        {
+          "const": "platform_forecast",
+          "description": "Платформа предсказала полную выгрузку (`FullDump`, `modified: all`).",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Прогноз не распознан или не получен: режим не известен.",
+          "type": "string"
+        }
+      ]
+    },
     "DumpResult": {
       "additionalProperties": false,
       "properties": {
@@ -56,7 +81,19 @@
           ]
         },
         "mode": {
-          "$ref": "#/$defs/DumpMode"
+          "$ref": "#/$defs/ReportedDumpMode",
+          "description": "Режим, который случился: по плану раннера и прогнозу платформы\n(`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). У превью — режим плана."
+        },
+        "mode_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DumpModeReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Почему случившийся режим не тот, что просили, или не известен. Поля нет, когда\nрежим тот, что просили."
         },
         "ok": {
           "type": "boolean"
@@ -81,6 +118,10 @@
         "provider_dispatched": {
           "description": "Получил ли исполнитель работу этой команды: запущен процесс, который её выполняет,\nлибо работающей сессии отдана команда запроса. Подъём и открытие сессии, в том числе\nзапуск её процесса, и её служебные команды работой не считаются. `false`, если работы\nне было: превью, отказ или прерывание до передачи работы, процесс, который не удалось\nзапустить. Поле есть всегда, поэтому отсутствие работы не выводится из отсутствия\nзначения.",
           "type": "boolean"
+        },
+        "requested_mode": {
+          "$ref": "#/$defs/DumpMode",
+          "description": "Режим, который просили."
         },
         "selectors": {
           "items": {
@@ -109,6 +150,7 @@
       "required": [
         "ok",
         "provider_dispatched",
+        "requested_mode",
         "mode",
         "target_path",
         "duration_ms"
@@ -256,6 +298,16 @@
         "origin"
       ],
       "type": "object"
+    },
+    "ReportedDumpMode": {
+      "description": "Случившийся режим выгрузки в ответе. В отличие от [`DumpMode`] знает «неизвестен»:\nпрогноз платформы не распознан или не получен, и обещать «по изменившемуся» нельзя.\nПлана с таким режимом не бывает, поэтому значение живёт только в ответе.",
+      "enum": [
+        "FULL",
+        "INCREMENTAL",
+        "PARTIAL",
+        "UNKNOWN"
+      ],
+      "type": "string"
     },
     "SessionEndpoint": {
       "additionalProperties": false,

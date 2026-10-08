@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PULL-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/pull.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -16,6 +16,17 @@ check:
 нормализует и вызывающий обязан видеть результат нормализации.
 
 Инструмент MCP `dump_config` отвечает этой же формой.
+
+**Что изменила версия 6.** Ответ называет и запрошенный режим (`requested_mode`), и
+случившийся (`mode`): по плану раннера и по прогнозу платформы
+([правило](../use-cases/the-dump-mode-is-forecast-in-the-same-command.md)). У `mode` новое
+значение `UNKNOWN` — прогноз не распознан или не получен. Необязательное `mode_reason` говорит,
+почему случившийся режим не тот, что просили: `version_file` — файла версий нет или он не
+распознан, `foreign_format` — версия формата не та, что пишет платформа, `platform_forecast` —
+платформа предсказала полную выгрузку, `unknown` — режим не известен. Когда режим тот, что
+просили, поля нет. Выборка `ibcmd` теперь называет случившимся режимом `INCREMENTAL`: объекты
+она выбирать не умеет и выгружает изменившееся. Прежде `mode` называл режим плана, а запрошенного
+ответ не называл.
 
 **Что изменила версия 5.** Появилось необязательное поле `losses` — перечень того, что в
 каталоге набора пропадает безвозвратно, каждым путём: после выгрузки с согласием
@@ -33,6 +44,7 @@ check:
   "ok": true,
   "provider_dispatched": false,
   "source_set": "main",
+  "requested_mode": "FULL",
   "mode": "FULL",
   "target_path": "src/cf",
   "duration_ms": 0,
