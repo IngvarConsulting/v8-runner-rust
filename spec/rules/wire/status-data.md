@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STATUS-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -24,6 +24,11 @@ check:
 расширения-инструмента клиентского MCP `tool: true`, — и, у файловой
 базы, `holders` — копии из метки владельца. Без `--deep` этих полей нет. Что платформа не
 ответила, форма называет `null` с причиной в `reason`, а не отказом команды.
+
+**Что изменила версия 3.** У `base` новые поля: `unapplied` — есть ли в базе непринятое
+(основная конфигурация, у набора расширения — само расширение, отличается от конфигурации
+базы данных), `true`, `false` или `null`, и `unapplied_reason` — почему `null`
+([правило](../cli/status-deep-names-the-unapplied.md)).
 
 **Что изменила версия 2.** Копия в `holders.owners` — ровно `project`, `host`, `since` и
 `this_copy`.
@@ -55,7 +60,8 @@ check:
           "base": {
             "tool": "designer",
             "token": "2222222222222222222222222222222222222222",
-            "comparison": "moved_ahead"
+            "comparison": "moved_ahead",
+            "unapplied": false
           }
         }
       ],

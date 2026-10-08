@@ -371,7 +371,7 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "расширение-инструмент, когда сборку ведёт `ibcmd`",
         ),
         (
-            "crate::use_cases::generation_reader::read_generation",
+            "crate::use_cases::generation_reader::ibcmd_dsl",
             "поколение, когда его спрашивают у `ibcmd`, выбранного для обмена",
         ),
     ];

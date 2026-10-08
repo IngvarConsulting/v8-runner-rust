@@ -34,7 +34,10 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::support::fs::{acquire_advisory_lock, write_temp_dir_metadata, TempDirKind};
+use crate::support::fs::{
+    acquire_advisory_lock, metadata_sidecar_path, remove_path_if_exists, write_temp_dir_metadata,
+    TempDirKind,
+};
 use crate::support::path::{
     hashed_lock_path, is_filesystem_root, nearest_existing_canonical_path, stable_path_identity,
 };
@@ -844,6 +847,7 @@ fn build_external_in(
     let descriptors = external_descriptors(context, config, resolved)
         .map_err(|error| (error, ArtifactSet::default(), None))?;
     let mut artifacts = ArtifactSet::default();
+    let mut stage_sidecars = Vec::with_capacity(descriptors.len());
     let mut last_result = PlatformCommandResult {
         process: crate::platform::process::ProcessResult {
             exit_code: 0,
@@ -878,6 +882,7 @@ fn build_external_in(
                 None,
             )
         })?;
+        stage_sidecars.push(metadata_sidecar_path(&staging_file));
 
         log_live_stage(
             "make: external export",
@@ -951,6 +956,18 @@ fn build_external_in(
         ),
     ) {
         return Err((error, artifacts, last_result.platform_log_path.clone()));
+    }
+
+    // Метки файлов лежат внутри промежуточного каталога и уехали бы с ним в выгрузку; на
+    // случай сбоя каталог покрывает его собственная метка рядом.
+    for sidecar in &stage_sidecars {
+        remove_path_if_exists(sidecar).map_err(|error| {
+            (
+                AppError::Runtime(format!("failed to remove staging metadata: {error}")),
+                artifacts.clone(),
+                last_result.platform_log_path.clone(),
+            )
+        })?;
     }
 
     let publish_phase = publication
@@ -1281,7 +1298,7 @@ fn validate_publish_target(resolved: &ResolvedArtifactsTarget) -> Result<(), App
 
 fn cleanup_orphan_files(resolved: &ResolvedArtifactsTarget) -> Result<(), AppError> {
     let mut scan_roots = Vec::new();
-    if let Some(parent) = resolved.output_path.parent() {
+    if let Some(parent) = crate::support::fs::parent_dir(&resolved.output_path) {
         scan_roots.push(parent.to_path_buf());
     }
     if resolved.is_directory_output {

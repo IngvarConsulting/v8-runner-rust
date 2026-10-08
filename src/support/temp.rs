@@ -30,13 +30,13 @@ impl Drop for PrivateTempDir {
     }
 }
 
-pub fn private_temp_dir(work_path: &Path) -> std::io::Result<PrivateTempDir> {
+pub fn private_temp_dir(work_path: &Path, prefix: &str) -> std::io::Result<PrivateTempDir> {
     let root = temp_root(work_path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let path = tempfile::Builder::new()
-            .prefix("applied-extension-inventory-")
+            .prefix(prefix)
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in(root)?
             .keep();
@@ -44,11 +44,11 @@ pub fn private_temp_dir(work_path: &Path) -> std::io::Result<PrivateTempDir> {
     }
     #[cfg(windows)]
     {
-        windows_private_temp_dir(&root)
+        windows_private_temp_dir(&root, prefix)
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = root;
+        let _ = (root, prefix);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "private temporary directories are not supported on this platform",
@@ -57,7 +57,7 @@ pub fn private_temp_dir(work_path: &Path) -> std::io::Result<PrivateTempDir> {
 }
 
 #[cfg(windows)]
-fn windows_private_temp_dir(root: &Path) -> std::io::Result<PrivateTempDir> {
+fn windows_private_temp_dir(root: &Path, prefix: &str) -> std::io::Result<PrivateTempDir> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
@@ -135,10 +135,7 @@ fn windows_private_temp_dir(root: &Path) -> std::io::Result<PrivateTempDir> {
     };
     let result = (|| {
         for _ in 0..8 {
-            let path = root.join(format!(
-                "applied-extension-inventory-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let path = root.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
             let wide: Vec<u16> = path
                 .as_os_str()
                 .encode_wide()
@@ -254,7 +251,8 @@ mod tests {
     #[test]
     fn private_snapshot_directory_is_writable_and_removed() {
         let work = tempdir().expect("work");
-        let private = private_temp_dir(work.path()).expect("private snapshot dir");
+        let private = private_temp_dir(work.path(), "applied-extension-inventory-")
+            .expect("private snapshot dir");
         let path = private.path().to_owned();
         std::fs::write(path.join("applied.cfe"), b"private").expect("write private snapshot");
         #[cfg(unix)]
