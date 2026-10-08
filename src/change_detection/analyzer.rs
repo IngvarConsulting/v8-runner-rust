@@ -112,8 +112,12 @@ pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextA
         },
     };
 
-    let stored_keys: HashSet<String> = snapshot.entries.keys().cloned().collect();
-    let scan = match scanner::scan(context.path(), snapshot.watermark, &stored_keys) {
+    let stored_mtimes: HashMap<String, u64> = snapshot
+        .entries
+        .iter()
+        .map(|(rel, state)| (rel.clone(), state.mtime_ns))
+        .collect();
+    let scan = match scanner::scan(context.path(), snapshot.watermark, &stored_mtimes) {
         Ok(scan) => scan,
         Err(e) => {
             tracing::warn!(
@@ -282,7 +286,7 @@ pub fn prepare_full_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
-    let scan = scanner::scan(source_path, None, &HashSet::new())
+    let scan = scanner::scan(source_path, None, &HashMap::new())
         .map_err(|error| map_scan_error(context, error))?;
     Ok(FullSnapshot {
         snapshot: scan
@@ -564,6 +568,44 @@ mod tests {
             .collect();
         assert_eq!(changed, [(edited, ChangeKind::Modified)]);
     }
+    /// Модуль, восстановленный из сохранённой копии со старым временем изменения (так
+    /// делают `cp -p`, `Copy-Item`, распаковка архива), — изменение, хотя его время раньше
+    /// отметки последнего анализа (#447, найдено в Unica).
+    #[test]
+    fn a_module_restored_with_an_old_mtime_is_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let source_root = dir.path().join("src");
+        let work_path = dir.path().join("work");
+        std::fs::create_dir_all(&source_root).expect("source");
+        let module = source_root.join("Tests.bsl");
+        let saved_at = SystemTime::now() - std::time::Duration::from_secs(600);
+        std::fs::write(&module, "Процедура ВременныйТест() КонецПроцедуры").expect("temporary");
+        let context = SourceSetContext::new("main", source_root, "designer-main");
+        rescan_and_commit_full(&context, &work_path).expect("prime");
+
+        std::fs::write(&module, "Процедура Тест() КонецПроцедуры").expect("restore");
+        File::options()
+            .write(true)
+            .open(&module)
+            .expect("open")
+            .set_modified(saved_at)
+            .expect("restore mtime");
+
+        let analysis = analyze_context(&context, &work_path);
+
+        let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
+            panic!(
+                "the restored module must be a change: {:?}",
+                analysis.outcome
+            );
+        };
+        let changed: Vec<_> = changes
+            .into_iter()
+            .map(|change| (change.path, change.kind))
+            .collect();
+        assert_eq!(changed, [(module, ChangeKind::Modified)]);
+    }
+
     #[test]
     fn publishing_a_prepared_snapshot_does_not_absorb_a_later_user_edit() {
         let dir = tempdir().expect("tempdir");
