@@ -4,8 +4,9 @@
 //! сбросе принимает человек.
 //!
 //! Ход: признак непринятого тем же чтением, что у `status --deep` (нет — отката нет; не
-//! получен — отказ до отката), затем своя хеш-память набора заменяется пустой, затем откат
-//! ([`act`]), затем запись журнала поколений переписывает инструмент, который её сделал.
+//! получен — отказ до отката), поколение до отката инструментом записи набора, затем своя
+//! хеш-память набора заменяется пустой, затем откат ([`act`]), затем запись журнала поколений
+//! переписывает инструмент, который её сделал, — если база не ушла от неё.
 
 pub(crate) mod act;
 
@@ -18,15 +19,15 @@ use crate::domain::capability::{Operation, Provider};
 use crate::domain::next_step::NextStep;
 use crate::domain::reset::{HashMemoryFate, ResetOutcome, ResetResult};
 use crate::domain::source_set::SourceSetPurpose;
-use crate::domain::status::GenerationRecordFate;
+use crate::domain::status::{GenerationAfter, GenerationRecordFate};
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::generation_reader::{
-    designer_log_file, read_by_record_tool, read_unapplied, Executor as ReaderExecutor,
-    GenerationProcess,
+    designer_log_file, read_by_record_tool, read_unapplied, GenerationProcess, LocatedTool,
 };
+use crate::use_cases::generation_record::{self, RecordStep};
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 use crate::use_cases::request::ResetRequest;
 use crate::use_cases::result::{
@@ -226,6 +227,34 @@ fn discard(
         return Ok(());
     }
     let memory = inventory.designer_context(&set.name);
+    let record = memory.and_then(|memory| {
+        crate::use_cases::exchange_guard::recorded_generation(memory, &config.work_path)
+            .map(|record| (memory, record))
+    });
+    // Поколение до отката сверяется с записью, как у `apply`: запись переписывается, только
+    // когда база не ушла от неё, — иначе откат спрятал бы чужую загрузку от проверки
+    // `non_fast_forward` следующей отправки.
+    let before = match &record {
+        Some((_, record)) if record.after != GenerationAfter::FailedBuild => {
+            match executor.read_generation(context, config, record.tool, set, extension) {
+                Ok(before) => Some(before),
+                Err(error) if error.cancellation().is_some() => return Err(error),
+                Err(error) => {
+                    tracing::debug!(%error, "the generation before the reset is not known");
+                    Some(None)
+                }
+            }
+        }
+        _ => None,
+    };
+    // Пришедшая отмена останавливает до памяти: пустая память без отката заставила бы
+    // следующую отправку грузить набор целиком зря.
+    if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
+        context,
+        format!("reset for source-set '{}'", set.name),
+    ) {
+        return Err(error);
+    }
     result.hash_memory = Some(match memory {
         Some(memory) => crate::use_cases::exchange_guard::empty_hash_memory_before_reset(
             memory,
@@ -236,22 +265,43 @@ fn discard(
     let ((), deferrals) = collecting_deferrals(|deferrals| {
         executor.roll_back(context, config, set, extension, deferrals)
     })?;
-    let record = memory.and_then(|memory| {
-        crate::use_cases::exchange_guard::recorded_generation(memory, &config.work_path)
-            .map(|record| (memory, record))
-    });
-    let (generation, note) = match record {
-        Some((memory, record)) => {
+    let (generation, note) = match (record, before) {
+        (None, _) => (GenerationRecordFate::Unchecked, None),
+        // Запись перед неудачной загрузкой остаётся: что та загрузка сделала с базой,
+        // неизвестно, и её сверку делает следующая отправка.
+        (Some(_), None) => (
+            GenerationRecordFate::Kept,
+            Some(format!(
+                "the generation record of source-set '{}' was made before a failed load and is kept, so the next push compares the infobase with it",
+                set.name
+            )),
+        ),
+        (Some((memory, record)), Some(Some(token))) if token == record.token => {
             let after = executor.read_generation(context, config, record.tool, set, extension);
-            crate::use_cases::apply::record::carry_record(
-                "reset",
+            generation_record::carry_record(
+                RecordStep::Reset,
                 memory,
                 &config.work_path,
                 &record,
                 after,
             )?
         }
-        None => (GenerationRecordFate::Unchecked, None),
+        (Some((_, record)), Some(Some(token))) => (
+            GenerationRecordFate::Kept,
+            Some(format!(
+                "the infobase moved ahead of the record of source-set '{}' before the reset: its configuration generation was {token}, the record after the last {} is {}; the record is kept, so the next push that loads is refused until the infobase is pulled or overwritten",
+                set.name, record.after, record.token
+            )),
+        ),
+        (Some((memory, record)), Some(None)) => generation_record::erase_record(
+            RecordStep::Reset,
+            memory,
+            &config.work_path,
+            &format!(
+                "could not be read by {}, the tool of its record",
+                record.tool
+            ),
+        ),
     };
     result.generation = Some(generation);
     result.outcome = ResetOutcome::Discarded;
@@ -275,13 +325,12 @@ struct Executor {
 }
 
 impl Executor {
-    fn located(&self) -> Result<&std::path::Path, AppError> {
-        self.binary.as_deref().ok_or_else(|| {
-            AppError::Runtime(format!(
-                "{} was not located before the reset",
-                self.provider
-            ))
-        })
+    /// Исполнитель и его утилита — в том виде, что знает общий читатель поколения.
+    fn tool(&self) -> LocatedTool<'_> {
+        LocatedTool {
+            provider: self.provider,
+            binary: self.binary.as_deref(),
+        }
     }
 
     /// Расширение откатывается, только когда оно есть в базе: состав базы читает и
@@ -323,7 +372,7 @@ impl Executor {
         config: &AppConfig,
         extension: Option<&str>,
     ) -> Result<bool, AppError> {
-        let binary = self.located()?;
+        let binary = self.tool().path(context)?;
         match self.provider {
             Provider::Designer => read_unapplied(
                 context,
@@ -363,7 +412,7 @@ impl Executor {
         extension: Option<&str>,
         deferrals: &mut crate::use_cases::interruption::Deferrals,
     ) -> Result<(), AppError> {
-        let binary = self.located()?;
+        let binary = self.tool().path(context)?;
         let tool = match self.provider {
             Provider::Designer => RollingBack::Designer {
                 binary,
@@ -384,7 +433,7 @@ impl Executor {
         act::roll_back(context, config, tool, &set.name, extension, deferrals)
     }
 
-    /// Поколение после отката — инструментом записи набора.
+    /// Поколение до и после отката — инструментом записи набора.
     fn read_generation(
         &mut self,
         context: &ExecutionContext,
@@ -397,7 +446,7 @@ impl Executor {
             context,
             config,
             tool,
-            ReaderExecutor {
+            LocatedTool {
                 provider: self.provider,
                 binary: self.binary.as_deref(),
             },

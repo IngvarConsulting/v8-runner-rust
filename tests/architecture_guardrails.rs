@@ -5764,13 +5764,17 @@ fn installed_extensions_are_matched_in_one_place() {
 /// фаза и учёт отложенной отмены (#235). Корень, от которого он стережёт, — тот же, что у
 /// применения (#210): копия записи в базу у каждого исполнителя расходится в защите от
 /// отмены. Страж ловит вызов `/RollbackCfg` и `config reset` вне владельца под любым
-/// именем функции.
+/// именем функции в любом слое; сами команды строят `designer.rs` и `ibcmd.rs`.
 #[test]
 fn the_rollback_act_has_one_owner() {
-    let owner = repo_path("src/use_cases/reset/act.rs");
-    let offenders = collect_rust_files(&repo_path("src/use_cases"))
+    let allowed = [
+        repo_path("src/use_cases/reset/act.rs"),
+        repo_path("src/platform/designer.rs"),
+        repo_path("src/platform/ibcmd.rs"),
+    ];
+    let offenders = collect_rust_files(&repo_path("src"))
         .into_iter()
-        .filter(|file| *file != owner)
+        .filter(|file| !allowed.contains(file))
         .filter(|file| {
             let tokens = production_tokens(file);
             tokens.contains(".rollback_cfg(") || tokens.contains(".config_reset(")

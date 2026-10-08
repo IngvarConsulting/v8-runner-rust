@@ -9,6 +9,7 @@ check:
   - tests/cli_reset.rs::reset_with_nothing_unapplied_rolls_nothing_back
   - tests/cli_reset.rs::a_failed_rollback_answers_a_platform_failure_and_the_next_push_loads_everything
   - tests/cli_reset.rs::reset_creates_no_memory_of_the_base
+  - tests/cli_reset.rs::reset_into_a_base_that_moved_keeps_the_record_and_the_next_push_is_refused
 ---
 
 # `data` команды `reset`
@@ -22,9 +23,11 @@ check:
 хеш-память заменена пустой; `absent` — своей непустой хеш-памяти нет, ничего не записано.
 Поля нет — команда до памяти не дошла: превью, нечего отбрасывать или отказ раньше.
 `generation` говорит, что стало с записью журнала поколений набора после отката, теми же
-значениями, что у `apply` (`CTR.WIRE.APPLY-DATA`): `recorded` — записан ответ инструмента
-записи, признак «не применено» снят; `erased` — ответа нет, запись стёрта; `unerased` —
-стереть не удалось; `unchecked` — своей записи нет. Значения `kept` у `reset` не бывает.
+значениями, что у `apply` (`CTR.WIRE.APPLY-DATA`): `recorded` — поколение до отката совпало
+с записью, и после него записан ответ инструмента записи, признак «не применено» снят;
+`kept` — база ушла от записи до отката или запись сделана перед неудачной загрузкой: запись
+не тронута, и следующая отправка это назовёт; `erased` — ответа нет, запись стёрта;
+`unerased` — стереть не удалось; `unchecked` — своей записи нет.
 Поля нет — отката не было, или отмена прервала чтение поколения после него (сообщение
 называет и то и другое).
 

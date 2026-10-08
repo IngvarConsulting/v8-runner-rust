@@ -1850,8 +1850,8 @@ fn apply_unapplied(
         collecting_deferrals(|deferrals| run(UnappliedOp::Apply(deferrals)).map(|_| ())).map_err(
             |error| crate::use_cases::apply::load_kept_unapplied(context, set.name(), error),
         )?;
-    let (_, note) = crate::use_cases::apply::record::carry_record(
-        "apply",
+    let (_, note) = crate::use_cases::generation_record::carry_record(
+        crate::use_cases::generation_record::RecordStep::Apply,
         set,
         &config.work_path,
         record,

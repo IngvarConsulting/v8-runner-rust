@@ -81,11 +81,24 @@ pub(crate) fn read_generation<'a>(
     }
 }
 
-/// Исполнитель команды: инструмент и найденная утилита.
+/// Исполнитель команды: инструмент и найденная им утилита.
 #[derive(Clone, Copy)]
-pub(crate) struct Executor<'a> {
+pub(crate) struct LocatedTool<'a> {
     pub(crate) provider: Provider,
     pub(crate) binary: Option<&'a Path>,
+}
+
+impl<'a> LocatedTool<'a> {
+    /// Утилита исполнителя; не найдена до работы — ошибка сценария.
+    pub(crate) fn path(self, context: &ExecutionContext) -> Result<&'a Path, AppError> {
+        self.binary.ok_or_else(|| {
+            AppError::Runtime(format!(
+                "{} was not located before the {}",
+                self.provider,
+                context.command().as_str()
+            ))
+        })
+    }
 }
 
 /// Поколение инструментом `tool` — тем, что сделал запись набора: токены разных инструментов
@@ -97,7 +110,7 @@ pub(crate) fn read_by_record_tool(
     context: &ExecutionContext,
     config: &AppConfig,
     tool: Provider,
-    executor: Executor<'_>,
+    executor: LocatedTool<'_>,
     utilities: &mut PlatformUtilities,
     name: &str,
     extension: Option<&str>,
@@ -108,16 +121,7 @@ pub(crate) fn read_by_record_tool(
         Provider::Agent | Provider::IbcmdRs | Provider::Webinst => return Ok(None),
     };
     let binary = if tool == executor.provider {
-        executor
-            .binary
-            .ok_or_else(|| {
-                AppError::Runtime(format!(
-                    "{} was not located before the {}",
-                    executor.provider,
-                    context.command().as_str()
-                ))
-            })?
-            .to_path_buf()
+        executor.path(context)?.to_path_buf()
     } else {
         match utilities.locate(utility) {
             Ok(location) => location.path,
@@ -132,21 +136,18 @@ pub(crate) fn read_by_record_tool(
         context,
         config,
         || {
-            Ok(match utility {
-                UtilityType::Ibcmd => GenerationProcess::Ibcmd {
+            // `tool` здесь — Конфигуратор или `ibcmd`: прочие ответили выше.
+            Ok(if tool == Provider::Ibcmd {
+                GenerationProcess::Ibcmd {
                     binary: &binary,
                     runner,
                     data_path: None,
-                },
-                UtilityType::V8 => GenerationProcess::Designer {
+                }
+            } else {
+                GenerationProcess::Designer {
                     binary: &binary,
                     runner,
                     log_file: designer_log_file(config, name)?,
-                },
-                other => {
-                    return Err(AppError::Runtime(format!(
-                        "{other:?} does not read the configuration generation"
-                    )))
                 }
             })
         },

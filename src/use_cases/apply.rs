@@ -4,7 +4,6 @@
 //! ([`act`]), которым применяют и `push`, и расширение-инструмент.
 
 pub(crate) mod act;
-pub(crate) mod record;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -24,9 +23,8 @@ use crate::support::error::AppError;
 use crate::use_cases::agent_session::{self, AgentHandle};
 use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::extension_identity::extension_name_key;
-use crate::use_cases::generation_reader::{
-    designer_log_file, read_by_record_tool, Executor as ReaderExecutor,
-};
+use crate::use_cases::generation_reader::{designer_log_file, read_by_record_tool, LocatedTool};
+use crate::use_cases::generation_record::{self, RecordStep};
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 use crate::use_cases::request::ApplyRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
@@ -354,8 +352,13 @@ fn apply_target(
         Some(token) if token == record.token => {
             let deferrals = applied(context, config, executor, target, index)?;
             let after = executor.read_generation(context, config, record.tool, target, index);
-            let (generation, note) =
-                record::carry_record("apply", set, &config.work_path, &record, after)?;
+            let (generation, note) = generation_record::carry_record(
+                RecordStep::Apply,
+                set,
+                &config.work_path,
+                &record,
+                after,
+            )?;
             Ok(TargetApplied {
                 generation: Some(generation),
                 deferrals,
@@ -375,8 +378,8 @@ fn apply_target(
         }
         None => {
             let deferrals = applied(context, config, executor, target, index)?;
-            let (generation, note) = record::erase_record(
-                "apply",
+            let (generation, note) = generation_record::erase_record(
+                RecordStep::Apply,
                 set,
                 &config.work_path,
                 &format!(
@@ -590,7 +593,7 @@ impl Executor {
             context,
             config,
             tool,
-            ReaderExecutor {
+            LocatedTool {
                 provider: self.provider,
                 binary: self.binary.as_deref(),
             },

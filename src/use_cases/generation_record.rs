@@ -13,6 +13,31 @@ use crate::domain::status::GenerationRecordFate;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{ApplyMark, GenerationLedger, GenerationRecord};
 
+/// Шаг, после которого переносится запись: оба кончаются равенством основной конфигурации
+/// и конфигурации базы данных и с каталогом не обмениваются.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordStep {
+    /// Применение — `apply` и применение своего непринятого у `push`.
+    Apply,
+    /// Откат непринятого — `reset`.
+    Reset,
+}
+
+impl RecordStep {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::Reset => "reset",
+        }
+    }
+}
+
+impl std::fmt::Display for RecordStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// После шага `step` — применения, перед которым поколение совпало с записью, или отката
 /// непринятого: ответ инструмента записи становится записью — с прежней операцией и снятым
 /// признаком «не применено»: после обоих шагов основная конфигурация равна конфигурации базы
@@ -21,7 +46,7 @@ use crate::use_cases::agent_session::{ApplyMark, GenerationLedger, GenerationRec
 /// чтении, стирает запись и останавливает шаг: её называет отказ вместе со стёртой записью,
 /// как после загрузки (`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`).
 pub(crate) fn carry_record(
-    step: &str,
+    step: RecordStep,
     set: &SourceSetContext,
     work_path: &Path,
     record: &GenerationRecord,
@@ -45,7 +70,7 @@ pub(crate) fn carry_record(
             });
         }
         Err(error) => {
-            tracing::debug!(%error, step, "the generation after the step is not known");
+            tracing::debug!(%error, %step, "the generation after the step is not known");
             None
         }
     };
@@ -72,7 +97,7 @@ pub(crate) fn carry_record(
 
 /// Стирает запись набора после шага `step`, у которого нет ответа инструмента записи.
 pub(crate) fn erase_record(
-    step: &str,
+    step: RecordStep,
     set: &SourceSetContext,
     work_path: &Path,
     why: &str,
@@ -84,7 +109,7 @@ pub(crate) fn erase_record(
 }
 
 fn erase(
-    step: &str,
+    step: RecordStep,
     set: &SourceSetContext,
     ledger: &GenerationLedger,
     why: &str,

@@ -316,8 +316,8 @@ fn reset_discards_a_push_without_apply_and_the_next_push_loads_it_again() {
     let order: Vec<usize> = [
         "/DumpCfg",
         "/DumpDBCfg",
-        "/RollbackCfg",
         "/GetConfigGenerationID",
+        "/RollbackCfg",
     ]
     .iter()
     .map(|call| {
@@ -325,6 +325,7 @@ fn reset_discards_a_push_without_apply_and_the_next_push_loads_it_again() {
             .find(call)
             .unwrap_or_else(|| panic!("{call}: {calls}"))
     })
+    .chain(calls.rfind("/GetConfigGenerationID"))
     .collect();
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{calls}");
     assert!(!calls.contains("-Extension"), "{calls}");
@@ -345,7 +346,7 @@ fn reset_discards_a_push_without_apply_and_the_next_push_loads_it_again() {
     project.forget_calls();
     let pushed = succeeded(&project.run(&["push"]));
     let step = &pushed["data"]["steps"][0];
-    assert_ne!(step["mode"], "skipped", "{pushed}");
+    assert_eq!(step["mode"], "full", "{pushed}");
     assert_eq!(step["applied"], true, "{pushed}");
     assert!(
         project.calls().contains("/LoadConfigFromFiles"),
@@ -589,6 +590,7 @@ fn reset_rewrites_the_record_with_the_tool_that_made_it() {
     assert!(!calls.contains("/GetConfigGenerationID"), "{calls}");
     assert_eq!(project.record()["tool"], "ibcmd");
     assert_eq!(project.record()["token"], THIRD);
+    assert_eq!(project.record()["after"], "build");
     assert!(
         project.record().get("applied").is_none(),
         "{}",
@@ -824,6 +826,60 @@ fn an_edt_push_after_reset_loads_the_discarded_set_again() {
     assert!(loaded, "{pushed}");
     assert!(
         project.calls().contains("/LoadConfigFromFiles"),
+        "{}",
+        project.calls()
+    );
+}
+
+/// База ушла от записи до отката — кто-то загрузил и применил своё: откат идёт, а запись
+/// остаётся прежней (`kept`), и следующая отправка по-прежнему отказывает `non_fast_forward`.
+#[test]
+fn reset_into_a_base_that_moved_keeps_the_record_and_the_next_push_is_refused() {
+    let project = Project::new();
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    succeeded(&project.run(&["push", "--no-apply"]));
+    project.generation(THIRD);
+    let ledger = project.ledger();
+
+    let reset = succeeded(&project.run(&["reset"]));
+
+    assert_eq!(reset["data"]["outcome"], "discarded", "{reset}");
+    assert_eq!(reset["data"]["generation"], "kept", "{reset}");
+    assert!(
+        reset["data"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("moved ahead of the record"),
+        "{reset}"
+    );
+    assert_eq!(project.ledger(), ledger);
+
+    let pushed = refused(&project.run(&["push"]));
+    assert_eq!(pushed["error"]["kind"], "non_fast_forward", "{pushed}");
+}
+
+/// Запись, сделанная перед неудачной загрузкой, после отката остаётся как есть: её сверку
+/// делает следующая отправка.
+#[test]
+fn reset_keeps_a_record_made_before_a_failed_load() {
+    let project = Project::new();
+    succeeded(&project.run(&["push", "--force"]));
+    let file = project.memory().join("generation.json");
+    let text = fs::read_to_string(&file).expect("ledger");
+    fs::write(&file, text.replace("\"build\"", "\"failed_build\"")).expect("ledger");
+    assert_eq!(project.record()["after"], "failed_build");
+    fs::write(project.state("main"), "half loaded").expect("state");
+    let ledger = project.ledger();
+    project.forget_calls();
+
+    let reset = succeeded(&project.run(&["reset"]));
+
+    assert_eq!(reset["data"]["outcome"], "discarded", "{reset}");
+    assert_eq!(reset["data"]["generation"], "kept", "{reset}");
+    assert_eq!(project.ledger(), ledger);
+    assert!(
+        !project.calls().contains("/GetConfigGenerationID"),
         "{}",
         project.calls()
     );

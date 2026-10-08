@@ -22,7 +22,8 @@ pub struct ResetResult {
     /// Что стало с хеш-памятью набора; нет поля — команда до неё не дошла.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash_memory: Option<HashMemoryFate>,
-    /// Что стало с записью журнала поколений набора; нет поля — отката не было.
+    /// Что стало с записью журнала поколений набора; нет поля — отката не было или отмена
+    /// прервала чтение поколения после него (сообщение называет и то и другое).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationRecordFate>,
     pub message: Option<String>,

@@ -40,6 +40,8 @@ pub mod extension_inventory;
 pub mod external_artifacts;
 /// Единственный читатель поколения процессом платформы.
 pub(crate) mod generation_reader;
+/// Перенос записи журнала поколений после `apply` и `reset`.
+pub(crate) mod generation_record;
 /// Shared formatting helpers for IBCMD diagnostics.
 pub mod ibcmd_diagnostics;
 /// What stays out of the project git: `.gitignore` patterns and the tracked version-file refusal.
