@@ -18,7 +18,24 @@ use crate::use_cases::request::{
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::run_tests;
 use crate::use_cases::transport::{dispatch_with_workspace_lock, BoundaryNote};
-use tracing::warn;
+
+/// Ответ порта: исход сценария и то, что граница сказала сверх него (база другой копии,
+/// взятие базы без метки, смена ушедшего владельца) — те же тексты, что командная строка
+/// кладёт первыми в `warnings` своего ответа.
+#[derive(Debug)]
+pub struct PortAnswer<T> {
+    pub outcome: UseCaseResult<T>,
+    pub warnings: Vec<String>,
+}
+
+impl<T> From<UseCaseResult<T>> for PortAnswer<T> {
+    fn from(outcome: UseCaseResult<T>) -> Self {
+        Self {
+            outcome,
+            warnings: Vec::new(),
+        }
+    }
+}
 
 /// Thin indirection layer used by the MCP service to call use cases.
 pub trait McpUseCasePort {
@@ -27,35 +44,35 @@ pub trait McpUseCasePort {
         context: &ExecutionContext,
         config: &AppConfig,
         request: &BuildRequest,
-    ) -> UseCaseResult<BuildResult>;
+    ) -> PortAnswer<BuildResult>;
 
     fn run_tests(
         &self,
         context: &ExecutionContext,
         config: &AppConfig,
         request: &TestRequest,
-    ) -> UseCaseResult<TestRunResult>;
+    ) -> PortAnswer<TestRunResult>;
 
     fn dump_config(
         &self,
         context: &ExecutionContext,
         config: &AppConfig,
         request: &DumpRequest,
-    ) -> UseCaseResult<DumpResult>;
+    ) -> PortAnswer<DumpResult>;
 
     fn launch_app(
         &self,
         context: &ExecutionContext,
         config: &AppConfig,
         request: &LaunchRequest,
-    ) -> UseCaseResult<LaunchResult>;
+    ) -> PortAnswer<LaunchResult>;
 
     fn check_syntax(
         &self,
         context: &ExecutionContext,
         config: &AppConfig,
         request: &SyntaxRequest,
-    ) -> UseCaseResult<SyntaxCheckResult>;
+    ) -> PortAnswer<SyntaxCheckResult>;
 }
 
 /// Production port implementation delegating directly to use cases.
@@ -68,7 +85,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         context: &ExecutionContext,
         config: &AppConfig,
         request: &BuildRequest,
-    ) -> UseCaseResult<BuildResult> {
+    ) -> PortAnswer<BuildResult> {
         with_workspace_lock(context, config, BaseAccess::Writes, || {
             build_project::execute(context, config, request)
         })
@@ -79,7 +96,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         context: &ExecutionContext,
         config: &AppConfig,
         request: &TestRequest,
-    ) -> UseCaseResult<TestRunResult> {
+    ) -> PortAnswer<TestRunResult> {
         with_workspace_lock(context, config, BaseAccess::Writes, || {
             run_tests::execute(context, config, request)
         })
@@ -90,7 +107,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         context: &ExecutionContext,
         config: &AppConfig,
         request: &DumpRequest,
-    ) -> UseCaseResult<DumpResult> {
+    ) -> PortAnswer<DumpResult> {
         with_workspace_lock(context, config, BaseAccess::Writes, || {
             dump_config::execute(context, config, request)
         })
@@ -101,7 +118,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         context: &ExecutionContext,
         config: &AppConfig,
         request: &LaunchRequest,
-    ) -> UseCaseResult<LaunchResult> {
+    ) -> PortAnswer<LaunchResult> {
         with_workspace_lock(context, config, BaseAccess::Writes, || {
             launch_app::execute(context, config, request)
         })
@@ -112,7 +129,7 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
         context: &ExecutionContext,
         config: &AppConfig,
         request: &SyntaxRequest,
-    ) -> UseCaseResult<SyntaxCheckResult> {
+    ) -> PortAnswer<SyntaxCheckResult> {
         with_workspace_lock(context, config, request.base_access(), || {
             check_syntax::execute(context, config, request)
         })
@@ -121,25 +138,29 @@ impl McpUseCasePort for DefaultMcpUseCasePort {
 
 /// Граница порта: замок `workPath`, затем замок базы и проверка владельца — та же, что у
 /// командной строки. Инструменты MCP — команды записи или базу не открывают; то, что
-/// граница говорит сверх ответа (взятие базы без метки, смена ушедшего владельца), уходит в
-/// журнал сервера.
+/// граница говорит сверх ответа, порт отдаёт рядом с исходом.
 fn with_workspace_lock<T>(
     context: &ExecutionContext,
     config: &AppConfig,
     base: BaseAccess,
     run: impl FnOnce() -> UseCaseResult<T>,
-) -> UseCaseResult<T> {
-    let command = context.command();
+) -> PortAnswer<T> {
+    let mut warnings = Vec::new();
     let before_dispatch = |notes: &[BoundaryNote]| {
-        for note in notes {
-            warn!(command = command.as_str(), "{}", note.message);
-        }
+        warnings = boundary_warnings(notes);
         Ok(())
     };
-    match dispatch_with_workspace_lock(config, command, base, before_dispatch, run) {
-        Ok(result) => result,
-        Err(refusal) => Err(UseCaseFailure::without_payload(refusal.error)),
-    }
+    let outcome =
+        match dispatch_with_workspace_lock(config, context.command(), base, before_dispatch, run) {
+            Ok(result) => result,
+            Err(refusal) => Err(UseCaseFailure::without_payload(refusal.error)),
+        };
+    PortAnswer { outcome, warnings }
+}
+
+/// Тексты границы для `warnings` ответа инструмента, в порядке командной строки.
+pub(crate) fn boundary_warnings(notes: &[BoundaryNote]) -> Vec<String> {
+    notes.iter().map(|note| note.message.clone()).collect()
 }
 
 impl<T> McpUseCasePort for Arc<T>
@@ -151,7 +172,7 @@ where
         context: &ExecutionContext,
         config: &AppConfig,
         request: &BuildRequest,
-    ) -> UseCaseResult<BuildResult> {
+    ) -> PortAnswer<BuildResult> {
         (**self).build_project(context, config, request)
     }
 
@@ -160,7 +181,7 @@ where
         context: &ExecutionContext,
         config: &AppConfig,
         request: &TestRequest,
-    ) -> UseCaseResult<TestRunResult> {
+    ) -> PortAnswer<TestRunResult> {
         (**self).run_tests(context, config, request)
     }
 
@@ -169,7 +190,7 @@ where
         context: &ExecutionContext,
         config: &AppConfig,
         request: &DumpRequest,
-    ) -> UseCaseResult<DumpResult> {
+    ) -> PortAnswer<DumpResult> {
         (**self).dump_config(context, config, request)
     }
 
@@ -178,7 +199,7 @@ where
         context: &ExecutionContext,
         config: &AppConfig,
         request: &LaunchRequest,
-    ) -> UseCaseResult<LaunchResult> {
+    ) -> PortAnswer<LaunchResult> {
         (**self).launch_app(context, config, request)
     }
 
@@ -187,7 +208,7 @@ where
         context: &ExecutionContext,
         config: &AppConfig,
         request: &SyntaxRequest,
-    ) -> UseCaseResult<SyntaxCheckResult> {
+    ) -> PortAnswer<SyntaxCheckResult> {
         (**self).check_syntax(context, config, request)
     }
 }
@@ -252,6 +273,7 @@ mod tests {
                     source_set: None,
                 },
             )
+            .outcome
             .expect_err("busy workspace");
 
         // Граница замка отказывает своим родом; словарь MCP узок и отвечает

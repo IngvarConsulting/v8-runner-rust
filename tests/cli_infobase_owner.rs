@@ -650,9 +650,8 @@ fn a_preview_names_the_warning_on_a_base_of_another_copy_and_writes_nothing() {
     assert_eq!(stand.marker_text(), marker);
 }
 
-/// Инструмент MCP на базе другой копии идёт так же, как командная строка, и метку не
-/// меняет. Предупреждение в ответ инструмента пока не попадает — только в журнал сервера
-/// (#404, `INV.MCP.A-BOUNDARY-NOTE-REACHES-THE-TOOL-ANSWER`).
+/// Инструмент MCP на базе другой копии идёт так же, как командная строка, метку не меняет
+/// и в `warnings` ответа несёт то же предупреждение, что ответ командной строки.
 #[test]
 fn an_mcp_tool_on_a_base_of_another_copy_runs_like_the_cli() {
     let stand = Stand::new();
@@ -660,12 +659,51 @@ fn an_mcp_tool_on_a_base_of_another_copy_runs_like_the_cli() {
     let second = stand.copy("second");
     succeeded(&first.run(&["push"]));
     let marker = stand.marker_text();
-    assert_warned(&second.run(&["push"]), "push", &first, &stand);
+    let cli_warning = assert_warned(&second.run(&["push"]), "push", &first, &stand);
 
     let answer = support::mcp::call_tool(&second.config, "build_project", json!({}));
 
     assert!(!answer.is_error, "{}", answer.envelope);
     assert_eq!(stand.marker_text(), marker);
+    assert_eq!(
+        warnings(&answer.envelope).first(),
+        Some(&cli_warning),
+        "the tool answer leads with the CLI warning: {}",
+        answer.envelope
+    );
+}
+
+/// Взятие базы без метки и смену ушедшего владельца инструмент MCP называет в `warnings`
+/// ответа, как командная строка, а не только в журнале сервера.
+#[test]
+fn an_mcp_tool_answer_names_the_takeover_and_the_gone_owner() {
+    let stand = Stand::new();
+    let first = stand.copy("first");
+    let second = stand.copy("second");
+
+    let taken = support::mcp::call_tool(&first.config, "build_project", json!({}));
+    assert!(!taken.is_error, "{}", taken.envelope);
+    assert_eq!(stand.owners(), [first.canonical_root()]);
+    assert!(
+        warnings(&taken.envelope)
+            .iter()
+            .any(|warning| warning.contains("now held by this working copy")),
+        "{}",
+        taken.envelope
+    );
+
+    let first_root = first.canonical_root();
+    fs::remove_dir_all(&first.root).expect("remove the first copy");
+    let replaced = support::mcp::call_tool(&second.config, "build_project", json!({}));
+    assert!(!replaced.is_error, "{}", replaced.envelope);
+    assert_eq!(stand.owners(), [second.canonical_root()]);
+    assert!(
+        warnings(&replaced.envelope)
+            .iter()
+            .any(|warning| warning.contains(&first_root)),
+        "names the gone owner: {}",
+        replaced.envelope
+    );
 }
 
 /// Владелец с другой машины всегда живой: раннер его не сменяет и метку не трогает, а

@@ -1,7 +1,5 @@
 use std::future::Future;
 
-use tracing::warn;
-
 use crate::config::model::AppConfig;
 use crate::domain::infobase_export::InfobaseTransferPhase;
 use crate::use_cases::command_lock::CommandLockGuard;
@@ -59,22 +57,19 @@ pub fn dispatch_with_workspace_lock<TResult>(
 /// Та же граница для асинхронного сценария: замки держатся, пока сценарий не дошёл до
 /// конечного состояния, и снимаются вместе с его будущим — раньше, чем вызывающий
 /// отпустит что-то своё. Сценарий создаётся уже под замками; то, что граница говорит
-/// сверх ответа, уходит в журнал.
+/// сверх ответа, возвращается рядом с его исходом.
 pub(crate) async fn dispatch_with_workspace_lock_async<TFuture>(
     config: &AppConfig,
     command: CommandName,
     base: BaseAccess,
     run: impl FnOnce() -> TFuture,
-) -> Result<TFuture::Output, UseCaseError>
+) -> Result<(TFuture::Output, Vec<BoundaryNote>), UseCaseError>
 where
     TFuture: Future,
 {
     let (_workspace_lock, _infobase_lock, notes) =
         acquire(config, command, base).map_err(|refusal| refusal.error)?;
-    for note in &notes {
-        warn!(command = command.as_str(), "{}", note.message);
-    }
-    Ok(run().await)
+    Ok((run().await, notes))
 }
 
 /// Граница превью: замков нет, метку владельца читают без замка и ничего не пишут. Превью

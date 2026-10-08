@@ -76,18 +76,21 @@ where
             source_set: request.source_set.clone(),
         };
 
-        match self
+        let answer = self
             .port
-            .build_project(&context, self.config, &use_case_request)
-        {
-            Ok(result) => ok_envelope(CommandName::Build, result.duration_ms, result)
-                .map_err(McpServiceError::Internal),
-            Err(failure) => Err(map_use_case_failure_envelope(
-                failure,
-                |result| err_envelope(CommandName::Build, result.duration_ms, result),
-                |error| fallback_error_envelope(CommandName::Build, "build_project", error),
-            )),
-        }
+            .build_project(&context, self.config, &use_case_request);
+        with_boundary_warnings(
+            answer.warnings,
+            match answer.outcome {
+                Ok(result) => ok_envelope(CommandName::Build, result.duration_ms, result)
+                    .map_err(McpServiceError::Internal),
+                Err(failure) => Err(map_use_case_failure_envelope(
+                    failure,
+                    |result| err_envelope(CommandName::Build, result.duration_ms, result),
+                    |error| fallback_error_envelope(CommandName::Build, "build_project", error),
+                )),
+            },
+        )
     }
 
     /// Executes the `run_all_tests` MCP tool.
@@ -100,19 +103,22 @@ where
             .map_err(McpServiceError::Internal)?;
         let (effective_config, use_case_request) = map_run_all_tests_request(self.config, request)?;
 
-        match self
+        let answer = self
             .port
-            .run_tests(&context, &effective_config, &use_case_request)
-        {
-            Ok(result) => {
-                mcp_value_envelope(test_envelope(&result)).map_err(McpServiceError::Internal)
-            }
-            Err(failure) => Err(map_use_case_failure_envelope(
-                failure,
-                |result| mcp_value_envelope(test_envelope(&result)),
-                |error| fallback_error_envelope(CommandName::Test, "run_all_tests", error),
-            )),
-        }
+            .run_tests(&context, &effective_config, &use_case_request);
+        with_boundary_warnings(
+            answer.warnings,
+            match answer.outcome {
+                Ok(result) => {
+                    mcp_value_envelope(test_envelope(&result)).map_err(McpServiceError::Internal)
+                }
+                Err(failure) => Err(map_use_case_failure_envelope(
+                    failure,
+                    |result| mcp_value_envelope(test_envelope(&result)),
+                    |error| fallback_error_envelope(CommandName::Test, "run_all_tests", error),
+                )),
+            },
+        )
     }
 
     /// Executes the `run_module_tests` MCP tool.
@@ -143,19 +149,22 @@ where
             scope: TestScopeRequest::Module { name: module_name },
         };
 
-        match self
+        let answer = self
             .port
-            .run_tests(&context, self.config, &use_case_request)
-        {
-            Ok(result) => {
-                mcp_value_envelope(test_envelope(&result)).map_err(McpServiceError::Internal)
-            }
-            Err(failure) => Err(map_use_case_failure_envelope(
-                failure,
-                |result| mcp_value_envelope(test_envelope(&result)),
-                |error| fallback_error_envelope(CommandName::Test, "run_module_tests", error),
-            )),
-        }
+            .run_tests(&context, self.config, &use_case_request);
+        with_boundary_warnings(
+            answer.warnings,
+            match answer.outcome {
+                Ok(result) => {
+                    mcp_value_envelope(test_envelope(&result)).map_err(McpServiceError::Internal)
+                }
+                Err(failure) => Err(map_use_case_failure_envelope(
+                    failure,
+                    |result| mcp_value_envelope(test_envelope(&result)),
+                    |error| fallback_error_envelope(CommandName::Test, "run_module_tests", error),
+                )),
+            },
+        )
     }
 
     /// Executes the `dump_config` MCP tool.
@@ -207,24 +216,27 @@ where
             force_way_out: ForceWayOut::PullForce,
         };
 
-        match self
+        let answer = self
             .port
-            .dump_config(&context, self.config, &use_case_request)
-        {
-            Ok(result) => ok_envelope(CommandName::Dump, result.duration_ms, result)
-                .map_err(McpServiceError::Internal),
-            Err(failure) => Err(map_use_case_failure_envelope(
-                failure,
-                |result| err_envelope(CommandName::Dump, result.duration_ms, result),
-                |error| {
-                    let mut envelope =
-                        fallback_error_envelope(CommandName::Dump, "dump_config", error)?;
-                    envelope.data["requested_mode"] =
-                        json!(render_dump_mode(use_case_request.mode));
-                    Ok(envelope)
-                },
-            )),
-        }
+            .dump_config(&context, self.config, &use_case_request);
+        with_boundary_warnings(
+            answer.warnings,
+            match answer.outcome {
+                Ok(result) => ok_envelope(CommandName::Dump, result.duration_ms, result)
+                    .map_err(McpServiceError::Internal),
+                Err(failure) => Err(map_use_case_failure_envelope(
+                    failure,
+                    |result| err_envelope(CommandName::Dump, result.duration_ms, result),
+                    |error| {
+                        let mut envelope =
+                            fallback_error_envelope(CommandName::Dump, "dump_config", error)?;
+                        envelope.data["requested_mode"] =
+                            json!(render_dump_mode(use_case_request.mode));
+                        Ok(envelope)
+                    },
+                )),
+            },
+        )
     }
 
     /// Executes the `launch_app` MCP tool.
@@ -238,28 +250,31 @@ where
         let use_case_request = map_launch_app_request(request)?;
         let started = Instant::now();
 
-        match self
+        let answer = self
             .port
-            .launch_app(&context, self.config, &use_case_request)
-        {
-            Ok(result) => ok_envelope(
-                CommandName::Launch,
-                started.elapsed().as_millis() as u64,
-                result,
-            )
-            .map_err(McpServiceError::Internal),
-            Err(failure) => Err(map_use_case_failure_envelope(
-                failure,
-                |result| {
-                    err_envelope(
-                        CommandName::Launch,
-                        started.elapsed().as_millis() as u64,
-                        result,
-                    )
-                },
-                |error| fallback_error_envelope(CommandName::Launch, "launch_app", error),
-            )),
-        }
+            .launch_app(&context, self.config, &use_case_request);
+        with_boundary_warnings(
+            answer.warnings,
+            match answer.outcome {
+                Ok(result) => ok_envelope(
+                    CommandName::Launch,
+                    started.elapsed().as_millis() as u64,
+                    result,
+                )
+                .map_err(McpServiceError::Internal),
+                Err(failure) => Err(map_use_case_failure_envelope(
+                    failure,
+                    |result| {
+                        err_envelope(
+                            CommandName::Launch,
+                            started.elapsed().as_millis() as u64,
+                            result,
+                        )
+                    },
+                    |error| fallback_error_envelope(CommandName::Launch, "launch_app", error),
+                )),
+            },
+        )
     }
 
     /// Executes the `check_syntax_edt` MCP tool.
@@ -272,10 +287,10 @@ where
             .map_err(McpServiceError::Internal)?;
         let use_case_request = normalize_check_syntax_edt_request(request);
 
-        map_syntax_use_case_result(
-            self.port
-                .check_syntax(&context, self.config, &use_case_request),
-        )
+        let answer = self
+            .port
+            .check_syntax(&context, self.config, &use_case_request);
+        with_boundary_warnings(answer.warnings, map_syntax_use_case_result(answer.outcome))
     }
 
     /// Executes the `check_syntax_designer_config` MCP tool.
@@ -296,24 +311,27 @@ where
             dry_run: false,
         };
 
-        match self
+        let answer = self
             .port
-            .check_syntax(&context, self.config, &use_case_request)
-        {
-            Ok(result) => ok_envelope(CommandName::Syntax, result.duration_ms, result)
-                .map_err(McpServiceError::Internal),
-            Err(failure) => Err(map_use_case_failure_envelope(
-                failure,
-                |result| err_envelope(CommandName::Syntax, result.duration_ms, result),
-                |error| {
-                    fallback_error_envelope(
-                        CommandName::Syntax,
-                        "check_syntax_designer_config",
-                        error,
-                    )
-                },
-            )),
-        }
+            .check_syntax(&context, self.config, &use_case_request);
+        with_boundary_warnings(
+            answer.warnings,
+            match answer.outcome {
+                Ok(result) => ok_envelope(CommandName::Syntax, result.duration_ms, result)
+                    .map_err(McpServiceError::Internal),
+                Err(failure) => Err(map_use_case_failure_envelope(
+                    failure,
+                    |result| err_envelope(CommandName::Syntax, result.duration_ms, result),
+                    |error| {
+                        fallback_error_envelope(
+                            CommandName::Syntax,
+                            "check_syntax_designer_config",
+                            error,
+                        )
+                    },
+                )),
+            },
+        )
     }
 
     /// Executes the `check_syntax_designer_modules` MCP tool.
@@ -333,24 +351,27 @@ where
             dry_run: false,
         };
 
-        match self
+        let answer = self
             .port
-            .check_syntax(&context, self.config, &use_case_request)
-        {
-            Ok(result) => ok_envelope(CommandName::Syntax, result.duration_ms, result)
-                .map_err(McpServiceError::Internal),
-            Err(failure) => Err(map_use_case_failure_envelope(
-                failure,
-                |result| err_envelope(CommandName::Syntax, result.duration_ms, result),
-                |error| {
-                    fallback_error_envelope(
-                        CommandName::Syntax,
-                        "check_syntax_designer_modules",
-                        error,
-                    )
-                },
-            )),
-        }
+            .check_syntax(&context, self.config, &use_case_request);
+        with_boundary_warnings(
+            answer.warnings,
+            match answer.outcome {
+                Ok(result) => ok_envelope(CommandName::Syntax, result.duration_ms, result)
+                    .map_err(McpServiceError::Internal),
+                Err(failure) => Err(map_use_case_failure_envelope(
+                    failure,
+                    |result| err_envelope(CommandName::Syntax, result.duration_ms, result),
+                    |error| {
+                        fallback_error_envelope(
+                            CommandName::Syntax,
+                            "check_syntax_designer_modules",
+                            error,
+                        )
+                    },
+                )),
+            },
+        )
     }
 }
 
@@ -780,6 +801,31 @@ fn mcp_value_envelope<T: Serialize>(
     })
 }
 
+/// Ответ инструмента несёт сказанное границей первым в `warnings`, как ответ командной
+/// строки той же команды — и в успехе, и в отказе.
+pub(crate) fn with_boundary_warnings(
+    warnings: Vec<String>,
+    response: McpServiceResult<McpCommandEnvelope>,
+) -> McpServiceResult<McpCommandEnvelope> {
+    if warnings.is_empty() {
+        return response;
+    }
+    let lead = |envelope: &mut McpCommandEnvelope| {
+        envelope.warnings.splice(0..0, warnings);
+    };
+    match response {
+        Ok(mut envelope) => {
+            lead(&mut envelope);
+            Ok(envelope)
+        }
+        Err(McpServiceError::Business(mut failure)) => {
+            lead(&mut failure.response);
+            Err(McpServiceError::Business(failure))
+        }
+        Err(internal) => Err(internal),
+    }
+}
+
 fn map_use_case_failure_envelope<TPayload, FPayload, FFallback>(
     failure: UseCaseFailure<TPayload>,
     payload_mapper: FPayload,
@@ -1110,6 +1156,32 @@ mod envelope_tests {
         // Словарь MCP уже: кода возможности у него нет, и это граница, а не потеря.
         assert_eq!(rendered["kind"], "runtime", "{rendered}");
     }
+
+    /// Сказанное границей идёт первым в `warnings` и отказа: ответ, который не удался после
+    /// записи в базу другой копии, всё равно её называет.
+    #[test]
+    fn a_boundary_warning_leads_a_refusal_too() {
+        let refusal = map_use_case_failure_envelope::<(), _, _>(
+            crate::use_cases::result::UseCaseFailure::without_payload(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "refused",
+            )),
+            |()| unreachable!("no payload"),
+            |error| {
+                let mut envelope =
+                    fallback_error_envelope(CommandName::Build, "build_project", error)?;
+                envelope.warnings.push("own".to_owned());
+                Ok(envelope)
+            },
+        );
+
+        let answered = with_boundary_warnings(vec!["boundary".to_owned()], Err(refusal));
+
+        let Err(McpServiceError::Business(failure)) = answered else {
+            panic!("a refusal stays a refusal");
+        };
+        assert_eq!(failure.response.warnings, ["boundary", "own"]);
+    }
 }
 
 #[cfg(test)]
@@ -1139,7 +1211,7 @@ mod tests {
     };
     use crate::mcp::context::McpCallContext;
     use crate::mcp::error::{McpErrorCode, McpServiceError};
-    use crate::mcp::port::McpUseCasePort;
+    use crate::mcp::port::{McpUseCasePort, PortAnswer};
     use crate::mcp::request::{
         McpBuildProjectRequest, McpCheckSyntaxDesignerConfigRequest,
         McpCheckSyntaxDesignerModulesRequest, McpCheckSyntaxEdtRequest, McpDumpConfigRequest,
@@ -1212,7 +1284,7 @@ mod tests {
             context: &ExecutionContext,
             _config: &AppConfig,
             request: &BuildRequest,
-        ) -> UseCaseResult<BuildResult> {
+        ) -> PortAnswer<BuildResult> {
             self.build_requests
                 .borrow_mut()
                 .push((context.clone(), request.clone()));
@@ -1220,6 +1292,7 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .expect("missing build result")
+                .into()
         }
 
         fn run_tests(
@@ -1227,7 +1300,7 @@ mod tests {
             context: &ExecutionContext,
             config: &AppConfig,
             request: &TestRequest,
-        ) -> UseCaseResult<TestRunResult> {
+        ) -> PortAnswer<TestRunResult> {
             self.test_requests
                 .borrow_mut()
                 .push((context.clone(), request.clone()));
@@ -1236,6 +1309,7 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .expect("missing test result")
+                .into()
         }
 
         fn dump_config(
@@ -1243,7 +1317,7 @@ mod tests {
             context: &ExecutionContext,
             _config: &AppConfig,
             request: &DumpRequest,
-        ) -> UseCaseResult<DumpResult> {
+        ) -> PortAnswer<DumpResult> {
             self.dump_requests
                 .borrow_mut()
                 .push((context.clone(), request.clone()));
@@ -1251,6 +1325,7 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .expect("missing dump result")
+                .into()
         }
 
         fn launch_app(
@@ -1258,7 +1333,7 @@ mod tests {
             context: &ExecutionContext,
             _config: &AppConfig,
             request: &LaunchRequest,
-        ) -> UseCaseResult<LaunchResult> {
+        ) -> PortAnswer<LaunchResult> {
             self.launch_requests
                 .borrow_mut()
                 .push((context.clone(), request.clone()));
@@ -1266,6 +1341,7 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .expect("missing launch result")
+                .into()
         }
 
         fn check_syntax(
@@ -1273,7 +1349,7 @@ mod tests {
             context: &ExecutionContext,
             _config: &AppConfig,
             request: &SyntaxRequest,
-        ) -> UseCaseResult<SyntaxCheckResult> {
+        ) -> PortAnswer<SyntaxCheckResult> {
             self.syntax_requests
                 .borrow_mut()
                 .push((context.clone(), request.clone()));
@@ -1281,6 +1357,7 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .expect("missing syntax result")
+                .into()
         }
     }
 
