@@ -352,7 +352,11 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpCfg".to_owned());
-        args.push(target_file.display().to_string());
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(target_file)
+                .display()
+                .to_string(),
+        );
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -368,7 +372,11 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpDBCfg".to_owned());
-        args.push(target_file.display().to_string());
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(target_file)
+                .display()
+                .to_string(),
+        );
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -543,6 +551,108 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    #[derive(Default)]
+    struct CapturingRunner(std::cell::RefCell<Vec<crate::platform::process::ProcessRequest>>);
+
+    #[cfg(windows)]
+    impl ProcessRunner for CapturingRunner {
+        fn run_with_policy(
+            &self,
+            request: &crate::platform::process::ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
+        {
+            self.0.borrow_mut().push(request.clone());
+            Ok(crate::platform::process::ProcessResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: None,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &crate::platform::process::ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
+        {
+            panic!("CF export must run synchronously")
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cf_exports_pass_windows_drive_paths_without_verbatim_prefix() {
+        assert_cf_export_target(
+            r"\\?\C:\Каталог с пробелами\конфигурация.cf",
+            r"C:\Каталог с пробелами\конфигурация.cf",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cf_exports_pass_windows_unc_paths_without_verbatim_prefix() {
+        assert_cf_export_target(
+            r"\\?\UNC\server\share\Каталог с пробелами\конфигурация.cf",
+            r"\\server\share\Каталог с пробелами\конфигурация.cf",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cf_exports_preserve_regular_windows_targets() {
+        assert_cf_export_target(
+            r"C:\Каталог с пробелами\конфигурация.cf",
+            r"C:\Каталог с пробелами\конфигурация.cf",
+        );
+    }
+
+    #[cfg(windows)]
+    fn assert_cf_export_target(target: &str, expected: &str) {
+        let runner = CapturingRunner::default();
+        let dsl = DesignerDsl::new(
+            "1cv8.exe".into(),
+            V8Connection::from_connection_string("File=C:/ib"),
+            &runner,
+            None,
+            ProcessExecutionPolicy::default(),
+        );
+        dsl.dump_cfg(Path::new(target), Some("Расширение"))
+            .expect("dump configuration");
+        dsl.dump_db_cfg(Path::new(target), None)
+            .expect("dump database configuration");
+
+        let requests = runner.0.borrow();
+        assert_eq!(requests.len(), 2);
+        let mut mismatches = Vec::new();
+        for (request, flag, extension) in [
+            (&requests[0], "/DumpCfg", true),
+            (&requests[1], "/DumpDBCfg", false),
+        ] {
+            let mut expected_args = vec![
+                "DESIGNER",
+                "/DisableStartupDialogs",
+                "/DisableStartupMessages",
+                "/IBConnectionString",
+                "File=C:/ib",
+                flag,
+                expected,
+            ];
+            if extension {
+                expected_args.extend(["-Extension", "Расширение"]);
+            }
+            if request.args != expected_args {
+                mismatches.push(format!(
+                    "{flag}: actual {:?}, expected {:?}",
+                    request.args, expected_args
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
 
     #[test]
     fn status_mapping_matches_designer_exit_codes() {
