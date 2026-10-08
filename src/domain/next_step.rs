@@ -4,6 +4,19 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Выходы рабочей копии к своей базе — одним текстом для каждого, кто их называет: отказа
+/// копии без объявленной базы (`INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`) и
+/// предупреждения о базе другой копии
+/// (`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`). `source` — база,
+/// копию которой предлагают: `<infobase>` или имя секции, например `upstream`.
+pub fn ways_to_an_own_infobase(source: &str) -> String {
+    format!(
+        "its own clean infobase built from the sources — `v8-runner init --infobase <connection string>`, then `v8-runner infobase create`; \
+         a copy of an infobase with its data — `v8-runner init --infobase <connection string>`, then `v8-runner infobase create --from {source}`; \
+         an infobase deployed from a reference image — `v8-runner init --infobase <connection string>`, then `v8-runner infobase restore --input <reference>.dt --create`"
+    )
+}
+
 /// Шаг, которым вызывающий выходит из отказа: команда, при нужде набор исходников и ключи.
 ///
 /// Поле отвечает машине; человеку остаётся текст сообщения, и он не сокращается.

@@ -315,6 +315,70 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     assert!(log.contains("opening agent session"), "{log}");
 }
 
+/// `INV.CLI.CLONE-FROM-WARNS-ON-A-BASE-OF-ANOTHER-COPY`: `clone --from` на файловой базе
+/// другой рабочей копии не отказывает — проект заводится и выгружается, ответ предупреждает,
+/// чья это база, а метка остаётся за прежней копией.
+#[test]
+fn clone_from_a_base_of_another_copy_runs_with_a_warning() {
+    let bases = support::temp_workspace();
+    let base = bases.path().join("source-ib");
+    fs::create_dir_all(&base).expect("base");
+    fs::write(base.join("1Cv8.1CD"), "database").expect("infobase file");
+    let marker = bases.path().join(".source-ib.v8-runner.owners.json");
+    let foreign = serde_json::json!({
+        "version": 2,
+        "owners": [{
+            "machine": "a".repeat(64),
+            "host": "build-agent",
+            "project": "/srv/elsewhere",
+            "since": "2026-10-01T00:00:00Z"
+        }]
+    })
+    .to_string();
+    fs::write(&marker, &foreign).expect("marker");
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    let agent = managed_agent_double();
+    write_fake_designer(
+        &platform_path,
+        &calls_log,
+        &agent.pid_file,
+        &agent.base_dir_file,
+    );
+    let mut args = bootstrap_args(
+        &project_dir,
+        &platform_path,
+        &format!("File={}", base.display()),
+    );
+    args.insert(0, "--json-message".to_owned());
+
+    let output = v8_runner_command()
+        .args(args)
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["dumped"], true, "{payload}");
+    let warned = payload["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|warning| {
+            warning.contains("of another working copy") && warning.contains("/srv/elsewhere")
+        });
+    assert!(warned, "{payload}");
+    assert_eq!(fs::read_to_string(&marker).expect("marker"), foreign);
+}
+
 #[test]
 fn bootstrap_preserves_non_secret_connection_attributes() {
     let bases = support::temp_workspace();
