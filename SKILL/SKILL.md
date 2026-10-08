@@ -165,21 +165,18 @@ v8-runner infobase create
   infobase lock: it builds in its own throwaway base.
 - A development file infobase is held by one working copy, recorded in the owner marker
   `.<dir>.v8-runner.owners.json` next to the base directory. A writing command on a base held by
-  another live copy answers `error.code: infobase_held` (kind `workspace`, step `infobase owner`,
-  exit 3; MCP: `runtime_failure`) — retrying does not help. Give this copy its own base:
-  `init --infobase File=build/ib` (keeps the old section as `upstream`), then `infobase create`
-  (clean base, `error.next`), `infobase create --from upstream` (copy with data) or `infobase restore --input <reference>.dt --create`; to free the base, remove it from the other copy's local layer (a copy on another
-  machine: delete its record from the marker by hand). A gone owner
-  (directory deleted or no longer declaring the base) is replaced automatically and named in
-  `warnings`. `--infobase <connection string>` obeys the owner but never becomes one. An
-  unreadable marker or one of an unknown version stops a write with `runtime_failure`.
-- To share a file infobase between copies (a delivery base several clones push to), put
-  `shared: true` at the base in `v8project.local.yaml` of every copy that writes it — the project
-  file refuses the key. One copy without it (or with `false`) makes writes of every copy refuse
-  `infobase_held`, naming who does not share; a copy on another machine reports its consent
-  through the marker at its next write; every section declaring that base needs the key. An
-  ad hoc `--infobase <connection string>` never consents: on a shared base it is refused — pass
-  the base name. No incremental guarantees on a shared base.
+  another live copy is not refused: it runs, and the preview and the answer carry a `warnings`
+  entry (step `infobase owner`) naming the owning copy, saying the command changes its base, and
+  the ways to an own base — `init --infobase File=build/ib` (keeps the old section as
+  `upstream`), then `infobase create --from upstream` (copy with data), `infobase restore --input
+  <reference>.dt --create` or `infobase create` (bare base from the sources). Read the warning
+  before accepting the plan: running it means you agree to write another copy's base. The marker
+  is left as is; the owner's next `push` then refuses `non_fast_forward`. A gone owner (directory
+  deleted or no longer declaring the base) is replaced automatically and named in `warnings`.
+  `--infobase <connection string>` never becomes an owner. An unreadable marker or one of an
+  unknown version stops a write with `runtime_failure`. MCP tools behave the same; their warning
+  goes to the server log only (#404). Incompatible with 0.13.0: no `infobase_held`, no shared
+  bases — `shared` in `v8project.local.yaml` is an unknown-key error; remove it.
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
