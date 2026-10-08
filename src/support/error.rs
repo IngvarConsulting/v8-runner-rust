@@ -466,7 +466,10 @@ impl From<AgentError> for AppError {
             | AgentError::NoFreePort { .. }
             | AgentError::Channel { .. }
             | AgentError::Launch(_)
-            | AgentError::StartupTimedOut { .. } => Self::EnvironmentUnavailable(error.to_string()),
+            | AgentError::StartupTimedOut { .. }
+            | AgentError::ExitedBeforeSession { .. } => {
+                Self::EnvironmentUnavailable(error.to_string())
+            }
         }
     }
 }

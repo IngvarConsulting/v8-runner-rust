@@ -2126,6 +2126,88 @@ fn a_managed_agent_that_did_not_start_fails_the_command_without_the_designer() {
     assert!(!output.exists());
 }
 
+/// Агент, который поднялся и вышел, не приняв сессии (замер #429: занятый порт и нечитаемый
+/// ключ — rc=0, причина только в `/Out`), отказывает сразу, а не по сроку подъёма, и
+/// приводит строку `/Out`. Порт, занятый после выхода, назван занятым.
+#[test]
+fn a_managed_agent_that_exits_before_a_session_is_refused_at_once() {
+    for hold_port in [true, false] {
+        let (dir, config, base, calls) = setup("DEFAULT");
+        let binary = dir.path().join("1cv8");
+        write_shell_script(
+            &binary,
+            &format!(
+                r#"printf '%s\n' "$*" >> "{}"
+previous=''
+out=''
+for argument in "$@"; do
+  if [ "$previous" = /Out ]; then out="$argument"; fi
+  previous="$argument"
+done
+sleep 1
+printf '\357\273\277Фатальная ошибка SSH-сервера: Binding: Address already in use\r\n' > "$out"
+exit 0"#,
+                calls.display()
+            ),
+        );
+        let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("hold a port");
+        let port = holder.local_addr().expect("address").port();
+        let text = fs::read_to_string(&config).expect("config");
+        let declared = if hold_port {
+            format!("    port: {port}\n")
+        } else {
+            String::new()
+        };
+        fs::write(
+            &config,
+            format!("{text}  designer_agent:\n    startup_timeout_ms: 60000\n{declared}"),
+        )
+        .expect("agent settings");
+        let output = base.join("dist/main.cf");
+
+        let started = std::time::Instant::now();
+        let command = v8_runner_command()
+            .args([
+                "--config",
+                &config.display().to_string(),
+                "--json-message",
+                "download",
+                "main",
+                "--output",
+                &output.display().to_string(),
+            ])
+            .output()
+            .expect("run download");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the runner waited for the startup deadline"
+        );
+        let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+        assert_eq!(
+            envelope["error"]["code"], "environment_unavailable",
+            "{envelope}"
+        );
+        let message = envelope["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("Address already in use"), "{message}");
+        assert!(
+            !message.contains('\u{feff}') && !message.contains('\r'),
+            "{message}"
+        );
+        if hold_port {
+            assert!(
+                message.contains(&format!(
+                    "port {port} of the managed agent is taken by another process"
+                )),
+                "{message}"
+            );
+        } else {
+            assert!(message.contains("before accepting a session"), "{message}");
+        }
+        drop(holder);
+    }
+}
+
 /// Объявленный порт агента занят другим процессом, и агент на нём не поднялся: отказ
 /// называет порт занятым и советует другой, Конфигуратор пакетно не вызывается.
 #[test]

@@ -508,6 +508,18 @@ pub fn read_platform_log(path: &Path) -> std::io::Result<String> {
     decode_platform_log(&std::fs::read(path)?)
 }
 
+/// Слова платформы как улика для человека: без BOM, непустые строки через «; ». Улика ничего
+/// не решает — её никто не читает обратно (`DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES`).
+pub fn evidence_lines(text: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join("; "))
+}
+
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 const UTF16LE_BOM: &[u8] = &[0xFF, 0xFE];
 const UTF16BE_BOM: &[u8] = &[0xFE, 0xFF];
