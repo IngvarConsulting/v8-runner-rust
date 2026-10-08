@@ -449,6 +449,10 @@
           "$ref": "#/$defs/GenerationAfter",
           "description": "После чего записан токен."
         },
+        "applied": {
+          "description": "Применена ли загрузка к конфигурации базы данных: `false` — загружено без применения\n(`push --no-apply` или неудачное применение), и `apply` ещё не прошёл.",
+          "type": "boolean"
+        },
         "recorded_at": {
           "type": "string"
         },
@@ -464,6 +468,7 @@
         "token",
         "tool",
         "after",
+        "applied",
         "recorded_at"
       ],
       "type": "object"

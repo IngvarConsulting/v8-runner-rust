@@ -516,6 +516,10 @@ struct ProvidersSchema {
     #[deprecated = "name the executor by its command: providers.push"]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     build: Option<ProviderSchema>,
+    /// Executor for `apply`: the same row as `push`, set apart for when the apply should go
+    /// another way than the load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    apply: Option<ProviderSchema>,
     /// Executor for `upload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     upload: Option<ProviderSchema>,

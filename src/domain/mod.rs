@@ -1,3 +1,5 @@
+/// Ответ команды `apply`.
+pub mod apply;
 /// Shared artifact models.
 pub mod artifact;
 /// Artifact build/export domain models.

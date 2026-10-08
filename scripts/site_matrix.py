@@ -55,6 +55,7 @@ TARGETS = ("file", "cluster", "standalone")
 SCENARIO_OPERATIONS = {
     "infobase-create": ("infobase.create",),
     "push": ("push",),
+    "apply": ("apply",),
     "pull": ("pull",),
     "upload": ("upload",),
     "make": ("make",),
@@ -72,7 +73,6 @@ SCENARIOS_WITHOUT_ROW = {
     "status",
     "init",
     "clone",
-    "apply",
     "reset",
     "diff",
     "sessions",

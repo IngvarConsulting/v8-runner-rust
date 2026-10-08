@@ -13,7 +13,7 @@ use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
-use crate::platform::ibcmd::{DynamicUpdateMode, IbcmdConnection, IbcmdDsl};
+use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
@@ -21,10 +21,11 @@ use crate::platform::utilities::PlatformUtilities;
 use crate::support::edt_project;
 use crate::support::error::AppError;
 use crate::support::temp::{platform_logs_dir, tool_extension_export_dir};
+use crate::use_cases::apply::act::Applier;
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
+use crate::use_cases::request::ApplyPolicy;
 
 #[derive(Debug)]
 pub(crate) struct ToolExtensionFailure {
@@ -53,11 +54,12 @@ pub(crate) fn prepare_client_mcp_extension(
     config: &AppConfig,
     full_rebuild: bool,
     dry_run: bool,
+    apply: ApplyPolicy,
 ) -> Result<Option<BuildStep>, ToolExtensionFailure> {
     let Some(extension) = client_mcp_extension(config) else {
         return Ok(None);
     };
-    prepare_extension(context, config, extension, full_rebuild, dry_run)
+    prepare_extension(context, config, extension, full_rebuild, dry_run, apply)
         .map(Some)
         .map_err(|error| {
             let message = error.to_string();
@@ -74,6 +76,7 @@ fn prepare_extension(
     extension: &ToolExtensionConfig,
     full_rebuild: bool,
     dry_run: bool,
+    apply: ApplyPolicy,
 ) -> Result<BuildStep, AppError> {
     let started = Instant::now();
 
@@ -98,6 +101,7 @@ fn prepare_extension(
             &mut utilities,
             started,
             full_rebuild,
+            apply,
             deferrals,
         ),
         ToolExtensionInput::Artifact(artifact) => prepare_artifact_extension(
@@ -106,13 +110,15 @@ fn prepare_extension(
             extension,
             &artifact.path,
             &mut utilities,
+            apply,
             deferrals,
         )
         .map(|()| {
             successful_build_step(
                 extension,
-                format!("prepared extension '{}' from .cfe artifact", extension.name),
+                prepared(extension, "from .cfe artifact", apply),
                 started.elapsed().as_millis() as u64,
+                apply == ApplyPolicy::Apply,
             )
         }),
     })?;
@@ -147,6 +153,7 @@ fn preview_extension(
                 extension.name
             ),
             started.elapsed().as_millis() as u64,
+            false,
         ))
     };
 
@@ -232,6 +239,9 @@ fn locate_extension_tools(
     Ok(named.join(" и "))
 }
 
+// Принятый waiver: девятый аргумент — признак применения (`push --no-apply`); подготовка
+// расширения передаёт по цепочке те же параметры, что шаг набора в `build_project.rs`.
+#[allow(clippy::too_many_arguments)]
 fn prepare_source_extension(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -240,31 +250,42 @@ fn prepare_source_extension(
     utilities: &mut PlatformUtilities,
     started: Instant,
     full_rebuild: bool,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<BuildStep, AppError> {
     let source_context = tool_extension_source_context(config, extension, source)?;
-    if full_rebuild {
-        prepare_source_extension_full(context, config, extension, source, utilities, deferrals)?;
-        commit_tool_extension_full_rescan(&source_context, &config.work_path, true)?;
-        return Ok(successful_build_step(
+    // Без применения память исходников расширения не фиксируется: следующая отправка
+    // загрузит и применит его снова, а `apply` применит его сам. Иначе отправка без
+    // изменений оставила бы его непринятым — записи поколения у расширения-инструмента нет.
+    let loaded = |commit: &dyn Fn() -> Result<(), AppError>| {
+        if apply == ApplyPolicy::Apply {
+            commit()?;
+        }
+        Ok(successful_build_step(
             extension,
-            format!("prepared extension '{}' from sources", extension.name),
+            prepared(extension, "from sources", apply),
             started.elapsed().as_millis() as u64,
-        ));
+            apply == ApplyPolicy::Apply,
+        ))
+    };
+    if full_rebuild {
+        prepare_source_extension_full(
+            context, config, extension, source, utilities, apply, deferrals,
+        )?;
+        return loaded(&|| {
+            commit_tool_extension_full_rescan(&source_context, &config.work_path, true)
+        });
     }
 
     let outcome = match analyzer::analyze_context(&source_context, &config.work_path).outcome {
         Ok(outcome) => outcome,
         Err(_error) if storage_needs_recovery(&source_context, &config.work_path) => {
             prepare_source_extension_full(
-                context, config, extension, source, utilities, deferrals,
+                context, config, extension, source, utilities, apply, deferrals,
             )?;
-            commit_tool_extension_full_rescan(&source_context, &config.work_path, true)?;
-            return Ok(successful_build_step(
-                extension,
-                format!("prepared extension '{}' from sources", extension.name),
-                started.elapsed().as_millis() as u64,
-            ));
+            return loaded(&|| {
+                commit_tool_extension_full_rescan(&source_context, &config.work_path, true)
+            });
         }
         Err(error) => return Err(AppError::Runtime(error.to_string())),
     };
@@ -277,26 +298,18 @@ fn prepare_source_extension(
         )),
         AnalysisOutcome::Fallback => {
             prepare_source_extension_full(
-                context, config, extension, source, utilities, deferrals,
+                context, config, extension, source, utilities, apply, deferrals,
             )?;
-            commit_tool_extension_full_rescan(&source_context, &config.work_path, false)?;
-            Ok(successful_build_step(
-                extension,
-                format!("prepared extension '{}' from sources", extension.name),
-                started.elapsed().as_millis() as u64,
-            ))
+            loaded(&|| commit_tool_extension_full_rescan(&source_context, &config.work_path, false))
         }
         AnalysisOutcome::Changes { prepared, .. } => {
             prepare_source_extension_full(
-                context, config, extension, source, utilities, deferrals,
+                context, config, extension, source, utilities, apply, deferrals,
             )?;
-            analyzer::commit_success(&source_context, &config.work_path, &prepared)
-                .map_err(|error| AppError::Runtime(error.to_string()))?;
-            Ok(successful_build_step(
-                extension,
-                format!("prepared extension '{}' from sources", extension.name),
-                started.elapsed().as_millis() as u64,
-            ))
+            loaded(&|| {
+                analyzer::commit_success(&source_context, &config.work_path, &prepared)
+                    .map_err(|error| AppError::Runtime(error.to_string()))
+            })
         }
     }
 }
@@ -307,6 +320,7 @@ fn prepare_source_extension_full(
     extension: &ToolExtensionConfig,
     source: &ToolExtensionSourceConfig,
     utilities: &mut PlatformUtilities,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     match source.format.unwrap_or(config.format) {
@@ -316,13 +330,14 @@ fn prepare_source_extension_full(
             extension,
             &source.path,
             utilities,
+            apply,
             deferrals,
         ),
         SourceFormat::Edt => {
             let exported =
                 export_edt_source_extension(context, config, extension, &source.path, utilities)?;
             prepare_designer_source_extension(
-                context, config, extension, &exported, utilities, deferrals,
+                context, config, extension, &exported, utilities, apply, deferrals,
             )
         }
     }
@@ -408,6 +423,7 @@ fn prepare_designer_source_extension(
     extension: &ToolExtensionConfig,
     source_path: &Path,
     utilities: &mut PlatformUtilities,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     match config.selected_provider(Operation::Build) {
@@ -436,29 +452,20 @@ fn prepare_designer_source_extension(
                 .load_config_from_files_full(source_path, Some(&extension.name))
                 .map_err(AppError::from)?;
             ensure_written("load", extension, &load, deferrals)?;
-
-            if let Some(error) =
-                interruption_before_safe_point(context, extension, "tool extension update_db_cfg")
-            {
-                return Err(error);
+            if apply == ApplyPolicy::Defer {
+                return Ok(());
             }
-            let dsl = build_designer_dsl(
+            apply_extension(
                 context,
                 config,
-                &binary,
-                utilities.runner_for(UtilityType::V8),
+                Applier::Designer {
+                    binary: &binary,
+                    runner: utilities.runner_for(UtilityType::V8),
+                    log_file: designer_log_file(config, extension, "update")?,
+                },
                 extension,
-                "update",
-            )?;
-            log_tool_extension_stage(
-                extension,
-                "update",
-                &extension_stage_detail("Конфигуратор", "Применение", extension),
-            );
-            let update = dsl
-                .update_db_cfg(Some(&extension.name))
-                .map_err(AppError::from)?;
-            ensure_written("update_db_cfg", extension, &update, deferrals)
+                deferrals,
+            )
         }
         Provider::Ibcmd => {
             let binary = utilities
@@ -480,29 +487,44 @@ fn prepare_designer_source_extension(
                 .config_import_full(source_path, Some(&extension.name))
                 .map_err(AppError::from)?;
             ensure_written("ibcmd_import", extension, &import, deferrals)?;
-
-            if let Some(error) =
-                interruption_before_safe_point(context, extension, "tool extension ibcmd apply")
-            {
-                return Err(error);
+            if apply == ApplyPolicy::Defer {
+                return Ok(());
             }
-            let dsl = build_ibcmd_dsl(
+            apply_extension(
                 context,
                 config,
-                &binary,
-                utilities.runner_for(UtilityType::Ibcmd),
-            )?;
-            log_tool_extension_stage(
+                Applier::Ibcmd {
+                    binary: &binary,
+                    runner: utilities.runner_for(UtilityType::Ibcmd),
+                },
                 extension,
-                "ibcmd_apply",
-                &extension_stage_detail("ibcmd", "Применение", extension),
-            );
-            let apply = dsl
-                .config_apply(Some(&extension.name), DynamicUpdateMode::Auto)
-                .map_err(AppError::from)?;
-            ensure_written("ibcmd_apply", extension, &apply, deferrals)
+                deferrals,
+            )
         }
     }
+}
+
+/// Применение расширения-инструмента — тем же владельцем акта, что у наборов.
+pub(crate) fn apply_extension(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    applier: Applier<'_>,
+    extension: &ToolExtensionConfig,
+    deferrals: &mut Deferrals,
+) -> Result<(), AppError> {
+    let timeline = format!("tool:{}", extension.name);
+    crate::use_cases::apply::act::apply(
+        context,
+        config,
+        applier,
+        &crate::use_cases::apply::act::Subject {
+            kind: crate::use_cases::apply::act::SubjectKind::ToolExtension,
+            name: &extension.name,
+            extension: Some(&extension.name),
+            timeline: &timeline,
+        },
+        deferrals,
+    )
 }
 
 fn prepare_artifact_extension(
@@ -511,6 +533,7 @@ fn prepare_artifact_extension(
     extension: &ToolExtensionConfig,
     artifact_path: &Path,
     utilities: &mut PlatformUtilities,
+    apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     let binary = utilities
@@ -534,24 +557,20 @@ fn prepare_artifact_extension(
         .load_cfg(artifact_path, Some(&extension.name))
         .map_err(AppError::from)?;
     ensure_written("load_cfg", extension, &load, deferrals)?;
-
-    if let Some(error) =
-        interruption_before_safe_point(context, extension, "tool extension update_db_cfg")
-    {
-        return Err(error);
+    if apply == ApplyPolicy::Defer {
+        return Ok(());
     }
-    let dsl = build_designer_dsl(
+    apply_extension(
         context,
         config,
-        &binary,
-        utilities.runner_for(UtilityType::V8),
+        Applier::Designer {
+            binary: &binary,
+            runner: utilities.runner_for(UtilityType::V8),
+            log_file: designer_log_file(config, extension, "update-artifact")?,
+        },
         extension,
-        "update-artifact",
-    )?;
-    let update = dsl
-        .update_db_cfg(Some(&extension.name))
-        .map_err(AppError::from)?;
-    ensure_written("update_db_cfg", extension, &update, deferrals)
+        deferrals,
+    )
 }
 
 fn export_edt_source_extension(
@@ -618,10 +637,7 @@ fn build_designer_dsl<'a>(
     extension: &ToolExtensionConfig,
     action: &str,
 ) -> Result<DesignerDsl<'a>, AppError> {
-    let log_dir = platform_logs_dir(&config.work_path).map_err(|error| {
-        AppError::Runtime(format!("failed to create platform logs dir: {error}"))
-    })?;
-    let log_file = log_dir.join(format!("build-tool-{}-{action}.log", extension.name));
+    let log_file = designer_log_file(config, extension, action)?;
 
     Ok(DesignerDsl::new(
         binary.to_path_buf(),
@@ -630,6 +646,18 @@ fn build_designer_dsl<'a>(
         Some(log_file),
         context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
     ))
+}
+
+/// Журнал Конфигуратора у расширения-инструмента: `build-tool-<имя>-<действие>.log`.
+fn designer_log_file(
+    config: &AppConfig,
+    extension: &ToolExtensionConfig,
+    action: &str,
+) -> Result<PathBuf, AppError> {
+    crate::use_cases::generation_reader::designer_log_file(
+        config,
+        &format!("build-tool-{}-{action}", extension.name),
+    )
 }
 
 fn build_ibcmd_dsl<'a>(
@@ -740,20 +768,12 @@ fn ensure_tool_extension_success(
     extension: &ToolExtensionConfig,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    let Err(code) = result.process.outcome() else {
-        return Ok(());
-    };
-
-    Err(AppError::Platform(format_ibcmd_failure_details(
+    crate::use_cases::ibcmd_diagnostics::ensure_succeeded(
         action,
         "tool extension",
         &extension.name,
-        code.get(),
-        &result.process.stdout,
-        &result.process.stderr,
-        result.platform_log.as_deref(),
-        result.platform_log_path.as_deref(),
-    )))
+        result,
+    )
 }
 
 fn interruption_before_safe_point(
@@ -767,15 +787,29 @@ fn interruption_before_safe_point(
     )
 }
 
+/// Сообщение удачного шага: подготовлено и применено или только загружено.
+fn prepared(extension: &ToolExtensionConfig, from: &str, apply: ApplyPolicy) -> String {
+    if apply == ApplyPolicy::Apply {
+        format!("prepared extension '{}' {from}", extension.name)
+    } else {
+        format!(
+            "loaded extension '{}' {from} without apply: the next push loads it again, and apply applies it",
+            extension.name
+        )
+    }
+}
+
 fn successful_build_step(
     extension: &ToolExtensionConfig,
     message: String,
     duration_ms: u64,
+    applied: bool,
 ) -> BuildStep {
     BuildStep {
         source_set: format!("tool:{}", extension.name),
         mode: BuildMode::Full,
         ok: true,
+        applied,
         message: Some(message),
         duration_ms,
     }
@@ -790,6 +824,7 @@ fn skipped_build_step(
         source_set: format!("tool:{}", extension.name),
         mode: BuildMode::Skipped,
         ok: true,
+        applied: false,
         message: Some(message),
         duration_ms,
     }
@@ -800,6 +835,7 @@ fn failed_build_step(extension: &ToolExtensionConfig, message: String) -> BuildS
         source_set: format!("tool:{}", extension.name),
         mode: BuildMode::Full,
         ok: false,
+        applied: false,
         message: Some(message),
         duration_ms: 0,
     }

@@ -174,7 +174,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 30,
+        report.accepted, 31,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -373,6 +373,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
         (
             "crate::use_cases::generation_reader::ibcmd_dsl",
             "поколение, когда его спрашивают у `ibcmd`, выбранного для обмена",
+        ),
+        (
+            "crate::use_cases::apply::act::apply",
+            "применение, когда его ведёт `ibcmd`, выбранный для `push` или `apply`",
         ),
     ];
     let expected = BUILT_FOR_IBCMD
@@ -5718,6 +5722,7 @@ fn installed_extensions_are_matched_in_one_place() {
     for walk in [
         "src/use_cases/dump_config/all.rs",
         "src/use_cases/infobase_export/all.rs",
+        "src/use_cases/apply.rs",
     ] {
         let tokens = production_tokens(&repo_path(walk));
         assert!(
@@ -5761,4 +5766,35 @@ fn the_purpose_bucket_finder_sees_a_second_order_under_another_name() {
         "fn kind(purpose: SourceSetPurpose) -> u8 {\n    match purpose {\n        SourceSetPurpose::Configuration => 0,\n        _ => 1,\n    }\n}\n",
     );
     assert!(!sorts_source_sets_into_purpose_buckets(&a_plain_match));
+}
+
+/// Применение к конфигурации базы данных делает один владелец — `apply::act`: точка
+/// безопасности, критическая фаза и учёт отложенной отмены у `push`, расширения-инструмента
+/// и `apply` одни (#210). Прежняя проблема — по копии применения в каждом исполнителе
+/// `push` и в расширении-инструменте; страж ловит новую копию под любым именем функции.
+/// Исключения названы в `act.rs`: `upload` применяет в своей грамматике шагов, а
+/// `infobase create` собирает ничью ещё базу.
+#[test]
+fn the_apply_act_has_one_owner() {
+    let allowed = [
+        repo_path("src/use_cases/apply/act.rs"),
+        repo_path("src/use_cases/load_artifact.rs"),
+        repo_path("src/use_cases/init_project.rs"),
+    ];
+    let offenders = collect_rust_files(&repo_path("src/use_cases"))
+        .into_iter()
+        .filter(|file| !allowed.contains(file))
+        .filter(|file| {
+            let tokens = production_tokens(file);
+            tokens.contains(".update_db_cfg(")
+                || tokens.contains(".config_apply(")
+                || tokens.contains("config update-db-cfg")
+        })
+        .map(|file| file.display().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "these modules apply the configuration on their own instead of through apply::act:\n{}",
+        offenders.join("\n")
+    );
 }

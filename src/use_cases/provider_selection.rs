@@ -202,6 +202,7 @@ macro_rules! carries_receipt {
 carries_receipt!(
     crate::domain::init::InitResult,
     crate::domain::build::BuildResult,
+    crate::domain::apply::ApplyResult,
     crate::domain::dump::DumpResult,
     crate::domain::dump::PullAllResult,
     crate::domain::extensions::ExtensionsResult,

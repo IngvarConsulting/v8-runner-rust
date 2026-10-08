@@ -172,7 +172,7 @@ window.RUNNER_DATA = (function () {
       what: 'Приводит конфигурацию базы данных к основной; --sessions force разрешает завершать чужие сеансы.',
       cmd: function (ctx) { return 'v8-runner apply'; },
       applies: function (ctx) { return notExternal(ctx, 'apply') || needEdt(ctx); },
-      today: function (ctx) { return { chain: builderChoice(ctx, true, true), config: ['connection'], note: 'часть build; отдельной команды нет' }; },
+      today: function (ctx) { return { chain: builderChoice(ctx, true, true), config: ['connection', 'providers.apply — исполнитель отдельно от push'], note: 'отдельная команда после push --no-apply или после отказа применения; --sessions ещё нет (#211), открытый сеанс даёт отказ платформы' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['connection', 'standalone.gate — для agent'], note: '/UpdateDBCfg по прямому шлюзу; agent — update-db-cfg по SSH' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection'], note: '/UpdateDBCfg' };

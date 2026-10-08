@@ -75,6 +75,9 @@ where
                 PushMode::Changes
             },
             source_set: request.source_set.clone(),
+            // `push --no-apply` — ключ только командной строки: `build_project` применяет
+            // всегда (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).
+            apply: crate::use_cases::request::ApplyPolicy::Apply,
         };
 
         let answer = self
@@ -1403,6 +1406,7 @@ mod tests {
                 ok: true,
                 message: Some("loaded".to_owned()),
                 duration_ms: 17,
+                applied: true,
             }],
             duration_ms: 42,
         }));
@@ -1446,6 +1450,7 @@ mod tests {
                     ok: false,
                     message: Some("broken".to_owned()),
                     duration_ms: 9,
+                    applied: true,
                 }],
                 duration_ms: 19,
             },

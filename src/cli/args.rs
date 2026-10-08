@@ -79,6 +79,9 @@ pub enum Command {
     /// Send configured source-sets to the infobase
     #[command(name = "push", alias = "build")]
     Build(BuildArgs),
+    /// Apply the main configuration to the database configuration: the second half of
+    /// push, after `push --no-apply` or a push whose apply failed
+    Apply(ApplyArgs),
     /// Upload a built package (.cf/.cfe) into the infobase
     #[command(name = "upload", alias = "load")]
     Load(LoadArgs),
@@ -303,8 +306,23 @@ pub struct BuildArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Load into the main configuration only and leave the database configuration as it is,
+    /// so open sessions keep working; apply it later with `apply`
+    #[arg(long)]
+    pub no_apply: bool,
+
     #[command(flatten)]
     pub source_set: SourceSetArg,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ApplyArgs {
+    /// Source set declared in v8project.yaml (never an infobase); without it every set in
+    /// order — the configuration, then the extensions installed in the infobase — and the
+    /// client MCP tool extension
+    #[arg(value_name = "SET")]
+    pub set: Option<String>,
 }
 
 /// Файл пакета обязателен: позиционно или прежним ключом `--path`, но не обоими сразу.

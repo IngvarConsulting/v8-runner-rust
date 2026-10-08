@@ -1,7 +1,14 @@
 ---
 id: INV.CLI.APPLY-IS-A-SEPARATE-STEP
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/210
+check:
+  - tests/cli_apply.rs::a_push_without_apply_loads_and_apply_applies_it
+  - tests/cli_apply.rs::an_apply_of_one_set_applies_only_that_set
+  - tests/cli_apply.rs::providers_apply_assigns_the_executor_of_the_apply
+  - src/use_cases/build_project.rs::a_push_without_apply_loads_and_never_calls_update_db_cfg
+  - src/use_cases/build_project.rs::an_ibcmd_push_without_apply_imports_and_never_calls_config_apply
+  - src/use_cases/build_project.rs::a_push_without_apply_leaves_the_tool_extension_unapplied
+  - src/use_cases/apply.rs::an_apply_walks_the_sets_in_order_and_skips_external_files
+  - tests/cli_build_agent.rs::an_agent_push_without_apply_leaves_the_update_to_apply
 ---
 
 # Применение — отдельный шаг, а не хвост отправки

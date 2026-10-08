@@ -282,6 +282,36 @@ fn status_without_deep_starts_no_platform() {
     assert_eq!(set(&bases[1], "main")["memory"], "none", "{all}");
 }
 
+/// Запись, загруженная без применения, в `status` несёт `applied: false`; `apply` его снимает.
+#[test]
+fn status_names_a_load_without_apply() {
+    let project = Project::new();
+    project.remember(FIRST);
+    let record = |status: &serde_json::Value| {
+        set(&status["data"]["infobases"][0], "main")["recorded"].clone()
+    };
+    assert_eq!(
+        record(&succeeded(&project.run(&["status"])))["applied"],
+        true
+    );
+    fs::write(
+        project.root().join("sources").join("Module.bsl"),
+        "Procedure A()\n// edited\nEndProcedure\n",
+    )
+    .expect("edit");
+
+    succeeded(&project.run(&["push", "--no-apply"]));
+
+    let status = succeeded(&project.run(&["status"]));
+    assert_data_matches_its_command_form(&status, "status");
+    assert_eq!(record(&status)["applied"], false, "{status}");
+    succeeded(&project.run(&["apply", "main"]));
+    assert_eq!(
+        record(&succeeded(&project.run(&["status"])))["applied"],
+        true
+    );
+}
+
 /// До первого обмена памяти о базе нет, и `status` так и говорит.
 #[test]
 fn status_names_a_base_without_memory() {

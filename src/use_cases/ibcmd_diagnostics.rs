@@ -19,6 +19,32 @@ pub fn format_ibcmd_failure_details(
     )
 }
 
+/// Итог команды платформы по коду выхода: отказ называет действие, род и имя предмета
+/// (`source-set 'main'`, `tool extension 'x'`) и несёт улики. Единственная такая проверка у
+/// загрузки и применения наборов и расширения-инструмента.
+pub(crate) fn ensure_succeeded(
+    action: &str,
+    target_kind: &str,
+    target: &str,
+    result: &crate::platform::result::PlatformCommandResult,
+) -> Result<(), crate::support::error::AppError> {
+    let Err(code) = result.process.outcome() else {
+        return Ok(());
+    };
+    Err(crate::support::error::AppError::Platform(
+        format_ibcmd_failure_details(
+            action,
+            target_kind,
+            target,
+            code.get(),
+            &result.process.stdout,
+            &result.process.stderr,
+            result.platform_log.as_deref(),
+            result.platform_log_path.as_deref(),
+        ),
+    ))
+}
+
 /// Улики отказа команды платформы: вывод и журнал идут за `headline`, который называет, что
 /// не удалось и с каким кодом.
 pub fn format_failure_evidence(

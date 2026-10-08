@@ -13,11 +13,9 @@ use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::support::error::AppError;
-use crate::support::temp::platform_logs_dir;
 use crate::use_cases::build_progress::log_build_step_timeline;
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{shell_word, ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption;
 use tracing::debug;
 
@@ -27,6 +25,37 @@ pub(super) type AnalysisByName =
 pub(super) enum StepCommit {
     Prepared(PreparedStateUpdate),
     RescanFull { recover_storage: bool },
+}
+
+/// Чем кончилось применение после удачной загрузки набора.
+pub(super) enum AfterLoad {
+    Applied,
+    /// `push --no-apply`: загружено, применение отложено до `apply`.
+    Deferred,
+    /// Загрузка удалась, применение нет: загруженное запоминается как непринятое
+    /// (`INV.USE-CASES.A-PUSH-WHOSE-APPLY-FAILED-KEEPS-THE-LOAD`).
+    Failed(AppError),
+}
+
+impl AfterLoad {
+    pub(super) const fn applied(&self) -> bool {
+        matches!(self, Self::Applied)
+    }
+
+    /// Признак записи поколения после этой загрузки.
+    pub(super) const fn mark(&self) -> crate::use_cases::agent_session::ApplyMark {
+        if self.applied() {
+            crate::use_cases::agent_session::ApplyMark::Applied
+        } else {
+            crate::use_cases::agent_session::ApplyMark::Unapplied
+        }
+    }
+}
+
+/// Удачная загрузка набора: предупреждения шага и исход применения после неё.
+pub(super) struct Loaded {
+    pub(super) warnings: Vec<String>,
+    pub(super) apply: AfterLoad,
 }
 
 pub(super) enum StepPlan {
@@ -414,6 +443,29 @@ pub(super) fn push_build_step(
         source_set: source_set_name.to_owned(),
         mode,
         ok,
+        applied: false,
+        message: Some(message),
+        duration_ms,
+    };
+    log_build_step_timeline(&step);
+    steps.push(step);
+}
+
+/// Удачный шаг, который загрузил набор или применил его непринятое: `applied` — дошло ли
+/// до конфигурации базы данных.
+pub(super) fn push_loaded_step(
+    steps: &mut Vec<BuildStep>,
+    source_set_name: &str,
+    mode: BuildMode,
+    applied: bool,
+    message: String,
+    duration_ms: u64,
+) {
+    let step = BuildStep {
+        source_set: source_set_name.to_owned(),
+        mode,
+        ok: true,
+        applied,
         message: Some(message),
         duration_ms,
     };
@@ -499,12 +551,7 @@ pub(super) fn build_designer_dsl<'a>(
     action: &str,
     safety: InterruptionSafetyClass,
 ) -> Result<DesignerDsl<'a>, AppError> {
-    let log_dir = platform_logs_dir(&config.work_path).map_err(|error| {
-        AppError::Runtime(format!("failed to create platform logs dir: {error}"))
-    })?;
-    let log_file = log_dir.join(format!(
-        "build-{step_index:02}-{source_set_name}-{action}.log"
-    ));
+    let log_file = designer_log_file(config, source_set_name, step_index, action)?;
 
     Ok(DesignerDsl::new(
         binary.to_path_buf(),
@@ -513,6 +560,19 @@ pub(super) fn build_designer_dsl<'a>(
         Some(log_file),
         context.process_policy(safety, None),
     ))
+}
+
+/// Журнал Конфигуратора у шага набора: `build-<номер>-<набор>-<действие>.log`.
+pub(super) fn designer_log_file(
+    config: &AppConfig,
+    source_set_name: &str,
+    step_index: usize,
+    action: &str,
+) -> Result<PathBuf, AppError> {
+    crate::use_cases::generation_reader::designer_log_file(
+        config,
+        &format!("build-{step_index:02}-{source_set_name}-{action}"),
+    )
 }
 
 pub(super) fn build_ibcmd_dsl<'a>(
@@ -543,6 +603,18 @@ pub(super) fn interruption_before_safe_point(
     interruption::interruption_before_safe_point(context, safe_point)
 }
 
+/// Предмет применения для набора.
+pub(super) fn apply_subject(
+    source_set: &SourceSetConfig,
+) -> crate::use_cases::apply::act::Subject<'_> {
+    crate::use_cases::apply::act::Subject {
+        kind: crate::use_cases::apply::act::SubjectKind::SourceSet,
+        name: &source_set.name,
+        extension: extension_name(source_set),
+        timeline: &source_set.name,
+    }
+}
+
 pub(super) fn extension_name(source_set: &SourceSetConfig) -> Option<&str> {
     match source_set.purpose {
         SourceSetPurpose::Configuration => None,
@@ -556,20 +628,12 @@ pub(crate) fn ensure_platform_success(
     source_set: &SourceSetConfig,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    let Err(code) = result.process.outcome() else {
-        return Ok(());
-    };
-
-    Err(AppError::Platform(format_ibcmd_failure_details(
+    crate::use_cases::ibcmd_diagnostics::ensure_succeeded(
         action,
         "source-set",
         &source_set.name,
-        code.get(),
-        &result.process.stdout,
-        &result.process.stderr,
-        result.platform_log.as_deref(),
-        result.platform_log_path.as_deref(),
-    )))
+        result,
+    )
 }
 
 pub(super) fn fail_with_remaining_steps(
