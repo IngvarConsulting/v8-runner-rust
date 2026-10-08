@@ -25,8 +25,9 @@ pub struct BoundaryRefusal {
 
 /// Что граница говорит сверх ответа команды: шаг, на котором это замечено, и текст.
 ///
-/// Замок базы, который команде чтения не достался; взятие базы без метки и смена ушедшего
-/// владельца; метка, которую команда чтения не прочитала.
+/// Замок базы, который команде чтения не достался; запись в базу другой рабочей копии;
+/// взятие базы без метки и смена ушедшего владельца; метка, которую команда чтения не
+/// прочитала.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryNote {
     pub phase: InfobaseTransferPhase,
@@ -37,8 +38,8 @@ pub struct BoundaryNote {
 /// file infobase, under the infobase lock taken after it and past the owner check.
 ///
 /// Занятый каталог отказывает здесь своим родом `WorkspaceBusy`, занятая база —
-/// `InfobaseBusy`, база другой рабочей копии — `InfobaseHeld` для всякой команды: словарь
-/// провода выбирает транспорт, а не граница замка. `before_dispatch` идёт под обоими
+/// `InfobaseBusy` для всякой команды: словарь провода выбирает транспорт, а не граница
+/// замка. База другой рабочей копии не отказ, а предупреждение. `before_dispatch` идёт под обоими
 /// замками и получает то, что граница говорит сверх ответа команды.
 pub fn dispatch_with_workspace_lock<TResult>(
     config: &AppConfig,
@@ -77,8 +78,9 @@ where
 }
 
 /// Граница превью: замков нет, метку владельца читают без замка и ничего не пишут. Превью
-/// команды записи на базе другой рабочей копии отказывает так же, как отказал бы прогон;
-/// превью команды чтения говорит, если метку не прочитать.
+/// команды записи на базе другой рабочей копии предупреждает так же, как прогон, а метку,
+/// которую не прочитать, называет отказом; превью команды чтения говорит, если метку не
+/// прочитать.
 pub fn preview_boundary(
     config: &AppConfig,
     command: CommandName,
@@ -315,11 +317,11 @@ mod tests {
         assert!(!ran.get());
     }
 
-    /// Чья база — проверка границы: на базе другой рабочей копии команда записи отказывает
-    /// на шаге `infobase owner` после обоих замков и раньше сценария, а значит раньше
+    /// Чья база — проверка границы: на базе другой рабочей копии команда записи идёт, а
+    /// предупреждение шага `infobase owner` граница отдаёт до сценария, а значит раньше
     /// проверок памяти и поколения, которые идут в нём.
     #[test]
-    fn a_base_of_another_copy_stops_the_dispatch_before_the_scenario() {
+    fn a_base_of_another_copy_warns_before_the_scenario() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("ib");
         fs::create_dir_all(&base).expect("base");
@@ -352,23 +354,29 @@ mod tests {
         )
         .expect("the first copy takes the base");
         let ran = Cell::new(false);
+        let warned = Cell::new(false);
 
-        let refusal = dispatch_with_workspace_lock(
+        dispatch_with_workspace_lock(
             &second,
             CommandName::Build,
             BaseAccess::Writes,
-            |_| Ok(()),
+            |notes| {
+                assert!(!ran.get(), "the warning comes before the scenario");
+                assert_eq!(notes.len(), 1, "{notes:?}");
+                assert_eq!(notes[0].phase, InfobaseTransferPhase::InfobaseOwner);
+                assert!(
+                    notes[0].message.contains("of another working copy"),
+                    "{notes:?}"
+                );
+                warned.set(true);
+                Ok(())
+            },
             || ran.set(true),
         )
-        .expect_err("a base of another copy");
+        .expect("a write on a base of another copy runs");
 
-        assert_eq!(refusal.phase, InfobaseTransferPhase::InfobaseOwner);
-        assert_eq!(refusal.error.kind(), UseCaseErrorKind::InfobaseHeld);
-        assert_eq!(
-            refusal.error.next().map(|next| next.command.as_str()),
-            Some("infobase create")
-        );
-        assert!(!ran.get());
+        assert!(warned.get() && ran.get());
+        ran.set(false);
         dispatch_with_workspace_lock(
             &second,
             CommandName::InfobaseDump,

@@ -205,8 +205,6 @@ pub struct HolderStatus {
     pub project: PathBuf,
     /// Имя хоста на момент записи.
     pub host: Option<String>,
-    /// Согласие копии делить базу, записанное в метке.
-    pub shared: bool,
     #[schemars(with = "String", extend("format" = "date-time"))]
     pub since: DateTime<Utc>,
     /// Это та копия, из которой спрашивают.

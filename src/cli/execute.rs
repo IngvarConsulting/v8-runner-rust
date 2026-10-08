@@ -415,7 +415,7 @@ fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &
                     Some(owners) => {
                         for owner in owners {
                             lines.push(format!(
-                                "held by '{}'{}{}{}",
+                                "held by '{}'{}{}",
                                 owner.project.display(),
                                 owner
                                     .host
@@ -427,7 +427,6 @@ fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &
                                 } else {
                                     ""
                                 },
-                                if owner.shared { ", shared" } else { "" }
                             ));
                         }
                     }
@@ -1907,15 +1906,21 @@ pub fn preview_prepared_infobase_command(
             }
         }
         PreparedInfobaseCommand::Restore { request, provider } => {
-            // Восстановление — команда записи: его превью называет отказ по владельцу так
-            // же, как прогон.
-            // Превью команды записи предупреждений не несёт: метку, которую не прочитать, оно
-            // называет отказом, как прогон.
-            if let Err(refusal) =
-                preview_boundary(config, CommandName::InfobaseRestore, BaseAccess::Writes)
-            {
-                print_workspace_refusal(presenter, CommandName::InfobaseRestore, &refusal);
-                return Err(refusal.error);
+            // Восстановление — команда записи: его превью предупреждает о базе другой копии
+            // так же, как прогон, а метку, которую не прочитать, называет отказом.
+            match preview_boundary(config, CommandName::InfobaseRestore, BaseAccess::Writes) {
+                Ok(notes) => {
+                    for note in &notes {
+                        presenter.note_leading_warnings(
+                            note.phase.as_str(),
+                            std::slice::from_ref(&note.message),
+                        );
+                    }
+                }
+                Err(refusal) => {
+                    print_workspace_refusal(presenter, CommandName::InfobaseRestore, &refusal);
+                    return Err(refusal.error);
+                }
             }
             match infobase_export::preview_infobase_restore(&context, config, &request, &provider) {
                 Ok(result) => {
@@ -2928,8 +2933,8 @@ pub(crate) fn with_cli_workspace_lock<T>(
             !clean_before_execution,
             "очистка с превью отклонена на запуске"
         );
-        // Превью замков не берёт, но отказ по владельцу называет заранее: метку оно читает
-        // без замка и ничего в неё не пишет.
+        // Превью замков не берёт, но предупреждение о базе другой копии и отказ нечитаемой
+        // метки называет заранее: метку оно читает без замка и ничего в неё не пишет.
         match preview_boundary(config, command, base) {
             Ok(notes) => {
                 for note in &notes {

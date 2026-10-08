@@ -109,7 +109,7 @@ v8-runner infobase create
 - Full `pull` refuses a target containing `workPath`, including symlink aliases. EDT export cache stays shared.
 - Plain `pull` lays the dump over the directory (files the base lacks stay; git shows the change, there is no three-way merge); `pull --force` makes the directory exactly the base. Before the platform starts any `pull` without `--force` refuses (exit 2, `refusing to overwrite`/`replace`) over uncommitted, untracked or ignored files in the source-set directory, and over any file in a directory outside git: commit/stash (outside git: put it under git or move the files; git failing inside a repository, e.g. `safe.directory`: fix what the refusal quotes), or run the named `pull <SET> --force`. An empty directory has nothing to lose. `--force` names what it destroyed in `data.losses`; `--dry-run` lists the same losses without touching anything. EDT projects have no merge: every pull replaces the project under the same rules.
 - `pull --all` pulls every configuration/extension set (each as `pull <SET>`, `--force` replaces each) and asks the infobase which extensions it has: one without a set is pulled whole into `src/ext/<Name>` (relative to `basePath`) and then appended to `source-set:` of `v8project.yaml` (comments kept; commit it with the new directory); disabled ones too, `tools.client_mcp.extension` never. The planned project is validated before the first dump. `data.declared` names the new sets, `data.not_installed` the project's extension sets missing from the base (skipped). An extension named like a Windows device (`CON`, `AUX`…) gets no set: it is listed in `data.not_declared` with the reason; the same for one whose `src/ext/<Name>` would nest in (or hold) another set's directory; declare it by hand under another path. A leftover `src/ext/<Name>` with uncommitted files (crash between dump and declaration) is refused: commit or move it, or declare the set by hand; `pull --all --force` would replace every set. `--dry-run` starts no platform: `declared: null`, only the configuration set previewed, extension sets in `if_installed`. CLI only; not combinable with a set, `--extension` or `--object`.
-- No `ConfigDumpInfo.xml` (or one without a root `version`) turns a plain `pull` into a full dump over the directory before the platform starts (`mode: FULL`, reason in `message`; `--dry-run` shows the same). It removes no extra files and records no hashes (the message says so); `pull <SET> --force` aligns fully. The format version itself is not compared yet (no measured platform table, #403).
+- No `ConfigDumpInfo.xml` (or one without a root `version`) turns a plain `pull` into a full dump over the directory before the platform starts (`mode: FULL`, reason in `message`; `--dry-run` shows the same). It removes no extra files and records no hashes (the message says so); `pull <SET> --force` aligns fully. A recorded format version other than the one the platform writes (8.3.27 → 2.20, 8.5.4 → 2.22) also turns the dump full, and a load from a newer format is refused before the platform starts — only for a platform in the measured table whose version is visible from its install path (`…/8.3.27.2074/bin/1cv8`); other platforms are not compared. With `ibcmd` a full dump over a non-empty directory is not possible yet (#423).
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner push --full`.
 - Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`. `--dry-run` stops after the utility is located and before the platform runs: no platform log directory is created, and the answer names `status: planned`, `provider_dispatched: false` and `exit_code: -1`.
 - EDT check with `interactive-mode: true` reads the shared session's verdict exactly as MCP `check_syntax_edt` does: any stderr or stdout without log issues is `tool_failed`, `exit_code` is `101` for issues and `-1` for a failure, and `tools.edt_cli.command_timeout_ms` bounds each project.
@@ -165,21 +165,17 @@ v8-runner infobase create
   infobase lock: it builds in its own throwaway base.
 - A development file infobase is held by one working copy, recorded in the owner marker
   `.<dir>.v8-runner.owners.json` next to the base directory. A writing command on a base held by
-  another live copy answers `error.code: infobase_held` (kind `workspace`, step `infobase owner`,
-  exit 3; MCP: `runtime_failure`) — retrying does not help. Give this copy its own base:
-  `init --infobase File=build/ib` (keeps the old section as `upstream`), then `infobase create`
-  (clean base, `error.next`), `infobase create --from upstream` (copy with data) or `infobase restore --input <reference>.dt --create`; to free the base, remove it from the other copy's local layer (a copy on another
-  machine: delete its record from the marker by hand). A gone owner
-  (directory deleted or no longer declaring the base) is replaced automatically and named in
-  `warnings`. `--infobase <connection string>` obeys the owner but never becomes one. An
-  unreadable marker or one of an unknown version stops a write with `runtime_failure`.
-- To share a file infobase between copies (a delivery base several clones push to), put
-  `shared: true` at the base in `v8project.local.yaml` of every copy that writes it — the project
-  file refuses the key. One copy without it (or with `false`) makes writes of every copy refuse
-  `infobase_held`, naming who does not share; a copy on another machine reports its consent
-  through the marker at its next write; every section declaring that base needs the key. An
-  ad hoc `--infobase <connection string>` never consents: on a shared base it is refused — pass
-  the base name. No incremental guarantees on a shared base.
+  another live copy is not refused: it runs, and the preview and the answer carry a `warnings`
+  entry (step `infobase owner`) naming the owning copy, saying the command changes its base, and
+  the ways to an own base — `init --infobase File=build/ib` (keeps the old section as
+  `upstream`), then `infobase create --from upstream` (copy with data), `infobase restore --input
+  <reference>.dt --create` or `infobase create` (bare base from the sources). Read the warning
+  before accepting the plan: running it means you agree to write another copy's base. The marker
+  is left as is; the owner's next `push` then refuses `non_fast_forward`. A gone owner (directory
+  deleted or no longer declaring the base) is replaced automatically and named in `warnings`.
+  `--infobase <connection string>` never becomes an owner. An unreadable marker or one of an
+  unknown version stops a write with `runtime_failure`. MCP tools behave the same; their warning
+  goes to the server log only (#404).
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
