@@ -274,9 +274,7 @@ impl<'a> IbcmdDsl<'a> {
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
-        let result = self
-            .run_with(&args, &self.execution_policy.for_reading())
-            .map_err(IbcmdError::Spawn)?;
+        let result = self.run_with(&args, &self.execution_policy.for_reading())?;
         if result.process.exit_code != 0 {
             return Ok(None);
         }
@@ -314,7 +312,8 @@ impl<'a> IbcmdDsl<'a> {
         let status = match self.run_with(&question, &self.execution_policy.for_reading()) {
             Ok(probe) if probe.process.exit_code == 0 => IbcmdInfobaseCreateStatus::AlreadyExists,
             Ok(_) => IbcmdInfobaseCreateStatus::Failed,
-            Err(error) => IbcmdInfobaseCreateStatus::Unconfirmed(error),
+            Err(IbcmdError::Spawn(error)) => IbcmdInfobaseCreateStatus::Unconfirmed(error),
+            Err(error) => return Err(error),
         };
 
         Ok(IbcmdInfobaseCreateOutcome { status, result })
@@ -568,34 +567,37 @@ impl<'a> IbcmdDsl<'a> {
     }
 
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, IbcmdError> {
-        if wipes_the_export_directory(args) {
-            return Err(IbcmdError::DirectoryWipingExport);
-        }
         self.run_with(args, &self.execution_policy)
-            .map_err(IbcmdError::Spawn)
     }
 
     fn run_with(
         &self,
         args: &[String],
         policy: &ProcessExecutionPolicy,
-    ) -> Result<PlatformCommandResult, ProcessError> {
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        // Единственная точка запуска ibcmd: запрет стоит здесь, а не у методов выгрузки.
+        if wipes_the_export_directory(args) {
+            return Err(IbcmdError::DirectoryWipingExport);
+        }
         let mut args_with_data = args.to_vec();
         if let Some(data_path) = &self.data_path {
             args_with_data.insert(1, data_path.display().to_string());
             args_with_data.insert(1, "--data".to_owned());
         }
-        let process = self.runner.run_with_policy(
-            &ProcessRequest {
-                program: self.binary.clone(),
-                args: args_with_data,
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: None,
-            },
-            policy,
-        )?;
+        let process = self
+            .runner
+            .run_with_policy(
+                &ProcessRequest {
+                    program: self.binary.clone(),
+                    args: args_with_data,
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: None,
+                    startup_probe: None,
+                },
+                policy,
+            )
+            .map_err(IbcmdError::Spawn)?;
 
         Ok(PlatformCommandResult {
             process,
@@ -614,10 +616,19 @@ fn push_option_value(args: &mut Vec<String>, key: &str, value: impl ToString) {
 /// `config export` with both `--sync` and `--force`: when the platform falls back to a full
 /// export it deletes everything in the target directory, foreign files and `.git` included.
 fn wipes_the_export_directory(args: &[String]) -> bool {
-    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    let has = |flag: &str| {
+        args.iter().any(|arg| {
+            arg == flag
+                || arg
+                    .strip_prefix(flag)
+                    .is_some_and(|rest| rest.starts_with('='))
+        })
+    };
+    // `config export` и `config <база> export` (`config_export_file`): export после config.
     let exports = args
-        .windows(2)
-        .any(|pair| pair[0] == "config" && pair[1] == "export");
+        .iter()
+        .position(|arg| arg == "config")
+        .is_some_and(|config| args[config..].iter().any(|arg| arg == "export"));
     exports && has("--sync") && has("--force")
 }
 
@@ -1175,15 +1186,56 @@ mod tests {
             "{error}"
         );
         assert!(!started.exists(), "ibcmd must not be started");
-        assert!(!wipes_the_export_directory(
-            &["infobase", "config", "export", "--sync", "/t"].map(str::to_owned)
-        ));
-        assert!(!wipes_the_export_directory(
-            &["infobase", "config", "export", "--force", "/t"].map(str::to_owned)
-        ));
-        assert!(!wipes_the_export_directory(
-            &["infobase", "config", "import", "--sync", "--force"].map(str::to_owned)
-        ));
+    }
+
+    /// Сочетание ловится в любом написании ключей и в обеих формах `config … export`;
+    /// `--sync` и `--force` поодиночке и не-выгрузка разрешены.
+    #[test]
+    fn the_wiping_export_is_recognised_in_every_spelling() {
+        let args = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>()
+        };
+        for wiping in [
+            args(&[
+                "infobase",
+                "--db-path",
+                "/ib",
+                "config",
+                "export",
+                "--sync",
+                "--force",
+                "/t",
+            ]),
+            args(&[
+                "config",
+                "--db-path=/ib",
+                "export",
+                "--force",
+                "--sync",
+                "/t",
+            ]),
+            args(&[
+                "infobase",
+                "config",
+                "export",
+                "--sync=yes",
+                "--force=yes",
+                "/t",
+            ]),
+        ] {
+            assert!(wipes_the_export_directory(&wiping), "{wiping:?}");
+        }
+        for allowed in [
+            args(&["infobase", "config", "export", "--sync", "/t"]),
+            args(&["infobase", "config", "export", "--force", "/t"]),
+            args(&["infobase", "config", "import", "--sync", "--force", "/t"]),
+            args(&["infobase", "config", "export", "--forced", "--sync", "/t"]),
+        ] {
+            assert!(!wipes_the_export_directory(&allowed), "{allowed:?}");
+        }
     }
 
     #[cfg(unix)]

@@ -1,6 +1,8 @@
 ---
 id: INV.PLATFORM.AN-IBCMD-EXPORT-NEVER-SYNCS-WITH-FORCE
-check: [src/platform/ibcmd.rs::a_sync_export_with_force_is_never_started]
+check:
+  - src/platform/ibcmd.rs::a_sync_export_with_force_is_never_started
+  - src/platform/ibcmd.rs::the_wiping_export_is_recognised_in_every_spelling
 ---
 
 # Выгрузка `ibcmd` не сочетает `--sync` с `--force`
@@ -11,5 +13,5 @@ check: [src/platform/ibcmd.rs::a_sync_export_with_force_is_never_started]
 очищает каталог целиком, вместе с `.git` и всеми посторонними файлами
 ([замер](../../../references/1c/confirmed-runtime-measurements.md), раздел о версии формата
 файла версий). Каталог выгрузки раннера — рабочее дерево пользователя. Запрет стоит на
-сочетании ключей в единственной точке запуска `ibcmd`, а не на имени метода, поэтому новый
-путь выгрузки его не обходит.
+сочетании ключей в любом написании (`--force`, `--force=…`) в единственной точке запуска
+`ibcmd`, а не на имени метода, поэтому новый путь выгрузки его не обходит.
