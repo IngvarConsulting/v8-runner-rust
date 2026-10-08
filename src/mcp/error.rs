@@ -31,7 +31,6 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
             UseCaseErrorKind::Environment
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
-            | UseCaseErrorKind::InfobaseHeld
             | UseCaseErrorKind::NonFastForward
             | UseCaseErrorKind::NoMemory => Self::Runtime,
             UseCaseErrorKind::InvalidOutput
@@ -65,7 +64,6 @@ impl McpBusinessError {
             UseCaseErrorKind::Environment
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
-            | UseCaseErrorKind::InfobaseHeld
             | UseCaseErrorKind::NonFastForward
             | UseCaseErrorKind::NoMemory => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::InvalidOutput

@@ -7,7 +7,6 @@ use crate::config::model::{
 };
 use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
-    LOCAL_ONLY_INFOBASE_KEYS,
 };
 use crate::config::validate::{
     validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
@@ -351,10 +350,8 @@ fn root_mapping_mut(
 }
 
 /// Ключи местного слоя в проектном файле. Карта баз живёт только в местном слое: к какой
-/// базе подключён каталог, знает эта машина, а не проект. Согласие делить базу (`shared`)
-/// даёт каждая рабочая копия за себя, и прежняя секция `infobase:` его не несёт: согласие
-/// одной копии не коммитят. Отказ называет слой до границы схемы, где ключ был бы просто
-/// неизвестным.
+/// базе подключён каталог, знает эта машина, а не проект. Отказ называет слой до границы
+/// схемы, где ключ был бы просто неизвестным.
 fn reject_local_keys_in_project_file(
     root: &serde_yaml::Value,
 ) -> Result<(), ConfigValidationError> {
@@ -365,18 +362,6 @@ fn reject_local_keys_in_project_file(
     };
     if mapping_contains_key(mapping, "infobases") {
         return Err(ConfigValidationError::InfobasesBelongToTheLocalLayer);
-    }
-    let (synonym, _) = INFOBASE_SECTION_SYNONYM;
-    if let Some(section) = mapping
-        .get(yaml_key(synonym))
-        .and_then(serde_yaml::Value::as_mapping)
-    {
-        if let Some(key) = LOCAL_ONLY_INFOBASE_KEYS
-            .into_iter()
-            .find(|key| mapping_contains_key(section, key))
-        {
-            return Err(ConfigValidationError::InfobaseKeyBelongsToTheLocalLayer { key });
-        }
     }
     Ok(())
 }
@@ -660,9 +645,8 @@ pub fn load_declared_infobases(
     let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
     if regular_file_exists(&project_path)? {
         let mut project = read_yaml_file(&project_path)?;
-        // Ключи местного слоя в проектном файле владельца — `shared` в прежней секции
-        // `infobase:` или карта `infobases:` — дают ошибку: такой проект не загрузился бы и
-        // сам, и проверка владельца считает его живым и несогласным.
+        // Карта `infobases:` в проектном файле владельца даёт ошибку: такой проект не
+        // загрузился бы и сам, и проверка владельца считает его живым.
         reject_local_keys_in_project_file(&project)?;
         fold_infobase_synonym(&mut project, ConfigFile::Project(&project_path))?;
         if let Some(infobases) = root_mapping_mut(&mut project)?.remove(yaml_key("infobases")) {

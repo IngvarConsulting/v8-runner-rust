@@ -20,10 +20,6 @@
           "description": "Канонический абсолютный каталог проекта копии: там лежит её местный слой.",
           "type": "string"
         },
-        "shared": {
-          "description": "Согласие копии делить базу.",
-          "type": "boolean"
-        },
         "since": {
           "description": "Когда копия записана в метку.",
           "format": "date-time",
@@ -33,7 +29,6 @@
       "required": [
         "machine",
         "project",
-        "shared",
         "since"
       ],
       "type": "object"
@@ -52,10 +47,10 @@
       "type": "array"
     },
     "version": {
-      "description": "Версия формы. Метку другой версии раннер не переписывает.",
+      "description": "Версия формы. Метку незнакомой версии раннер не переписывает; метку версии 1 он\nчитает.",
       "format": "uint32",
-      "maximum": 1,
-      "minimum": 1,
+      "maximum": 2,
+      "minimum": 2,
       "type": "integer"
     }
   },

@@ -27,7 +27,6 @@ pub fn local_config_schema_url() -> String {
 pub fn main_config_schema_json() -> Value {
     let mut schema = serde_json::to_value(schema_for!(MainConfigSchema)).expect("schema json");
     set_schema_id(&mut schema, &main_config_schema_url());
-    remove_local_only_infobase_keys(&mut schema);
     add_tool_extension_schema_constraints(&mut schema);
     add_numeric_runtime_bounds(&mut schema);
     schema
@@ -58,21 +57,6 @@ pub fn schema_json_pretty(schema: &Value) -> String {
     let mut text = serde_json::to_string_pretty(schema).expect("schema json");
     text.push('\n');
     text
-}
-
-/// Ключи секции базы, которые объявляет только местный слой: проектный файл их отвергает
-/// по имени, и его схема их не описывает. Секция базы у двух схем одна — тип
-/// `InfobaseSchema`, — а в схеме проектного файла её читает только прежний ключ `infobase:`.
-pub(crate) const LOCAL_ONLY_INFOBASE_KEYS: [&str; 1] = ["shared"];
-
-fn remove_local_only_infobase_keys(schema: &mut Value) {
-    let properties = schema_object_mut(schema, &["InfobaseSchema"])
-        .and_then(|section| section.get_mut("properties"))
-        .and_then(Value::as_object_mut)
-        .expect("the project schema describes the infobase section");
-    for key in LOCAL_ONLY_INFOBASE_KEYS {
-        properties.remove(key);
-    }
 }
 
 fn schema_url(file_name: &str) -> String {
@@ -620,17 +604,6 @@ struct InfobaseSchema {
     /// server have no cluster and refuse the section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cluster: Option<InfobaseClusterSchema>,
-    /// Consent of this working copy to share the file infobase with the other working copies
-    /// that hold it. A write command on an infobase held by another copy runs only when every
-    /// holder and this copy consent; the refusal names those who do not. Declared only here:
-    /// the project file refuses the key, since the consent of one copy is not committed.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_non_null_optional",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(with = "bool")]
-    shared: Option<bool>,
 }
 
 /// A standalone server (`ibsrv`) as the target.
@@ -1712,59 +1685,6 @@ source-set:
     type: CONFIGURATION
     path: .
 ";
-
-    /// Согласие делить файловую базу — ключ местного слоя: его принимают схема слоя и
-    /// загрузчик, и выбранная база его несёт (`INV.USE-CASES.A-BASE-IS-SHARED-BY-CONSENT-OF-EVERY-COPY`).
-    #[test]
-    fn the_local_layer_declares_consent_to_share_a_base() {
-        for overlay in [
-            "infobases:\n  origin:\n    connection: 'File=build/ib'\n    shared: true\n",
-            "infobase:\n  connection: 'File=build/ib'\n  shared: true\n",
-        ] {
-            assert_schema_valid(&local_config_schema_json(), overlay);
-            let dir = tempfile::tempdir().expect("tempdir");
-            std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
-            let config_path = dir.path().join("v8project.yaml");
-            std::fs::write(&config_path, PROJECT_WITHOUT_AN_INFOBASE).expect("config");
-            std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
-            let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
-                .map(|loaded| loaded.config)
-                .expect("load config");
-            assert!(config.infobase.shared, "{overlay}");
-        }
-        for wrong in ["yes please", "null"] {
-            let overlay = format!(
-                "infobases:\n  origin:\n    connection: 'File=build/ib'\n    shared: {wrong}\n"
-            );
-            assert_schema_invalid(&local_config_schema_json(), &overlay);
-            assert_overlay_loader_error(&overlay);
-        }
-    }
-
-    /// Согласие одной копии не коммитят: проектный файл, в том числе прежняя секция
-    /// `infobase:`, ключ `shared` отвергает по имени, и схема проектного файла его не знает.
-    #[test]
-    fn the_project_file_refuses_consent_to_share_a_base() {
-        let project = format!(
-            "{PROJECT_WITHOUT_AN_INFOBASE}{}",
-            r"infobase:
-  connection: 'File=build/ib'
-  shared: true
-"
-        );
-        assert_schema_invalid(&main_config_schema_json(), &project);
-        assert_config_loader_error(
-            &project,
-            "`shared` is declared only in v8project.local.yaml",
-        );
-        let main_schema = main_config_schema_json();
-        assert!(
-            main_schema["$defs"]["InfobaseSchema"]["properties"]
-                .get("shared")
-                .is_none(),
-            "the project schema does not describe the key"
-        );
-    }
 
     #[test]
     fn local_schema_and_loader_reject_project_identity_and_unknown_keys() {

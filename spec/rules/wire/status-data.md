@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STATUS-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -24,6 +24,9 @@ check:
 расширения-инструмента клиентского MCP `tool: true`, — и, у файловой
 базы, `holders` — копии из метки владельца. Без `--deep` этих полей нет. Что платформа не
 ответила, форма называет `null` с причиной в `reason`, а не отказом команды.
+
+**Что изменила версия 2.** Копия в `holders.owners` — ровно `project`, `host`, `since` и
+`this_copy`.
 
 ## Пример
 
@@ -67,7 +70,6 @@ check:
           {
             "project": "/home/dev/demo",
             "host": "dev-box",
-            "shared": false,
             "since": "2026-10-01T09:00:00Z",
             "this_copy": true
           }
