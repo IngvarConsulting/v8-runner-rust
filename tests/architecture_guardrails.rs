@@ -5767,3 +5767,34 @@ fn the_purpose_bucket_finder_sees_a_second_order_under_another_name() {
     );
     assert!(!sorts_source_sets_into_purpose_buckets(&a_plain_match));
 }
+
+/// Применение к конфигурации базы данных делает один владелец — `apply::act`: точка
+/// безопасности, критическая фаза и учёт отложенной отмены у `push`, расширения-инструмента
+/// и `apply` одни (#210). Прежняя проблема — по копии применения в каждом исполнителе
+/// `push` и в расширении-инструменте; страж ловит новую копию под любым именем функции.
+/// Исключения названы в `act.rs`: `upload` применяет в своей грамматике шагов, а
+/// `infobase create` собирает ничью ещё базу.
+#[test]
+fn the_apply_act_has_one_owner() {
+    let allowed = [
+        repo_path("src/use_cases/apply/act.rs"),
+        repo_path("src/use_cases/load_artifact.rs"),
+        repo_path("src/use_cases/init_project.rs"),
+    ];
+    let offenders = collect_rust_files(&repo_path("src/use_cases"))
+        .into_iter()
+        .filter(|file| !allowed.contains(file))
+        .filter(|file| {
+            let tokens = production_tokens(file);
+            tokens.contains(".update_db_cfg(")
+                || tokens.contains(".config_apply(")
+                || tokens.contains("config update-db-cfg")
+        })
+        .map(|file| file.display().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "these modules apply the configuration on their own instead of through apply::act:\n{}",
+        offenders.join("\n")
+    );
+}

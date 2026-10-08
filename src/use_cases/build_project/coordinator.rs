@@ -487,6 +487,29 @@ fn run_build_with(
                             token.as_deref(),
                             apply.applied(),
                         ));
+                        let remembered = remember_unapplied(&apply, token.as_deref(), || {
+                            commit_step_state(
+                                source_set,
+                                &source_context,
+                                &config.work_path,
+                                &commit,
+                            )
+                        });
+                        match remembered {
+                            Ok(note) => warnings.extend(note),
+                            Err(error) => {
+                                let result = fail_from_source_set_index(
+                                    started,
+                                    steps,
+                                    &ordered_source_sets,
+                                    index,
+                                    source_set,
+                                    mode,
+                                    error.to_string(),
+                                );
+                                return Err(BuildExecutionFailure::with_payload(error, result));
+                            }
+                        }
                         warnings.extend(gate.restore_version_file(
                             &source_context,
                             extent,
@@ -770,20 +793,34 @@ pub(super) fn run_build_ibcmd(
                 let read = || read_ibcmd_generation(context, config, &binary, runner, source_set);
                 match remove_left_candidates(source_context.path())
                     .and_then(|()| {
-                        guarded_load(&gate, &source_context, Provider::Ibcmd, read, || {
-                            execute_source_set_step_ibcmd(
-                                context,
-                                config,
-                                &binary,
-                                runner,
-                                source_set,
-                                &source_context,
-                                &source_context,
-                                partial_paths.as_deref(),
-                                &commit,
-                                args.apply,
-                            )
-                        })
+                        guarded_load(
+                            &gate,
+                            &source_context,
+                            Provider::Ibcmd,
+                            read,
+                            || {
+                                execute_source_set_step_ibcmd(
+                                    context,
+                                    config,
+                                    &binary,
+                                    runner,
+                                    source_set,
+                                    &source_context,
+                                    &source_context,
+                                    partial_paths.as_deref(),
+                                    &commit,
+                                    args.apply,
+                                )
+                            },
+                            || {
+                                commit_step_state(
+                                    source_set,
+                                    &source_context,
+                                    &config.work_path,
+                                    &commit,
+                                )
+                            },
+                        )
                     })
                     .and_then(|Loaded { warnings, apply }| {
                         settle_loaded(context, &source_set.name, warnings, apply)
@@ -1463,7 +1500,7 @@ pub(super) fn run_build_edt(
                                 source_set,
                                 op,
                             ),
-                            _ => designer_unapplied_op(
+                            Provider::Designer => designer_unapplied_op(
                                 context,
                                 config,
                                 &binary,
@@ -1472,6 +1509,12 @@ pub(super) fn run_build_edt(
                                 index,
                                 op,
                             ),
+                            other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => {
+                                Err(crate::use_cases::unimplemented_provider(
+                                    Operation::Build,
+                                    other,
+                                ))
+                            }
                         }
                     })
                 });
@@ -1546,21 +1589,35 @@ pub(super) fn run_build_edt(
                                 context, config, designer, runner, source_set, index,
                             )
                         };
-                        guarded_load(&gate, &designer_context, Provider::Designer, read, || {
-                            execute_source_set_step(
-                                context,
-                                config,
-                                designer,
-                                runner,
-                                source_set,
-                                &designer_context,
-                                &designer_context,
-                                index,
-                                partial_paths.as_deref(),
-                                &commit,
-                                args.apply,
-                            )
-                        })
+                        guarded_load(
+                            &gate,
+                            &designer_context,
+                            Provider::Designer,
+                            read,
+                            || {
+                                execute_source_set_step(
+                                    context,
+                                    config,
+                                    designer,
+                                    runner,
+                                    source_set,
+                                    &designer_context,
+                                    &designer_context,
+                                    index,
+                                    partial_paths.as_deref(),
+                                    &commit,
+                                    args.apply,
+                                )
+                            },
+                            || {
+                                commit_step_state(
+                                    source_set,
+                                    &designer_context,
+                                    &config.work_path,
+                                    &commit,
+                                )
+                            },
+                        )
                     }
                     Provider::Ibcmd => {
                         let ibcmd = &loader;
@@ -1578,20 +1635,34 @@ pub(super) fn run_build_edt(
                         let runner = utilities.runner_for(UtilityType::Ibcmd);
                         let read =
                             || read_ibcmd_generation(context, config, ibcmd, runner, source_set);
-                        guarded_load(&gate, &designer_context, Provider::Ibcmd, read, || {
-                            execute_source_set_step_ibcmd(
-                                context,
-                                config,
-                                ibcmd,
-                                runner,
-                                source_set,
-                                &designer_context,
-                                &designer_context,
-                                partial_paths.as_deref(),
-                                &commit,
-                                args.apply,
-                            )
-                        })
+                        guarded_load(
+                            &gate,
+                            &designer_context,
+                            Provider::Ibcmd,
+                            read,
+                            || {
+                                execute_source_set_step_ibcmd(
+                                    context,
+                                    config,
+                                    ibcmd,
+                                    runner,
+                                    source_set,
+                                    &designer_context,
+                                    &designer_context,
+                                    partial_paths.as_deref(),
+                                    &commit,
+                                    args.apply,
+                                )
+                            },
+                            || {
+                                commit_step_state(
+                                    source_set,
+                                    &designer_context,
+                                    &config.work_path,
+                                    &commit,
+                                )
+                            },
+                        )
                     }
                 };
                 match load_result.and_then(|Loaded { warnings, apply }| {
@@ -1640,12 +1711,36 @@ fn guarded_load(
     tool: Provider,
     read: impl Fn() -> Result<Option<String>, AppError>,
     load: impl FnOnce() -> Result<Loaded, AppError>,
+    commit: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<Loaded, AppError> {
     gate.before_load(set, tool, &read)?;
     let Loaded { warnings, apply } = load().inspect_err(|_| gate.after_failed_load(set, tool))?;
     let (mut warnings, token) = generation_after_load(gate, set, tool, warnings, read())?;
     warnings.extend(gate.after_load(set, tool, token.as_deref(), apply.applied()));
+    warnings.extend(remember_unapplied(&apply, token.as_deref(), commit)?);
     Ok(Loaded { warnings, apply })
+}
+
+/// Загрузка без применения помнится памятью исходников только вместе с записью поколения
+/// `applied: false`: без неё отправка, которой нечего грузить, не узнала бы о непринятом и
+/// не применила бы его (`INV.USE-CASES.A-PUSH-WITH-NOTHING-TO-LOAD-APPLIES-ITS-OWN-UNAPPLIED`).
+/// Поколения нет — память не фиксируется, следующая отправка загрузит и применит набор снова;
+/// строка — для ответа. Применённую загрузку фиксирует сам шаг.
+fn remember_unapplied(
+    apply: &AfterLoad,
+    token: Option<&str>,
+    commit: impl FnOnce() -> Result<(), AppError>,
+) -> Result<Option<String>, AppError> {
+    if apply.applied() {
+        return Ok(None);
+    }
+    if token.is_some() {
+        commit()?;
+        return Ok(None);
+    }
+    Ok(Some(
+        "the configuration generation after the load is not known, so the load is not remembered as unapplied: the next push loads the set again and applies it".to_owned(),
+    ))
 }
 
 /// Шаг удачной загрузки по исходу применения: применено — удача; `--no-apply` — удача,
@@ -1712,23 +1807,28 @@ fn apply_unapplied(
     set: &SourceSetContext,
     record: &crate::use_cases::agent_session::GenerationRecord,
     run: &mut dyn FnMut(UnappliedOp<'_>) -> Result<Option<String>, AppError>,
-) -> Result<Option<Vec<String>>, AppError> {
+) -> Result<Option<Result<Vec<String>, String>>, AppError> {
     if run(UnappliedOp::Read)?.as_deref() != Some(record.token.as_str()) {
-        return Ok(None);
+        // Признаку не верят: база ушла от записи. Шаг остаётся пропуском, но непринятое он
+        // называет — его применит только `apply`.
+        return Ok(Some(Err(format!(
+            "source-set '{}' was loaded without apply earlier, and the infobase moved away from that record, so this push does not apply it; apply it with {}",
+            set.name(),
+            context.advised_command(&format!("apply {}", shell_word(set.name())))
+        ))));
     }
     let ((), mut warnings) =
         collecting_deferrals(|deferrals| run(UnappliedOp::Apply(deferrals)).map(|_| ())).map_err(
             |error| crate::use_cases::apply::load_kept_unapplied(context, set.name(), error),
         )?;
-    let after = run(UnappliedOp::Read).ok().flatten();
     let (_, note) = crate::use_cases::apply::record::carry_after_apply(
         set,
         &config.work_path,
         record,
-        after.as_deref(),
-    );
+        run(UnappliedOp::Read),
+    )?;
     warnings.extend(note);
-    Ok(Some(warnings))
+    Ok(Some(Ok(warnings)))
 }
 
 /// Шаг отправки без изменений после попытки применить непринятое.
@@ -1736,12 +1836,20 @@ fn settle_unapplied(
     steps: &mut Vec<crate::domain::build::BuildStep>,
     set: &str,
     message: String,
-    applied: Result<Option<Vec<String>>, AppError>,
+    applied: Result<Option<Result<Vec<String>, String>>, AppError>,
     started: Instant,
 ) -> Result<(), AppError> {
     match applied? {
         None => push_build_step(steps, set, BuildMode::Skipped, true, message, 0),
-        Some(warnings) => push_loaded_step(
+        Some(Err(warning)) => push_build_step(
+            steps,
+            set,
+            BuildMode::Skipped,
+            true,
+            append_warnings(message, &[warning]),
+            0,
+        ),
+        Some(Ok(warnings)) => push_loaded_step(
             steps,
             set,
             BuildMode::Skipped,

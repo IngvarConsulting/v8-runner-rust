@@ -4151,7 +4151,7 @@ fn render_build_text(result: &BuildResult, presenter: &Presenter, succeeded: boo
         && result
             .steps
             .iter()
-            .all(|step| matches!(step.mode, BuildMode::Skipped) && step.ok)
+            .all(|step| matches!(step.mode, BuildMode::Skipped) && step.ok && !step.applied)
     {
         TimelineItem::new(TimelineStatus::Succeeded, "Build completed: no changes")
     } else {

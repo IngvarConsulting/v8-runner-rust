@@ -713,7 +713,11 @@ fn execute_source_set_step(
             AfterLoad::Deferred
         };
 
-        commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+        // Без применения память исходников фиксирует координатор — только вместе с записью
+        // поколения `applied: false` (`remember_unapplied`).
+        if apply.applied() {
+            commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+        }
         Ok(apply)
     })
     .map(|(apply, mut warnings)| {
@@ -864,7 +868,11 @@ fn execute_source_set_step_ibcmd(
             AfterLoad::Deferred
         };
 
-        commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+        // Без применения память исходников фиксирует координатор — только вместе с записью
+        // поколения `applied: false` (`remember_unapplied`).
+        if apply.applied() {
+            commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+        }
         Ok(apply)
     })
     .map(|(apply, mut warnings)| {
@@ -958,6 +966,40 @@ mod tests {
         let mut perms = fs::metadata(path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    /// Поколение, которым отвечают поддельные утилиты `*_answering`: то же, что пишет
+    /// `remember_unknown_sets`, — сверка перед загрузкой проходит.
+    #[cfg(unix)]
+    const ZERO_GENERATION: &str = "0000000000000000000000000000000000000000";
+
+    /// Конфигуратор, который отвечает поколением, и отказывает на `fail_pattern`.
+    #[cfg(unix)]
+    fn write_designer_script_answering(path: &Path, calls_log: &Path, fail_pattern: Option<&str>) {
+        let fail = fail_pattern
+            .map(|pattern| {
+                format!("if printf '%s' \"$args\" | grep -F -q -- '{pattern}'; then exit 17; fi\n")
+            })
+            .unwrap_or_default();
+        write_designer_script_with(
+            path,
+            calls_log,
+            &format!(
+                "{fail}case \"$args\" in *GetConfigGenerationID*) printf '{ZERO_GENERATION}' > \"$out\" ;; esac"
+            ),
+        );
+    }
+
+    /// `ibcmd`, который отвечает поколением, и отказывает на `fail_pattern`.
+    #[cfg(unix)]
+    fn write_ibcmd_script_answering(path: &Path, calls_log: &Path, fail_pattern: &str) {
+        write_ibcmd_script_with(
+            path,
+            calls_log,
+            &format!(
+                "if printf '%s' \"$args\" | grep -F -q -- '{fail_pattern}'; then exit 17; fi\ncase \"$args\" in *generation-id*) echo '{ZERO_GENERATION}' ;; esac"
+            ),
+        );
     }
 
     #[cfg(unix)]
@@ -1327,6 +1369,16 @@ mod tests {
         let calls = fs::read_to_string(&calls_log).expect("calls");
         assert!(calls.contains("config import"));
         assert!(!calls.contains("config apply"));
+        // Поколения после отмены нет, и записи «не применено» нет: память исходников не
+        // фиксируется, следующая отправка загрузит и применит набор снова.
+        let storage = SourceSetsService::new(&config)
+            .designer_contexts()
+            .into_iter()
+            .find(|context| context.name() == "main")
+            .expect("designer context")
+            .storage_path(&config.work_path)
+            .expect("memory path");
+        assert!(!storage.exists(), "{}", storage.display());
     }
 
     /// Применение через `ibcmd`, отложившее отмену и потом не удавшееся, остаётся отказом,
@@ -1364,7 +1416,7 @@ mod tests {
         // Загрузка удалась, не удалось применение: загруженное запомнено, и выход — `apply`
         // (`INV.USE-CASES.A-PUSH-WHOSE-APPLY-FAILED-KEEPS-THE-LOAD`).
         assert!(
-            message.contains("is loaded into the main configuration and remembered"),
+            message.contains("is loaded into the main configuration but not applied"),
             "{message}"
         );
         assert_eq!(
@@ -2602,7 +2654,7 @@ mod tests {
         let script = dir.path().join("ibcmd");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_ibcmd_script(&script, &calls, Some("config apply"));
+        write_ibcmd_script_answering(&script, &calls, "config apply");
         let config = build_config(
             &base,
             &work,
@@ -2999,7 +3051,7 @@ mod tests {
             "procedure Test()\n  // changed ext\nendprocedure",
         )
         .expect("write ext");
-        write_designer_script(
+        write_designer_script_answering(
             &platform_script,
             &designer_calls,
             Some("/UpdateDBCfg -Extension client_mcp"),
@@ -3247,7 +3299,7 @@ mod tests {
         let designer_calls = dir.path().join("designer-calls.log");
         let edt_calls = dir.path().join("edt-calls.log");
         create_source_tree(&base);
-        write_designer_script(&platform_script, &designer_calls, Some("/UpdateDBCfg"));
+        write_designer_script_answering(&platform_script, &designer_calls, Some("/UpdateDBCfg"));
         write_edt_script(&edt_script, &edt_calls, None);
         let config = build_edt_config(&base, &work, &dir.path().join("platform"), &edt_script);
         prime_edt_snapshots(&config);
@@ -3894,7 +3946,7 @@ mod tests {
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_designer_script(&script, &calls, None);
+        write_designer_script_answering(&script, &calls, None);
         let config = build_config(
             &base,
             &work,

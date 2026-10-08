@@ -171,7 +171,9 @@ impl SourceSetLoader for AgentLoader {
             unstage(handle, &exchange, &exposed);
             let apply = outcome?;
 
-            commit_step_state(source_set, source_context, &config.work_path, commit)?;
+            if apply.applied() {
+                commit_step_state(source_set, source_context, &config.work_path, commit)?;
+            }
             Ok(apply)
         })
         .map(|(apply, mut warnings)| {

@@ -40,14 +40,14 @@ pub(crate) fn load_kept_unapplied(
 ) -> AppError {
     let advice = context.advised_command(&format!("apply {}", shell_word(set)));
     let kept = format!(
-        "source-set '{set}' is loaded into the main configuration and remembered, but not applied to the database configuration; apply it with {advice}"
+        "source-set '{set}' is loaded into the main configuration but not applied to the database configuration; apply it with {advice}"
     );
     if error.cancellation().is_some() {
         return error.with_context(kept);
     }
-    let refusal = UseCaseError::from(error);
     AppError::Refused(Box::new(
-        UseCaseError::new(refusal.kind(), format!("{}; {kept}", refusal.message()))
+        UseCaseError::from(error)
+            .followed_by(&kept)
             .with_next(NextStep::command("apply").for_source_set(set)),
     ))
 }
@@ -303,21 +303,20 @@ fn apply_target(
     match before {
         Some(token) if token == record.token => {
             let mut warnings = applied(context, config, executor, target, index)?;
-            let after = executor
-                .read_generation(context, config, record.tool, target, index)
-                .ok()
-                .flatten();
+            let after = executor.read_generation(context, config, record.tool, target, index);
             let (generation, note) =
-                record::carry_after_apply(set, &config.work_path, &record, after.as_deref());
+                record::carry_after_apply(set, &config.work_path, &record, after)?;
             warnings.extend(note);
             Ok((Some(generation), warnings))
         }
-        Some(token) if record.after == GenerationAfter::FailedBuild => {
+        // Ответа нет — расхождение после неудачной загрузки не исключено, и применять по
+        // возможно наполовину загруженной конфигурации нельзя.
+        before if record.after == GenerationAfter::FailedBuild => {
             Err(crate::use_cases::exchange_guard::apply_after_failed_load(
                 context,
                 config,
                 &target.name,
-                &token,
+                before.as_deref(),
                 &record,
             ))
         }
@@ -787,6 +786,40 @@ mod tests {
             .unwrap_or_default()
             .contains("its record is erased"));
         assert_eq!(ledger(&config).read(), Recorded::Nothing);
+    }
+
+    /// Запись помечена неудачной загрузкой, а инструмент записи поколением не ответил:
+    /// расхождения не исключить, и `apply` отказывает до применения
+    /// (`INV.USE-CASES.AN-APPLY-AFTER-A-FAILED-LOAD-IS-REFUSED`).
+    #[test]
+    fn an_apply_after_a_failed_load_without_an_answer_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let (tool, calls) = (dir.path().join("1cv8"), dir.path().join("calls.log"));
+        write_tool(&tool, &calls, &dir.path().join("token"), "");
+        let config = config(dir.path(), &tool, Provider::Designer);
+        ledger(&config)
+            .record_as(
+                Provider::Designer,
+                FIRST,
+                GenerationAfter::FailedBuild,
+                true,
+            )
+            .expect("record");
+
+        let failure = execute(
+            &ExecutionContext::cli(CommandName::Apply),
+            &config,
+            &all_sets(),
+        )
+        .expect_err("refused");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::NonFastForward);
+        assert_eq!(
+            failure.error.next().map(|next| next.command.as_str()),
+            Some("push")
+        );
+        let calls = fs::read_to_string(&calls).expect("calls");
+        assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
     }
 
     /// Запись сделана другим инструментом: поколение до и после читает он, а применяет

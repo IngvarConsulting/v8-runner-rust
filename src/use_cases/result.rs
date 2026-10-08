@@ -190,6 +190,13 @@ impl UseCaseError {
         self
     }
 
+    /// Дописывает к тексту отказа то, что из него следует; род, шаг и поколения остаются.
+    #[must_use]
+    pub fn followed_by(mut self, tail: impl AsRef<str>) -> Self {
+        self.message = format!("{}; {}", self.message, tail.as_ref());
+        self
+    }
+
     /// Называет шаг, которым вызывающий выходит из отказа.
     #[must_use]
     pub fn with_next(mut self, next: NextStep) -> Self {

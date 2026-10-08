@@ -836,26 +836,34 @@ pub(crate) fn apply_after_failed_load(
     context: &ExecutionContext,
     config: &AppConfig,
     set: &str,
-    base: &str,
+    base: Option<&str>,
     record: &GenerationRecord,
 ) -> AppError {
     let target = config.v8_connection().describe_target();
     let push_force = context.advised_command(&format!("push {} --force", shell_word(set)));
     let pull = context.advised_command(&format!("pull {}", shell_word(set)));
+    let generation = match base {
+        Some(base) => format!("the configuration generation of {target} is {base}, not"),
+        None => format!(
+            "{} gives no configuration generation of {target} to compare with",
+            record.tool
+        ),
+    };
     let message = format!(
-        "cannot apply source-set '{set}': the configuration generation of {target} is {base}, not {} that was recorded before the last push of this working copy failed ({}); the main configuration may hold a half-finished load, and applying it would rebuild the database configuration from it. Load the directory again with {push_force}; if someone else changed the infobase, take their changes first with {pull}.{}",
+        "cannot apply source-set '{set}': {generation} {} that was recorded before the last push of this working copy failed ({}); the main configuration may hold a half-finished load, and applying it would rebuild the database configuration from it. Load the directory again with {push_force}; if someone else changed the infobase, take their changes first with {pull}.{}",
         record.token,
         record.recorded_at,
         Standing::of(config).caveats()
     );
-    AppError::Refused(Box::new(
-        UseCaseError::new(UseCaseErrorKind::NonFastForward, message)
-            .with_next(WayOut::PushForce.step(set, Some(set)))
-            .with_generations(Generations {
-                base: base.to_owned(),
-                local: record.token.clone(),
-            }),
-    ))
+    let refusal = UseCaseError::new(UseCaseErrorKind::NonFastForward, message)
+        .with_next(WayOut::PushForce.step(set, Some(set)));
+    AppError::Refused(Box::new(match base {
+        Some(base) => refusal.with_generations(Generations {
+            base: base.to_owned(),
+            local: record.token.clone(),
+        }),
+        None => refusal,
+    }))
 }
 
 /// Пропуск выгрузки по изменившемуся: поколение до неё совпало с записанным тем же

@@ -1,10 +1,12 @@
 //! `apply` отдельной командой и `push --no-apply` (#210).
 //!
 //! Поддельный Конфигуратор отвечает `/GetConfigGenerationID` токеном из файла `token` рядом с
-//! собой. `/UpdateDBCfg` отказывает при файле `apply-fails`, а при файле `apply-token`
-//! переносит его в `token` — так подделка меняет поколение при применении, как могла бы
-//! платформа (замера, меняет ли, нет). Загрузка отказывает при файле `fail`, сдвинув
-//! поколение на `drift`.
+//! собой, у расширения `ext` — из `token-ext`. `/UpdateDBCfg` отказывает при файле
+//! `apply-fails`, а при файле `apply-token` (у `ext` — `apply-token-ext`) переносит его в
+//! токен. Замер 8.3.27.2074: применение не меняет поколение основной конфигурации, а
+//! Конфигуратор `-Extension` читает применённое расширение — его поколение меняет только
+//! применение. Подделка умеет оба исхода, и раннер не должен зависеть от того, какой выпал.
+//! Загрузка отказывает при файле `fail`, сдвинув поколение на `drift`.
 #![cfg(unix)]
 
 mod support;
@@ -31,8 +33,12 @@ for arg in "$@"; do
 done
 case "$*" in
   *'/GetConfigGenerationID'*)
-    if [ -f '{token}' ]; then cat '{token}' > "$out"; fi
+    file='{token}'
+    case "$*" in *'-Extension ext'*) file='{token}-ext' ;; esac
+    if [ -f "$file" ]; then cat "$file" > "$out"; fi
     exit 0 ;;
+  *'/UpdateDBCfg -Extension ext'*)
+    if [ -f '{apply_token}-ext' ]; then mv '{apply_token}-ext' '{token}-ext'; fi ;;
   *'/UpdateDBCfg'*)
     if [ -f '{apply_fails}' ]; then exit 1; fi
     if [ -f '{apply_token}' ]; then mv '{apply_token}' '{token}'; fi ;;
@@ -69,6 +75,7 @@ impl Project {
         let ext = root.join("ext");
         fs::create_dir_all(&ext).expect("extension sources");
         fs::write(ext.join("Configuration.xml"), "<Configuration/>\n").expect("extension");
+        fs::write(ext.join("Module.bsl"), "Procedure B()\nEndProcedure\n").expect("module");
         write_shell_script(&root.join("1cv8"), &platform(root));
         let config = root.join("v8project.yaml");
         fs::write(
@@ -454,4 +461,36 @@ fn providers_apply_assigns_the_executor_of_the_apply() {
         "{}",
         project.calls()
     );
+}
+
+/// Конфигуратор читает поколение применённого расширения: загрузка без применения его не
+/// меняет, применение меняет. Запись после `push --no-apply` — прежнее поколение; `apply`
+/// переносит её на новое, и следующая отправка не отказывает.
+#[test]
+fn an_extension_whose_generation_moves_only_on_apply_is_pushed_again_without_refusal() {
+    let project = Project::new().with_extension();
+    fs::write(project.root().join("token-ext"), format!("{FIRST}\r\n")).expect("token");
+    succeeded(&project.run(&["push", "--force"]));
+    let edit = || {
+        let module = project.root().join("ext").join("Module.bsl");
+        let text = fs::read_to_string(&module).expect("module");
+        fs::write(&module, format!("{text}// edited\n")).expect("edit");
+    };
+    edit();
+    succeeded(&project.run(&["push", "ext", "--no-apply"]));
+    fs::write(
+        project.root().join("apply-token-ext"),
+        format!("{SECOND}\r\n"),
+    )
+    .expect("token");
+
+    let applied = succeeded(&project.run(&["apply", "ext"]));
+    assert_eq!(
+        applied["data"]["steps"][0]["generation"], "recorded",
+        "{applied}"
+    );
+
+    edit();
+    let pushed = succeeded(&project.run(&["push", "ext"]));
+    assert_eq!(pushed["data"]["steps"][0]["applied"], true, "{pushed}");
 }
