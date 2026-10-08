@@ -9,8 +9,8 @@ check:
 
 Инструмент MCP, который на базе другой рабочей копии выполняет команду записи, не
 отказывает и метку не меняет — так же, как команда командной строки
-(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`). Попадёт ли
-предупреждение в ответ инструмента, говорит `INV.MCP.A-BOUNDARY-NOTE-REACHES-THE-TOOL-ANSWER`.
+(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`). Предупреждение в
+ответе инструмента обещает `INV.MCP.A-BOUNDARY-NOTE-REACHES-THE-TOOL-ANSWER`.
 Команда записи определена в `INV.USE-CASES.A-DEVELOPMENT-BASE-IS-HELD-BY-ONE-WORKING-COPY`.
 
 Источник: [`sources.html#copies`](../../../docs/site/sources.html#copies).
