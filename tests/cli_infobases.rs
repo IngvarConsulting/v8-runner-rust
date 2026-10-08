@@ -410,10 +410,6 @@ fn a_refusal_without_origin_names_the_ways_out() {
     ] {
         assert!(message.contains(way), "{way}: {message}");
     }
-    assert!(
-        !message.contains("shared"),
-        "a shared infobase is no way out: {message}"
-    );
     assert!(!project.platform_calls.exists());
 }
 
@@ -474,47 +470,6 @@ fn the_map_is_refused_in_the_project_file() {
     assert!(
         message.contains("declared only in v8project.local.yaml"),
         "{message}"
-    );
-}
-
-/// `INV.CONFIG.THE-SHARED-KEY-IS-REFUSED-WITH-A-HINT`: общих баз больше нет, и конфиг с
-/// ключом `shared` — в местном слое или в прежней секции проектного файла — получает ошибку
-/// незнакомого ключа с подсказкой. Несовместимо с 0.13.0.
-#[test]
-fn a_config_with_the_shared_key_is_refused_with_a_hint() {
-    let bases = support::temp_workspace();
-    let tmp = bases.path().display().to_string();
-    let hinted = |output: &Output, section: &str, file: &str| {
-        let message = refusal_message(output);
-        for part in [
-            format!("unknown key `shared` in {section} of {file}"),
-            "remove `shared`".to_owned(),
-            "a write command on an infobase of another working copy now runs and warns".to_owned(),
-        ] {
-            assert!(message.contains(&part), "{part}: {message}");
-        }
-    };
-
-    let project = project();
-    project.write_local(&format!(
-        "infobases:\n  origin:\n    connection: 'File={tmp}/origin-ib'\n    shared: true\n"
-    ));
-    hinted(
-        &project.run_json(&[], LAUNCH_PREVIEW),
-        "infobases.origin",
-        "v8project.local.yaml",
-    );
-
-    let project = self::project();
-    let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str(&format!(
-        "infobase:\n  connection: 'File={tmp}/origin-ib'\n  shared: true\n"
-    ));
-    fs::write(&project.config_path, config).expect("config");
-    hinted(
-        &project.run_json(&[], LAUNCH_PREVIEW),
-        "infobase",
-        "v8project.yaml",
     );
 }
 

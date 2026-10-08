@@ -7,7 +7,7 @@ check:
   - src/use_cases/infobase_owner.rs::a_written_marker_passes_its_schema
   - src/use_cases/infobase_owner.rs::the_marker_keeps_the_machine_hashed
   - src/use_cases/infobase_owner.rs::a_marker_with_a_relative_project_is_not_understood
-  - src/use_cases/infobase_owner.rs::a_marker_of_version_one_is_read_without_its_consent
+  - src/use_cases/infobase_owner.rs::a_marker_of_version_one_is_read
 ---
 
 # Форма метки владельца файловой базы
@@ -26,10 +26,11 @@ generated_owner_marker_schema_is_current`. Метку другой версии 
 (`INV.USE-CASES.A-MARKER-OF-AN-UNKNOWN-VERSION-IS-NOT-REWRITTEN`), поэтому новая версия формы —
 событие для всех рабочих копий базы, а не только для одной.
 
-**Что изменила версия 2.** У записи нет поля `shared`: общих баз больше нет (#437). Метку
-версии 1, которую писал 0.13.0, раннер читает, отбросив `shared`, а когда записывает в неё
-свою копию, переписывает формой версии 2. Раннер 0.13.0 метку версии 2 не понимает: его
-команда записи на такой базе отказывает и называет версию метки и свою. Несовместимо с 0.13.0.
+**Что изменила версия 2.** Запись копии — ровно `machine`, `host`, `project` и `since`. Метку
+версии 1 раннер читает, пропуская поля записей, которых нет в версии 2, а когда записывает в неё
+свою копию, переписывает формой версии 2. Раннер, который знает только версию 1, метку версии 2
+не понимает: его команда записи на такой базе отказывает и называет версию метки и свою, —
+обновите раннер у всех копий базы.
 
 ## Пример
 

@@ -31,9 +31,9 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 /// Версия формы метки, которую пишет этот раннер.
 pub const OWNER_MARKER_VERSION: u32 = 2;
 
-/// Прежняя версия формы, которую раннер читает: её записи несли согласие `shared` делить
-/// базу. Общих баз больше нет, и согласие при чтении отбрасывается; метку этой версии раннер
-/// переписывает новой, когда записывает в неё свою копию.
+/// Прежняя версия формы, которую раннер читает: поля её записей, которых нет в нынешней
+/// форме, он пропускает, а метку этой версии переписывает нынешней, когда записывает в неё
+/// свою копию.
 const LEGACY_OWNER_MARKER_VERSION: u32 = 1;
 
 /// Файл, в котором лежит порождённая форма метки.
@@ -52,7 +52,7 @@ const OWNER_MARKER_SUFFIX: &str = ".v8-runner.owners.json";
 )]
 pub struct OwnerMarker {
     /// Версия формы. Метку незнакомой версии раннер не переписывает; метку версии 1 он
-    /// читает без её поля `shared`.
+    /// читает.
     #[schemars(range(min = 2, max = 2))]
     pub version: u32,
     /// Рабочие копии, которые держат базу.
@@ -219,7 +219,6 @@ fn check_as(
             &base_dir,
             &marker_path,
             &alive,
-            recorded,
         )]);
     }
     // Превью ничего не берёт, а строка соединения владельцем не становится — даже на базе
@@ -439,21 +438,9 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
     }
 }
 
-/// Предупреждение команды записи на базе другой копии: чья база, что команда её меняет,
-/// где метка, как освободить базу и как завести свою. Метку команда не меняет: владельцем
-/// остаётся прежняя копия.
-///
-/// `this_recorded` — эта копия тоже записана в метке: наследие общей базы 0.13.0, где
-/// владельцев было несколько. Тогда предупреждение говорит об этом и называет, как сделать
-/// базу только своей: без этого каждая её команда записи предупреждала бы всегда.
-fn another_copy_warning(
-    command_name: &str,
-    base_dir: &Path,
-    marker_path: &Path,
-    alive: &[(&OwnerRecord, &Alive)],
-    this_recorded: bool,
-) -> String {
-    let holders = alive
+/// Живые копии из метки, кроме этой, — для людей.
+fn describe_holders(alive: &[(&OwnerRecord, &Alive)]) -> String {
+    alive
         .iter()
         .map(|(owner, why)| match why {
             Alive::Declares => format!(
@@ -478,8 +465,12 @@ fn another_copy_warning(
             }
         })
         .collect::<Vec<_>>()
-        .join("; ");
-    let release = alive
+        .join("; ")
+}
+
+/// Как освободить базу от живых копий из метки.
+fn describe_release(alive: &[(&OwnerRecord, &Alive)]) -> String {
+    alive
         .iter()
         .map(|(owner, why)| match why {
             Alive::Declares | Alive::Unreadable(_) => format!(
@@ -492,25 +483,27 @@ fn another_copy_warning(
             ),
         })
         .collect::<Vec<_>>()
-        .join("; ");
-    let marker = marker_path.display();
-    let whose = if this_recorded {
-        format!(
-            "{command_name} writes the infobase '{}', which the owner marker '{marker}' records for this working copy and also for {holders} — a leftover of a shared infobase of 0.13.0, and shared infobases are gone. \
-             The command changes the infobase of those working copies too, and the marker stays as it is. \
-             To make the infobase this working copy's own: {release}",
-            base_dir.display()
-        )
-    } else {
-        format!(
-            "{command_name} writes the infobase '{}' of another working copy: it is held by {holders}. \
-             The command changes that working copy's infobase, and its owner stays as it is in the owner marker '{marker}'. \
-             To free the infobase: {release}",
-            base_dir.display()
-        )
-    };
+        .join("; ")
+}
+
+/// Предупреждение команды записи на базе другой копии: чья база, что команда её меняет,
+/// где метка, как освободить базу и как завести свою. Метку команда не меняет: владельцем
+/// остаётся прежняя копия.
+fn another_copy_warning(
+    command_name: &str,
+    base_dir: &Path,
+    marker_path: &Path,
+    alive: &[(&OwnerRecord, &Alive)],
+) -> String {
     format!(
-        "{whose}. Ways to an infobase of this working copy's own (`init --infobase` keeps the previous section as upstream): {}",
+        "{command_name} writes the infobase '{}' of another working copy: it is held by {}. \
+         The command changes that working copy's infobase, and its owner stays as it is in the owner marker '{}'. \
+         To free the infobase: {}. \
+         Ways to an infobase of this working copy's own (`init --infobase` keeps the previous section as upstream): {}",
+        base_dir.display(),
+        describe_holders(alive),
+        marker_path.display(),
+        describe_release(alive),
         crate::domain::next_step::ways_to_an_own_infobase("upstream")
     )
 }
@@ -539,8 +532,8 @@ impl MarkerReadError {
 }
 
 /// Метка рядом с базой: `None`, если её ещё нет. Версия сверяется раньше формы: незнакомая
-/// версия называется как версия, а не как непонятная форма. Метка прежней версии читается
-/// без согласия `shared` её записей.
+/// версия называется как версия, а не как непонятная форма. Метка прежней версии читается в
+/// нынешней форме.
 fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
     let Some(raw) = read_optional(path).map_err(MarkerReadError::Io)? else {
         return Ok(None);
@@ -555,7 +548,7 @@ fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
     match version.as_u64() {
         Some(known) if known == u64::from(OWNER_MARKER_VERSION) => {}
         Some(legacy) if legacy == u64::from(LEGACY_OWNER_MARKER_VERSION) => {
-            forget_legacy_consent(&mut value)?;
+            keep_fields_of_this_version(&mut value);
         }
         _ => return Err(MarkerReadError::UnknownVersion(version)),
     }
@@ -576,10 +569,10 @@ fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
     Ok(Some(marker))
 }
 
-/// Метка версии 1 в форме нынешней версии: согласие `shared` у записей отбрасывается — общих
-/// баз больше нет, — остальная форма та же. Согласие версия 1 требовала логическим значением;
-/// иное значение — непонятная метка, как и раньше.
-fn forget_legacy_consent(value: &mut serde_json::Value) -> Result<(), MarkerReadError> {
+/// Метка прежней версии в нынешней форме: у записей остаются только поля нынешней формы,
+/// остальное раннер пропускает; проверяет запись затем нынешняя форма.
+fn keep_fields_of_this_version(value: &mut serde_json::Value) {
+    const FIELDS: [&str; 4] = ["machine", "host", "project", "since"];
     if let Some(owners) = value
         .get_mut("owners")
         .and_then(serde_json::Value::as_array_mut)
@@ -588,23 +581,10 @@ fn forget_legacy_consent(value: &mut serde_json::Value) -> Result<(), MarkerRead
             .iter_mut()
             .filter_map(serde_json::Value::as_object_mut)
         {
-            match owner.remove("shared") {
-                Some(serde_json::Value::Bool(_)) => {}
-                Some(other) => {
-                    return Err(MarkerReadError::Malformed(format!(
-                        "the owner record of version {LEGACY_OWNER_MARKER_VERSION} gives `shared` as {other}, not as true or false"
-                    )))
-                }
-                None => {
-                    return Err(MarkerReadError::Malformed(format!(
-                        "the owner record of version {LEGACY_OWNER_MARKER_VERSION} names no `shared`"
-                    )))
-                }
-            }
+            owner.retain(|field, _| FIELDS.contains(&field.as_str()));
         }
     }
     value["version"] = serde_json::Value::from(OWNER_MARKER_VERSION);
-    Ok(())
 }
 
 /// Пишет метку заменой файла целиком: читатель без замка видит прежнюю метку или новую.
@@ -1034,11 +1014,11 @@ mod tests {
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), text);
     }
 
-    /// Метка версии 1 читается без согласия `shared`: копия, уже записанная в ней, метку не
+    /// Метка версии 1 читается: копия, уже записанная в ней, метку не
     /// переписывает; запись другой живой копии в ней идёт с предупреждением и метку не трогает;
     /// смена ушедшего владельца переписывает её формой нынешней версии.
     #[test]
-    fn a_marker_of_version_one_is_read_without_its_consent() {
+    fn a_marker_of_version_one_is_read() {
         let dir = tempdir().expect("tempdir");
         let base = base(dir.path());
         let config = project(&dir.path().join("copy"), &base);
@@ -1100,31 +1080,37 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&marker_path).expect("marker")).expect("json");
         assert_eq!(written["version"], 2, "{written}");
-        assert!(written["owners"][0].get("shared").is_none(), "{written}");
+        let mut fields: Vec<&str> = written["owners"][0]
+            .as_object()
+            .expect("record")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(fields, ["host", "machine", "project", "since"], "{written}");
         assert_eq!(marker(&base).owners[0].project, config.base_path);
         let validator =
             jsonschema::validator_for(&generated_owner_marker_schema()).expect("schema");
         assert!(validator.is_valid(&written), "{written}");
     }
 
-    /// Наследие общей базы 0.13.0: эта копия и другая живая записаны в метке обе. Запись идёт с
-    /// особым предупреждением — эта копия тоже владелец, общих баз нет — и называет, как сделать
-    /// базу своей; метка не меняется.
+    /// Метка с несколькими владельцами — обычный случай: если среди них есть другая живая
+    /// копия, команда записи этой копии идёт с обычным предупреждением, и метка не меняется.
     #[test]
-    fn a_shared_leftover_names_how_to_make_the_base_own() {
+    fn a_marker_with_this_copy_and_another_live_one_warns() {
         let dir = tempdir().expect("tempdir");
         let base = base(dir.path());
         let config = project(&dir.path().join("copy"), &base);
         let marker_path = owner_marker_path(&base).expect("marker path");
-        let legacy = serde_json::json!({
-            "version": 1,
+        let marker = serde_json::json!({
+            "version": 2,
             "owners": [
-                {"machine": super::machine_hash("machine-a"), "host": "host", "project": config.base_path, "shared": true, "since": "2026-10-01T00:00:00Z"},
-                {"machine": super::machine_hash("machine-b"), "host": "build-agent", "project": "/srv/elsewhere", "shared": true, "since": "2026-10-01T00:00:00Z"}
+                {"machine": super::machine_hash("machine-a"), "host": "host", "project": config.base_path, "since": "2026-10-01T00:00:00Z"},
+                {"machine": super::machine_hash("machine-b"), "host": "build-agent", "project": "/srv/elsewhere", "since": "2026-10-01T00:00:00Z"}
             ]
         })
         .to_string();
-        fs::write(&marker_path, &legacy).expect("marker");
+        fs::write(&marker_path, &marker).expect("marker");
 
         let warned = check_as(
             &on("machine-a", "host", &config),
@@ -1136,16 +1122,11 @@ mod tests {
         .expect("the write runs");
 
         assert_eq!(warned.len(), 1, "{warned:?}");
-        for part in [
-            "records for this working copy and also for",
-            "leftover of a shared infobase of 0.13.0",
-            "To make the infobase this working copy's own",
-            "delete the record of '/srv/elsewhere' from the owner marker",
-            &marker_path.display().to_string(),
-        ] {
-            assert!(warned[0].contains(part), "{part}: {warned:?}");
-        }
-        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), legacy);
+        assert!(
+            warned[0].contains("To free the infobase: delete the record of '/srv/elsewhere'"),
+            "{warned:?}"
+        );
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), marker);
     }
 
     /// Отказ копии без своей базы и предупреждение о базе другой копии называют одни и те же
@@ -1193,9 +1174,6 @@ mod tests {
             )),
             "{warned:?}"
         );
-        for text in [&refusal, &warned[0]] {
-            assert!(!text.contains("shared"), "{text}");
-        }
     }
 
     /// Превью команды записи на базе другой копии говорит то же предупреждение, что прогон, и

@@ -6,7 +6,7 @@ check:
   - tests/cli_infobase_owner.rs::an_owner_on_another_machine_is_never_replaced
   - src/use_cases/transport.rs::a_base_of_another_copy_warns_before_the_scenario
   - src/use_cases/infobase_owner.rs::the_refusal_and_the_warning_name_the_same_ways_out
-  - src/use_cases/infobase_owner.rs::a_shared_leftover_names_how_to_make_the_base_own
+  - src/use_cases/infobase_owner.rs::a_marker_with_this_copy_and_another_live_one_warns
 ---
 
 # Запись в базу другой копии идёт с предупреждением
@@ -17,14 +17,11 @@ check:
 копию-владельца, говорит, что команда меняет базу этой копии, называет метку, как освободить
 базу (убрать её из `v8project.local.yaml` копии-владельца или удалить эту копию; у копии с
 другой машины — удалить её запись из метки) и те же выходы к своей базе, что отказ
-`INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`, с источником копии `upstream`. Общую
-базу выходом оно не называет. Кода отказа для базы другой копии нет.
+`INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`, с источником копии `upstream`. Кода
+отказа для базы другой копии нет. Так же — когда в метке записана и эта копия: предупреждает
+любая другая живая копия-владелец.
 
-Если эта копия тоже записана в метке рядом с другой живой — наследие общей базы 0.13.0, —
-предупреждение говорит об этом и называет, как сделать базу только своей: те же способы
-освободить её от другой копии и путь метки.
-
-Решение владельца от 07.10.2026 (#437): общих баз нет; писать в базу другой копии —
-ответственность разработчика, и принятый ответ с предупреждением — его согласие.
+Решение владельца от 07.10.2026 (#437): писать в базу другой копии — ответственность
+разработчика, и принятый ответ с предупреждением — его согласие.
 
 Источник: [`sources.html#copies`](../../../docs/site/sources.html#copies).

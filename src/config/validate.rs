@@ -333,12 +333,6 @@ pub enum ConfigValidationError {
     InfobasesBelongToTheLocalLayer,
 
     #[error(
-        "unknown key `{key}` in {section} of {file}: shared infobases are gone (incompatible with 0.13.0) — remove `{key}`; a write command on an infobase of another working copy now runs and warns whose infobase it changes",
-        key = crate::config::schema::REMOVED_SHARED_INFOBASE_KEY
-    )]
-    SharedInfobaseKeyIsGone { section: String, file: &'static str },
-
-    #[error(
         "{file} declares both `infobase` and `infobases`: `infobase` is the one-cycle synonym for `infobases.origin`, keep one of them"
     )]
     InfobaseKeysMixed { file: String },

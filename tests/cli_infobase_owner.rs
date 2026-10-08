@@ -174,7 +174,7 @@ fn warnings(payload: &Value) -> Vec<String> {
 }
 
 /// Предупреждение о базе другой копии в ответе `payload` команды `command`: оно называет
-/// копию-владельца, метку и выходы к своей базе, а общую базу выходом не называет.
+/// копию-владельца, метку, как освободить базу, и выходы к своей базе.
 fn another_copy_warning(payload: &Value, command: &str, owner: &Copy, stand: &Stand) -> String {
     assert_eq!(payload["command"], command, "{payload}");
     let warning = warnings(payload)
@@ -212,7 +212,6 @@ fn another_copy_warning(payload: &Value, command: &str, owner: &Copy, stand: &St
             || warning.contains("To free the infobase: delete the record of"),
         "says how to free the base: {warning}"
     );
-    assert!(!warning.contains("shared"), "{warning}");
     warning
 }
 
@@ -558,8 +557,7 @@ fn a_base_without_a_marker_is_taken_and_the_answer_says_so() {
             .any(|warning| warning.contains("now held by this working copy")),
         "{pushed}"
     );
-    // Метка лежит рядом с каталогом базы, а не в нём, и называет машину и каталог проекта;
-    // согласия делить базу в ней больше нет.
+    // Метка лежит рядом с каталогом базы, а не в нём, и называет машину и каталог проекта.
     let mut inside: Vec<String> = fs::read_dir(&stand.base)
         .expect("base dir")
         .map(|entry| {
@@ -581,7 +579,6 @@ fn a_base_without_a_marker_is_taken_and_the_answer_says_so() {
             .is_some_and(|machine| !machine.is_empty()),
         "{marker}"
     );
-    assert!(owner.get("shared").is_none(), "{marker}");
     let again = succeeded(&copy.run(&["push"]));
     assert!(
         !warnings(&again)
@@ -700,8 +697,8 @@ fn an_owner_on_another_machine_is_never_replaced() {
     assert_eq!(stand.marker_text().as_deref(), Some(foreign.as_str()));
 }
 
-/// Метку версии 1, которую пишет 0.13.0, раннер читает: согласие `shared` в ней ничего не
-/// значит, запись в базу её владельца идёт с предупреждением, а метка остаётся как была.
+/// Метку версии 1 раннер читает: лишние поля её записей он пропускает, запись в базу её
+/// владельца идёт с предупреждением, а метка остаётся как была.
 #[test]
 fn a_marker_of_version_one_is_still_read() {
     let stand = Stand::new();

@@ -59,11 +59,6 @@ pub fn schema_json_pretty(schema: &Value) -> String {
     text
 }
 
-/// Ключ секции базы, который ушёл после 0.13.0: согласие делить файловую базу (`shared`).
-/// Общих баз больше нет; загрузчик называет ключ раньше границы схемы, где он был бы просто
-/// незнакомым, и подсказывает, что делать.
-pub(crate) const REMOVED_SHARED_INFOBASE_KEY: &str = "shared";
-
 fn schema_url(file_name: &str) -> String {
     format!("{REPOSITORY_RAW_SCHEMA_BASE}/{file_name}")
 }
@@ -1690,74 +1685,6 @@ source-set:
     type: CONFIGURATION
     path: .
 ";
-
-    /// Общих баз больше нет: ключ `shared` секции базы не описывает ни одна схема, а
-    /// загрузчик называет его незнакомым с подсказкой — убрать ключ; запись в базу другой
-    /// копии идёт с предупреждением. Так в местном слое — в карте и в прежней секции — и в
-    /// прежней секции проектного файла. Несовместимо с 0.13.0 (#437).
-    #[test]
-    fn the_shared_key_is_refused_as_unknown_with_a_hint() {
-        let hint = |error: String, section: &str, file: &str| {
-            for part in [
-                format!("unknown key `shared` in {section} of {file}"),
-                "remove `shared`".to_owned(),
-                "runs and warns whose infobase it changes".to_owned(),
-            ] {
-                assert!(error.contains(&part), "{part}: {error}");
-            }
-        };
-        for (overlay, section) in [
-            (
-                "infobases:\n  origin:\n    connection: 'File=build/ib'\n    shared: true\n",
-                "infobases.origin",
-            ),
-            (
-                "infobases:\n  test:\n    connection: 'File=build/test'\n    shared: false\n",
-                "infobases.test",
-            ),
-            (
-                "infobase:\n  connection: 'File=build/ib'\n  shared: true\n",
-                "infobase",
-            ),
-        ] {
-            assert_schema_invalid(&local_config_schema_json(), overlay);
-            let dir = tempfile::tempdir().expect("tempdir");
-            std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
-            let config_path = dir.path().join("v8project.yaml");
-            std::fs::write(&config_path, PROJECT_WITHOUT_AN_INFOBASE).expect("config");
-            std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
-            let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
-                .map(|loaded| loaded.config)
-                .expect_err("the shared key is gone");
-            hint(error.to_string(), section, "v8project.local.yaml");
-        }
-
-        let project = format!(
-            "{PROJECT_WITHOUT_AN_INFOBASE}{}",
-            r"infobase:
-  connection: 'File=build/ib'
-  shared: true
-"
-        );
-        assert_schema_invalid(&main_config_schema_json(), &project);
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
-        let config_path = dir.path().join("v8project.yaml");
-        std::fs::write(&config_path, &project).expect("config");
-        let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
-            .map(|loaded| loaded.config)
-            .expect_err("the shared key is gone");
-        hint(error.to_string(), "infobase", "v8project.yaml");
-
-        for schema in [main_config_schema_json(), local_config_schema_json()] {
-            assert!(
-                schema["$defs"]["InfobaseSchema"]["properties"]
-                    .get("shared")
-                    .is_none(),
-                "no schema describes the key"
-            );
-        }
-    }
 
     #[test]
     fn local_schema_and_loader_reject_project_identity_and_unknown_keys() {
