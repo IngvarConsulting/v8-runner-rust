@@ -81,6 +81,34 @@ Any review of Rust code changes is incomplete without explicitly applying the `/
 3. If a task includes Rust code review, refactoring, error handling, type safety, API design, or performance-sensitive changes, `/rust-expert-best-practices-code-review` is mandatory.
 4. Missing a separate pass with this skill is a review policy violation; findings from it must not be ignored silently. Each finding must be fixed or explicitly recorded as an accepted waiver with a short rationale.
 
+## Expected Result and Acceptance Criteria
+
+When you file an issue, state its expected result and an acceptance section. The result says
+what changes for the user of v8-runner (a person, or an agent through the CLI, MCP or
+`SKILL/SKILL.md`) or for the agent developing it. The acceptance section — «Приёмка»; the
+older headings «Критерий готовности» and «Готово, когда» count too — is a list of checkable
+statements: which test, rule `check`, scenario of the target model (#233; for the site, the
+issue's lines removed from `scripts/site_matrix_known.txt` with `scripts/site_matrix.py`
+green), or live run on the platform will prove the work done, and — only for what no check
+can show, such as wording — which reviewer conclusion. A live run states its command and
+result in the PR; a new fact about the platform itself goes into
+`references/1c/confirmed-runtime-measurements.md`. For a defect the criterion can be a
+reproduction that shows the expected behavior after the fix, kept as a regression test when
+it does not need the platform; for a measurement, the facts the record must state. If the
+result or the criteria are not clear yet, ask the owner in the session instead of filing an
+issue with an open question.
+
+Before taking a task into work, be able to name its result and the check that proves it
+without guessing the author's intent. Read the area's rules first: the proving check is often
+an existing rule's `check` or the `gap` the work closes. When the result and the check are
+obvious, name them in one sentence of the plan or the first reply; for a simple cosmetic edit
+the request itself is the criterion. A criterion already agreed in the issue, in an agreed
+rule (its `check`, or the `gap` the work closes), or in this work is not agreed again. When
+the result or the criterion is unclear or needs a product choice, ask the owner in the
+session before implementing: the options, their cost, and a recommendation. A conflict with
+an agreed rule follows [When a Rule and the Code Disagree](#when-a-rule-and-the-code-disagree).
+Record the agreed criterion in the PR description; update the issue only when the owner asks.
+
 ## Task Classification
 
 Use these categories to decide which review gates apply.
