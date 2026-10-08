@@ -6,6 +6,8 @@ check:
   - src/use_cases/dump_config.rs::a_designer_full_forecast_is_reported_as_full_by_the_platform
   - src/use_cases/dump_config.rs::an_unrecognized_forecast_reports_the_mode_as_unknown
   - src/use_cases/dump_config.rs::a_changes_forecast_keeps_the_incremental_mode
+  - src/use_cases/dump_config.rs::a_failed_forecast_reports_the_mode_as_unknown
+  - src/use_cases/dump_config.rs::a_dump_without_a_version_file_asks_for_no_forecast
   - src/use_cases/dump_config.rs::an_ibcmd_full_forecast_dumps_through_the_stage_without_sync
   - src/use_cases/dump_config.rs::an_ibcmd_partial_dump_follows_a_full_forecast_too
   - tests/cli_push_generation.rs::a_designer_pull_with_an_unchanged_generation_dumps_nothing

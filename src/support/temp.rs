@@ -198,10 +198,8 @@ pub fn partial_list_file(work_path: &Path) -> std::io::Result<NamedTempFile> {
         .tempfile_in(partial_lists_dir(work_path)?)
 }
 
-/// Create a temporary text file for a partial dump object list inside
-/// `work_path/temp/partial-lists`.
-/// Файл, куда Конфигуратор пишет прогноз выгрузки (`-getChanges`); убирается вместе с
-/// дескриптором.
+/// Файл, куда Конфигуратор или агент пишет прогноз выгрузки (`-getChanges`); убирается
+/// вместе с дескриптором.
 pub fn dump_forecast_file(work_path: &Path) -> std::io::Result<NamedTempFile> {
     tempfile::Builder::new()
         .prefix("dump-forecast-")
@@ -209,6 +207,8 @@ pub fn dump_forecast_file(work_path: &Path) -> std::io::Result<NamedTempFile> {
         .tempfile_in(partial_lists_dir(work_path)?)
 }
 
+/// Create a temporary text file for a partial dump object list inside
+/// `work_path/temp/partial-lists`.
 pub fn dump_object_list_file(work_path: &Path) -> std::io::Result<NamedTempFile> {
     tempfile::Builder::new()
         .prefix("dump-object-list-")

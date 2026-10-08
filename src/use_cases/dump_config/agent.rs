@@ -154,8 +154,19 @@ fn dump_through(
                     let target =
                         expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
                     let forecast = forecast_for(how, || {
-                        forecast_through(handle, &exchange, &target, extension, wait, config, &run)
-                    });
+                        forecast_through(
+                            context,
+                            config,
+                            handle,
+                            &exchange,
+                            &ForecastRequest {
+                                target: &target,
+                                extension,
+                                run: &run,
+                            },
+                            wait,
+                        )
+                    })?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={}{update}",
@@ -190,15 +201,18 @@ fn dump_through(
                     }
                     let forecast = forecast_for(how, || {
                         forecast_through(
+                            context,
+                            config,
                             handle,
                             &exchange,
-                            &target_relative,
-                            extension,
+                            &ForecastRequest {
+                                target: &target_relative,
+                                extension,
+                                run: &run,
+                            },
                             wait,
-                            config,
-                            &run,
                         )
-                    });
+                    })?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={}{update}",
@@ -318,46 +332,63 @@ fn dump_through(
 }
 
 /// Прогноз нужен только выгрузке по изменившемуся.
-fn forecast_for(how: &OverDirectory, ask: impl FnOnce() -> DumpForecast) -> Option<DumpForecast> {
+fn forecast_for(
+    how: &OverDirectory,
+    ask: impl FnOnce() -> Result<DumpForecast, AppError>,
+) -> Result<Option<DumpForecast>, AppError> {
     match how {
-        OverDirectory::ByVersionFile => Some(ask()),
-        OverDirectory::Whole(_) => None,
+        OverDirectory::ByVersionFile => ask().map(Some),
+        OverDirectory::Whole(_) => Ok(None),
     }
 }
 
+/// Куда агент кладёт прогноз и что спросить: цель выгрузки и расширение.
+struct ForecastRequest<'r> {
+    target: &'r str,
+    extension: Option<&'r str>,
+    run: &'r str,
+}
+
 /// Прогноз агента: `--get-changes` в той же сессии перед `--update` (замер #166). Список
-/// агент пишет в свой каталог пользователя, раннер его забирает. Отказ агента и ответ вне
-/// словаря — «неизвестен»: выгрузка идёт как просили.
+/// агент пишет в корень своего каталога пользователя, как в замере; раннер его забирает.
+/// Отказ агента и список вне словаря — «неизвестен», выгрузка идёт как просили; обрыв
+/// сессии, предел ожидания и отмена — ошибка, как у любой команды.
 fn forecast_through(
+    context: &ExecutionContext,
+    config: &AppConfig,
     handle: &mut AgentHandle,
     exchange: &Exchange,
-    target: &str,
-    extension: Option<&str>,
+    request: &ForecastRequest<'_>,
     wait: &WaitPolicy,
-    config: &AppConfig,
-    run: &str,
-) -> DumpForecast {
-    let list_relative = format!("dump-forecast/{run}.txt");
+) -> Result<DumpForecast, AppError> {
+    let list_relative = format!("dump-forecast-{}.txt", request.run);
     let command = with_extension(
         format!(
             "config dump-config-to-files --dir={} --update --get-changes={}",
-            argument(target),
+            argument(request.target),
             argument(&list_relative)
         ),
-        extension,
+        request.extension,
     );
     log_live_stage("dump: forecast", "[агент] asking what the dump will do");
-    let Ok(local) = crate::support::temp::dump_forecast_file(&config.work_path) else {
-        return DumpForecast::Unknown;
-    };
-    let read = run_command(handle, &command, wait)
-        .and_then(|_| collect_file(handle, exchange, &list_relative, local.path()))
+    let reply = handle
+        .session()
+        .run(&command, wait)
+        .map_err(AppError::from)?;
+    ensure_interruption_clear(context, "after the dump forecast")?;
+    if reply.outcome().is_err() {
+        return Ok(DumpForecast::Unknown);
+    }
+    let local = crate::support::temp::dump_forecast_file(&config.work_path).map_err(|error| {
+        AppError::Runtime(format!("failed to create the dump forecast file: {error}"))
+    })?;
+    let read = collect_file(handle, exchange, &list_relative, local.path())
         .ok()
         .and_then(|()| std::fs::read(local.path()).ok());
     tidy(handle, exchange, &list_relative);
-    read.map_or(DumpForecast::Unknown, |bytes| {
+    Ok(read.map_or(DumpForecast::Unknown, |bytes| {
         crate::platform::dump_forecast::read_changes_list(&bytes)
-    })
+    }))
 }
 
 fn with_extension(mut command: String, extension: Option<&str>) -> String {

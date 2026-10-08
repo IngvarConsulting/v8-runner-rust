@@ -327,9 +327,6 @@ impl FakeAgent {
             let list = self
                 .user_dir()
                 .join(option("get-changes").unwrap_or_default());
-            if let Some(parent) = list.parent() {
-                fs::create_dir_all(parent).expect("forecast dir");
-            }
             fs::write(&list, "\u{feff}").expect("forecast list");
             return (success(), false);
         }

@@ -42,8 +42,10 @@ pub fn read_changes_list(bytes: &[u8]) -> DumpForecast {
 /// `added: <объект>` и `modified: <объект>` или пусто — изменившееся.
 pub fn read_export_status(text: &str) -> DumpForecast {
     let lines = entries(text);
-    if lines == ["modified: all"] {
-        return DumpForecast::Full;
+    if let [only] = lines.as_slice() {
+        if only.split_once(": ") == Some(("modified", "all")) {
+            return DumpForecast::Full;
+        }
     }
     let changes = lines.iter().all(|line| {
         matches!(

@@ -407,7 +407,7 @@ pub(super) fn empty_result(
         source_set,
         extension,
         selectors,
-        mode: (&mode).into(),
+        mode: mode.into(),
         requested_mode: mode,
         mode_reason: None,
         target_path: target_path.unwrap_or_default(),

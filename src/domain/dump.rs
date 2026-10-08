@@ -36,7 +36,8 @@ pub struct DumpResult {
     /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). У превью — режим плана.
     pub mode: ReportedDumpMode,
     /// Почему случившийся режим не тот, что просили, или не известен. Поля нет, когда
-    /// режим тот, что просили.
+    /// режим тот, что просили, и у выборки `ibcmd`, которая выгружает изменившееся: это
+    /// называет предупреждение в `message`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_reason: Option<DumpModeReason>,
     pub target_path: PathBuf,
@@ -60,7 +61,7 @@ pub struct DumpSelectorResult {
     pub normalized: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DumpMode {
     Full,
@@ -80,8 +81,8 @@ pub enum ReportedDumpMode {
     Unknown,
 }
 
-impl From<&DumpMode> for ReportedDumpMode {
-    fn from(mode: &DumpMode) -> Self {
+impl From<DumpMode> for ReportedDumpMode {
+    fn from(mode: DumpMode) -> Self {
         match mode {
             DumpMode::Full => Self::Full,
             DumpMode::Incremental => Self::Incremental,

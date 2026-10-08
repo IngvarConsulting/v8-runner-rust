@@ -345,7 +345,7 @@ impl DumpPlan {
                 (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
             }
             (_, Some(DumpForecast::Changes)) => (ReportedDumpMode::Incremental, None),
-            (plan, None) => ((&plan.mode()).into(), None),
+            (plan, None) => (plan.mode().into(), None),
         }
     }
 
@@ -3626,6 +3626,58 @@ exit 0"#,
 
         assert_eq!(result.mode, ReportedDumpMode::Incremental);
         assert_eq!(result.mode_reason, None);
+    }
+
+    /// Отказ процесса прогноза — режим «неизвестен», выгрузка идёт как просили.
+    #[test]
+    fn a_failed_forecast_reports_the_mode_as_unknown() {
+        use crate::domain::dump::DumpModeReason;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        project_with_a_version_file(&base);
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" -getChanges \"*) exit 1;; esac\nexit 0",
+                calls.display()
+            ),
+        );
+        let config = build_config(&base, &dir.path().join("work"), &script);
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.mode, ReportedDumpMode::Unknown);
+        assert_eq!(result.mode_reason, Some(DumpModeReason::Unknown));
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(
+            calls
+                .lines()
+                .any(|line| line.contains("-update") && !line.contains("-getChanges")),
+            "{calls}"
+        );
+    }
+
+    /// Без файла версий выгрузка полная по плану, и прогноз не спрашивается.
+    #[test]
+    fn a_dump_without_a_version_file_asks_for_no_forecast() {
+        use crate::domain::dump::DumpModeReason;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_forecasting_designer_script(&script, &calls, "FullDump\\r\\n");
+        let config = build_config(&base, &dir.path().join("work"), &script);
+
+        let result = run_dump(&config, &incremental_main()).expect("dump");
+
+        assert_eq!(result.mode, ReportedDumpMode::Full);
+        assert_eq!(result.mode_reason, Some(DumpModeReason::VersionFile));
+        assert!(!fs::read_to_string(calls)
+            .expect("calls")
+            .contains("-getChanges"));
     }
 
     /// `ibcmd` предсказал полную выгрузку: `--sync` её не сделает (#424), поэтому выгрузка

@@ -249,7 +249,7 @@ fn run_dump_selected(
         }
         let (reported, mode_reason) = plan.reported(None);
         let mut preview = empty_result(
-            mode.clone(),
+            mode,
             started,
             Some(resolved.source_set_name.clone()),
             resolved.extension.clone(),
@@ -469,8 +469,7 @@ fn run_dump_selected(
             whole_consequences(context, config, &resolved)
         )
     });
-    let requested = mode.clone();
-    let mode = plan.mode();
+    let requested = mode;
 
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
@@ -777,6 +776,8 @@ fn run_dump_selected(
         }
         Err(error) => {
             let message = error.to_string();
+            // Отказ называет режим плана и его причину: прогноз до ответа не дошёл.
+            let (reported, mode_reason) = plan.reported(None);
             Err(DumpExecutionFailure::with_payload(
                 error,
                 DumpResult {
@@ -788,8 +789,8 @@ fn run_dump_selected(
                     extension: resolved.extension,
                     selectors,
                     requested_mode: requested,
-                    mode: (&mode).into(),
-                    mode_reason: None,
+                    mode: reported,
+                    mode_reason,
                     target_path: resolved.target_path,
                     platform_log_path: None,
                     duration_ms: started.elapsed().as_millis() as u64,
