@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -78,10 +78,16 @@ pub struct ScanSnapshot {
 /// Recursively scan `root` and return:
 /// - all seen files with metadata
 /// - only candidate files hashed by mtime/watermark rules
+///
+/// `stored` maps each remembered file to the mtime it had when it was last hashed. A
+/// remembered file is a candidate when it was touched within the margin of the watermark
+/// or when its mtime is not the remembered one in either direction: a copy restored with
+/// its old mtime (`cp -p`, `Copy-Item`, an archive) changes the bytes without moving the
+/// mtime past the watermark (#447).
 pub fn scan(
     root: &Path,
     watermark: Option<u64>,
-    stored_keys: &HashSet<String>,
+    stored: &HashMap<String, u64>,
 ) -> Result<ScanSnapshot, ScanError> {
     let scan_started_at =
         mtime_nanos(std::time::SystemTime::now(), root).map_err(|source| ScanError::Mtime {
@@ -137,10 +143,10 @@ pub fn scan(
             rel_path: rel_path.clone(),
             mtime_ns,
         };
-        let is_new = !stored_keys.contains(&rel_path);
-        let is_candidate = match cutoff {
-            None => true,
-            Some(cutoff) => is_new || mtime_ns >= cutoff,
+        let remembered = stored.get(&rel_path);
+        let is_candidate = match (cutoff, remembered) {
+            (None, _) | (_, None) => true,
+            (Some(cutoff), Some(&remembered)) => mtime_ns >= cutoff || mtime_ns != remembered,
         };
         if is_candidate {
             let hash = hash_file(path)?;
@@ -195,7 +201,7 @@ fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
 mod tests {
     use super::{scan, ScanSnapshot, COARSE_MARGIN_NS};
     use crate::change_detection::file_state::mtime_nanos;
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     use std::fs::{self, File};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
@@ -225,21 +231,45 @@ mod tests {
     /// знака за вычетом запаса: грубые часы файловой системы правку не прячут, а нетронутое
     /// не читается. Новый файл хешируется всегда.
     #[test]
-    fn a_known_file_is_hashed_only_when_touched_within_the_margin() {
+    fn a_known_file_is_hashed_when_touched_within_the_margin_or_its_mtime_moved() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         let margin = Duration::from_nanos(COARSE_MARGIN_NS);
         let watermark = SystemTime::now() - 10 * margin;
-        write_touched(&root.join("Old.bsl"), "old", watermark - 2 * margin);
-        write_touched(&root.join("Near.bsl"), "near", watermark - margin / 2);
-        write_touched(&root.join("New.bsl"), "new", watermark - 2 * margin);
-        let known: HashSet<String> = ["Old.bsl", "Near.bsl"].map(str::to_owned).into();
-        let watermark_ns = mtime_nanos(watermark, root).expect("watermark");
+        let old = watermark - 2 * margin;
+        let near = watermark - margin / 2;
+        write_touched(&root.join("Old.bsl"), "old", old);
+        write_touched(&root.join("Near.bsl"), "near", near);
+        write_touched(&root.join("New.bsl"), "new", old);
+        let at = |time| mtime_nanos(time, root).expect("mtime");
+        // Near.bsl запомнен со своим временем: кандидат он только по запасу у отметки.
+        let known: HashMap<String, u64> = [("Old.bsl", at(old)), ("Near.bsl", at(near))]
+            .map(|(name, mtime)| (name.to_owned(), mtime))
+            .into();
 
-        let snapshot = scan(root, Some(watermark_ns), &known).expect("scan");
+        let snapshot = scan(root, Some(at(watermark)), &known).expect("scan");
 
         assert_eq!(snapshot.seen_files.len(), 3);
         assert_eq!(candidates(&snapshot), ["Near.bsl", "New.bsl"]);
+    }
+
+    /// Копия, восстановленная со старым временем изменения (`cp -p`, `Copy-Item`, архив),
+    /// лежит раньше отметки, но её время не то, что запомнено: её хешируют (#447).
+    #[test]
+    fn a_restored_copy_with_an_old_mtime_is_hashed() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let margin = Duration::from_nanos(COARSE_MARGIN_NS);
+        let watermark = SystemTime::now() - 10 * margin;
+        let restored = watermark - 300 * margin;
+        write_touched(&root.join("Module.bsl"), "restored bytes", restored);
+        let at = |time| mtime_nanos(time, root).expect("mtime");
+        let known: HashMap<String, u64> =
+            [("Module.bsl".to_owned(), at(watermark - 2 * margin))].into();
+
+        let snapshot = scan(root, Some(at(watermark)), &known).expect("scan");
+
+        assert_eq!(candidates(&snapshot), ["Module.bsl"]);
     }
 
     /// Служебные и порождённые каталоги и файл состояния выгрузки в обход не входят.
@@ -258,7 +288,7 @@ mod tests {
             fs::write(nested.join("File.bsl"), "generated").expect("ignored file");
         }
 
-        let snapshot = scan(root, None, &HashSet::new()).expect("scan");
+        let snapshot = scan(root, None, &HashMap::new()).expect("scan");
 
         let seen: Vec<&str> = snapshot
             .seen_files
@@ -283,7 +313,7 @@ mod tests {
                 std::fs::create_dir(&child).expect("ignored child");
                 std::fs::write(child.join("Module.bsl"), "generated").expect("child source");
             }
-            let scanned = scan(&root, None, &HashSet::new()).expect("scan");
+            let scanned = scan(&root, None, &HashMap::new()).expect("scan");
             assert_eq!(scanned.seen_files.len(), 1, "root {root_name}");
             assert_eq!(scanned.candidates.len(), 1, "root {root_name}");
             assert_eq!(scanned.candidates[0].rel_path, "Module.bsl");
