@@ -250,6 +250,7 @@ mod tests {
                     dry_run: false,
                     load: crate::use_cases::request::PushMode::Full,
                     source_set: None,
+                    apply: true,
                 },
             )
             .expect_err("busy workspace");

@@ -139,6 +139,15 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::Apply(args) => execute_apply(
+            config,
+            args,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Load(args) => execute_load(
             config,
             args,
@@ -614,6 +623,7 @@ pub fn command_name(command: &Command) -> CommandName {
         }) => CommandName::ToolsDownload,
         Command::Extensions(_) => CommandName::Extensions,
         Command::Build(_) => CommandName::Build,
+        Command::Apply(_) => CommandName::Apply,
         Command::Load(_) => CommandName::Load,
         Command::Test(_) => CommandName::Test,
         Command::Dump(_) => CommandName::Dump,
@@ -1206,6 +1216,66 @@ fn execute_build(
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
                         render_build_text(result, presenter, false);
+                    }
+                    presenter.print_error(&error.to_string());
+                }
+                Err(error)
+            }
+        },
+    )
+}
+
+/// `apply`: команда записи — замок `workPath`, затем замок файловой базы и проверка, чья
+/// она; на базе другой копии идёт с предупреждением, превью ничего не запускает.
+fn execute_apply(
+    config: &AppConfig,
+    args: &crate::cli::args::ApplyArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    let request = crate::use_cases::request::ApplyRequest {
+        source_set: args.set.clone(),
+        dry_run,
+    };
+    let context = cli_context(config, CommandName::Apply, cancellation)
+        .with_command_line(command_line.clone());
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        CommandName::Apply,
+        BaseAccess::Writes,
+        clean_before_execution,
+        dry_run,
+        || match crate::use_cases::apply::execute(&context, config, &request) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        CommandName::Apply.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    render_apply_text(&result, presenter, true);
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    if let Some(result) = failure.payload {
+                        presenter.print_envelope(&failure_envelope(
+                            CommandName::Apply.as_str(),
+                            result.duration_ms,
+                            result,
+                            &error,
+                        ));
+                    }
+                } else {
+                    if let Some(result) = failure.payload.as_ref() {
+                        render_apply_text(result, presenter, false);
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -3053,6 +3123,7 @@ fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
             PushMode::Changes
         },
         source_set: args.source_set.name().map(str::to_owned),
+        apply: !args.no_apply,
     }
 }
 
@@ -4086,6 +4157,21 @@ fn render_build_text(result: &BuildResult, presenter: &Presenter, succeeded: boo
     } else {
         TimelineItem::outcome(timeline_status(succeeded), "Build")
     };
+    let receipt = provider_receipt_details(result.provider.as_ref());
+    let summary = if receipt.is_empty() {
+        summary
+    } else {
+        summary.with_detail(receipt.join("\n"))
+    };
+    presenter.print_timeline(&[summary]);
+}
+
+fn render_apply_text(
+    result: &crate::domain::apply::ApplyResult,
+    presenter: &Presenter,
+    succeeded: bool,
+) {
+    let summary = TimelineItem::outcome(timeline_status(succeeded), "Apply");
     let receipt = provider_receipt_details(result.provider.as_ref());
     let summary = if receipt.is_empty() {
         summary
@@ -5352,6 +5438,7 @@ mod tests {
                     full_rebuild: true,
                     source_set: SourceSetArg::default(),
                     force: false,
+                    no_apply: false,
                 },
                 false,
             )
@@ -5798,6 +5885,7 @@ mod tests {
                 full_rebuild: false,
                 source_set: SourceSetArg::default(),
                 force: false,
+                no_apply: false,
             })),
             CommandName::Build
         );
@@ -5872,6 +5960,7 @@ mod tests {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
                 force: false,
+                no_apply: false,
             }),
             &CommandLineTarget::default(),
             &presenter,
@@ -6074,6 +6163,7 @@ mod tests {
                 full_rebuild: true,
                 source_set: SourceSetArg::default(),
                 force: false,
+                no_apply: false,
             }),
             &CommandLineTarget::default(),
             &presenter,

@@ -7,6 +7,7 @@
 //! координатора — до загрузки и после неё — тем же разговором.
 
 use super::coordinator::SourceSetLoader;
+use super::helpers::apply_subject;
 use super::*;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
@@ -111,7 +112,8 @@ impl SourceSetLoader for AgentLoader {
         step_index: usize,
         partial_paths: Option<&[PathBuf]>,
         commit: &StepCommit,
-    ) -> Result<Vec<String>, AppError> {
+        apply: bool,
+    ) -> Result<Loaded, AppError> {
         // Всё, что идёт после отложенной отмены, — провал следующей команды, безопасная
         // точка, фиксация состояния, — выходит через учёт, который её называет.
         // Версия формата сверяется до сессии: формат новее платформы — отказ. Версию
@@ -154,6 +156,7 @@ impl SourceSetLoader for AgentLoader {
 
             let outcome = load_and_update(
                 context,
+                config,
                 handle,
                 &wait,
                 &exchange,
@@ -162,17 +165,40 @@ impl SourceSetLoader for AgentLoader {
                 source_context,
                 extension,
                 partial_paths,
+                apply,
                 deferrals,
             );
             unstage(handle, &exchange, &exposed);
-            outcome?;
+            let apply = outcome?;
 
-            commit_step_state(source_set, source_context, &config.work_path, commit)
+            commit_step_state(source_set, source_context, &config.work_path, commit)?;
+            Ok(apply)
         })
-        .map(|((), mut warnings)| {
+        .map(|(apply, mut warnings)| {
             warnings.extend(format_notice);
-            warnings
+            Loaded { warnings, apply }
         })
+    }
+
+    fn apply_only(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        _step_index: usize,
+        deferrals: &mut Deferrals,
+    ) -> Result<(), AppError> {
+        let (handle, wait) = self.handle(context, config)?;
+        crate::use_cases::apply::act::apply(
+            context,
+            config,
+            crate::use_cases::apply::act::Applier::Agent {
+                handle,
+                wait: &wait,
+            },
+            &apply_subject(source_set),
+            deferrals,
+        )
     }
 
     fn finish(&mut self) {
@@ -185,6 +211,7 @@ impl SourceSetLoader for AgentLoader {
 #[allow(clippy::too_many_arguments)]
 fn load_and_update(
     context: &ExecutionContext,
+    config: &AppConfig,
     handle: &mut AgentHandle,
     wait: &WaitPolicy,
     exchange: &Exchange,
@@ -193,11 +220,12 @@ fn load_and_update(
     source_context: &SourceSetContext,
     extension: Option<&str>,
     partial_paths: Option<&[PathBuf]>,
+    apply: bool,
     deferrals: &mut Deferrals,
-) -> Result<(), AppError> {
+) -> Result<AfterLoad, AppError> {
     // Обе команды меняют базу: загрузка переписывает конфигурацию, а `update-db-cfg`
-    // перестраивает таблицы; обе идут через `run_critical`. Класс совпадает с путём
-    // Конфигуратора (`build_project.rs`: `load_config_from_files_full` и `update_db_cfg`).
+    // перестраивает таблицы; загрузка идёт через `run_critical`, применение — через
+    // владельца акта (`apply::act`), который зовёт тот же `run_critical`.
     let mut load = format!(
         "config load-config-from-files --dir={} --update-config-dump-info",
         argument(exposed)
@@ -241,22 +269,19 @@ fn load_and_update(
     }
     loaded?;
 
-    if let Some(error) = interruption_before_safe_point(
-        context,
-        format!("update_db_cfg for source-set '{}'", source_set.name),
-    ) {
-        return Err(error);
+    if !apply {
+        return Ok(AfterLoad::Deferred);
     }
-    log_timeline_stage(
-        &source_set.name,
-        "update_db_cfg",
-        "[агент] Применение изменений",
-        TimelineStageStatus::Running,
-    );
-    let mut update = String::from("config update-db-cfg");
-    if let Some(extension) = extension {
-        update.push_str(&format!(" --extension={}", argument(extension)));
-    }
-    run_critical(handle, "update_db_cfg", &update, wait, deferrals)?;
-    Ok(())
+    Ok(
+        match crate::use_cases::apply::act::apply(
+            context,
+            config,
+            crate::use_cases::apply::act::Applier::Agent { handle, wait },
+            &apply_subject(source_set),
+            deferrals,
+        ) {
+            Ok(()) => AfterLoad::Applied,
+            Err(error) => AfterLoad::Failed(error),
+        },
+    )
 }

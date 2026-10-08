@@ -1,51 +1,79 @@
 {
   "$defs": {
-    "BuildMode": {
+    "ApplyGeneration": {
+      "description": "Запись журнала поколений набора после применения.",
       "oneOf": [
         {
-          "enum": [
-            "edt_export",
-            "full",
-            "skipped"
-          ],
+          "const": "recorded",
+          "description": "Поколение до применения совпало с записью; после него записано то, что ответил\nинструмент записи, и снят признак «не применено».",
           "type": "string"
         },
         {
-          "additionalProperties": false,
-          "properties": {
-            "partial": {
-              "additionalProperties": false,
-              "properties": {
-                "file_count": {
-                  "format": "uint",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "file_count"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "partial"
-          ],
-          "type": "object"
+          "const": "kept",
+          "description": "База ушла от записи до применения: запись не тронута, следующая отправка это назовёт.",
+          "type": "string"
+        },
+        {
+          "const": "erased",
+          "description": "Инструмент записи не ответил поколением: запись стёрта, и следующая отправка базу не\nсверяет.",
+          "type": "string"
+        },
+        {
+          "const": "unchecked",
+          "description": "Записи этой пары нет: сверять не с чем.",
+          "type": "string"
         }
       ]
     },
-    "BuildStep": {
-      "additionalProperties": false,
-      "properties": {
-        "applied": {
-          "description": "Дошёл ли шаг до конфигурации базы данных: загруженное применено, или применено\nнепринятое прежней загрузки. `false` — шаг ничего не применял: пропуск, превью,\n`push --no-apply`, отказ (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).",
-          "type": "boolean"
+    "ApplyOutcome": {
+      "description": "Исход шага. Удача шага — `applied`, `planned` или `skipped`; отдельного `ok` у шага нет.",
+      "oneOf": [
+        {
+          "const": "applied",
+          "description": "Применено.",
+          "type": "string"
         },
+        {
+          "const": "planned",
+          "description": "Превью: применилось бы.",
+          "type": "string"
+        },
+        {
+          "const": "skipped",
+          "description": "Не применяется: внешний набор или расширение, которого нет в базе.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Применение отказало; команда остановилась на этом шаге.",
+          "type": "string"
+        },
+        {
+          "const": "not_run",
+          "description": "Не запускался: команда остановилась раньше.",
+          "type": "string"
+        }
+      ]
+    },
+    "ApplyStep": {
+      "additionalProperties": false,
+      "description": "Один набор исходников (или расширение-инструмент `tool:<имя>`).",
+      "properties": {
         "duration_ms": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplyGeneration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Что стало с записью журнала поколений набора; нет поля — набор не применялся."
         },
         "message": {
           "type": [
@@ -53,11 +81,11 @@
             "null"
           ]
         },
-        "mode": {
-          "$ref": "#/$defs/BuildMode"
+        "outcome": {
+          "$ref": "#/$defs/ApplyOutcome"
         },
-        "ok": {
-          "type": "boolean"
+        "purpose": {
+          "$ref": "#/$defs/SourceSetPurpose"
         },
         "source_set": {
           "type": "string"
@@ -65,9 +93,8 @@
       },
       "required": [
         "source_set",
-        "mode",
-        "ok",
-        "applied",
+        "purpose",
+        "outcome",
         "duration_ms"
       ],
       "type": "object"
@@ -232,9 +259,19 @@
         "reason"
       ],
       "type": "object"
+    },
+    "SourceSetPurpose": {
+      "description": "Назначение набора исходников — значение ключа `type` в `v8project.yaml`.",
+      "enum": [
+        "CONFIGURATION",
+        "EXTENSION",
+        "EXTERNAL_DATA_PROCESSORS",
+        "EXTERNAL_REPORTS"
+      ],
+      "type": "string"
     }
   },
-  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/push.schema.json",
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/apply.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -258,12 +295,13 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
-      "description": "Whether an executor got this command's work: a process was started to do it, or the\nrequest's command was handed to a running session. Starting or opening a session and\nits own service commands are not work. `false` whenever the executor got none — a\npreview, a refusal or interruption before any work, a run with nothing to do, or a\nprocess that could not be started.\n\nAlways present. In a preview each step's `mode` is the mode that would be used and\nits message says so.",
+      "description": "Получил ли исполнитель работу этой команды\n(`INV.WIRE.PROVIDER-DISPATCHED-SAYS-WHETHER-AN-EXECUTOR-GOT-WORK`). У превью — `false`.",
       "type": "boolean"
     },
     "steps": {
+      "description": "Наборы по порядку: конфигурация, расширения, внешние; за ними — расширение-инструмент.",
       "items": {
-        "$ref": "#/$defs/BuildStep"
+        "$ref": "#/$defs/ApplyStep"
       },
       "type": "array"
     }
@@ -274,6 +312,6 @@
     "steps",
     "duration_ms"
   ],
-  "title": "BuildResult",
+  "title": "ApplyResult",
   "type": "object"
 }

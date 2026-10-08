@@ -1,10 +1,11 @@
 ---
 id: CTR.WIRE.STATUS-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_status.rs::status_without_deep_starts_no_platform
+  - tests/cli_status.rs::status_names_a_load_without_apply
   - tests/cli_status.rs::status_deep_predicts_the_push_generation_check
   - tests/cli_status.rs::status_deep_without_a_platform_answers_null_with_a_reason
 ---
@@ -24,6 +25,11 @@ check:
 расширения-инструмента клиентского MCP `tool: true`, — и, у файловой
 базы, `holders` — копии из метки владельца. Без `--deep` этих полей нет. Что платформа не
 ответила, форма называет `null` с причиной в `reason`, а не отказом команды.
+
+**Что изменила версия 4.** У записи `recorded` новое обязательное поле `applied`: `false` —
+набор загружен без применения к конфигурации базы данных (`push --no-apply` или отказ
+применения), и `apply` ещё не прошёл
+([правило](../use-cases/a-load-without-apply-is-remembered-as-unapplied.md)).
 
 **Что изменила версия 3.** У `base` новые поля: `unapplied` — есть ли в базе непринятое
 (основная конфигурация, у набора расширения — само расширение, отличается от конфигурации
@@ -54,6 +60,7 @@ check:
             "token": "1111111111111111111111111111111111111111",
             "tool": "designer",
             "after": "build",
+            "applied": true,
             "recorded_at": "2026-10-06T10:00:00+00:00"
           },
           "changed_files": 3,

@@ -80,6 +80,10 @@ pub enum Operation {
     Init,
     #[serde(rename = "push", alias = "build")]
     Build,
+    /// Применение основной конфигурации к конфигурации базы данных — `apply`. Строка та же,
+    /// что у `push`: применяет тот же исполнитель, который загружает.
+    #[serde(rename = "apply")]
+    Apply,
     #[serde(rename = "upload", alias = "load")]
     Load,
     #[serde(rename = "pull", alias = "dump")]
@@ -103,9 +107,10 @@ pub enum Operation {
 }
 
 impl Operation {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Init,
         Self::Build,
+        Self::Apply,
         Self::Load,
         Self::Dump,
         Self::Extensions,
@@ -123,6 +128,7 @@ impl Operation {
         match self {
             Self::Init => "infobase.create",
             Self::Build => "push",
+            Self::Apply => "apply",
             Self::Load => "upload",
             Self::Dump => "pull",
             Self::Extensions => "extensions",
@@ -343,8 +349,13 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     match (operation, target) {
         (Operation::Init, TargetKind::File) => CREATE_FILE,
         (Operation::Init, TargetKind::Cluster) => CREATE_CLUSTER,
-        (Operation::Build | Operation::Dump, TargetKind::File) => AGENT_DESIGNER_IBCMD,
-        (Operation::Build | Operation::Dump, TargetKind::Cluster) => AGENT_DESIGNER,
+        // `apply` применяет тем, чем `push` загружает: строка та же у каждой цели.
+        (Operation::Build | Operation::Apply | Operation::Dump, TargetKind::File) => {
+            AGENT_DESIGNER_IBCMD
+        }
+        (Operation::Build | Operation::Apply | Operation::Dump, TargetKind::Cluster) => {
+            AGENT_DESIGNER
+        }
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
             DESIGNER_ONLY
         }
@@ -366,7 +377,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         // `ibsrv` 8.3.27 (живой прогон 15.09.2026, #189). Состав расширений — только агент:
         // Конфигуратора для `extensions` у раннера нет ни у какой цели (#206).
         (
-            Operation::Build | Operation::Dump | Operation::ConfigurationExport,
+            Operation::Build | Operation::Apply | Operation::Dump | Operation::ConfigurationExport,
             TargetKind::Standalone,
         ) => DIRECT_GATE_THEN_GATE,
         (
@@ -409,7 +420,10 @@ pub const fn serves_project(operation: Operation, provider: Provider, shape: Pro
         Provider::Agent => match operation {
             Operation::Build => !shape.edt_sources && !shape.tool_extension,
             Operation::Dump => !shape.edt_sources,
-            Operation::Init
+            // Применению форма проекта не мешает: агент применяет и основную конфигурацию
+            // проекта EDT, и расширение-инструмент — исходников он не читает.
+            Operation::Apply
+            | Operation::Init
             | Operation::Load
             | Operation::Extensions
             | Operation::ConfigurationExport

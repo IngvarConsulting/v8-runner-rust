@@ -845,9 +845,24 @@ pub(crate) struct GenerationRecord {
     pub tool: Provider,
     /// Что было сделано, когда токен записан.
     pub after: GenerationAfter,
+    /// Применена ли загрузка к конфигурации базы данных. `false` — загружено без
+    /// применения (`push --no-apply` или неудачное применение): поле пишется только тогда,
+    /// и запись без него — прежняя запись, она применённая
+    /// (`INV.USE-CASES.A-LOAD-WITHOUT-APPLY-IS-REMEMBERED-AS-UNAPPLIED`).
+    #[serde(default = "applied_by_default", skip_serializing_if = "is_applied")]
+    pub applied: bool,
     pub recorded_at: String,
     /// Привязка памяти набора (база, каталог, назначение, имя): запись другой пары чужая.
     pub identity: String,
+}
+
+const fn applied_by_default() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "подпись задаёт serde")]
+const fn is_applied(applied: &bool) -> bool {
+    *applied
 }
 
 /// Ответ записи на вопрос «менялась ли база с прошлого чтения».
@@ -951,11 +966,24 @@ impl GenerationLedger {
     /// (`INV.WIRE.A-BUSY-WORKSPACE-ANSWERS-WORKSPACE-BUSY`), и две команды в одном журнале
     /// не пишут. Если бы запись другого набора всё же потерялась, следующая выгрузка этого
     /// набора не пропустилась бы по поколению — лишняя выгрузка, а не потеря правок.
+    #[cfg(test)]
     pub(crate) fn record(
         &self,
         tool: Provider,
         token: &str,
         after: GenerationAfter,
+    ) -> Result<(), AppError> {
+        self.record_as(tool, token, after, true)
+    }
+
+    /// Записывает поколение с признаком применения: `applied: false` — загружено без
+    /// применения к конфигурации базы данных.
+    pub(crate) fn record_as(
+        &self,
+        tool: Provider,
+        token: &str,
+        after: GenerationAfter,
+        applied: bool,
     ) -> Result<(), AppError> {
         let dir = self.file.parent().ok_or_else(|| {
             AppError::Runtime(format!(
@@ -973,6 +1001,7 @@ impl GenerationLedger {
             token: token.to_owned(),
             tool,
             after,
+            applied,
             recorded_at: chrono::Utc::now().to_rfc3339(),
             identity: self.identity.clone(),
         })
@@ -1093,6 +1122,32 @@ mod tests {
             .path()
             .join("work/infobases/origin/generation.json")
             .is_file());
+    }
+
+    /// Признак «не применено» пишется только тогда, когда он есть: прежняя запись без поля
+    /// читается применённой, и прежний раннер, не знающий поля, читает новую запись как
+    /// обычную запись отправки (`INV.USE-CASES.A-LOAD-WITHOUT-APPLY-IS-REMEMBERED-AS-UNAPPLIED`).
+    #[test]
+    fn a_record_without_the_applied_mark_reads_as_applied() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let main = ledger(root.path(), "main", "base-a");
+        main.record(Provider::Designer, "abc", GenerationAfter::Build)
+            .expect("record");
+        let text =
+            std::fs::read_to_string(root.path().join("work/infobases/origin/generation.json"))
+                .expect("ledger");
+        assert!(!text.contains("applied"), "{text}");
+        assert!(recorded(&main).applied);
+
+        main.record_as(Provider::Designer, "def", GenerationAfter::Build, false)
+            .expect("record");
+        let text =
+            std::fs::read_to_string(root.path().join("work/infobases/origin/generation.json"))
+                .expect("ledger");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(value["main"]["applied"], false, "{text}");
+        assert_eq!(value["main"]["after"], "build", "{text}");
+        assert!(!recorded(&main).applied);
     }
 
     fn recorded(ledger: &GenerationLedger) -> GenerationRecord {

@@ -1,6 +1,42 @@
 {
   "_comment": "Матрица исполнителей из src/domain/capability.rs. Порождается тестом при UPDATE_CAPABILITY_MATRIX=1, руками не правится.",
   "operations": {
+    "apply": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        },
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "agent"
+        },
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "agent"
+        }
+      ]
+    },
     "convert": {
       "cluster": [
         {

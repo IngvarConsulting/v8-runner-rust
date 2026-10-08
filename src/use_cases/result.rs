@@ -375,6 +375,7 @@ carries_dispatch!(
     crate::domain::artifacts::MakeAllResult,
     crate::domain::infobase_export::DownloadAllResult,
     crate::domain::build::BuildResult,
+    crate::domain::apply::ApplyResult,
     crate::domain::load::LoadResult,
     crate::domain::launch::LaunchResult,
     crate::domain::publish::PublishResult,

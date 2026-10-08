@@ -174,7 +174,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 30,
+        report.accepted, 31,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -373,6 +373,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
         (
             "crate::use_cases::generation_reader::ibcmd_dsl",
             "поколение, когда его спрашивают у `ibcmd`, выбранного для обмена",
+        ),
+        (
+            "crate::use_cases::apply::act::apply",
+            "применение, когда его ведёт `ibcmd`, выбранный для `push` или `apply`",
         ),
     ];
     let expected = BUILT_FOR_IBCMD
@@ -5718,6 +5722,7 @@ fn installed_extensions_are_matched_in_one_place() {
     for walk in [
         "src/use_cases/dump_config/all.rs",
         "src/use_cases/infobase_export/all.rs",
+        "src/use_cases/apply.rs",
     ] {
         let tokens = production_tokens(&repo_path(walk));
         assert!(

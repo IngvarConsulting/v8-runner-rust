@@ -1,7 +1,10 @@
 ---
 id: INV.USE-CASES.A-PUSH-WHOSE-APPLY-FAILED-KEEPS-THE-LOAD
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/210
+check:
+  - tests/cli_apply.rs::a_push_whose_apply_failed_keeps_the_load
+  - src/use_cases/build_project.rs::an_ibcmd_push_whose_apply_failed_keeps_the_load
+  - src/use_cases/build_project.rs::an_edt_push_whose_apply_failed_keeps_the_generated_designer_snapshot
+  - src/use_cases/build_project.rs::an_ibcmd_apply_that_fails_after_a_deferred_cancellation_names_it
 ---
 
 # Отправка, у которой не удалось только применение, сохраняет загрузку

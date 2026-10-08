@@ -104,6 +104,7 @@ fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
                         token: record.token,
                         tool: record.tool,
                         after: record.after,
+                        applied: record.applied,
                         recorded_at: record.recorded_at,
                     }
                 }),
@@ -483,6 +484,7 @@ mod tests {
             token: token.to_owned(),
             tool,
             after: GenerationAfter::Build,
+            applied: true,
             recorded_at: "2026-10-06T00:00:00Z".to_owned(),
             identity: "pair".to_owned(),
         }

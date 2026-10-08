@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-PUSH-WITH-NOTHING-TO-LOAD-APPLIES-ITS-OWN-UNAPPLIED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/210
+check:
+  - tests/cli_apply.rs::a_push_with_nothing_to_load_applies_its_own_unapplied
 ---
 
 # Отправка без изменений применяет своё непринятое

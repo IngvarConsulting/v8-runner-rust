@@ -1,11 +1,12 @@
 ---
 id: CTR.WIRE.PUSH-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/push.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
+  - tests/cli_apply.rs::a_push_without_apply_loads_and_apply_applies_it
 ---
 
 # `data` команды `push`
@@ -16,6 +17,12 @@ check:
 
 Инструмент MCP `build_project` отвечает этой же формой: поверхность MCP не повторяет CLI,
 но предмет команды у них один.
+
+**Что изменила версия 4.** У шага новое обязательное поле `applied`: дошёл ли он до
+конфигурации базы данных — загруженное применено или применено непринятое прежней загрузки.
+`false` у пропуска, превью, `push --no-apply` и у отказа
+([правило](../cli/apply-is-a-separate-step.md)). Прежде применение было неотделимо от загрузки, и
+поле не требовалось.
 
 **Что изменила версия 3.** Квитанция `provider` получила необязательное поле
 `endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
@@ -37,6 +44,7 @@ check:
       "source_set": "main",
       "mode": "full",
       "ok": true,
+      "applied": false,
       "message": "full load selected by partial-load rules; planned, Designer not dispatched",
       "duration_ms": 0
     }

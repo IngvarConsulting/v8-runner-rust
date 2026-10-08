@@ -1,6 +1,6 @@
 ---
 id: CTR.CONFIG.V8PROJECT-SCHEMA
-version: 12
+version: 13
 artifact: docs/schemas/v8project.schema.json
 check:
   - src/config/schema.rs::generated_schema_artifacts_are_current
@@ -17,6 +17,9 @@ check:
 порождаются из типизированной модели и обязаны совпадать с ней: расхождение
 валит проверку, а не обнаруживается в редакторе пользователя. Артефакт обновляется
 командой `UPDATE_CONFIG_SCHEMAS=1 cargo test generated_schema_artifacts_are_current`.
+
+**Что изменила версия 13.** Ключ `providers.apply` назначает исполнителя команды `apply`:
+строка матрицы та же, что у `push` ([правило](../cli/apply-is-a-separate-step.md)).
 
 **Что изменила версия 12.** Секция базы местного слоя описывает тот же набор ключей, что и в
 схеме проектного файла.

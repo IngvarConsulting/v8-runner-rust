@@ -266,6 +266,7 @@ pub fn run() -> i32 {
         | Command::Tools(_)
         | Command::Extensions(_)
         | Command::Build(_)
+        | Command::Apply(_)
         | Command::Load(_)
         | Command::Test(_)
         | Command::Dump(_)

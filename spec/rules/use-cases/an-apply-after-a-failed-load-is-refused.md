@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.AN-APPLY-AFTER-A-FAILED-LOAD-IS-REFUSED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/210
+check:
+  - tests/cli_apply.rs::an_apply_after_a_failed_load_is_refused
 ---
 
 # Применение после неудачной загрузки отказывает

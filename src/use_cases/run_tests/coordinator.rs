@@ -108,6 +108,9 @@ pub(super) fn run_tests(
                     dry_run: false,
                     load: PushMode::Changes,
                     source_set: None,
+                    // Клиент тестов работает с конфигурацией базы данных: сборка перед ним
+                    // применяет всегда.
+                    apply: true,
                 },
             ) {
                 Ok(result) => result,

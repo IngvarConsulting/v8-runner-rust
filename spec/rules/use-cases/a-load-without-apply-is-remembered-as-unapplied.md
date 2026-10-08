@@ -1,7 +1,12 @@
 ---
 id: INV.USE-CASES.A-LOAD-WITHOUT-APPLY-IS-REMEMBERED-AS-UNAPPLIED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/210
+check:
+  - tests/cli_apply.rs::a_push_without_apply_loads_and_apply_applies_it
+  - tests/cli_apply.rs::a_push_after_an_apply_that_changed_the_generation_is_not_refused
+  - tests/cli_apply.rs::a_pull_after_a_push_without_apply_is_up_to_date
+  - src/use_cases/agent_session.rs::a_record_without_the_applied_mark_reads_as_applied
+  - src/use_cases/apply.rs::an_apply_reads_the_generation_with_the_tool_of_the_record
+  - src/use_cases/apply.rs::an_apply_without_an_answer_of_the_record_tool_erases_the_record
 ---
 
 # Загрузка без применения запоминается как непринятая

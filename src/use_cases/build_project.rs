@@ -12,7 +12,6 @@ use crate::domain::capability::{Operation, Provider};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
-use crate::platform::ibcmd::DynamicUpdateMode;
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::utilities::PlatformUtilities;
@@ -40,11 +39,12 @@ mod helpers;
 
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
-    build_designer_dsl, build_ibcmd_dsl, change_detection_failure, commit_step_state,
-    dump_designer_version_file, extension_name, fail_from_source_set_index,
-    interruption_before_safe_point, map_ibcmd_error, plan_configurator_load_step,
-    plan_edt_export_step, plan_generated_designer_load_step, push_build_step,
-    read_designer_generation, read_ibcmd_generation, remove_storage_path, StepCommit, StepPlan,
+    apply_subject, build_designer_dsl, build_ibcmd_dsl, change_detection_failure,
+    commit_step_state, designer_log_file, dump_designer_version_file, extension_name,
+    fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
+    plan_configurator_load_step, plan_edt_export_step, plan_generated_designer_load_step,
+    push_build_step, push_loaded_step, read_designer_generation, read_ibcmd_generation,
+    remove_storage_path, AfterLoad, Loaded, StepCommit, StepPlan,
 };
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 
@@ -351,6 +351,7 @@ fn append_client_mcp_extension_step(
         config,
         args.load.is_whole(),
         args.dry_run,
+        args.apply,
     ) {
         Ok(Some(step)) => {
             log_build_step_timeline(&step);
@@ -610,7 +611,8 @@ fn execute_source_set_step(
     step_index: usize,
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
-) -> Result<Vec<String>, AppError> {
+    apply: bool,
+) -> Result<Loaded, AppError> {
     // Отмену, которую отложила критическая команда, шаг отмечает сразу по её исходу, до
     // проверки итога: так её называет и отказ этой команды, и всё, что идёт после, —
     // безопасная точка, следующая команда, фиксация состояния.
@@ -695,44 +697,38 @@ fn execute_source_set_step(
             ensure_platform_success("load", source_set, &result)?;
         }
 
-        if let Some(error) = interruption_before_safe_point(
-            context,
-            format!("update_db_cfg for source-set '{}'", source_set.name),
-        ) {
-            return Err(error);
-        }
+        let apply = if apply {
+            settle_apply(crate::use_cases::apply::act::apply(
+                context,
+                config,
+                crate::use_cases::apply::act::Applier::Designer {
+                    binary,
+                    runner,
+                    log_file: designer_log_file(config, &source_set.name, step_index, "update")?,
+                },
+                &apply_subject(source_set),
+                deferrals,
+            ))
+        } else {
+            AfterLoad::Deferred
+        };
 
-        debug!(
-            source_set = source_set.name.as_str(),
-            "updating database configuration after load"
-        );
-        log_timeline_stage(
-            &source_set.name,
-            "update_db_cfg",
-            "[Конфигуратор] Применение изменений",
-            TimelineStageStatus::Running,
-        );
-        let update_result = build_designer_dsl(
-            context,
-            config,
-            binary,
-            runner,
-            &source_set.name,
-            step_index,
-            "update",
-            InterruptionSafetyClass::CriticalNonAbortable,
-        )?
-        .update_db_cfg(extension_name(source_set))
-        .map_err(AppError::from)?;
-        deferrals.note_result("update_db_cfg", &update_result);
-        ensure_platform_success("update_db_cfg", source_set, &update_result)?;
-
-        commit_step_state(source_set, commit_context, &config.work_path, commit)
+        commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+        Ok(apply)
     })
-    .map(|((), mut warnings)| {
+    .map(|(apply, mut warnings)| {
         warnings.extend(format_notice);
-        warnings
+        Loaded { warnings, apply }
     })
+}
+
+/// Исход применения после удачной загрузки: отказ — не отказ шага, а непринятое, которое
+/// шаг запомнит (`INV.USE-CASES.A-PUSH-WHOSE-APPLY-FAILED-KEEPS-THE-LOAD`).
+fn settle_apply(applied: Result<(), AppError>) -> AfterLoad {
+    match applied {
+        Ok(()) => AfterLoad::Applied,
+        Err(error) => AfterLoad::Failed(error),
+    }
 }
 
 fn write_partial_load_list_or_preserve(
@@ -793,7 +789,8 @@ fn execute_source_set_step_ibcmd(
     commit_context: &SourceSetContext,
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
-) -> Result<Vec<String>, AppError> {
+    apply: bool,
+) -> Result<Loaded, AppError> {
     // Версия формата сверяется до запуска платформы: формат новее неё — отказ.
     let format_notice = crate::use_cases::version_file::check_load_format(
         &config.work_path,
@@ -855,41 +852,24 @@ fn execute_source_set_step_ibcmd(
         deferrals.note_result("ibcmd_import", &load_result);
         ensure_platform_success("load", source_set, &load_result)?;
 
-        if let Some(error) = interruption_before_safe_point(
-            context,
-            format!("ibcmd apply for source-set '{}'", source_set.name),
-        ) {
-            return Err(error);
-        }
+        let apply = if apply {
+            settle_apply(crate::use_cases::apply::act::apply(
+                context,
+                config,
+                crate::use_cases::apply::act::Applier::Ibcmd { binary, runner },
+                &apply_subject(source_set),
+                deferrals,
+            ))
+        } else {
+            AfterLoad::Deferred
+        };
 
-        debug!(
-            source_set = source_set.name.as_str(),
-            "applying database configuration after ibcmd load"
-        );
-        let apply_dsl = build_ibcmd_dsl(
-            context,
-            config,
-            binary,
-            runner,
-            InterruptionSafetyClass::CriticalNonAbortable,
-        )?;
-        log_timeline_stage(
-            &source_set.name,
-            "ibcmd_apply",
-            "[ibcmd] Применение изменений",
-            TimelineStageStatus::Running,
-        );
-        let apply_result = apply_dsl
-            .config_apply(extension, DynamicUpdateMode::Auto)
-            .map_err(map_ibcmd_error)?;
-        deferrals.note_result("apply", &apply_result);
-        ensure_platform_success("apply", source_set, &apply_result)?;
-
-        commit_step_state(source_set, commit_context, &config.work_path, commit)
+        commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+        Ok(apply)
     })
-    .map(|((), mut warnings)| {
+    .map(|(apply, mut warnings)| {
         warnings.extend(format_notice);
-        warnings
+        Loaded { warnings, apply }
     })
 }
 
@@ -1254,6 +1234,7 @@ mod tests {
                 PushMode::Changes
             },
             source_set: None,
+            apply: true,
         }
     }
 
@@ -1380,13 +1361,18 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("exit code 17"), "{message}");
-        // Шаг называет ещё, что поколение после неудачной загрузки не записано.
-        let step = failed_step_message(failure.payload.expect("payload"));
-        assert!(step.starts_with(&failure.error.to_string()), "{step}");
+        // Загрузка удалась, не удалось применение: загруженное запомнено, и выход — `apply`
+        // (`INV.USE-CASES.A-PUSH-WHOSE-APPLY-FAILED-KEEPS-THE-LOAD`).
         assert!(
-            step.contains("is not recorded after the failed load"),
-            "{step}"
+            message.contains("is loaded into the main configuration and remembered"),
+            "{message}"
         );
+        assert_eq!(
+            failure.error.next().map(|next| next.command.as_str()),
+            Some("apply")
+        );
+        let step = failed_step_message(failure.payload.expect("payload"));
+        assert!(step.starts_with(failure.error.message()), "{step}");
     }
 
     /// Загрузка через Конфигуратор, отложившая отмену и потом не удавшаяся, остаётся
@@ -1529,8 +1515,7 @@ mod tests {
         );
         assert!(
             message.contains(
-                "before entering tool extension update_db_cfg for tool extension 'client_mcp' \
-                 safe point"
+                "before entering update_db_cfg for tool extension 'client_mcp' safe point"
             ),
             "{message}"
         );
@@ -2610,7 +2595,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ibcmd_apply_failure_does_not_commit_state() {
+    fn an_ibcmd_push_whose_apply_failed_keeps_the_load() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -2637,12 +2622,22 @@ mod tests {
         .expect("modify main");
 
         let failure = run_build(&config, &build_args(false)).expect_err("expected failure");
+        assert_eq!(
+            failure.error.next().map(|next| next.command.as_str()),
+            Some("apply"),
+            "{}",
+            failure.error
+        );
         let result = failure
             .payload
             .expect("build failures should preserve a structured payload");
 
+        // Загрузка удалась — память исходников зафиксирована, как у `push --no-apply`
+        // (`INV.USE-CASES.A-PUSH-WHOSE-APPLY-FAILED-KEEPS-THE-LOAD`); шаг отказал и не
+        // применён.
         assert!(!result.ok);
-        assert_eq!(generation_before, storage_generation(&config, "main"));
+        assert!(!result.steps[0].ok && !result.steps[0].applied);
+        assert_eq!(generation_before + 1, storage_generation(&config, "main"));
     }
 
     #[cfg(unix)]
@@ -2985,7 +2980,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn edt_extension_load_failure_does_not_commit_generated_designer_snapshot() {
+    fn an_edt_extension_whose_apply_failed_keeps_the_generated_designer_snapshot() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -3048,7 +3043,7 @@ mod tests {
         }));
         assert!(designer_calls_text.contains("/UpdateDBCfg -Extension client_mcp"));
         assert_eq!(edt_storage_generation(&config, "client_mcp"), 2);
-        assert!(!designer_storage_path.exists());
+        assert!(designer_storage_path.exists());
     }
 
     #[cfg(unix)]
@@ -3243,7 +3238,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn edt_build_failure_does_not_commit_generated_designer_snapshot() {
+    fn an_edt_push_whose_apply_failed_keeps_the_generated_designer_snapshot() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -3284,7 +3279,9 @@ mod tests {
             step.source_set == "main" && matches!(step.mode, BuildMode::Full) && !step.ok
         }));
         assert_eq!(edt_storage_generation(&config, "main"), 2);
-        assert!(!designer_storage_path.exists());
+        // Загрузка удалась, отказало применение: снимок Конфигуратора запомнен
+        // (`INV.USE-CASES.A-PUSH-WHOSE-APPLY-FAILED-KEEPS-THE-LOAD`).
+        assert!(designer_storage_path.exists());
     }
 
     #[cfg(unix)]
@@ -3638,6 +3635,7 @@ mod tests {
                 dry_run: false,
                 load: PushMode::Changes,
                 source_set: Some("ext".to_owned()),
+                apply: true,
             },
         )
         .expect("build");
@@ -3689,6 +3687,7 @@ mod tests {
                 dry_run: false,
                 load: PushMode::Changes,
                 source_set: Some("ext".to_owned()),
+                apply: true,
             },
         )
         .expect("build");
@@ -3727,6 +3726,7 @@ mod tests {
                 dry_run: false,
                 load: PushMode::Changes,
                 source_set: Some("missing".to_owned()),
+                apply: true,
             },
         )
         .expect_err("unknown source-set must fail");
@@ -3833,7 +3833,11 @@ mod tests {
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_designer_script(&script, &calls, Some("/UpdateDBCfg -Extension ext"));
+        write_designer_script(
+            &script,
+            &calls,
+            Some("-updateConfigDumpInfo -Extension ext"),
+        );
         let config = build_config(
             &base,
             &work,
@@ -3868,10 +3872,117 @@ mod tests {
             .message
             .as_deref()
             .expect("message")
-            .contains("update_db_cfg failed for source-set 'ext' with exit code 17"));
-        assert!(calls_text.contains("/UpdateDBCfg -Extension ext"));
+            .contains("load failed for source-set 'ext' with exit code 17"));
+        assert!(!calls_text.contains("/UpdateDBCfg -Extension ext"));
         assert_eq!(storage_generation(&config, "main"), 2);
         assert_eq!(storage_generation(&config, "ext"), 1);
+    }
+
+    fn without_apply(mut args: BuildArgs) -> BuildArgs {
+        args.apply = false;
+        args
+    }
+
+    /// `push --no-apply` у Конфигуратора: загрузка и запись памяти исходников, без
+    /// `/UpdateDBCfg`; шаг удачен и не применён (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).
+    #[cfg(unix)]
+    #[test]
+    fn a_push_without_apply_loads_and_never_calls_update_db_cfg() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_designer_script(&script, &calls, None);
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            SourceFormat::Designer,
+            Default::default(),
+        );
+
+        let result = run_build(&config, &without_apply(build_args(true))).expect("build");
+
+        let calls_text = fs::read_to_string(&calls).expect("calls");
+        assert!(calls_text.contains("/LoadConfigFromFiles"), "{calls_text}");
+        assert!(!calls_text.contains("/UpdateDBCfg"), "{calls_text}");
+        assert!(result.ok);
+        assert!(result.steps.iter().all(|step| step.ok && !step.applied));
+        assert!(result.steps[0]
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("loaded without apply"));
+        assert_eq!(storage_generation(&config, "main"), 1);
+    }
+
+    /// `push --no-apply` у `ibcmd`: импорт без `config apply`.
+    #[cfg(unix)]
+    #[test]
+    fn an_ibcmd_push_without_apply_imports_and_never_calls_config_apply() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_ibcmd_script(&script, &calls, None);
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            SourceFormat::Designer,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+
+        let result = run_build(&config, &without_apply(build_args(true))).expect("build");
+
+        let calls_text = fs::read_to_string(&calls).expect("calls");
+        assert!(calls_text.contains("config import"), "{calls_text}");
+        assert!(!calls_text.contains("config apply"), "{calls_text}");
+        assert!(result.ok);
+        assert!(result.steps.iter().all(|step| !step.applied));
+    }
+
+    /// `--no-apply` откладывает и расширение-инструмент: оно загружается, но не применяется.
+    #[cfg(unix)]
+    #[test]
+    fn a_push_without_apply_leaves_the_tool_extension_unapplied() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("platform").join("bin").join("1cv8");
+        let calls = dir.path().join("designer.calls.log");
+        let artifact = dir.path().join("client_mcp.cfe");
+        create_source_tree(&base);
+        fs::write(&artifact, "cfe").expect("artifact");
+        write_designer_script(&platform, &calls, None);
+        let mut config = build_config(
+            &base,
+            &work,
+            &dir.path().join("platform"),
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        config.source_sets.truncate(1);
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Artifact(ToolExtensionArtifactConfig { path: artifact }),
+        });
+
+        let result = run_build(&config, &without_apply(build_args(true))).expect("build");
+
+        let calls_text = fs::read_to_string(&calls).expect("calls");
+        assert!(calls_text.contains("/LoadCfg"), "{calls_text}");
+        assert!(!calls_text.contains("/UpdateDBCfg"), "{calls_text}");
+        let tool = result
+            .steps
+            .iter()
+            .find(|step| step.source_set == "tool:client_mcp")
+            .expect("tool step");
+        assert!(tool.ok && !tool.applied, "{tool:?}");
     }
 
     #[test]
@@ -3887,6 +3998,7 @@ mod tests {
                     ok: true,
                     message: Some("forced full rebuild".to_owned()),
                     duration_ms: 1,
+                    applied: false,
                 },
                 crate::domain::build::BuildStep {
                     source_set: "ext".to_owned(),
@@ -3894,6 +4006,7 @@ mod tests {
                     ok: false,
                     message: Some("aborted after previous failure".to_owned()),
                     duration_ms: 0,
+                    applied: false,
                 },
             ],
             duration_ms: 42,
