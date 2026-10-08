@@ -105,6 +105,15 @@ impl ManagedSpawnResult {
         result
     }
 
+    /// Код выхода, если процесс уже завершился сам; `None` — ещё работает или ручки нет.
+    pub fn exited(&mut self) -> Option<i32> {
+        let spawned = self.child.as_mut()?;
+        match spawned.child.try_wait() {
+            Ok(Some(status)) => Some(status.code().unwrap_or(-1)),
+            Ok(None) | Err(_) => None,
+        }
+    }
+
     /// Terminate the managed process and wait for it to exit.
     pub fn terminate(mut self) {
         if let Some(mut spawned) = self.child.take() {
