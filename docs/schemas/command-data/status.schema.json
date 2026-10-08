@@ -144,10 +144,6 @@
           "description": "Каталог проекта копии.",
           "type": "string"
         },
-        "shared": {
-          "description": "Согласие копии делить базу, записанное в метке.",
-          "type": "boolean"
-        },
         "since": {
           "format": "date-time",
           "type": "string"
@@ -159,7 +155,6 @@
       },
       "required": [
         "project",
-        "shared",
         "since",
         "this_copy"
       ],

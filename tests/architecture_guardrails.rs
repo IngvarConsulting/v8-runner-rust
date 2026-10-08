@@ -2277,6 +2277,33 @@ fn the_owner_of_a_file_base_is_checked_in_one_place() {
     );
 }
 
+/// Выходы рабочей копии к своей базе строит один формирователь
+/// (`domain::next_step::ways_to_an_own_infobase`): отказ без объявленной базы и предупреждение о
+/// базе другой копии разошлись, когда каждый держал свой текст (#437). Текст выхода из
+/// эталонного образа вне формирователя ловится здесь под любым именем вызывающего.
+#[test]
+fn the_ways_to_an_own_infobase_have_one_builder() {
+    const WAY_FROM_A_REFERENCE: &str = "restore --input <reference>.dt --create";
+    let owner = repo_path("src/domain/next_step.rs");
+    assert!(
+        production_source(&owner).contains(WAY_FROM_A_REFERENCE),
+        "the builder no longer names the way from a reference image: update this guard"
+    );
+    let offenders: Vec<String> = collect_rust_files(&repo_path("src"))
+        .into_iter()
+        .filter(|file| file != &owner)
+        .filter(|file| {
+            without_doc_comments(&production_source(file)).contains(WAY_FROM_A_REFERENCE)
+        })
+        .map(|file| file.display().to_string())
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "the ways to an own infobase are built only by domain::next_step::ways_to_an_own_infobase:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn an_agent_deferral_is_read_in_one_place() {
     // Корень проблемы (#317): `with_session` жил в двух копиях, и каждая брала отмену,

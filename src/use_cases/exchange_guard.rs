@@ -273,8 +273,6 @@ struct Standing {
     copied: Option<CopyMark>,
     /// База в кластере или на автономном сервере: метки у неё нет.
     server: bool,
-    /// Общая база (`shared: true`): остальные её владельцы из метки.
-    shared_with: Option<Vec<String>>,
 }
 
 impl Standing {
@@ -283,19 +281,16 @@ impl Standing {
             new_owner: new_owner_since(config),
             copied: copied_from(config),
             server: config.target_kind() != TargetKind::File,
-            shared_with: crate::use_cases::infobase_owner::shared_base_owners(config),
         }
     }
 
-    /// Выгрузку предлагают всем, кроме нового владельца до первой отправки. Общей базе
-    /// (`shared: true`) — всегда: решение владельца продукта от 06.10.2026 даёт ей оба выхода,
-    /// и её меняют другие копии по согласию, а не захват.
+    /// Выгрузку предлагают всем, кроме нового владельца до первой отправки.
     ///
-    /// Копии базы до первой отправки выгрузку не предлагают никогда, и общей тоже: её
-    /// конфигурация принадлежит ветке источника
+    /// Копии базы до первой отправки выгрузку не предлагают никогда: её конфигурация
+    /// принадлежит ветке источника
     /// (`INV.USE-CASES.A-COPIED-BASE-OFFERS-NO-PULL-BEFORE-ITS-FIRST-PUSH`).
     fn offers_pull(&self) -> bool {
-        self.copied.is_none() && (self.shared_with.is_some() || self.new_owner.is_none())
+        self.copied.is_none() && self.new_owner.is_none()
     }
 
     /// Почему выгрузка не предложена и кто ещё мог менять базу.
@@ -306,16 +301,7 @@ impl Standing {
                 " The infobase is a copy of {source} and nothing has been pushed into it since: its configuration belongs to the branch of the source, and taking it into this directory would bring that branch here, so only the overwrite is offered."
             ));
         }
-        if let Some(others) = &self.shared_with {
-            let others = if others.is_empty() {
-                "none recorded in the owner marker".to_owned()
-            } else {
-                others.join(", ")
-            };
-            text.push_str(&format!(
-                " The infobase is shared (`shared: true`): other working copies change it too; its other owners: {others}."
-            ));
-        } else if let Some(since) = &self.new_owner {
+        if let Some(since) = &self.new_owner {
             text.push_str(&format!(
                 " This working copy took the infobase over ({since}) and has not pushed into it since: other working copies may have changed it, and taking its state into this directory would bring their work here, so only the overwrite is offered."
             ));

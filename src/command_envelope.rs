@@ -39,8 +39,6 @@ pub enum ErrorCode {
     WorkspaceBusy,
     /// Файловую базу держит другая команда; как `workspace_busy`, можно повторить.
     InfobaseBusy,
-    /// Файловую базу держит другая рабочая копия; повтор не поможет.
-    InfobaseHeld,
     InvalidOutput,
     Cancelled,
     TimedOut,
@@ -101,7 +99,6 @@ impl ErrorCode {
             Self::EnvironmentUnavailable => "environment_unavailable",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
-            Self::InfobaseHeld => "infobase_held",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
@@ -124,7 +121,6 @@ impl ErrorCode {
         Self::EnvironmentUnavailable,
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
-        Self::InfobaseHeld,
         Self::InvalidOutput,
         Self::Cancelled,
         Self::TimedOut,
@@ -388,7 +384,6 @@ mod schema_tests {
                 "workspace",
             ),
             (UseCaseErrorKind::InfobaseBusy, "infobase_busy", "workspace"),
-            (UseCaseErrorKind::InfobaseHeld, "infobase_held", "workspace"),
             (
                 UseCaseErrorKind::NonFastForward,
                 "non_fast_forward",

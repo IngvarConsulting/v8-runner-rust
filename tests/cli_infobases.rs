@@ -473,28 +473,6 @@ fn the_map_is_refused_in_the_project_file() {
     );
 }
 
-/// Согласие делить базу — ключ местного слоя: прежняя секция `infobase:` проектного файла
-/// его отвергает по имени, а в местном слое он принимается.
-#[test]
-fn consent_to_share_a_base_is_refused_in_the_project_file() {
-    let bases = support::temp_workspace();
-    let tmp = bases.path().display().to_string();
-    let project = project();
-    let mut config = fs::read_to_string(&project.config_path).expect("config");
-    config.push_str(&format!(
-        "infobase:\n  connection: 'File={tmp}/origin-ib'\n  shared: true\n"
-    ));
-    fs::write(&project.config_path, config).expect("config");
-
-    let output = project.run_json(&[], LAUNCH_PREVIEW);
-
-    let message = refusal_message(&output);
-    assert!(
-        message.contains("`shared` is declared only in v8project.local.yaml"),
-        "{message}"
-    );
-}
-
 #[test]
 fn both_keys_in_the_project_file_are_refused() {
     let bases = support::temp_workspace();

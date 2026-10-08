@@ -5,12 +5,13 @@
 //! в метке рядом с каталогом базы, снаружи него: копия каталога базы метку не уносит. Форма
 //! метки закреплена `CTR.USE-CASES.INFOBASE-OWNER-MARKER`.
 //!
-//! Проверку зовёт только граница команды (`use_cases::transport`), сразу после замка базы:
-//! команда записи на базе другой живой копии отказывает `InfobaseHeld`, если делить базу не
-//! согласны эта копия или кто-то из владельцев (`shared: true` в местном слое,
-//! `INV.USE-CASES.A-BASE-IS-SHARED-BY-CONSENT-OF-EVERY-COPY`); прошедшая проверку команда
-//! записи на базе из местного слоя записывает свою копию в метку со своим согласием. Команда
-//! чтения метку только читает; превью читает её без замка и ничего не пишет.
+//! Проверку зовёт только граница команды (`use_cases::transport`), сразу после замка базы.
+//! Команда записи на базе другой живой копии не отказывает: она идёт, а ответ предупреждает,
+//! чью базу она меняет и как завести свою
+//! (`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`); метку такая
+//! команда не трогает. Команда записи на базе из местного слоя, у которой нет живого владельца,
+//! кроме этой копии, записывает свою копию в метку. Команда чтения метку только читает; превью
+//! читает её без замка и ничего не пишет.
 
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -20,7 +21,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::loader::{load_declared_infobases, ConfigLoadError};
 use crate::config::model::{AppConfig, InfobaseConfig};
-use crate::domain::next_step::NextStep;
 use crate::platform::connection::V8Connection;
 use crate::support::fs::{read_optional, write_file_atomically};
 use crate::support::machine::{host_name, machine_id};
@@ -28,8 +28,13 @@ use crate::support::path::{nearest_existing_canonical_path, stable_path_identity
 use crate::use_cases::infobase_lock::BaseAccess;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
-/// Версия формы метки, которую пишет и понимает этот раннер.
-pub const OWNER_MARKER_VERSION: u32 = 1;
+/// Версия формы метки, которую пишет этот раннер.
+pub const OWNER_MARKER_VERSION: u32 = 2;
+
+/// Прежняя версия формы, которую раннер читает: поля её записей, которых нет в нынешней
+/// форме, он пропускает, а метку этой версии переписывает нынешней, когда записывает в неё
+/// свою копию.
+const LEGACY_OWNER_MARKER_VERSION: u32 = 1;
 
 /// Файл, в котором лежит порождённая форма метки.
 #[allow(dead_code, reason = "читает сторож свежести артефакта")]
@@ -46,8 +51,9 @@ const OWNER_MARKER_SUFFIX: &str = ".v8-runner.owners.json";
     description = "Кто держит файловую базу: метка лежит рядом с каталогом базы как `.<имя каталога>.v8-runner.owners.json`."
 )]
 pub struct OwnerMarker {
-    /// Версия формы. Метку другой версии раннер не переписывает.
-    #[schemars(range(min = 1, max = 1))]
+    /// Версия формы. Метку незнакомой версии раннер не переписывает; метку версии 1 он
+    /// читает.
+    #[schemars(range(min = 2, max = 2))]
     pub version: u32,
     /// Рабочие копии, которые держат базу.
     pub owners: Vec<OwnerRecord>,
@@ -68,8 +74,6 @@ pub struct OwnerRecord {
     pub host: Option<String>,
     /// Канонический абсолютный каталог проекта копии: там лежит её местный слой.
     pub project: PathBuf,
-    /// Согласие копии делить базу.
-    pub shared: bool,
     /// Когда копия записана в метку.
     #[schemars(with = "String", extend("format" = "date-time"))]
     pub since: DateTime<Utc>,
@@ -118,7 +122,8 @@ fn machine_hash(identity: &str) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Чего команда ждёт от проверки: прогон записывает свою копию, превью только называет отказ.
+/// Чего команда ждёт от проверки: прогон записывает свою копию, превью только называет то,
+/// что сказал бы прогон.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnerCheck {
     Run,
@@ -127,9 +132,8 @@ pub(crate) enum OwnerCheck {
 
 /// Проверяет, чья база, и записывает эту копию в метку, если должна.
 ///
-/// Возвращает то, что ответ команды говорит сверх своего: взятие базы без метки, смену
-/// ушедшего владельца, нечитаемую метку у команды чтения. Отказ — `InfobaseHeld` на базе
-/// другой живой копии, если делить её согласны не все: эта копия и каждый живой владелец;
+/// Возвращает то, что ответ команды говорит сверх своего: запись в базу другой живой копии,
+/// взятие базы без метки, смену ушедшего владельца, нечитаемую метку у команды чтения.
 /// `Runtime` — когда метку не прочитать, не понять или не записать.
 /// Метку пишет только прогон команды записи, и только под замком базы: его держит
 /// вызывающий.
@@ -195,10 +199,6 @@ fn check_as(
         })
         .collect();
     let nobody_held_it = owners.is_empty();
-    let this_consent = ThisConsent::of(config, &base_dir);
-    let shares = this_consent == ThisConsent::Shares;
-    // Метку пишет только прогон команды записи на базе, названной в местном слое.
-    let records = check == OwnerCheck::Run && config.infobase_name.is_some();
 
     let alive: Vec<(&OwnerRecord, &Alive)> = owners
         .iter()
@@ -207,34 +207,23 @@ fn check_as(
             Standing::This | Standing::Gone(_) => None,
         })
         .collect();
-    let recorded_consent = owners
+    let recorded = owners
         .iter()
-        .find_map(|(owner, standing)| matches!(standing, Standing::This).then_some(owner.shared));
-
-    if !alive.is_empty() && (!shares || alive.iter().any(|(owner, why)| !why.consents(owner))) {
-        // Копия, уже записанная в метке, сообщает своё согласие и при отказе: копии других
-        // машин видят отзыв только так. Ушедших отказ не сменяет.
-        let unrecorded = (records && recorded_consent.is_some_and(|recorded| recorded != shares))
-            .then(|| {
-                let reported = OwnerMarker {
-                    version: OWNER_MARKER_VERSION,
-                    owners: rewritten(&owners, shares, Departed::Stay),
-                };
-                write_marker(&marker_path, &reported).err()
-            })
-            .flatten();
-        return Err(HeldRefusal {
+        .any(|(_, standing)| matches!(standing, Standing::This));
+    // База другой живой копии: команда идёт с предупреждением, а метку не трогает — ни
+    // прогон, ни превью. Владельцем остаётся прежняя копия, и её следующая команда сама
+    // увидит, что база ушла вперёд её памяти.
+    if !alive.is_empty() {
+        return Ok(vec![another_copy_warning(
             command_name,
-            base_dir: &base_dir,
-            marker_path: &marker_path,
-            this: this_consent,
-            alive,
-            unrecorded,
-        }
-        .into_error());
+            &base_dir,
+            &marker_path,
+            &alive,
+        )]);
     }
-    // Превью ничего не берёт, а строка соединения подчиняется владельцу, но им не
-    // становится — даже на базе без метки или с ушедшим владельцем.
+    // Превью ничего не берёт, а строка соединения владельцем не становится — даже на базе
+    // без метки или с ушедшим владельцем.
+    let records = check == OwnerCheck::Run && config.infobase_name.is_some();
     if !records {
         return Ok(Vec::new());
     }
@@ -245,7 +234,7 @@ fn check_as(
             Standing::This | Standing::Alive(_) => None,
         })
         .collect();
-    if recorded_consent == Some(shares) && gone.is_empty() {
+    if recorded && gone.is_empty() {
         return Ok(Vec::new());
     }
     let Some(machine) = this.machine.clone() else {
@@ -288,13 +277,17 @@ fn check_as(
             )
         })?;
     }
-    let mut kept = rewritten(&owners, shares, Departed::Leave);
-    if recorded_consent.is_none() {
+    // Ушедших сменяет эта копия; живых здесь уже нет.
+    let mut kept: Vec<OwnerRecord> = owners
+        .iter()
+        .filter(|(_, standing)| matches!(standing, Standing::This))
+        .map(|(owner, _)| owner.clone())
+        .collect();
+    if !recorded {
         kept.push(OwnerRecord {
             machine,
             host: this.host.clone(),
             project: this.project.clone(),
-            shared: shares,
             since: Utc::now(),
         });
     }
@@ -313,34 +306,6 @@ fn check_as(
         )
     })?;
     Ok(notes)
-}
-
-/// Остальные владельцы общей базы — для отказов обмена с ней
-/// (`INV.USE-CASES.A-SHARED-BASE-REFUSAL-OFFERS-PULL-FIRST-AND-NAMES-PUSH`). `None` — эта
-/// копия базу не делит (или это не файловая база); иначе — копии из метки, кроме этой:
-/// каталог проекта и хост. Метку, которую не прочитать, отказ обмена не называет.
-pub(crate) fn shared_base_owners(config: &AppConfig) -> Option<Vec<String>> {
-    let base_dir = config
-        .v8_connection()
-        .file_infobase_dir(&config.base_path)?;
-    if ThisConsent::of(config, &base_dir) != ThisConsent::Shares {
-        return None;
-    }
-    let this = ThisCopy::of(config);
-    let owners = owner_marker_path(&base_dir)
-        .and_then(|path| read_marker(&path).ok().flatten())
-        .map(|marker| marker.owners)
-        .unwrap_or_default();
-    Some(
-        owners
-            .iter()
-            .filter(|owner| !this.is(owner))
-            .map(|owner| match &owner.host {
-                Some(host) => format!("'{}' on '{host}'", owner.project.display()),
-                None => format!("'{}'", owner.project.display()),
-            })
-            .collect(),
-    )
 }
 
 /// Копии, которые держат выбранную файловую базу, по её метке — для `status --deep`
@@ -364,7 +329,6 @@ pub(crate) fn holders(config: &AppConfig) -> Option<crate::domain::status::Holde
                         this_copy: this.is(&owner),
                         project: owner.project,
                         host: owner.host,
-                        shared: owner.shared,
                         since: owner.since,
                     })
                     .collect(),
@@ -380,78 +344,18 @@ pub(crate) fn holders(config: &AppConfig) -> Option<crate::domain::status::Holde
     })
 }
 
-/// Согласие этой копии делить базу: из её местного слоя в момент команды.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThisConsent {
-    Shares,
-    DoesNotShare,
-    /// База пришла строкой соединения в `--infobase`: согласия у неё нет, она базу не делит,
-    /// а только подчиняется владельцу.
-    ConnectionString,
-}
-
-impl ThisConsent {
-    fn of(config: &AppConfig, base_dir: &Path) -> Self {
-        if config.infobase_name.is_none() {
-            return Self::ConnectionString;
-        }
-        // Выбранная секция объявляет базу всегда; остальные секции той же базы тоже
-        // должны согласиться — так же, как у копии-владельца.
-        let sections = std::iter::once(&config.infobase).chain(config.infobases.values());
-        match consent_of(sections, &config.base_path, base_dir) {
-            Some(true) => Self::Shares,
-            Some(false) | None => Self::DoesNotShare,
-        }
-    }
-}
-
-/// Согласие копии делить файловую базу `base_dir` по секциям её местного слоя, пути — от её
-/// каталога `project`. `None` — ни одна секция базу не объявляет; иначе копия согласна, только
-/// если `shared: true` стоит у каждой секции, которая базу объявляет.
-fn consent_of<'a>(
+/// Объявляет ли какая-нибудь секция местного слоя копии файловую базу `base_dir`; пути — от
+/// каталога копии `project`.
+fn declares<'a>(
     sections: impl IntoIterator<Item = &'a InfobaseConfig>,
     project: &Path,
     base_dir: &Path,
-) -> Option<bool> {
-    let mut declaring = sections
-        .into_iter()
-        .filter(|infobase| {
-            V8Connection::from_connection_string(&infobase.connection)
-                .file_infobase_dir(project)
-                .is_some_and(|dir| same_path(&dir, base_dir))
-        })
-        .peekable();
-    declaring.peek()?;
-    Some(declaring.all(|infobase| infobase.shared))
-}
-
-/// Что делать с ушедшими владельцами, когда метка переписывается.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Departed {
-    /// Команда записи прошла и сменяет их.
-    Leave,
-    /// Команда отказала: метку она меняет только согласием этой копии.
-    Stay,
-}
-
-/// Записи метки после команды: у этой копии — её нынешнее согласие, живые остаются,
-/// ушедшие — по `departed`.
-fn rewritten(
-    owners: &[(OwnerRecord, Standing)],
-    shares: bool,
-    departed: Departed,
-) -> Vec<OwnerRecord> {
-    owners
-        .iter()
-        .filter_map(|(owner, standing)| match standing {
-            Standing::This => Some(OwnerRecord {
-                shared: shares,
-                ..owner.clone()
-            }),
-            Standing::Alive(_) => Some(owner.clone()),
-            Standing::Gone(_) => (departed == Departed::Stay).then(|| owner.clone()),
-        })
-        .collect()
+) -> bool {
+    sections.into_iter().any(|infobase| {
+        V8Connection::from_connection_string(&infobase.connection)
+            .file_infobase_dir(project)
+            .is_some_and(|dir| same_path(&dir, base_dir))
+    })
 }
 
 /// Где копия-владелец по отношению к этой команде.
@@ -465,28 +369,15 @@ enum Standing {
 }
 
 enum Alive {
-    /// Каталог копии на этой машине есть и объявляет базу; `shared` — согласие делить её,
-    /// прочитанное из её местного слоя сейчас.
-    Declares { shared: bool },
-    /// Местный слой копии не прочитать: она считается живой и несогласной. Причина — без
-    /// текста чужих файлов: в нём бывают пароли.
+    /// Каталог копии на этой машине есть и объявляет базу.
+    Declares,
+    /// Местный слой копии не прочитать: она считается живой. Причина — без текста чужих
+    /// файлов: в нём бывают пароли.
     Unreadable(String),
     /// Копия с другой машины: проверить её отсюда нельзя. `maybe_this_machine` — тот же
     /// каталог проекта и то же имя хоста, что у этой копии: возможно, это эта машина, у
     /// которой сменился идентификатор.
     Remote { maybe_this_machine: bool },
-}
-
-impl Alive {
-    /// Согласна ли копия делить базу. Копия этой машины отвечает своим местным слоем,
-    /// нечитаемый слой — несогласием, копия другой машины — своей записью в метке.
-    fn consents(&self, record: &OwnerRecord) -> bool {
-        match self {
-            Self::Declares { shared } => *shared,
-            Self::Unreadable(_) => false,
-            Self::Remote { .. } => record.shared,
-        }
-    }
 }
 
 enum Gone {
@@ -540,113 +431,81 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
         Err(_) => Standing::Alive(Alive::Unreadable(
             "its v8project.yaml or v8project.local.yaml cannot be parsed".to_owned(),
         )),
-        Ok(declared) => match consent_of(declared.values(), &owner.project, base_dir) {
-            Some(shared) => Standing::Alive(Alive::Declares { shared }),
-            None => Standing::Gone(Gone::NoLongerDeclares),
-        },
+        Ok(declared) if declares(declared.values(), &owner.project, base_dir) => {
+            Standing::Alive(Alive::Declares)
+        }
+        Ok(_) => Standing::Gone(Gone::NoLongerDeclares),
     }
 }
 
-/// Отказ на базе другой копии: кто её держит и согласен ли делить её, как освободить базу,
-/// где метка и какие выходы есть у этой копии. Следующий шаг — первый и безопасный: своя
-/// чистая база. Выгрузку отказ не предлагает: базу держит другая копия, и выгрузка увела бы эту
-/// копию в её ветку.
-struct HeldRefusal<'a> {
-    command_name: &'a str,
-    base_dir: &'a Path,
-    marker_path: &'a Path,
-    this: ThisConsent,
-    alive: Vec<(&'a OwnerRecord, &'a Alive)>,
-    /// Почему согласие этой копии не записалось в метку при отказе.
-    unrecorded: Option<std::io::Error>,
-}
-
-impl HeldRefusal<'_> {
-    fn into_error(self) -> UseCaseError {
-        let Self {
-            command_name,
-            base_dir,
-            marker_path,
-            this,
-            alive,
-            unrecorded,
-        } = self;
-        let holders = alive
+/// Живые копии из метки, кроме этой, — для людей.
+fn describe_holders(alive: &[(&OwnerRecord, &Alive)]) -> String {
+    alive
         .iter()
-        .map(|(owner, why)| {
-            let sharing = if why.consents(owner) {
-                "which shares it"
-            } else {
-                "which does not share it"
-            };
-            match why {
-                Alive::Declares { .. } => format!(
-                    "the working copy '{}' on this machine, {sharing}",
-                    owner.project.display()
-                ),
-                Alive::Unreadable(reason) => format!(
-                    "the working copy '{}' on this machine, whose local layer cannot be read ({reason}) and which therefore counts as holding it and not sharing it",
-                    owner.project.display()
-                ),
-                Alive::Remote { .. } => format!(
-                    "the working copy '{}' on machine '{}', {sharing} by its record in the owner marker",
+        .map(|(owner, why)| match why {
+            Alive::Declares => format!(
+                "the working copy '{}' on this machine",
+                owner.project.display()
+            ),
+            Alive::Unreadable(reason) => format!(
+                "the working copy '{}' on this machine, whose local layer cannot be read ({reason}) and which therefore counts as holding it",
+                owner.project.display()
+            ),
+            Alive::Remote { maybe_this_machine } => {
+                let maybe = if *maybe_this_machine {
+                    " (its record names this project and this host name with another machine identifier — perhaps it is this machine whose identifier changed)"
+                } else {
+                    ""
+                };
+                format!(
+                    "the working copy '{}' on machine '{}'{maybe}",
                     owner.project.display(),
                     owner.host.as_deref().unwrap_or("with an unknown host name")
-                ),
+                )
             }
         })
         .collect::<Vec<_>>()
-        .join("; ");
-        let this_copy = match this {
-        ThisConsent::Shares => "this working copy shares it",
-        ThisConsent::DoesNotShare => "this working copy does not share it",
-        ThisConsent::ConnectionString => {
-            "a connection string does not share an infobase — pass its name (declared in v8project.local.yaml with shared: true)"
-        }
-    };
-        let release = alive
+        .join("; ")
+}
+
+/// Как освободить базу от живых копий из метки.
+fn describe_release(alive: &[(&OwnerRecord, &Alive)]) -> String {
+    alive
         .iter()
         .map(|(owner, why)| match why {
-            Alive::Declares { .. } | Alive::Unreadable(_) => format!(
+            Alive::Declares | Alive::Unreadable(_) => format!(
                 "remove the infobase from v8project.local.yaml of '{}' or remove that working copy",
                 owner.project.display()
             ),
-            Alive::Remote {
-                maybe_this_machine: false,
-            } => format!(
-                "on another machine only by hand: delete its record of '{}' from the owner marker",
-                owner.project.display()
-            ),
-            Alive::Remote {
-                maybe_this_machine: true,
-            } => format!(
-                "the record of '{}' names this project and this host name with another machine identifier — perhaps it is this machine whose identifier changed: then delete that record from the owner marker",
+            Alive::Remote { .. } => format!(
+                "delete the record of '{}' from the owner marker by hand",
                 owner.project.display()
             ),
         })
         .collect::<Vec<_>>()
-        .join("; ");
-        let unrecorded = unrecorded
-            .map(|error| {
-                format!(
-                ". The consent of this working copy cannot be recorded in the owner marker: {error}"
-            )
-            })
-            .unwrap_or_default();
-        UseCaseError::new(
-        UseCaseErrorKind::InfobaseHeld,
-        format!(
-            "cannot start {command_name}: the infobase '{}' is held by {holders}; {this_copy}. A command that writes a development infobase runs only in the working copy that holds it, or on a shared infobase when every working copy that holds it and this one share it, and repeating it does not help. \
-             Ways out for this working copy: its own clean infobase — `v8-runner init --infobase <connection string>` points infobases.origin at an infobase of its own (the previous section stays as upstream), then `v8-runner infobase create`; \
-             a copy of the infobase with its data — the same `init --infobase <connection string>`, then `v8-runner infobase create --from upstream`, which snapshots this infobase while it is free and creates the new one from the image; \
-             an infobase deployed from a reference image — the same `init --infobase <connection string>`, then `v8-runner infobase restore --input <reference>.dt --create`. \
-             To free the infobase: {release}. Owner marker: '{}'{unrecorded}",
-            base_dir.display(),
-            marker_path.display()
-        ),
+        .join("; ")
+}
+
+/// Предупреждение команды записи на базе другой копии: чья база, что команда её меняет,
+/// где метка, как освободить базу и как завести свою. Метку команда не меняет: владельцем
+/// остаётся прежняя копия.
+fn another_copy_warning(
+    command_name: &str,
+    base_dir: &Path,
+    marker_path: &Path,
+    alive: &[(&OwnerRecord, &Alive)],
+) -> String {
+    format!(
+        "{command_name} writes the infobase '{}' of another working copy: it is held by {}. \
+         The command changes that working copy's infobase, and its owner stays as it is in the owner marker '{}'. \
+         To free the infobase: {}. \
+         Ways to an infobase of this working copy's own (`init --infobase` keeps the previous section as upstream): {}",
+        base_dir.display(),
+        describe_holders(alive),
+        marker_path.display(),
+        describe_release(alive),
+        crate::domain::next_step::ways_to_an_own_infobase("upstream")
     )
-    .with_next(NextStep::command("infobase create"))
-    }
 }
 
 /// Почему метку не прочитать.
@@ -666,28 +525,32 @@ impl MarkerReadError {
                 format!("the owner marker next to '{beside}' cannot be understood: {error}")
             }
             Self::UnknownVersion(version) => format!(
-                "the owner marker next to '{beside}' has version {version}, and this runner knows version {OWNER_MARKER_VERSION}; a marker of another version is not rewritten — use a runner that knows it, or remove the marker by hand"
+                "the owner marker next to '{beside}' has version {version}, and this runner knows version {OWNER_MARKER_VERSION} (and reads version {LEGACY_OWNER_MARKER_VERSION}); a marker of another version is not rewritten — use a runner that knows it, or remove the marker by hand"
             ),
         }
     }
 }
 
 /// Метка рядом с базой: `None`, если её ещё нет. Версия сверяется раньше формы: незнакомая
-/// версия называется как версия, а не как непонятная форма.
+/// версия называется как версия, а не как непонятная форма. Метка прежней версии читается в
+/// нынешней форме.
 fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
     let Some(raw) = read_optional(path).map_err(MarkerReadError::Io)? else {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_slice(&raw)
+    let mut value: serde_json::Value = serde_json::from_slice(&raw)
         .map_err(|error| MarkerReadError::Malformed(error.to_string()))?;
-    match value.get("version") {
-        Some(version) if version.as_u64() == Some(u64::from(OWNER_MARKER_VERSION)) => {}
-        Some(version) => return Err(MarkerReadError::UnknownVersion(version.clone())),
-        None => {
-            return Err(MarkerReadError::Malformed(
-                "the marker names no version".to_owned(),
-            ))
+    let Some(version) = value.get("version").cloned() else {
+        return Err(MarkerReadError::Malformed(
+            "the marker names no version".to_owned(),
+        ));
+    };
+    match version.as_u64() {
+        Some(known) if known == u64::from(OWNER_MARKER_VERSION) => {}
+        Some(legacy) if legacy == u64::from(LEGACY_OWNER_MARKER_VERSION) => {
+            keep_fields_of_this_version(&mut value);
         }
+        _ => return Err(MarkerReadError::UnknownVersion(version)),
     }
     let marker: OwnerMarker = serde_json::from_value(value)
         .map_err(|error| MarkerReadError::Malformed(error.to_string()))?;
@@ -704,6 +567,25 @@ fn read_marker(path: &Path) -> Result<Option<OwnerMarker>, MarkerReadError> {
         )));
     }
     Ok(Some(marker))
+}
+
+/// Метка прежней версии в нынешней форме: у записей остаются только поля нынешней формы,
+/// остальное раннер пропускает; проверяет запись затем нынешняя форма. Поля повторяют
+/// `OwnerRecord`: форма версии 1 закрыта, и список читает только её.
+fn keep_fields_of_this_version(value: &mut serde_json::Value) {
+    const FIELDS: [&str; 4] = ["machine", "host", "project", "since"];
+    if let Some(owners) = value
+        .get_mut("owners")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for owner in owners
+            .iter_mut()
+            .filter_map(serde_json::Value::as_object_mut)
+        {
+            owner.retain(|field, _| FIELDS.contains(&field.as_str()));
+        }
+    }
+    value["version"] = serde_json::Value::from(OWNER_MARKER_VERSION);
 }
 
 /// Пишет метку заменой файла целиком: читатель без замка видит прежнюю метку или новую.
@@ -763,23 +645,18 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
+    /// Копия в `root`, чей местный слой объявляет `base`.
     fn project(root: &Path, base: &Path) -> AppConfig {
-        shared_project(root, base, false)
-    }
-
-    /// Копия в `root`, чей местный слой объявляет `base` с согласием `shared` делить её.
-    fn shared_project(root: &Path, base: &Path, shared: bool) -> AppConfig {
         fs::create_dir_all(root).expect("project");
         fs::write(
             root.join("v8project.local.yaml"),
             format!(
-                "infobases:\n  origin:\n    connection: 'File={}'\n    shared: {shared}\n",
+                "infobases:\n  origin:\n    connection: 'File={}'\n",
                 base.display()
             ),
         )
         .expect("local layer");
-        let mut infobase = InfobaseConfig::file(format!("File={}", base.display()));
-        infobase.shared = shared;
+        let infobase = InfobaseConfig::file(format!("File={}", base.display()));
         AppConfig {
             base_path: fs::canonicalize(root).expect("canonical project"),
             work_path: root.join("work"),
@@ -797,7 +674,7 @@ mod tests {
     }
 
     fn base(dir: &Path) -> PathBuf {
-        let base = dir.join("shared").join("ib");
+        let base = dir.join("bases").join("ib");
         fs::create_dir_all(&base).expect("base");
         fs::canonicalize(base).expect("canonical base")
     }
@@ -843,15 +720,20 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(marker(&base), recorded, "the owner is not written again");
 
-        let refused = check_as(
+        let warned = check_as(
             &on("machine-a", "new-name", &second),
             &second,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
         )
-        .expect_err("a live copy of the renamed machine holds the base");
-        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseHeld);
+        .expect("a write on a base of a live copy runs");
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(
+            warned[0].contains(&first.base_path.display().to_string()),
+            "{warned:?}"
+        );
+        assert_eq!(marker(&base), recorded, "the owner stays");
 
         fs::remove_dir_all(dir.path().join("first")).expect("remove the first copy");
         let notes = check_as(
@@ -1055,21 +937,26 @@ mod tests {
         )
         .expect("run");
 
-        let refused = check_as(
+        let recorded = marker(&base);
+
+        let warned = check_as(
             &on("new-machine", "host", &config),
             &config,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
         )
-        .expect_err("another machine holds the base");
+        .expect("a write on a base of another machine runs");
 
-        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseHeld);
+        assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(
-            refused
-                .message()
-                .contains("perhaps it is this machine whose identifier changed"),
-            "{refused}"
+            warned[0].contains("perhaps it is this machine whose identifier changed"),
+            "{warned:?}"
+        );
+        assert_eq!(
+            marker(&base),
+            recorded,
+            "the record of the other machine stays"
         );
     }
 
@@ -1106,7 +993,7 @@ mod tests {
         let config = project(&dir.path().join("copy"), &base);
         let marker_path = owner_marker_path(&base).expect("marker path");
         let text = format!(
-            "{{\"version\":1,\"owners\":[{{\"machine\":\"{}\",\"project\":\"copy\",\"shared\":false,\"since\":\"2026-10-01T00:00:00Z\"}}]}}",
+            "{{\"version\":2,\"owners\":[{{\"machine\":\"{}\",\"project\":\"copy\",\"since\":\"2026-10-01T00:00:00Z\"}}]}}",
             super::machine_hash("machine-a")
         );
         fs::write(&marker_path, &text).expect("marker");
@@ -1128,224 +1015,204 @@ mod tests {
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), text);
     }
 
-    fn consents(base: &Path) -> Vec<(PathBuf, bool)> {
-        marker(base)
-            .owners
-            .into_iter()
-            .map(|owner| (owner.project, owner.shared))
-            .collect()
-    }
-
-    /// Копия другой машины сообщает согласие меткой: отозвав его, она получает отказ, и её
-    /// запись в метке обновляется под замком; после этого отказывает и эта машина и
-    /// называет её. До её команды отзыв отсюда не виден.
+    /// Метка версии 1 читается: копия, уже записанная в ней, метку не
+    /// переписывает; запись другой живой копии в ней идёт с предупреждением и метку не трогает;
+    /// смена ушедшего владельца переписывает её формой нынешней версии.
     #[test]
-    fn a_remote_copy_that_withdrew_consent_stops_this_machine_after_its_next_write() {
+    fn a_marker_of_version_one_is_read() {
         let dir = tempdir().expect("tempdir");
         let base = base(dir.path());
-        let here = shared_project(&dir.path().join("here"), &base, true);
-        let there = shared_project(&dir.path().join("there"), &base, true);
-        let this_machine = on("machine-a", "here-host", &here);
-        let other_machine = on("machine-b", "there-host", &there);
+        let config = project(&dir.path().join("copy"), &base);
+        let marker_path = owner_marker_path(&base).expect("marker path");
+        let legacy = |owners: &[(&str, &Path)]| {
+            let owners = owners
+                .iter()
+                .map(|(machine, project)| {
+                    serde_json::json!({
+                        "machine": super::machine_hash(machine),
+                        "host": "host",
+                        "project": project,
+                        "shared": true,
+                        "since": "2026-10-01T00:00:00Z"
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({"version": 1, "owners": owners}).to_string()
+        };
 
-        check_as(
-            &this_machine,
-            &here,
+        let own = legacy(&[("machine-a", &config.base_path)]);
+        fs::write(&marker_path, &own).expect("marker");
+        let notes = check_as(
+            &on("machine-a", "host", &config),
+            &config,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
         )
-        .expect("this machine takes the base");
-        check_as(
-            &other_machine,
-            &there,
+        .expect("this copy holds the base");
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), own);
+
+        let remote = legacy(&[("machine-b", Path::new("/srv/elsewhere"))]);
+        fs::write(&marker_path, &remote).expect("marker");
+        let warned = check_as(
+            &on("machine-a", "host", &config),
+            &config,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
         )
-        .expect("the other machine shares it");
-        assert_eq!(
-            consents(&base),
-            [
-                (here.base_path.clone(), true),
-                (there.base_path.clone(), true)
+        .expect("a write on a base of another copy runs");
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("/srv/elsewhere"), "{warned:?}");
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), remote);
+
+        let gone = dir.path().join("gone");
+        fs::write(&marker_path, legacy(&[("machine-a", &gone)])).expect("marker");
+        let notes = check_as(
+            &on("machine-a", "host", &config),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("a gone owner is replaced");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&marker_path).expect("marker")).expect("json");
+        assert_eq!(written["version"], 2, "{written}");
+        let mut fields: Vec<&str> = written["owners"][0]
+            .as_object()
+            .expect("record")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(fields, ["host", "machine", "project", "since"], "{written}");
+        assert_eq!(marker(&base).owners[0].project, config.base_path);
+        let validator =
+            jsonschema::validator_for(&generated_owner_marker_schema()).expect("schema");
+        assert!(validator.is_valid(&written), "{written}");
+    }
+
+    /// Метка с несколькими владельцами — обычный случай: если среди них есть другая живая
+    /// копия, команда записи этой копии идёт с обычным предупреждением, и метка не меняется.
+    #[test]
+    fn a_marker_with_this_copy_and_another_live_one_warns() {
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let config = project(&dir.path().join("copy"), &base);
+        let marker_path = owner_marker_path(&base).expect("marker path");
+        let marker = serde_json::json!({
+            "version": 2,
+            "owners": [
+                {"machine": super::machine_hash("machine-a"), "host": "host", "project": config.base_path, "since": "2026-10-01T00:00:00Z"},
+                {"machine": super::machine_hash("machine-b"), "host": "build-agent", "project": "/srv/elsewhere", "since": "2026-10-01T00:00:00Z"}
             ]
+        })
+        .to_string();
+        fs::write(&marker_path, &marker).expect("marker");
+
+        let warned = check_as(
+            &on("machine-a", "host", &config),
+            &config,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("the write runs");
+
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(
+            warned[0].contains("To free the infobase: delete the record of '/srv/elsewhere'"),
+            "{warned:?}"
+        );
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), marker);
+    }
+
+    /// Отказ копии без своей базы и предупреждение о базе другой копии называют одни и те же
+    /// выходы: их текст строит один формирователь, и каждый из двух его берёт.
+    #[test]
+    fn the_refusal_and_the_warning_name_the_same_ways_out() {
+        use crate::domain::next_step::ways_to_an_own_infobase;
+        let refusal = crate::config::validate::ConfigValidationError::OriginNotDeclared {
+            declared: "test".to_owned(),
+        }
+        .to_string();
+        assert!(
+            refusal.contains(&ways_to_an_own_infobase("<infobase>")),
+            "{refusal}"
         );
 
-        let there = shared_project(&dir.path().join("there"), &base, false);
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let first = project(&dir.path().join("first"), &base);
+        let second = project(&dir.path().join("second"), &base);
         check_as(
-            &this_machine,
-            &here,
+            &on("machine-a", "host", &first),
+            &first,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
         )
-        .expect("the withdrawal is not seen before the other copy reports it");
-
-        let refused = check_as(
-            &other_machine,
-            &there,
+        .expect("the first copy takes the base");
+        let warned = check_as(
+            &on("machine-a", "host", &second),
+            &second,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
         )
-        .expect_err("the copy that withdrew is refused");
-        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseHeld);
+        .expect("the write runs");
         assert!(
-            refused
-                .message()
-                .contains(&here.base_path.display().to_string()),
-            "{refused}"
+            warned[0].contains(&ways_to_an_own_infobase("upstream")),
+            "{warned:?}"
         );
-        assert_eq!(
-            consents(&base),
-            [
-                (here.base_path.clone(), true),
-                (there.base_path.clone(), false)
-            ],
-            "the refused copy reports its withdrawal through the marker"
-        );
-
-        let refused = check_as(
-            &this_machine,
-            &here,
-            "push",
-            BaseAccess::Writes,
-            OwnerCheck::Run,
-        )
-        .expect_err("this machine sees the withdrawal");
-        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseHeld);
         assert!(
-            refused.message().contains(&format!(
-                "'{}' on machine 'there-host', which does not share it",
-                there.base_path.display()
+            warned[0].contains(&format!(
+                "remove the infobase from v8project.local.yaml of '{}'",
+                first.base_path.display()
             )),
-            "{refused}"
+            "{warned:?}"
         );
     }
 
-    /// Превью и команда чтения согласие в метку не пишут: его сообщает только прогон команды
-    /// записи под замком базы.
+    /// Превью команды записи на базе другой копии говорит то же предупреждение, что прогон, и
+    /// метку не трогает.
     #[test]
-    fn only_a_run_of_a_write_reports_consent() {
+    fn a_preview_on_a_base_of_another_copy_warns_like_the_run() {
         let dir = tempdir().expect("tempdir");
         let base = base(dir.path());
-        let here = shared_project(&dir.path().join("here"), &base, true);
-        let there = shared_project(&dir.path().join("there"), &base, true);
-        let this_machine = on("machine-a", "here-host", &here);
-        let other_machine = on("machine-b", "there-host", &there);
+        let first = project(&dir.path().join("first"), &base);
+        let second = project(&dir.path().join("second"), &base);
         check_as(
-            &this_machine,
-            &here,
+            &on("machine-a", "host", &first),
+            &first,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
         )
-        .expect("run");
-        check_as(
-            &other_machine,
-            &there,
-            "push",
-            BaseAccess::Writes,
-            OwnerCheck::Run,
-        )
-        .expect("run");
+        .expect("the first copy takes the base");
         let recorded = marker(&base);
 
-        let there = shared_project(&dir.path().join("there"), &base, false);
-        check_as(
-            &other_machine,
-            &there,
+        let preview = check_as(
+            &on("machine-a", "host", &second),
+            &second,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Preview,
         )
-        .expect_err("the preview names the refusal");
-        check_as(
-            &other_machine,
-            &there,
-            "infobase.dump",
-            BaseAccess::Reads,
-            OwnerCheck::Run,
-        )
-        .expect("a read passes");
-
-        assert_eq!(marker(&base), recorded);
-    }
-
-    /// Единственный владелец, сменивший согласие, обновляет свою запись: копия с другой
-    /// машины узнает о нём из метки.
-    #[test]
-    fn a_sole_owner_records_its_changed_consent() {
-        let dir = tempdir().expect("tempdir");
-        let base = base(dir.path());
-        let config = shared_project(&dir.path().join("copy"), &base, false);
-        let this = on("machine-a", "host", &config);
-        check_as(&this, &config, "push", BaseAccess::Writes, OwnerCheck::Run).expect("run");
-        assert_eq!(consents(&base), [(config.base_path.clone(), false)]);
-
-        let config = shared_project(&dir.path().join("copy"), &base, true);
-        let notes =
-            check_as(&this, &config, "push", BaseAccess::Writes, OwnerCheck::Run).expect("run");
-        assert!(notes.is_empty(), "{notes:?}");
-        assert_eq!(consents(&base), [(config.base_path.clone(), true)]);
-    }
-
-    /// Согласие, которое не записать в метку при отказе, отказ не подменяет: ответ остаётся
-    /// `InfobaseHeld` и говорит, что согласие не записано. Каталог рядом с базой закрыт на
-    /// запись; под root права не действуют, и тогда проверке не на чем стоять.
-    #[cfg(unix)]
-    #[test]
-    fn a_consent_that_cannot_be_recorded_keeps_the_held_refusal() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempdir().expect("tempdir");
-        let base = base(dir.path());
-        let here = shared_project(&dir.path().join("here"), &base, true);
-        let there = shared_project(&dir.path().join("there"), &base, true);
-        let other_machine = on("machine-b", "there-host", &there);
-        check_as(
-            &on("machine-a", "here-host", &here),
-            &here,
+        .expect("preview");
+        let run = check_as(
+            &on("machine-a", "host", &second),
+            &second,
             "push",
             BaseAccess::Writes,
             OwnerCheck::Run,
         )
         .expect("run");
-        check_as(
-            &other_machine,
-            &there,
-            "push",
-            BaseAccess::Writes,
-            OwnerCheck::Run,
-        )
-        .expect("run");
-        let recorded = marker(&base);
-        let there = shared_project(&dir.path().join("there"), &base, false);
-        let beside = base.parent().expect("parent").to_path_buf();
-        fs::set_permissions(&beside, fs::Permissions::from_mode(0o555)).expect("chmod");
-        let probe = beside.join("probe");
-        if fs::write(&probe, "").is_ok() {
-            fs::remove_file(&probe).expect("remove probe");
-            fs::set_permissions(&beside, fs::Permissions::from_mode(0o755)).expect("chmod back");
-            eprintln!("skipped: permissions do not apply to this user");
-            return;
-        }
 
-        let refused = check_as(
-            &other_machine,
-            &there,
-            "push",
-            BaseAccess::Writes,
-            OwnerCheck::Run,
-        );
-        fs::set_permissions(&beside, fs::Permissions::from_mode(0o755)).expect("chmod back");
-
-        let refused = refused.expect_err("the copy that withdrew is refused");
-        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseHeld);
-        assert!(
-            refused.message().contains("cannot be recorded"),
-            "{refused}"
-        );
+        assert_eq!(preview, run);
         assert_eq!(marker(&base), recorded);
     }
 }

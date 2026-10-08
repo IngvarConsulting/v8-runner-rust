@@ -333,11 +333,6 @@ pub enum ConfigValidationError {
     InfobasesBelongToTheLocalLayer,
 
     #[error(
-        "`{key}` is declared only in v8project.local.yaml: each working copy gives it for itself, and it is not committed with the project — move `{key}` to infobases.<name> of v8project.local.yaml"
-    )]
-    InfobaseKeyBelongsToTheLocalLayer { key: &'static str },
-
-    #[error(
         "{file} declares both `infobase` and `infobases`: `infobase` is the one-cycle synonym for `infobases.origin`, keep one of them"
     )]
     InfobaseKeysMixed { file: String },
@@ -367,7 +362,8 @@ pub enum ConfigValidationError {
     InfobaseNotDeclared { name: String, declared: String },
 
     #[error(
-        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`). Ways out for a working copy without an infobase of its own: its own clean infobase — `v8-runner init --infobase <connection string>`, then `v8-runner infobase create`; a copy of a declared infobase with its data — `v8-runner init --infobase <connection string>`, then `v8-runner infobase create --from <infobase>`; an infobase deployed from a reference image — `v8-runner init --infobase <connection string>`, then `v8-runner infobase restore --input <reference>.dt --create`"
+        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`). Ways out for a working copy without an infobase of its own: {ways}",
+        ways = crate::domain::next_step::ways_to_an_own_infobase("<infobase>")
     )]
     OriginNotDeclared { declared: String },
 
@@ -2993,7 +2989,6 @@ mod tests {
                 web: None,
                 standalone: None,
                 cluster: None,
-                shared: false,
             },
             infobases: Default::default(),
             infobase_name: None,

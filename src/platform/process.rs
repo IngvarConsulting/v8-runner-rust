@@ -3651,8 +3651,12 @@ mod tests {
     fn read_pid(path: &Path) -> u32 {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
-            if let Ok(pid) = fs::read_to_string(path) {
-                return pid.trim().parse().expect("child pid");
+            // The helper creates the file before it writes the PID: an empty read is not yet an answer.
+            if let Some(pid) = fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
             }
             thread::sleep(Duration::from_millis(10));
         }
