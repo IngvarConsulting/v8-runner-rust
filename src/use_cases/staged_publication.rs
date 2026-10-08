@@ -5,7 +5,7 @@ use chrono::Utc;
 
 use crate::support::error::AppError;
 use crate::support::fs::{
-    ensure_dir, is_known_tool_name, metadata_sidecar_path, read_temp_dir_metadata,
+    ensure_dir, is_known_tool_name, metadata_sidecar_path, move_file, read_temp_dir_metadata,
     remove_path_if_exists, replace_dir_atomically, replace_file_atomically,
     write_temp_dir_metadata, ReplaceFileFailureState, TempDirKind, TempDirMetadata,
 };
@@ -165,6 +165,49 @@ impl StagedPublication {
         })
     }
 
+    /// Кладёт промежуточный каталог поверх целевого и убирает промежуточный: файлы
+    /// переносятся на место переименованием, то, чего в выгрузке нет, остаётся. Так ложится
+    /// полная выгрузка `ibcmd`, которая в непустой каталог не пишет
+    /// (`INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE`).
+    ///
+    /// Файл `last` (файл версий) переносится последним: по нему следующая выгрузка решает,
+    /// что каталог совпадает с базой. Оборванный перенос этот файл в целевом каталоге
+    /// удаляет, и следующая выгрузка снова идёт полной. Возвращает предупреждение, если
+    /// промежуточный каталог убрать не удалось: его узнает уборка по описанию.
+    pub fn lay_over_dir(
+        &self,
+        context: &ExecutionContext,
+        error_prefix: &str,
+        last: &str,
+    ) -> Result<Option<String>, AppError> {
+        if let Some(error) = interruption_before_publish(context, "staged directory overlay") {
+            return Err(self.cleanup_failure(error));
+        }
+        let laid =
+            move_tree_over(&self.staging_path, &self.target_path, Path::new(last)).and_then(|()| {
+                let staged_last = self.staging_path.join(last);
+                if staged_last.exists() {
+                    move_file(&staged_last, &self.target_path.join(last))?;
+                }
+                Ok(())
+            });
+        if let Err(error) = laid {
+            let _ = remove_path_if_exists(&self.target_path.join(last));
+            return Err(self.cleanup_failure(AppError::Runtime(format!(
+                "{error_prefix}: {error}; the version file was removed, so the next dump is full"
+            ))));
+        }
+        let sidecar = metadata_sidecar_path(&self.staging_path);
+        let cleanup = remove_path_if_exists(&self.staging_path)
+            .and_then(|()| remove_path_if_exists(&sidecar));
+        Ok(cleanup.err().map(|error| {
+            format!(
+                "failed to remove the dump stage '{}': {error}; the next run removes it once it is stale",
+                self.staging_path.display()
+            )
+        }))
+    }
+
     pub fn publish_file(
         &self,
         context: &ExecutionContext,
@@ -236,6 +279,26 @@ impl StagedPublication {
         )
         .map_err(|error| AppError::Runtime(format!("{message}: {error}")))
     }
+}
+
+/// Переносит дерево `source` поверх `target`, кроме файла `skip` в корне: каталоги
+/// создаются, файлы заменяются переименованием, лишнее в `target` остаётся.
+fn move_tree_over(source: &Path, target: &Path, skip: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if Path::new(&name) == skip {
+            continue;
+        }
+        let destination = target.join(&name);
+        if entry.file_type()?.is_dir() {
+            move_tree_over(&entry.path(), &destination, Path::new(""))?;
+        } else {
+            move_file(&entry.path(), &destination)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn cleanup_staging_path(staging_path: &Path, error: AppError) -> AppError {

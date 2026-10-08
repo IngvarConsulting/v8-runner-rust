@@ -1,7 +1,9 @@
 ---
 id: INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/423
+check:
+  - src/use_cases/dump_config.rs::an_ibcmd_full_dump_lands_over_a_non_empty_directory_through_a_stage
+  - src/use_cases/dump_config.rs::a_failed_ibcmd_stage_dump_leaves_the_directory_untouched
+  - src/use_cases/dump_config.rs::a_broken_overlay_removes_the_version_file_so_the_next_dump_is_full
 ---
 
 # Полная выгрузка `ibcmd` ложится поверх каталога через промежуточный
@@ -12,4 +14,6 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/423
 файлом или с чужой версией формата — `ibcmd` делает в пустой промежуточный каталог раннера, а
 раннер переносит результат поверх каталога набора так же, как Конфигуратор пишет его на место:
 файлы выгрузки переписаны, лишнее и посторонние файлы, `.git` в их числе, остаются
-(`INV.CLI.PULL-LAYS-THE-DUMP-OVER-THE-DIRECTORY`). Решение владельца от 08.10.2026.
+(`INV.CLI.PULL-LAYS-THE-DUMP-OVER-THE-DIRECTORY`). Файл версий ложится последним: оборванный
+перенос его удаляет, и следующая выгрузка снова полная, а не по файлу, под которым лежат не
+все объекты. Решение владельца от 08.10.2026.
