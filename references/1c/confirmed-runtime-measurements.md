@@ -1537,3 +1537,317 @@ Docker) не остановил. Администратор центрально
 Ответ на `disconnect-ib` только после конца выгрузки значит, что shell исполняет команды по
 очереди и разрыв, а не `disconnect-ib`, решает исход. Во втором случае раннер по решению
 владельца не рвёт сессию, а ждёт ответа агента на текущую команду.
+
+## Версия формата файла версий
+
+Замер 07.10.2026. Задача: [#403](https://github.com/IngvarConsulting/v8-runner-rust/issues/403). Платформы
+8.3.27.2074 и 8.5.4.1878, macOS, файловые базы с фикстурой `tests/fixtures/designer/configuration`.
+`<W>` — рабочий каталог замера. Версия формата живёт в двух местах: атрибут `version` корня
+`ConfigDumpInfo.xml` и тот же атрибут у `MetaDataObject` каждого XML-файла выгрузки.
+
+**Что пишут исполнители.**
+
+| платформа | Конфигуратор `/DumpConfigToFiles` | `ibcmd config export` | агент `config dump-config-to-files` |
+| --- | --- | --- | --- |
+| 8.3.27.2074 | 2.20 | 2.20 | 2.20 |
+| 8.5.4.1306, 8.5.4.1683, 8.5.4.1878 | 2.22 (1878) | 2.22 | не мерено |
+
+Выгрузки Конфигуратора, `ibcmd` и агента одной базы побайтно равны (`diff -rq` пуст), включая
+`ConfigDumpInfo.xml`. `ibcmd config export info` пишет тот же `ConfigDumpInfo.xml` (`--out` —
+каталог, не файл: путь к файлу даёт rc=255 «Файл не обнаружен '<out>/ConfigDumpInfo.xml'»; без
+`--out` — в stdout). На 8.5.1.x стенда Конфигуратора и `ibcmd` нет — только тонкий клиент.
+
+**Выгрузка по изменившемуся.** В копию выгрузки подставлялась версия в `ConfigDumpInfo.xml`;
+файлы выгрузки — той же платформы. «Перезаписано» — файлы с новым временем изменения.
+
+| версия в файле | Конфигуратор `-update` | `-update -force` | `ibcmd export --sync` | `--sync --force` | `-getChanges` / `export status` |
+| --- | --- | --- | --- | --- | --- |
+| своя (2.20 на 8.3.27, 2.22 на 8.5.4) | rc=0, обычная | — | rc=0 | — | обычный ответ |
+| старше своей (2.10, 2.17, 2.19 на 8.3.27; 2.20, 2.21 на 8.5.4) | **rc=101**, ничего не перезаписано | rc=0, полная: все файлы, файл версий получает свою версию | rc=255 | rc=0, полная | **rc=0, пусто — «изменений нет»** |
+| атрибута `version` нет | rc=101 | rc=0, полная | rc=255 | rc=0, полная | rc=0, пусто |
+| новее своей (2.21, 2.99, 3.0 на 8.3.27; 2.23 на 8.5.4; настоящая выгрузка 8.5.4 на 8.3.27) | rc=1 | rc=1, `-force` не помогает | rc=255 | rc=255 | rc=1 / rc=255 |
+
+Тексты. Старше: Конфигуратор — «Обновление XML выгрузки невозможно: версия формата платформы
+отличается от версии формата выгрузки.» / «Для синхронизации необходимо выполнить полную
+выгрузку.»; `ibcmd` — «Версия формат выгрузки и платформы не совпадают. Требуется
+экспортировать конфигурацию полностью.». Новее: все — «Неизвестная версия формата <v>
+загружаемого файла <путь>/ConfigDumpInfo.xml». Агент 8.3.27 отвечает теми же текстами, но оба
+случая у него одного рода — `ConfigFilesError`; `--update --force` на старшей версии делает
+полную выгрузку.
+
+Главное: **код 101 у Конфигуратора — структурный признак «формат выгрузки старше платформы»**,
+отличный от rc=1 «неизвестная, новее». У `ibcmd` оба случая — rc=255, различает их только проза.
+**Прогноз не видит чужую старую версию**: `-getChanges` и `config export status` по файлу 2.17
+отвечают «изменений нет», а следующий `-update` отказывает. Запись раздела «`-getChanges`» о
+версии 2.17 («принят, обычный список») верна только для `-getChanges`: сам `-update` такой файл
+не принимает.
+
+**Загрузка из каталога с чужой версией** (`/LoadConfigFromFiles`, `-updateConfigDumpInfo`,
+`ibcmd config import`; одинаково):
+
+| вход | исход |
+| --- | --- |
+| версия новее только в `ConfigDumpInfo.xml` (2.21 на 8.3.27) | rc=0, загружено: версию файла версий загрузка не проверяет |
+| версия новее во всех XML (2.21, 3.0; настоящая выгрузка 8.5.4 на 8.3.27) | Конфигуратор rc=1, `ibcmd` rc=255: «Неизвестная версия формата 2.22 загружаемого файла <путь>/Configuration.xml» |
+| версия старше во всех XML (2.17 на 8.3.27; выгрузка 8.3.27 на 8.5.4) | rc=0, загружено |
+| `ConfigDumpInfo.xml` нет | rc=0 |
+
+`-updateConfigDumpInfo` переписывает `ConfigDumpInfo.xml` **в исходном каталоге** со своей
+версией (2.21 → 2.20); без этого ключа загрузка каталог не трогает, `ibcmd config import`
+тоже.
+
+**`ibcmd config export` без `--sync`** (п. 4 задачи):
+
+| каталог | без ключей | `--force` |
+| --- | --- | --- |
+| не существует или пуст | rc=0, полная выгрузка, каталог создаётся | так же |
+| прежняя выгрузка или любые посторонние файлы | **rc=255, «Каталог <путь> не пуст.»**, ничего не тронуто | rc=255, то же: `--force` без `--sync` непустой каталог не принимает |
+
+Конфигуратор `/DumpConfigToFiles` без `-update` в каталог с посторонними файлами выгружает
+поверх, rc=0, посторонние файлы остаются.
+
+**`ibcmd config export --sync`** (п. 5 задачи):
+
+| каталог | `--sync` | `--sync --force` |
+| --- | --- | --- |
+| своя выгрузка, изменений нет | rc=0, ничего не перезаписано, посторонние файлы целы | rc=0, то же |
+| нет `ConfigDumpInfo.xml` (каталог пуст, с выгрузкой без файла версий, с посторонними файлами) | rc=255, «В каталоге выгрузки отсутствует файл <путь>/ConfigDumpInfo.xml. Требуется экспортировать конфигурацию полностью.» | не мерено |
+| каталога нет | rc=255, «Каталог <путь> не существует.» | не мерено |
+| удалён объект в конфигурации (`export status` — `modified: all`) | **rc=255, «Требуется экспортировать конфигурацию полностью.»** | rc=0, полная |
+| версия формата старше | rc=255 (см. выше) | rc=0, полная |
+
+**`--sync --force`, переходя на полную выгрузку, очищает каталог целиком**: исчезают
+посторонние файлы, скрытые каталоги, `.git` со всем содержимым, `.gitignore`, `README.md`.
+Проверено и на старшей версии формата, и на удалении объекта. Конфигуратор в тех же случаях
+(`-update` при `FullDump`, `-update -force` при старшей версии) переписывает только файлы
+выгрузки и удаляет файлы удалённых объектов; `.git`, `.gitignore`, `README.md`, скрытые
+каталоги и посторонние файлы остаются.
+
+```text
+1cv8 DESIGNER /F <W>/ib /DisableStartupDialogs /DisableStartupMessages /DumpConfigToFiles <W>/v/D2.17 -update [-force] /Out …
+1cv8 DESIGNER /F <W>/ib … /DumpConfigToFiles <W>/v/Dg2.17 -update -getChanges <W>/out/ch.txt /Out …
+1cv8 DESIGNER /F <W>/ibL … /LoadConfigFromFiles <W>/v/L_2.21_all [-updateConfigDumpInfo] /Out …
+ibcmd config export --db-path=<W>/ib [--force] <W>/x/e_dump
+ibcmd config export --sync [--force] --db-path=<W>/ib <W>/v/I2.17
+ibcmd config export status --db-path=<W>/ib --base=<W>/v/Is2.17/ConfigDumpInfo.xml
+ibcmd config export info --db-path=<W>/ib --out=<W>/infod
+ibcmd config import --db-path=<W>/ibL <W>/v/L_2.21_all
+```
+
+**Вывод для потребителей.**
+
+- Таблица «платформа → версия формата» (#214, `src/platform/dump_format.rs`): 8.3.27 → 2.20,
+  8.5.4 → 2.22. Выгрузка по изменившемуся принимает **только свою** версию: старшая даёт отказ
+  (rc=101 / rc=255), а не полную выгрузку; полную даёт только `-force` / `--sync --force`.
+- Отказ загрузки по формату новее определяется версией в XML-файлах (`Configuration.xml`), а
+  не в `ConfigDumpInfo.xml`: каталог с новой версией только в файле версий платформа
+  загружает. Сверка раннера по `ConfigDumpInfo.xml` строже платформы, а без файла версий её
+  нечем делать.
+- Прогноз режима (#166) надо дополнять сверкой версии: по чужой старой версии
+  `-getChanges` и `export status` отвечают «изменений нет».
+- `ibcmd config export` без `--sync` в непустой каталог **всегда** отказывает: выгрузка
+  `ibcmd` поверх каталога без файла версий (`config_export_over`, #217) так не работает;
+  полная выгрузка `ibcmd` годится только в пустой каталог (как `config_export_full` в
+  промежуточный).
+- `ibcmd --sync` после удаления объекта отказывает, а не переходит на полную выгрузку, как
+  Конфигуратор.
+- `ibcmd config export --sync --force` в рабочем дереве уничтожает репозиторий. Раннер этого
+  сочетания сейчас не строит; строить его по каталогу пользователя нельзя.
+
+## Прогноз режима выгрузки: язык и словарь `export status`
+
+Замер 07.10.2026. Задача: [#166](https://github.com/IngvarConsulting/v8-runner-rust/issues/166).
+Продолжение раздела «Список изменений выгрузки: `-getChanges`». Сценарии на копиях файловой
+базы: правка модуля (частичная загрузка `Module.bsl`), новый справочник (частичная загрузка
+`Configuration.xml` и его XML), удалённый объект `Бот1`.
+
+**`-getChanges` от языка не зависит.** Файл при `/L ru`, `/L en` и `/L de` побайтно один и тот
+же в каждом сценарии (8.3.27): `New: Catalog.Справочник9`, `Modified: CommonModule.ОбщийМодуль1`,
+`FullDump`, пусто (только BOM). Имена классов метаданных — английские, имена объектов — как в
+конфигурации.
+
+**Словарь `ibcmd config export status`** — одинаковый на 8.3.27.2074 и 8.5.4.1878, от `LANG`
+и `LC_ALL` не зависит (побайтно):
+
+| изменение | полная форма | `--short` |
+| --- | --- | --- |
+| новый объект | `added: Catalog.Справочник9` | `A: Catalog.Справочник9` |
+| изменённый объект | `modified: CommonModule.ОбщийМодуль1` | `M: CommonModule.ОбщийМодуль1` |
+| удалён объект (у Конфигуратора `FullDump`) | `modified: all` | `M: all` |
+| изменений нет | пусто | пусто |
+
+Ключ отделён от значения двоеточием и пробелом; записи `deleted` не встретилось. Код возврата
+во всех случаях 0. С `--out` файл в UTF-8 с BOM и CRLF; без `--out` тот же список идёт в
+stdout без BOM, строки через LF, stderr пуст. Порядок: сначала `added`, затем `modified` по
+имени — как у `-getChanges`.
+
+```text
+1cv8 DESIGNER /F <W>/ibM /DisableStartupDialogs /DisableStartupMessages /L en /DumpConfigToFiles <W>/d0 -getChanges <W>/out/gc.txt /Out …
+ibcmd config export status --db-path=<W>/ibM --base=<W>/d0/ConfigDumpInfo.xml [--short] [--out=<W>/out/st.txt]
+```
+
+**Вывод для потребителей.** Прогноз разбирается по ключу до двоеточия: `FullDump` у
+Конфигуратора и значение `all` у ключа `modified` у `ibcmd` — «полная»; `New`/`Modified` и
+`added`/`modified` — «по изменившемуся». Язык Конфигуратора закреплять не нужно. Версию формата
+файла версий прогноз не проверяет (см. «Версия формата файла версий»).
+
+## Сборка `make` во временной базе
+
+Замер 07.10.2026. Задача: [#416](https://github.com/IngvarConsulting/v8-runner-rust/issues/416).
+Платформа 8.3.27.2074, macOS. Командные строки — в той форме, которую строят
+`src/use_cases/throwaway_infobase.rs` и `src/platform/{designer,ibcmd}.rs`. Каждый пакет
+проверен: загружен `/LoadCfg` в чистую базу (`.cfe` — `-Extension Расширение1` в базу с
+конфигурацией), выгружен `/DumpConfigToFiles` и сравнен с исходниками.
+
+| сочетание | исход |
+| --- | --- |
+| 1. `CREATEINFOBASE File='<ib>'`, затем `DESIGNER /IBConnectionString File=<ib> /LoadConfigFromFiles <xml>` (без `-updateConfigDumpInfo` и `/UpdateDBCfg`), `/DumpCfg <f>.cf`; затем расширение `/LoadConfigFromFiles <xml_cfe> -Extension Расширение1`, `/DumpCfg <f>.cfe -Extension Расширение1` | все rc=0; `.cf` 114 987 байт, `.cfe` 6 164; содержимое равно исходникам |
+| 2. `ibcmd infobase --data <d> --db-path <ib> create`, затем `ibcmd infobase --data <d> --db-path <ib> config import --out=<f> <xml>` для `.cf` и `.cfe` | все rc=0; `.cf` 116 029 байт, `.cfe` 6 824; содержимое равно исходникам; `<d>` получает `ipc-data log-data perf-data session-data temp users-data` |
+| 3а. `/LoadExternalDataProcessorOrReportFromFiles <root.xml> <f>.epf` (и `.erf`) в базе из п. 1: конфигурация загружена, не применена | rc=0 |
+| 3б. то же для обработки с реквизитом типа `CatalogRef.Справочник1` | rc=0; реквизит с этим типом есть в пакете (выгружен обратно `/DumpExternalDataProcessorOrReportToFiles`) |
+| 3в. обработка с `CatalogRef.Справочник1` в пустой базе, без конфигурации | **rc=1**, «Неизвестное имя типа - CatalogRef.Справочник1» / «Ошибка загрузки документа.»; обработка без ссылочных типов там же — rc=0 |
+| 4. Конфигуратор в базе, созданной `ibcmd infobase --data <d> --db-path <ib> create`: `/LoadConfigFromFiles`, `/DumpCfg`, расширение, внешняя обработка с `CatalogRef` | все rc=0; `.cf` по содержимому равен выгрузке; после Конфигуратора `ibcmd config import --out` в той же базе — rc=0 |
+
+`CREATEINFOBASE` без `Locale` создаёт базу в локали системы: в протоколе
+`File='…';Locale = "en_AU";`. Пакеты обоих путей не детерминированы по байтам (размеры
+плавают), равенство — только по выгрузке, как в разделе «Сборка пакета из XML».
+
+```text
+1cv8 CREATEINFOBASE "File='<W>/m/ib1'" /Out …
+1cv8 DESIGNER /DisableStartupDialogs /DisableStartupMessages /IBConnectionString File=<W>/m/ib1 /LoadConfigFromFiles <W>/src_cfg /Out …
+1cv8 DESIGNER … /IBConnectionString File=<W>/m/ib1 /DumpCfg <W>/m/out/d.cf /Out …
+1cv8 DESIGNER … /IBConnectionString File=<W>/m/ib1 /LoadExternalDataProcessorOrReportFromFiles <W>/m/extref/ВнешняяОбработка1.xml <W>/m/out/pref.epf /Out …
+ibcmd infobase --data <W>/m/data2 --db-path <W>/m/ib2 create
+ibcmd infobase --data <W>/m/data2 --db-path <W>/m/ib2 config import --out=<W>/m/out/i.cf <W>/src_cfg
+```
+
+**Вывод для потребителей.** Все четыре сочетания #416 подтверждены. Внешней обработке со
+ссылками на объекты конфигурации основная конфигурация в базе нужна, применять её не нужно.
+Конфигуратор работает в базе, созданной `ibcmd`, поэтому внешние наборы можно собирать и в
+ней.
+
+## Признаки «есть непринятое» и «обновлено динамически»
+
+Замер 07.10.2026. Задача: [#412](https://github.com/IngvarConsulting/v8-runner-rust/issues/412).
+Платформа 8.3.27.2074 (признак непринятого — и 8.5.4.1878), macOS, копии файловой базы.
+
+**Проба изнутри.** Внешняя обработка, запущенная `1cv8 ENTERPRISE /F <ib> /Execute <probe>.epf`,
+пишет в файл значения `КонфигурацияИзменена()` и
+`КонфигурацияБазыДанныхИзмененаДинамически()` и завершает сеанс (около 7 с на запуск).
+**Снаружи** — `ibcmd infobase --data <d> --db-path <ib> config save <f>` против `config save
+--db <f>` (около 6 с на вызов). `config save` детерминирован: два вызова дают одни и те же
+байты, `--db` тоже, а Конфигуратор `/DumpCfg` и `/DumpDBCfg` дают те же байты, что `ibcmd`.
+
+| состояние базы | `КонфигурацияИзменена()` | `…ИзмененаДинамически()` в новом сеансе | `save` = `save --db` |
+| --- | --- | --- | --- |
+| применена (`/UpdateDBCfg`) | false | false | да |
+| частичная загрузка модуля без применения | true | false | нет |
+| полная загрузка того же дерева без применения | true | false | нет |
+| правка модуля и обратная правка, без применения | true | false | нет |
+| непринятое, затем `ibcmd config reset` | false | false | да |
+| `ibcmd config apply --dynamic=force` | false | **false** | да |
+| динамическое применение, затем новое непринятое | true | false | нет |
+| динамическое, затем `apply --dynamic=disable` | false | false | да |
+| `/UpdateDBCfg -Dynamic+` и `-Dynamic-` | false | false | да |
+
+На 8.5.4: принятая база — три `save` (два основных, один `--db`) побайтно равны; после
+частичной загрузки без применения основная отличается, `--db` прежняя.
+
+**Динамическое обновление снаружи не видно.** `КонфигурацияБазыДанныхИзмененаДинамически()`
+относится к сеансу: сеанс, открытый до `ibcmd config apply --dynamic=force` (применение при
+открытом сеансе файловой базы — rc=0), через 25 с получает `true`, а любой новый сеанс —
+`false`. Идентификатор поколения после динамического и обычного применения одного вида (32
+hex и `00000000`), сохранённые `.cf` основной и `--db` после динамического применения равны.
+Постоянного признака «база обновлена динамически» в базе не нашлось ни у одного исполнителя.
+Агент не мерен.
+
+```text
+1cv8 ENTERPRISE /F <W>/q/s1 /DisableStartupDialogs /DisableStartupMessages /Execute <W>/q/probe.epf
+ibcmd infobase --data <W>/q/data --db-path <W>/q/s1 config save <W>/q/s1m.cf
+ibcmd infobase --data <W>/q/data --db-path <W>/q/s1 config save --db <W>/q/s1d.cf
+ibcmd infobase --data <W>/q/data --db-path <W>/q/ib config apply --force --dynamic=force
+1cv8 DESIGNER /F <W>/q/s0 … /DumpCfg <W>/q/s0_dc1.cf | /DumpDBCfg <W>/q/s0_ddb1.cf
+```
+
+**Вывод для потребителей.** «Есть непринятое» (#216, `status --deep`) — структурный признак
+есть: побайтное неравенство `config save` и `config save --db` (`/DumpCfg` и `/DumpDBCfg` у
+Конфигуратора). Во всех девяти состояниях он совпал с `КонфигурацияИзменена()`, включая
+загрузку того же содержимого — это «записано, но не применено», а не «отличается по смыслу».
+Цена — два сохранения базы. «Обновлено динамически» как состояние базы платформа наружу не
+отдаёт: признак есть только внутри сеанса, начатого до обновления.
+
+## `ibcmd-rs` 0.4.0: сборка и разборка пакетов без платформы
+
+Замер 07.10.2026. Задача: [#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413).
+Выпуск `v0.4.0` из `github.com/Untru/ibcmd-rs`, архив `ibcmd-rs-0.4.0-x86_64-unknown-linux-gnu.zip`
+(SHA-256 `f9b892cb…888db5` совпал с опубликованным). Запуск — контейнер `ubuntu:24.04`
+linux/amd64 под эмуляцией на macOS, без сети. Входы — выгрузка 8.3.27.2074 той же фикстуры
+`tests/fixtures/designer/*` и пакеты, собранные платформой (раздел «Сборка `make` во временной
+базе»).
+
+**Распространение.** Сборки есть только для Windows x64 и Linux x64; для macOS и arm64 сборок
+нет. Linux-сборке нужна glibc ≥ 2.39: в Ubuntu 22.04 (glibc 2.35, образы стенда) она не
+запускается — «version `GLIBC_2.39' not found». **Лицензии нет**: в репозитории нет файла
+лицензии, GitHub лицензию не определяет (404), у `Cargo.toml` и SBOM выпуска поле лицензии
+пусто. Сам README называет проект экспериментом до версии 1.0.
+
+**CLI.** `ibcmd-rs --version` → `ibcmd-rs 0.4.0`. Сборка `.cf` из XML —
+`cf bootstrap [--platform <8.3.27|8.5.1|сборка>] <каталог> <файл>`; существующий файл не
+перезаписывается. Разборка — `cf export [--platform …] <файл> <каталог>`, тип пакета
+определяется сам. Ответ — JSON в stdout при успехе и в stderr при отказе (`ok`, `errors[]` с
+`code`, `message`, `element`). Коды: 0 — успех, 2 — отказ сборки и ошибка командной строки
+(clap); код 1 «не поддерживается» в замере не встретился. Ключа `--base-free`, описанного в
+README и `docs/COMMANDS.md` ветки `master`, у выпуска 0.4.0 нет: «unexpected argument
+'--base-free'», rc=2.
+
+**Сборка `.cf` из XML не работает на фикстуре.** `cf bootstrap` на дереве, которое выгрузила
+сама платформа 8.3.27.2074 (`--platform` не задан, `8.3.27` или `8.3.27.2214` — одинаково),
+отказывает с rc=2 до записи файла. Ниже — объекты, на которых он отказывал, если по очереди
+убирать каждый следующий:
+
+| объект | отказ |
+| --- | --- |
+| регистры бухгалтерии, накопления и расчёта, бизнес-процесс, справочник, планы счетов, видов расчёта и видов характеристик | `bootstrap_compile_failed`: `InvalidEnvelope("business object property inventory is not exact")` |
+| бот, общий реквизит, общая форма, общий макет | `uses unsupported family \`Bot\`` (`CommonAttribute`, `CommonForm`, `CommonTemplate`) |
+| `Configuration.xml` после удаления объектов | `Missing("uuid")` |
+
+Обычный справочник из выгрузки 8.3.27.2074 не собирается. `.cfe` и `.epf` тем же
+`bootstrap` не мерили: сборка основной конфигурации не прошла.
+
+**Разборка пакета в XML работает частично.** `cf export` пакетов, собранных платформой:
+
+| пакет | rc | итог |
+| --- | --- | --- |
+| `.cfe` (`Расширение1`) | 0 | дерево равно исходникам, кроме `ConfigDumpInfo.xml` |
+| `.epf`, в том числе с реквизитом `CatalogRef.Справочник1`; `.erf` | 0 | побайтно равно выгрузке платформы `/DumpExternalDataProcessorOrReportToFiles` |
+| `.cf` фикстуры | **0, `ok: true`** | 47 файлов из 51: нет `ChartsOfAccounts`, `ChartsOfCalculationTypes`, `FilterCriteria`, `WebSocketClients`; в `Configuration.xml` нет `ChildObjects`; ещё 7 файлов отличаются. Пропуски видны только в `export.storage.entries[]` (`disposition: "opaque"`, `message: "… not written …"`; итог `supported: 46, opaque: 7, failed: 0`). Ни код возврата, ни `ok`, ни `errors` о них не говорят |
+
+```text
+docker run --rm --platform linux/amd64 --network none -v <S>:/s ubuntu:24.04 /s/irs/x/ibcmd-rs-0.4.0-x86_64-unknown-linux-gnu/ibcmd-rs …
+ibcmd-rs cf bootstrap [--platform 8.3.27] /s/w/d0 /s/irs/out/b.cf        # rc=2
+ibcmd-rs cf bootstrap --base-free --platform 8.3.27 /s/w/d0 /s/irs/out/b.cf   # rc=2, нет ключа
+ibcmd-rs cf export --platform 8.3.27 /s/irs/out/d.cf /s/irs/out/x_d.cf    # rc=0, 7 элементов opaque
+ibcmd-rs cf export --platform 8.3.27 /s/irs/out/p.epf /s/irs/out/x_p.epf  # rc=0, равно платформе
+```
+
+**Вывод для потребителей.** Адаптер `make` через `ibcmd-rs` (#413) на выпуске 0.4.0 строить не
+на чем: сборка `.cf` из XML отказывает на обычной конфигурации 8.3.27.2074, ключ `--base-free`
+не выпущен. В `convert` пакет → XML (#236) годятся `.cfe`, `.epf` и `.erf`. Разборку `.cf`
+раннеру без своей проверки полноты принимать нельзя: неполное дерево приходит с rc=0 и
+`ok: true`, пропуски названы только в `opaque`. Без лицензии `tools download ibcmd-rs` и
+распространение исключены; остаётся путь к утилите из настроек. Windows и macOS не мерены:
+macOS-сборки нет, Windows на стенде нет.
+
+**Перепроверка на `master` ibcmd-rs** (`e382f21`, 02.10.2026; собран `cargo build --release` на
+macOS arm64 за 2 мин; сам называет себя `0.4.0`). `cf bootstrap --base-free --platform 8.3.27`:
+
+| вход | исход |
+| --- | --- |
+| выгрузка фикстуры 8.3.27.2074 целиком | rc=2, `base_free_compile_failed`, четыре строки: `WebSocketClient` не знает ни `Configuration.xml`, ни сам объект; «no base-free compiler for ExternalDataSource yet»; право роли `ExclusiveModeTerminationAtSessionStart` — «unknown right» |
+| то же без WebSocket-клиента, внешнего источника данных и этого права | rc=0. `.cf` платформа загружает (`/LoadCfg`) и применяет (`/UpdateDBCfg`), её выгрузка совпадает с деревом файл в файл |
+| XML расширения | rc=0, `ok: true`, но `/LoadCfg -Extension` отвечает rc=1 «Ожидается файл расширения конфигурации». У пакета `storage_version` 5 и корень `root`/`version`/`versions`; у `.cfe` Конфигуратора — 6 и `configinfo` |
+| XML внешней обработки | rc=2, ищет `Configuration.xml`: сборки `.epf`/`.erf` из XML нет |
+
+`cf export` на `master` даёт то же, что 0.4.0: `.cf` неполон при `ok: true`, `.cfe`, `.epf` и
+`.erf` выгружаются верно. Задачи автору — Untru/ibcmd-rs#432–#442; решение владельца —
+встраивание ждёт выпуска с исправлениями (#413).
