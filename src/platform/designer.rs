@@ -392,7 +392,11 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpIB".to_owned());
-        args.push(target_file.display().to_string());
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(target_file)
+                .display()
+                .to_string(),
+        );
         self.run(&args)
     }
 
@@ -543,6 +547,95 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    #[derive(Default)]
+    struct CapturingDumpRunner(
+        std::cell::RefCell<Option<crate::platform::process::ProcessRequest>>,
+    );
+
+    #[cfg(windows)]
+    impl ProcessRunner for CapturingDumpRunner {
+        fn run_with_policy(
+            &self,
+            request: &crate::platform::process::ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
+        {
+            self.0.replace(Some(request.clone()));
+            Ok(crate::platform::process::ProcessResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: None,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &crate::platform::process::ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
+        {
+            panic!("DT export must run synchronously")
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dt_export_passes_windows_drive_path_without_verbatim_prefix() {
+        assert_dt_export_target(
+            r"\\?\C:\Каталог с пробелами\база.dt",
+            r"C:\Каталог с пробелами\база.dt",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dt_export_passes_windows_unc_path_without_verbatim_prefix() {
+        assert_dt_export_target(
+            r"\\?\UNC\server\share\Каталог с пробелами\база.dt",
+            r"\\server\share\Каталог с пробелами\база.dt",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dt_export_preserves_regular_windows_target() {
+        assert_dt_export_target(
+            r"C:\Каталог с пробелами\база.dt",
+            r"C:\Каталог с пробелами\база.dt",
+        );
+    }
+
+    #[cfg(windows)]
+    fn assert_dt_export_target(target: &str, expected: &str) {
+        let runner = CapturingDumpRunner::default();
+        let dsl = DesignerDsl::new(
+            "1cv8.exe".into(),
+            V8Connection::from_connection_string("File=C:/ib"),
+            &runner,
+            None,
+            ProcessExecutionPolicy::default(),
+        );
+        dsl.dump_infobase(Path::new(target)).expect("dump infobase");
+
+        let request = runner.0.borrow();
+        let request = request.as_ref().expect("process request");
+        assert_eq!(
+            request.args,
+            [
+                "DESIGNER",
+                "/DisableStartupDialogs",
+                "/DisableStartupMessages",
+                "/IBConnectionString",
+                "File=C:/ib",
+                "/DumpIB",
+                expected,
+            ],
+            "DT target passed to Designer",
+        );
+    }
 
     #[test]
     fn status_mapping_matches_designer_exit_codes() {
