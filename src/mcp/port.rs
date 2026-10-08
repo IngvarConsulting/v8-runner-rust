@@ -21,18 +21,20 @@ use crate::use_cases::transport::{dispatch_with_workspace_lock, BoundaryNote};
 
 /// Ответ порта: исход сценария и то, что граница сказала сверх него (база другой копии,
 /// взятие базы без метки, смена ушедшего владельца) — те же тексты, что командная строка
-/// кладёт первыми в `warnings` своего ответа.
+/// кладёт в `warnings` своего ответа.
 #[derive(Debug)]
 pub struct PortAnswer<T> {
     pub outcome: UseCaseResult<T>,
-    pub warnings: Vec<String>,
+    pub notes: Vec<BoundaryNote>,
 }
 
+/// Исход без сказанного границей — у поддельного порта тестов.
+#[cfg(test)]
 impl<T> From<UseCaseResult<T>> for PortAnswer<T> {
     fn from(outcome: UseCaseResult<T>) -> Self {
         Self {
             outcome,
-            warnings: Vec::new(),
+            notes: Vec::new(),
         }
     }
 }
@@ -145,9 +147,9 @@ fn with_workspace_lock<T>(
     base: BaseAccess,
     run: impl FnOnce() -> UseCaseResult<T>,
 ) -> PortAnswer<T> {
-    let mut warnings = Vec::new();
+    let mut boundary = Vec::new();
     let before_dispatch = |notes: &[BoundaryNote]| {
-        warnings = boundary_warnings(notes);
+        boundary = notes.to_vec();
         Ok(())
     };
     let outcome =
@@ -155,12 +157,10 @@ fn with_workspace_lock<T>(
             Ok(result) => result,
             Err(refusal) => Err(UseCaseFailure::without_payload(refusal.error)),
         };
-    PortAnswer { outcome, warnings }
-}
-
-/// Тексты границы для `warnings` ответа инструмента, в порядке командной строки.
-pub(crate) fn boundary_warnings(notes: &[BoundaryNote]) -> Vec<String> {
-    notes.iter().map(|note| note.message.clone()).collect()
+    PortAnswer {
+        outcome,
+        notes: boundary,
+    }
 }
 
 impl<T> McpUseCasePort for Arc<T>

@@ -659,16 +659,17 @@ fn an_mcp_tool_on_a_base_of_another_copy_runs_like_the_cli() {
     let second = stand.copy("second");
     succeeded(&first.run(&["push"]));
     let marker = stand.marker_text();
-    let cli_warning = assert_warned(&second.run(&["push"]), "push", &first, &stand);
+    let pushed = succeeded(&second.run(&["push"]));
+    another_copy_warning(&pushed, "push", &first, &stand);
 
     let answer = support::mcp::call_tool(&second.config, "build_project", json!({}));
 
     assert!(!answer.is_error, "{}", answer.envelope);
     assert_eq!(stand.marker_text(), marker);
     assert_eq!(
-        warnings(&answer.envelope).first(),
-        Some(&cli_warning),
-        "the tool answer leads with the CLI warning: {}",
+        warnings(&answer.envelope),
+        warnings(&pushed),
+        "the tool answer warns as the CLI does: {}",
         answer.envelope
     );
 }

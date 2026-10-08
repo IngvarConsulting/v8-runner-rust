@@ -36,6 +36,7 @@ use crate::use_cases::request::{
     TestScopeRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
+use crate::use_cases::transport::BoundaryNote;
 
 type McpCommandEnvelope = Envelope<Value>;
 
@@ -80,7 +81,7 @@ where
             .port
             .build_project(&context, self.config, &use_case_request);
         with_boundary_warnings(
-            answer.warnings,
+            answer.notes,
             match answer.outcome {
                 Ok(result) => ok_envelope(CommandName::Build, result.duration_ms, result)
                     .map_err(McpServiceError::Internal),
@@ -107,7 +108,7 @@ where
             .port
             .run_tests(&context, &effective_config, &use_case_request);
         with_boundary_warnings(
-            answer.warnings,
+            answer.notes,
             match answer.outcome {
                 Ok(result) => {
                     mcp_value_envelope(test_envelope(&result)).map_err(McpServiceError::Internal)
@@ -153,7 +154,7 @@ where
             .port
             .run_tests(&context, self.config, &use_case_request);
         with_boundary_warnings(
-            answer.warnings,
+            answer.notes,
             match answer.outcome {
                 Ok(result) => {
                     mcp_value_envelope(test_envelope(&result)).map_err(McpServiceError::Internal)
@@ -220,7 +221,7 @@ where
             .port
             .dump_config(&context, self.config, &use_case_request);
         with_boundary_warnings(
-            answer.warnings,
+            answer.notes,
             match answer.outcome {
                 Ok(result) => ok_envelope(CommandName::Dump, result.duration_ms, result)
                     .map_err(McpServiceError::Internal),
@@ -254,7 +255,7 @@ where
             .port
             .launch_app(&context, self.config, &use_case_request);
         with_boundary_warnings(
-            answer.warnings,
+            answer.notes,
             match answer.outcome {
                 Ok(result) => ok_envelope(
                     CommandName::Launch,
@@ -290,7 +291,7 @@ where
         let answer = self
             .port
             .check_syntax(&context, self.config, &use_case_request);
-        with_boundary_warnings(answer.warnings, map_syntax_use_case_result(answer.outcome))
+        with_boundary_warnings(answer.notes, map_syntax_use_case_result(answer.outcome))
     }
 
     /// Executes the `check_syntax_designer_config` MCP tool.
@@ -315,7 +316,7 @@ where
             .port
             .check_syntax(&context, self.config, &use_case_request);
         with_boundary_warnings(
-            answer.warnings,
+            answer.notes,
             match answer.outcome {
                 Ok(result) => ok_envelope(CommandName::Syntax, result.duration_ms, result)
                     .map_err(McpServiceError::Internal),
@@ -355,7 +356,7 @@ where
             .port
             .check_syntax(&context, self.config, &use_case_request);
         with_boundary_warnings(
-            answer.warnings,
+            answer.notes,
             match answer.outcome {
                 Ok(result) => ok_envelope(CommandName::Syntax, result.duration_ms, result)
                     .map_err(McpServiceError::Internal),
@@ -801,28 +802,43 @@ fn mcp_value_envelope<T: Serialize>(
     })
 }
 
-/// Ответ инструмента несёт сказанное границей первым в `warnings`, как ответ командной
-/// строки той же команды — и в успехе, и в отказе.
+/// Ответ инструмента несёт сказанное границей в `warnings` так же, как ответ командной
+/// строки той же команды: после предупреждений самой команды — и в успехе, и в отказе.
+/// Ответа без конверта у границы нет, и сказанное ею остаётся в журнале сервера.
 pub(crate) fn with_boundary_warnings(
-    warnings: Vec<String>,
+    notes: Vec<BoundaryNote>,
     response: McpServiceResult<McpCommandEnvelope>,
 ) -> McpServiceResult<McpCommandEnvelope> {
-    if warnings.is_empty() {
+    if notes.is_empty() {
         return response;
     }
-    let lead = |envelope: &mut McpCommandEnvelope| {
-        envelope.warnings.splice(0..0, warnings);
-    };
     match response {
         Ok(mut envelope) => {
-            lead(&mut envelope);
+            follow_with_notes(&mut envelope, notes);
             Ok(envelope)
         }
         Err(McpServiceError::Business(mut failure)) => {
-            lead(&mut failure.response);
+            follow_with_notes(&mut failure.response, notes);
             Err(McpServiceError::Business(failure))
         }
-        Err(internal) => Err(internal),
+        Err(internal) => {
+            log_undelivered_notes(&notes);
+            Err(internal)
+        }
+    }
+}
+
+fn follow_with_notes(envelope: &mut McpCommandEnvelope, notes: Vec<BoundaryNote>) {
+    envelope
+        .warnings
+        .extend(notes.into_iter().map(|note| note.message));
+}
+
+/// Сказанное границей, которому не досталось конверта: граница уже могла сменить метку,
+/// и это не должно пропасть бесследно.
+pub(crate) fn log_undelivered_notes(notes: &[BoundaryNote]) {
+    for note in notes {
+        tracing::warn!("{}", note.message);
     }
 }
 
@@ -1131,6 +1147,15 @@ mod profile_tests {
     }
 }
 
+/// Сказанное границей в тестах ответа.
+#[cfg(test)]
+pub(crate) fn boundary_note(message: &str) -> BoundaryNote {
+    BoundaryNote {
+        phase: crate::domain::infobase_export::InfobaseTransferPhase::InfobaseOwner,
+        message: message.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod envelope_tests {
     use super::*;
@@ -1157,10 +1182,10 @@ mod envelope_tests {
         assert_eq!(rendered["kind"], "runtime", "{rendered}");
     }
 
-    /// Сказанное границей идёт первым в `warnings` и отказа: ответ, который не удался после
-    /// записи в базу другой копии, всё равно её называет.
+    /// Сказанное границей есть и в `warnings` отказа, после предупреждений команды: ответ,
+    /// который не удался после записи в базу другой копии, всё равно её называет.
     #[test]
-    fn a_boundary_warning_leads_a_refusal_too() {
+    fn a_boundary_warning_reaches_a_refusal_too() {
         let refusal = map_use_case_failure_envelope::<(), _, _>(
             crate::use_cases::result::UseCaseFailure::without_payload(UseCaseError::new(
                 UseCaseErrorKind::Validation,
@@ -1175,12 +1200,12 @@ mod envelope_tests {
             },
         );
 
-        let answered = with_boundary_warnings(vec!["boundary".to_owned()], Err(refusal));
+        let answered = with_boundary_warnings(vec![boundary_note("boundary")], Err(refusal));
 
         let Err(McpServiceError::Business(failure)) = answered else {
             panic!("a refusal stays a refusal");
         };
-        assert_eq!(failure.response.warnings, ["boundary", "own"]);
+        assert_eq!(failure.response.warnings, ["own", "boundary"]);
     }
 }
 
@@ -1239,6 +1264,7 @@ mod tests {
         dump_requests: RefCell<Vec<(ExecutionContext, DumpRequest)>>,
         launch_requests: RefCell<Vec<(ExecutionContext, LaunchRequest)>>,
         syntax_requests: RefCell<Vec<(ExecutionContext, SyntaxRequest)>>,
+        test_notes: Vec<crate::use_cases::transport::BoundaryNote>,
     }
 
     impl StubPort {
@@ -1305,11 +1331,15 @@ mod tests {
                 .borrow_mut()
                 .push((context.clone(), request.clone()));
             self.test_configs.borrow_mut().push(config.clone());
-            self.test_result
+            let outcome = self
+                .test_result
                 .borrow_mut()
                 .take()
-                .expect("missing test result")
-                .into()
+                .expect("missing test result");
+            PortAnswer {
+                outcome,
+                notes: self.test_notes.clone(),
+            }
         }
 
         fn dump_config(
@@ -1478,6 +1508,40 @@ mod tests {
         assert!(requests[0].1.full);
         assert_eq!(requests[0].1.scope, TestScopeRequest::All);
         assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::YaXUnit);
+    }
+
+    /// Сказанное границей идёт в `warnings` после предупреждений самой команды — порядок
+    /// ответа командной строки (`Presenter::print_envelope`), в успехе и в отказе.
+    #[test]
+    fn boundary_notes_follow_the_command_warnings_like_the_cli() {
+        for succeeded in [true, false] {
+            let mut result = sample_test_result(succeeded);
+            result.warnings = vec!["own".to_owned()];
+            let outcome = if succeeded {
+                Ok(result)
+            } else {
+                Err(UseCaseFailure::with_payload(
+                    UseCaseError::new(UseCaseErrorKind::Validation, "refused"),
+                    result,
+                ))
+            };
+            let port = StubPort {
+                test_notes: vec![super::boundary_note("boundary")],
+                ..StubPort::with_test_result(outcome)
+            };
+            let config = sample_config();
+            let service = McpService::with_port(&config, port);
+
+            let envelope = match service
+                .run_all_tests(McpCallContext::stdio(), &McpRunAllTestsRequest::default())
+            {
+                Ok(envelope) => envelope,
+                Err(McpServiceError::Business(failure)) => failure.response,
+                Err(McpServiceError::Internal(error)) => panic!("{error:?}"),
+            };
+
+            assert_eq!(envelope.warnings, ["own", "boundary"], "ok={succeeded}");
+        }
     }
 
     #[test]

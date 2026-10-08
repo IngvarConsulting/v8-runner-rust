@@ -36,7 +36,7 @@ use url::Url;
 use crate::config::model::AppConfig;
 use crate::mcp::context::McpCallContext;
 use crate::mcp::error::{McpInternalError, McpServiceResult};
-use crate::mcp::port::{boundary_warnings, DefaultMcpUseCasePort, McpUseCasePort};
+use crate::mcp::port::{DefaultMcpUseCasePort, McpUseCasePort};
 use crate::mcp::request::{
     McpBuildProjectRequest, McpCheckSyntaxDesignerConfigRequest,
     McpCheckSyntaxDesignerModulesRequest, McpCheckSyntaxEdtRequest, McpDumpConfigRequest,
@@ -44,8 +44,8 @@ use crate::mcp::request::{
 };
 use crate::mcp::service::McpService;
 use crate::mcp::service::{
-    execution_context, map_syntax_use_case_result, normalize_check_syntax_edt_request,
-    with_boundary_warnings,
+    execution_context, log_undelivered_notes, map_syntax_use_case_result,
+    normalize_check_syntax_edt_request, with_boundary_warnings,
 };
 use crate::mcp::telemetry::{
     McpEdtSessionObserver, McpTelemetry, SemaphoreWaitErrorKind, SemaphoreWaitOutcome,
@@ -487,11 +487,15 @@ impl McpToolServer {
         )
         .await
         {
-            Ok((joined, notes)) => joined
-                .map(|outcome| (outcome, boundary_warnings(&notes)))
-                .map_err(|_| {
-                    execution_error(ErrorReason::JoinFailure, ExecutionStage::Running, None)
-                }),
+            Ok((Ok(outcome), notes)) => Ok((outcome, notes)),
+            Ok((Err(_), notes)) => {
+                log_undelivered_notes(&notes);
+                Err(execution_error(
+                    ErrorReason::JoinFailure,
+                    ExecutionStage::Running,
+                    None,
+                ))
+            }
             Err(error) => {
                 permit.take();
                 return map_tool_result(map_syntax_use_case_result(Err(
@@ -501,20 +505,23 @@ impl McpToolServer {
         };
         permit.take();
 
-        let (outcome, warnings) = result?;
+        let (outcome, notes) = result?;
         match outcome {
             Ok(use_case_result) => map_tool_result(with_boundary_warnings(
-                warnings,
+                notes,
                 map_syntax_use_case_result(use_case_result),
             )),
-            Err(missed) => Err(execution_error(
-                match missed.reason() {
-                    EdtSessionMiss::Cancelled => ErrorReason::Cancelled,
-                    EdtSessionMiss::TimedOut => ErrorReason::Timeout,
-                },
-                ExecutionStage::Queued,
-                Some(edt_timeout),
-            )),
+            Err(missed) => {
+                log_undelivered_notes(&notes);
+                Err(execution_error(
+                    match missed.reason() {
+                        EdtSessionMiss::Cancelled => ErrorReason::Cancelled,
+                        EdtSessionMiss::TimedOut => ErrorReason::Timeout,
+                    },
+                    ExecutionStage::Queued,
+                    Some(edt_timeout),
+                ))
+            }
         }
     }
 }

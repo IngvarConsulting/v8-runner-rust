@@ -176,7 +176,7 @@ v8-runner infobase create
   deleted or no longer declaring the base) is replaced automatically and named in `warnings`.
   `--infobase <connection string>` never becomes an owner. An unreadable marker or one of an
   unknown version stops a write with `runtime_failure`. MCP tools behave the same and carry the
-  same texts first in `warnings`.
+  same texts in `warnings`, after the command's own.
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
