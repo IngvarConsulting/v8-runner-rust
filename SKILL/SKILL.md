@@ -144,7 +144,7 @@ v8-runner infobase create
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
   `pull`, `download`; `upload`/`check` — Designer only; `extensions` — file `ibcmd → agent`,
   cluster agent only. The agent drops out of `push`/`pull` for `format: EDT` and out of `push`
-  with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared; if it does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster still lists installed extensions through `ibcmd` (needs `dbms`, #431). `providers.<op>: designer` restores the Designer-first choice;
+  with `tools.client_mcp.extension`. The managed agent gets a one-time ED25519 host key (pinned) and a free loopback port unless `tools.designer_agent.host-key`/`port` are declared; if it does not start, the command fails (`environment_unavailable`, receipt `selected: agent`) with no fallback to the batch Designer. `upload .cfe` on a cluster or standalone server lists installed extensions through the agent, so it needs neither `ibcmd` nor `dbms`; if the agent cannot start, the upload fails `environment` before loading. `providers.<op>: designer` restores the Designer-first choice;
   a cluster base refuses `providers.<op>: ibcmd` for these operations.
 - `error.kind` and `error.code` are closed enumerations. Within `capability`, the code says why:
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
@@ -176,8 +176,8 @@ v8-runner infobase create
   is left as is; the owner's next `push` then refuses `non_fast_forward`. A gone owner (directory
   deleted or no longer declaring the base) is replaced automatically and named in `warnings`.
   `--infobase <connection string>` never becomes an owner. An unreadable marker or one of an
-  unknown version stops a write with `runtime_failure`. MCP tools behave the same; their warning
-  goes to the server log only (#404).
+  unknown version stops a write with `runtime_failure`. MCP tools behave the same and carry the
+  same texts in `warnings`, after the command's own.
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps

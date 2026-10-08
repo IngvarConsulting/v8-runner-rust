@@ -105,6 +105,22 @@ impl ManagedSpawnResult {
         result
     }
 
+    /// Состояние выхода, если процесс уже завершился сам; `None` — ещё работает, ручки нет
+    /// или ожидание не ответило (это пишется в журнал).
+    pub fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        let spawned = self.child.as_mut()?;
+        match spawned.child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::warn!(
+                    pid = self.result.pid,
+                    "failed to poll the managed process: {error}"
+                );
+                None
+            }
+        }
+    }
+
     /// Terminate the managed process and wait for it to exit.
     pub fn terminate(mut self) {
         if let Some(mut spawned) = self.child.take() {

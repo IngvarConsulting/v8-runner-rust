@@ -359,6 +359,12 @@ pub enum AgentError {
     #[error("managed agent did not accept a session within {timeout_ms} ms; last: {last}")]
     StartupTimedOut { timeout_ms: u64, last: String },
 
+    /// Процесс агента завершился, не приняв ни одной сессии. Код выхода причину не
+    /// различает (замер #429: и занятый порт, и нечитаемый ключ — rc=0), поэтому ответ
+    /// приводит строку `/Out` агента как есть.
+    #[error("managed agent exited ({status}) before accepting a session; /Out: {out}")]
+    ExitedBeforeSession { status: String, out: String },
+
     #[error("agent base dir '{base_dir}' has no directory for user '{user}': {detail}")]
     UserDirUnknown {
         base_dir: PathBuf,
@@ -643,6 +649,17 @@ impl AgentSession {
     /// Открывает сессию и переводит её в машинный режим. Успех означает, что
     /// аутентификация прошла и агент ответил JSON, — этим и доказывается готовность.
     pub fn open(request: &AgentSessionRequest, policy: &WaitPolicy) -> Result<Self, AgentError> {
+        Self::open_within(request, policy, None)
+    }
+
+    /// То же, но рукопожатие транспорта ограничено `handshake`: слушатель, который принял
+    /// соединение и молчит, — не агент, и его ответа ждать нельзя. Истёкший срок отвечает
+    /// `Unreachable`, как не принятое соединение.
+    fn open_within(
+        request: &AgentSessionRequest,
+        policy: &WaitPolicy,
+        handshake: Option<Duration>,
+    ) -> Result<Self, AgentError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -662,16 +679,27 @@ impl AgentSession {
         let (connection, channel) =
             runtime.block_on(async {
                 let config = Arc::new(ssh_client_config());
-                let mut connection = client::connect(
+                let connect = client::connect(
                     config,
                     (host.as_str(), endpoint.port),
                     ClientEvents {
                         expectation: expectation.clone(),
                         presented: presented.clone(),
                     },
-                )
-                .await
-                .map_err(|error| match error {
+                );
+                let connected = match handshake {
+                    Some(limit) => tokio::time::timeout(limit, connect).await.map_err(|_| {
+                        AgentError::Unreachable {
+                            endpoint: named.clone(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                format!("no SSH answer within {} ms", limit.as_millis()),
+                            ),
+                        }
+                    })?,
+                    None => connect.await,
+                };
+                let mut connection = connected.map_err(|error| match error {
                     russh::Error::IO(source) => AgentError::Unreachable {
                         endpoint: named.clone(),
                         source,
@@ -1358,7 +1386,9 @@ pub struct AgentLaunch {
     /// (`/AgentSSHHostKeyAuto`) раннер не берёт: сессия закрепляется на отданном ключе.
     pub host_key: LaunchHostKey,
     pub base_dir: PathBuf,
-    /// Куда зеркалится stdout/stderr процесса агента: улика при неудачном запуске.
+    /// Куда зеркалится stdout/stderr процесса агента: улика при неудачном запуске. Рядом
+    /// лежит `/Out` агента (`.out.log`): причину выхода до первой сессии агент пишет только
+    /// туда.
     pub process_log: PathBuf,
 }
 
@@ -1375,7 +1405,14 @@ impl AgentLaunch {
         args.push(self.host_key.path().display().to_string());
         args.push("/AgentBaseDir".to_owned());
         args.push(self.base_dir.display().to_string());
+        args.push("/Out".to_owned());
+        args.push(self.out_file().display().to_string());
         args
+    }
+
+    /// Файл `/Out` агента.
+    pub fn out_file(&self) -> PathBuf {
+        self.process_log.with_extension("out.log")
     }
 
     pub fn endpoint(&self) -> AgentEndpoint {
@@ -1410,6 +1447,13 @@ impl ManagedAgent {
             path: launch.base_dir.clone(),
             source,
         })?;
+        // `/Out` прошлого запуска не должен стать причиной этого.
+        crate::support::fs::remove_path_if_exists(&launch.out_file()).map_err(|source| {
+            AgentError::Workspace {
+                path: launch.out_file(),
+                source,
+            }
+        })?;
         let request = ProcessRequest {
             program: launch.v8.clone(),
             args: launch.args(),
@@ -1418,7 +1462,7 @@ impl ManagedAgent {
             stderr_log_path: Some(launch.process_log.with_extension("stderr.log")),
             startup_probe: Some(Duration::from_millis(300)),
         };
-        let process = runner
+        let mut process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
             .spawn_managed(&request, ManagedSpawnMode::Wait, None)
             .map_err(|error| match port_taken(launch.port) {
@@ -1436,7 +1480,7 @@ impl ManagedAgent {
 
         let started = Instant::now();
         let opened = loop {
-            let last = match AgentSession::open(&session, policy) {
+            let last = match AgentSession::open_within(&session, policy, Some(HANDSHAKE_PROBE)) {
                 Ok(opened) => break opened,
                 Err(error @ AgentError::Unreachable { .. }) => error.to_string(),
                 Err(AgentError::HostKeyRejected {
@@ -1461,6 +1505,22 @@ impl ManagedAgent {
                 return Err(AgentError::Cancelled {
                     command: "open".to_owned(),
                     delivered: false,
+                });
+            }
+            // Агент, вышедший до первой сессии, сессию уже не примет: ждать срок незачем.
+            // Порт, занятый после выхода, — структурный признак «порт занят»; прочее
+            // называет `/Out` агента.
+            if let Some(status) = process.exited() {
+                let out = out_evidence(&launch.out_file());
+                return Err(match port_taken(launch.port) {
+                    Some(detail) => AgentError::PortTaken {
+                        port: launch.port,
+                        detail: format!("{detail}; /Out: {out}"),
+                    },
+                    None => AgentError::ExitedBeforeSession {
+                        status: status.to_string(),
+                        out,
+                    },
                 });
             }
             if started.elapsed() >= startup_timeout {
@@ -1526,6 +1586,24 @@ impl Drop for ManagedAgent {
         self.process.take();
     }
 }
+
+/// Сколько знаков `/Out` агента приводит отказ.
+const OUT_EVIDENCE_CHARS: usize = 400;
+
+/// Текст `/Out` агента для отказа — улика, а не решение; нет файла или текста — пометка.
+fn out_evidence(path: &Path) -> String {
+    crate::support::fs::read_platform_log(path)
+        .ok()
+        .and_then(|text| crate::support::fs::evidence_lines(&text))
+        .map_or_else(
+            || "no /Out text".to_owned(),
+            |text| text.chars().take(OUT_EVIDENCE_CHARS).collect(),
+        )
+}
+
+/// Срок рукопожатия при подъёме управляемого агента: поднявшийся агент присылает баннер
+/// SSH сразу, а молчащий слушатель на порту не должен держать ожидание.
+const HANDSHAKE_PROBE: Duration = Duration::from_secs(2);
 
 /// Занят ли порт на адресе управляемого агента: `Some` — чем, `None` — свободен.
 fn port_taken(port: u16) -> Option<String> {
@@ -2125,6 +2203,8 @@ mod tests {
                 "/work/host_key",
                 "/AgentBaseDir",
                 "/work/agent",
+                "/Out",
+                "/work/logs/agent.out.log",
             ]
         );
     }
