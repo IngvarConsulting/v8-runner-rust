@@ -884,3 +884,38 @@ fn reset_keeps_a_record_made_before_a_failed_load() {
         project.calls()
     );
 }
+
+/// Запись, сделанную агентом, `reset` не читает — новой сессии агента ради токена не
+/// открывает, — а стирает и называет; следующая отправка грузит набор целиком.
+#[test]
+fn reset_erases_a_record_made_by_the_agent() {
+    let project = Project::new();
+    succeeded(&project.run(&["push", "--force"]));
+    let file = project.memory().join("generation.json");
+    let text = fs::read_to_string(&file).expect("ledger");
+    fs::write(&file, text.replace("\"designer\"", "\"agent\"")).expect("ledger");
+    assert_eq!(project.record()["tool"], "agent");
+    fs::write(project.state("main"), "loaded by the agent").expect("state");
+    project.forget_calls();
+
+    let reset = succeeded(&project.run(&["reset"]));
+
+    assert_eq!(reset["data"]["outcome"], "discarded", "{reset}");
+    assert_eq!(reset["data"]["generation"], "erased", "{reset}");
+    assert!(
+        reset["data"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be read by agent"),
+        "{reset}"
+    );
+    assert!(project.record().is_null(), "{}", project.ledger());
+    assert!(
+        !project.calls().contains("/AgentMode"),
+        "{}",
+        project.calls()
+    );
+
+    let pushed = succeeded(&project.run(&["push"]));
+    assert_eq!(pushed["data"]["steps"][0]["mode"], "full", "{pushed}");
+}

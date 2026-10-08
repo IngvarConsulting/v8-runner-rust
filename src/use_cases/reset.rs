@@ -16,23 +16,20 @@ use std::time::Instant;
 use self::act::RollingBack;
 use crate::config::model::{AppConfig, SourceSetConfig};
 use crate::domain::capability::{Operation, Provider};
-use crate::domain::next_step::NextStep;
 use crate::domain::reset::{HashMemoryFate, ResetOutcome, ResetResult};
 use crate::domain::source_set::SourceSetPurpose;
 use crate::domain::status::{GenerationAfter, GenerationRecordFate};
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::use_cases::context::{shell_word, ExecutionContext};
+use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::generation_reader::{
     designer_log_file, read_by_record_tool, read_unapplied, GenerationProcess, LocatedTool,
 };
 use crate::use_cases::generation_record::{self, RecordStep};
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 use crate::use_cases::request::ResetRequest;
-use crate::use_cases::result::{
-    stamp_dispatch, UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult,
-};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
 type ResetFailure = UseCaseFailure<ResetResult>;
@@ -56,7 +53,7 @@ fn run(
 ) -> UseCaseResult<ResetResult> {
     let started = Instant::now();
     let inventory = SourceSetInventory::new(config);
-    let set = target(context, &inventory, request).map_err(ResetFailure::without_payload)?;
+    let set = target(&inventory, request).map_err(ResetFailure::without_payload)?;
     let mut result = ResetResult {
         provider: None,
         ok: false,
@@ -127,10 +124,8 @@ fn run(
 }
 
 /// Цель команды: с набором — он, если он идёт в базу; без набора — основная конфигурация.
-/// В проекте без набора основной конфигурации команда без набора отказывает и называет
-/// наборы расширений: расширение откатывается только названным.
+/// Расширение откатывается только названным набором.
 fn target<'a>(
-    context: &ExecutionContext,
     inventory: &SourceSetInventory<'a>,
     request: &ResetRequest,
 ) -> Result<&'a SourceSetConfig, AppError> {
@@ -143,7 +138,7 @@ fn target<'a>(
         Some(name) => inventory.named(name)?,
         None => match inventory.main_configuration() {
             Some(set) => set,
-            None => return Err(no_main_configuration(context, inventory)),
+            None => return Err(no_main_configuration()),
         },
     };
     if set.purpose.is_external() {
@@ -155,33 +150,13 @@ fn target<'a>(
     Ok(set)
 }
 
-/// Отказ проекта без набора основной конфигурации: откатить без набора нечего, а
-/// расширение откатывается только названным.
-fn no_main_configuration(
-    context: &ExecutionContext,
-    inventory: &SourceSetInventory<'_>,
-) -> AppError {
-    let extensions = inventory.source_sets_with_purpose(SourceSetPurpose::Extension);
-    let Some(first) = extensions.first() else {
-        return AppError::Validation(
-            "the project declares no CONFIGURATION source-set, only external files that are not loaded into the infobase: reset has nothing to discard".to_owned(),
-        );
-    };
-    let names = extensions
-        .iter()
-        .map(|set| format!("'{}'", set.name))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let advice = context.advised_command(&format!("reset {}", shell_word(&first.name)));
-    AppError::Refused(Box::new(
-        UseCaseError::new(
-            UseCaseErrorKind::Validation,
-            format!(
-                "the project declares no CONFIGURATION source-set, and reset without a set rolls back only the main configuration; an extension is reset only by its set — {names}, for example {advice}"
-            ),
-        )
-        .with_next(NextStep::command("reset").for_source_set(&first.name)),
-    ))
+/// Отказ проекта без набора основной конфигурации: у него одни внешние наборы — набор
+/// расширения без основной конфигурации проверка проекта не пропускает, — и откатывать
+/// нечего.
+fn no_main_configuration() -> AppError {
+    AppError::Validation(
+        "the project declares no CONFIGURATION source-set, only external files that are not loaded into the infobase: reset has nothing to discard".to_owned(),
+    )
 }
 
 /// Как называется цель в текстах.
@@ -533,43 +508,6 @@ mod tests {
 
     fn calls(dir: &Path) -> String {
         fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
-    }
-
-    /// Без набора основной конфигурации `reset` без набора называет наборы расширений и шаг
-    /// `reset` первого из них. Проверка конфигурации такой проект сейчас не пропускает
-    /// (расширению нужна основная конфигурация), а правило держит ответ и на этот случай.
-    #[test]
-    fn without_a_configuration_set_the_refusal_names_the_extension_sets() {
-        let dir = tempdir().expect("tempdir");
-        let tool = write_tool(dir.path(), "1cv8", "");
-        let mut config = config(dir.path(), &tool, Provider::Designer);
-        config.source_sets = ["ext", "patch"]
-            .into_iter()
-            .map(|name| SourceSetConfig {
-                name: name.to_owned(),
-                purpose: SourceSetPurpose::Extension,
-                path: PathBuf::from("main"),
-            })
-            .collect();
-
-        let failure = execute(
-            &ExecutionContext::cli(CommandName::Reset),
-            &config,
-            &main_configuration(),
-        )
-        .expect_err("refused");
-
-        assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
-        let next = failure.error.next().expect("next");
-        assert_eq!(next.command, "reset");
-        assert_eq!(next.source_set.as_deref(), Some("ext"));
-        assert!(
-            failure.error.message().contains("'ext', 'patch'"),
-            "{}",
-            failure.error
-        );
-        assert!(failure.payload.is_none());
-        assert!(calls(dir.path()).is_empty(), "{}", calls(dir.path()));
     }
 
     /// Отмена до точки безопасности отката останавливает его до записи в базу.
