@@ -519,7 +519,6 @@ impl<'a> IbcmdDsl<'a> {
         }
         args.push(format!("--base={}", version_file.display()));
         self.run_with(&args, &self.execution_policy.for_reading())
-            .map_err(IbcmdError::Spawn)
     }
 
     /// Exports changes in sync mode (`--sync`) relative to the version file of an existing
