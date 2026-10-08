@@ -532,14 +532,26 @@ fn an_external_set_with_a_dot_in_its_name_is_built_into_its_directory() {
 fn an_external_set_is_published_to_a_bare_relative_output() {
     let project = Project::new(&[]);
     let output = project.run(&["make", "tools", "--output", "Deploy"]);
-    let envelope = envelope(&output);
-    assert!(output.status.success(), "{envelope}");
+    let first = envelope(&output);
+    assert!(output.status.success(), "{first}");
     let deploy = project.root.join("Deploy");
-    assert!(deploy.is_dir(), "{envelope}");
+    assert!(deploy.is_dir(), "{first}");
     assert!(
         fs::read_dir(&deploy).expect("deploy dir").next().is_some(),
-        "{envelope}"
+        "{first}"
     );
+
+    // Повторная сборка заменяет существующий каталог — путь с резервной копией.
+    let again = project.run(&["make", "tools", "--output", "Deploy"]);
+    assert!(again.status.success(), "{}", envelope(&again));
+    assert!(deploy.is_dir());
+
+    // Файл пакета с голым именем — замена файла в текущем каталоге.
+    let package = project.run(&["make", "main", "--output", "main.cf"]);
+    assert!(package.status.success(), "{}", envelope(&package));
+    assert!(project.root.join("main.cf").is_file());
+    let replaced = project.run(&["make", "main", "--output", "main.cf"]);
+    assert!(replaced.status.success(), "{}", envelope(&replaced));
 }
 
 /// Два набора, чьи пакеты (файл или каталог) на файловой системе без регистра назвались бы

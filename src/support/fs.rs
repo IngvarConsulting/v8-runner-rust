@@ -233,10 +233,7 @@ pub fn try_acquire_advisory_lock(path: &Path) -> std::io::Result<AdvisoryLockGua
 }
 
 fn try_acquire_advisory_lock_impl(path: &Path) -> std::io::Result<AdvisoryLockGuard> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let parent = parent_dir(path).unwrap_or_else(|| Path::new("."));
     ensure_dir(parent)?;
 
     let metadata = AdvisoryLockMetadata {
@@ -617,6 +614,19 @@ where
     result
 }
 
+/// Каталог, в котором лежит `path`. У голого относительного имени (`Deploy`) родитель —
+/// пустой путь, то есть текущий каталог (#443): его нельзя открыть, а `"."` можно. `None` —
+/// у корня и у пустого пути.
+pub fn parent_dir(path: &Path) -> Option<&Path> {
+    path.parent().map(|parent| {
+        if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        }
+    })
+}
+
 pub fn best_effort_fsync_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -678,7 +688,7 @@ fn candidate_next_to(
             format!("path has no {what}: {}", path.display()),
         )
     };
-    let parent = path.parent().ok_or_else(|| invalid("parent"))?;
+    let parent = parent_dir(path).ok_or_else(|| invalid("parent"))?;
     let mut prefix = path
         .file_name()
         .ok_or_else(|| invalid("file name"))?
@@ -711,7 +721,7 @@ pub fn write_file_atomically(
     fill(candidate.as_file_mut())?;
     candidate.as_file().sync_all()?;
     candidate.persist(path).map_err(|error| error.error)?;
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = parent_dir(path) {
         let _ = best_effort_fsync_dir(parent);
     }
     Ok(())
@@ -749,7 +759,7 @@ fn publish_file_atomically_impl(
         return rename(temp_path, destination_path);
     }
 
-    let parent = destination_path.parent().ok_or_else(|| {
+    let parent = parent_dir(destination_path).ok_or_else(|| {
         std::io::Error::new(
             ErrorKind::InvalidInput,
             format!(
@@ -795,7 +805,7 @@ pub fn metadata_sidecar_path(dir: &Path) -> PathBuf {
         .file_name()
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| "temp-dir".to_owned());
-    dir.parent()
+    parent_dir(dir)
         .unwrap_or_else(|| Path::new("."))
         .join(format!("{file_name}.meta.json"))
 }
@@ -882,7 +892,7 @@ pub fn replace_dir_atomically(
     target_identity: &str,
     backup_prefix: &str,
 ) -> std::io::Result<ReplaceDirOutcome> {
-    let parent = target_dir.parent().ok_or_else(|| {
+    let parent = parent_dir(target_dir).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("target path has no parent: {}", target_dir.display()),
@@ -980,7 +990,7 @@ pub fn replace_file_atomically(
     run_id: &str,
     target_identity: &str,
 ) -> Result<ReplaceFileOutcome, ReplaceFileError> {
-    let parent = target_file.parent().ok_or_else(|| {
+    let parent = parent_dir(target_file).ok_or_else(|| {
         ReplaceFileError::new(
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

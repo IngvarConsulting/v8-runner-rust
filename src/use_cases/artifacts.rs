@@ -1281,7 +1281,7 @@ fn validate_publish_target(resolved: &ResolvedArtifactsTarget) -> Result<(), App
 
 fn cleanup_orphan_files(resolved: &ResolvedArtifactsTarget) -> Result<(), AppError> {
     let mut scan_roots = Vec::new();
-    if let Some(parent) = resolved.output_path.parent() {
+    if let Some(parent) = crate::support::fs::parent_dir(&resolved.output_path) {
         scan_roots.push(parent.to_path_buf());
     }
     if resolved.is_directory_output {
