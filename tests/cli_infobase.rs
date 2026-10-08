@@ -2190,6 +2190,10 @@ exit 0"#,
         );
         let message = envelope["error"]["message"].as_str().unwrap_or_default();
         assert!(message.contains("Address already in use"), "{message}");
+        assert!(
+            !message.contains('\u{feff}') && !message.contains('\r'),
+            "{message}"
+        );
         if hold_port {
             assert!(
                 message.contains(&format!(
@@ -2198,10 +2202,7 @@ exit 0"#,
                 "{message}"
             );
         } else {
-            assert!(
-                message.contains("exited with code 0 before accepting a session"),
-                "{message}"
-            );
+            assert!(message.contains("before accepting a session"), "{message}");
         }
         drop(holder);
     }

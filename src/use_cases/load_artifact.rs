@@ -723,17 +723,7 @@ fn installed_extension_state(
 /// sentence the runner deliberately refused to interpret.
 fn probe_evidence(result: &PlatformCommandResult) -> Option<String> {
     result.process.outcome().err()?;
-    let log = result.platform_log.as_deref()?;
-    let text = log
-        .strip_prefix('\u{feff}')
-        .unwrap_or(log)
-        .replace("\r\n", "\n");
-    let lines = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    (!lines.is_empty()).then(|| lines.join("; "))
+    crate::support::fs::evidence_lines(result.platform_log.as_deref()?)
 }
 
 /// The whole decision, enumerated: target kind, requested mode, and what was established.

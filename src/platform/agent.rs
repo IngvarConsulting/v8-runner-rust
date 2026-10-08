@@ -362,8 +362,8 @@ pub enum AgentError {
     /// Процесс агента завершился, не приняв ни одной сессии. Код выхода причину не
     /// различает (замер #429: и занятый порт, и нечитаемый ключ — rc=0), поэтому ответ
     /// приводит строку `/Out` агента как есть.
-    #[error("managed agent exited with code {code} before accepting a session: {out}")]
-    ExitedBeforeSession { code: i32, out: String },
+    #[error("managed agent exited ({status}) before accepting a session; /Out: {out}")]
+    ExitedBeforeSession { status: String, out: String },
 
     #[error("agent base dir '{base_dir}' has no directory for user '{user}': {detail}")]
     UserDirUnknown {
@@ -1447,6 +1447,13 @@ impl ManagedAgent {
             path: launch.base_dir.clone(),
             source,
         })?;
+        // `/Out` прошлого запуска не должен стать причиной этого.
+        crate::support::fs::remove_path_if_exists(&launch.out_file()).map_err(|source| {
+            AgentError::Workspace {
+                path: launch.out_file(),
+                source,
+            }
+        })?;
         let request = ProcessRequest {
             program: launch.v8.clone(),
             args: launch.args(),
@@ -1503,14 +1510,17 @@ impl ManagedAgent {
             // Агент, вышедший до первой сессии, сессию уже не примет: ждать срок незачем.
             // Порт, занятый после выхода, — структурный признак «порт занят»; прочее
             // называет `/Out` агента.
-            if let Some(code) = process.exited() {
-                let out = out_head(&launch.out_file());
+            if let Some(status) = process.exited() {
+                let out = out_evidence(&launch.out_file());
                 return Err(match port_taken(launch.port) {
                     Some(detail) => AgentError::PortTaken {
                         port: launch.port,
-                        detail: if out.is_empty() { detail } else { out },
+                        detail: format!("{detail}; /Out: {out}"),
                     },
-                    None => AgentError::ExitedBeforeSession { code, out },
+                    None => AgentError::ExitedBeforeSession {
+                        status: status.to_string(),
+                        out,
+                    },
                 });
             }
             if started.elapsed() >= startup_timeout {
@@ -1577,27 +1587,25 @@ impl Drop for ManagedAgent {
     }
 }
 
-/// Занят ли порт на адресе управляемого агента: `Some` — чем, `None` — свободен.
-/// Начало `/Out` агента без BOM и пустых строк; нет файла — пусто.
-fn out_head(path: &Path) -> String {
-    let Ok(bytes) = std::fs::read(path) else {
-        return String::new();
-    };
-    let text = String::from_utf8_lossy(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes));
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("; ")
-        .chars()
-        .take(400)
-        .collect()
+/// Сколько знаков `/Out` агента приводит отказ.
+const OUT_EVIDENCE_CHARS: usize = 400;
+
+/// Текст `/Out` агента для отказа — улика, а не решение; нет файла или текста — пометка.
+fn out_evidence(path: &Path) -> String {
+    crate::support::fs::read_platform_log(path)
+        .ok()
+        .and_then(|text| crate::support::fs::evidence_lines(&text))
+        .map_or_else(
+            || "no /Out text".to_owned(),
+            |text| text.chars().take(OUT_EVIDENCE_CHARS).collect(),
+        )
 }
 
 /// Срок рукопожатия при подъёме управляемого агента: поднявшийся агент присылает баннер
 /// SSH сразу, а молчащий слушатель на порту не должен держать ожидание.
 const HANDSHAKE_PROBE: Duration = Duration::from_secs(2);
 
+/// Занят ли порт на адресе управляемого агента: `Some` — чем, `None` — свободен.
 fn port_taken(port: u16) -> Option<String> {
     std::net::TcpListener::bind((MANAGED_LISTEN_HOST, port))
         .err()
