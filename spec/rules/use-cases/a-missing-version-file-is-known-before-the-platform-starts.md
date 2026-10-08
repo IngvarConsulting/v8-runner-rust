@@ -23,7 +23,6 @@ check:
 Полная выгрузка вместо выгрузки по изменившемуся ложится поверх каталога набора и лишнего
 в нём не удаляет (`INV.CLI.PULL-LAYS-THE-DUMP-OVER-THE-DIRECTORY`), хеш-память не пишет, и
 ответ это называет вместе с советом `pull <SET> --force`; снимок формата EDT заменяется
-целиком. Как `ibcmd config export` без `--sync` и `--force` ведёт себя в непустом каталоге и
-пишет ли он файл версий, не замерено; не замерена и выборка `ibcmd` (`--object`, идёт как
-`--sync`) без файла версий — [#403](https://github.com/IngvarConsulting/v8-runner-rust/issues/403).
+целиком. Полную выгрузку `ibcmd` поверх каталога держит
+`INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE`.
 Чужую версию формата держит `INV.USE-CASES.A-FOREIGN-FORMAT-VERSION-TURNS-THE-DUMP-FULL`.

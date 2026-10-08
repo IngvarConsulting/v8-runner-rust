@@ -408,7 +408,7 @@ fn incremental_mode_updates_the_target_in_place_through_a_link() {
     let harness = harness(true, Some(true), false);
     fs::write(
         harness.target.join("ConfigDumpInfo.xml"),
-        "<ConfigDumpInfo version=\"2.17\"/>",
+        "<ConfigDumpInfo version=\"2.20\"/>",
     )
     .expect("version file");
     commit_project(&harness);

@@ -337,7 +337,7 @@ impl FakeAgent {
             if option("list-file").is_none() {
                 fs::write(
                     target.join("ConfigDumpInfo.xml"),
-                    "<ConfigDumpInfo format=\"Hierarchical\" version=\"2.17\"/>\n",
+                    "<ConfigDumpInfo format=\"Hierarchical\" version=\"2.20\"/>\n",
                 )
                 .expect("dump info");
             }
@@ -393,7 +393,7 @@ impl FakeAgent {
                 fs::write(
                     &version_file,
                     format!(
-                        "<ConfigDumpInfo version=\"2.17\" agent-load=\"{}\"/>\n",
+                        "<ConfigDumpInfo version=\"2.20\" agent-load=\"{}\"/>\n",
                         self.token()
                     ),
                 )
