@@ -28,15 +28,16 @@ check:
   - src/use_cases/init_project.rs::an_ibcmd_creation_that_failed_after_a_deferred_cancellation_names_it
   - src/use_cases/init_project.rs::a_stop_after_the_creation_leaves_its_deferred_cancellation_in_the_step
   - tests/architecture_guardrails.rs::a_critical_phase_names_its_deferral_through_the_owner
+  - src/use_cases/apply.rs::an_apply_that_fails_after_a_deferred_cancellation_names_it
 ---
 
 # Отложенная отмена переживает следующий отказ
 
 Отмену, которую критическая фаза отложила до своего исхода, ответ `upload`,
-`infobase restore`, `push`, `extensions` и `infobase create` называет и тогда, когда команда
-кончается не удачей: критическая команда потом отказала, сессия агента оборвалась, следующая
-команда не удалась или команда остановилась на следующей безопасной точке. Так поступает
-каждый исполнитель этих команд. Форма с `execution` называет её записью о прерывании с
+`infobase restore`, `push`, `apply`, `extensions` и `infobase create` называет и тогда,
+когда команда кончается не удачей: критическая команда потом отказала, сессия агента
+оборвалась, следующая команда не удалась или команда остановилась на следующей безопасной
+точке. Так поступает каждый исполнитель этих команд. Форма с `execution` называет её записью о прерывании с
 `deferred: true` и тем же текстом среди своих предупреждений — `warnings` у
 `infobase restore`, `execution.diagnostics` у `upload`. Форма без `execution` называет
 её предупреждением в сообщении шага, чья команда отложила отмену; если этот шаг сам не

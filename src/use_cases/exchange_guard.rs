@@ -35,7 +35,7 @@ use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::{GenerationAfter, GenerationVerdict, MemoryState};
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
+    ApplyMark, GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
 };
 use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::ignored_files::VERSION_FILE_NAME;
@@ -540,6 +540,31 @@ pub(crate) enum BeforeLoad {
     Matched,
 }
 
+/// Что стало с записью поколения после загрузки набора.
+#[derive(Debug)]
+pub(crate) enum LoadRecord {
+    /// Поколение записано.
+    Recorded,
+    /// Записи нет: ответа не было или запись не удалась, и прежняя запись стёрта (её могло и
+    /// не быть); строка — для ответа.
+    Erased(Option<String>),
+    /// Записи нет, а прежнюю стереть не удалось: она описывает базу до загрузки.
+    NotErased(String),
+    /// У набора нет памяти о базе, и журнала поколений нет.
+    NoLedger,
+}
+
+impl LoadRecord {
+    /// Строка для ответа, если она есть.
+    pub(crate) fn into_note(self) -> Option<String> {
+        match self {
+            Self::Erased(note) => note,
+            Self::NotErased(note) => Some(note),
+            Self::Recorded | Self::NoLedger => None,
+        }
+    }
+}
+
 /// Сверка поколения у отправки: перед загрузкой набора и после неё.
 pub(crate) struct GenerationGate<'a> {
     context: &'a ExecutionContext,
@@ -698,33 +723,40 @@ impl<'a> GenerationGate<'a> {
     /// запись набора стирается — прежний токен описывает уже не ту базу, и следующая
     /// отправка не должна принять свою же загрузку за чужую правку; стёртую запись ответ
     /// называет. Загрузка уже прошла, поэтому сбой записи — предупреждение, а не отказ.
+    /// `ApplyMark::Unapplied` — загрузка не применена к конфигурации базы данных, и запись это
+    /// помнит (`INV.USE-CASES.A-LOAD-WITHOUT-APPLY-IS-REMEMBERED-AS-UNAPPLIED`); ответ
+    /// говорит, записана ли запись на самом деле: только тогда загрузку без применения можно
+    /// запомнить памятью исходников.
     #[must_use]
     pub(crate) fn after_load(
         &self,
         set: &SourceSetContext,
         tool: Provider,
         token: Option<&str>,
-    ) -> Option<String> {
-        let ledger = GenerationLedger::of(set, &self.config.work_path)?;
+        mark: ApplyMark,
+    ) -> LoadRecord {
+        let Some(ledger) = GenerationLedger::of(set, &self.config.work_path) else {
+            return LoadRecord::NoLedger;
+        };
         let name = set.name();
         match token {
-            Some(token) => match ledger.record(tool, token, GenerationAfter::Build) {
-                Ok(()) => None,
-                Err(error) => Some(match ledger.forget() {
-                    Ok(_) => format!(
+            Some(token) => match ledger.record_as(tool, token, GenerationAfter::Build, mark) {
+                Ok(()) => LoadRecord::Recorded,
+                Err(error) => match ledger.forget() {
+                    Ok(_) => LoadRecord::Erased(Some(format!(
                         "the configuration generation of source-set '{name}' was not recorded: {error}; its previous record is erased, so the next push does not check whether the infobase moved ahead"
-                    ),
-                    Err(forget) => format!(
+                    ))),
+                    Err(forget) => LoadRecord::NotErased(format!(
                         "the configuration generation of source-set '{name}' was not recorded: {error}; its previous record was not erased either ({forget}), so the next push may take this load for a change made elsewhere"
-                    ),
-                }),
+                    )),
+                },
             },
             None => match ledger.forget() {
-                Ok(false) => None,
-                Ok(true) => Some(format!(
+                Ok(false) => LoadRecord::Erased(None),
+                Ok(true) => LoadRecord::Erased(Some(format!(
                     "the configuration generation of source-set '{name}' is not known after the load: its previous record is erased, so the next push does not check whether the infobase moved ahead"
-                )),
-                Err(error) => Some(format!(
+                ))),
+                Err(error) => LoadRecord::NotErased(format!(
                     "the configuration generation of source-set '{name}' is not known after the load, and its previous record was not erased: {error}; the next push may take this load for a change made elsewhere"
                 )),
             },
@@ -743,8 +775,14 @@ impl<'a> GenerationGate<'a> {
             "the configuration generation of source-set '{name}' is not recorded after the failed load"
         );
         let marked = GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| {
-            self.record_of(set, tool)
-                .map(|record| ledger.record(tool, &record.token, GenerationAfter::FailedBuild))
+            self.record_of(set, tool).map(|record| {
+                ledger.record_as(
+                    tool,
+                    &record.token,
+                    GenerationAfter::FailedBuild,
+                    record.mark(),
+                )
+            })
         });
         let note = match marked {
             None => not_recorded,
@@ -819,6 +857,50 @@ impl<'a> GenerationGate<'a> {
     }
 }
 
+/// Отказ `apply` набора, чья запись помечена как сделанная перед неудачной загрузкой, — при
+/// любом поколении базы: разошедшемся с записью, равном ей (Конфигуратор читает поколение
+/// применённого расширения, и загрузка его не сдвигает) или без ответа (`base: None`).
+/// Применение перестроило бы базу данных по наполовину загруженной основной конфигурации.
+/// Первый выход — повторить загрузку перезаписью
+/// (`INV.USE-CASES.AN-APPLY-AFTER-A-FAILED-LOAD-IS-REFUSED`).
+pub(crate) fn apply_after_failed_load(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    set: &str,
+    base: Option<&str>,
+    record: &GenerationRecord,
+) -> AppError {
+    let target = config.v8_connection().describe_target();
+    let push_force = context.advised_command(&format!("push {} --force", shell_word(set)));
+    let pull = context.advised_command(&format!("pull {}", shell_word(set)));
+    let (token, recorded_at) = (&record.token, &record.recorded_at);
+    let generation = match base {
+        Some(base) if base == token => format!(
+            "the configuration generation of {target} matches the record {token}, but the record was made before the last push of this working copy failed ({recorded_at}), and an equal generation does not prove that the failed load left the infobase untouched"
+        ),
+        Some(base) => format!(
+            "the configuration generation of {target} is {base}, not {token} that was recorded before the last push of this working copy failed ({recorded_at})"
+        ),
+        None => format!(
+            "{} gives no configuration generation of {target} to compare with {token} that was recorded before the last push of this working copy failed ({recorded_at})",
+            record.tool
+        ),
+    };
+    let message = format!(
+        "cannot apply source-set '{set}': {generation}; the main configuration may hold a half-finished load, and applying it would rebuild the database configuration from it. Load the directory again with {push_force}; if someone else changed the infobase, take their changes first with {pull}.{}",
+        Standing::of(config).caveats()
+    );
+    let refusal = UseCaseError::new(UseCaseErrorKind::NonFastForward, message)
+        .with_next(WayOut::PushForce.step(set, Some(set)));
+    AppError::Refused(Box::new(match base {
+        Some(base) => refusal.with_generations(Generations {
+            base: base.to_owned(),
+            local: record.token.clone(),
+        }),
+        None => refusal,
+    }))
+}
+
 /// Пропуск выгрузки по изменившемуся: поколение до неё совпало с записанным тем же
 /// инструментом — в базе нечего брать с прошлого обмена. Строка — ответ «всё актуально»;
 /// `None` — выгружать (`INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED`).
@@ -855,7 +937,17 @@ pub(crate) fn record_after_dump(
         return None;
     };
     let ledger = GenerationLedger::of(set, work_path)?;
-    if let Err(error) = ledger.record(tool, before, GenerationAfter::Dump) {
+    // Выгрузка берёт основную конфигурацию и непринятого не снимает: запись того же
+    // инструмента и того же поколения, загруженная без применения, остаётся непринятой.
+    let mark = match ledger.read() {
+        Recorded::Ours(record)
+            if record.compare(tool, before) == GenerationComparison::Unchanged =>
+        {
+            record.mark()
+        }
+        Recorded::Ours(_) | Recorded::Nothing | Recorded::Foreign { .. } => ApplyMark::Applied,
+    };
+    if let Err(error) = ledger.record_as(tool, before, GenerationAfter::Dump, mark) {
         return Some(format!(
             "the configuration generation of source-set '{}' was not recorded: {error}",
             set.name()

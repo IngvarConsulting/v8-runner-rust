@@ -21,6 +21,28 @@ pub struct BuildRequest {
     pub source_set: Option<String>,
     /// Plan every step and locate the platform without dispatching it.
     pub dry_run: bool,
+    /// Применять ли загруженное к конфигурации базы данных; `Defer` — `push --no-apply`:
+    /// только загрузка в основную конфигурацию, ключ только командной строки.
+    pub apply: ApplyPolicy,
+}
+
+/// Что `push` делает после удачной загрузки набора (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ApplyPolicy {
+    /// Применить к конфигурации базы данных.
+    #[default]
+    Apply,
+    /// Оставить загруженное непринятым до `apply` (`push --no-apply`).
+    Defer,
+}
+
+/// Transport-neutral request for `apply`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyRequest {
+    /// Один набор; без него — все наборы проекта и расширение-инструмент.
+    pub source_set: Option<String>,
+    /// Plan every step and locate the platform without dispatching it.
+    pub dry_run: bool,
 }
 
 /// Как `push` грузит выбранные наборы.

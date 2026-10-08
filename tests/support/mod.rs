@@ -23,7 +23,7 @@ use tempfile::{tempdir, TempDir};
 /// Блок `providers:`, который ставит Конфигуратор первым там, где цепочка умолчаний
 /// начинается с агента (#206). Двойник платформы в этих тестах — пакетный Конфигуратор:
 /// агента он не поднимает.
-pub const DESIGNER_LEADS: &str = "providers:\n  push: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\n";
+pub const DESIGNER_LEADS: &str = "providers:\n  push: designer\n  apply: designer\n  pull: designer\n  download: designer\n  infobase.dump: designer\n  infobase.restore: designer\n";
 
 pub fn temp_workspace() -> TempDir {
     tempdir().expect("tempdir")

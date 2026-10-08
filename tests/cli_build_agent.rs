@@ -200,6 +200,53 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
         .is_some_and(|token| token.len() == 40));
 }
 
+/// `push --no-apply` через агента грузит без `update-db-cfg`; `apply` применяет командой
+/// своей сессии и переносит запись поколения (`INV.CLI.APPLY-IS-A-SEPARATE-STEP`).
+#[test]
+fn an_agent_push_without_apply_leaves_the_update_to_apply() {
+    let harness = harness();
+
+    let (code, payload) = run(&harness, &["push", "--no-apply"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["steps"][0]["applied"], false, "{payload}");
+    let lines = commands(&harness);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("config load-config-from-files")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line == "config update-db-cfg"),
+        "{lines:?}"
+    );
+    let before = lines.len();
+
+    let (code, payload) = run(&harness, &["apply"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["data"]["steps"][0]["outcome"], "applied",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["data"]["steps"][0]["generation"], "recorded",
+        "{payload}"
+    );
+    let lines = commands(&harness);
+    assert!(
+        lines[before..]
+            .iter()
+            .any(|line| line == "config update-db-cfg"),
+        "{lines:?}"
+    );
+}
+
 /// Сборка без изменений не поднимает агента и не открывает сессию.
 #[test]
 fn a_build_without_changes_opens_no_session() {

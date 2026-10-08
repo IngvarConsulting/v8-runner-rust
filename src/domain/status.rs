@@ -103,6 +103,9 @@ pub struct RecordedGeneration {
     pub tool: Provider,
     /// После чего записан токен.
     pub after: GenerationAfter,
+    /// Применена ли загрузка к конфигурации базы данных: `false` — загружено без применения
+    /// (`push --no-apply` или неудачное применение), и `apply` ещё не прошёл.
+    pub applied: bool,
     pub recorded_at: String,
 }
 
