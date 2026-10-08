@@ -54,7 +54,7 @@ impl StagedPublication {
         target_identity: &str,
         stage_prefix: &str,
     ) -> Result<Self, AppError> {
-        let target_parent = target_path.parent().ok_or_else(|| {
+        let target_parent = crate::support::fs::parent_dir(target_path).ok_or_else(|| {
             AppError::Runtime(format!(
                 "target path has no parent: {}",
                 target_path.display()
@@ -89,7 +89,7 @@ impl StagedPublication {
         stage_prefix: &str,
         extension: &str,
     ) -> Result<Self, AppError> {
-        let target_parent = target_path.parent().ok_or_else(|| {
+        let target_parent = crate::support::fs::parent_dir(target_path).ok_or_else(|| {
             AppError::Runtime(format!(
                 "target path has no parent: {}",
                 target_path.display()
@@ -425,7 +425,7 @@ fn orphan_cleanup_paths(path: &Path) -> (PathBuf, PathBuf) {
         return (path.to_path_buf(), metadata_sidecar_path(path));
     };
     (
-        path.parent()
+        crate::support::fs::parent_dir(path)
             .unwrap_or_else(|| Path::new("."))
             .join(temp_name),
         path.to_path_buf(),

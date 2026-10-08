@@ -33,7 +33,9 @@ use crate::use_cases::agent_session::{
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::exchange_guard::{memory_of, new_owner_since, predict, recorded_generation};
-use crate::use_cases::generation_reader::{designer_log_file, read_generation, GenerationProcess};
+use crate::use_cases::generation_reader::{
+    designer_log_file, read_generation, read_unapplied, GenerationProcess,
+};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
@@ -175,15 +177,24 @@ fn deepen(
             .designer_context(&declared.name)
             .and_then(|context| recorded_generation(context, &config.work_path));
         set.base = Some(match asker.as_mut() {
-            Ok(asker) => base_generation(
-                tool,
-                asker
-                    .read(context, config, *extension)
-                    .as_ref()
-                    .map(Option::as_deref),
-                record.as_ref(),
+            Ok(asker) => {
+                let base = base_generation(
+                    tool,
+                    asker
+                        .read(context, config, *extension)
+                        .as_ref()
+                        .map(Option::as_deref),
+                    record.as_ref(),
+                );
+                let unapplied = asker
+                    .unapplied(context, config, *extension)
+                    .map_err(|error| error.to_string());
+                with_unapplied(base, unapplied)
+            }
+            Err(error) => with_unapplied(
+                base_generation(tool, Err(&*error), record.as_ref()),
+                Err(error.to_string()),
             ),
-            Err(error) => base_generation(tool, Err(&*error), record.as_ref()),
         });
     }
     if let Ok(asker) = asker {
@@ -195,6 +206,15 @@ fn deepen(
     interrupted(context, "the owner marker")?;
     status.holders = crate::use_cases::infobase_owner::holders(config);
     Ok(())
+}
+
+/// Признак непринятого рядом с поколением; чего исполнитель не ответил — `null` с причиной.
+fn with_unapplied(mut base: BaseGeneration, answer: Result<bool, String>) -> BaseGeneration {
+    (base.unapplied, base.unapplied_reason) = match answer {
+        Ok(unapplied) => (Some(unapplied), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    base
 }
 
 /// Ответ о поколении набора и та же сверка с записью, что сделает `push`.
@@ -217,6 +237,8 @@ fn base_generation(
         token,
         comparison,
         reason,
+        unapplied: None,
+        unapplied_reason: None,
     }
 }
 
@@ -401,6 +423,46 @@ impl Asker {
             How::Agent { handle, wait } => {
                 generation_id(handle.session(), extension, wait).map(Some)
             }
+        }
+    }
+
+    /// Есть ли непринятое в основной конфигурации или расширении `extension`. Сохранение
+    /// конфигурации у агента не замерено (#412): ответа нет.
+    fn unapplied(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        extension: Option<&str>,
+    ) -> Result<bool, AppError> {
+        match &mut self.how {
+            How::Designer { binary, utilities } => read_unapplied(
+                context,
+                config,
+                || {
+                    Ok(GenerationProcess::Designer {
+                        binary,
+                        runner: utilities.runner_for(UtilityType::V8),
+                        log_file: designer_log_file(config, "status-unapplied")?,
+                    })
+                },
+                extension,
+            ),
+            How::Ibcmd { binary, utilities } => read_unapplied(
+                context,
+                config,
+                || {
+                    Ok(GenerationProcess::Ibcmd {
+                        binary,
+                        runner: utilities.runner_for(UtilityType::Ibcmd),
+                        data_path: None,
+                    })
+                },
+                extension,
+            ),
+            How::Agent { .. } => Err(AppError::capability(
+                "the agent's configuration save is not measured: the unapplied state is unknown"
+                    .to_owned(),
+            )),
         }
     }
 
