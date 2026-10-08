@@ -5,8 +5,8 @@ use chrono::Utc;
 
 use crate::support::error::AppError;
 use crate::support::fs::{
-    ensure_dir, is_known_tool_name, metadata_sidecar_path, read_temp_dir_metadata,
-    remove_path_if_exists, replace_dir_atomically, replace_file_atomically,
+    copy_dir_recursively, ensure_dir, is_known_tool_name, metadata_sidecar_path,
+    read_temp_dir_metadata, remove_path_if_exists, replace_dir_atomically, replace_file_atomically,
     write_temp_dir_metadata, ReplaceFileFailureState, TempDirKind, TempDirMetadata,
 };
 use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
@@ -163,6 +163,26 @@ impl StagedPublication {
             deferred_interruption: publish_phase.deferred_interruption,
             previous_target_present: self.previous_target_present,
         })
+    }
+
+    /// Кладёт промежуточный каталог поверх целевого и убирает промежуточный: файлы
+    /// переписываются, то, чего в выгрузке нет, остаётся на месте. Так ложится полная
+    /// выгрузка `ibcmd`, которая в непустой каталог не пишет
+    /// (`INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE`).
+    pub fn lay_over_dir(
+        &self,
+        context: &ExecutionContext,
+        error_prefix: &str,
+    ) -> Result<(), AppError> {
+        if let Some(error) = interruption_before_publish(context, "staged directory overlay") {
+            return Err(self.cleanup_failure(error));
+        }
+        let laid = copy_dir_recursively(&self.staging_path, &self.target_path)
+            .map_err(|error| AppError::Runtime(format!("{error_prefix}: {error}")));
+        // Промежуточный каталог убирается и после удачи; не убранный узнает уборка по описанию.
+        let _ = remove_path_if_exists(&self.staging_path);
+        let _ = remove_path_if_exists(&metadata_sidecar_path(&self.staging_path));
+        laid
     }
 
     pub fn publish_file(

@@ -506,22 +506,6 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
-    /// `config export [--extension=<name>] <dir>`: full export over the directory, without
-    /// `--sync` (no version file to synchronize by) and without `--force`. How it treats a
-    /// non-empty directory and whether it writes the version file is not measured (#403).
-    pub fn config_export_over(
-        &self,
-        target_dir: &Path,
-        extension: Option<&str>,
-    ) -> Result<PlatformCommandResult, IbcmdError> {
-        let mut args = self.authenticated_infobase_args(&["config", "export"]);
-        if let Some(extension) = extension {
-            push_option_value(&mut args, "--extension", extension);
-        }
-        args.push(target_dir.display().to_string());
-        self.run(&args)
-    }
-
     /// Exports changes in sync mode (`--sync`) relative to the version file of an existing
     /// target directory.
     pub fn config_export_incremental(
@@ -841,49 +825,6 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("export"));
         assert!(args.contains("--force"));
-    }
-
-    /// Выгрузка поверх каталога: ни `--sync`, ни `--force`, расширение — до каталога,
-    /// каталог — последним аргументом.
-    #[cfg(unix)]
-    #[test]
-    fn config_export_over_builds_expected_args() {
-        let dir = tempdir().expect("tempdir");
-        let script = dir.path().join("ibcmd");
-        let args_log = dir.path().join("args.log");
-        write_script(
-            &script,
-            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
-        );
-        let runner = ProcessExecutor;
-        let dsl = IbcmdDsl::new(
-            script,
-            file_connection("File=/ib"),
-            &runner as &dyn ProcessRunner,
-            ProcessExecutionPolicy::default(),
-        );
-        let target = dir.path().join("target");
-
-        dsl.config_export_over(&target, Some("ext"))
-            .expect("export");
-
-        let args = fs::read_to_string(args_log).expect("args");
-        let args: Vec<&str> = args.lines().collect();
-        assert!(
-            args.windows(2).any(|pair| pair == ["config", "export"]),
-            "{args:?}"
-        );
-        assert!(!args.contains(&"--sync"), "{args:?}");
-        assert!(!args.contains(&"--force"), "{args:?}");
-        assert!(
-            args.windows(2).any(|pair| pair == ["--extension", "ext"]),
-            "{args:?}"
-        );
-        assert_eq!(
-            args.last(),
-            Some(&target.display().to_string().as_str()),
-            "{args:?}"
-        );
     }
 
     #[cfg(unix)]

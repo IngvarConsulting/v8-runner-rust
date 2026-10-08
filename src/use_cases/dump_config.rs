@@ -464,9 +464,8 @@ fn run_full_dump_designer(
     Ok((dump_result, notes))
 }
 
-/// Выгрузка `ibcmd` прямо в каталог: с файлом версий — `--sync`, без него — полная
-/// поверх каталога без `--force`. Полная выгрузка в непустой каталог у `ibcmd` отказывает
-/// («Каталог … не пуст», замер #403); путь через промежуточный каталог — #423.
+/// Выгрузка `ibcmd` в каталог набора: с файлом версий — `--sync` на месте, без него —
+/// полная через промежуточный каталог ([`run_whole_dump_through_stage_ibcmd`]).
 fn run_dump_over_directory_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -494,15 +493,39 @@ fn run_dump_over_directory_ibcmd(
             )
         }
         OverDirectory::Whole(_) => {
-            log_live_stage("dump: full", "[ibcmd] exporting configuration files");
-            dsl.config_export_over(
-                &resolved.platform_target_path,
-                resolved.extension.as_deref(),
-            )
+            return run_whole_dump_through_stage_ibcmd(context, resolved, &dsl);
         }
     }
     .map_err(map_ibcmd_error)?;
     ensure_platform_success("dump", resolved, &dump_result)?;
+    Ok((dump_result, DumpNotes::default()))
+}
+
+/// Полная выгрузка `ibcmd` поверх каталога набора. В непустой каталог `config export`
+/// отказывает («Каталог … не пуст», замер #403), поэтому выгрузка идёт в пустой
+/// промежуточный каталог рядом, а результат ложится поверх: файлы выгрузки переписаны,
+/// лишнее и посторонние файлы остаются, как у Конфигуратора
+/// (`INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE`).
+fn run_whole_dump_through_stage_ibcmd(
+    context: &ExecutionContext,
+    resolved: &ResolvedDumpTarget,
+    dsl: &crate::platform::ibcmd::IbcmdDsl<'_>,
+) -> DumpRun {
+    let publication = StagedPublication::prepare_dir(
+        &resolved.platform_target_path,
+        &resolved.platform_target_identity,
+        ".dump-stage",
+    )?;
+    log_live_stage("dump: full", "[ibcmd] exporting configuration files");
+    let dump_result = match dsl
+        .config_export_full(publication.staging_path(), resolved.extension.as_deref())
+        .map_err(map_ibcmd_error)
+        .and_then(|result| ensure_platform_success("dump", resolved, &result).map(|()| result))
+    {
+        Ok(result) => result,
+        Err(error) => return Err(publication.cleanup_failure(error)),
+    };
+    publication.lay_over_dir(context, "failed to lay the staged dump over the directory")?;
     Ok((dump_result, DumpNotes::default()))
 }
 
@@ -3181,6 +3204,77 @@ exit 0"#,
         assert!(!base.join("main").join("old.txt").exists());
     }
 
+    /// `ibcmd` в непустой каталог не выгружает (замер #403). Без файла версий выгрузка идёт в
+    /// пустой промежуточный каталог и ложится поверх: файлы выгрузки переписаны, посторонние
+    /// файлы и скрытые каталоги целы, промежуточного каталога после выгрузки нет.
+    #[test]
+    fn an_ibcmd_full_dump_lands_over_a_non_empty_directory_through_a_stage() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        // Как настоящий `ibcmd`: непустой каталог — отказ, пустой — выгрузка с файлом версий.
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\ncase \" $args \" in *\" generation-id \"*) exit 0;; esac\nfor last; do :; done\nif [ -d \"$last\" ] && [ -n \"$(ls -A \"$last\")\" ]; then echo \"Каталог $last не пуст.\" >&2; exit 255; fi\nmkdir -p \"$last\"\nprintf 'new\\n' > \"$last/Configuration.xml\"\nprintf '<ConfigDumpInfo version=\\\"2.20\\\"/>\\n' > \"$last/ConfigDumpInfo.xml\"\nexit 0",
+                calls.display()
+            ),
+        );
+        let config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+        let target = base.join("main");
+        fs::create_dir_all(target.join(".idea")).expect("hidden dir");
+        fs::write(target.join(".idea").join("workspace.xml"), "ide").expect("hidden file");
+        fs::write(target.join("stray.txt"), "keep").expect("stray");
+        fs::write(target.join("Configuration.xml"), "old").expect("old dump file");
+        commit_sources(&base);
+
+        let result = run_dump(
+            &config,
+            &DumpArgs {
+                dry_run: false,
+                discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
+                mode: DumpModeRequest::Incremental,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("dump");
+
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.mode, DumpMode::Full);
+        assert_eq!(
+            fs::read_to_string(target.join("Configuration.xml")).expect("dumped"),
+            "new\n"
+        );
+        assert!(target.join("ConfigDumpInfo.xml").is_file());
+        assert_eq!(
+            fs::read_to_string(target.join("stray.txt")).expect("stray"),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(".idea/workspace.xml")).expect("hidden"),
+            "ide"
+        );
+        let leftovers = fs::read_dir(&base)
+            .expect("base")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".dump-stage"))
+            .count();
+        assert_eq!(leftovers, 0, "the stage is removed");
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(!calls.contains("--sync"), "{calls}");
+    }
+
     #[test]
     fn ibcmd_dump_with_server_infobase_passes_dbms_and_infobase_credentials() {
         let dir = tempdir().expect("tempdir");
@@ -3305,8 +3399,7 @@ exit 0"#,
         assert!(synced.contains("--sync"));
         assert!(synced.contains(base.join("main").display().to_string().as_str()));
 
-        // Без файла версий `ibcmd` выгружает полностью поверх каталога: без `--sync` и без
-        // `--force`, который заменил бы каталог.
+        // Без файла версий `ibcmd` выгружает полностью в промежуточный каталог, без `--sync`.
         fs::remove_dir_all(base.join("main")).expect("remove target");
         fs::remove_file(&calls).expect("reset calls");
         let result = run_dump(&config, &args).expect("dump");
@@ -3314,8 +3407,7 @@ exit 0"#,
         assert_eq!(result.mode, DumpMode::Full);
         let full = fs::read_to_string(&calls).expect("calls");
         assert!(!full.contains("--sync"), "{full}");
-        assert!(!full.contains("--force"), "{full}");
-        assert!(full.contains(base.join("main").display().to_string().as_str()));
+        assert!(full.contains(".dump-stage-"), "{full}");
     }
 
     #[test]

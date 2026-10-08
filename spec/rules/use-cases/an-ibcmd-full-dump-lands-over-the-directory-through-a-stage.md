@@ -1,7 +1,6 @@
 ---
 id: INV.USE-CASES.AN-IBCMD-FULL-DUMP-LANDS-OVER-THE-DIRECTORY-THROUGH-A-STAGE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/423
+check: [src/use_cases/dump_config.rs::an_ibcmd_full_dump_lands_over_a_non_empty_directory_through_a_stage]
 ---
 
 # Полная выгрузка `ibcmd` ложится поверх каталога через промежуточный
