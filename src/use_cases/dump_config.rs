@@ -3571,7 +3571,7 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         project_with_a_version_file(&base);
-        write_forecasting_designer_script(&script, &calls, "\\xEF\\xBB\\xBFFullDump\\r\\n");
+        write_forecasting_designer_script(&script, &calls, "\\0357\\0273\\0277FullDump\\r\\n");
         let config = build_config(&base, &dir.path().join("work"), &script);
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
@@ -3618,7 +3618,7 @@ exit 0"#,
         write_forecasting_designer_script(
             &script,
             &calls,
-            "\\xEF\\xBB\\xBFModified: Catalog.Items\\r\\n",
+            "\\0357\\0273\\0277Modified: Catalog.Items\\r\\n",
         );
         let config = build_config(&base, &dir.path().join("work"), &script);
 
