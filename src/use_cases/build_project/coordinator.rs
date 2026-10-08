@@ -1850,13 +1850,14 @@ fn apply_unapplied(
         collecting_deferrals(|deferrals| run(UnappliedOp::Apply(deferrals)).map(|_| ())).map_err(
             |error| crate::use_cases::apply::load_kept_unapplied(context, set.name(), error),
         )?;
-    let (_, note) = crate::use_cases::apply::record::carry_after_apply(
+    let (_, note) = crate::use_cases::generation_record::carry_record(
+        crate::use_cases::generation_record::RecordStep::Apply,
         set,
         &config.work_path,
         record,
         run(UnappliedOp::Read),
     )?;
-    let cancelled = crate::use_cases::apply::cancellation_after_apply(context, &deferrals);
+    let cancelled = crate::use_cases::apply::cancellation_after(context, &deferrals, "apply");
     Ok(UnappliedStep::Applied(
         deferrals.into_iter().chain(note).chain(cancelled).collect(),
     ))

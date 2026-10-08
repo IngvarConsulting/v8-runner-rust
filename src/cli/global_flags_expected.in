@@ -43,6 +43,7 @@ const LEAVES_WITH_PREVIEW: &[&str] = &[
     "extensions activate",
     "push",
     "apply",
+    "reset",
     "upload",
     "pull",
     "download",

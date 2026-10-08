@@ -319,6 +319,30 @@
         }
       ]
     },
+    "reset": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        },
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
+    },
     "syntax": {
       "cluster": [
         {

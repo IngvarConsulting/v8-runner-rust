@@ -1,79 +1,5 @@
 {
   "$defs": {
-    "ApplyOutcome": {
-      "description": "Исход шага. Удача шага — `applied`, `planned` или `skipped`; отдельного `ok` у шага нет.",
-      "oneOf": [
-        {
-          "const": "applied",
-          "description": "Применено.",
-          "type": "string"
-        },
-        {
-          "const": "planned",
-          "description": "Превью: применилось бы.",
-          "type": "string"
-        },
-        {
-          "const": "skipped",
-          "description": "Не применяется: внешний набор или расширение, которого нет в базе.",
-          "type": "string"
-        },
-        {
-          "const": "failed",
-          "description": "Применение отказало; команда остановилась на этом шаге.",
-          "type": "string"
-        },
-        {
-          "const": "not_run",
-          "description": "Не запускался: команда остановилась раньше.",
-          "type": "string"
-        }
-      ]
-    },
-    "ApplyStep": {
-      "additionalProperties": false,
-      "description": "Один набор исходников (или расширение-инструмент `tool:<имя>`).",
-      "properties": {
-        "duration_ms": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "generation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/GenerationRecordFate"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Что стало с записью журнала поколений набора; нет поля — набор не применялся."
-        },
-        "message": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "outcome": {
-          "$ref": "#/$defs/ApplyOutcome"
-        },
-        "purpose": {
-          "$ref": "#/$defs/SourceSetPurpose"
-        },
-        "source_set": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "source_set",
-        "purpose",
-        "outcome",
-        "duration_ms"
-      ],
-      "type": "object"
-    },
     "GenerationRecordFate": {
       "description": "Что стало с записью журнала поколений набора после шага, который меняет основную\nконфигурацию или конфигурацию базы данных, но не обменивается с каталогом: `apply` и\n`reset`. Запись читает и переписывает инструмент, который её сделал.",
       "oneOf": [
@@ -100,6 +26,21 @@
         {
           "const": "unerased",
           "description": "Инструмент записи не ответил, а стереть запись не удалось: она осталась прежней и\nможет принять этот шаг за чужую правку; ответ называет причину.",
+          "type": "string"
+        }
+      ]
+    },
+    "HashMemoryFate": {
+      "description": "Хеш-память набора перед откатом.",
+      "oneOf": [
+        {
+          "const": "replaced",
+          "description": "Своя хеш-память набора заменена пустой: следующая отправка грузит набор целиком.",
+          "type": "string"
+        },
+        {
+          "const": "absent",
+          "description": "Своей непустой хеш-памяти у набора нет: ничего не записано, новой памяти команда не\nсоздаёт.",
           "type": "string"
         }
       ]
@@ -211,6 +152,31 @@
       ],
       "type": "object"
     },
+    "ResetOutcome": {
+      "description": "Исход команды.",
+      "oneOf": [
+        {
+          "const": "discarded",
+          "description": "Непринятое отброшено: основная конфигурация (или расширение) равна конфигурации базы\nданных.",
+          "type": "string"
+        },
+        {
+          "const": "nothing_to_discard",
+          "description": "Непринятого нет: отката не было, ничего не записано.",
+          "type": "string"
+        },
+        {
+          "const": "planned",
+          "description": "Превью: ничего не читалось и не запускалось.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Команда отказала; что успело случиться, говорят `hash_memory` и сообщение.",
+          "type": "string"
+        }
+      ]
+    },
     "SessionEndpoint": {
       "additionalProperties": false,
       "description": "Точка входа открытой сессии: режим и `host:port`, к которому раннер подключился.\n\nАдрес строится из разобранных хоста и порта, а не из записи конфига, поэтому\nучётных данных в нём нет: ни `user:pass@`, ни пароля строки соединения.",
@@ -276,7 +242,7 @@
       "type": "string"
     }
   },
-  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/apply.schema.json",
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/reset.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -285,8 +251,39 @@
       "minimum": 0,
       "type": "integer"
     },
+    "generation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationRecordFate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Что стало с записью журнала поколений набора; нет поля — отката не было или отмена\nпрервала чтение поколения после него (сообщение называет и то и другое)."
+    },
+    "hash_memory": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HashMemoryFate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Что стало с хеш-памятью набора; нет поля — команда до неё не дошла."
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "ok": {
       "type": "boolean"
+    },
+    "outcome": {
+      "$ref": "#/$defs/ResetOutcome"
     },
     "provider": {
       "anyOf": [
@@ -303,20 +300,22 @@
       "description": "Получил ли исполнитель работу этой команды\n(`INV.WIRE.PROVIDER-DISPATCHED-SAYS-WHETHER-AN-EXECUTOR-GOT-WORK`). У превью — `false`.",
       "type": "boolean"
     },
-    "steps": {
-      "description": "Наборы по порядку: конфигурация, расширения, внешние; за ними — расширение-инструмент.",
-      "items": {
-        "$ref": "#/$defs/ApplyStep"
-      },
-      "type": "array"
+    "purpose": {
+      "$ref": "#/$defs/SourceSetPurpose"
+    },
+    "source_set": {
+      "description": "Набор, чья цель откатывается.",
+      "type": "string"
     }
   },
   "required": [
     "ok",
     "provider_dispatched",
-    "steps",
+    "source_set",
+    "purpose",
+    "outcome",
     "duration_ms"
   ],
-  "title": "ApplyResult",
+  "title": "ResetResult",
   "type": "object"
 }

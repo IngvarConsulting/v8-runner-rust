@@ -18,6 +18,7 @@ check:
   - tests/cli_build_agent.rs::a_load_that_fails_after_a_deferred_cancellation_names_it
   - tests/cli_build_agent.rs::an_update_that_deferred_the_cancellation_is_named_when_the_generation_is_refused
   - src/use_cases/configure_extensions.rs::a_failed_safety_update_after_a_deferred_cancellation_names_it
+  - src/use_cases/reset.rs::a_rollback_that_fails_after_a_deferred_cancellation_names_it
   - src/use_cases/extension_inventory.rs::a_change_through_ibcmd_names_the_cancellation_it_deferred
   - tests/cli_agent_scenarios.rs::extensions_safety_through_the_agent_names_the_deferred_cancellation
   - tests/cli_agent_scenarios.rs::an_extension_created_through_the_agent_names_the_deferral_of_its_failure

@@ -84,6 +84,10 @@ pub enum Operation {
     /// что у `push`: применяет тот же исполнитель, который загружает.
     #[serde(rename = "apply")]
     Apply,
+    /// Откат непринятого: основная конфигурация возвращается к конфигурации базы данных —
+    /// `reset`. Обратный ход `apply`; у агента команды отката нет.
+    #[serde(rename = "reset")]
+    Reset,
     #[serde(rename = "upload", alias = "load")]
     Load,
     #[serde(rename = "pull", alias = "dump")]
@@ -107,10 +111,11 @@ pub enum Operation {
 }
 
 impl Operation {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Init,
         Self::Build,
         Self::Apply,
+        Self::Reset,
         Self::Load,
         Self::Dump,
         Self::Extensions,
@@ -129,6 +134,7 @@ impl Operation {
             Self::Init => "infobase.create",
             Self::Build => "push",
             Self::Apply => "apply",
+            Self::Reset => "reset",
             Self::Load => "upload",
             Self::Dump => "pull",
             Self::Extensions => "extensions",
@@ -297,6 +303,16 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Agent, LiveVerified),
     ];
     const DIRECT_GATE_ONLY: &[Capability] = &[implemented(Designer, ArgvTested)];
+    // Откат непринятого: `/RollbackCfg` и `ibcmd config reset` замерены вручную у файловой
+    // базы (08.10.2026, 8.3.27.2074), путь раннера проверен по командной строке. Порядок —
+    // решение владельца (#235). У кластера и прямого шлюза — Конфигуратор: `ibcmd` к ним в
+    // умолчаниях нет, у агента (справка 8.5.1.1150) команды отката нет; кластер и шлюз не
+    // замерены.
+    const ROLLBACK_FILE: &[Capability] = &[
+        implemented(Designer, ArgvTested),
+        implemented(Ibcmd, ArgvTested),
+    ];
+    const ROLLBACK_SERVER: &[Capability] = &[implemented(Designer, ArgvTested)];
     // `make` собирает пакет из исходников во временной базе раннера, а не выгружает базу
     // проекта, поэтому строка от вида цели не зависит. `ibcmd`: `infobase create`, затем
     // `config import --out` (замер #182, 06.10.2026, 8.3.27.2074); Конфигуратор:
@@ -356,6 +372,8 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         (Operation::Build | Operation::Apply | Operation::Dump, TargetKind::Cluster) => {
             AGENT_DESIGNER
         }
+        (Operation::Reset, TargetKind::File) => ROLLBACK_FILE,
+        (Operation::Reset, TargetKind::Cluster) => ROLLBACK_SERVER,
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
             DESIGNER_ONLY
         }
@@ -382,6 +400,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         ) => DIRECT_GATE_THEN_GATE,
         (
             Operation::Load
+            | Operation::Reset
             | Operation::Syntax
             | Operation::InfobaseDump
             | Operation::InfobaseRestore,
@@ -423,6 +442,7 @@ pub const fn serves_project(operation: Operation, provider: Provider, shape: Pro
             // Применению форма проекта не мешает: агент применяет и основную конфигурацию
             // проекта EDT, и расширение-инструмент — исходников он не читает.
             Operation::Apply
+            | Operation::Reset
             | Operation::Init
             | Operation::Load
             | Operation::Extensions

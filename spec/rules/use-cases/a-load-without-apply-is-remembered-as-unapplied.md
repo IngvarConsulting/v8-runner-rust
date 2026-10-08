@@ -10,6 +10,10 @@ check:
   - src/use_cases/agent_session.rs::a_record_without_the_applied_mark_reads_as_applied
   - src/use_cases/apply.rs::an_apply_reads_the_generation_with_the_tool_of_the_record
   - src/use_cases/apply.rs::an_apply_without_an_answer_of_the_record_tool_erases_the_record
+  - tests/cli_reset.rs::reset_rewrites_the_record_with_the_tool_that_made_it
+  - tests/cli_reset.rs::reset_without_an_answer_erases_the_record
+  - tests/cli_reset.rs::reset_into_a_base_that_moved_keeps_the_record_and_the_next_push_is_refused
+  - tests/cli_reset.rs::reset_keeps_a_record_made_before_a_failed_load
 ---
 
 # Загрузка без применения запоминается как непринятая
@@ -23,4 +27,7 @@ false`; поле `after` по-прежнему называет операцию
 верят, только пока поколение базы равно записи. Удачное применение тем же инструментом
 снимает признак и записывает новое поколение; без ответа после применения запись стирается
 и ответ это называет — как после загрузки
-(`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`).
+(`INV.USE-CASES.A-LOAD-RECORDS-ITS-GENERATION-OR-ERASES-THE-RECORD`). Откат непринятого
+(`reset`) снимает признак так же: поколение до и после отката читает инструмент записи; база
+не ушла от записи — запись переписывается его ответом с прежним `after`; ушла, или запись
+сделана перед неудачной загрузкой, — запись не трогается; без ответа она стирается.

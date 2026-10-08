@@ -900,6 +900,17 @@
           ],
           "description": "Executor for `push`."
         },
+        "reset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `reset`: the Designer `/RollbackCfg` or `ibcmd config reset`."
+        },
         "syntax": {
           "anyOf": [
             {

@@ -520,6 +520,9 @@ struct ProvidersSchema {
     /// another way than the load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     apply: Option<ProviderSchema>,
+    /// Executor for `reset`: the Designer `/RollbackCfg` or `ibcmd config reset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reset: Option<ProviderSchema>,
     /// Executor for `upload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     upload: Option<ProviderSchema>,

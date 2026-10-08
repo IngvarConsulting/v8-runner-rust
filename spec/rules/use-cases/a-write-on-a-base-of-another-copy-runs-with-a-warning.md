@@ -7,6 +7,7 @@ check:
   - src/use_cases/transport.rs::a_base_of_another_copy_warns_before_the_scenario
   - src/use_cases/infobase_owner.rs::the_refusal_and_the_warning_name_the_same_ways_out
   - src/use_cases/infobase_owner.rs::a_marker_with_this_copy_and_another_live_one_warns
+  - tests/cli_infobase_owner.rs::reset_on_a_base_of_another_copy_warns_and_names_the_owner
 ---
 
 # Запись в базу другой копии идёт с предупреждением

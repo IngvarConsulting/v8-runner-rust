@@ -181,14 +181,18 @@ window.RUNNER_DATA = (function () {
     },
     {
       id: 'reset', verb: 'reset', title: 'Отбросить непринятое в базе',
-      what: 'Возвращает основную конфигурацию к конфигурации базы данных; чужое непринятое без --force не трогает.',
-      cmd: function (ctx) { return 'v8-runner reset'; },
+      what: 'Возвращает основную конфигурацию к конфигурации базы данных; без набора — основную, расширение — своим набором.',
+      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner reset my-ext' : 'v8-runner reset'); },
       applies: function (ctx) { return notExternal(ctx, 'reset'); },
-      today: function (ctx) { return { chain: [], config: [], note: 'нет' }; },
+      today: function (ctx) {
+        if (ctx.target === 'standalone') return { chain: [P.designer], config: ['connection — прямой шлюз', 'providers.reset'], note: '/RollbackCfg по прямому шлюзу; у SSH-шлюза и агента отката нет; не замерено' };
+        if (ctx.target === 'cluster') return { chain: [P.designer], config: ['connection', 'providers.reset'], note: '/RollbackCfg; не замерено' };
+        return { chain: [P.designer, P.ibcmd], config: ['connection', 'providers.reset'], note: 'признак непринятого до отката: нет — отката нет; своё и чужое не различаются; память исходников набора становится пустой' };
+      },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer], config: ['connection'], note: '/RollbackCfg по прямому шлюзу; в наборе SSH-шлюза отката нет' };
         if (ctx.target === 'cluster') return { chain: [P.designer], config: ['connection'], note: '/RollbackCfg, для расширения с -Extension' };
-        return { chain: [P.designer, P.ibcmd], config: ['connection'], note: '/RollbackCfg или ibcmd config reset; своё непринятое — по памяти о поколении, чужое — только с --force' };
+        return { chain: [P.designer, P.ibcmd], config: ['connection'], note: '/RollbackCfg или ibcmd config reset; своё и чужое непринятое не различаются' };
       }
     },
     {

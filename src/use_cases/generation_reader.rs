@@ -2,7 +2,8 @@
 //! (`/GetConfigGenerationID`) или `ibcmd config generation-id`.
 //!
 //! Единственный такой читатель: его зовут `push` перед загрузкой и после неё, `pull` до и
-//! после выгрузки и `status --deep`. У агента поколение читает его сессия
+//! после выгрузки, `status --deep`, а `apply` и `reset` — инструментом записи набора
+//! ([`read_by_record_tool`]). У агента поколение читает его сессия
 //! (`agent_session::generation_id`). Что ответ значит для обмена, решает
 //! `exchange_guard::predict`.
 //!
@@ -12,9 +13,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::model::AppConfig;
+use crate::domain::capability::Provider;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
+use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
+use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 
@@ -75,6 +79,84 @@ pub(crate) fn read_generation<'a>(
             .config_generation_id(extension)
             .map_err(AppError::from),
     }
+}
+
+/// Исполнитель команды: инструмент и найденная им утилита.
+#[derive(Clone, Copy)]
+pub(crate) struct LocatedTool<'a> {
+    pub(crate) provider: Provider,
+    pub(crate) binary: Option<&'a Path>,
+}
+
+impl<'a> LocatedTool<'a> {
+    /// Утилита исполнителя; не найдена до работы — ошибка сценария.
+    pub(crate) fn path(self, context: &ExecutionContext) -> Result<&'a Path, AppError> {
+        self.binary.ok_or_else(|| {
+            AppError::Runtime(format!(
+                "{} was not located before the {}",
+                self.provider,
+                context.command().as_str()
+            ))
+        })
+    }
+}
+
+/// Поколение инструментом `tool` — тем, что сделал запись набора: токены разных инструментов
+/// несравнимы. Свой инструмент исполнителя спрашивает сам; Конфигуратор и `ibcmd` ищутся,
+/// если исполнитель другой, и ненайденный — нет ответа. Агент здесь не спрашивается: его
+/// поколение читает сессия, которую держит исполнитель-агент, а у другого исполнителя
+/// ответа агента нет. `None` — ответа нет; `name` — имя файла `/Out` Конфигуратора.
+pub(crate) fn read_by_record_tool(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    tool: Provider,
+    executor: LocatedTool<'_>,
+    utilities: &mut PlatformUtilities,
+    name: &str,
+    extension: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    /// Инструмент записи, который отвечает процессом платформы.
+    #[derive(Clone, Copy)]
+    enum Process {
+        Designer,
+        Ibcmd,
+    }
+    let (process, utility) = match tool {
+        Provider::Designer => (Process::Designer, UtilityType::V8),
+        Provider::Ibcmd => (Process::Ibcmd, UtilityType::Ibcmd),
+        Provider::Agent | Provider::IbcmdRs | Provider::Webinst => return Ok(None),
+    };
+    let binary = if tool == executor.provider {
+        executor.path(context)?.to_path_buf()
+    } else {
+        match utilities.locate(utility) {
+            Ok(location) => location.path,
+            Err(error) => {
+                tracing::debug!(%error, %tool, "the tool of the generation record is not found");
+                return Ok(None);
+            }
+        }
+    };
+    let runner = utilities.runner_for(utility);
+    read_generation(
+        context,
+        config,
+        || {
+            Ok(match process {
+                Process::Ibcmd => GenerationProcess::Ibcmd {
+                    binary: &binary,
+                    runner,
+                    data_path: None,
+                },
+                Process::Designer => GenerationProcess::Designer {
+                    binary: &binary,
+                    runner,
+                    log_file: designer_log_file(config, name)?,
+                },
+            })
+        },
+        extension,
+    )
 }
 
 /// `ibcmd` к базе проекта — для обоих чтений этого модуля.

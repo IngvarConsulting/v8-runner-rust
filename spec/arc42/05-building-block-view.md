@@ -63,7 +63,7 @@ flowchart TB
 `init_project` (в `CommandName` — `Init`; копия базы `--from` — `init_project/copy.rs`), `download`, `infobase dump` и `restore` —
 `infobase_export`, `extensions` — `configure_extensions` и `extension_inventory`, `test` —
 `run_tests`; остальные названы по команде: `convert_sources`, `launch_app`, `publish_infobase`,
-`tools_download`, `status`, `apply`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит
+`tools_download`, `status`, `apply`, `reset`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит
 [правило](../rules/mcp/published-tool-surface.md).
 
 ### 5.4 Общее в `use_cases`
@@ -74,7 +74,7 @@ flowchart TB
 | [`infobase_owner.rs`](../../src/use_cases/infobase_owner.rs) | Метка владельца файловой базы: чья база, предупреждение о базе другой копии, запись копии, форма метки; зовёт её только граница в `transport.rs` — [8.3](08-cross-cutting-concepts.md) |
 | [`exchange_guard.rs`](../../src/use_cases/exchange_guard.rs) | Проверки перед обменом после владельца: память о базе у набора (`no_memory`) и поколение до и после загрузки и выгрузки (`non_fast_forward`), сверка всех наборов до первой загрузки, пропуск выгрузки при неизменном поколении, признак нового владельца, память созданной базы, восстановление файла версий; единственный, кто строит эти отказы и их `next` (сквозь исполнителей они идут как `AppError::Refused`); журнал поколений — в [`agent_session.rs`](../../src/use_cases/agent_session.rs) — [6.3](06-runtime-view.md) |
 | [`status.rs`](../../src/use_cases/status.rs) | `status`: память о базе по наборам — определение памяти и сверка поколения (`predict`) берутся у `exchange_guard.rs` — и с `--deep` поколение исполнителем `push`, состав расширений исполнителем `extensions` (`extension_inventory.rs`), копии из метки (`infobase_owner.rs`); пишет только журналы |
-| [`generation_reader.rs`](../../src/use_cases/generation_reader.rs) | Единственное чтение поколения процессом платформы — Конфигуратором и `ibcmd` — для `push`, `pull` и `status --deep`; у агента поколение читает его сессия |
+| [`generation_reader.rs`](../../src/use_cases/generation_reader.rs) | Единственное чтение поколения процессом платформы — Конфигуратором и `ibcmd` — для `push`, `pull` и `status --deep`, а инструментом записи набора — для `apply` и `reset`; признак непринятого у `status --deep` и `reset`; у агента поколение читает его сессия |
 | [`provider_selection.rs`](../../src/use_cases/provider_selection.rs) | Выбор исполнителя и квитанция — [6.2](06-runtime-view.md) |
 | [`agent_session.rs`](../../src/use_cases/agent_session.rs) | Сессия агента на команду, обмен файлами, поколение — [6.4](06-runtime-view.md) |
 | [`staged_publication.rs`](../../src/use_cases/staged_publication.rs), [`destruction_guard.rs`](../../src/use_cases/destruction_guard.rs) | Публикация с заменой и вопрос к git — [8.8](08-cross-cutting-concepts.md) |
@@ -87,7 +87,8 @@ flowchart TB
 | [`throwaway_infobase.rs`](../../src/use_cases/throwaway_infobase.rs) | Временная база раннера под `workPath`, в которой `make` и `convert` собирают пакет из исходников, а `convert` разбирает пакет в XML: создание исполнителем (`ibcmd` со своим `--data` или Конфигуратор), загрузка основной конфигурации один раз за прогон, сборка и разбор пакета, уборка своей и брошенных баз; единственный перевод исходников EDT в XML (`edt_sources_to_xml`) — и для сборки файловой базы у `infobase create` — [правило](../rules/use-cases/make-builds-packages-from-sources-in-a-throwaway-base.md) |
 | [`set_walk.rs`](../../src/use_cases/set_walk.rs) | Общее у обходов наборов: ответ каждого набора в `sets`, остановка на первом отказе, закрытие ответа обхода |
 | [`tool_extension.rs`](../../src/use_cases/tool_extension.rs) | Расширение-инструмент клиентского MCP |
-| [`apply/act.rs`](../../src/use_cases/apply/act.rs), [`apply/record.rs`](../../src/use_cases/apply/record.rs) | Акт применения к конфигурации базы данных — один владелец у `push` всех исполнителей, расширения-инструмента и `apply`: точка безопасности, критическая фаза, учёт отложенной отмены; перенос записи поколения после применения. `upload` и `infobase create` применяют сами — почему, сказано в `act.rs` |
+| [`apply/act.rs`](../../src/use_cases/apply/act.rs), [`generation_record.rs`](../../src/use_cases/generation_record.rs) | Акт применения к конфигурации базы данных — один владелец у `push` всех исполнителей, расширения-инструмента и `apply`: точка безопасности, критическая фаза, учёт отложенной отмены; перенос записи поколения после применения и отката (`generation_record.rs`). `upload` и `infobase create` применяют сами — почему, сказано в `act.rs` |
+| [`reset/act.rs`](../../src/use_cases/reset/act.rs) | Акт отката непринятого — один владелец у `reset`: точка безопасности, критическая фаза, учёт отложенной отмены, подсказка об открытом Конфигураторе. Признак непринятого — `generation_reader`, пустая хеш-память — `exchange_guard`, перенос записи поколения — `generation_record.rs` |
 | [`client_address.rs`](../../src/use_cases/client_address.rs) | Адрес клиента у `launch` и у клиента `test`: строка подключения, без неё — `infobase.web.url`, ключ `--via`; отказ толстому клиенту и обычному приложению у автономной цели — [правило](../rules/cli/a-client-goes-by-the-connection-string-before-the-web-address.md) |
 
 ### 5.5 `platform`

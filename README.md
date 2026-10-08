@@ -170,7 +170,10 @@ v8-runner push
 `push --no-apply` только загружает — открытые сеансы продолжают работать, — а
 `v8-runner apply [<SET>]` применяет потом. Если не удалось только применение, загрузка
 сохраняется, и ответ называет `apply` следующим шагом
-([CAPABILITIES](docs/CAPABILITIES.md#apply)).
+([CAPABILITIES](docs/CAPABILITIES.md#apply)). Обратный ход — `v8-runner reset [<SET>]`:
+основная конфигурация (без набора) или расширение набора возвращается к конфигурации базы
+данных, а следующий `push` загружает отброшенное заново
+([CAPABILITIES](docs/CAPABILITIES.md#reset)).
 
 **Несовместимо с 0.13.0:** у файловой базы и кластера `push`, `pull`, `download`, `clone` и
 `infobase dump|restore` без ключа идут через агента Конфигуратора, которого раннер поднимает

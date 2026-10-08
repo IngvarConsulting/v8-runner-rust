@@ -45,6 +45,15 @@ pub struct ApplyRequest {
     pub dry_run: bool,
 }
 
+/// Transport-neutral request for `reset`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetRequest {
+    /// Набор, чья цель откатывается; без него — основная конфигурация.
+    pub source_set: Option<String>,
+    /// Name the rollback and locate the platform without dispatching it.
+    pub dry_run: bool,
+}
+
 /// Как `push` грузит выбранные наборы.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PushMode {

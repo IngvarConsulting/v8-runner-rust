@@ -135,6 +135,11 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "reset",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "upload",
         preview: Preview::Runs,
         base: Base::Resolves,

@@ -8,12 +8,14 @@ check:
   - src/platform/ibcmd.rs::a_cancel_cuts_the_question_after_a_failed_create
   - src/use_cases/apply.rs::an_apply_stopped_at_its_safe_point_writes_nothing
   - src/use_cases/apply.rs::an_apply_that_fails_after_a_deferred_cancellation_names_it
+  - src/use_cases/reset.rs::a_rollback_stopped_at_its_safe_point_writes_nothing
+  - src/use_cases/reset.rs::a_cancellation_deferred_by_the_rollback_is_named_once
 ---
 
 # Запись в базу — критическая фаза
 
 Шаг, который меняет базу, объявляет класс прерывания `CriticalNonAbortable`: загрузка и
-применение конфигурации — и у `push`, и у `apply`, — изменение состава и свойств
+применение конфигурации — и у `push`, и у `apply`, — откат непринятого у `reset`, изменение состава и свойств
 расширений, создание базы, загрузка базы целиком из файла. Снятый посреди записи процесс оставляет базу в состоянии, которое не
 назовёт никто.
 
