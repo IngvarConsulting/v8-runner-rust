@@ -2627,3 +2627,160 @@ config`). В справке пакетного Конфигуратора тож
 - **Структурный признак «Конфигуратор открыт» — `F_GETLK` на `1Cv8.cgr`**, а не на `1Cv8.1CD`.
   Признак «есть сеанс» по-прежнему даёт `1Cv8.1CD` (раздел #435). Признак блокировки сеансов —
   наличие `1Cv8.cdn`. Коды выхода у всех отказов общие (1 и 255), различает их только текст.
+
+## Инкрементальная сборка в постоянной базе сборки
+
+Замер 08.10.2026. Задача: [#471](https://github.com/IngvarConsulting/v8-runner-rust/issues/471).
+Платформа 8.3.27.2074, macOS 27.0 (arm64). Время — по стене, на один вызов, с запуском процесса.
+
+**Вход.** `src_cfg` — фикстура `tests/fixtures/designer/configuration` (51 файл);
+`src_cfg_mod` — она же с процедурой, дописанной в `CommonModules/ОбщийМодуль1/Ext/Module.bsl`.
+Расширения — `tests/fixtures/designer/extension` (`Расширение1`), его копия с изменённым
+`Comment` у `CommonModules/Расш1_ОбщийМодуль1.xml` и `Расширение2` — копия с новым именем,
+префиксом `Расш2_` и новыми UUID своих объектов (UUID заимствованных прежние). Большая
+конфигурация — фикстура и 10 000 общих модулей по ~6 КБ текста: 20 050 файлов, 157 МБ;
+изменённая — с процедурой, дописанной в `Модуль05000`. Постоянная база — файловая база, в
+которую основная конфигурация загружена один раз и не применена (без `/UpdateDBCfg`), как во
+временной базе `make`.
+
+**Как сравнивались пакеты.** Каждый пакет разобран в XML `ibcmd config export --file` на
+пустой базе, как разбирает `convert`, и выгрузки сравнены `diff -r`. «Равно» ниже значит: все
+файлы, кроме `ConfigDumpInfo.xml`, равны, а в `ConfigDumpInfo.xml` отличаются только атрибуты
+`configVersion` — они разные у любых двух сборок, как в разделе «Сборка пакета из XML».
+Контроль: пакет до частичной загрузки отличается от эталона ровно изменённым файлом.
+
+**1. `ibcmd`: частичный импорт есть.** `ibcmd help config`: у `config import` подкоманда
+`files` — `--base-dir=<каталог>` или `--archive=<путь>`, `--partial`, `--no-check`,
+`--extension`, затем список файлов относительно базового каталога. Ключ `--out` есть только у
+самой `config import`, не у `files`.
+
+| вызов на постоянной базе | rc | исход |
+| --- | --- | --- |
+| `config import files --partial --base-dir=src_cfg_mod CommonModules/ОбщийМодуль1/Ext/Module.bsl` | 0 | изменение в базе, `generation-id` новый |
+| то же без `--partial` (в списке один `.bsl`) | 0 | так же |
+| затем `config save <f>.cf` (без `--db`) | 0 | пакет равен эталону |
+| `config save --db <f>.cf` | 0 | 4 973 байта — пустая конфигурация базы данных: загруженное не применено. Для сборки `--db` не годится |
+| `config import files --partial --out=<f> …` и `config import --out=<f> files …` | 0 | **`--out` молча пропущен**: файла нет, изменение записано в базу (`generation-id` сменился) |
+| `config import --out=<f> src_cfg_mod` на базе с загруженной конфигурацией | 0 | пакет равен эталону; `generation-id` базы не меняется |
+
+**2. Пакет после частичной загрузки равен пакету из свежей базы** — у обоих исполнителей.
+Эталон — `/LoadConfigFromFiles src_cfg_mod` и `/DumpCfg` в свежей базе.
+
+| путь в постоянной базе с `src_cfg` | равен эталону |
+| --- | --- |
+| Конфигуратор: `/LoadConfigFromFiles src_cfg_mod -partial -listFile <список>` (без `-updateConfigDumpInfo`), `/DumpCfg` | да |
+| Конфигуратор: `/LoadConfigFromFiles src_cfg_mod -files "CommonModules/ОбщийМодуль1/Ext/Module.bsl" -partial`, `/DumpCfg` | да |
+| Конфигуратор: полная `/LoadConfigFromFiles src_cfg_mod` поверх загруженной, `/DumpCfg` | да |
+| `ibcmd`: `config import files --partial`, `config save` | да |
+| `ibcmd`: полный `config import src_cfg_mod` поверх загруженной, `config save` | да |
+| `ibcmd config import --out` в свежей базе | да |
+| база Конфигуратора, догружена `ibcmd import files --partial` (свой `--data`), `ibcmd config save` | да |
+| база `ibcmd`, догружена Конфигуратором `-partial -listFile`, `/DumpCfg` | да |
+| большая: Конфигуратор `-partial -listFile` и полная перезагрузка; `ibcmd` `files --partial`, `--out` на загруженной базе и полный реимпорт — против `/DumpCfg` свежей базы | да, все 20 051 файл выгрузки |
+
+`ConfigDumpInfo.xml` источника Конфигуратор без `-updateConfigDumpInfo` не тронул. **Повтор
+без изменений побайтно стабилен**: два `/DumpCfg` подряд одной базы дают один и тот же файл
+(`sha1` равны), два `config save` — тоже; на фикстуре и на большой. Полная перезагрузка тех
+же исходников байты меняет.
+
+**3. Время.**
+
+| шаг | Конфигуратор, фикстура | `ibcmd`, фикстура | Конфигуратор, большая | `ibcmd`, большая |
+| --- | --- | --- | --- | --- |
+| создание базы | 1,8–2,0 с | 4,5–4,7 с | 1,9 с | 4,3–7,3 с |
+| полная загрузка в пустую базу | 2,9–3,3 с | 5,3 с | 34–36 с | 25 с |
+| пакет из базы (`/DumpCfg`, `config save`) | 2,5–3,1 с | 4,5–4,8 с | 12–13,5 с | 14 с |
+| частичная загрузка одного модуля | 2,8 с | 5,1 с | 4,7 с | 10,2 с |
+| полная загрузка поверх загруженной | 2,9–3,0 с | 5,3 с | 47 с | 24 с |
+| **свежая база** (создание, загрузка, пакет; у `ibcmd` — создание и `--out`) | **7,9 с** | **9,9 с** | **49,9 с** | **31,5 с** |
+| **постоянная база, без изменений** (только пакет) | **2,6 с** | **4,6 с** | **13,5 с** | **14,1 с** |
+| **постоянная база, один модуль** (частичная и пакет) | **5,3 с** | **9,9 с** | **16,9 с** | **24,4 с** |
+| постоянная база, полная перезагрузка и пакет | 5,4 с | 10,0 с | 58,8 с | 45,4 с |
+| `ibcmd config import --out` на постоянной базе | — | 4,8 с | — | 25,4 с |
+
+Каждый вызов `ibcmd` несёт ~4,5 с постоянной цены запуска, поэтому на фикстуре частичный путь
+`ibcmd` (два вызова) не быстрее свежей базы. Полная перезагрузка в постоянную базу медленнее
+загрузки в свежую.
+
+**4. Расширения.** Все вызовы — rc=0.
+
+| случай | Конфигуратор | `ibcmd` |
+| --- | --- | --- |
+| загрузка расширения в базу с основной | `/LoadConfigFromFiles src_ext1 -Extension Расширение1`, 2,9 с | `config import --extension=Расширение1 src_ext1` (без `--out` — в базу), 5,1 с |
+| частичная загрузка расширения | `/LoadConfigFromFiles src_ext1_mod -partial -listFile <список> -Extension Расширение1`, 2,9 с | `config import files --partial --extension=Расширение1 --base-dir=src_ext1_mod CommonModules/Расш1_ОбщийМодуль1.xml`, 6,0 с |
+| пакет расширения после частичной | `/DumpCfg <f>.cfe -Extension Расширение1` — равен свежей сборке | `config save --extension=Расширение1 <f>.cfe` — равен |
+| второе расширение в той же базе | `Расширение2` загружено, оба пакета собираются, `Расширение1` после этого равно прежнему | так же; `config extension list` показывает оба |
+| основная после загрузки расширений | `/DumpCfg` равен эталону | `config save` равен эталону |
+| расширение в пустой базе без основной | загрузка проходит | загрузка и `config save --extension` проходят, пакет равен исходникам |
+
+Пакеты расширения Конфигуратора и `ibcmd` равны между собой по выгрузке. Повторный
+`/DumpCfg -Extension` одной базы побайтно **не** стабилен, в отличие от основной.
+
+**5. Смена версии платформы — не замерена:** лицензии 8.5.4 на этом Mac нет. На копиях
+постоянных баз 8.3.27 (Конфигуратора и `ibcmd`):
+
+- `1cv8` 8.5.4.1878 `/DumpCfg` и `/LoadConfigFromFiles … -partial` — rc=1 за 22–24 с, `/Out`:
+  «Не найдена лицензия. Не обнаружен ключ защиты программы или полученная программная лицензия!»;
+- `ibcmd` 8.5.4.1878 `config generation-id`, `config save`, `config import files --partial`,
+  `infobase create` печатают успех (`save` пишет пакет, равный эталону), но процесс не
+  завершается за 180 с и снят по тайм-ауту; повтор с новым `--data` не печатает и ответа;
+- после этого 8.3.27 открывает обе базы как прежде (`generation-id`, `config save`,
+  `/DumpCfg` — rc=0, пакет равен эталону); заголовок `1Cv8.1CD` — та же версия формата.
+
+**EDT не замерен.** `1cedtcli` на этом Mac нет: под `/Applications/1C/1CE` установлен только
+запускатель `1c-edt-start` 2025.2.1, без самого EDT. Сборка проекта EDT и доля
+`1cedtcli export` в ней не измерены.
+
+**Попутно: `ibcmd config export --file` с потоками по умолчанию нестабилен.** Разбор формой
+`convert` (без `--threads`) падал на исправном пакете: на фикстуре 4 из 38 вызовов rc=255
+(«Ошибка при выполнении файловой операции '<пакет>'. 22(0x00000016): Invalid argument» или
+«Неверный формат хранилища данных '<пакет>'»), на большой — 10 из 10 (rc=255 тем же текстом
+или снятие процесса сигналом), успев выгрузить от 1 542 до 20 047 файлов. С `--threads=1` —
+16 из 16 успешно (большая — 85–114 с). Тот же пакет разбирается с `--threads=1`, а пакет
+фикстуры — и повторным вызовом без ключа, то есть ломается разбор, а не пакет; свежая пустая
+база для разбора не помогает.
+
+```text
+ibcmd help config
+1cv8 CREATEINFOBASE "File='<W>/dP'" /Out …
+1cv8 DESIGNER /DisableStartupDialogs /DisableStartupMessages /IBConnectionString File=<W>/dP /LoadConfigFromFiles <W>/src_cfg /Out … -NoTruncate
+1cv8 DESIGNER … /IBConnectionString File=<W>/dP /LoadConfigFromFiles <W>/src_cfg_mod -partial -listFile <W>/list_mod.txt /Out …
+1cv8 DESIGNER … /IBConnectionString File=<W>/dP2 /LoadConfigFromFiles <W>/src_cfg_mod -files "CommonModules/ОбщийМодуль1/Ext/Module.bsl" -partial /Out …
+1cv8 DESIGNER … /IBConnectionString File=<W>/dP /DumpCfg <W>/pk/D_pers_part.cf /Out …
+1cv8 DESIGNER … /IBConnectionString File=<W>/dP2 /LoadConfigFromFiles <W>/src_ext1_mod -partial -listFile <W>/list_ext.txt -Extension Расширение1 /Out …
+1cv8 DESIGNER … /IBConnectionString File=<W>/dP2 /DumpCfg <W>/pk/D_pers_ext1_part.cfe -Extension Расширение1 /Out …
+ibcmd infobase --data <W>/iP/data --db-path <W>/iP/ib create
+ibcmd config --data <W>/iP/data --db-path <W>/iP/ib import <W>/src_cfg
+ibcmd config --data <W>/iP/data --db-path <W>/iP/ib import files --partial --base-dir=<W>/src_cfg_mod CommonModules/ОбщийМодуль1/Ext/Module.bsl
+ibcmd config --data <W>/iP/data --db-path <W>/iP/ib save <W>/pk/I_pers_part.cf
+ibcmd config --data <W>/iO/data --db-path <W>/iO/ib import files --partial --base-dir=<W>/src_cfg_mod --out=<W>/pk/I_fo.cf CommonModules/ОбщийМодуль1/Ext/Module.bsl   # rc=0, файла нет, база изменена
+ibcmd config --data <W>/iP/data --db-path <W>/iP/ib import --extension=Расширение1 <W>/src_ext1
+ibcmd config --data <W>/iP/data --db-path <W>/iP/ib import files --partial --extension=Расширение1 --base-dir=<W>/src_ext1_mod CommonModules/Расш1_ОбщийМодуль1.xml
+ibcmd config --data <W>/iP/data --db-path <W>/iP/ib save --extension=Расширение1 <W>/pk/I_pers_ext1_part.cfe
+ibcmd config --data <W>/unpack/data --db-path <W>/unpack/ib export --threads=1 --file=<пакет> <каталог>
+```
+
+**Вывод для потребителей.**
+
+- Инкрементальная сборка в постоянной базе возможна у обоих исполнителей и даёт тот же пакет
+  по содержимому, что свежая база: Конфигуратор — `/LoadConfigFromFiles <каталог> -partial
+  -listFile <список>` (или `-files … -partial`) и `/DumpCfg`; `ibcmd` — `config import files
+  --partial --base-dir=<каталог> <файлы>` и `config save` **без `--db`**. Так же для
+  расширений (`-Extension`, `--extension`); несколько расширений в одной базе не мешают ни
+  друг другу, ни основной. Базу одного исполнителя другой догружает и собирает.
+- Выигрыш — у Конфигуратора: на большой конфигурации 49,9 с → 16,9 с при одном изменённом
+  модуле и 13,5 с без изменений; на фикстуре 7,9 → 5,3 с. У `ibcmd` — 31,5 → 24,4 с на
+  большой (`config save` один стоит 14 с) и ничего на фикстуре: каждый вызов несёт ~4,5 с
+  запуска. `config import --out` на постоянной базе экономит только создание базы.
+- Цепочка исполнителей `make` с постоянной базой: Конфигуратор первым (частичная загрузка и
+  `/DumpCfg`), `ibcmd` — запасным (`import files --partial` и `config save`). Полная
+  перезагрузка в постоянную базу медленнее свежей базы: при неизвестном списке изменений
+  дешевле свежая база или `ibcmd config import --out`. `--out` нельзя сочетать с `files`:
+  ключ молча пропускается, и импорт пишет в базу.
+- Без изменений пакет основной конфигурации из той же базы побайтно повторяется у обоих
+  исполнителей, так что «не изменилось» по байтам пакета возможно, пока базу не перезагружали
+  целиком; у пакета расширения Конфигуратора — нет.
+- Не замерены: удаление и переименование объектов при частичной загрузке, проект EDT и доля
+  `1cedtcli`, переход базы на 8.5.4.
+- Разбор `ibcmd config export --file` с потоками по умолчанию на этом Mac ломается, на больших
+  пакетах — всегда; `--threads=1` проходит.
