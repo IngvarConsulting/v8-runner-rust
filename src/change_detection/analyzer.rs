@@ -61,6 +61,10 @@ pub struct ContextAnalysis {
 /// Hard failures that prevent normal change-detection flow.
 #[derive(Debug, Clone, Error)]
 pub enum ChangeDetectionError {
+    /// A pre-load scan stopped cooperatively. This must never become full-load fallback.
+    #[error("source analysis interrupted")]
+    Interrupted,
+
     #[error("hard storage error for source-set '{source_set}' at '{storage_path}': {reason}")]
     StorageHard {
         source_set: String,
@@ -92,73 +96,66 @@ pub enum ChangeDetectionError {
 }
 
 /// Analyze one source-set context and produce either concrete changes or a safe fallback.
-pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextAnalysis {
-    let snapshot = match context.storage_path(work_path) {
-        None => Default::default(),
-        Some(path) => match load_bound_snapshot(context, &HashStorage::new(path)) {
-            Ok(Some(snapshot)) => snapshot,
-            Ok(None) => {
-                return ContextAnalysis {
-                    context: context.clone(),
-                    outcome: Ok(AnalysisOutcome::Fallback),
-                }
-            }
-            Err(error) => {
-                return ContextAnalysis {
-                    context: context.clone(),
-                    outcome: Err(error),
-                }
-            }
-        },
-    };
-
-    let stored_mtimes: HashMap<String, u64> = snapshot
-        .entries
-        .iter()
-        .map(|(rel, state)| (rel.clone(), state.mtime_ns))
-        .collect();
-    let scan = match scanner::scan(context.path(), snapshot.watermark, &stored_mtimes) {
-        Ok(scan) => scan,
-        Err(e) => {
-            tracing::warn!(
-                source_set = %context.name(),
-                error = %e,
-                "scan failed, switching to fallback mode"
-            );
-            return ContextAnalysis {
-                context: context.clone(),
-                outcome: Ok(AnalysisOutcome::Fallback),
-            };
-        }
-    };
-
-    let mut changes = detect_changes(&scan.candidates, &snapshot.entries);
-    let seen_rel: HashSet<&str> = scan
-        .seen_files
-        .iter()
-        .map(|f| f.rel_path.as_str())
-        .collect();
-    changes.extend(
-        snapshot
-            .entries
-            .iter()
-            .filter(|(rel, _)| !seen_rel.contains(rel.as_str()))
-            .map(|(rel, _)| FileChange {
-                path: context.path().join(rel),
-                kind: ChangeKind::Deleted,
-            }),
-    );
-
-    let prepared = build_prepared_state(&scan, &snapshot.entries, snapshot.generation);
-    let outcome = if changes.is_empty() {
-        AnalysisOutcome::NoChanges
+pub fn analyze_context(
+    context: &SourceSetContext,
+    work_path: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> ContextAnalysis {
+    // All outcomes, including storage and IO fallback, cross the same final
+    // interruption check. No early return can turn cancellation into a full load.
+    let outcome = if interrupted() {
+        Err(ChangeDetectionError::Interrupted)
     } else {
-        AnalysisOutcome::Changes { changes, prepared }
+        (|| {
+            let snapshot = match context.storage_path(work_path) {
+                None => Default::default(),
+                Some(path) => match load_bound_snapshot(context, &HashStorage::new(path)) {
+                    Ok(Some(snapshot)) => snapshot,
+                    Ok(None) => return Ok(AnalysisOutcome::Fallback),
+                    Err(error) => return Err(error),
+                },
+            };
+            let scan = match scanner::scan(context.path(), interrupted) {
+                Ok(scan) => scan,
+                Err(ScanError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+                Err(error) => {
+                    tracing::warn!(source_set = %context.name(), error = %error, "scan failed, switching to fallback mode");
+                    return Ok(AnalysisOutcome::Fallback);
+                }
+            };
+            let mut changes = detect_changes(&scan.files, &snapshot.entries);
+            let seen_rel: HashSet<&str> = scan
+                .files
+                .iter()
+                .map(|file| file.rel_path.as_str())
+                .collect();
+            changes.extend(
+                snapshot
+                    .entries
+                    .iter()
+                    .filter(|(relative, _)| !seen_rel.contains(relative.as_str()))
+                    .map(|(relative, _)| FileChange {
+                        path: context.path().join(relative),
+                        kind: ChangeKind::Deleted,
+                    }),
+            );
+            Ok(if changes.is_empty() {
+                AnalysisOutcome::NoChanges
+            } else {
+                AnalysisOutcome::Changes {
+                    changes,
+                    prepared: build_prepared_state(&scan, snapshot.generation),
+                }
+            })
+        })()
     };
-
     ContextAnalysis {
         context: context.clone(),
-        outcome: Ok(outcome),
+        outcome: if interrupted() {
+            Err(ChangeDetectionError::Interrupted)
+        } else {
+            outcome
+        },
     }
 }
 
@@ -241,10 +238,14 @@ pub fn commit_empty_snapshot(
 }
 
 /// Analyze multiple source-set contexts using the same work directory.
-pub fn analyze_contexts(contexts: &[SourceSetContext], work_path: &Path) -> Vec<ContextAnalysis> {
+pub fn analyze_contexts(
+    contexts: &[SourceSetContext],
+    work_path: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Vec<ContextAnalysis> {
     contexts
         .iter()
-        .map(|ctx| analyze_context(ctx, work_path))
+        .map(|ctx| analyze_context(ctx, work_path, interrupted))
         .collect()
 }
 
@@ -286,11 +287,13 @@ pub fn prepare_full_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
-    let scan = scanner::scan(source_path, None, &HashMap::new())
+    // The caller records an already successful load/publication: cancellation must not
+    // leave its memory describing the preceding database/tree.
+    let scan = scanner::scan(source_path, &mut || false)
         .map_err(|error| map_scan_error(context, error))?;
     Ok(FullSnapshot {
         snapshot: scan
-            .candidates
+            .files
             .into_iter()
             .map(|candidate| {
                 (
@@ -340,7 +343,7 @@ pub fn commit_full_snapshot(
 }
 
 fn detect_changes(
-    candidates: &[scanner::CandidateFile],
+    candidates: &[scanner::HashedFile],
     stored: &HashMap<String, StoredFileState>,
 ) -> Vec<FileChange> {
     candidates
@@ -361,55 +364,16 @@ fn detect_changes(
 
 fn build_prepared_state(
     scan: &scanner::ScanSnapshot,
-    stored: &HashMap<String, StoredFileState>,
     observed_generation: u64,
 ) -> PreparedStateUpdate {
-    let seen_rel: HashSet<&str> = scan
-        .seen_files
-        .iter()
-        .map(|f| f.rel_path.as_str())
-        .collect();
-    let candidate_map: HashMap<&str, &scanner::CandidateFile> = scan
-        .candidates
-        .iter()
-        .map(|candidate| (candidate.rel_path.as_str(), candidate))
-        .collect();
-
-    let mut merged = HashMap::<String, StoredFileState>::new();
-    for file in &scan.seen_files {
-        let state = if let Some(candidate) = candidate_map.get(file.rel_path.as_str()) {
-            StoredFileState {
-                mtime_ns: candidate.mtime_ns,
-                hash: candidate.hash.clone(),
-            }
-        } else {
-            stored
-                .get(&file.rel_path)
-                .cloned()
-                .unwrap_or_else(|| StoredFileState {
-                    mtime_ns: file.mtime_ns,
-                    hash: String::new(),
-                })
-        };
-        merged.insert(file.rel_path.clone(), state);
-    }
-
-    // Drop deleted entries.
-    for rel in stored.keys() {
-        if !seen_rel.contains(rel.as_str()) {
-            merged.remove(rel);
-        }
-    }
-    // Remove invalid placeholders introduced by missing stored state.
-    merged.retain(|_, state| !state.hash.is_empty());
-
     PreparedStateUpdate {
-        snapshot: merged
-            .into_iter()
-            .map(|(rel_path, state)| PreparedFileState {
-                rel_path,
-                mtime_ns: state.mtime_ns,
-                hash: state.hash,
+        snapshot: scan
+            .files
+            .iter()
+            .map(|file| PreparedFileState {
+                rel_path: file.rel_path.clone(),
+                mtime_ns: file.mtime_ns,
+                hash: file.hash.clone(),
             })
             .collect(),
         scan_started_at: scan.scan_started_at,
@@ -468,6 +432,9 @@ fn map_commit_error(
 }
 
 fn map_scan_error(context: &SourceSetContext, err: ScanError) -> ChangeDetectionError {
+    if matches!(err, ScanError::Interrupted) {
+        return ChangeDetectionError::Interrupted;
+    }
     ChangeDetectionError::StorageHard {
         source_set: context.name().to_owned(),
         storage_path: context.path().to_path_buf(),
@@ -553,7 +520,7 @@ mod tests {
                 .expect("set mtime");
         }
 
-        let analysis = analyze_context(&context, &work_path);
+        let analysis = analyze_context(&context, &work_path, &mut || false);
 
         let Ok(AnalysisOutcome::Changes {
             changes,
@@ -591,7 +558,7 @@ mod tests {
             .set_modified(saved_at)
             .expect("restore mtime");
 
-        let analysis = analyze_context(&context, &work_path);
+        let analysis = analyze_context(&context, &work_path, &mut || false);
 
         let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
             panic!(
@@ -622,9 +589,157 @@ mod tests {
         std::fs::write(target.join("Module.bsl"), "user edit after publication")
             .expect("user edit");
         super::commit_full_snapshot(&context, &work, &prepared).expect("commit prepared");
-        let outcome = analyze_context(&context, &work).outcome.expect("analysis");
+        let outcome = analyze_context(&context, &work, &mut || false)
+            .outcome
+            .expect("analysis");
         assert!(
             matches!(outcome, AnalysisOutcome::Changes { ref changes, .. } if changes.len() == 1 && changes[0].kind == ChangeKind::Modified)
         );
+    }
+    /// A same-size edit with exactly the old stored mtime is loaded once and then skipped.
+    #[test]
+    fn changed_bytes_with_the_exact_remembered_old_mtime_are_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("source");
+        let module = root.join("Tests.bsl");
+        std::fs::write(&module, "Процедура А() КонецПроцедуры").expect("before bytes");
+        File::options()
+            .write(true)
+            .open(&module)
+            .expect("open before")
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(600))
+            .expect("old mtime");
+        let before = std::fs::metadata(&module).expect("before metadata");
+        let remembered = before.modified().expect("before mtime");
+        let context = SourceSetContext::new("main", root, "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime A with old mtime");
+        let storage = crate::change_detection::hash_storage::HashStorage::new(
+            context.storage_path(&work).expect("storage path"),
+        );
+        let primed = storage.load_snapshot().expect("primed memory");
+        let old = primed.entries.get("Tests.bsl").expect("remembered module");
+        assert_eq!(
+            old.mtime_ns,
+            crate::change_detection::file_state::mtime_nanos(remembered, &module)
+                .expect("mtime nanos")
+        );
+        assert!(old.mtime_ns < primed.watermark.expect("watermark") - 2_000_000_000);
+
+        std::fs::write(&module, "Процедура Б() КонецПроцедуры").expect("edited bytes");
+        File::options()
+            .write(true)
+            .open(&module)
+            .expect("open edited")
+            .set_modified(remembered)
+            .expect("restore exact mtime");
+        let after = std::fs::metadata(&module).expect("after metadata");
+        assert_eq!(before.len(), after.len(), "size is unchanged");
+        assert_eq!(remembered, after.modified().expect("after mtime"));
+
+        let outcome = analyze_context(&context, &work, &mut || false)
+            .outcome
+            .expect("analysis");
+        let AnalysisOutcome::Changes { changes, prepared } = outcome else {
+            panic!("same-mtime different bytes must be a change: {outcome:?}");
+        };
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, module);
+        assert_eq!(changes[0].kind, ChangeKind::Modified);
+        let pending = storage
+            .load_snapshot()
+            .expect("memory before successful load");
+        assert_eq!(
+            pending.generation, primed.generation,
+            "analysis does not commit"
+        );
+        assert_eq!(pending.entries["Tests.bsl"].hash, old.hash);
+        assert_eq!(pending.entries["Tests.bsl"].mtime_ns, old.mtime_ns);
+        let edited_hash = crate::change_detection::scanner::hash_file(&module, &mut || false)
+            .expect("edited hash");
+        assert_ne!(edited_hash, old.hash);
+
+        super::commit_success(&context, &work, &prepared).expect("successful load commits B");
+        let loaded = storage.load_snapshot().expect("memory after load");
+        assert_eq!(loaded.generation, primed.generation + 1);
+        assert_eq!(loaded.entries["Tests.bsl"].hash, edited_hash);
+        assert_eq!(loaded.entries["Tests.bsl"].mtime_ns, old.mtime_ns);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+    /// Cancellation is distinct from a full-load fallback and leaves committed memory alone.
+    #[test]
+    fn interrupted_analysis_keeps_memory_and_never_falls_back() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        std::fs::write(root.join("A.bsl"), "before").expect("A");
+        std::fs::write(root.join("B.bsl"), "before").expect("B");
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let storage = crate::change_detection::hash_storage::HashStorage::new(
+            context.storage_path(&work).expect("path"),
+        );
+        let before = storage.load_snapshot().expect("before");
+        std::fs::write(root.join("A.bsl"), "edited").expect("edit");
+        for cancel_at in [1, 10] {
+            let mut checkpoints = 0;
+            let analysis = analyze_context(&context, &work, &mut || {
+                checkpoints += 1;
+                checkpoints >= cancel_at
+            });
+            assert!(
+                matches!(analysis.outcome, Err(ChangeDetectionError::Interrupted)),
+                "{:?}",
+                analysis.outcome
+            );
+            let after = storage.load_snapshot().expect("after");
+            assert_eq!(before.generation, after.generation);
+            assert_eq!(before.watermark, after.watermark);
+            assert_eq!(before.identity, after.identity);
+            for (path, original) in &before.entries {
+                assert_eq!(after.entries[path].hash, original.hash);
+                assert_eq!(after.entries[path].mtime_ns, original.mtime_ns);
+            }
+        }
+        let analysis = analyze_context(&context, &work, &mut || false);
+        assert!(
+            matches!(analysis.outcome, Ok(AnalysisOutcome::Changes { ref changes, .. }) if changes.len() == 1)
+        );
+    }
+    #[test]
+    fn cancellation_during_recoverable_storage_read_is_not_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        std::fs::write(root.join("Module.bsl"), "source").expect("source");
+        let context = SourceSetContext::new("main", root, "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        let path = context.storage_path(&work).expect("storage");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+        std::fs::write(&path, b"corrupt memory").expect("corrupt fixture");
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::Fallback)
+        ));
+        let before = std::fs::read(&path).expect("before");
+        let mut checks = 0;
+        let analysis = analyze_context(&context, &work, &mut || {
+            checks += 1;
+            checks >= 2
+        });
+        assert!(
+            matches!(analysis.outcome, Err(ChangeDetectionError::Interrupted)),
+            "{:?}",
+            analysis.outcome
+        );
+        assert_eq!(before, std::fs::read(&path).expect("memory unchanged"));
     }
 }

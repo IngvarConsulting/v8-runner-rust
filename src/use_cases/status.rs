@@ -49,11 +49,15 @@ pub fn execute(
     let infobases = match scope {
         StatusScope::All => declared(config)
             .iter()
-            .map(|base| from_memory(base, base.infobase_name == config.infobase_name))
-            .collect(),
-        StatusScope::Selected => vec![from_memory(config, true)],
+            .map(|base| from_memory(context, base, base.infobase_name == config.infobase_name))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(UseCaseFailure::without_payload)?,
+        StatusScope::Selected => {
+            vec![from_memory(context, config, true).map_err(UseCaseFailure::without_payload)?]
+        }
         StatusScope::Deep => {
-            let mut status = from_memory(config, true);
+            let mut status =
+                from_memory(context, config, true).map_err(UseCaseFailure::without_payload)?;
             deepen(context, config, &mut status).map_err(UseCaseFailure::without_payload)?;
             vec![status]
         }
@@ -81,7 +85,12 @@ fn declared(config: &AppConfig) -> Vec<AppConfig> {
 }
 
 /// Ответ по памяти под `workPath`: платформа не запускается.
-fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
+fn from_memory(
+    execution: &ExecutionContext,
+    config: &AppConfig,
+    selected: bool,
+) -> Result<InfobaseStatus, AppError> {
+    interrupted(execution, "during source analysis")?;
     let base_path = crate::support::path::absolute_from_current_dir(&config.base_path)
         .unwrap_or_else(|_| config.base_path.clone());
     let inventory = SourceSetInventory::new(config);
@@ -90,12 +99,15 @@ fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
         .into_iter()
         .filter_map(|(set, _)| {
             let context = inventory.designer_context(&set.name)?;
+            Some((set, context))
+        })
+        .map(|(set, context)| {
             let memory = memory_of(context, &config.work_path);
             let sources = match config.format {
                 SourceFormat::Designer => Some(context),
                 SourceFormat::Edt => inventory.edt_context(&set.name),
             };
-            Some(SourceSetStatus {
+            Ok(SourceSetStatus {
                 name: set.name.clone(),
                 purpose: set.purpose,
                 memory,
@@ -108,14 +120,16 @@ fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
                         recorded_at: record.recorded_at,
                     }
                 }),
-                changed_files: sources
-                    .filter(|_| memory == MemoryState::Remembered)
-                    .and_then(|sources| changed_files(sources, &config.work_path)),
+                changed_files: match sources.filter(|_| memory == MemoryState::Remembered) {
+                    Some(sources) => changed_files(execution, sources, &config.work_path)?,
+                    None => None,
+                },
                 base: None,
             })
         })
-        .collect();
-    InfobaseStatus {
+        .collect::<Result<Vec<_>, AppError>>()?;
+    interrupted(execution, "during source analysis")?;
+    Ok(InfobaseStatus {
         name: config.infobase_name.clone(),
         selected,
         kind: config.target_kind(),
@@ -128,17 +142,34 @@ fn from_memory(config: &AppConfig, selected: bool) -> InfobaseStatus {
         source_sets,
         extensions: None,
         holders: None,
-    }
+    })
 }
 
 /// Сколько файлов каталога изменилось с последнего чтения; анализ ничего не записывает.
 /// `None` — сравнить не с чем: памяти нет или хранилище не читается.
-fn changed_files(context: &SourceSetContext, work_path: &Path) -> Option<u64> {
-    match analyzer::analyze_context(context, work_path).outcome {
+fn changed_files(
+    execution: &ExecutionContext,
+    context: &SourceSetContext,
+    work_path: &Path,
+) -> Result<Option<u64>, AppError> {
+    let analysis = analyzer::analyze_context(context, work_path, &mut || {
+        crate::use_cases::interruption::pending_interruption_error(
+            execution,
+            "during source analysis",
+        )
+        .is_some()
+    });
+    interrupted(execution, "during source analysis")?;
+    Ok(match analysis.outcome {
         Ok(AnalysisOutcome::NoChanges) => Some(0),
         Ok(AnalysisOutcome::Changes { changes, .. }) => Some(changes.len() as u64),
+        Err(analyzer::ChangeDetectionError::Interrupted) => {
+            return Err(AppError::Runtime(
+                "source analysis interrupted without a command cancellation".to_owned(),
+            ))
+        }
         Ok(AnalysisOutcome::Fallback) | Err(_) => None,
-    }
+    })
 }
 
 /// Отмена между вопросами к платформе: безопасная точка, после которой вопросов нет.

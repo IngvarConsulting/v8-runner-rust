@@ -132,8 +132,12 @@ impl<'a> SourceSetsService<'a> {
             .collect()
     }
     /// Analyze all provided contexts and return context-tagged outcomes.
-    pub fn analyze_contexts(&self, contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
-        analyzer::analyze_contexts(contexts, &self.config.work_path)
+    pub fn analyze_contexts(
+        &self,
+        contexts: &[SourceSetContext],
+        interrupted: &mut dyn FnMut() -> bool,
+    ) -> Vec<ContextAnalysis> {
+        analyzer::analyze_contexts(contexts, &self.config.work_path, interrupted)
     }
 }
 
@@ -229,7 +233,7 @@ mod tests {
         std::fs::write(&generated, "generated").expect("generated");
         rescan_and_commit_full(&context, &config.work_path).expect("snapshot");
         assert!(matches!(
-            analyze_context(&context, &config.work_path).outcome,
+            analyze_context(&context, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
 
@@ -237,7 +241,7 @@ mod tests {
         std::fs::write(&generated, "regenerated").expect("regenerate");
 
         let Ok(AnalysisOutcome::Changes { changes, .. }) =
-            analyze_context(&context, &config.work_path).outcome
+            analyze_context(&context, &config.work_path, &mut || false).outcome
         else {
             panic!("the edited module in the set root must be a change");
         };
@@ -324,19 +328,19 @@ mod tests {
             .designer_contexts()
             .remove(0);
         assert!(matches!(
-            analyze_context(&b, &config.work_path).outcome,
+            analyze_context(&b, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::Changes { .. })
         ));
         rescan_and_commit_full(&b, &config.work_path).expect("snapshot B");
         assert!(matches!(
-            analyze_context(&a, &config.work_path).outcome,
+            analyze_context(&a, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
         config.infobase_name = Some("main".to_owned());
         let foreign = SourceSetsService::new(&config)
             .designer_contexts()
             .remove(0);
-        let error = analyze_context(&foreign, &config.work_path)
+        let error = analyze_context(&foreign, &config.work_path, &mut || false)
             .outcome
             .expect_err("retargeted base");
         assert!(
@@ -349,7 +353,7 @@ mod tests {
         assert!(error.to_string().contains("/tmp/ib"));
         rescan_and_commit_full(&foreign, &config.work_path).expect("explicit rebuild");
         assert!(matches!(
-            analyze_context(&foreign, &config.work_path).outcome,
+            analyze_context(&foreign, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
         config.source_sets[0].path = PathBuf::from("moved");
@@ -357,7 +361,9 @@ mod tests {
         let moved = SourceSetsService::new(&config)
             .designer_contexts()
             .remove(0);
-        assert!(analyze_context(&moved, &config.work_path).outcome.is_err());
+        assert!(analyze_context(&moved, &config.work_path, &mut || false)
+            .outcome
+            .is_err());
     }
 
     /// База, названная строкой соединения, помнится по строке: память лежит под
@@ -378,7 +384,7 @@ mod tests {
             .designer_contexts()
             .remove(0);
         assert!(matches!(
-            analyze_context(&context, &config.work_path).outcome,
+            analyze_context(&context, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
         let address = config
@@ -399,7 +405,7 @@ mod tests {
 
         std::fs::write(dir.path().join("src/module.bsl"), "source").expect("write");
         let Ok(AnalysisOutcome::Changes { prepared, .. }) =
-            analyze_context(&context, &config.work_path).outcome
+            analyze_context(&context, &config.work_path, &mut || false).outcome
         else {
             panic!("the first analysis sees existing files as added");
         };
@@ -414,7 +420,7 @@ mod tests {
             context.storage_path(&config.work_path)
         );
         assert!(matches!(
-            analyze_context(&again, &config.work_path).outcome,
+            analyze_context(&again, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
         let bases: Vec<_> = std::fs::read_dir(config.work_path.join("infobases"))
@@ -432,7 +438,7 @@ mod tests {
             context.storage_path(&config.work_path)
         );
         assert!(matches!(
-            analyze_context(&other, &config.work_path).outcome,
+            analyze_context(&other, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::Changes { .. })
         ));
     }

@@ -79,8 +79,18 @@ pub(super) enum StepPlan {
 pub(super) fn change_detection_failure(
     error: &analyzer::ChangeDetectionError,
     context: &ExecutionContext,
-) -> String {
-    match error {
+) -> Result<String, AppError> {
+    Ok(match error {
+        analyzer::ChangeDetectionError::Interrupted => {
+            return Err(
+                interruption::pending_interruption_error(context, "during source analysis")
+                    .unwrap_or_else(|| {
+                        AppError::Runtime(
+                            "source analysis interrupted without a command cancellation".to_owned(),
+                        )
+                    }),
+            )
+        }
         analyzer::ChangeDetectionError::ForeignMemory { source_set, .. } => {
             format!(
                 "{error}. If the infobase holds the right state, run a full pull {}, which replaces the directory of source-set '{source_set}' and discards its uncommitted changes, to record it; if the source directory does, run {}, which loads it whole and replaces the configuration in the infobase",
@@ -90,7 +100,7 @@ pub(super) fn change_detection_failure(
         }
         analyzer::ChangeDetectionError::StorageHard { .. }
         | analyzer::ChangeDetectionError::ConcurrentStateModified { .. } => error.to_string(),
-    }
+    })
 }
 
 pub(super) fn plan_configurator_load_step(
@@ -192,6 +202,7 @@ pub(super) fn plan_generated_designer_load_step(
     full_rebuild: bool,
     edt_stage_skipped: bool,
     work_path: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<StepPlan, analyzer::ChangeDetectionError> {
     if edt_stage_skipped && !designer_context.path().exists() {
         return Ok(StepPlan::Skip {
@@ -211,7 +222,7 @@ pub(super) fn plan_generated_designer_load_step(
         });
     }
 
-    let outcome = analyzer::analyze_context(designer_context, work_path).outcome?;
+    let outcome = analyzer::analyze_context(designer_context, work_path, interrupted).outcome?;
     Ok(plan_generated_designer_load_from_analysis(
         source_set,
         designer_context.path(),

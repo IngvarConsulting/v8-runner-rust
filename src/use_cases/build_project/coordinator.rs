@@ -245,10 +245,10 @@ fn run_build_with(
     let analysis_by_name = if args.load.is_whole() {
         None
     } else {
-        Some(analyze_contexts_by_name(
-            &inventory,
-            &selected_designer_contexts,
-        ))
+        Some(
+            analyze_contexts_by_name(context, &inventory, &selected_designer_contexts)
+                .map_err(BuildExecutionFailure::without_payload)?,
+        )
     };
 
     let mut steps = Vec::new();
@@ -317,7 +317,8 @@ fn run_build_with(
         ) {
             Ok(plan) => plan,
             Err(error) => {
-                let error = change_detection_failure(&error, context);
+                let error = change_detection_failure(&error, context)
+                    .map_err(BuildExecutionFailure::without_payload)?;
                 let result = fail_from_source_set_index(
                     started,
                     steps,
@@ -617,10 +618,10 @@ pub(super) fn run_build_ibcmd(
     let analysis_by_name = if args.load.is_whole() {
         None
     } else {
-        Some(analyze_contexts_by_name(
-            &inventory,
-            &selected_designer_contexts,
-        ))
+        Some(
+            analyze_contexts_by_name(context, &inventory, &selected_designer_contexts)
+                .map_err(BuildExecutionFailure::without_payload)?,
+        )
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
@@ -666,7 +667,8 @@ pub(super) fn run_build_ibcmd(
         ) {
             Ok(plan) => plan,
             Err(error) => {
-                let error = change_detection_failure(&error, context);
+                let error = change_detection_failure(&error, context)
+                    .map_err(BuildExecutionFailure::without_payload)?;
                 let result = fail_from_source_set_index(
                     started,
                     steps,
@@ -935,7 +937,10 @@ pub(super) fn run_build_edt(
     let edt_analysis_by_name = if args.load.is_whole() {
         None
     } else {
-        Some(analyze_contexts_by_name(&inventory, &selected_edt_contexts))
+        Some(
+            analyze_contexts_by_name(context, &inventory, &selected_edt_contexts)
+                .map_err(BuildExecutionFailure::without_payload)?,
+        )
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
@@ -950,8 +955,14 @@ pub(super) fn run_build_edt(
     if matches!(provider, Provider::Designer | Provider::Ibcmd) {
         let loading = sets_to_load(&inventory, &ordered_source_sets, args, |set| {
             loads_into_the_base(set, args.load, edt_analysis_by_name.as_ref())
-                || generated_copy_loads(set, &inventory, &config.work_path)
+                || generated_copy_loads(context, set, &inventory, &config.work_path)
         });
+        if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
+            context,
+            "during generated-source analysis",
+        ) {
+            return Err(BuildExecutionFailure::without_payload(error));
+        }
         gate.check_early(&loading, provider, |set| {
             let Some((index, source_set)) = source_set_named(&ordered_source_sets, set.name())
             else {
@@ -1005,7 +1016,8 @@ pub(super) fn run_build_edt(
         ) {
             Ok(plan) => plan,
             Err(error) => {
-                let error = change_detection_failure(&error, context);
+                let error = change_detection_failure(&error, context)
+                    .map_err(BuildExecutionFailure::without_payload)?;
                 let result = fail_from_source_set_index(
                     started,
                     steps,
@@ -1438,10 +1450,23 @@ pub(super) fn run_build_edt(
             args.load.is_whole(),
             edt_stage_skipped,
             &config.work_path,
+            &mut || {
+                crate::use_cases::interruption::pending_interruption_error(
+                    context,
+                    "during source analysis",
+                )
+                .is_some()
+            },
         ) {
             Ok(plan) => plan,
             Err(error) => {
-                let error = change_detection_failure(&error, context);
+                let (error, message) = match change_detection_failure(&error, context) {
+                    Ok(message) => (AppError::Runtime(message.clone()), message),
+                    Err(error) => {
+                        let message = error.to_string();
+                        (error, message)
+                    }
+                };
                 let result = fail_from_source_set_index(
                     started,
                     steps,
@@ -1449,12 +1474,9 @@ pub(super) fn run_build_edt(
                     index,
                     source_set,
                     BuildMode::Skipped,
-                    error.clone(),
+                    message,
                 );
-                return Err(BuildExecutionFailure::with_payload(
-                    AppError::Runtime(error),
-                    result,
-                ));
+                return Err(BuildExecutionFailure::with_payload(error, result));
             }
         };
 
@@ -2126,6 +2148,7 @@ fn refused_before_the_loads(
 /// изменилась сама копия — так бывает после оборванного прогона. Сбой анализа — «пойдёт»:
 /// лишняя сверка дешевле пропущенной.
 fn generated_copy_loads(
+    execution: &ExecutionContext,
     source_set: &SourceSetConfig,
     inventory: &SourceSetInventory,
     work_path: &Path,
@@ -2136,7 +2159,14 @@ fn generated_copy_loads(
             .is_some_and(|copy| {
                 copy.path().exists()
                     && !matches!(
-                        analyzer::analyze_context(copy, work_path).outcome,
+                        analyzer::analyze_context(copy, work_path, &mut || {
+                            crate::use_cases::interruption::pending_interruption_error(
+                                execution,
+                                "during generated-source analysis",
+                            )
+                            .is_some()
+                        })
+                        .outcome,
                         Ok(analyzer::AnalysisOutcome::NoChanges)
                     )
             })

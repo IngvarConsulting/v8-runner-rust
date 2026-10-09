@@ -1533,7 +1533,7 @@ mod tests {
             before
         );
         assert!(matches!(
-            analyze_context(source, &config.work_path).outcome,
+            analyze_context(source, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
         let retry = super::StagedPublication::prepare_dir(
@@ -1556,12 +1556,12 @@ mod tests {
             "database source"
         );
         assert!(matches!(
-            analyze_context(source, &config.work_path).outcome,
+            analyze_context(source, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)
         ));
         fs::write(source.path().join("Module.bsl"), "user change").expect("edit");
         assert!(matches!(
-            analyze_context(source, &config.work_path).outcome,
+            analyze_context(source, &config.work_path, &mut || false).outcome,
             Ok(AnalysisOutcome::Changes { .. })
         ));
     }

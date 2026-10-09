@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::change_detection::analyzer::{self, AnalysisOutcome};
+use crate::change_detection::analyzer;
 use crate::change_detection::partial_load;
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::build::{BuildMode, BuildResult};
@@ -44,7 +43,7 @@ use self::helpers::{
     fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
     plan_configurator_load_step, plan_edt_export_step, plan_generated_designer_load_step,
     push_build_step, push_loaded_step, read_designer_generation, read_ibcmd_generation,
-    remove_storage_path, AfterLoad, Loaded, StepCommit, StepPlan,
+    remove_storage_path, AfterLoad, AnalysisByName, Loaded, StepCommit, StepPlan,
 };
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 
@@ -426,14 +425,27 @@ fn edt_contexts_for_source_sets(
 }
 
 fn analyze_contexts_by_name(
+    context: &ExecutionContext,
     inventory: &SourceSetInventory<'_>,
     contexts: &[SourceSetContext],
-) -> HashMap<String, Result<AnalysisOutcome, analyzer::ChangeDetectionError>> {
-    inventory
-        .analyze_contexts(contexts)
+) -> Result<AnalysisByName, AppError> {
+    let analyses = inventory.analyze_contexts(contexts, &mut || {
+        crate::use_cases::interruption::pending_interruption_error(
+            context,
+            "during source analysis",
+        )
+        .is_some()
+    });
+    if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
+        context,
+        "during source analysis",
+    ) {
+        return Err(error);
+    }
+    Ok(analyses
         .into_iter()
         .map(|analysis| (analysis.context.name().to_owned(), analysis.outcome))
-        .collect()
+        .collect())
 }
 
 /// Шаг EDT: проект набора переводится `1cedtcli` в файлы Конфигуратора в `export_target`.
@@ -4097,6 +4109,151 @@ mod tests {
             1,
             "{message}"
         );
+    }
+
+    /// A successfully completed apply that deferred cancellation still records all source bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_completed_full_step_records_hashes_after_deferred_cancellation() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        let held = HeldCommand::in_dir(dir.path());
+        write_designer_script_with(&script, &calls, &held.script_branch("/UpdateDBCfg", 0));
+        let mut config = build_config(
+            &base,
+            &work,
+            &script,
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        config.source_sets.truncate(1);
+        let result =
+            push_interrupted_while_held(&config, &held, &build_args(true)).expect("completed step");
+        assert!(result.steps[0].applied);
+        assert!(result.steps[0]
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unsafe interruption was not performed"));
+        let source = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        let storage = crate::change_detection::hash_storage::HashStorage::new(
+            source.storage_path(&work).expect("memory path"),
+        );
+        let snapshot = storage.load_snapshot().expect("completed memory");
+        assert!(snapshot.generation > 0);
+        assert!(!snapshot.entries.is_empty());
+        assert!(matches!(
+            crate::change_detection::analyzer::analyze_context(&source, &work, &mut || false)
+                .outcome,
+            Ok(crate::change_detection::analyzer::AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    /// The existing synchronous completion event makes cancellation deterministic:
+    /// EDT already exported and recorded its bytes, but no Designer load has started.
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_after_edt_export_keeps_completed_work_in_the_response() {
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        struct CancelCompleted(CancellationToken);
+        impl<S: tracing::Subscriber> Layer<S> for CancelCompleted {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                #[derive(Default)]
+                struct Completed {
+                    set: bool,
+                    succeeded: bool,
+                    completed: bool,
+                }
+                impl tracing::field::Visit for Completed {
+                    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                    }
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        match field.name() {
+                            "timeline_label" => self.set = value == "main:",
+                            "timeline_status" => self.succeeded = value == "succeeded",
+                            "timeline_detail" => self.completed = value == "✓ completed",
+                            _ => (),
+                        }
+                    }
+                }
+                let mut completed = Completed::default();
+                event.record(&mut completed);
+                if completed.set && completed.succeeded && completed.completed {
+                    self.0.cancel();
+                }
+            }
+        }
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform_home = dir.path().join("platform");
+        let designer = platform_home.join("bin/1cv8");
+        let edt = dir.path().join("edt/1cedtcli");
+        let designer_calls = dir.path().join("designer.calls");
+        let edt_calls = dir.path().join("edt.calls");
+        create_source_tree(&base);
+        write_designer_script_answering(&designer, &designer_calls, None);
+        write_edt_script(&edt, &edt_calls, None);
+        let mut config = build_edt_config(&base, &work, &platform_home, &edt);
+        config.source_sets.truncate(1);
+        config.providers.insert(
+            crate::domain::capability::Operation::Build,
+            crate::domain::capability::Provider::Designer,
+        );
+        prime_edt_snapshots(&config);
+        crate::use_cases::exchange_guard::remember_unknown_sets(&config);
+        std::fs::write(
+            base.join("main/Catalogs.Items/ObjectModule.bsl"),
+            "modified EDT source",
+        )
+        .expect("edit");
+        let token = CancellationToken::new();
+        let context = ExecutionContext::cli(CommandName::Build).with_cancellation(token.clone());
+        let subscriber = tracing_subscriber::registry().with(CancelCompleted(token.clone()));
+        let failure = tracing::subscriber::with_default(subscriber, || {
+            super::execute(&context, &config, &build_args(false))
+        })
+        .expect_err("cancel after export");
+        assert!(
+            token.is_cancelled(),
+            "completion event triggered cancellation"
+        );
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(CancelledAt::Boundary)
+        );
+        let payload = failure
+            .payload
+            .expect("completed work remains in command data");
+        assert!(payload.provider_dispatched, "EDT received work");
+        assert!(payload
+            .steps
+            .iter()
+            .any(|step| step.mode == BuildMode::EdtExport && step.ok));
+        assert!(fs::read_to_string(edt_calls)
+            .expect("EDT calls")
+            .contains("--configuration-files"));
+        let calls = fs::read_to_string(designer_calls).unwrap_or_default();
+        assert!(
+            !calls.contains("/LoadConfigFromFiles"),
+            "cancel before Designer load: {calls}"
+        );
+        let edt_context = SourceSetsService::new(&config).edt_contexts().remove(0);
+        assert!(matches!(
+            crate::change_detection::analyzer::analyze_context(&edt_context, &work, &mut || false)
+                .outcome,
+            Ok(crate::change_detection::analyzer::AnalysisOutcome::NoChanges)
+        ));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -8,6 +8,9 @@ use crate::change_detection::file_state::{mtime_nanos, MtimeError};
 
 #[derive(Debug, Error)]
 pub enum ScanError {
+    #[error("source scan interrupted")]
+    Interrupted,
+
     #[error("failed to walk directory '{path}': {source}")]
     Walk {
         path: PathBuf,
@@ -48,19 +51,9 @@ fn is_ignored_file(name: &str) -> bool {
     })
 }
 
-/// Coarse filesystem mtime guard (2 seconds).
-pub const COARSE_MARGIN_NS: u64 = 2_000_000_000;
-
-/// One discovered source file (metadata only, no hash).
+/// One fully read source file. Metadata never substitutes for its content hash.
 #[derive(Debug, Clone)]
-pub struct SeenFile {
-    pub rel_path: String,
-    pub mtime_ns: u64,
-}
-
-/// One hashed candidate file.
-#[derive(Debug, Clone)]
-pub struct CandidateFile {
+pub struct HashedFile {
     pub path: PathBuf,
     pub rel_path: String,
     pub mtime_ns: u64,
@@ -71,38 +64,27 @@ pub struct CandidateFile {
 #[derive(Debug, Clone)]
 pub struct ScanSnapshot {
     pub scan_started_at: u64,
-    pub seen_files: Vec<SeenFile>,
-    pub candidates: Vec<CandidateFile>,
+    pub files: Vec<HashedFile>,
 }
 
-/// Recursively scan `root` and return:
-/// - all seen files with metadata
-/// - only candidate files hashed by mtime/watermark rules
-///
-/// `stored` maps each remembered file to the mtime it had when it was last hashed. A
-/// remembered file is a candidate when it was touched within the margin of the watermark
-/// or when its mtime is not the remembered one in either direction: a copy restored with
-/// its old mtime (`cp -p`, `Copy-Item`, an archive) changes the bytes without moving the
-/// mtime past the watermark (#447).
-pub fn scan(
-    root: &Path,
-    watermark: Option<u64>,
-    stored: &HashMap<String, u64>,
-) -> Result<ScanSnapshot, ScanError> {
+/// Hash every selected regular file, including equal-size edits with exactly the old
+/// remembered mtime (#447). The predicate is the caller's existing interruption policy;
+/// successful post-publication bookkeeping supplies an always-false predicate.
+pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSnapshot, ScanError> {
+    check_interruption(interrupted)?;
     let scan_started_at =
         mtime_nanos(std::time::SystemTime::now(), root).map_err(|source| ScanError::Mtime {
             path: root.to_path_buf(),
             source,
         })?;
-    let mut seen_files = Vec::new();
-    let mut candidates = Vec::new();
+    let mut files = Vec::new();
 
-    let cutoff = watermark.map(|w| w.saturating_sub(COARSE_MARGIN_NS));
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| e.depth() == 0 || !is_ignored_dir(e))
     {
+        check_interruption(interrupted)?;
         let entry = entry.map_err(|e| ScanError::Walk {
             path: root.to_path_buf(),
             source: e,
@@ -139,42 +121,67 @@ pub fn scan(
             source,
         })?;
         let rel_path = rel_path(root, path)?;
-        let seen = SeenFile {
-            rel_path: rel_path.clone(),
+        let hash = hash_file(path, interrupted)?;
+        files.push(HashedFile {
+            path: path.to_path_buf(),
+            rel_path,
             mtime_ns,
-        };
-        let remembered = stored.get(&rel_path);
-        let is_candidate = match (cutoff, remembered) {
-            (None, _) | (_, None) => true,
-            (Some(cutoff), Some(&remembered)) => mtime_ns >= cutoff || mtime_ns != remembered,
-        };
-        if is_candidate {
-            let hash = hash_file(path)?;
-            candidates.push(CandidateFile {
-                path: path.to_path_buf(),
-                rel_path,
-                mtime_ns,
-                hash,
-            });
-        }
-        seen_files.push(seen);
+            hash,
+        });
     }
 
+    check_interruption(interrupted)?;
     Ok(ScanSnapshot {
         scan_started_at,
-        seen_files,
-        candidates,
+        files,
     })
 }
 
 /// Compute SHA-256 hex digest of a file's contents.
-pub fn hash_file(path: &Path) -> Result<String, ScanError> {
-    let data = std::fs::read(path).map_err(|e| ScanError::Read {
+pub fn hash_file(path: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<String, ScanError> {
+    check_interruption(interrupted)?;
+    let file = std::fs::File::open(path).map_err(|e| ScanError::Read {
         path: path.to_path_buf(),
         source: e,
     })?;
-    let digest = Sha256::digest(&data);
-    Ok(format!("{:x}", digest))
+    hash_reader(file, path, interrupted)
+}
+
+fn hash_reader(
+    mut reader: impl Read,
+    path: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<String, ScanError> {
+    // Working storage, not a maximum file size. Files of any size are streamed.
+    let mut buffer = [0u8; 64 * 1024];
+    let mut digest = Sha256::new();
+    loop {
+        check_interruption(interrupted)?;
+        let length = match reader.read(&mut buffer) {
+            Ok(length) => length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(source) => {
+                return Err(ScanError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            }
+        };
+        check_interruption(interrupted)?;
+        if length == 0 {
+            break;
+        }
+        digest.update(&buffer[..length]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn check_interruption(interrupted: &mut dyn FnMut() -> bool) -> Result<(), ScanError> {
+    if interrupted() {
+        Err(ScanError::Interrupted)
+    } else {
+        Ok(())
+    }
 }
 
 fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
@@ -199,9 +206,8 @@ fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{scan, ScanSnapshot, COARSE_MARGIN_NS};
+    use super::{scan, ScanSnapshot};
     use crate::change_detection::file_state::mtime_nanos;
-    use std::collections::HashMap;
     use std::fs::{self, File};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
@@ -219,7 +225,7 @@ mod tests {
 
     fn candidates(snapshot: &ScanSnapshot) -> Vec<&str> {
         let mut names: Vec<&str> = snapshot
-            .candidates
+            .files
             .iter()
             .map(|candidate| candidate.rel_path.as_str())
             .collect();
@@ -227,48 +233,36 @@ mod tests {
         names
     }
 
-    /// Известный прошлому снимку файл хешируется, только если тронут не раньше водяного
-    /// знака за вычетом запаса: грубые часы файловой системы правку не прячут, а нетронутое
-    /// не читается. Новый файл хешируется всегда.
+    /// Every selected file is read, including old files and an unchanged mtime.
     #[test]
-    fn a_known_file_is_hashed_when_touched_within_the_margin_or_its_mtime_moved() {
+    fn every_selected_file_is_hashed_regardless_of_mtime() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        let margin = Duration::from_nanos(COARSE_MARGIN_NS);
-        let watermark = SystemTime::now() - 10 * margin;
-        let old = watermark - 2 * margin;
-        let near = watermark - margin / 2;
+        let old = SystemTime::now() - Duration::from_secs(600);
         write_touched(&root.join("Old.bsl"), "old", old);
-        write_touched(&root.join("Near.bsl"), "near", near);
+        write_touched(&root.join("Near.bsl"), "near", SystemTime::now());
         write_touched(&root.join("New.bsl"), "new", old);
-        let at = |time| mtime_nanos(time, root).expect("mtime");
-        // Near.bsl запомнен со своим временем: кандидат он только по запасу у отметки.
-        let known: HashMap<String, u64> = [("Old.bsl", at(old)), ("Near.bsl", at(near))]
-            .map(|(name, mtime)| (name.to_owned(), mtime))
-            .into();
-
-        let snapshot = scan(root, Some(at(watermark)), &known).expect("scan");
-
-        assert_eq!(snapshot.seen_files.len(), 3);
-        assert_eq!(candidates(&snapshot), ["Near.bsl", "New.bsl"]);
+        let snapshot = scan(root, &mut || false).expect("scan");
+        assert_eq!(candidates(&snapshot), ["Near.bsl", "New.bsl", "Old.bsl"]);
+        for file in &snapshot.files {
+            assert_eq!(
+                file.hash,
+                super::hash_file(&file.path, &mut || false).expect("hash")
+            );
+        }
     }
 
-    /// Копия, восстановленная со старым временем изменения (`cp -p`, `Copy-Item`, архив),
-    /// лежит раньше отметки, но её время не то, что запомнено: её хешируют (#447).
+    /// A restored copy whose mtime moved backwards remains in the full content scan.
     #[test]
     fn a_restored_copy_with_an_old_mtime_is_hashed() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        let margin = Duration::from_nanos(COARSE_MARGIN_NS);
-        let watermark = SystemTime::now() - 10 * margin;
-        let restored = watermark - 300 * margin;
-        write_touched(&root.join("Module.bsl"), "restored bytes", restored);
-        let at = |time| mtime_nanos(time, root).expect("mtime");
-        let known: HashMap<String, u64> =
-            [("Module.bsl".to_owned(), at(watermark - 2 * margin))].into();
-
-        let snapshot = scan(root, Some(at(watermark)), &known).expect("scan");
-
+        write_touched(
+            &root.join("Module.bsl"),
+            "restored bytes",
+            SystemTime::now() - Duration::from_secs(600),
+        );
+        let snapshot = scan(root, &mut || false).expect("scan");
         assert_eq!(candidates(&snapshot), ["Module.bsl"]);
     }
 
@@ -288,10 +282,10 @@ mod tests {
             fs::write(nested.join("File.bsl"), "generated").expect("ignored file");
         }
 
-        let snapshot = scan(root, None, &HashMap::new()).expect("scan");
+        let snapshot = scan(root, &mut || false).expect("scan");
 
         let seen: Vec<&str> = snapshot
-            .seen_files
+            .files
             .iter()
             .map(|file| file.rel_path.as_str())
             .collect();
@@ -313,10 +307,155 @@ mod tests {
                 std::fs::create_dir(&child).expect("ignored child");
                 std::fs::write(child.join("Module.bsl"), "generated").expect("child source");
             }
-            let scanned = scan(&root, None, &HashMap::new()).expect("scan");
-            assert_eq!(scanned.seen_files.len(), 1, "root {root_name}");
-            assert_eq!(scanned.candidates.len(), 1, "root {root_name}");
-            assert_eq!(scanned.candidates[0].rel_path, "Module.bsl");
+            let scanned = scan(&root, &mut || false).expect("scan");
+            assert_eq!(scanned.files.len(), 1, "root {root_name}");
+            assert_eq!(scanned.files[0].rel_path, "Module.bsl");
         }
+    }
+    /// Equal file size and the exact remembered mtime do not hide different bytes.
+    #[test]
+    fn changed_bytes_with_the_exact_remembered_old_mtime_are_hashed() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let module = root.join("Module.bsl");
+        let watermark = SystemTime::now();
+        write_touched(
+            &module,
+            "before bytes",
+            watermark - Duration::from_secs(600),
+        );
+        let before = fs::metadata(&module).expect("before metadata");
+        let remembered = before.modified().expect("before mtime");
+        let remembered_ns = mtime_nanos(remembered, &module).expect("mtime nanos");
+        let old_hash = super::hash_file(&module, &mut || false).expect("old hash");
+
+        write_touched(&module, "edited bytes", remembered);
+        let after = fs::metadata(&module).expect("after metadata");
+        assert_eq!(before.len(), after.len(), "size is unchanged");
+        assert_eq!(remembered, after.modified().expect("after mtime"));
+        assert!(remembered_ns < mtime_nanos(watermark, root).expect("watermark") - 2_000_000_000);
+
+        let snapshot = scan(root, &mut || false).expect("scan");
+        assert_eq!(candidates(&snapshot), ["Module.bsl"]);
+        assert_eq!(snapshot.files[0].mtime_ns, remembered_ns);
+        assert_ne!(snapshot.files[0].hash, old_hash, "changed bytes are read");
+        assert_eq!(
+            snapshot.files[0].hash,
+            super::hash_file(&module, &mut || false).expect("edited hash")
+        );
+    }
+    /// Buffer capacity bounds memory, never accepted file size.
+    #[test]
+    fn hashing_streams_files_larger_than_its_working_buffer() {
+        use std::io::{Read, Result};
+        struct LargeReader {
+            left: usize,
+            largest: usize,
+        }
+        impl Read for LargeReader {
+            fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+                self.largest = self.largest.max(buffer.len());
+                let count = self.left.min(buffer.len());
+                buffer[..count].fill(17);
+                self.left -= count;
+                Ok(count)
+            }
+        }
+        let length = 3 * 64 * 1024 + 7;
+        let mut reader = LargeReader {
+            left: length,
+            largest: 0,
+        };
+        let hash =
+            super::hash_reader(&mut reader, Path::new("large"), &mut || false).expect("hash");
+        use sha2::{Digest, Sha256};
+        assert_eq!(hash, format!("{:x}", Sha256::digest(vec![17; length])));
+        assert_eq!(reader.left, 0);
+        assert!(reader.largest <= 64 * 1024);
+    }
+
+    /// A partially read file never yields a digest on IO failure or cancellation.
+    #[test]
+    fn partial_reads_fail_without_a_hash_and_cancel_before_the_next_read() {
+        use std::{
+            cell::Cell,
+            io::{self, Read},
+            rc::Rc,
+        };
+        struct PartialReader {
+            reads: Rc<Cell<usize>>,
+            cancelled: Rc<Cell<bool>>,
+            cancel: bool,
+        }
+        impl Read for PartialReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let count = self.reads.get();
+                self.reads.set(count + 1);
+                if count > 0 {
+                    return Err(io::Error::other("read failed after a prefix"));
+                }
+                buffer[..3].copy_from_slice(b"abc");
+                self.cancelled.set(self.cancel);
+                Ok(3)
+            }
+        }
+        for cancel in [false, true] {
+            let reads = Rc::new(Cell::new(0));
+            let cancelled = Rc::new(Cell::new(false));
+            let reader = PartialReader {
+                reads: reads.clone(),
+                cancelled: cancelled.clone(),
+                cancel,
+            };
+            let error = super::hash_reader(reader, Path::new("partial"), &mut || cancelled.get())
+                .expect_err("no partial hash");
+            if cancel {
+                assert!(matches!(error, super::ScanError::Interrupted));
+                assert_eq!(reads.get(), 1, "no read after cancellation");
+            } else {
+                assert!(
+                    matches!(error, super::ScanError::Read { path, .. } if path == Path::new("partial"))
+                );
+                assert_eq!(reads.get(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_io_is_retried_and_empty_files_have_the_complete_digest() {
+        use std::io::{self, Read};
+        struct OnceInterrupted(bool);
+        impl Read for OnceInterrupted {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    self.0 = false;
+                    Err(io::ErrorKind::Interrupted.into())
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+        let digest = super::hash_reader(OnceInterrupted(true), Path::new("empty"), &mut || false)
+            .expect("retry then EOF");
+        assert_eq!(
+            digest,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_scan_returns_no_partial_snapshot() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("A.bsl"), "first").expect("first");
+        fs::write(dir.path().join("B.bsl"), "second").expect("second");
+        // Root, first file and its read finish before the second directory entry.
+        let mut checkpoints = 0;
+        let error = scan(dir.path(), &mut || {
+            checkpoints += 1;
+            checkpoints >= 9
+        })
+        .expect_err("cancelled");
+        assert!(matches!(error, super::ScanError::Interrupted));
+        assert_eq!(checkpoints, 9);
     }
 }

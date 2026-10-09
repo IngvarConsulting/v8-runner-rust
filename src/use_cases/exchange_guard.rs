@@ -1207,7 +1207,7 @@ mod tests {
         assert_eq!(remember_created_base(&config, Some(&memory)), None);
 
         let contexts = SourceSetsService::new(&config).designer_contexts();
-        let analysis = analyze_context(&contexts[0], &config.work_path);
+        let analysis = analyze_context(&contexts[0], &config.work_path, &mut || false);
         assert!(
             matches!(analysis.outcome, Ok(AnalysisOutcome::NoChanges)),
             "{:?}",
@@ -1218,7 +1218,7 @@ mod tests {
             "changed",
         )
         .expect("edit");
-        let analysis = analyze_context(&contexts[0], &config.work_path);
+        let analysis = analyze_context(&contexts[0], &config.work_path, &mut || false);
         assert!(
             matches!(analysis.outcome, Ok(AnalysisOutcome::Changes { .. })),
             "{:?}",
