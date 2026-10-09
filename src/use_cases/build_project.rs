@@ -4219,11 +4219,34 @@ mod tests {
         .expect("edit");
         let token = CancellationToken::new();
         let context = ExecutionContext::cli(CommandName::Build).with_cancellation(token.clone());
+        // tracing-core's single-dispatch optimization asks the registering
+        // thread's default dispatcher. Keep a second registry alive so an
+        // unrelated thread cannot cache this shared event as disabled.
+        let sibling_dispatch = tracing::Dispatch::new(tracing_subscriber::registry());
         let subscriber = tracing_subscriber::registry().with(CancelCompleted(token.clone()));
-        let failure = tracing::subscriber::with_default(subscriber, || {
+        let result = tracing::subscriber::with_default(subscriber, || {
+            // Another build may first register the shared event on a thread
+            // without this test's scoped subscriber.
+            std::thread::spawn(|| {
+                super::log_build_step_timeline(&crate::domain::build::BuildStep {
+                    source_set: "other".to_owned(),
+                    mode: BuildMode::EdtExport,
+                    ok: true,
+                    applied: false,
+                    message: Some("EDT export completed".to_owned()),
+                    duration_ms: 0,
+                });
+            })
+            .join()
+            .expect("sibling build completion");
+            assert!(
+                !token.is_cancelled(),
+                "sibling event is not this build's completion"
+            );
             super::execute(&context, &config, &build_args(false))
-        })
-        .expect_err("cancel after export");
+        });
+        drop(sibling_dispatch);
+        let failure = result.expect_err("cancel after export");
         assert!(
             token.is_cancelled(),
             "completion event triggered cancellation"
