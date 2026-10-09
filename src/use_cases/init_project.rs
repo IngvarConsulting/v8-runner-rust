@@ -1787,7 +1787,11 @@ mod tests {
             .iter()
             .find(|context| context.name() == "main")
             .expect("main");
-        let analysis = crate::change_detection::analyzer::analyze_context(main, &config.work_path);
+        let analysis = crate::change_detection::analyzer::analyze_context(
+            main,
+            &config.work_path,
+            &mut || false,
+        );
         assert!(
             matches!(
                 analysis.outcome,

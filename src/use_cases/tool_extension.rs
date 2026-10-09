@@ -88,7 +88,14 @@ fn prepare_extension(
     // Превью отвечает раньше подготовки: она запускает платформу против базы, фиксирует
     // состояние обнаружения изменений, а при исходниках EDT ещё и сносит каталог экспорта.
     if dry_run {
-        return preview_extension(config, extension, &mut utilities, full_rebuild, started);
+        return preview_extension(
+            context,
+            config,
+            extension,
+            &mut utilities,
+            full_rebuild,
+            started,
+        );
     }
     // Отмены, которые критические команды отложили, ответ называет, чем бы подготовка ни
     // кончилась: удача — в сообщении шага, отказ — в начале своего текста.
@@ -136,6 +143,7 @@ fn prepare_extension(
 /// требует, чтобы отсутствие платформы отказывало и превью, а не одобряло план, который
 /// боевой прогон выполнить не сможет.
 fn preview_extension(
+    context: &ExecutionContext,
     config: &AppConfig,
     extension: &ToolExtensionConfig,
     utilities: &mut PlatformUtilities,
@@ -169,7 +177,15 @@ fn preview_extension(
             // Разбор изменений — чтение: снимок загружается, каталог обходится, ничего не
             // создаётся. Поэтому превью называет режим, который был бы применён, а не
             // отделывается общими словами. Так же поступает превью обычного набора.
-            match analyzer::analyze_context(&source_context, &config.work_path).outcome {
+            match analyzer::analyze_context(&source_context, &config.work_path, &mut || {
+                crate::use_cases::interruption::pending_interruption_error(
+                    context,
+                    "during source analysis",
+                )
+                .is_some()
+            })
+            .outcome
+            {
                 Ok(AnalysisOutcome::NoChanges) => Ok(skipped_build_step(
                     extension,
                     "no changes".to_owned(),
@@ -177,6 +193,17 @@ fn preview_extension(
                 )),
                 Ok(AnalysisOutcome::Fallback | AnalysisOutcome::Changes { .. }) => {
                     planned("from sources".to_owned())
+                }
+                Err(analyzer::ChangeDetectionError::Interrupted) => {
+                    Err(interruption::pending_interruption_error(
+                        context,
+                        "during tool-extension source analysis",
+                    )
+                    .unwrap_or_else(|| {
+                        AppError::Runtime(
+                            "source analysis interrupted without a command cancellation".to_owned(),
+                        )
+                    }))
                 }
                 Err(_error) if storage_needs_recovery(&source_context, &config.work_path) => {
                     planned("from sources after recovering its change-detection state".to_owned())
@@ -277,8 +304,27 @@ fn prepare_source_extension(
         });
     }
 
-    let outcome = match analyzer::analyze_context(&source_context, &config.work_path).outcome {
+    let outcome = match analyzer::analyze_context(&source_context, &config.work_path, &mut || {
+        crate::use_cases::interruption::pending_interruption_error(
+            context,
+            "during source analysis",
+        )
+        .is_some()
+    })
+    .outcome
+    {
         Ok(outcome) => outcome,
+        Err(analyzer::ChangeDetectionError::Interrupted) => {
+            return Err(interruption::pending_interruption_error(
+                context,
+                "during tool-extension source analysis",
+            )
+            .unwrap_or_else(|| {
+                AppError::Runtime(
+                    "source analysis interrupted without a command cancellation".to_owned(),
+                )
+            }))
+        }
         Err(_error) if storage_needs_recovery(&source_context, &config.work_path) => {
             prepare_source_extension_full(
                 context, config, extension, source, utilities, apply, deferrals,

@@ -331,8 +331,12 @@ impl<'a> SourceSetInventory<'a> {
         !self.edt_contexts.is_empty()
     }
 
-    pub(crate) fn analyze_contexts(&self, contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
-        SourceSetsService::new(self.config).analyze_contexts(contexts)
+    pub(crate) fn analyze_contexts(
+        &self,
+        contexts: &[SourceSetContext],
+        interrupted: &mut dyn FnMut() -> bool,
+    ) -> Vec<ContextAnalysis> {
+        SourceSetsService::new(self.config).analyze_contexts(contexts, interrupted)
     }
 }
 
