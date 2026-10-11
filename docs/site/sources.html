@@ -6,7 +6,7 @@
 <title>v8-runner · Исходники и база</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=16">
+<link rel="stylesheet" href="styles.css?v=41">
 <style>
   .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
   pre.sh { background: var(--code-bg); padding: 12px 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
@@ -19,11 +19,44 @@
   <a class="brand" href="index.html">v8-runner</a>
   <nav>
     <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
     <a href="platform.html">Платформа</a>
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html" aria-current="page">Исходники</a>
-    <a href="cli.html">CLI</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -41,7 +74,6 @@
   <li><a href="#map">Что чему соответствует</a></li>
   <li><a href="#states">Состояния и переходы</a></li>
   <li><a href="#memory">Три памяти о прошлом разе</a></li>
-  <li><a href="#copies">Несколько рабочих копий</a></li>
   <li><a href="#runner">Что делает раннер</a></li>
 </ul>
 
@@ -59,19 +91,7 @@
 
 <p>Пакет — четвёртый вид того же предмета: один файл, который платформа умеет применить к базе или разобрать обратно в файлы <span class="ref">(<a href="platform.html#t30">30</a>)</span>. Снимок всей базы в <code>.dt</code> к исходникам не относится: в нём данные.</p>
 
-<p>Наборы объявлены в <code>v8project.yaml</code>. Тип набора раннер определяет по содержимому маркерных файлов: каталог можно назвать как угодно, тип задаёт <code>Configuration.xml</code> внутри.</p>
-
-<pre class="sh"><code>format: DESIGNER            # или EDT — формат один на проект
-source-set:
-  - name: main
-    type: configuration
-    path: src/cf
-  - name: my-ext        # псевдоним в проекте; имя в базе — Name из src/ext/Configuration.xml
-    type: extension
-    path: src/ext
-  - name: tools
-    type: external
-    path: src/epf</code></pre>
+<p>Наборы объявлены в <a href="project.html#source-sets"><code>v8project.yaml</code></a>. Тип набора раннер определяет по содержимому маркерных файлов: каталог можно назвать как угодно, тип задаёт <code>Configuration.xml</code> внутри. Структура объявления и примеры находятся на странице <a href="project.html#source-sets">v8project.yaml</a>.</p>
 
 <p>У формата EDT две ступени. Проект правят в EDT, а с базой платформа обменивается только XML-выгрузкой <span class="ref">(<a href="platform.html#t108">108</a>)</span>. Экспорт проекта в XML раннер держит у себя как кеш: он не лежит под контролем версий и пересчитывается по изменившемуся.</p>
 
@@ -93,41 +113,41 @@ source-set:
 
 <!-- diagram:mapping -->
 <div class="diagram" role="img" aria-label="Шесть направлений между исходниками, базой и пакетом">
-<svg viewBox="32.5 -3.0 855.0 420.0" xmlns="http://www.w3.org/2000/svg" style="max-width:855px">
+<svg viewBox="32.5 -12.0 855.0 438.0" xmlns="http://www.w3.org/2000/svg" style="max-width:855px">
 <defs><marker id="arr-mapping" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
 <g class="fr fr-host"><rect x="442.5" y="7.0" width="435.0" height="400.0" rx="12"/><text x="456.5" y="25.0">информационная база</text></g>
-<g class="fr fr-host"><rect x="42.5" y="7.0" width="155.0" height="400.0" rx="12"/><text x="56.5" y="25.0">каталог проекта</text></g>
-<path marker-end="url(#arr-mapping)" class="e" d="M179.5,68.4 C305.9,68.4 334.1,68.4 460.5,68.4"/>
-<path marker-end="url(#arr-mapping)" class="e" d="M460.5,91.6 C334.1,91.6 305.9,91.6 179.5,91.6"/>
+<g class="fr fr-host"><rect x="42.5" y="-2.0" width="155.0" height="418.0" rx="12"/><text x="56.5" y="16.0">каталог проекта</text></g>
+<path marker-end="url(#arr-mapping)" class="e" d="M179.5,64.8 C305.9,64.8 334.1,68.4 460.5,68.4"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M460.5,91.6 C334.1,91.6 305.9,95.2 179.5,95.2"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M579.5,68.4 C652.0,68.4 668.0,68.4 740.5,68.4"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M740.5,91.6 C668.0,91.6 652.0,91.6 579.5,91.6"/>
-<path marker-end="url(#arr-mapping)" class="e" d="M172.0,348.4 C301.8,348.4 330.7,348.4 460.5,348.4"/>
-<path marker-end="url(#arr-mapping)" class="e" d="M460.5,371.6 C330.7,371.6 301.8,371.6 172.0,371.6"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M172.0,344.8 C301.8,344.8 330.7,348.4 460.5,348.4"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M460.5,371.6 C330.7,371.6 301.8,375.2 172.0,375.2"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M579.5,348.4 C653.8,348.4 670.2,348.4 744.5,348.4"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M744.5,371.6 C670.2,371.6 653.8,371.6 579.5,371.6"/>
-<path marker-end="url(#arr-mapping)" class="e" d="M120.0,109.0 C120.0,149.0 120.0,151.0 120.0,191.0"/>
-<path marker-end="url(#arr-mapping)" class="e" d="M172.0,208.4 C317.9,208.4 496.2,254.9 496.2,109.0"/>
-<path marker-end="url(#arr-mapping)" class="e" d="M543.8,109.0 C543.8,276.3 339.3,234.5 172.0,234.5"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M120.0,118.0 C120.0,158.0 120.0,142.0 120.0,182.0"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M172.0,204.8 C317.9,204.8 496.2,254.9 496.2,109.0"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M543.8,109.0 C543.8,276.3 339.3,239.0 172.0,239.0"/>
 <path marker-end="url(#arr-mapping)" class="e dash" d="M567.6,109.0 C567.6,186.8 662.7,220.0 740.5,220.0"/>
-<g class="n n-doc"><path d="M60.5,51.0 h119.0 v50.0 q-29.8,12.0 -59.5,0 q-29.8,-12.0 -59.5,0 z"/><text><tspan x="120.0" y="71.0">src/cf</tspan><tspan x="120.0" y="89.0">конфигурация</tspan></text></g>
-<g class="n n-doc"><path d="M68.0,331.0 h104.0 v50.0 q-26.0,12.0 -52.0,0 q-26.0,-12.0 -52.0,0 z"/><text><tspan x="120.0" y="351.0">src/ext</tspan><tspan x="120.0" y="369.0">расширение</tspan></text></g>
-<g class="n n-doc"><path d="M68.0,191.0 h104.0 v50.0 q-26.0,12.0 -52.0,0 q-26.0,-12.0 -52.0,0 z"/><text><tspan x="120.0" y="211.0">пакет</tspan><tspan x="120.0" y="229.0">.cf · .cfe</tspan></text></g>
+<g class="n n-doc"><path d="M60.5,42.0 h119.0 v68.0 q-29.8,12.0 -59.5,0 q-29.8,-12.0 -59.5,0 z"/><text><tspan x="120.0" y="71.0">src/cf</tspan><tspan x="120.0" y="89.0">конфигурация</tspan></text></g>
+<g class="n n-doc"><path d="M68.0,322.0 h104.0 v68.0 q-26.0,12.0 -52.0,0 q-26.0,-12.0 -52.0,0 z"/><text><tspan x="120.0" y="351.0">src/ext</tspan><tspan x="120.0" y="369.0">расширение</tspan></text></g>
+<g class="n n-doc"><path d="M68.0,182.0 h104.0 v68.0 q-26.0,12.0 -52.0,0 q-26.0,-12.0 -52.0,0 z"/><text><tspan x="120.0" y="211.0">пакет</tspan><tspan x="120.0" y="229.0">.cf · .cfe</tspan></text></g>
 <g class="n n-sw"><rect x="460.5" y="51.0" width="119.0" height="58.0" rx="8"/><text><tspan x="520.0" y="71.0">основная</tspan><tspan x="520.0" y="89.0">конфигурация</tspan></text></g>
 <g class="n n-run"><rect x="740.5" y="51.0" width="119.0" height="58.0" rx="8"/><text><tspan x="800.0" y="71.0">конфигурация</tspan><tspan x="800.0" y="89.0">базы данных</tspan></text></g>
 <g class="n n-off"><rect x="740.5" y="191.0" width="119.0" height="58.0" rx="8"/><text><tspan x="800.0" y="211.0">конфигурации</tspan><tspan x="800.0" y="229.0">поставщиков</tspan></text></g>
 <g class="n n-sw"><rect x="460.5" y="331.0" width="119.0" height="58.0" rx="8"/><text><tspan x="520.0" y="351.0">конфигурация</tspan><tspan x="520.0" y="369.0">расширения</tspan></text></g>
 <g class="n n-run"><rect x="744.5" y="331.0" width="111.0" height="58.0" rx="8"/><text><tspan x="800.0" y="351.0">база данных</tspan><tspan x="800.0" y="369.0">расширения</tspan></text></g>
-<g class="lbl"><rect x="283.0" y="56.4" width="74" height="24" rx="4"/><text><tspan x="320.0" y="68.4">push main</tspan></text></g>
-<g class="lbl"><rect x="283.0" y="79.6" width="74" height="24" rx="4"/><text><tspan x="320.0" y="91.6">pull main</tspan></text></g>
+<g class="lbl"><rect x="283.0" y="54.6" width="74" height="24" rx="4"/><text><tspan x="320.0" y="66.6">push main</tspan></text></g>
+<g class="lbl"><rect x="283.0" y="81.4" width="74" height="24" rx="4"/><text><tspan x="320.0" y="93.4">pull main</tspan></text></g>
 <g class="lbl"><rect x="636.5" y="56.4" width="47" height="24" rx="4"/><text><tspan x="660.0" y="68.4">apply</tspan></text></g>
 <g class="lbl"><rect x="636.5" y="79.6" width="47" height="24" rx="4"/><text><tspan x="660.0" y="91.6">reset</tspan></text></g>
-<g class="lbl"><rect x="272.8" y="336.4" width="87" height="24" rx="4"/><text><tspan x="316.2" y="348.4">push my-ext</tspan></text></g>
-<g class="lbl"><rect x="272.8" y="359.6" width="87" height="24" rx="4"/><text><tspan x="316.2" y="371.6">pull my-ext</tspan></text></g>
+<g class="lbl"><rect x="272.8" y="334.6" width="87" height="24" rx="4"/><text><tspan x="316.2" y="346.6">push my-ext</tspan></text></g>
+<g class="lbl"><rect x="272.8" y="361.4" width="87" height="24" rx="4"/><text><tspan x="316.2" y="373.4">pull my-ext</tspan></text></g>
 <g class="lbl"><rect x="615.0" y="336.4" width="94" height="24" rx="4"/><text><tspan x="662.0" y="348.4">apply my-ext</tspan></text></g>
 <g class="lbl"><rect x="615.0" y="359.6" width="94" height="24" rx="4"/><text><tspan x="662.0" y="371.6">reset my-ext</tspan></text></g>
 <g class="lbl"><rect x="100.0" y="138.0" width="40" height="24" rx="4"/><text><tspan x="120.0" y="150.0">make</tspan></text></g>
-<g class="lbl"><rect x="342.4" y="202.9" width="54" height="24" rx="4"/><text><tspan x="369.4" y="214.9">upload</tspan></text></g>
-<g class="lbl"><rect x="364.9" y="225.0" width="67" height="24" rx="4"/><text><tspan x="398.4" y="237.0">download</tspan></text></g>
+<g class="lbl"><rect x="342.4" y="200.8" width="54" height="24" rx="4"/><text><tspan x="369.4" y="212.8">upload</tspan></text></g>
+<g class="lbl"><rect x="364.9" y="227.6" width="67" height="24" rx="4"/><text><tspan x="398.4" y="239.6">download</tspan></text></g>
 <g class="lbl"><rect x="534.4" y="181.7" width="181" height="24" rx="4"/><text><tspan x="624.9" y="193.7">diff --against vendor:имя</tspan></text></g>
 </svg>
 </div>
@@ -142,7 +162,7 @@ source-set:
 <tr><td class="k">база → исходники</td><td><code>pull</code></td><td>да</td></tr>
 <tr><td class="k">пакет → база</td><td><code>upload</code></td><td>да</td></tr>
 <tr><td class="k">база → пакет</td><td><code>download</code></td><td>да</td></tr>
-<tr><td class="k">исходники → пакет</td><td><code>make</code></td><td>нет: <code>ibcmd</code> или Конфигуратор собирают пакет во временной базе раннера, <code>ibcmd-rs</code> — без базы по ключу <code>providers.make</code> <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
+<tr><td class="k">исходники → пакет</td><td><code>make</code></td><td>нет для конфигурации и внешних <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
 <tr><td class="k">пакет → исходники</td><td><code>convert</code></td><td>нет <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
 </tbody>
 </table></div>
@@ -183,7 +203,7 @@ source-set:
 
 <p>Петля у «разошлись» — отказ по несовпадению предка. Раннер не выбирает, чья правка важнее: он возвращает к <code>pull</code>, а сводит расхождение система контроля версий.</p>
 
-<p>До первого обмена состояния нет: раннер ещё не знает, как относятся друг к другу каталог и база. <code>status</code> так и говорит. Из этого положения <code>pull</code> идёт всегда. Пустую базу раннер не различает <span class="ref">(<a href="problems.html#p6">замер</a>)</span>, поэтому <code>push</code> без памяти отказывает в любую базу, и в пустую тоже, и предлагает <code>pull</code> или <code>push --force</code>. Базу, которую создал сам раннер, он помнит с создания, и первый <code>push</code> в неё идёт без отказа.</p>
+<p>До первого обмена состояния нет: раннер ещё не знает, как относятся друг к другу каталог и база. <code>status</code> так и говорит. Из этого положения <code>pull</code> идёт всегда, <code>push</code> — только в пустую базу; в непустую без памяти он отказывает и предлагает <code>pull</code> или <code>push --force</code>.</p>
 
 <p>Внутри базы у каждой пары свои состояния. Сохранить изменение в основную конфигурацию и применить его к базе данных — два разных события <span class="ref">(<a href="platform.html#t3">3</a>, <a href="platform.html#t6">6</a>)</span>.</p>
 
@@ -223,9 +243,8 @@ source-set:
 <tr><td class="k">есть с обеих сторон</td><td>обычная работа</td><td><code>push</code>, <code>pull</code></td></tr>
 <tr><td class="k">есть в проекте, нет в базе</td><td>расширение ещё не заведено</td><td><code>push my-ext</code> заводит его сам <span class="ref">(<a href="platform.html#t39">39</a>)</span></td></tr>
 <tr><td class="k">есть в базе, нет в проекте</td><td>поставил кто-то другой или пришло с обновлением</td><td><code>pull my-ext</code> после объявления набора исходников</td></tr>
-<tr><td class="k">переименовано в проекте</td><td>имени из <code>Configuration.xml</code> в базе нет, а внутренний идентификатор совпал с установленным расширением</td><td><code>push my-ext</code> переименовывает его на месте, данные остаются <span class="ref">(<a href="platform.html#t39">39</a>)</span></td></tr>
 <tr><td class="k">выключено</td><td>установлено, но не действует</td><td><code>extensions set my-ext --active no</code></td></tr>
-<tr><td class="k">больше не нужно</td><td>уводит данные, которые добавляло <span class="ref">(<a href="platform.html#t42">42</a>)</span></td><td><code>push --delete my-ext</code>: снимает активность, затем удаляет</td></tr>
+<tr><td class="k">больше не нужно</td><td>уводит данные, которые добавляло <span class="ref">(<a href="platform.html#t42">42</a>)</span></td><td><code>push --delete my-ext</code></td></tr>
 </tbody>
 </table></div>
 
@@ -247,136 +266,55 @@ origin: File="/srv/ib/demo"
 <tbody>
 <tr><td class="k">хеши исходников</td><td>какие файлы я тронул</td><td>раннер считает сам</td><td><code>workPath</code>, по файлу на набор</td></tr>
 <tr><td class="k">поколение базы</td><td>менялась ли база</td><td>платформа отвечает, раннер записывает <span class="ref">(<a href="platform.html#t13">13</a>)</span></td><td><code>workPath</code>, с именем инструмента и операции</td></tr>
-<tr><td class="k">файл версий <code>ConfigDumpInfo.xml</code></td><td>что платформе выгружать заново</td><td>платформа <span class="ref">(<a href="platform.html#t16">16</a>)</span></td><td><code>workPath</code>; в каталоге исходников лежит расходный экземпляр, подменённый раннер заменяет копией</td></tr>
+<tr><td class="k">файл версий <code>ConfigDumpInfo.xml</code></td><td>что платформе выгружать заново</td><td>платформа <span class="ref">(<a href="platform.html#t16">16</a>)</span></td><td><code>workPath</code>; в каталог исходников подкладывается на время команды</td></tr>
 </tbody>
 </table></div>
 
-<p>Хеши сравнивают каталог с прошлым разом и дают список файлов для частичной загрузки. Поколение сравнивается только на равенство: совпало — база с прошлого раза не менялась, и инкрементальная выгрузка отвечает «нечего делать» за секунду; полная выгружает дерево всегда, потому что по нему записываются хеши. Файл версий читает только платформа: по нему она решает, какие объекты перекладывать.</p>
+<p>Хеши сравнивают каталог с прошлым разом и дают список файлов для частичной загрузки. Поколение сравнивается только на равенство: совпало — база с прошлого раза не менялась, и выгрузка отвечает «нечего делать» за секунду. Файл версий читает только платформа: по нему она решает, какие объекты перекладывать.</p>
 
 <p>Все три описывают отношение между <strong>одним каталогом и одной базой</strong>. Поэтому под <code>workPath</code> они лежат по базе: у каждой объявленной базы своя память, и отправка в тестовую не сбивает память о рабочей. Место для этого в конфигурации уже есть: местный слой <code>v8project.local.yaml</code> задаёт <code>workPath</code> и базы по именам, из которых <code>origin</code> берётся без ключа, а наборы исходников и формат в нём запрещены.</p>
 
-<pre class="sh"><code>build/                       # workPath
+<pre class="sh"><code>.build/                       # workPath
   infobases/
     origin/                  # база по умолчанию
       generation.json        # поколение, чем получено, после какой операции
-      hashes/                # хеши исходников по наборам; tools/ — расширений-инструментов
+      hashes/                # хеши исходников по наборам
       dump-info/
         main/
           ConfigDumpInfo.xml # файл версий набора: у конфигурации и у каждого расширения свой
         my-ext/
           …
-      designer/              # формат EDT: снимок Конфигуратора по наборам
     test/
-      …
-    @3f2a…/                  # база, названная строкой соединения: ключ из адреса без учётных данных
       …</code></pre>
-
-<h2 id="copies">Несколько рабочих копий</h2>
-<p>Рабочая копия — каталог с проектом: основной, ворктри гита или ещё один клон. У каждой свой местный слой, свой <code>workPath</code> и своя память. Люди и агенты ведут задачи параллельно, каждую в своей копии, и базу, с которой копия ведёт разработку, держит одна копия.</p>
-
-<p>Причина в устройстве базы. Основная конфигурация в ней одна <span class="ref">(<a href="platform.html#t1">1</a>)</span>. Полная загрузка заменяет её целиком <span class="ref">(<a href="platform.html#t23">23</a>)</span>, частичная кладёт объекты поверх по полному имени и идентификатору <span class="ref">(<a href="platform.html#t24">24</a>)</span>, а поколение говорит только «то же» или «другое» <span class="ref">(<a href="platform.html#t13">13</a>)</span>. Две копии с разными ветками в одной базе затирают друг друга. Отказы первого знакомства и «база ушла вперёд» чужую работу замечают, но их выходы ведут в чужую ветку: <code>pull</code> приносит её правки в каталог, <code>push --force</code> заменяет конфигурацию соседа. Применение и снимок к тому же требуют монопольного доступа <span class="ref">(<a href="platform.html#t3">3</a>, <a href="platform.html#t71">71</a>)</span>, и тесты в одной копии срывают применение в другой.</p>
-
-<p>У гита похожая граница: ветка стоит в одном ворктри, во второй её пускает только <code>git worktree add --force</code>. Правило касается базы, с которой копия ведёт разработку. Базы поставки — тестовая, рабочая — общие по назначению: в них отправляют сборка и разные клоны репозитория. Серверные базы поставки защищает проверка поколения. В файловую базу поставки другие копии отправляют с предупреждением: метка называет её владельца, и раннер говорит, чью базу меняет команда.</p>
-
-<h3>Три выхода</h3>
-<p>Копия без своей базы сама ничего не создаёт. Команда, которой нужна база, отказывает и называет три выхода. Те же выходы называет предупреждение, когда копия пишет в базу другой копии.</p>
-
-<div class="tablewrap"><table>
-<thead><tr><th>выход</th><th>команды</th><th>что получается</th></tr></thead>
-<tbody>
-<tr><td class="k">своя чистая база</td><td><code>init</code>, <code>infobase create</code>, <code>push</code></td><td>база с конфигурацией из исходников этой копии; память знает, из чего база собрана, и первая отправка досылает остальное</td></tr>
-<tr><td class="k">копия базы с данными</td><td><code>init</code>, <code>infobase create --from &lt;база&gt;</code>, <code>push</code></td><td>новая база с данными и конфигурацией источника; первая отправка полная</td></tr>
-<tr><td class="k">база из эталонного образа</td><td><code>init</code>, <code>infobase restore --input &lt;образ&gt;.dt --create</code>, <code>push</code></td><td>база с данными и конфигурацией эталона; первая отправка полная</td></tr>
-</tbody>
-</table></div>
-
-<p>Файловую базу команда <code>infobase create</code> собирает через ibcmd сразу с основной конфигурацией из исходников <span class="ref">(<a href="platform.html#t74">74</a>)</span>, и в память записывается этот набор; расширения досылает первая отправка. Базу в кластере Конфигуратор без шаблона создаёт пустой <span class="ref">(<a href="platform.html#t72">72</a>, <a href="platform.html#t73">73</a>)</span>: память знает только, что база есть, и первая отправка полная. Созданную файловую базу команда записывает в метку за своей копией.</p>
-
-<h3>Копия базы</h3>
-<p><code>infobase create --from &lt;база&gt;</code> создаёт базу этой рабочей копии как копию другой базы, с её данными и конфигурацией. Для этого с источника снимается образ, а снимок требует монопольного доступа <span class="ref">(<a href="platform.html#t71">71</a>)</span>: источник должен быть свободен. Чужие сеансы файловой базы раннер завершить не может <span class="ref">(<a href="platform.html#t5">5</a>)</span>, поэтому Конфигуратор и клиенты копии, которая держит базу, закрывают заранее. Базу в кластере освобождает окно обслуживания: <code>sessions deny</code> и <code>sessions terminate</code> <span class="ref">(<a href="platform.html#t57">57</a>)</span>, ценой работы других пользователей. После снимка, удачного или нет, окно закрывает <code>sessions allow</code>. Сеансы раннер сам не завершает: если снять образ не удалось, отказ называет этот рецепт. Пока идёт снимок, команды копии-владельца получают отказ: база занята. Файловую базу из образа создаёт ibcmd <span class="ref">(<a href="platform.html#t74">74</a>)</span>, базу в кластере — Конфигуратор по шаблону .dt <span class="ref">(<a href="platform.html#t72">72</a>, <a href="platform.html#t73">73</a>)</span>; для автономного сервера команда отказывает и называет рецепт <span class="ref">(<a href="platform.html#t75">75</a>)</span>. Источник на автономном сервере — тоже отказ до снимка: образ снимают на машине сервера.</p>
-
-<p>Конфигурация в новой базе принадлежит ветке источника. Поэтому память копии знает только поколение новой базы и то, что содержимое пришло из другой базы; хешей и файла версий у неё нет. Первая отправка идёт полной, и отказ первого знакомства её не останавливает. До этой отправки раннер не предлагает выгрузку: она принесла бы в каталог чужую ветку. Применение после первой отправки приводит скопированные данные к структуре этой ветки. Если конфигурация в новой базе стоит под хранилищем или на поддержке без возможности изменений, полная отправка недоступна <span class="ref">(<a href="platform.html#t23">23</a>, <a href="platform.html#t50">50</a>)</span>: этот выход тогда не годится, и остаётся своя чистая база.</p>
-
-<h3>Когда <code>origin</code> указывает на чужую базу</h3>
-<p>Местный слой часто копируют в новый ворктри целиком, ради инструментов, тестов и учётных данных. Тогда <code>origin</code> указывает на базу соседа. Команда записи не отказывает и подтверждения не просит: она выполняется, а превью и ответ предупреждают, чья это база, и печатают готовые шаги к своей. Писать в базу соседа — решение разработчика: принятый план с предупреждением и есть согласие.</p>
-
-<pre class="sh"><code>$ v8-runner push --dry-run
-▲ push пишет в базу File=/work/erp/build/ib другой рабочей копии: её держит /work/erp на этой машине
-  команда меняет базу этой копии; владельцем в метке остаётся /work/erp
-  освободить базу:  убрать её из местного слоя /work/erp
-  копия с данными:  v8-runner init --infobase File=build/ib
-                    v8-runner infobase create --from upstream
-  из эталона .dt:   v8-runner init --infobase File=build/ib
-                    v8-runner infobase restore --input &lt;образ&gt;.dt --create
-  голая база:       v8-runner init --infobase File=build/ib
-                    v8-runner infobase create
-  метка:            рядом с каталогом /work/erp/build/ib</code></pre>
-
-<p>Метку такая команда не меняет. Её запись владелец замечает своей следующей отправкой: база ушла вперёд его памяти, и <code>push</code> отказывает <code>non_fast_forward</code>: чужая работа молча не затирается.</p>
-
-<p><code>init --infobase</code> в проекте, где <code>v8project.yaml</code> уже есть, пишет только местный слой: перенаправляет <code>origin</code> и сохраняет прежнюю секцию под именем <code>upstream</code> вместе с учётными данными, поэтому <code>--from upstream</code> их не теряет. Ответ называет заменённый адрес. Адрес, который уже стоит в <code>origin</code>, ничего не меняет; если <code>upstream</code> уже есть, <code>init</code> отказывает и называет обе секции. Копируя слой, оставляйте <code>workPath</code> относительным: с общим <code>workPath</code> две копии делят и память, и замок.</p>
-
-<h3>Метка и замок</h3>
-<p>Кто держит файловую базу, записано в метке рядом с её каталогом: для каждой копии-владельца — машина и каталог проекта. Метка лежит снаружи каталога базы, поэтому копия каталога её не уносит. Машину метка называет идентификатором, который переживает смену имени хоста. У метки есть версия формы: метку версии, которой раннер не знает, команда записи не переписывает, а отказывает и называет версию метки и свою. Метку версии 1 раннер читает.</p>
-
-<p>Команда, которая открывает файловую базу, берёт замок рядом с её каталогом на всё своё время. Замок берётся после замка своего <code>workPath</code> и не ждёт: занятая база отвечает сразу и называет, кто с ней сейчас работает. Записаться в метку можно только под этим замком, поэтому две копии, начавшие одновременно, владельцами обе не станут. Без замка метку читает только превью: оно называет владельца и предупреждение, ничего не беря. <code>status --deep</code> открывает базу и берёт замок, как всякая такая команда. Если рядом с базой нельзя взять замок или прочитать и записать метку, команда, которая меняет базу или записывает копию в метку, отказывает и называет каталог и причину; чтение базы идёт дальше и говорит об этом. На сетевом ресурсе замок держится настолько, насколько его держит файловая система, и защиту между машинами раннер там не обещает.</p>
-
-<p>Владельца, чей каталог на этой машине исчез или больше не объявляет базу, команда сменяет сама и говорит об этом. Живого владельца раннер не трогает. У копии этой машины базу забирают, убрав её из местного слоя копии или удалив копию. У копии с другой машины — только удалив её запись из метки; где лежит метка, предупреждение называет.</p>
-
-<p>Базу без метки берёт первая копия, которая к ней обратилась, и ответ об этом говорит. Взяв базу без метки или сменив ушедшего владельца, копия до первой удачной отправки выгрузку не предлагает, если база ушла вперёд её памяти: базу могли менять другие копии. Если с одной файловой базой уже работают несколько копий, базы разводят одним из трёх выходов.</p>
-
-<h3>Какие команды предупреждают</h3>
-<p>На чужой базе предупреждает команда, которая меняет или заменяет базу, запускает с ней клиент или Конфигуратор либо сверяет ответ со своими исходниками и памятью: <code>push</code>, <code>pull</code>, <code>apply</code>, <code>reset</code>, <code>upload</code>, <code>infobase restore</code>, <code>extensions set</code>, <code>test</code>, <code>check</code> для исходников XML, <code>launch</code>, <code>diff</code>, <code>clone --from</code>. На базе без другого живого владельца эти же команды записывают копию в метку. Чтение базы целиком проходит молча и владельцем не делает: <code>infobase dump</code>, <code>download</code>, <code>extensions list</code>, <code>diff --against</code>, <code>status --deep</code>. Превью ничего не пишет и предупреждает заранее. Команда со строкой соединения в <code>--infobase</code> предупреждает так же, но владельцем не становится.</p>
-
-<p>Проверки идут по порядку: чья база, есть ли о ней память, не ушла ли она вперёд. Предупреждение о чужой базе приходит первым и проверок памяти и поколения не отменяет.</p>
-
-<h3>Какую базу выбрать</h3>
-<div class="tablewrap"><table>
-<thead><tr><th>что делаете в копии</th><th>база</th><th>во что обходится</th></tr></thead>
-<tbody>
-<tr><td class="k">тесты и проверки, данные не нужны</td><td>своя чистая</td><td>полная загрузка исходников и место на диске под базу</td></tr>
-<tr><td class="k">ошибку надо воспроизвести на данных</td><td>копия базы</td><td>снимок и восстановление; источник на это время освобождают</td></tr>
-<tr><td class="k">сборка пакета, перевод формата</td><td>не нужна</td><td>—</td></tr>
-<tr><td class="k">файловая база велика, копию базы делать долго</td><td>база другой копии</td><td>каждая команда записи предупреждает; владелец после неё получает отказ «база ушла вперёд»; пока работает одна копия, команды другой получают отказ занятой базы</td></tr>
-<tr><td class="k">серверная база, которую не скопировать</td><td>общая, без метки</td><td>защищает только проверка поколения</td></tr>
-<tr><td class="k">задание сборки</td><td>своя на задание, из эталонного .dt</td><td>восстановление образа, как в сценарии <a href="usecases.html#clean">«Проверка на чистой базе»</a></td></tr>
-</tbody>
-</table></div>
-
-<h3>Серверная база</h3>
-<p>У базы в кластере и у автономного сервера места для метки нет. Их защищает только проверка поколения, и отказ «база ушла вперёд» говорит, что базу могла изменить другая рабочая копия. Своя база копии в кластере — <code>infobase create</code> со своим именем базы <span class="ref">(<a href="platform.html#t73">73</a>)</span> или <code>--from</code>. Она нужна там, где файловая не годится: для окна обслуживания (у файловой базы <code>sessions</code> отказывает), поведения СУБД, объёма данных. Базы автономного сервера создают только на его машине <span class="ref">(<a href="platform.html#t75">75</a>)</span>.</p>
-
-<p>Сервер MCP в каждой рабочей копии свой и читает её местный слой. Инструменты на чужой базе идут так же, как командная строка, и несут то же предупреждение в <code>warnings</code> ответа. Набор инструментов от этого не меняется.</p>
 
 <h2 id="runner">Что делает раннер</h2>
 <p>Раннер берёт на себя ровно то, чего платформе знать неоткуда: какая база с каким каталогом связана и что в каталоге ваше.</p>
 
 <h3>Свой файл версий на пару</h3>
-<p>Файл версий <code>ConfigDumpInfo.xml</code> хранится у раннера, по копии на пару «база ↔ каталог». Файл в каталоге расходный: он остаётся там после команды, годится для ручной выгрузки из Конфигуратора, а в системе контроля версий ему места нет. Перед работой по изменившемуся раннер сверяет файл в каталоге со своей копией. После удачных получения и отправки копией становится то, что записала платформа; сбой копию не меняет.</p>
+<p>Файл версий <code>ConfigDumpInfo.xml</code> хранится у раннера и подкладывается в каталог на время команды. Файл в каталоге становится расходным: он принадлежит последней команде, и в системе контроля версий ему места нет. Перед работой по изменившемуся раннер сверяет отпечаток файла в каталоге со своим.</p>
 
 <div class="tablewrap"><table>
-<thead><tr><th>файл версий в каталоге</th><th>что делает раннер</th></tr></thead>
+<thead><tr><th>файл версий</th><th>каталог</th><th>что делает раннер</th></tr></thead>
 <tbody>
-<tr><td class="k">наш</td><td>работает по изменившемуся</td></tr>
-<tr><td class="k">подменён</td><td>подкладывает свою копию и работает по изменившемуся</td></tr>
-<tr><td class="k">нет или без версии формата</td><td>до запуска платформы выгружает полностью поверх каталога: лишнего не удаляет, хеш-память не пишет; незакоммиченное в каталоге останавливает выгрузку</td></tr>
+<tr><td class="k">наш</td><td>наш</td><td>работает по изменившемуся</td></tr>
+<tr><td class="k">чужой</td><td>наш</td><td>подкладывает свою копию и работает по изменившемуся</td></tr>
+<tr><td class="k">наш</td><td>разошёлся</td><td>точка отсчёта устарела — выгрузка полная</td></tr>
+<tr><td class="k">чужой</td><td>разошёлся</td><td>выгрузка полная</td></tr>
 </tbody>
 </table></div>
 
-<p>Правки исходников в каталоге выгрузку полной не делают: что с ними будет при получении, решает слияние.</p>
-
-<p>Выгрузить один файл версий, не трогая остального, платформа умеет <span class="ref">(<a href="platform.html#t21">21</a>)</span>. Такой файл опишет базу такой, какая она сейчас, и заявит, что все её объекты уже лежат в каталоге. Раннер выгружает его для набора только при доказанном совпадении каталога и базы: в той же команде и под тем же замком сразу после удачной полной отправки или полного получения этого набора, либо после частичной отправки, перед которой поколение совпало с записанным, и поколение после операции не изменилось. Поколения сравниваются только внутри одного инструмента; без ответа о поколении доказательства нет. Так раннер восстанавливает потерянный файл версий без полной выгрузки. В остальных случаях выгрузка полная, иначе следующая работа по изменившемуся пропустит настоящие изменения.</p>
+<p>Выгрузить один файл версий, не трогая остального, платформа умеет <span class="ref">(<a href="platform.html#t21">21</a>)</span>, и раннер этого не делает: новый файл опишет базу такой, какая она сейчас, и заявит, что все её объекты уже лежат в каталоге. Следующая работа по изменившемуся пропустит настоящие изменения.</p>
 
 <h3>Проверка до выбора режима</h3>
-<p>Наличие файла версий и версия формата в нём читаются до запуска платформы. Файла нет — выгрузка полная, она же его создаст; исключение — восстановление файла версий сразу после отправки или получения, описанное выше. Версия чужая — тоже полная. Для загрузки та же проверка работает в обратную сторону: формат новее платформы — отказ до запуска с обеими версиями <span class="ref">(<a href="platform.html#t22">22</a>)</span>.</p>
+<p>Наличие файла версий и версия формата в нём читаются до запуска платформы. Файла нет — выгрузка полная, она же его создаст. Версия чужая — тоже полная. Для загрузки та же проверка работает в обратную сторону: формат новее платформы — отказ до запуска с обеими версиями <span class="ref">(<a href="platform.html#t22">22</a>)</span>.</p>
 
 <h3>Ответ описывает случившееся</h3>
-<p>Платформа может перейти на полную выгрузку сама, но заранее сообщает это прогнозом <span class="ref">(<a href="platform.html#t18">18</a>, <a href="problems.html#p3">замер</a>)</span>. Перед выгрузкой с файлом версий раннер в той же команде и под тем же замком спрашивает прогноз: у Конфигуратора <code>-getChanges</code>, у ibcmd <code>config export status</code>. Ответ называет запрошенный режим и рядом — случившийся, с причиной; прогноз, который раннер не распознал, даёт режим «неизвестен».</p>
+<p>Платформа может перейти на полную выгрузку сама, и узнать об этом заранее нельзя <span class="ref">(<a href="platform.html#t18">18</a>)</span>. Поэтому раннер не обещает быстро: ответ называет запрошенный режим и рядом — что вышло на самом деле, с причиной.</p>
 
 <h3>Токен хранится с именем инструмента</h3>
-<p>Рядом с поколением лежит то, чем оно получено. Сравниваются только значения от одного инструмента, чужое считается отсутствием ответа. Пустую базу по токену раннер не различает: её значение зависит от версии платформы <span class="ref">(<a href="problems.html#p6">замер</a>)</span> и сравнивается как любое другое.</p>
+<p>Рядом с поколением лежит то, чем оно получено. Сравниваются только значения от одного инструмента, чужое считается отсутствием ответа. Токен пустой базы, включая сорок нулей, сохраняется и сравнивается как любой другой токен этого инструмента.</p>
 
-<h3>Слить или заменить</h3>
+<h3 id="merge">Слить или заменить</h3>
 <p>Выгрузка из базы, где правили мимо исходников, должна встретиться с тем, что вы успели наработать. Выбор явный:</p>
 
 <div class="tablewrap"><table>
@@ -408,6 +346,6 @@ origin: File="/srv/ib/demo"
 <p>Перед операцией с базой раннер спрашивает поколение и спрашивает его снова после. Если между ними базу правили, ответ называет это, а память о прошлом разе не обновляется: следующая команда снова увидит расхождение.</p>
 </main>
 
-<script src="site.js?v=7" defer></script>
+<script src="site.js?v=26" defer></script>
 </body>
 </html>

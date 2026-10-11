@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Словарь — v8-runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=41">
+<style>
+  ol.path { padding-left: 1.4em; }
+  ol.path li { margin: 8px 0; }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="glossary.html" aria-current="page">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Словарь</h1>
+<div class="tablewrap"><table>
+<tbody>
+<tr><td class="k">база</td><td>информационная база 1С: конфигурации и данные, с которыми работают пользователи. Бывает файловой, в кластере или за автономным сервером; у проекта сколько угодно именованных баз, умолчание зовётся <code>origin</code>, как у гита</td></tr>
+<tr><td class="k">исходники</td><td>та же конфигурация, разложенная в файлы под контролем версий</td></tr>
+<tr><td class="k">набор исходников</td><td>каталог с одним предметом: конфигурация, расширение или группа внешних обработок</td></tr>
+<tr><td class="k">пакет</td><td>один файл с предметом: <code>.cf</code>, <code>.cfe</code>, <code>.epf</code>, <code>.erf</code></td></tr>
+<tr><td class="k">выгрузка</td><td>база → исходники</td></tr>
+<tr><td class="k">загрузка</td><td>исходники → база</td></tr>
+<tr><td class="k">применение</td><td>основная конфигурация → конфигурация базы данных</td></tr>
+<tr><td class="k">исполнитель</td><td>инструмент или точка входа, которыми выполняется операция; роли и ограничения перечислены в <a href="#tools">списке инструментов</a></td></tr>
+<tr><td class="k">workPath</td><td>рабочий каталог раннера: журналы, временные файлы и память о том, на чём остановились, отдельная для каждой базы</td></tr>
+<tr><td class="k">квитанция</td><td>ответ команды: что сделано, чем, что пропущено. Текстом или JSON</td></tr>
+<tr><td class="k">превью</td><td><code>--dry-run</code>: показать план, ничего не делая</td></tr>
+</tbody></table></div>
+<h2 id="tools">Инструменты и сервисы</h2>
+<p>Раннер запускает утилиты, подключается к точкам входа и использует компоненты внутри клиента 1С. В таблицах указано, что делает каждый инструмент и как раннер с ним взаимодействует.</p>
+
+<h3 id="tool-processes">Утилиты и приложения</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Инструмент</th><th>Что это</th><th>Как использует раннер</th></tr></thead>
+<tbody>
+<tr id="tool-designer"><td><code>1cv8 DESIGNER</code></td><td>Конфигуратор 1С в пакетном режиме: административные операции с базой и конфигурацией.</td><td>Запускает процесс на операцию, передаёт аргументы, читает результат и журнал. Возможности зависят от команды и режима базы.</td></tr>
+<tr id="tool-agent"><td><code>1cv8 /AgentMode</code></td><td>Конфигуратор в режиме агента: точка входа для машинных команд по SSH.</td><td>Запускает собственный агент либо подключается к уже работающему. Собственным процессом управляет; подключённый внешний агент не завершает. SSH-клиент встроен в раннер.</td></tr>
+<tr id="tool-thick-client"><td><code>1cv8 ENTERPRISE</code></td><td>Толстый клиент 1С, выполняющий приложение и внешние обработки.</td><td>Запускает клиент для работы пользователя, тестов, внешней обработки или клиентского MCP. Ожидание завершения и управление процессом зависят от варианта запуска.</td></tr>
+<tr id="tool-thin-client"><td><code>1cv8c</code></td><td>Тонкий клиент 1С.</td><td>Запускает клиент по строке подключения или по веб-адресу через HTTP/HTTPS. Способы запуска описаны в <a href="cli-launch.html#op-launch">launch</a>.</td></tr>
+<tr id="tool-ibcmd"><td><code>ibcmd</code></td><td>Утилита администрирования информационной базы из поставки платформы 1С.</td><td>Запускает на операцию. Утилита работает с файловой базой или напрямую с СУБД по <code>dbms</code>; кластерная строка подключения для прямого доступа не используется. До прямой работы серверные процессы, обслуживающие эту базу, должны быть остановлены: кластер или <code>ibsrv</code>. СУБД остаётся запущенной. См. <a href="variant-cluster.html">условия работы с кластерной базой</a>.</td></tr>
+<tr id="tool-edt-cli"><td><code>1cedtcli</code></td><td>Командная строка 1C:Enterprise Development Tools (EDT).</td><td>Импортирует и экспортирует проекты EDT, проверяет исходники. Работает с проектами и рабочей областью EDT; раннер запускает разовую команду или управляет своей интерактивной сессией.</td></tr>
+<tr id="tool-webinst"><td><code>webinst</code></td><td>Утилита платформы 1С для веб-публикации базы на Apache или IIS.</td><td>Запускает локально для создания или удаления публикации, записи <code>default.vrd</code> и настройки веб-сервера. Нужен доступ к каталогу и требуемой конфигурации веб-сервера. См. <a href="cli-publish.html#op-publish">publish</a>.</td></tr>
+<tr id="tool-git"><td><code>git</code></td><td>Система контроля версий исходников.</td><td>Запрашивает правила игнорирования и состояние локальных файлов, чтобы оценить риск потери работы перед заменой каталога. Раннер не создаёт коммиты и не отправляет изменения в Git; работа без Git возможна.</td></tr>
+<tr id="tool-browser"><td>Браузер и обработчик ссылок ОС</td><td>Приложение по умолчанию для открытия веб-адреса.</td><td><code>launch web</code> передаёт URL системе: <code>open</code> на macOS, <code>xdg-open</code> на Linux, <code>rundll32.exe</code> на Windows. Раннер не управляет вкладками и не проверяет доступность публикации при таком открытии.</td></tr>
+</tbody></table></div>
+
+<h3 id="tool-services">Серверы и внешние сервисы</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Компонент</th><th>Что это</th><th>Как используется</th></tr></thead>
+<tbody>
+<tr id="tool-cluster"><td>Кластер 1С: <code>ragent</code>, <code>rmngr</code>, <code>rphost</code></td><td>Агент сервера, менеджер кластера и рабочие процессы, обслуживающие информационные базы.</td><td>К базе через кластер подключаются Конфигуратор, агент и клиенты 1С. Кластер запущен вне раннера; раннер не управляет запуском и остановкой его серверных процессов.</td></tr>
+<tr id="tool-ibsrv"><td><code>ibsrv</code></td><td>Автономный сервер 1С: обслуживает базу, предоставляет прямой шлюз, агентский SSH-шлюз и HTTP-доступ.</td><td>Раннер использует SSH-шлюз; Конфигуратор и тонкий клиент могут подключаться по прямому шлюзу, клиенты — по HTTP. Сервер запущен вне раннера; запуском и остановкой <code>ibsrv</code> раннер не управляет. См. <a href="variant-standalone.html">варианты подключения</a>.</td></tr>
+<tr id="tool-apache"><td>Apache с модулем <code>wsap</code></td><td>Веб-сервер и модуль расширения 1С, обслуживающие веб-публикации.</td><td>Публикацию настраивает <code>webinst</code>; браузер и тонкий клиент открывают её по HTTP/HTTPS. Веб-сервер соединяется с базой через модуль 1С. Раннер не запускает и не останавливает Apache.</td></tr>
+<tr id="tool-iis"><td>IIS с модулем <code>wsisapi</code></td><td>Веб-сервер Windows и модуль расширения 1С для веб-публикаций.</td><td>Для публикации используется <code>webinst</code>, для открытия — веб-адрес. Запуском и остановкой IIS раннер не управляет. Готовую публикацию можно открыть без права менять её: достаточно <code>web.url</code>.</td></tr>
+<tr id="tool-dbms"><td>СУБД</td><td>Сервер базы данных, в котором хранится информационная база серверного варианта.</td><td>С СУБД работает кластер, <code>ibsrv</code> или <code>ibcmd</code> при прямом доступе. Раннер передаёт настройки <code>dbms</code> утилите; собственного SQL-драйвера для этих операций нет. Запуском и остановкой СУБД раннер не управляет.</td></tr>
+<tr id="tool-github"><td>GitHub Releases</td><td>Сервис публикации выпусков и файлов внешних инструментов.</td><td><a href="cli-tools-download.html#op-tools-download">tools download</a> запрашивает выпуск и скачивает готовый артефакт или архив исходников. Запросы выполняет встроенный HTTP-клиент раннера.</td></tr>
+</tbody></table></div>
+
+<h3 id="tool-client-components">Компоненты внутри клиента 1С</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Инструмент</th><th>Что это</th><th>Как использует раннер</th></tr></thead>
+<tbody>
+<tr id="tool-yaxunit"><td>YAxUnit</td><td>Расширение 1С для выполнения модульных тестов.</td><td>Может скачать расширение или его исходники. Для <code>test yaxunit</code> подготавливает компоненты и параметры, запускает клиент 1С, затем читает JUnit и журналы. Загрузка файлов и установка расширения в базу — отдельные действия.</td></tr>
+<tr id="tool-vanessa"><td>Vanessa Automation Single</td><td>Внешняя обработка <code>.epf</code> для сценарных тестов и автоматизации клиента 1С.</td><td>Может скачать обработку, передаёт ей настройки и запускает внутри клиента для <code>test va</code> или <code>launch mcp va</code>. Это компонент платформенного клиента, а не отдельная программа ОС.</td></tr>
+<tr id="tool-client-mcp"><td><code>onec-client-mcp-devkit</code></td><td>Расширение, предоставляющее MCP-инструменты из клиента 1С.</td><td>Скачивает артефакт или исходники, подготавливает расширение для клиентского MCP и запускает клиент. При <code>--wait-ready</code> проверяет готовность MCP по HTTP. У Vanessa в режиме MCP есть собственная точка входа, проверяемая тем же механизмом.</td></tr>
+</tbody></table></div>
+
+<h3 id="tool-planned">Администрирование кластера и работа с пакетами</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Инструмент</th><th>Что это</th><th>Взаимодействие с раннером</th></tr></thead>
+<tbody>
+<tr id="tool-rac"><td><code>rac</code> <span class="plan-badge">План</span></td><td>Консольная утилита администрирования кластера 1С через RAS.</td><td>Управление сеансами своей базы: список, завершение и блокировка начала. Администрирование серверов, лицензий и профилей безопасности остаётся за пределами раннера.</td></tr>
+<tr id="tool-ras"><td><code>ras</code> <span class="plan-badge">План</span></td><td>Сервер администрирования кластера 1С, к которому обращается <code>rac</code>.</td><td>Объявленный <code>cluster.ras</code> используется как готовый сервис: его запуск и остановка из раннера недоступны. Если адрес не задан, раннер запускает собственный RAS на своей машине на время команды и завершает его вместе с ней. См. <a href="variant-cluster-admin.html">варианты RAS</a>.</td></tr>
+<tr id="tool-ibcmd-rs"><td><code>ibcmd-rs</code> <span class="plan-badge">План</span></td><td>Отдельный конвертер между XML-исходниками и пакетом конфигурации без платформы 1С.</td><td>Раннер запускает его для преобразования исходников и пакетов. Совпадение части имени с <code>ibcmd</code> не делает утилиты взаимозаменяемыми.</td></tr>
+</tbody></table></div>
+<p class="hint">SSH, SFTP и HTTP — протоколы взаимодействия. Для агентского доступа и SFTP раннер использует встроенный клиент; внешние команды <code>ssh</code> и <code>sftp</code> не требуются. Docker относится к размещению серверов: раннер не вызывает Docker CLI. EDT IDE используется для разработки проектов; раннер обращается к <code>1cedtcli</code>.</p>
+
+<h2 id="base-modes">Режимы доступа к базе</h2>
+<p>Под вариантами команд эти значки показывают, как база обслуживается и что команда делает в каждом режиме. Рядом со значком всегда стоит название режима.</p>
+<dl class="mode-behavior" aria-label="Обозначения режимов доступа">
+  <div class="mode-row" id="mode-file">
+    <dt><span class="mode-label mode-file"><span class="mode-icon" aria-hidden="true"></span>Файловая</span></dt>
+    <dd>База хранится в каталоге с файлом <code>1Cv8.1CD</code>. Для доступа к ней не нужны кластер или автономный сервер. <a href="variant-file.html">Варианты файловой базы</a>.</dd>
+  </div>
+  <div class="mode-row" id="mode-cluster">
+    <dt><span class="mode-label mode-cluster"><span class="mode-icon" aria-hidden="true"></span>Кластер</span></dt>
+    <dd>Базу обслуживает кластер серверов 1С; данные хранятся в СУБД. <a href="variant-cluster.html">Варианты кластера</a>.</dd>
+  </div>
+  <div class="mode-row" id="mode-standalone">
+    <dt><span class="mode-label mode-standalone"><span class="mode-icon" aria-hidden="true"></span>Автономный</span></dt>
+    <dd>Базу обслуживает автономный сервер <code>ibsrv</code>. Она может храниться в файле или в СУБД. <a href="variant-standalone.html">Варианты автономного сервера</a>.</dd>
+  </div>
+</dl>
+<p class="hint">Значок обозначает режим доступа, а не утилиту команды. Вызов <code>ibcmd</code> сам по себе не делает базу автономной. Прямой доступ к СУБД описывается отдельно, вместе с условиями остановки обслуживающего базу сервера.</p>
+
+<h2 id="source-formats">Форматы исходников</h2>
+<p>Формат задаёт, как исходники хранятся в проекте. Он выбирается ключом <code>format</code> в <a href="project.html">v8project.yaml</a> и сочетается с любым режимом доступа к базе.</p>
+<dl class="mode-behavior" aria-label="Обозначения форматов исходников">
+  <div class="mode-row" id="format-designer">
+    <dt><span class="mode-label mode-designer"><span class="mode-icon" aria-hidden="true"></span>Конфигуратор</span></dt>
+    <dd>XML-формат выгрузки платформы. В проекте — <code>format: DESIGNER</code>.</dd>
+  </div>
+  <div class="mode-row" id="format-edt">
+    <dt><span class="mode-label mode-edt"><span class="mode-icon" aria-hidden="true"></span>EDT</span></dt>
+    <dd>Формат проекта 1C:Enterprise Development Tools. В проекте — <code>format: EDT</code>. Обмен с базой проходит через XML-формат платформы <span class="ref">(<a href="platform.html#t108">108</a>)</span>.</dd>
+  </div>
+</dl>
+<p class="hint">Исполнитель команды выбирается отдельно от формата исходников. Подробнее — <a href="sources.html">«Исходники и база»</a>.</p>
+
+<h2 id="d-legend">Как читать схемы</h2>
+<p>Схемы нарисованы в нотации ArchiMate, уровень технологий: рамка — машина (node), прямоугольник — процесс (system software), скруглённый блок — точка входа (technology service), «документ» и цилиндр — данные (artifact), синий блок — сам раннер (application component). Подпись на стрелке называет канал и протокол; пунктир — сеть, сплошная — процесс или файл на той же машине. Серое — то, с чем раннер не разговаривает.</p>
+<!-- diagram:legend -->
+<div class="diagram" role="img" aria-label="Как читать схемы: процесс, точка входа, файл, база данных, раннер, вне раннера">
+<svg viewBox="25.0 11.0 670.0 170.0" xmlns="http://www.w3.org/2000/svg" style="max-width:670px">
+<defs><marker id="arr-legend" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="n n-run"><rect x="35.0" y="28.0" width="150.0" height="44.0" rx="8"/><text><tspan x="110.0" y="50.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="255.0" y="21.0" width="170.0" height="58.0" rx="8"/><text><tspan x="340.0" y="41.0">процесс</tspan><tspan x="340.0" y="59.0">утилита платформы</tspan></text></g>
+<g class="n n-svc"><rect x="495.0" y="21.0" width="190.0" height="58.0" rx="29.0"/><text><tspan x="590.0" y="41.0">точка входа</tspan><tspan x="590.0" y="59.0">SSH-шлюз, HTTP</tspan></text></g>
+<g class="n n-doc"><path d="M35.0,109.0 h150.0 v54.0 q-37.5,12.0 -75.0,0 q-37.5,-12.0 -75.0,0 z"/><text><tspan x="110.0" y="140.0">файл или каталог</tspan></text></g>
+<g class="n n-cyl"><path d="M260.0,120.0 v40.0 a80.0,7.0 0 0 0 160.0,0 v-40.0"/><ellipse cx="340.0" cy="120.0" rx="80.0" ry="7.0"/><text><tspan x="340.0" y="140.0">база данных СУБД</tspan></text></g>
+<g class="n n-off"><rect x="515.0" y="118.0" width="150.0" height="44.0" rx="8"/><text><tspan x="590.0" y="140.0">вне раннера</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:legend -->
+<p class="hint">Операции платформы раннер поручает исполнителям. Утилиту он вызывает запуском процесса — аргументы командной строки, код выхода и журнал; с агентом и шлюзом говорит сессией SSH. Поэтому на стрелке от раннера стоит вид вызова, а не имя команды. Где раннер поднимает процесс сам, у стрелки написано «поднимает»: агент Конфигуратора он запускает и только потом к нему подключается, а шлюз автономного сервера работает вне раннера — туда идёт одна сессия. Сервер администрирования работает по тому же правилу: объявленный раннер использует, необъявленный поднимает сам.</p>
+
+<h2 id="command-responses">Ответы команд</h2>
+<p>На странице каждой CLI-команды перечислены её классы результатов: выполнено, запланировано, пропущено, получено с предупреждением или не выполнено. Не каждый класс возможен у каждой команды. Сообщения платформы и пути могут различаться; классы и поля ответа позволяют понять исход.</p>
+<h3 id="response-envelope">Как читать CLI и JSON</h3>
+<p>В JSON <code>ok</code> сообщает об исходе всей команды. <code>data</code> содержит её результат, <code>warnings</code> — предупреждения, <code>steps</code> — шаги, <code>error</code> — причину неуспеха. У выполнения может быть отдельный <code>data.execution.status</code>: <code>succeeded</code>, <code>failed</code>, <code>cancelled</code>, <code>timed_out</code> или <code>invalid_output</code>.</p>
+<p>Статус шага — другой уровень: <code>succeeded</code>, <code>failed</code>, <code>skipped</code> или <code>degraded</code>. Последний означает выполненный шаг с ухудшением/предупреждением, а не универсальный статус команды. Нельзя заменять предметные статусы <code>clean</code>, <code>issues_found</code>, <code>up_to_date</code> или <code>planned</code> одним этим перечнем.</p>
+<p>В тексте итоговые знаки означают: <strong>●</strong> выполнено, <strong>▲</strong> выполнено с предупреждениями, <strong>✖</strong> не выполнено, <strong>○</strong> пропущено. <strong>◌</strong> относится к текущему ходу работы, не к окончательному ответу. Последний отказ печатается в stderr как <code>ERROR: …</code>.</p>
+<h3 id="response-refusal">Отказ до работы и ошибка после начала</h3>
+<p>Ранний отказ может вернуть в <code>data</code> только <code>{"message": "…"}</code>. Когда сценарий уже получил предметный результат, ошибка сохраняет его собственную форму: выполненные шаги, опубликованные файлы, исход проверки, отчёт или пути журналов. Некоторые команды сохраняют форму операции даже при раннем отказе. <code>ok: false</code> не обещает, что ничего не изменилось.</p>
+<p>Предупреждение не равно отказу: <code>ok</code> может оставаться true. У отдельных команд предупреждения находятся в <code>data.message</code>, журнале или диагностике исполнения, а не только в общем <code>warnings</code>. Превью тоже успешно, но работу не выполняет. <code>provider_dispatched</code> и PID читайте по правилам конкретного метода: они не заменяют его фактические статусы шагов и проверку готовности.</p>
+<h3 id="response-errors">Причины отказов</h3>
+<p><code>error.kind</code> группирует причину, <code>error.code</code> уточняет её. Код ошибки отдельного шага в <code>data.execution.errors[].code</code> принадлежит другому словарю. Коды выхода 2/3/4 относятся к CLI; код выхода внешней утилиты в data может отличаться.</p>
+<div class="tablewrap"><table><thead><tr><th>Причина и код</th><th>Род и выход CLI</th><th>Смысл</th></tr></thead><tbody><tr id="response-invalid_argument" data-error-code="invalid_argument" data-error-kind="validation"><td>Неверные настройки или ключи<br><code>invalid_argument</code></td><td><code>validation</code><br>Выход: 2</td><td>Запрос не прошёл проверку.</td></tr><tr id="response-unsupported_value" data-error-code="unsupported_value" data-error-kind="validation"><td>Значение не поддерживается<br><code>unsupported_value</code></td><td><code>validation</code></td><td>Значение ключа или настройки не входит в допустимый набор для выбранной операции.</td></tr><tr id="response-capability_unavailable" data-error-code="capability_unavailable" data-error-kind="capability"><td>Операция недоступна<br><code>capability_unavailable</code></td><td><code>capability</code><br>Выход: 2</td><td>Нет подходящего способа выполнить операцию.</td></tr><tr id="response-subject" data-error-code="subject" data-error-kind="capability"><td>Неподходящий предмет<br><code>subject</code></td><td><code>capability</code><br>Выход: 2</td><td>Операция неприменима к выбранному предмету, например к внешней обработке вместо конфигурации.</td></tr><tr id="response-target" data-error-code="target" data-error-kind="capability"><td>Неподходящая цель<br><code>target</code></td><td><code>capability</code><br>Выход: 2</td><td>Операция не выполняется для этой цели. error.next может назвать подходящую команду.</td></tr><tr id="response-environment_unavailable" data-error-code="environment_unavailable" data-error-kind="environment"><td>Среда недоступна<br><code>environment_unavailable</code></td><td><code>environment</code><br>Выход: 2</td><td>Не найдена требуемая утилита или среда не подготовлена.</td></tr><tr id="response-workspace_busy" data-error-code="workspace_busy" data-error-kind="workspace"><td>Рабочий каталог занят<br><code>workspace_busy</code></td><td><code>workspace</code><br>Выход: 3</td><td>Другой вызов владеет workPath; этот вызов не начинает работу.</td></tr><tr id="response-infobase_busy" data-error-code="infobase_busy" data-error-kind="workspace"><td>Файловая база занята<br><code>infobase_busy</code></td><td><code>workspace</code><br>Выход: 3</td><td>Другой вызов владеет файловой базой; этот вызов не начинает работу. Дождитесь завершения владельца базы и повторите команду.</td></tr><tr id="response-platform_failure" data-error-code="platform_failure" data-error-kind="platform"><td>Сбой платформы или внешнего инструмента<br><code>platform_failure</code></td><td><code>platform</code><br>Выход: 4</td><td>Ошибка запуска, ненулевой выход либо другой сбой внешнего исполнения.</td></tr><tr id="response-invalid_output" data-error-code="invalid_output" data-error-kind="invalid_output"><td>Результат не подтверждён<br><code>invalid_output</code></td><td><code>invalid_output</code><br>Выход: 4</td><td>Ожидаемый файл или машинный ответ не получен либо невалиден.</td></tr><tr id="response-runtime_failure" data-error-code="runtime_failure" data-error-kind="runtime"><td>Ошибка выполнения сценария<br><code>runtime_failure</code></td><td><code>runtime</code><br>Выход: 3</td><td>Сбой файловой системы, сети, публикации результата или другой шаг оркестрации; некоторые проверки возвращают этот же род.</td></tr><tr id="response-cancelled" data-error-code="cancelled" data-error-kind="interruption"><td>Операция отменена<br><code>cancelled</code></td><td><code>interruption</code><br>Выход: 4</td><td>Терминальное прерывание; данные могут содержать уже выполненные шаги.</td></tr><tr id="response-timed_out" data-error-code="timed_out" data-error-kind="interruption"><td>Истёк срок выполнения<br><code>timed_out</code></td><td><code>interruption</code><br>Выход: 4</td><td>Терминальное прерывание по сроку. У отдельных ожиданий предметный результат может оформляться как runtime_failure.</td></tr><tr id="response-non_fast_forward" data-error-code="non_fast_forward" data-error-kind="non_fast_forward"><td><span class="plan-badge">План</span> База ушла вперёд<br><code>non_fast_forward</code></td><td><code>non_fast_forward</code></td><td>Контроль поколений отказывается перезаписать непринятые изменения базы.</td></tr><tr id="response-no_memory" data-error-code="no_memory" data-error-kind="no_memory"><td><span class="plan-badge">План</span> Нет памяти обмена<br><code>no_memory</code></td><td><code>no_memory</code></td><td>Для решения об обмене не хватает сохранённого состояния базы.</td></tr></tbody></table></div>
+<h3 id="response-outside">Диагностика до ответа команды</h3>
+<p>Неизвестная команда, неизвестный ключ или ошибка синтаксиса аргументов возникают в парсере CLI до сценария. Парсер печатает диагностику и Usage, завершает процесс с кодом 2; JSON-конверт при этом не обещается. Это отличается от проверок глобальных ключей после разбора: они уже могут вернуть общий конверт отказа, даже для version.</p>
+<p>Ошибка загрузки проекта после разбора команды оформляется общим отказом. Если сам раннер не удалось запустить или записать ответ, это сбой запуска/вывода процесса; ответа команды может не быть.</p>
+<h3 id="response-error-examples">Примеры общих отказов</h3>
+<p>Это примеры формы CLI/JSON для разных причин. Они не обещают, что каждая команда выдаёт каждую причину; применимость указана на её странице.</p>
+<fieldset class="output-format" data-output-format><legend>Примеры</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset><h4 id="error-example-invalid_argument">Неверные настройки или ключи</h4><pre data-output-example="error-example-invalid_argument" data-output-schema="refusal"><code>ERROR: validation error: Неверные настройки или ключи</code></pre>
+<h4 id="error-example-capability_unavailable">Операция недоступна</h4><pre data-output-example="error-example-capability_unavailable" data-output-schema="refusal"><code>ERROR: capability unavailable: Операция недоступна</code></pre>
+<h4 id="error-example-target">Неподходящая цель</h4><pre data-output-example="error-example-target" data-output-schema="refusal"><code>ERROR: capability unavailable: the operation is not available for this target</code></pre>
+<h4 id="error-example-environment_unavailable">Среда недоступна</h4><pre data-output-example="error-example-environment_unavailable" data-output-schema="refusal"><code>ERROR: environment unavailable: required utility was not found</code></pre>
+<h4 id="error-example-workspace_busy">Рабочий каталог занят</h4><pre data-output-example="error-example-workspace_busy" data-output-schema="refusal"><code>ERROR: workspace busy: workPath is locked by another command</code></pre>
+<h4 id="error-example-infobase_busy">Файловая база занята</h4><pre data-output-example="error-example-infobase_busy" data-output-schema="refusal"><code>ERROR: infobase busy: file infobase is locked by another command</code></pre>
+<h4 id="error-example-platform_failure">Сбой платформы или внешнего инструмента</h4><pre data-output-example="error-example-platform_failure" data-output-schema="refusal"><code>ERROR: platform error: Сбой платформы или внешнего инструмента</code></pre>
+<h4 id="error-example-invalid_output">Результат не подтверждён</h4><pre data-output-example="error-example-invalid_output" data-output-schema="refusal"><code>ERROR: invalid output: Результат не подтверждён</code></pre>
+<h4 id="error-example-runtime_failure">Ошибка выполнения сценария</h4><pre data-output-example="error-example-runtime_failure" data-output-schema="refusal"><code>ERROR: runtime error: Ошибка выполнения сценария</code></pre>
+<h4 id="error-example-cancelled">Операция отменена</h4><pre data-output-example="error-example-cancelled" data-output-schema="refusal"><code>ERROR: cancelled: Операция отменена</code></pre>
+<h4 id="error-example-timed_out">Истёк срок выполнения</h4><pre data-output-example="error-example-timed_out" data-output-schema="refusal"><code>ERROR: timed out: Истёк срок выполнения</code></pre>
+</main>
+<script type="application/json" id="output-examples">{
+  "error-example-invalid_argument": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "Неверные настройки или ключи"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "invalid_argument",
+      "kind": "validation",
+      "message": "Неверные настройки или ключи"
+    }
+  },
+  "error-example-capability_unavailable": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "Операция недоступна"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "capability_unavailable",
+      "kind": "capability",
+      "message": "Операция недоступна"
+    }
+  },
+  "error-example-target": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "the operation is not available for this target"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "target",
+      "kind": "capability",
+      "message": "the operation is not available for this target"
+    }
+  },
+  "error-example-environment_unavailable": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "required utility was not found"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "environment_unavailable",
+      "kind": "environment",
+      "message": "required utility was not found"
+    }
+  },
+  "error-example-workspace_busy": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "workPath is locked by another command"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "workspace_busy",
+      "kind": "workspace",
+      "message": "workPath is locked by another command"
+    }
+  },
+  "error-example-platform_failure": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "Сбой платформы или внешнего инструмента"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "platform_failure",
+      "kind": "platform",
+      "message": "Сбой платформы или внешнего инструмента"
+    }
+  },
+  "error-example-invalid_output": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "Результат не подтверждён"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "invalid_output",
+      "kind": "invalid_output",
+      "message": "Результат не подтверждён"
+    }
+  },
+  "error-example-runtime_failure": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "Ошибка выполнения сценария"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "runtime_failure",
+      "kind": "runtime",
+      "message": "Ошибка выполнения сценария"
+    }
+  },
+  "error-example-cancelled": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "Операция отменена"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "cancelled",
+      "kind": "interruption",
+      "message": "Операция отменена"
+    }
+  },
+  "error-example-timed_out": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "Истёк срок выполнения"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "timed_out",
+      "kind": "interruption",
+      "message": "Истёк срок выполнения"
+    }
+  },
+  "error-example-infobase_busy": {
+    "ok": false,
+    "command": "push",
+    "duration_ms": 0,
+    "data": {
+      "message": "file infobase is locked by another command"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "infobase_busy",
+      "kind": "workspace",
+      "message": "file infobase is locked by another command"
+    }
+  }
+}</script>
+<script src="site.js?v=26" defer></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Веб-публикация</title>
+<link rel="canonical" href="variant-publication.html">
+<link rel="stylesheet" href="styles.css?v=41">
+<script>
+(function () {
+  var sections = ['#d-web-remote', '#d-web-mounted', '#d-web-docker'];
+  var section = sections.indexOf(location.hash) >= 0 ? location.hash : '#d-web-remote';
+  location.replace('variant-publication.html' + section);
+})();
+</script>
+</head>
+<body>
+<main class="page">
+<h1>Веб-публикация</h1>
+<p>Сценарии перенесены на страницу «Веб-публикация»:</p>
+<ul>
+<li id="d-web-remote"><a href="variant-publication.html#d-web-remote">Кластер с готовой веб-публикацией</a></li>
+<li id="d-web-mounted"><a href="variant-publication.html#d-web-mounted">Управление публикацией на отдельном веб-сервере</a></li>
+<li id="d-web-docker"><a href="variant-publication.html#d-web-docker">Веб-сервер в контейнере</a></li>
+</ul>
+</main>
+</body>
+</html>
