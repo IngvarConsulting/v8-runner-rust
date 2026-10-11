@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Автономный сервер</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=41">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Автономный сервер</h1>
+<p>Автономный сервер <code>ibsrv</code> запущен вне раннера. Раннер не управляет его запуском и остановкой.</p>
+<p>Выберите вариант по расположению базы и утилит. <a href="glossary.html#d-legend">Обозначения схем</a> и <a href="project.html">настройки файлов проекта</a> описаны отдельно.</p>
+<h2 id="d-standalone-local">Автономный сервер на своей машине</h2>
+<p>Раннер подключается к <code>ibsrv</code> по двум шлюзам: Конфигуратор — по прямому, как в кластер; сессия SSH — по агентскому.</p>
+<!-- diagram:d-standalone-local -->
+<div class="diagram" role="img" aria-label="Автономный сервер на машине раннера: прямой шлюз для Конфигуратора и SSH-шлюз для агентского набора">
+<svg viewBox="-29.0 -122.0 1463.0 544.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1463px">
+<defs><marker id="arr-d-standalone-local" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-19.0" y="-45.0" width="1443.0" height="457.0" rx="12"/><text x="-5.0" y="-27.0">одна машина</text></g>
+<g class="fr fr-srv"><rect x="617.0" y="7.0" width="781.0" height="379.0" rx="12"/><text x="631.0" y="25.0">автономный сервер</text></g>
+<g class="fr fr-host"><rect x="7.0" y="16.0" width="504.0" height="340.0" rx="12"/><text x="21.0" y="34.0">раннер</text></g>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M100,138 C100,85 180,80 635,80"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M165.0,160.0 C255.9,160.0 276.1,160.0 367.0,160.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M165,176 C300,176 500,330 930,330"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M100.0,182.0 C100.0,222.0 100.0,222.0 100.0,262.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M493.0,160.0 C556.9,160.0 571.1,190.0 635.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M885.0,190.0 C938.8,190.0 950.7,190.0 1004.5,190.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M885,90 C950,90 990,170 1000,178"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M1060.0,219.0 C1060.0,259.0 1060.0,252.0 1060.0,292.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M1115.5,190.0 C1180.5,190.0 1195.0,190.0 1260.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M1060.0,161.0 C1060.0,121.0 1060.0,142.0 1060.0,102.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M1060.0,-68.0 C1060.0,-11.3 1060.0,1.3 1060.0,58.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="367.0" y="138.0" width="126.0" height="44.0" rx="8"/><text><tspan x="430.0" y="160.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-doc"><path d="M25.0,262.0 h150.0 v68.0 q-37.5,12.0 -75.0,0 q-37.5,-12.0 -75.0,0 z"/><text><tspan x="100.0" y="291.0">workPath</tspan><tspan x="100.0" y="309.0">всегда локален</tspan></text></g>
+<g class="n n-svc"><rect x="635.0" y="51.0" width="250.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="71.0">SSH-шлюз 1543</tspan><tspan x="760.0" y="89.0">ibsrv --enable-ssh-gate</tspan></text></g>
+<g class="n n-svc"><rect x="635.0" y="161.0" width="250.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="181.0">прямой шлюз</tspan><tspan x="760.0" y="199.0">Srvr=localhost;Ref=demo</tspan></text></g>
+<g class="n n-sw"><rect x="1004.5" y="161.0" width="111.0" height="58.0" rx="8"/><text><tspan x="1060.0" y="181.0">ibsrv</tspan><tspan x="1060.0" y="199.0">вне раннера</tspan></text></g>
+<g class="n n-doc"><path d="M930.0,292.0 h260.0 v68.0 q-65.0,12.0 -130.0,0 q-65.0,-12.0 -130.0,0 z"/><text><tspan x="1060.0" y="321.0">каталог пользователя шлюза</tspan><tspan x="1060.0" y="339.0">users-data и имя пользователя</tspan></text></g>
+<g class="n n-svc"><rect x="1002.0" y="58.0" width="116.0" height="44.0" rx="22.0"/><text><tspan x="1060.0" y="80.0">HTTP 8314</tspan></text></g>
+<g class="n n-cyl"><path d="M1260.0,170.0 v40.0 a60.0,7.0 0 0 0 120.0,0 v-40.0"/><ellipse cx="1320.0" cy="170.0" rx="60.0" ry="7.0"/><text><tspan x="1320.0" y="190.0">база данных</tspan></text></g>
+<g class="n n-svc"><rect x="949.0" y="-112.0" width="222.0" height="44.0" rx="22.0"/><text><tspan x="1060.0" y="-90.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="204.8" y="70.5" width="228" height="24" rx="4"/><text><tspan x="318.8" y="82.5">SSH: команда строкой, ответ JSON</tspan></text></g>
+<g class="lbl"><rect x="195.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="266.0" y="160.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="348.3" y="221.5" width="107" height="40" rx="4"/><text><tspan x="401.8" y="233.5">exchange: dir</tspan><tspan x="401.8" y="249.5">ссылки и копии</tspan></text></g>
+<g class="lbl"><rect x="80.0" y="210.0" width="40" height="24" rx="4"/><text><tspan x="100.0" y="222.0">файл</tspan></text></g>
+<g class="lbl"><rect x="547.0" y="163.0" width="34" height="24" rx="4"/><text><tspan x="564.0" y="175.0">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-standalone-local -->
+<h3>Конфигурация</h3>
+<p>Основной файл <code>v8project.yaml</code> описывает исходники на машине раннера.</p>
+<pre data-config-example="main"><code>workPath: .build         # журналы, временные файлы и состояние
+format: DESIGNER         # исходники в формате платформы
+source-set:
+  - name: main           # локальное имя набора
+    type: CONFIGURATION  # основная конфигурация
+    path: src/cf         # путь от каталога v8project.yaml</code></pre>
+<p><code>v8project.local.yaml</code> рядом с основным файлом:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=localhost;Ref=demo&quot;  # прямой шлюз
+    user: developer                        # пользователь базы и SSH-шлюза
+    password: &quot;ib-password&quot;
+    standalone:
+      gate: &quot;localhost:1543&quot;               # агентский SSH-шлюз
+      exchange:
+        dir: /srv/ibsrv/users/developer    # каталог пользователя шлюза
+    web:
+      url: &quot;http://localhost:8314/demo&quot;    # встроенный HTTP-сервер</code></pre>
+<p>На машине раннера работает ibsrv с именем базы demo и указанными шлюзами. Каталог пользователя шлюза доступен раннеру по /srv/ibsrv/users/developer; workPath находится отдельно. HTTP-адрес соответствует настройкам самого ibsrv.</p>
+<h2 id="d-standalone-remote">Автономный сервер на другой машине</h2>
+<p>Автономный сервер на отдельной машине. Доступ к чужому диску раннеру не нужен: с платформой у себя он идёт Конфигуратором в прямой шлюз и держит файлы у себя; без платформы ему хватает SSH до агентского шлюза и объявленного канала файлов.</p>
+<!-- diagram:d-standalone-remote -->
+<div class="diagram" role="img" aria-label="Автономный сервер на другой машине: Конфигуратор по прямому шлюзу, SSH и SFTP для агентского пути">
+<svg viewBox="-3.0 4.0 1474.0 422.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1474px">
+<defs><marker id="arr-d-standalone-remote" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="7.0" y="16.0" width="511.0" height="400.0" rx="12"/><text x="21.0" y="34.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="729.0" y="14.0" width="494.0" height="382.0" rx="12"/><text x="743.0" y="32.0">другая машина</text></g>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M100.0,242.0 C100.0,282.0 100.0,282.0 100.0,322.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M165.0,235.4 C225.8,235.4 239.2,340.0 300.0,340.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e dash" d="M100,198 C100,85 180,80 746,80"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M165.0,220.0 C242.4,220.0 259.6,220.0 337.0,220.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e dash" d="M463.0,220.0 C594.2,220.0 623.3,190.0 754.5,190.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M885.5,190.0 C951.4,190.0 966.1,190.0 1032.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e dash" d="M500.0,340.0 C704.8,340.0 750.2,340.0 955.0,340.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M890,90 C960,90 1010,170 1020,178"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M1080.0,212.0 C1080.0,252.5 1080.0,261.5 1080.0,302.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M1128.0,190.0 C1200.9,190.0 1217.1,190.0 1290.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M1080.0,168.0 C1080.0,128.0 1080.0,142.0 1080.0,102.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e dash" d="M1239.0,80.0 C1193.5,80.0 1183.5,80.0 1138.0,80.0"/>
+<g class="n n-run"><rect x="35.0" y="198.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="220.0">v8-runner</tspan></text></g>
+<g class="n n-doc"><path d="M25.0,322.0 h150.0 v68.0 q-37.5,12.0 -75.0,0 q-37.5,-12.0 -75.0,0 z"/><text><tspan x="100.0" y="351.0">workPath</tspan><tspan x="100.0" y="369.0">остаётся здесь</tspan></text></g>
+<g class="n n-sw"><rect x="337.0" y="198.0" width="126.0" height="44.0" rx="8"/><text><tspan x="400.0" y="220.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-doc"><path d="M300.0,309.0 h200.0 v54.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="400.0" y="340.0">исходники и артефакты</tspan></text></g>
+<g class="n n-svc"><rect x="747.0" y="58.0" width="146.0" height="44.0" rx="22.0"/><text><tspan x="820.0" y="80.0">SSH-шлюз 1543</tspan></text></g>
+<g class="n n-svc"><rect x="754.5" y="168.0" width="131.0" height="44.0" rx="22.0"/><text><tspan x="820.0" y="190.0">прямой шлюз</tspan></text></g>
+<g class="n n-sw"><rect x="1032.0" y="168.0" width="96.0" height="44.0" rx="8"/><text><tspan x="1080.0" y="190.0">ibsrv</tspan></text></g>
+<g class="n n-doc"><path d="M955.0,302.0 h250.0 v68.0 q-62.5,12.0 -125.0,0 q-62.5,-12.0 -125.0,0 z"/><text><tspan x="1080.0" y="331.0">каталог пользователя шлюза</tspan><tspan x="1080.0" y="349.0">пути разрешаются здесь</tspan></text></g>
+<g class="n n-svc"><rect x="1022.0" y="58.0" width="116.0" height="44.0" rx="22.0"/><text><tspan x="1080.0" y="80.0">HTTP 8314</tspan></text></g>
+<g class="n n-cyl"><path d="M1290.0,170.0 v40.0 a60.0,7.0 0 0 0 120.0,0 v-40.0"/><ellipse cx="1350.0" cy="170.0" rx="60.0" ry="7.0"/><text><tspan x="1350.0" y="190.0">база данных</tspan></text></g>
+<g class="n n-svc"><rect x="1239.0" y="58.0" width="222.0" height="44.0" rx="22.0"/><text><tspan x="1350.0" y="80.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="80.0" y="270.0" width="40" height="24" rx="4"/><text><tspan x="100.0" y="282.0">файл</tspan></text></g>
+<g class="lbl"><rect x="212.5" y="275.7" width="40" height="24" rx="4"/><text><tspan x="232.5" y="287.7">файл</tspan></text></g>
+<g class="lbl"><rect x="242.9" y="72.1" width="228" height="24" rx="4"/><text><tspan x="356.9" y="84.1">SSH: команда строкой, ответ JSON</tspan></text></g>
+<g class="lbl"><rect x="173.4" y="208.0" width="141" height="24" rx="4"/><text><tspan x="243.9" y="220.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="591.8" y="193.0" width="34" height="24" rx="4"/><text><tspan x="608.8" y="205.0">TCP</tspan></text></g>
+<g class="lbl"><rect x="539.0" y="328.0" width="168" height="24" rx="4"/><text><tspan x="623.0" y="340.0">SFTP того же соединения</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-standalone-remote -->
+<h3>Конфигурация</h3>
+<p>Используйте тот же <code>v8project.yaml</code>, что в первом варианте этой страницы. Меняется локальный файл.</p>
+<p><code>v8project.local.yaml</code> рядом с основным файлом:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=srv.example;Ref=demo&quot;  # прямой шлюз
+    user: developer                          # пользователь базы и SSH-шлюза
+    password: &quot;ib-password&quot;
+    standalone:
+      gate: &quot;srv.example:1543&quot;               # агентский SSH-шлюз
+      exchange: sftp                         # файлы через то же SSH-соединение
+    web:
+      url: &quot;http://srv.example:8314/demo&quot;    # встроенный HTTP-сервер</code></pre>
+<p>srv.example — машина с ibsrv. Конфигуратор использует прямой шлюз и локальные файлы; агентский путь использует SSH и SFTP. Если на машине раннера нет платформы, оставьте standalone и уберите connection: обмен пойдёт через агентский шлюз.</p>
+<p class="hint">Возможности операций — на странице <a href="architecture.html#d-ops">Компоненты</a>.</p>
+</main>
+<script src="site.js?v=26" defer></script>
+</body>
+</html>

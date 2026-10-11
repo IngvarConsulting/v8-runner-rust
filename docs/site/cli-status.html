@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>status — v8-runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=41">
+<style>
+  td.k { white-space: nowrap; }
+  td.k code { white-space: nowrap; }
+  table.map td:first-child { width: 30%; }
+  table.map td:last-child { white-space: nowrap; width: 12%; }
+  pre.sh { background: var(--code-bg); padding: 12px 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
+  pre.sh code { background: none; padding: 0; }
+  .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status" aria-current="page">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>status</h1>
+<p class="lede">Начните с <code>status</code>, если непонятно, что происходит с проектом: команда показывает связь каталога с базой и расхождения между ними.</p>
+<fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
+<h2 class="command-variant" id="op-status">status <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner status</code></pre>
+<p>Показывает, к какой базе привязан каталог, что разошлось и что потеряется при замене. Использует локальную память проекта: платформу не запускает и базу не меняет.</p>
+<h3 id="response-classes">Классы ответов</h3>
+<p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
+<div class="tablewrap"><table class="response-classes">
+<thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
+<tbody><tr data-response-class="planned"><td>Обмена ещё не было</td><td>База объявлена в проекте, но сохранённого состояния ещё нет. Сравнивать исходники с прошлым обменом пока не с чем. <a href="#status-no-memory">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>Каталог привязан к базе</td><td>Показывает адрес базы и соответствие наборов исходников именам в базе. В этом примере изменений относительно сохранённого состояния нет. <a href="#status-linked">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>Есть расхождения</td><td>Исходники изменились после последнего обмена. Команда называет изменённый набор; фактическое состояние базы без <code>--deep</code> не запрашивает. <a href="#status-changed">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>Что потеряется при замене</td><td>Показывает риск замены по сохранённым сведениям. Сама команда ничего не заменяет; для проверки актуального состояния базы нужен <code>--deep</code>. <a href="#status-replacement">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>База совпадает с сохранённым состоянием</td><td>Поколение базы не изменилось; конфигурация и расширение соответствуют состоянию, известному проекту. <a href="#deep-matches">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>В базе есть непринятые изменения</td><td>Основная конфигурация изменена, но изменения ещё не применены к конфигурации базы данных. <a href="#deep-pending">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>База ушла вперёд</td><td>Поколение базы отличается от сохранённого после обмена. Перед отправкой исходников нужно забрать изменения командой <code>pull</code>. <a href="#deep-ahead">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>Расширение есть в базе, но отсутствует в проекте</td><td>Слева стоит прочерк: у установленного расширения нет соответствующего набора исходников в проекте. <a href="#deep-untracked">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>Конфигурация обновлена динамически</td><td>Платформа сообщает о динамическом обновлении конфигурации. <a href="#deep-dynamic">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>В проекте одна база</td><td>Результат совпадает с <code>status</code> для этой базы: один адрес и состояние её наборов исходников. <a href="#all-one">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>Объявлено несколько баз</td><td>Каждая база выводится отдельной группой со своим адресом и состоянием. Изменения относительно памяти одной базы не подменяют состояние другой. <a href="#all-many">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>С одной из баз ещё не было обмена</td><td>Для этой базы нет сохранённого состояния; остальные базы показываются по собственной памяти. <a href="#all-no-memory">Пример ответа</a>.</td></tr>
+</tbody>
+</table></div>
+<p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
+<h3>Варианты ответа</h3>
+<h4 id="status-no-memory">Обмена ещё не было</h4>
+<p>База объявлена в проекте, но сохранённого состояния ещё нет. Сравнивать исходники с прошлым обменом пока не с чем.</p>
+<pre data-output-example="status-no-memory" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main → ЖивоеИмяКонфигурации   нет сохранённого состояния — обмена ещё не было</code></pre>
+<h4 id="status-linked">Каталог привязан к базе</h4>
+<p>Показывает адрес базы и соответствие наборов исходников именам в базе. В этом примере изменений относительно сохранённого состояния нет.</p>
+<pre data-output-example="status-linked" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main   → ЖивоеИмяКонфигурации   совпадает
+  my-ext → РасширениеВБазе        совпадает</code></pre>
+<h4 id="status-changed">Есть расхождения</h4>
+<p>Исходники изменились после последнего обмена. Команда называет изменённый набор; фактическое состояние базы без <code>--deep</code> не запрашивает.</p>
+<pre data-output-example="status-changed" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main   → ЖивоеИмяКонфигурации   3 файла изменено
+  my-ext → РасширениеВБазе        совпадает</code></pre>
+<h4 id="status-replacement">Что потеряется при замене</h4>
+<p>Показывает риск замены по сохранённым сведениям. Сама команда ничего не заменяет; для проверки актуального состояния базы нужен <code>--deep</code>.</p>
+<pre data-output-example="status-replacement" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main → ЖивоеИмяКонфигурации   есть непринятое — будет потеряно при замене</code></pre>
+<h2 class="command-variant" id="status-deep">status --deep <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner status --deep</code></pre>
+<p>Дополняет локальное состояние сведениями из базы: обращается к платформе, чтобы прочитать поколение конфигурации, состав расширений, наличие непринятых изменений и динамического обновления. Базу не меняет.</p>
+<h3>Варианты ответа</h3>
+<h4 id="deep-matches">База совпадает с сохранённым состоянием</h4>
+<p>Поколение базы не изменилось; конфигурация и расширение соответствуют состоянию, известному проекту.</p>
+<pre data-output-example="deep-matches" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main   → ЖивоеИмяКонфигурации   совпадает
+  my-ext → РасширениеВБазе        совпадает</code></pre>
+<h4 id="deep-pending">В базе есть непринятые изменения</h4>
+<p>Основная конфигурация изменена, но изменения ещё не применены к конфигурации базы данных.</p>
+<pre data-output-example="deep-pending" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main → ЖивоеИмяКонфигурации   3 файла изменено · есть непринятое</code></pre>
+<h4 id="deep-ahead">База ушла вперёд</h4>
+<p>Поколение базы отличается от сохранённого после обмена. Перед отправкой исходников нужно забрать изменения командой <code>pull</code>.</p>
+<pre data-output-example="deep-ahead" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  patch-01 → Patch_01   база ушла вперёд — сперва pull</code></pre>
+<h4 id="deep-untracked">Расширение есть в базе, но отсутствует в проекте</h4>
+<p>Слева стоит прочерк: у установленного расширения нет соответствующего набора исходников в проекте.</p>
+<pre data-output-example="deep-untracked" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  — → Patch_007   есть в базе, нет в проекте</code></pre>
+<h4 id="deep-dynamic">Конфигурация обновлена динамически</h4>
+<p>Платформа сообщает о динамическом обновлении конфигурации.</p>
+<pre data-output-example="deep-dynamic" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main → ЖивоеИмяКонфигурации   обновлено динамически</code></pre>
+<h2 class="command-variant" id="status-all">status --all <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner status --all</code></pre>
+<p>Показывает состояние всех информационных баз, объявленных в проекте. Каждую базу рассматривает отдельно; платформу не запускает и базы не меняет.</p>
+<h3>Варианты ответа</h3>
+<h4 id="all-one">В проекте одна база</h4>
+<p>Результат совпадает с <code>status</code> для этой базы: один адрес и состояние её наборов исходников.</p>
+<pre data-output-example="all-one" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main → ЖивоеИмяКонфигурации   совпадает</code></pre>
+<h4 id="all-many">Объявлено несколько баз</h4>
+<p>Каждая база выводится отдельной группой со своим адресом и состоянием. Изменения относительно памяти одной базы не подменяют состояние другой.</p>
+<pre data-output-example="all-many" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main → ЖивоеИмяКонфигурации   3 файла изменено
+
+test: Srvr="srv";Ref="demo_test"
+
+  main → ЖивоеИмяКонфигурации   совпадает</code></pre>
+<h4 id="all-no-memory">С одной из баз ещё не было обмена</h4>
+<p>Для этой базы нет сохранённого состояния; остальные базы показываются по собственной памяти.</p>
+<pre data-output-example="all-no-memory" data-output-schema="planned"><code>origin: File="/srv/ib/demo"
+
+  main → ЖивоеИмяКонфигурации   совпадает
+
+test: Srvr="srv";Ref="demo_test"
+
+  main → ЖивоеИмяКонфигурации   нет сохранённого состояния — обмена ещё не было</code></pre>
+</main>
+<script type="application/json" id="output-examples">{
+  "status-no-memory": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "missing",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "no_memory"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "status-linked": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "unchanged"
+              ]
+            },
+            {
+              "alias": "my-ext",
+              "name": "РасширениеВБазе",
+              "states": [
+                "unchanged"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "status-changed": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "changed"
+              ],
+              "changed_files": 3
+            },
+            {
+              "alias": "my-ext",
+              "name": "РасширениеВБазе",
+              "states": [
+                "unchanged"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "status-replacement": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "pending_changes"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "deep-matches": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "unchanged"
+              ]
+            },
+            {
+              "alias": "my-ext",
+              "name": "РасширениеВБазе",
+              "states": [
+                "unchanged"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "deep-pending": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "changed",
+                "pending_changes"
+              ],
+              "changed_files": 3
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "deep-ahead": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "patch-01",
+              "name": "Patch_01",
+              "states": [
+                "ahead"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "deep-untracked": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": null,
+              "name": "Patch_007",
+              "states": [
+                "untracked"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "deep-dynamic": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "dynamic_update"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "all-one": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "unchanged"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "all-many": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "changed"
+              ],
+              "changed_files": 3
+            }
+          ]
+        },
+        {
+          "alias": "test",
+          "address": "Srvr=\"srv\";Ref=\"demo_test\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "unchanged"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "all-no-memory": {
+    "ok": true,
+    "command": "status",
+    "duration_ms": 0,
+    "data": {
+      "infobases": [
+        {
+          "alias": "origin",
+          "address": "File=\"/srv/ib/demo\"",
+          "memory": "available",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "unchanged"
+              ]
+            }
+          ]
+        },
+        {
+          "alias": "test",
+          "address": "Srvr=\"srv\";Ref=\"demo_test\"",
+          "memory": "missing",
+          "source_sets": [
+            {
+              "alias": "main",
+              "name": "ЖивоеИмяКонфигурации",
+              "states": [
+                "no_memory"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  }
+}</script>
+<script src="site.js?v=26" defer></script>
+</body>
+</html>

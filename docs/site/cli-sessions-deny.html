@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sessions deny — v8-runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=41">
+<style>
+  td.k { white-space: nowrap; }
+  td.k code { white-space: nowrap; }
+  table.map td:first-child { width: 30%; }
+  table.map td:last-child { white-space: nowrap; width: 12%; }
+  pre.sh { background: var(--code-bg); padding: 12px 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
+  pre.sh code { background: none; padding: 0; }
+  .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny" aria-current="page">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>sessions deny</h1>
+<p class="lede">Закройте вход в базу на время обслуживания.</p>
+<fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
+<h2 class="command-variant" id="op-sessions-deny">sessions deny [--message] [--code] [--jobs] <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner sessions deny --message &quot;Обслуживание&quot; --code service --jobs</code></pre>
+<p>запрещает начало новых сеансов и, с <code>--jobs</code>, регламентные задания; код разрешения пропускает своих <span class="ref">(<a href="platform.html#t57">57</a>)</span></p>
+<h3 id="response-classes">Классы ответов</h3>
+<p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
+<div class="tablewrap"><table class="response-classes">
+<thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
+<tbody><tr data-response-class="planned"><td>Вход закрыт</td><td>Установлен запрет новых сеансов и регламентных заданий. Код разрешения задан; его значение в ответе не раскрывается. <a href="#sessions-deny-success">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>Блокировка не установлена</td><td>Платформа отказала в изменении свойств базы. Запрошенная блокировка не установлена. <a href="#sessions-deny-alternative">Пример ответа</a>.</td></tr>
+</tbody>
+</table></div>
+<p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
+<h3>Варианты ответа</h3>
+<h4 id="sessions-deny-success">Вход закрыт</h4>
+<p>Установлен запрет новых сеансов и регламентных заданий. Код разрешения задан; его значение в ответе не раскрывается.</p>
+<pre data-output-example="sessions-deny-success" data-output-schema="planned"><code>origin: выбранная база
+Новые сеансы и регламентные задания запрещены.</code></pre>
+<h4 id="sessions-deny-alternative">Блокировка не установлена</h4>
+<p>Платформа отказала в изменении свойств базы. Запрошенная блокировка не установлена.</p>
+<pre data-output-example="sessions-deny-alternative" data-output-schema="planned"><code>origin: выбранная база
+Не хватает прав для изменения свойств базы.</code></pre>
+<p><a href="project.html#keys">Настройка исполнителей и конфигурации проекта</a>.</p>
+</main>
+<script type="application/json" id="output-examples">{
+  "sessions-deny-success": {
+    "ok": true,
+    "command": "sessions deny",
+    "duration_ms": 120,
+    "data": {
+      "infobase": "origin",
+      "sessions_denied": true,
+      "jobs_denied": true,
+      "message": "Обслуживание",
+      "permission_code_set": true
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "sessions-deny-alternative": {
+    "ok": false,
+    "command": "sessions deny",
+    "duration_ms": 120,
+    "data": {
+      "infobase": "origin",
+      "sessions_denied": false,
+      "jobs_denied": false
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "code": "platform_failure",
+      "message": "Не хватает прав для изменения свойств базы.",
+      "kind": "platform"
+    }
+  }
+}</script>
+<script src="site.js?v=26" defer></script>
+</body>
+</html>

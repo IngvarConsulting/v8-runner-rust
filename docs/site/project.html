@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8project.yaml — v8-runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=41">
+<style>
+  td.k { white-space: nowrap; }
+  td.k code { white-space: nowrap; }
+  table.map td:first-child { width: 30%; }
+  table.map td:last-child { white-space: nowrap; width: 12%; }
+  pre.sh { background: var(--code-bg); padding: 12px 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
+  pre.sh code { background: none; padding: 0; }
+  .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init" aria-current="page">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>v8project.yaml</h1>
+<h2 id="files">Два файла</h2>
+<div class="tablewrap"><table><thead><tr><th>Файл</th><th>Что хранит</th><th>Контроль версий</th></tr></thead><tbody>
+<tr><td><code>v8project.yaml</code></td><td>Формат, наборы исходников, общие настройки инструментов и команд</td><td>Коммитится вместе с исходниками</td></tr>
+<tr><td><code>v8project.local.yaml</code></td><td>Адреса баз, учётные данные и переопределения для этой машины</td><td>Добавьте в <code>.gitignore</code></td></tr>
+</tbody></table></div>
+<p>Оба файла используют YAML: вложенность задаётся пробелами. Названия ключей чувствительны к регистру. Строки соединения удобно заключать в кавычки.</p>
+<h2 id="discovery">Как раннер находит файл</h2>
+<p>По умолчанию читает <code>v8project.yaml</code> в текущем каталоге. В родительских каталогах не ищет. Другой путь задаётся через <code>--config</code> или переменную окружения <code>V8TR_CONFIG</code>; явный ключ имеет приоритет.</p>
+<pre><code>v8-runner --config path/to/v8project.yaml push</code></pre>
+<p>Локальный файл ищется рядом с выбранным основным файлом, всегда под именем <code>v8project.local.yaml</code>.</p>
+<p>Относительные пути исходников и рабочего каталога считаются от каталога основного файла.</p>
+<h2 id="minimal">Минимальный проект с конфигурацией</h2>
+<pre id="structure" data-config-example="main"><code>workPath: .build         # журналы, временные файлы и состояние раннера
+format: DESIGNER         # формат исходников: DESIGNER или EDT
+source-set:              # наборы исходников проекта
+  - name: main           # локальное имя для навигации и адресации в Unica
+    # type: CONFIGURATION, EXTENSION,
+    #       EXTERNAL_DATA_PROCESSORS или EXTERNAL_REPORTS
+    type: CONFIGURATION  # основная конфигурация
+    path: src/cf         # каталог относительно v8project.yaml</code></pre>
+<p>В <code>src/cf</code> должны лежать исходники конфигурации. Файл можно создать командой <a href="cli-init.html#op-init"><code>init</code></a>.</p>
+<h2 id="source-sets">Наборы исходников</h2>
+
+<pre data-config-example="main"><code>workPath: .build
+format: DESIGNER
+source-set:
+  - name: main
+    type: CONFIGURATION             # основная конфигурация
+    path: src/cf
+  - name: my-ext                    # локальное имя набора для навигации
+    type: EXTENSION                 # расширение конфигурации
+    path: src/ext
+  - name: tools
+    type: EXTERNAL_DATA_PROCESSORS  # внешние обработки
+    path: src/epf</code></pre>
+<p>Состав и виды исходников подробнее описаны на странице <a href="sources.html">Исходники</a>.</p>
+<h2 id="infobases">Информационные базы</h2>
+<p><code>infobases</code> в <code>v8project.local.yaml</code> задаёт адреса баз для этой машины. Каждая база имеет локальное имя. Имя <code>origin</code> используется, если команда не получила другой выбор.</p>
+<pre data-config-example="local"><code># v8project.local.yaml
+infobases:                        # базы этой машины
+  origin:                         # база по умолчанию
+    connection: "File=.build/ib"  # каталог файловой базы</code></pre>
+<p>Адрес записывает <a href="cli-init.html#op-init"><code>init</code></a>: например, <code>File=.build/ib</code> или значение <code>--infobase</code>. <a href="cli-infobase-create.html"><code>infobase create</code></a> создаёт базу по этому адресу. Команды обмена используют тот же адрес.</p>
+<h3>Несколько баз и параметры подключения</h3>
+<p>Добавьте базы под другими именами. Для файловой базы задаётся <code>File</code>, для серверной — <code>Srvr</code> и <code>Ref</code>. <code>standalone</code> задаёт подключение к автономному серверу.</p>
+<p>Для кластерной базы учётные данные разделены на три уровня: <code>user/password</code> — пользователь информационной базы; <code>cluster.user/password</code> — администратор кластера; <code>cluster.agent.user/password</code> — администратор центрального сервера. У центрального сервера и кластера отдельные списки администраторов (<a href="platform.html#t59">документация платформы</a>).</p>
+<pre class="sh"><code># v8project.local.yaml — не коммитится
+workPath: .build
+infobases:                             # базы проекта, как remote у репозитория
+  origin:                              # умолчание, как у гита
+    connection: "File=.build/ib"
+  test:
+    connection: "Srvr=srv;Ref=erp_test"
+  prod:
+    connection: "Srvr=srv;Ref=erp"
+    user: deploy                       # пользователь информационной базы
+    cluster:                           # для sessions и создания базы в кластере
+      ras: "srv:1545"                  # уже поднятый; без ключа раннер поднимет ras сам
+      user: clusteradmin               # имя администратора кластера
+      password: "cluster-password"     # пароль администратора кластера
+      agent:                           # центральный сервер
+        user: "serveradmin"            # имя администратора центрального сервера
+        password: "server-password"    # пароль администратора центрального сервера
+  ci:
+    connection: "Srvr=ibsrv;Ref=demo"  # прямой шлюз автономного сервера
+    standalone:                        # объявляет вид цели
+      gate: "ibsrv:1543"               # SSH-шлюз: агентский набор без платформы у раннера
+      exchange: sftp</code></pre>
+<p>Команда принимает <code>--infobase</code> с именем базы или строкой соединения целиком. Строка в ключе позволяет передать адрес из задания сборки без правки файла. Если <code>origin</code> не объявлен, команда требует выбрать базу: <code>init --infobase …</code> или <code>--infobase &lt;имя&gt;</code>.</p>
+<pre><code>v8-runner push                                   # в origin
+v8-runner push --infobase test                   # в именованную базу
+v8-runner apply --infobase prod --sessions force
+v8-runner pull --infobase "Srvr=ci;Ref=job-417"  # адрес без правки файла
+v8-runner status --all                           # все объявленные базы</code></pre>
+<h3 id="web">HTTP-адрес базы</h3>
+<p>У базы два адреса: <code>connection</code> нужен для операций с базой, <code>web.url</code> — для открытия опубликованной базы в браузере или тонком клиенте.</p>
+<pre data-config-example="local"><code># Фрагмент v8project.local.yaml
+infobases:
+  origin:
+    connection: "Srvr=srv;Ref=demo"  # подключение к кластерной базе
+    web:
+      url: https://srv.example/demo  # адрес веб-публикации</code></pre>
+<pre><code>v8-runner launch web             # открыть в браузере
+v8-runner launch thin --via web  # открыть тонким клиентом по веб-адресу</code></pre>
+<p><code>web.url</code> задаётся отдельно от <code>connection</code>; его нельзя подставлять вместо строки соединения. Для файловой и кластерной базы нужна веб-публикация. У автономного сервера адрес задаётся по настройкам его встроенного веб-сервера.</p>
+<p>Две публикации одной базы — например, <code>demo</code> и <code>demo_int</code> — показаны в <a href="variant-publication.html#d-web-dual">примере именованных веб-публикаций</a> <span class="pill">План</span>. Именованные публикации объявляются внутри одной базы в <code>web.publications</code>.</p>
+<h3 id="web-publication">Параметры публикации</h3>
+<p>Чтобы раннер мог опубликовать базу на Apache или IIS, добавьте параметры веб-сервера в ту же секцию <code>web</code>.</p>
+<pre data-config-example="local"><code># Фрагмент v8project.local.yaml — пример для Apache 2.4
+infobases:
+  origin:
+    connection: "Srvr=srv;Ref=demo"
+    web:
+      server: apache24               # веб-сервер: iis, apache2, apache22 или apache24
+      wsdir: demo                    # имя виртуального каталога
+      dir: /var/www/demo             # существующий каталог публикации
+      url: https://srv.example/demo  # адрес для открытия базы</code></pre>
+<p><code>server</code>, <code>wsdir</code> и <code>dir</code> нужны команде <a href="cli-publish.html"><code>publish</code></a>; <code>url</code> — команде <a href="cli-launch.html"><code>launch</code></a>. Для <code>apache2</code> и <code>apache22</code> также нужен <code>conf</code> — путь к файлу конфигурации Apache. Для IIS можно задать <code>os-auth: true</code> — аутентификацию средствами ОС.</p>
+<pre><code>v8-runner publish</code></pre>
+<h2 id="tools">Инструменты</h2>
+<p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С.</p>
+<h3 id="platform-selection">Выбор платформы <span class="plan-badge">План</span></h3>
+<p>Выберите один способ: <code>version</code> — поиск подходящей установленной платформы, <code>path</code> — использование платформы по указанному пути.</p>
+<pre data-config-example="main"><code># Фрагмент v8project.yaml
+workPath: .build
+tools:                 # внешние инструменты
+  platform:            # платформа 1С
+    version: "8.3.27"  # версия для автоматического поиска</code></pre>
+<p>Альтернативный вариант — явный путь:</p>
+<pre data-config-example="main"><code># Альтернативный фрагмент v8project.yaml — пример для Linux
+workPath: .build
+tools:
+  platform:
+    path: /opt/1cv8/x86_64/8.3.27.2074  # каталог установленной платформы</code></pre>
+<p>Если оба поля отсутствуют, раннер ищет установленную платформу автоматически. Если после объединения основного и локального файлов заданы и <code>path</code>, и <code>version</code>, это ошибка конфигурации. Локальный <code>path</code> не отменяет <code>version</code> из основного файла.</p>
+<h2 id="keys">Исполнители операций</h2>
+<p><code>providers</code> выбирает, какой инструмент исполнит операцию. Ключ называется именем команды: например, <code>providers.push</code> — исполнитель отправки исходников.</p>
+<pre data-config-example="main"><code># Фрагмент v8project.yaml
+workPath: .build
+providers:        # явно выбранные исполнители операций
+  push: designer  # отправка через Конфигуратор
+  pull: designer  # выгрузка через Конфигуратор</code></pre>
+<p>Если ключ не задан, раннер выбирает исполнителя сам. Если задан — использует только указанного исполнителя, без переключения на другого. Для <code>check</code> ветка определяется форматом проекта.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>ключ</th><th>чем управляет</th></tr></thead>
+<tbody>
+<tr><td class="k"><code>providers.push</code></td><td>отправкой исходников в базу</td></tr>
+<tr><td class="k"><code>providers.pull</code></td><td>выгрузкой из базы</td></tr>
+<tr><td class="k"><code>providers.apply</code> <span class="plan-badge">План</span></td><td>применением к базе данных</td></tr>
+<tr><td class="k"><code>providers.reset</code> <span class="plan-badge">План</span></td><td>откатом основной конфигурации к базе данных</td></tr>
+<tr><td class="k"><code>providers.upload</code></td><td>пакетом в базу</td></tr>
+<tr><td class="k"><code>providers.download</code></td><td>пакетом из базы</td></tr>
+<tr><td class="k"><code>providers.diff</code> <span class="plan-badge">План</span></td><td>сравнением</td></tr>
+<tr><td class="k"><code>providers.make</code></td><td>сборкой пакета</td></tr>
+<tr><td class="k"><code>providers.convert</code> <span class="plan-badge">План</span></td><td>преобразованием пакета в XML и обратно</td></tr>
+<tr><td class="k"><code>providers.extensions</code></td><td>работой со свойствами расширений</td></tr>
+<tr><td class="k"><code>providers.infobase.create</code><br><code>providers.infobase.dump</code><br><code>providers.infobase.restore</code></td><td>действиями с базой целиком</td></tr>
+<tr><td class="k"><code>providers.publish</code></td><td>публикацией базы</td></tr>
+</tbody>
+</table></div>
+<h2 id="operations">Настройки операций</h2>
+<h3 id="push-settings">Отправка исходников</h3>
+<p><code>push.partialLoadThreshold</code> задаёт максимальное число изменённых файлов для частичной загрузки через Конфигуратор. По умолчанию — 20; при превышении порога используется полная загрузка.</p>
+<pre data-config-example="main"><code># Фрагмент v8project.yaml
+workPath: .build
+push:                       # настройки отправки исходников
+  partialLoadThreshold: 20  # до 20 файлов — частичная загрузка</code></pre>
+<h3 id="test-settings">Тесты</h3>
+<p><code>tests</code> хранит настройки YAxUnit и Vanessa Automation. Общий таймаут выполнения задаётся в секундах; параметры конкретных инструментов лежат в <code>tests.yaxunit</code> и <code>tests.va</code>.</p>
+<pre data-config-example="main"><code># Фрагмент v8project.yaml
+workPath: .build
+tests:                            # настройки тестовых инструментов
+  execution_timeout_seconds: 300  # таймаут выполнения, секунды</code></pre>
+<h2 id="overlay">Локальные переопределения</h2>
+<p>Общие настройки хранятся в <code>v8project.yaml</code>, настройки этой машины — в <code>v8project.local.yaml</code> рядом с ним. Раннер сначала читает основной файл, затем локальный.</p>
+<p>Вложенные карты объединяются по ключам: локальное значение заменяет одноимённое основное, остальные значения сохраняются. Значения других типов, включая списки, заменяются целиком.</p>
+<p>Локальный файл может переопределять <code>workPath</code>, <code>providers</code>, <code>tools</code> и <code>tests</code>, а также объявлять <code>infobases</code>. Он не может менять <code>format</code> и <code>source-set</code>: это общие свойства проекта.</p>
+<h3 id="local-push">Пример: другой порог загрузки <span class="plan-badge">План</span></h3>
+<p>Секцию <a href="#push-settings"><code>push</code></a> можно задать в обоих файлах. В основном примере порог равен 20. Добавьте в локальный файл:</p>
+<pre data-config-example="local-push"><code># Фрагмент v8project.local.yaml
+push:
+  partialLoadThreshold: 40  # порог для этой машины</code></pre>
+<p>На этой машине итоговый порог будет 40. Остальные общие настройки сохранятся.</p>
+</main>
+<script src="site.js?v=26" defer></script>
+</body>
+</html>

@@ -35,6 +35,17 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
+      - name: Test installer
+        run: python3 scripts/test/test_site_install.py
+
+      - name: Test CLI reference
+        run: |
+          python3 -m pip install 'jsonschema>=4,<5'
+          python3 docs/site/test_cli_reference.py
+
+      - name: Check target reference and rebuild search index
+        run: python3 docs/site/check_target_content.py
+
       - name: Upload site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:

@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Кластер 1С</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=41">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Кластер 1С</h1>
+<p>Здесь показаны подключение к кластеру, прямой доступ к его СУБД и администрирование через RAS. Для каждого размещения — схема и соответствующий файл проекта. <a href="glossary.html#d-legend">Обозначения схем</a> и <a href="project.html">формат файлов проекта</a> описаны отдельно.</p>
+
+<h2 id="through-cluster">Работа через кластер</h2>
+<p>Конфигуратор, агент и клиент используют <code>connection</code> из <code>v8project.local.yaml</code>. Подключение к одному адресу кластера:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    # Srvr — адрес сервера и порт менеджера кластера
+    # Ref — имя информационной базы, зарегистрированной в кластере
+    connection: 'Srvr="srv:1541";Ref="demo";'</code></pre>
+<p>Для уже настроенного отказоустойчивого кластера — два адреса кластера:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: 'Srvr="srv1:1541,srv2:1541";Ref="demo";'</code></pre>
+<p>Список адресов задаёт подключение; отказоустойчивость настраивается на стороне кластера.</p>
+<p>В этих схемах платформа и исходники находятся на машине раннера. Выгруженные файлы, журналы утилит и отчёты тестов остаются на этой машине. Во всех примерах используется один <code>v8project.yaml</code>; меняется подключение в <code>v8project.local.yaml</code> рядом с ним.</p>
+
+<h3 id="d-cluster-local">Кластер на своей машине</h3>
+<p>Раннер, сервер 1С и PostgreSQL установлены на одной машине. База demo уже зарегистрирована в кластере.</p>
+<!-- diagram:d-cluster-local -->
+<div class="diagram" role="img" aria-label="Кластер на машине раннера: раннер, утилиты и сервер 1С на одной машине — через работающий кластер">
+<svg viewBox="-39.0 -94.0 1308.0 453.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1308px">
+<defs><marker id="arr-d-cluster-local" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-29.0" y="-84.0" width="1288.0" height="433.0" rx="12"/><text x="-15.0" y="-66.0">одна машина</text></g>
+<g class="fr fr-host"><rect x="-3.0" y="-32.0" width="726.0" height="347.0" rx="12"/><text x="11.0" y="-14.0">раннер и утилиты</text></g>
+<g class="fr fr-srv"><rect x="807.5" y="97.0" width="185.0" height="218.0" rx="12"/><text x="821.5" y="115.0">сервер 1С</text></g>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M145.0,204.6 C222.4,204.6 239.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M145.0,215.6 C214.3,215.6 229.7,175.0 299.0,175.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M145.0,226.6 C220.6,226.6 237.4,275.0 313.0,275.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M443.0,71.2 C484.4,71.2 493.6,50.0 535.0,50.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M445,90 C560,140 770,150 844,160"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M461.0,169.2 C633.6,169.2 671.9,170.0 844.5,170.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M447.0,275.0 C625.9,275.0 665.6,190.3 844.5,190.3"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M900.0,199.0 C900.0,239.0 900.0,213.0 900.0,253.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M974.5,275.0 C1015.2,275.0 1024.3,275.0 1065.0,275.0"/>
+<g class="n n-run"><rect x="15.0" y="198.0" width="130.0" height="44.0" rx="8"/><text><tspan x="80.0" y="220.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-svc"><rect x="299.0" y="146.0" width="162.0" height="58.0" rx="29.0"/><text><tspan x="380.0" y="166.0">1cv8 /AgentMode</tspan><tspan x="380.0" y="184.0">127.0.0.1:1543</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="253.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="275.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-doc"><path d="M535.0,12.0 h170.0 v68.0 q-42.5,12.0 -85.0,0 q-42.5,-12.0 -85.0,0 z"/><text><tspan x="620.0" y="41.0">workPath</tspan><tspan x="620.0" y="59.0">.cf, .dt, журналы</tspan></text></g>
+<g class="n n-sw"><rect x="844.5" y="141.0" width="111.0" height="58.0" rx="8"/><text><tspan x="900.0" y="161.0">ragent 1540</tspan><tspan x="900.0" y="179.0">rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="825.5" y="253.0" width="149.0" height="44.0" rx="8"/><text><tspan x="900.0" y="275.0">rphost 1560–1591</tspan></text></g>
+<g class="n n-cyl"><path d="M1065.0,252.0 v46.0 a75.0,7.0 0 0 0 150.0,0 v-46.0"/><ellipse cx="1140.0" cy="252.0" rx="75.0" ry="7.0"/><text><tspan x="1140.0" y="266.0">PostgreSQL</tspan><tspan x="1140.0" y="284.0">localhost:5432</tspan></text></g>
+<g class="lbl"><rect x="160.5" y="130.3" width="141" height="24" rx="4"/><text><tspan x="231.0" y="142.3">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="148.0" y="183.3" width="148" height="24" rx="4"/><text><tspan x="222.0" y="195.3">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="165.5" y="238.8" width="127" height="24" rx="4"/><text><tspan x="229.0" y="250.8">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="536.5" y="119.1" width="127" height="24" rx="4"/><text><tspan x="600.0" y="131.1">Srvr=…;Ref=…, TCP</tspan></text></g>
+<g class="lbl"><rect x="667.7" y="157.7" width="34" height="24" rx="4"/><text><tspan x="684.7" y="169.7">TCP</tspan></text></g>
+<g class="lbl"><rect x="661.8" y="208.1" width="34" height="24" rx="4"/><text><tspan x="678.8" y="220.1">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-local -->
+<p><code>v8project.yaml</code>:</p>
+<pre data-config-example="main"><code>workPath: .build         # журналы, временные файлы и состояние
+format: DESIGNER         # исходники в формате платформы
+source-set:
+  - name: main           # локальное имя набора
+    type: CONFIGURATION  # основная конфигурация
+    path: src/cf         # путь от каталога v8project.yaml</code></pre>
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=localhost:1541;Ref=demo&quot;  # кластер на машине раннера</code></pre>
+<p><code>localhost:1541</code> — адрес менеджера кластера на этой машине. Если вы выбрали другой порт, укажите его в <code>Srvr</code>.</p>
+
+<h3 id="d-cluster-remote">Кластер на другой машине, несколько rphost</h3>
+<p>Раннер подключается к серверу srv по сети. Менеджер кластера направляет сеанс в один из рабочих процессов <code>rphost</code>. Поэтому с машины раннера должны быть доступны и порт менеджера, и диапазон портов рабочих процессов.</p>
+<!-- diagram:d-cluster-remote -->
+<div class="diagram" role="img" aria-label="Кластер на другой машине с несколькими rphost — через работающий кластер">
+<svg viewBox="7.0 -62.0 1378.0 598.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1378px">
+<defs><marker id="arr-d-cluster-remote" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="-52.0" width="726.0" height="429.0" rx="12"/><text x="31.0" y="-34.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="774.0" y="136.0" width="372.0" height="390.0" rx="12"/><text x="788.0" y="154.0">сервер приложений 1С</text></g>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M165.0,189.0 C233.4,189.0 248.6,100.0 317.0,100.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M165.0,200.0 C231.6,200.0 246.4,220.0 313.0,220.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M100.0,222.0 C100.0,311.6 209.4,330.0 299.0,330.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M443.0,91.2 C483.0,91.2 475.0,30.0 515.0,30.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e dash" d="M443.0,100.0 L722.0,100.0 Q740.0,100.0 740.0,118.0 L740.0,182.0 Q740.0,200.0 758.0,200.0 L850.0,200.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e dash" d="M447.0,220.0 L850.0,220.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e dash" d="M461.0,330.0 L722.0,330.0 Q740.0,330.0 740.0,312.0 L740.0,258.0 Q740.0,240.0 758.0,240.0 L850.0,240.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M894.0,260.0 C894.0,300.0 840.0,278.0 840.0,318.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M960.0,260.0 C960.0,300.0 960.0,278.0 960.0,318.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M1026.0,260.0 C1026.0,300.0 1080.0,278.0 1080.0,318.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M840,362 C840,420 1140,420 1265,358"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M960,362 C960,405 1150,410 1265,352"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M1128.0,340.0 C1189.7,340.0 1203.3,328.0 1265.0,328.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M830.4,362.0 C830.4,402.0 894.0,392.0 894.0,432.0"/>
+<g class="n n-run"><rect x="35.0" y="178.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="200.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="78.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="100.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-svc"><rect x="299.0" y="301.0" width="162.0" height="58.0" rx="29.0"/><text><tspan x="380.0" y="321.0">1cv8 /AgentMode</tspan><tspan x="380.0" y="339.0">127.0.0.1:1543</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="198.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="220.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-doc"><path d="M515.0,-8.0 h210.0 v68.0 q-52.5,12.0 -105.0,0 q-52.5,-12.0 -105.0,0 z"/><text><tspan x="620.0" y="21.0">workPath</tspan><tspan x="620.0" y="39.0">.cf, .dt, отчёты тестов</tspan></text></g>
+<g class="n n-sw"><rect x="850.0" y="180.0" width="220.0" height="80.0" rx="8"/><text><tspan x="960.0" y="211.0">ragent 1540</tspan><tspan x="960.0" y="229.0">rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="792.0" y="318.0" width="96.0" height="44.0" rx="8"/><text><tspan x="840.0" y="340.0">rphost</tspan></text></g>
+<g class="n n-sw"><rect x="912.0" y="318.0" width="96.0" height="44.0" rx="8"/><text><tspan x="960.0" y="340.0">rphost</tspan></text></g>
+<g class="n n-sw"><rect x="1032.0" y="318.0" width="96.0" height="44.0" rx="8"/><text><tspan x="1080.0" y="340.0">rphost</tspan></text></g>
+<g class="n n-docoff"><path d="M850.0,432.0 h220.0 v68.0 q-55.0,12.0 -110.0,0 q-55.0,-12.0 -110.0,0 z"/><text><tspan x="960.0" y="461.0">журнал регистрации,</tspan><tspan x="960.0" y="479.0">технологический журнал</tspan></text></g>
+<g class="n n-cyl"><path d="M1265.0,317.0 v46.0 a55.0,7.0 0 0 0 110.0,0 v-46.0"/><ellipse cx="1320.0" cy="317.0" rx="55.0" ry="7.0"/><text><tspan x="1320.0" y="331.0">PostgreSQL</tspan><tspan x="1320.0" y="349.0">db:5432</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="132.5" width="141" height="24" rx="4"/><text><tspan x="241.0" y="144.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="175.5" y="198.0" width="127" height="24" rx="4"/><text><tspan x="239.0" y="210.0">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="141.0" y="311.3" width="148" height="24" rx="4"/><text><tspan x="215.0" y="323.3">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="526.0" y="88.0" width="188" height="24" rx="4"/><text><tspan x="620.0" y="100.0">TCP 1541, дальше 1560–1591</tspan></text></g>
+<g class="lbl"><rect x="603.0" y="208.0" width="34" height="24" rx="4"/><text><tspan x="620.0" y="220.0">TCP</tspan></text></g>
+<g class="lbl"><rect x="603.0" y="318.0" width="34" height="24" rx="4"/><text><tspan x="620.0" y="330.0">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-remote -->
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=srv:1541;Ref=demo&quot;  # сервер приложений</code></pre>
+<p>Имя srv должно разрешаться с машины раннера. Файлы и журналы сервера по этому подключению недоступны. Агент Конфигуратора запускается на машине раннера; для подключения к уже запущенному агенту используется <code>tools.designer_agent.attach</code>.</p>
+
+<h3 id="d-cluster-ha">Отказоустойчивый кластер на двух серверах</h3>
+<p>В одном кластере настроены два центральных сервера — srv1 и srv2. Раннер подключается к базе demo по двум адресам: если один сервер недоступен, остаётся второй вход в кластер. Рабочие процессы обращаются к общей СУБД.</p>
+<!-- diagram:d-cluster-ha -->
+<div class="diagram" role="img" aria-label="Отказоустойчивый кластер на двух центральных серверах: srv1 и srv2">
+<svg viewBox="7.0 -12.0 1648.0 555.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1648px">
+<defs><marker id="arr-d-cluster-ha" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="-2.0" width="756.0" height="502.0" rx="12"/><text x="31.0" y="16.0">машина раннера</text></g>
+<g class="fr fr-box"><rect x="911.0" y="47.0" width="491.0" height="486.0" rx="12"/><text x="925.0" y="65.0">один отказоустойчивый кластер</text></g>
+<g class="fr fr-srv"><rect x="937.0" y="117.0" width="439.0" height="120.0" rx="12"/><text x="951.0" y="135.0">центральный сервер srv1</text></g>
+<g class="fr fr-srv"><rect x="937.0" y="387.0" width="439.0" height="120.0" rx="12"/><text x="951.0" y="405.0">центральный сервер srv2</text></g>
+<path marker-end="url(#arr-d-cluster-ha)" class="e" d="M1145.0,190.0 C1197.7,190.0 1209.3,190.0 1262.0,190.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e" d="M1145.0,460.0 C1197.7,460.0 1209.3,460.0 1262.0,460.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e" d="M165.0,286.8 C242.4,286.8 259.6,140.0 337.0,140.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e" d="M165.0,300.0 C234.3,300.0 249.7,300.0 319.0,300.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e" d="M165.0,313.2 C240.6,313.2 257.4,460.0 333.0,460.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e" d="M463.0,124.6 C503.0,124.6 505.0,80.0 545.0,80.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e dash" d="M463.0,133.4 C684.4,133.4 733.6,190.0 955.0,190.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e dash" d="M463.0,151.0 C684.4,151.0 733.6,460.0 955.0,460.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e dash" d="M481.0,300.0 C694.3,300.0 741.7,190.0 955.0,190.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e dash" d="M481.0,300.0 C694.3,300.0 741.7,460.0 955.0,460.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e dash" d="M467.0,453.4 C686.6,453.4 735.4,190.0 955.0,190.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e dash" d="M467.0,471.0 C686.6,471.0 735.4,460.0 955.0,460.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e" d="M1358.0,190.0 C1428.7,190.0 1444.3,313.0 1515.0,313.0"/>
+<path marker-end="url(#arr-d-cluster-ha)" class="e" d="M1358.0,460.0 C1428.7,460.0 1444.3,337.0 1515.0,337.0"/>
+<g class="n n-run"><rect x="35.0" y="278.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="300.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="337.0" y="118.0" width="126.0" height="44.0" rx="8"/><text><tspan x="400.0" y="140.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-svc"><rect x="319.0" y="271.0" width="162.0" height="58.0" rx="29.0"/><text><tspan x="400.0" y="291.0">1cv8 /AgentMode</tspan><tspan x="400.0" y="309.0">127.0.0.1:1543</tspan></text></g>
+<g class="n n-sw"><rect x="333.0" y="438.0" width="134.0" height="44.0" rx="8"/><text><tspan x="400.0" y="460.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-doc"><path d="M545.0,42.0 h210.0 v68.0 q-52.5,12.0 -105.0,0 q-52.5,-12.0 -105.0,0 z"/><text><tspan x="650.0" y="71.0">workPath</tspan><tspan x="650.0" y="89.0">.cf, .dt, отчёты тестов</tspan></text></g>
+<g class="n n-svc"><rect x="955.0" y="161.0" width="190.0" height="58.0" rx="29.0"/><text><tspan x="1050.0" y="181.0">Вход в кластер</tspan><tspan x="1050.0" y="199.0">srv1:1541</tspan></text></g>
+<g class="n n-sw"><rect x="1262.0" y="168.0" width="96.0" height="44.0" rx="8"/><text><tspan x="1310.0" y="190.0">rphost</tspan></text></g>
+<g class="n n-svc"><rect x="955.0" y="431.0" width="190.0" height="58.0" rx="29.0"/><text><tspan x="1050.0" y="451.0">Вход в кластер</tspan><tspan x="1050.0" y="469.0">srv2:1541</tspan></text></g>
+<g class="n n-sw"><rect x="1262.0" y="438.0" width="96.0" height="44.0" rx="8"/><text><tspan x="1310.0" y="460.0">rphost</tspan></text></g>
+<g class="n n-cyl"><path d="M1515.0,302.0 v46.0 a65.0,7.0 0 0 0 130.0,0 v-46.0"/><ellipse cx="1580.0" cy="302.0" rx="65.0" ry="7.0"/><text><tspan x="1580.0" y="316.0">PostgreSQL</tspan><tspan x="1580.0" y="334.0">db:5432</tspan></text></g>
+<g class="lbl"><rect x="180.5" y="201.4" width="141" height="24" rx="4"/><text><tspan x="251.0" y="213.4">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="168.0" y="288.0" width="148" height="24" rx="4"/><text><tspan x="242.0" y="300.0">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="185.5" y="374.6" width="127" height="24" rx="4"/><text><tspan x="249.0" y="386.6">процесс на запуск</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-ha -->
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: 'Srvr="srv1:1541,srv2:1541";Ref="demo";'</code></pre>
+<p>Оба имени должны разрешаться с машины раннера; доступны порты входа и рабочие порты обоих серверов. Кластер уже настроен на отказоустойчивую работу — строка подключения не задаёт уровень отказоустойчивости и резервирование сервисов. Подробнее — <a href="https://1c-dn.com/library/tutorials/1c_enterprise_administrator_guide_client_server_mode_8_3_27/">руководство администратора 1С, раздел 2.2.5</a>.</p>
+
+<h3 id="d-console">Кластер запущен из консоли</h3>
+<p>Сервер 1С запускаете вы в окне терминала. Он работает под вашей учётной записью; каталог данных и журналов задаётся при запуске. Раннер подключается к нему так же, как к серверу, запущенному службой.</p>
+<!-- diagram:d-console -->
+<div class="diagram" role="img" aria-label="Кластер поднят из консоли, а не службой — через работающий кластер">
+<svg viewBox="-19.0 -48.0 1438.0 499.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1438px">
+<defs><marker id="arr-d-console" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-9.0" y="-38.0" width="1418.0" height="479.0" rx="12"/><text x="5.0" y="-20.0">одна машина</text></g>
+<g class="fr fr-host"><rect x="17.0" y="14.0" width="462.0" height="393.0" rx="12"/><text x="31.0" y="32.0">раннер и утилиты</text></g>
+<g class="fr fr-neutral"><rect x="712.0" y="156.0" width="556.0" height="254.0" rx="12"/><text x="726.0" y="174.0">ваша консоль</text></g>
+<path marker-end="url(#arr-d-console)" class="e" d="M165.0,149.0 C233.4,149.0 248.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M165.0,160.0 C231.6,160.0 246.4,240.0 313.0,240.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M100.0,182.0 C100.0,271.6 209.4,360.0 299.0,360.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M443.0,80.0 L632.0,80.0 Q650.0,80.0 650.0,98.0 L650.0,202.0 Q650.0,220.0 668.0,220.0 L730.0,220.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M447.0,240.0 L730.0,240.0"/>
+<path marker-end="url(#arr-d-console)" class="e dash" d="M461.0,360.0 L632.0,360.0 Q650.0,360.0 650.0,342.0 L650.0,278.0 Q650.0,260.0 668.0,260.0 L730.0,260.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M850.0,280.0 C850.0,320.0 850.0,308.0 850.0,348.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M970.0,240.0 C1010.0,240.0 1010.0,240.0 1050.0,240.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M898.0,370.0 C1067.7,370.0 1105.3,370.0 1275.0,370.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-svc"><rect x="299.0" y="331.0" width="162.0" height="58.0" rx="29.0"/><text><tspan x="380.0" y="351.0">1cv8 /AgentMode</tspan><tspan x="380.0" y="369.0">127.0.0.1:1543</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="218.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="240.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-sw"><rect x="730.0" y="200.0" width="240.0" height="80.0" rx="8"/><text><tspan x="850.0" y="231.0">ragent, запущенный руками</tspan><tspan x="850.0" y="249.0">1540 · 1541</tspan></text></g>
+<g class="n n-sw"><rect x="802.0" y="348.0" width="96.0" height="44.0" rx="8"/><text><tspan x="850.0" y="370.0">rphost</tspan></text></g>
+<g class="n n-doc"><path d="M1050.0,202.0 h200.0 v68.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="1150.0" y="231.0">журнал сервера</tspan><tspan x="1150.0" y="249.0">у вас перед глазами</tspan></text></g>
+<g class="n n-cyl"><path d="M1275.0,350.0 v40.0 a45.0,7.0 0 0 0 90.0,0 v-40.0"/><ellipse cx="1320.0" cy="350.0" rx="45.0" ry="7.0"/><text><tspan x="1320.0" y="361.0">PostgreSQL</tspan><tspan x="1320.0" y="379.0">localhost:5432</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="102.5" width="141" height="24" rx="4"/><text><tspan x="241.0" y="114.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="175.5" y="188.0" width="127" height="24" rx="4"/><text><tspan x="239.0" y="200.0">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="141.0" y="325.7" width="148" height="24" rx="4"/><text><tspan x="215.0" y="337.7">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="526.5" y="68.0" width="67" height="24" rx="4"/><text><tspan x="560.0" y="80.0">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="543.0" y="228.0" width="34" height="24" rx="4"/><text><tspan x="560.0" y="240.0">TCP</tspan></text></g>
+<g class="lbl"><rect x="543.0" y="348.0" width="34" height="24" rx="4"/><text><tspan x="560.0" y="360.0">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-console -->
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=localhost:1541;Ref=demo&quot;  # кластер запущен в вашей консоли</code></pre>
+<p>Запустите сервер перед командой раннера и оставьте консоль открытой до её завершения. Файл проекта не управляет запуском и остановкой кластера.</p>
+
+<h2 id="direct-dbms">Прямой доступ к СУБД через ibcmd</h2>
+<p>Утилита <code>ibcmd</code> открывает базу непосредственно в СУБД. Перед её использованием остановите серверные процессы кластера, обслуживающего эту базу. Завершения сеансов или блокировки входа недостаточно: применение инструментов автономного сервера к базе под работающим кластером может разрушить базу данных <span class="ref">(<a href="platform.html#t60">60</a>)</span>.</p>
+<p>Для этого подключения добавляется секция <code>dbms</code>. В ней задаются тип и адрес СУБД, физическое имя базы и учётные данные пользователя СУБД. Имя <code>dbms.name</code> может отличаться от <code>Ref</code>; пользователь СУБД задаётся отдельно от пользователя 1С.</p>
+<p>В этом режиме используется <code>dbms</code>. Строка <code>connection</code> сохранена для обычной работы через кластер, когда вы снова его запустите. Наличие секции <code>dbms</code> не останавливает и не запускает кластер автоматически.</p>
+
+<h3 id="d-cluster-local-dbms"><span id="d-console-dbms"></span>На своей машине, кластер остановлен</h3>
+<p>PostgreSQL продолжает работать на машине раннера. Серверные процессы 1С остановлены по <a href="#direct-dbms">условиям прямого доступа</a>.</p>
+<p>Если кластер был запущен из консоли, завершите запущенные вами серверные процессы; схема и подключение к СУБД те же.</p>
+<!-- diagram:d-cluster-local-dbms -->
+<div class="diagram" role="img" aria-label="Кластер на машине раннера: раннер, утилиты и сервер 1С на одной машине — ibcmd при остановленном кластере">
+<svg viewBox="-19.0 24.0 1103.0 368.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1103px">
+<defs><marker id="arr-d-cluster-local-dbms" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-9.0" y="34.0" width="1083.0" height="348.0" rx="12"/><text x="5.0" y="52.0">одна машина</text></g>
+<g class="fr fr-host"><rect x="17.0" y="94.0" width="481.0" height="262.0" rx="12"/><text x="31.0" y="112.0">машина раннера</text></g>
+<path marker-end="url(#arr-d-cluster-local-dbms)" class="e" d="M165.0,160.0 C240.2,160.0 256.9,160.0 332.0,160.0"/>
+<path marker-end="url(#arr-d-cluster-local-dbms)" class="e" d="M380.0,182.0 C380.0,222.0 380.0,222.0 380.0,262.0"/>
+<path marker-end="url(#arr-d-cluster-local-dbms)" class="e" d="M428.0,160.0 C606.6,160.0 646.4,160.0 825.0,160.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="138.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="160.0">ibcmd</tspan></text></g>
+<g class="n n-doc"><path d="M280.0,262.0 h200.0 v68.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="380.0" y="291.0">workPath</tspan><tspan x="380.0" y="309.0">журналы и артефакты</tspan></text></g>
+<g class="n n-off"><rect x="770.0" y="271.0" width="260.0" height="58.0" rx="8"/><text><tspan x="900.0" y="291.0">ragent · rmngr · rphost</tspan><tspan x="900.0" y="309.0">остановлены</tspan></text></g>
+<g class="n n-cyl"><path d="M825.0,137.0 v46.0 a75.0,7.0 0 0 0 150.0,0 v-46.0"/><ellipse cx="900.0" cy="137.0" rx="75.0" ry="7.0"/><text><tspan x="900.0" y="151.0">PostgreSQL</tspan><tspan x="900.0" y="169.0">localhost:5432</tspan></text></g>
+<g class="lbl"><rect x="177.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="248.0" y="160.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="356.5" y="210.0" width="47" height="24" rx="4"/><text><tspan x="380.0" y="222.0">файлы</tspan></text></g>
+<g class="lbl"><rect x="559.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="630.0" y="160.0">dbms: прямой доступ</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-local-dbms -->
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=localhost:1541;Ref=demo&quot;            # штатная работа через кластер
+    dbms:                                                 # прямое подключение к СУБД
+      kind: PostgreSQL                                    # тип СУБД
+      server: &quot;localhost:5432&quot;                            # локальная СУБД; порт доступен раннеру
+      name: demo_data                                     # физическое имя БД, не Ref
+      user: dbadmin                                       # пользователь СУБД
+      password: &quot;db-password&quot;                             # пароль пользователя СУБД</code></pre>
+<p><code>localhost:5432</code> — локальный PostgreSQL; demo_data — физическая база, в которой хранятся данные информационной базы demo.</p>
+
+<h3 id="d-cluster-remote-dbms">На другой машине, кластер остановлен</h3>
+<p>СУБД находится на сервере db. Раннер обращается к ней по сети по <a href="#direct-dbms">условиям прямого доступа</a>.</p>
+<!-- diagram:d-cluster-remote-dbms -->
+<div class="diagram" role="img" aria-label="Кластер на другой машине с несколькими rphost — ibcmd при остановленном кластере">
+<svg viewBox="7.0 76.0 1051.0 290.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1051px">
+<defs><marker id="arr-d-cluster-remote-dbms" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="94.0" width="481.0" height="262.0" rx="12"/><text x="31.0" y="112.0">машина раннера</text></g>
+<g class="fr fr-neutral"><rect x="752.0" y="227.0" width="296.0" height="120.0" rx="12"/><text x="766.0" y="245.0">сервер приложений srv</text></g>
+<g class="fr fr-srv"><rect x="807.0" y="86.0" width="186.0" height="122.0" rx="12"/><text x="821.0" y="104.0">сервер СУБД db</text></g>
+<path marker-end="url(#arr-d-cluster-remote-dbms)" class="e" d="M165.0,160.0 C240.2,160.0 256.9,160.0 332.0,160.0"/>
+<path marker-end="url(#arr-d-cluster-remote-dbms)" class="e" d="M380.0,182.0 C380.0,222.0 380.0,222.0 380.0,262.0"/>
+<path marker-end="url(#arr-d-cluster-remote-dbms)" class="e dash" d="M428.0,160.0 C606.6,160.0 646.4,160.0 825.0,160.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="138.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="160.0">ibcmd</tspan></text></g>
+<g class="n n-doc"><path d="M280.0,262.0 h200.0 v68.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="380.0" y="291.0">workPath</tspan><tspan x="380.0" y="309.0">журналы и артефакты</tspan></text></g>
+<g class="n n-off"><rect x="770.0" y="271.0" width="260.0" height="58.0" rx="8"/><text><tspan x="900.0" y="291.0">ragent · rmngr · rphost</tspan><tspan x="900.0" y="309.0">остановлены</tspan></text></g>
+<g class="n n-cyl"><path d="M825.0,137.0 v46.0 a75.0,7.0 0 0 0 150.0,0 v-46.0"/><ellipse cx="900.0" cy="137.0" rx="75.0" ry="7.0"/><text><tspan x="900.0" y="151.0">PostgreSQL</tspan><tspan x="900.0" y="169.0">db:5432</tspan></text></g>
+<g class="lbl"><rect x="177.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="248.0" y="160.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="356.5" y="210.0" width="47" height="24" rx="4"/><text><tspan x="380.0" y="222.0">файлы</tspan></text></g>
+<g class="lbl"><rect x="559.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="630.0" y="160.0">dbms: прямой доступ</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-remote-dbms -->
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=srv:1541;Ref=demo&quot;                 # штатная работа через кластер
+    dbms:                                                # прямое подключение к СУБД
+      kind: PostgreSQL                                   # тип СУБД
+      server: &quot;db:5432&quot;                                  # сервер СУБД, доступный машине раннера
+      name: demo_data                                    # физическое имя БД, не Ref
+      user: dbadmin                                      # пользователь СУБД
+      password: &quot;db-password&quot;                            # пароль пользователя СУБД</code></pre>
+<p>Адрес db:5432 должен быть доступен с машины раннера. Адрес srv:1541 относится к серверу 1С и используется при обычной работе через кластер.</p>
+
+<h2 id="cluster-administration">Администрирование через RAS</h2>
+<p>RAS — сервер администрирования кластера. Утилита <code>rac</code> подключается к нему отдельно от соединения с информационной базой. Этот канал нужен для управления сеансами: <a href="cli-sessions-list.html">просмотра</a>, <a href="cli-sessions-terminate.html">завершения</a>, <a href="cli-sessions-deny.html">запрета</a> и <a href="cli-sessions-allow.html">разрешения входа</a>, в том числе перед монопольной операцией <span class="ref">(<a href="platform.html#t56">56</a>, <a href="platform.html#t57">57</a>)</span>.</p>
+<p>В примерах показаны три учётные записи: пользователь базы, администратор кластера и администратор центрального сервера. Укажите те, которые требуются для ваших операций <span class="ref">(<a href="platform.html#t59">59</a>)</span>.</p>
+
+<h3 id="d-ras">RAS на отдельной машине <span class="plan-badge">План</span></h3>
+<p>На машине admin.example уже работает RAS. Раннер обращается к нему утилитой rac, а Конфигуратор подключается к базе через сервер srv.</p>
+<!-- diagram:d-ras -->
+<div class="diagram" role="img" aria-label="Кластер, RAS поднят удалённо: раннер ходит к нему утилитой rac за сеансами своей базы">
+<svg viewBox="7.0 4.0 1149.0 306.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1149px">
+<defs><marker id="arr-d-ras" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="14.0" width="444.0" height="286.0" rx="12"/><text x="31.0" y="32.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="672.0" y="14.0" width="474.0" height="106.0" rx="12"/><text x="686.0" y="32.0">сервер 1С</text></g>
+<g class="fr fr-neutral"><rect x="672.0" y="194.0" width="474.0" height="106.0" rx="12"/><text x="686.0" y="212.0">машина с RAS</text></g>
+<path marker-end="url(#arr-d-ras)" class="e" d="M165.0,159.0 C233.4,159.0 248.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-ras)" class="e" d="M165.0,181.0 C240.2,181.0 256.9,260.0 332.0,260.0"/>
+<path marker-end="url(#arr-d-ras)" class="e dash" d="M443.0,80.0 C554.1,80.0 578.9,80.0 690.0,80.0"/>
+<path marker-end="url(#arr-d-ras)" class="e dash" d="M428.0,260.0 C545.9,260.0 572.1,260.0 690.0,260.0"/>
+<path marker-end="url(#arr-d-ras)" class="e dash" d="M800.0,238.0 C800.0,176.8 800.0,163.2 800.0,102.0"/>
+<path marker-end="url(#arr-d-ras)" class="e" d="M978.0,260.0 C938.0,260.0 950.0,260.0 910.0,260.0"/>
+<path marker-end="url(#arr-d-ras)" class="e" d="M910.0,80.0 C950.0,80.0 938.0,80.0 978.0,80.0"/>
+<g class="n n-run"><rect x="35.0" y="148.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="170.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="238.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="260.0">rac</tspan></text></g>
+<g class="n n-sw"><rect x="690.0" y="58.0" width="220.0" height="44.0" rx="8"/><text><tspan x="800.0" y="80.0">ragent 1540 · rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="978.0" y="58.0" width="150.0" height="44.0" rx="8"/><text><tspan x="1053.0" y="80.0">rphost 1560–1591</tspan></text></g>
+<g class="n n-svc"><rect x="690.0" y="238.0" width="220.0" height="44.0" rx="22.0"/><text><tspan x="800.0" y="260.0">RAS 1545</tspan></text></g>
+<g class="n n-off"><rect x="978.0" y="238.0" width="150.0" height="44.0" rx="8"/><text><tspan x="1053.0" y="260.0">консоль кластера</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="107.5" width="141" height="24" rx="4"/><text><tspan x="241.0" y="119.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="178.0" y="208.5" width="141" height="24" rx="4"/><text><tspan x="248.5" y="220.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="486.0" y="68.0" width="161" height="24" rx="4"/><text><tspan x="566.5" y="80.0">TCP 1541, Srvr=…;Ref=…</tspan></text></g>
+<g class="lbl"><rect x="482.0" y="248.0" width="154" height="24" rx="4"/><text><tspan x="559.0" y="260.0">TCP 1545, cluster.ras</tspan></text></g>
+<g class="lbl"><rect x="766.5" y="146.7" width="67" height="24" rx="4"/><text><tspan x="800.0" y="158.7">TCP 1540</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-ras -->
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=srv:1541;Ref=demo&quot;  # адрес базы
+    user: developer                       # пользователь базы
+    password: &quot;ib-password&quot;
+    cluster:
+      ras: &quot;admin.example:1545&quot;           # отдельная машина с RAS
+      user: clusteradmin                  # администратор кластера
+      password: &quot;cluster-password&quot;
+      agent:
+        user: serveradmin                 # администратор центрального сервера
+        password: &quot;server-password&quot;</code></pre>
+<p>Адрес <code>cluster.ras</code> задаёт готовый сервер администрирования. Запуск и остановка этого RAS из раннера недоступны. Консоль кластера может обращаться к тому же RAS для управления серверами, лицензиями и профилями безопасности.</p>
+
+<h3 id="d-ras-managed">RAS запускает раннер <span class="plan-badge">План</span></h3>
+<p>Если <code>cluster.ras</code> не задан, раннер запускает RAS на своей машине на время команды и завершает его вместе с ней. Для этого на машине раннера нужны <code>ras</code> и <code>rac</code> той же версии, что и кластер <span class="ref">(<a href="platform.html#t54">54</a>, <a href="platform.html#t55">55</a>)</span>.</p>
+<!-- diagram:d-ras-managed -->
+<div class="diagram" role="img" aria-label="Кластер, RAS поднят раннером на своей машине на время команды">
+<svg viewBox="7.0 4.0 1229.0 383.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1229px">
+<defs><marker id="arr-d-ras-managed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="14.0" width="516.0" height="363.0" rx="12"/><text x="31.0" y="32.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="752.0" y="14.0" width="474.0" height="106.0" rx="12"/><text x="766.0" y="32.0">сервер 1С</text></g>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M165.0,186.8 C233.4,186.8 248.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M165.0,200.0 C240.2,200.0 256.9,200.0 332.0,200.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M165.0,215.4 C216.6,215.4 193.4,330.0 245.0,330.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M380.0,222.0 C380.0,262.0 380.0,261.0 380.0,301.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e dash" d="M443.0,80.0 C590.1,80.0 622.9,80.0 770.0,80.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e dash" d="M515,330 C700,330 836,250 836,102"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M990.0,80.0 C1030.0,80.0 1018.0,80.0 1058.0,80.0"/>
+<g class="n n-run"><rect x="35.0" y="178.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="200.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="178.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="200.0">rac</tspan></text></g>
+<g class="n n-svc"><rect x="245.0" y="301.0" width="270.0" height="58.0" rx="29.0"/><text><tspan x="380.0" y="321.0">ras cluster</tspan><tspan x="380.0" y="339.0">127.0.0.1:1545, поднят раннером</tspan></text></g>
+<g class="n n-sw"><rect x="770.0" y="58.0" width="220.0" height="44.0" rx="8"/><text><tspan x="880.0" y="80.0">ragent 1540 · rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="1058.0" y="58.0" width="150.0" height="44.0" rx="8"/><text><tspan x="1133.0" y="80.0">rphost 1560–1591</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="121.4" width="141" height="24" rx="4"/><text><tspan x="241.0" y="133.4">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="178.0" y="188.0" width="141" height="24" rx="4"/><text><tspan x="248.5" y="200.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="111.0" y="260.7" width="188" height="24" rx="4"/><text><tspan x="205.0" y="272.7">поднимает на время команды</tspan></text></g>
+<g class="lbl"><rect x="386.5" y="249.5" width="67" height="24" rx="4"/><text><tspan x="420.0" y="261.5">TCP 1545</tspan></text></g>
+<g class="lbl"><rect x="553.2" y="68.0" width="161" height="24" rx="4"/><text><tspan x="633.7" y="80.0">TCP 1541, Srvr=…;Ref=…</tspan></text></g>
+<g class="lbl"><rect x="559.2" y="303.2" width="168" height="24" rx="4"/><text><tspan x="643.2" y="315.2">TCP 1540, хост из Srvr=</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-ras-managed -->
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    connection: &quot;Srvr=srv:1541;Ref=demo&quot;  # адрес базы
+    user: developer                       # пользователь базы
+    password: &quot;ib-password&quot;
+    cluster:
+      user: clusteradmin                  # администратор кластера
+      password: &quot;cluster-password&quot;
+      agent:
+        address: &quot;srv:1540&quot;               # агент, к которому подключится RAS
+        user: serveradmin                 # администратор центрального сервера
+        password: &quot;server-password&quot;</code></pre>
+<p><code>cluster.agent.address</code> — адрес агента центрального сервера, к которому подключается RAS. При стандартном адресе его можно опустить: хост берётся из <code>Srvr</code>, порт — 1540 <span class="ref">(<a href="platform.html#t63">63</a>)</span>. Запуск и завершение RAS не останавливают сам кластер.</p>
+<p>При заданном <code>cluster.ras</code> используется <a href="#d-ras">готовый RAS</a>. В обоих вариантах обмен с базой идёт по <code>connection</code>; недоступность RAS мешает операциям, которым нужен канал администрирования.</p>
+<p class="hint">Состав операций и выбор утилит — на странице <a href="architecture.html#d-ops">Компоненты</a>.</p>
+</main>
+<script src="site.js?v=26" defer></script>
+</body>
+</html>

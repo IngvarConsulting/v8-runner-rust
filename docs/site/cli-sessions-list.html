@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sessions list — v8-runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=41">
+<style>
+  td.k { white-space: nowrap; }
+  td.k code { white-space: nowrap; }
+  table.map td:first-child { width: 30%; }
+  table.map td:last-child { white-space: nowrap; width: 12%; }
+  pre.sh { background: var(--code-bg); padding: 12px 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
+  pre.sh code { background: none; padding: 0; }
+  .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list" aria-current="page">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>sessions list</h1>
+<p class="lede">Посмотрите, кто подключён к выбранной базе.</p>
+<fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
+<h2 class="command-variant" id="op-sessions-list">sessions list <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner sessions list</code></pre>
+<p>сеансы базы: кто, откуда, с какого времени <span class="ref">(<a href="platform.html#t56">56</a>)</span></p>
+<h3 id="response-classes">Классы ответов</h3>
+<p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
+<div class="tablewrap"><table class="response-classes">
+<thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
+<tbody><tr data-response-class="planned"><td>Есть активные сеансы</td><td>Для каждого сеанса показаны идентификатор, пользователь, клиент, машина и время начала. <a href="#sessions-list-success">Пример ответа</a>.</td></tr>
+<tr data-response-class="planned"><td>Сеансов нет</td><td>Запрос выполнен успешно; в выбранной базе нет активных сеансов. <a href="#sessions-list-alternative">Пример ответа</a>.</td></tr>
+</tbody>
+</table></div>
+<p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
+<h3>Варианты ответа</h3>
+<h4 id="sessions-list-success">Есть активные сеансы</h4>
+<p>Для каждого сеанса показаны идентификатор, пользователь, клиент, машина и время начала.</p>
+<pre data-output-example="sessions-list-success" data-output-schema="planned"><code>origin: выбранная база
+id  user   client      host         started_at
+42  admin  ThinClient  workstation  2026-10-10T09:00:00+03:00</code></pre>
+<h4 id="sessions-list-alternative">Сеансов нет</h4>
+<p>Запрос выполнен успешно; в выбранной базе нет активных сеансов.</p>
+<pre data-output-example="sessions-list-alternative" data-output-schema="planned"><code>origin: выбранная база
+Активных сеансов нет.</code></pre>
+<p>Администрирования кластера целиком у раннера нет: серверы, лицензии, профили безопасности остаются консоли и <code>rac</code>. Сеансы — исключение, потому что без них не бывает применения: окно обслуживания собирается из четырёх команд, <code>sessions deny</code>, <code>sessions terminate --all</code>, <code>apply</code>, <code>sessions allow</code>. Ключ <code>apply --sessions force</code> остаётся для короткого пути: завершить мешающие сеансы в момент, когда платформе нужен монопольный доступ <span class="ref">(<a href="platform.html#t4">4</a>)</span>.</p>
+
+<p>У кластера три уровня учётных данных, и раннер держит их в местном слое порознь <span class="ref">(<a href="platform.html#t59">59</a>)</span>: пользователь базы с правами администратора в ключе <code>user</code> секции базы, администратор кластера в <code>cluster.user</code>, администратор центрального сервера в <code>cluster.agent</code>. Каждый запрашивается только той операцией, которой он нужен: <code>sessions list</code> и <code>sessions terminate</code> — кластер; <code>sessions deny</code> и <code>sessions allow</code> — кластер и база, потому что это свойства базы; <code>infobase create</code> в кластере с заполненным списком администраторов — кластер, через <code>SUsr</code> и <code>SPwd</code> строки создания <span class="ref">(<a href="platform.html#t73">73</a>)</span> <span class="ref">(<a href="platform.html#t78">78</a>)</span>. Учётную запись центрального сервера ни одна операция раннера сама не требует; она пригодится, только если сервер её потребует. Отказ называет, какого уровня не хватает.</p>
+
+<p>Исполнителя задаёт вид базы, ключа <code>providers.sessions</code> нет. У кластера это <code>rac</code> по адресу сервера администрирования из секции базы, <code>cluster.ras</code>, с учётной записью администратора кластера <span class="ref">(<a href="platform.html#t58">58</a>)</span>. Если адрес не объявлен, раннер поднимает <code>ras</code> сам, на своей машине, против агента кластера из строки подключения и гасит его вместе с командой; для этого нужны серверные компоненты платформы той же версии, что кластер <span class="ref">(<a href="platform.html#t55">55</a>)</span>. У автономного сервера — <code>ibcmd session</code> <span class="ref">(<a href="platform.html#t103">103</a>)</span>. У файловой базы сервера, ведущего сеансы, нет: <code>sessions</code> отказывает и называет причину, а завершить можно только сеансы через веб-сервер и только в момент <code>apply</code> <span class="ref">(<a href="platform.html#t5">5</a>)</span>.</p>
+
+<p><a href="project.html#keys">Настройка исполнителей и конфигурации проекта</a>.</p>
+</main>
+<script type="application/json" id="output-examples">{
+  "sessions-list-success": {
+    "ok": true,
+    "command": "sessions list",
+    "duration_ms": 120,
+    "data": {
+      "infobase": "origin",
+      "sessions": [
+        {
+          "id": "42",
+          "user": "admin",
+          "client": "ThinClient",
+          "host": "workstation",
+          "started_at": "2026-10-10T09:00:00+03:00"
+        }
+      ]
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "sessions-list-alternative": {
+    "ok": true,
+    "command": "sessions list",
+    "duration_ms": 120,
+    "data": {
+      "infobase": "origin",
+      "sessions": []
+    },
+    "warnings": [],
+    "steps": []
+  }
+}</script>
+<script src="site.js?v=26" defer></script>
+</body>
+</html>
