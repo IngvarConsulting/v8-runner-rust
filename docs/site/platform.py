@@ -207,7 +207,7 @@ t("Утилита rac решает те же задачи, что консоль
 t("У центрального сервера и у каждого кластера свой список администраторов. По умолчанию оба списка пусты, и аутентификации не требуется; если список заполнен, действия с сервером или с кластером выполняют только аутентифицированные администраторы. Свойства базы, включая блокировку сеансов, правят в её свойствах в кластере; rac для этого принимает и учётную запись пользователя базы, что описано только в справке rac.",
   "Учётных данных три уровня: центральный сервер, кластер, база. Раннер просит каждый только для операции, которой он нужен, и отказ называет недостающий.",
   cs("5.2.4", "TI000000147"), cs("5.2.8", "TI000000166"), cs("5.2.7.2", "TI000000164"), key="cluster-admins")
-t("Автономный сервер ibsrv обслуживает одну базу, содержит встроенный веб-сервер и администрируется утилитой ibcmd. Его нельзя применять к базе, которой управляет кластер. Сервер ras им не управляет, фоновой реструктуризации нет, линейный формат он не загружает.",
+t("Автономный сервер ibsrv обслуживает одну базу, содержит встроенный веб-сервер и администрируется утилитой ibcmd. Автономный сервер и утилиту ibcmd нельзя применять к базе, которая в данный момент работает под управлением кластера: это может разрушить базу данных. Сервер ras им не управляет, фоновой реструктуризации нет, линейный формат он не загружает.",
   "Третий вид цели со своим набором ограничений.",
   adm("7.1", "TI000000895"), adm("7.2", "TI000000896"))
 t("У автономного сервера есть SSH-шлюз, работающий как Конфигуратор в режиме агента, с урезанным набором команд. Из группы config: dump-cfg, dump-config-to-files, load-cfg, load-config-from-files, update-db-cfg, generation-id, extensions, manage-cfg-support, sign-cfg и команды мобильных приложений. Из infobase-tools: dump-ib, restore-ib, erase-data, debug-info. Сравнения, проверок, отката и сохранения конфигурации базы данных в наборе нет. Утилите ibcmd по SSH недоступны создание базы и восстановление её целостности.",
@@ -381,11 +381,44 @@ NAV = '''<div class="topbar"><div class="in">
   <a class="brand" href="index.html">v8-runner</a>
   <nav>
     <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
     <a href="platform.html" aria-current="page">Платформа</a>
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html">Исходники</a>
-    <a href="cli.html">CLI</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -402,7 +435,7 @@ out.append('''<!DOCTYPE html>
 <title>v8-runner · Платформа</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=16">
+<link rel="stylesheet" href="styles.css?v=41">
 <style>
   table.theses:not(.stack) td:nth-child(2) { width: 46%; }
   table.theses:not(.stack) td:nth-child(3) { width: 32%; }
@@ -420,7 +453,7 @@ out.append('''
 <h1>Платформа</h1>
 <p class="lede">Всё, на чём стоит раннер, платформа описала сама. Здесь собраны её утверждения, по одному на строку, и рядом — что из каждого следует для нас. Каждая строка ведёт в раздел документации на ИТС.</p>
 
-<p>Читать подряд не обязательно. Страницы <a href="problems.html">Трудности</a>, <a href="sources.html">Исходники</a> и <a href="cli.html">CLI</a> ссылаются сюда по номеру тезиса.</p>
+<p>Читать подряд не обязательно. Страницы <a href="problems.html">Трудности</a>, <a href="sources.html">Исходники</a> и <a href="cli-init.html">CLI</a> ссылаются сюда по номеру тезиса.</p>
 
 <div class="legend">
   <span><strong>РР</strong> — Руководство разработчика 8.3.27</span>
@@ -448,7 +481,7 @@ out.append('''
 <h2 id="measured">Чего документация не говорит</h2>
 <p>Часть поведения платформы известна только из замеров на 8.3.27 и 8.5.1. Такие факты на сайте помечены словом «замер» и живут на странице <a href="problems.html">Трудности</a>. Документация их не подтверждает и не опровергает.</p>
 </main>
-<script src="site.js?v=7" defer></script>
+<script src="site.js?v=26" defer></script>
 </body>
 </html>
 ''')

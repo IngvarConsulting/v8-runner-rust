@@ -6,7 +6,7 @@
 <title>v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=16">
+<link rel="stylesheet" href="styles.css?v=41">
 <style>
   ol.path { padding-left: 1.4em; }
   ol.path li { margin: 8px 0; }
@@ -17,11 +17,44 @@
   <a class="brand" href="index.html">v8-runner</a>
   <nav>
     <a href="index.html" aria-current="page">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
     <a href="platform.html">Платформа</a>
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html">Исходники</a>
-    <a href="cli.html">CLI</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -30,70 +63,98 @@
 </div></div>
 
 <main class="page">
-<h1>Исходники 1С → действия над базой</h1>
-<p class="lede">v8-runner — программа командной строки, которая делает с базой 1С то, что вы делали бы руками через Конфигуратор, <code>ibcmd</code> и EDT CLI. Она сама находит платформу, выбирает инструмент и отвечает одинаково человеку, сценарию сборки и языковой модели.</p>
-
-<pre><code># есть исходники, базы нет
-v8-runner init              # найти исходники, записать конфиг
-v8-runner infobase create   # создать базу по адресу из конфига
-v8-runner push              # отправить исходники в базу
-v8-runner test yaxunit all
-
-# есть база, исходников нет
-v8-runner clone --from "File=/srv/ib/demo"   # привязать каталог и выгрузить</code></pre>
-
-<div class="note">
-<p><strong>Сайт описывает целевое состояние.</strong> Каждая страница говорит, каким раннер должен быть и почему. Расхождения с текущим кодом собираются отдельно и превращаются в план работ; здесь их нет.</p>
+<h1>v8-runner</h1>
+<p class="lede">v8-runner — инструмент командной строки для работы с проектами 1С. Он находит платформу, выбирает подходящую утилиту и выполняет операции с исходниками и информационными базами: загрузку и выгрузку, сборку, проверки и тесты.</p>
+<h2>Общая карта</h2>
+<p>Названия утилит и сервисов, их роли и способ взаимодействия с раннером — в <a href="glossary.html#tools">словаре инструментов</a>.</p>
+<!-- diagram:map -->
+<div class="diagram" role="img" aria-label="Общая карта: XML и EDT, утилиты и общие хранилища базы в разных режимах">
+<svg viewBox="-38.0 -192.0 1272.0 1464.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1272px">
+<defs><marker id="arr-map" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="-28.0" y="-26.0" width="536.0" height="1206.0" rx="12"/><text x="-14.0" y="-8.0">машина раннера</text></g>
+<path marker-end="url(#arr-map)" class="e" d="M130.0,543.9 L162.0,543.9 C181.0,543.9 181.0,40.0 200.0,40.0 L352.0,40.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M130.0,553.8 L162.0,553.8 C181.0,553.8 181.0,240.0 200.0,240.0 L337.0,240.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M130.0,564.2 L162.0,564.2 C181.0,564.2 181.0,430.0 200.0,430.0 L310.0,430.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M130.0,587.4 L162.0,587.4 C181.0,587.4 181.0,760.0 200.0,760.0 L352.0,760.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M130.0,597.3 L162.0,597.3 C181.0,597.3 181.0,1140.0 200.0,1140.0 L352.0,1140.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M130.0,575.8 L162.0,575.8 C181.0,575.8 181.0,550.0 200.0,550.0 L352.0,550.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M60.0,541.0 L60.0,-152.0 Q60.0,-170.0 78.0,-170.0 L1202.0,-170.0 Q1220.0,-170.0 1220.0,-152.0 L1220.0,632.0 Q1220.0,650.0 1202.0,650.0 L1155.0,650.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M60.0,599.0 L60.0,1232.0 Q60.0,1250.0 78.0,1250.0 L832.0,1250.0 Q850.0,1250.0 850.0,1232.0 L850.0,1162.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M448.0,40.0 L480.0,40.0 C548.0,40.0 548.0,-17.6 616.0,-17.6 L648.0,-17.6"/>
+<path marker-end="url(#arr-map)" class="e" d="M448.0,40.0 L480.0,40.0 C542.5,40.0 542.5,77.2 605.0,77.2 L637.0,77.2"/>
+<path marker-end="url(#arr-map)" class="e" d="M463.0,222.4 L522.0,222.4 Q540.0,222.4 540.0,204.4 L540.0,118.0 Q540.0,100.0 558.0,100.0 L637.0,100.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M445.0,401.0 L445.0,368.0 Q445.0,350.0 463.0,350.0 L562.0,350.0 Q580.0,350.0 580.0,332.0 L580.0,139.3 Q580.0,121.3 598.0,121.3 L637.0,121.3"/>
+<path marker-end="url(#arr-map)" class="e" d="M463.0,244.4 L495.0,244.4 C681.5,244.4 681.5,350.3 868.0,350.3 L900.0,350.3"/>
+<path marker-end="url(#arr-map)" class="e" d="M490.0,430.0 L522.0,430.0 C695.0,430.0 695.0,369.2 868.0,369.2 L900.0,369.2"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M362.2,262.0 L362.2,302.0 Q362.2,320.0 380.2,320.0 L572.0,320.0 Q590.0,320.0 590.0,338.0 L590.0,847.5 Q590.0,865.5 608.0,865.5 L640.0,865.5"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M445.0,459.0 L445.0,492.0 Q445.0,510.0 463.0,510.0 L522.0,510.0 Q540.0,510.0 540.0,528.0 L540.0,873.6 Q540.0,891.6 558.0,891.6 L640.0,891.6"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M463.0,233.4 L1142.0,233.4 Q1160.0,233.4 1160.0,251.4 L1160.0,512.0 Q1160.0,530.0 1142.0,530.0 L1122.4,530.0 Q1104.4,530.0 1104.4,548.0 L1104.4,621.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M1040.0,621.0 L1040.0,518.0 Q1040.0,510.0 1048.0,510.0 L1132.0,510.0 Q1140.0,510.0 1140.0,502.0 L1140.0,380.8 Q1140.0,372.8 1132.0,372.8 L1100.0,372.8"/>
+<path marker-end="url(#arr-map)" class="e" d="M1040.0,679.0 L1040.0,802.0 Q1040.0,810.0 1048.0,810.0 L1072.0,810.0 Q1080.0,810.0 1080.0,818.0 L1080.0,850.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M448.0,751.2 L512.0,751.2 Q520.0,751.2 520.0,743.2 L520.0,568.0 Q520.0,560.0 528.0,560.0 L852.0,560.0 Q860.0,560.0 860.0,552.0 L860.0,415.0 Q860.0,407.0 868.0,407.0 L900.0,407.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M448.0,768.8 L502.0,768.8 Q520.0,768.8 520.0,786.8 L520.0,1012.0 Q520.0,1030.0 538.0,1030.0 L1062.0,1030.0 Q1080.0,1030.0 1080.0,1012.0 L1080.0,910.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M448.0,1140.0 L480.0,1140.0 C622.0,1140.0 622.0,1140.0 764.0,1140.0 L796.0,1140.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M850.0,1118.0 L850.0,1078.0 Q850.0,1060.0 832.0,1060.0 L708.0,1060.0 Q690.0,1060.0 690.0,1042.0 L690.0,909.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M840.0,880.0 L872.0,880.0 C927.5,880.0 927.5,880.0 983.0,880.0 L1015.0,880.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M448.0,550.0 L480.0,550.0 C569.2,550.0 569.2,510.0 658.5,510.0 L690.5,510.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M760.0,488.0 L760.0,458.0 Q760.0,450.0 768.0,450.0 L832.0,450.0 Q840.0,450.0 840.0,442.0 L840.0,396.1 Q840.0,388.1 848.0,388.1 L900.0,388.1"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M760.0,532.0 L760.0,851.0"/>
+<g class="n n-run"><rect x="-10.0" y="541.0" width="140.0" height="58.0" rx="8"/><text><tspan x="60.0" y="561.0">v8-runner</tspan><tspan x="60.0" y="579.0">CLI</tspan></text></g>
+<g class="n n-sw"><rect x="352.0" y="18.0" width="96.0" height="44.0" rx="8"/><text><tspan x="400.0" y="40.0">1cedtcli</tspan></text></g>
+<g class="n n-sw"><rect x="337.0" y="218.0" width="126.0" height="44.0" rx="8"/><text><tspan x="400.0" y="240.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-svc"><rect x="310.0" y="401.0" width="180.0" height="58.0" rx="29.0"/><text><tspan x="400.0" y="421.0">1cv8 /AgentMode</tspan><tspan x="400.0" y="439.0">127.0.0.1:1543</tspan></text></g>
+<g class="n n-sw"><rect x="352.0" y="738.0" width="96.0" height="44.0" rx="8"/><text><tspan x="400.0" y="760.0">ibcmd</tspan></text></g>
+<g class="n n-sw"><rect x="352.0" y="1118.0" width="96.0" height="44.0" rx="8"/><text><tspan x="400.0" y="1140.0">rac</tspan></text></g>
+<g class="n n-sw"><rect x="352.0" y="528.0" width="96.0" height="44.0" rx="8"/><text><tspan x="400.0" y="550.0">webinst</tspan></text></g>
+<g class="n n-doc"><path d="M648.0,-48.0 h104.0 v68.0 q-26.0,12.0 -52.0,0 q-26.0,-12.0 -52.0,0 z"/><text><tspan x="700.0" y="-19.0">исходники</tspan><tspan x="700.0" y="-1.0">формат EDT</tspan></text></g>
+<g class="n n-doc"><path d="M637.0,62.0 h126.0 v68.0 q-31.5,12.0 -63.0,0 q-31.5,-12.0 -63.0,0 z"/><text><tspan x="700.0" y="91.0">исходники</tspan><tspan x="700.0" y="109.0">XML платформы</tspan></text></g>
+<g class="n n-doc"><path d="M900.0,335.0 h200.0 v82.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="1000.0" y="371.0">файловая база</tspan><tspan x="1000.0" y="389.0">каталог с 1Cv8.1CD</tspan></text></g>
+<g class="n n-svc"><rect x="925.0" y="621.0" width="230.0" height="58.0" rx="29.0"/><text><tspan x="1040.0" y="641.0">автономный сервер ibsrv</tspan><tspan x="1040.0" y="659.0">прямой шлюз · SSH 1543</tspan></text></g>
+<g class="n n-sw"><rect x="640.0" y="851.0" width="200.0" height="58.0" rx="8"/><text><tspan x="740.0" y="871.0">кластер 1С</tspan><tspan x="740.0" y="889.0">ragent · rmngr · rphost</tspan></text></g>
+<g class="n n-cyl"><path d="M1015.0,857.0 v46.0 a65.0,7.0 0 0 0 130.0,0 v-46.0"/><ellipse cx="1080.0" cy="857.0" rx="65.0" ry="7.0"/><text><tspan x="1080.0" y="871.0">база</tspan><tspan x="1080.0" y="889.0">в СУБД</tspan></text></g>
+<g class="n n-svc"><rect x="796.0" y="1118.0" width="108.0" height="44.0" rx="22.0"/><text><tspan x="850.0" y="1140.0">RAS 1545</tspan></text></g>
+<g class="n n-svc"><rect x="690.5" y="488.0" width="139.0" height="44.0" rx="22.0"/><text><tspan x="760.0" y="510.0">Apache · IIS</tspan></text></g>
+<g class="lbl"><rect x="235.5" y="20.0" width="81" height="40" rx="4"/><text><tspan x="276.0" y="32.0">одна живая</tspan><tspan x="276.0" y="48.0">сессия</tspan></text></g>
+<g class="lbl"><rect x="225.0" y="220.0" width="87" height="40" rx="4"/><text><tspan x="268.5" y="232.0">процесс</tspan><tspan x="268.5" y="248.0">на операцию</tspan></text></g>
+<g class="lbl"><rect x="214.5" y="410.0" width="81" height="40" rx="4"/><text><tspan x="255.0" y="422.0">поднимает,</tspan><tspan x="255.0" y="438.0">потом SSH</tspan></text></g>
+<g class="lbl"><rect x="232.5" y="740.0" width="87" height="40" rx="4"/><text><tspan x="276.0" y="752.0">процесс</tspan><tspan x="276.0" y="768.0">на операцию</tspan></text></g>
+<g class="lbl"><rect x="232.5" y="1120.0" width="87" height="40" rx="4"/><text><tspan x="276.0" y="1132.0">процесс</tspan><tspan x="276.0" y="1148.0">на операцию</tspan></text></g>
+<g class="lbl"><rect x="232.5" y="530.0" width="87" height="40" rx="4"/><text><tspan x="276.0" y="542.0">процесс</tspan><tspan x="276.0" y="558.0">на операцию</tspan></text></g>
+<g class="lbl"><rect x="799.5" y="-182.0" width="81" height="24" rx="4"/><text><tspan x="840.0" y="-170.0">SSH · SFTP</tspan></text></g>
+<g class="lbl"><rect x="462.5" y="1238.0" width="275" height="24" rx="4"/><text><tspan x="600.0" y="1250.0">поднимает, если cluster.ras не объявлен</tspan></text></g>
+<g class="lbl"><rect x="540.0" y="52.1" width="60" height="40" rx="4"/><text><tspan x="570.0" y="64.1">импорт</tspan><tspan x="570.0" y="80.1">экспорт</tspan></text></g>
+<g class="lbl"><rect x="745.0" y="324.3" width="40" height="24" rx="4"/><text><tspan x="765.0" y="336.3">файл</tspan></text></g>
+<g class="lbl"><rect x="770.0" y="362.3" width="40" height="24" rx="4"/><text><tspan x="790.0" y="374.3">файл</tspan></text></g>
+<g class="lbl"><rect x="556.5" y="713.0" width="67" height="24" rx="4"/><text><tspan x="590.0" y="725.0">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="556.5" y="879.6" width="67" height="24" rx="4"/><text><tspan x="590.0" y="891.6">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="939.5" y="221.4" width="121" height="24" rx="4"/><text><tspan x="1000.0" y="233.4">TCP: прямой шлюз</tspan></text></g>
+<g class="lbl"><rect x="1060.0" y="498.0" width="40" height="24" rx="4"/><text><tspan x="1080.0" y="510.0">файл</tspan></text></g>
+<g class="lbl"><rect x="1060.0" y="816.0" width="40" height="24" rx="4"/><text><tspan x="1080.0" y="828.0">СУБД</tspan></text></g>
+<g class="lbl"><rect x="663.0" y="548.0" width="74" height="24" rx="4"/><text><tspan x="700.0" y="560.0">--db-path</tspan></text></g>
+<g class="lbl"><rect x="762.5" y="1010.0" width="235" height="40" rx="4"/><text><tspan x="880.0" y="1022.0">--dbms</tspan><tspan x="880.0" y="1038.0">кластерная ИБ: кластер остановлен</tspan></text></g>
+<g class="lbl"><rect x="533.0" y="1128.0" width="194" height="24" rx="4"/><text><tspan x="630.0" y="1140.0">TCP 1545: сеансы своей базы</tspan></text></g>
+<g class="lbl"><rect x="599.5" y="498.6" width="81" height="24" rx="4"/><text><tspan x="640.0" y="510.6">публикация</tspan></text></g>
+<g class="lbl"><rect x="753.0" y="438.0" width="94" height="24" rx="4"/><text><tspan x="800.0" y="450.0">File=…: файл</tspan></text></g>
+<g class="lbl"><rect x="696.5" y="773.0" width="127" height="24" rx="4"/><text><tspan x="760.0" y="785.0">Srvr=…;Ref=…: TCP</tspan></text></g>
+<text class="note" x="900.0" y="790.0">кластер и ibsrv — поочерёдно</text>
+</svg>
 </div>
-
-<h2>Как читать</h2>
-<p>Страницы идут от платформы к командам. Каждая следующая опирается на предыдущую и ссылается на неё по номерам.</p>
-<ol class="path">
-  <li><a href="platform.html"><strong>Платформа</strong></a> — что утверждает документация 1С, по одному тезису на строку, каждый со ссылкой на ИТС.</li>
-  <li><a href="problems.html"><strong>Трудности</strong></a> — что в поведении платформы мешает работать без рук, и чем раннер на это отвечает.</li>
-  <li><a href="architecture.html"><strong>Компоненты</strong></a> — из чего состоит система: компоненты платформы, её утилиты, сам раннер и каналы между ними.</li>
-  <li><a href="sources.html"><strong>Исходники и база</strong></a> — какие бывают исходники, что им соответствует в базе, в каких состояниях они бывают.</li>
-  <li><a href="cli.html"><strong>CLI</strong></a> — словарь команд: вся поверхность командной строки и правило, по которому выбрано каждое имя.</li>
-</ol>
-<p>Рядом: <a href="scenarios.html">Подбор</a> команд под ваши условия, <a href="usecases.html">Сценарии</a> с потоками данных и <a href="deployments.html">Расстановки</a> платформы по машинам.</p>
-
-<h2>С чем работает</h2>
-<div class="tablewrap"><table>
-<tbody>
-<tr><td class="k">формат исходников</td><td><ul class="opts"><li>XML платформы</li><li>проект EDT</li></ul></td></tr>
-<tr><td class="k">предмет</td><td><ul class="opts"><li>конфигурация</li><li>расширение</li><li>внешние обработки и отчёты</li></ul></td></tr>
-<tr><td class="k">где база</td><td><ul class="opts"><li>файловая</li><li>кластер 1С</li><li>автономный сервер</li></ul></td></tr>
-<tr><td class="k">что делаете</td><td><ul class="opts cmds">
-<li><code>status</code> понять, что происходит</li>
-<li><code>init</code> · <code>clone</code> завести проект</li>
-<li><code>infobase create</code> создать базу</li>
-<li><code>push</code> · <code>apply</code> · <code>reset</code> отправить исходники в базу, применить или отбросить непринятое</li>
-<li><code>pull</code> забрать изменения из базы</li>
-<li><code>upload</code> · <code>download</code> пакет .cf или .cfe в базу и из базы</li>
-<li><code>make</code> собрать пакет из исходников</li>
-<li><code>check</code> · <code>test</code> проверить и прогнать тесты</li>
-<li><code>infobase dump</code> · <code>infobase restore</code> база в .dt и обратно</li>
-<li><code>sessions</code> окно обслуживания: запретить, завершить, разрешить</li>
-<li><code>extensions</code> · <code>publish</code> · <code>launch</code> · <code>convert</code></li>
-</ul></td></tr>
-</tbody></table></div>
-
-<h2>Словарь</h2>
-<div class="tablewrap"><table>
-<tbody>
-<tr><td class="k">база</td><td>информационная база 1С: конфигурации и данные, с которыми работают пользователи. Бывает файловой, в кластере или за автономным сервером; у проекта сколько угодно именованных баз, умолчание зовётся <code>origin</code>, как у гита</td></tr>
-<tr><td class="k">исходники</td><td>та же конфигурация, разложенная в файлы под контролем версий</td></tr>
-<tr><td class="k">набор исходников</td><td>каталог с одним предметом: конфигурация, расширение или группа внешних обработок</td></tr>
-<tr><td class="k">пакет</td><td>один файл с предметом: <code>.cf</code>, <code>.cfe</code>, <code>.epf</code>, <code>.erf</code></td></tr>
-<tr><td class="k">выгрузка</td><td>база → исходники</td></tr>
-<tr><td class="k">загрузка</td><td>исходники → база</td></tr>
-<tr><td class="k">применение</td><td>основная конфигурация → конфигурация базы данных</td></tr>
-<tr><td class="k">исполнитель</td><td>чем исполняется команда: Конфигуратор, его агент, ibcmd, шлюз автономного сервера, EDT CLI, webinst, rac, ibcmd-rs</td></tr>
-<tr><td class="k">workPath</td><td>рабочий каталог раннера: журналы, временные файлы и память о том, на чём остановились, отдельная для каждой базы</td></tr>
-<tr><td class="k">квитанция</td><td>ответ команды: что сделано, чем, что пропущено. Текстом или JSON</td></tr>
-<tr><td class="k">превью</td><td><code>--dry-run</code>: показать план, ничего не делая</td></tr>
-</tbody></table></div>
+<!-- /diagram:map -->
+<h2 id="usage">Как использовать?</h2>
+<div class="unica-row"><h3 class="unica-heading">В составе <a class="unica-link" href="https://ingvarconsulting.github.io/unica/" aria-label="Unica — установка и документация"><img src="assets/unica-logo-letter-transparent-blue.svg" alt="Unica" width="192" height="54"></a></h3><a class="download-unica" href="https://ingvarconsulting.github.io/unica/#install">Скачать</a></div>
+<p>v8-runner поставляется в составе Unica. Unica работает как MCP-сервер и использует командную строку v8-runner для исполнения команд.</p>
+<h3>Отдельно, из командной строки</h3>
+<div class="install-tabs" aria-label="Система для установки">
+<button type="button" data-install-tab="macos"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.4 1c.2 1.7-.6 3.4-1.6 4.4-1 1-2.6 1.7-4 1.5-.2-1.6.6-3.2 1.5-4.2C13.4 1.6 15.1 1 16.4 1M20.8 17.2c-.5 1.1-.8 1.6-1.5 2.6-1 1.4-2.4 3.2-4.1 3.2-1.5 0-1.9-1-4-1s-2.6 1-4 1c-1.7 0-3-1.6-4-3-2.7-3.8-3-8.3-1.3-10.7 1.2-1.7 3-2.7 4.7-2.7 1.7 0 2.8 1 4.2 1 1.3 0 2.2-1 4.2-1 1.5 0 3.1.8 4.3 2.2-3.8 2.1-3.2 7.1 1.5 8.4"/></svg>macOS</button>
+<button type="button" data-install-tab="windows"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M2 4l9-1v8H2zm11-1l9-1v9h-9zM2 13h9v8l-9-1zm11 0h9v9l-9-1z"/></svg>Windows</button>
+<button type="button" data-install-tab="linux"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 8V5a4 4 0 018 0v3l3 6 2 6-6 2-3-2-3 2-6-2 2-6z"/><ellipse cx="12" cy="14" rx="4" ry="5" fill="var(--paper)"/><circle cx="10" cy="5" r="1" fill="var(--paper)"/><circle cx="14" cy="5" r="1" fill="var(--paper)"/><path d="M10 8h4l-2 2z" fill="var(--paper)"/></svg>Linux</button>
+</div>
+<section data-install-panel="macos" aria-label="Установка macOS"><h4 id="install-macos">macOS</h4><p>Откройте Терминал и выполните команду. Загрузчик выберет Apple Silicon или Intel.</p><pre><code>curl -fsSL https://ingvarconsulting.github.io/v8-runner-rust/install.sh | sh</code></pre></section>
+<section data-install-panel="windows" aria-label="Установка Windows"><h4 id="install-windows">Windows</h4><p>Откройте PowerShell и выполните команду. Поддерживается Windows Intel/AMD 64.</p><pre><code>irm https://ingvarconsulting.github.io/v8-runner-rust/install.ps1 | iex</code></pre></section>
+<section data-install-panel="linux" aria-label="Установка Linux"><h4 id="install-linux">Linux</h4><p>Откройте Bash или Zsh и выполните команду. Поддерживается Intel/AMD 64; нужны curl и tar.</p><pre><code>curl -fsSL https://ingvarconsulting.github.io/v8-runner-rust/install.sh | sh</code></pre></section>
+<p>Загрузчик скачивает последний выпуск, проверяет SHA-256 архива и программы, устанавливает её в пользовательский каталог и настраивает PATH. Права администратора не нужны.</p>
+<p>Для операций с базой понадобятся соответствующие утилиты платформы 1С.</p>
 </main>
-<script src="site.js?v=7" defer></script>
+<script src="site.js?v=26" defer></script>
 </body>
 </html>
