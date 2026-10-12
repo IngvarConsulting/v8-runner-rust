@@ -27,7 +27,8 @@
         $stage = Join-Path $bin ([Guid]::NewGuid().ToString() + '.exe')
         try {
             Copy-Item $source $stage
-            if (Test-Path $target) { [IO.File]::Replace($stage, $target, $null) }
+            # PowerShell coerces $null to an empty string for a .NET string parameter.
+            if (Test-Path $target) { [IO.File]::Replace($stage, $target, [System.Management.Automation.Language.NullString]::Value) }
             else { [IO.File]::Move($stage, $target) }
         } finally { if (Test-Path $stage) { Remove-Item $stage -Force } }
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
