@@ -102,6 +102,8 @@ try {
             [IO.File]::WriteAllText($Ready, [string]$listener.LocalEndpoint.Port)
             $body = [IO.File]::ReadAllBytes($Path)
             while ($true) {
+                # Yield while idle so Stop-Job can interrupt cleanup between requests.
+                while (-not $listener.Pending()) { Start-Sleep -Milliseconds 100 }
                 $client = $listener.AcceptTcpClient()
                 try {
                     $client.ReceiveTimeout = 5000
