@@ -18,6 +18,9 @@ case "$CI_SCOPE" in
         cargo test --locked --test cli_infobase_cross_platform
         cargo test --locked --bin v8-runner 'support::fs::tests::'
         windows_contract_tests=(
+          "platform::designer::tests::cf_exports_pass_windows_drive_paths_without_verbatim_prefix"
+          "platform::designer::tests::cf_exports_pass_windows_unc_paths_without_verbatim_prefix"
+          "platform::designer::tests::cf_exports_preserve_regular_windows_targets"
           "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::managed_detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::windows_client_owner::host_job_terminates_client_before_startup_handoff"
