@@ -322,7 +322,7 @@ impl FullPullControl for StdioControl {
             ExecutorKind::Attached => WireExecutorKind::Attached,
             ExecutorKind::Remote => WireExecutorKind::Remote,
         };
-        self.emit(Frame::<Value>::Selected {
+        self.emit::<Value>(Frame::Selected {
             version: VERSION,
             nonce: &self.nonce,
             provider: executor.provider,
@@ -346,7 +346,7 @@ impl FullPullControl for StdioControl {
             .lock()
             .map_err(|_| AppError::Runtime("publication state lock poisoned".into()))?
             .publication = Publication::Unknown;
-        self.emit(Frame::<Value>::Ready {
+        self.emit::<Value>(Frame::Ready {
             version: VERSION,
             nonce: &self.nonce,
             command: ready.command.as_str(),
@@ -634,7 +634,7 @@ mod tests {
         }
 
         let result = Envelope::ok("pull", 0, Value::Null);
-        let ready = serde_json::to_value(Frame::<Value>::Ready {
+        let ready = serde_json::to_value::<Frame<'_, Value>>(Frame::Ready {
             version: VERSION,
             nonce: &nonce,
             command: "pull",
