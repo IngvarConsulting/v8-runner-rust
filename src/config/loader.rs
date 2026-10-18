@@ -872,8 +872,11 @@ impl ConfigDirectoryChanges {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
         use windows_sys::Win32::Storage::FileSystem::{
-            FindFirstChangeNotificationW, GetDriveTypeW, DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK,
-            DRIVE_REMOVABLE, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
+            FindFirstChangeNotificationW, GetDriveTypeW, FILE_NOTIFY_CHANGE_DIR_NAME,
+            FILE_NOTIFY_CHANGE_FILE_NAME,
+        };
+        use windows_sys::Win32::System::WindowsProgramming::{
+            DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE,
         };
         let path = std::fs::canonicalize(project)?;
         let ordinary = normalize_windows_verbatim_path(&path);
