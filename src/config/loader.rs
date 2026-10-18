@@ -3111,6 +3111,8 @@ mod tests {
         std::fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
         let during = project.clone();
         let held = root.join("held-project");
+        let local_after_read = local.clone();
+        let held_after_read = held.clone();
         let result = super::with_declared_read_hook(
             move |point| {
                 if matches!(point, super::DeclaredReadPoint::BeforeRecheck) {
@@ -3124,7 +3126,8 @@ mod tests {
             || super::load_declared_infobases(&project),
         );
         assert_eq!(result.unwrap().len(), 1);
-        std::fs::remove_file(local).expect("the read releases its sharing restriction");
-        std::fs::rename(&project, held).expect("the read releases its directory binding");
+        std::fs::remove_file(local_after_read).expect("the read releases its sharing restriction");
+        std::fs::rename(&project, held_after_read)
+            .expect("the read releases its directory binding");
     }
 }
