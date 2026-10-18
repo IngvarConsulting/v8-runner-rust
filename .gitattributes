@@ -6,3 +6,6 @@ FORK_NOTICE.md text eol=lf
 # на Windows с `core.autocrlf=true` записи пришли бы с CRLF, блока полей гейт не нашёл бы
 # ни у одной, и проверка правил упала бы целиком. Перевод строки держит поэтому git.
 spec/rules/**/*.md text eol=lf
+
+# Порождённые формы сравниваются с артефактами побайтно на всех ОС.
+docs/schemas/**/*.json text eol=lf

@@ -1127,7 +1127,8 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), own);
 
-        let remote = legacy(&[("machine-b", Path::new("/srv/elsewhere"))]);
+        let remote_project = dir.path().join("elsewhere");
+        let remote = legacy(&[("machine-b", &remote_project)]);
         fs::write(&marker_path, &remote).expect("marker");
         let warned = check_as(
             &on("machine-a", "host", &config),
@@ -1138,7 +1139,10 @@ mod tests {
         )
         .expect("a write on a base of another copy runs");
         assert_eq!(warned.len(), 1, "{warned:?}");
-        assert!(warned[0].contains("/srv/elsewhere"), "{warned:?}");
+        assert!(
+            warned[0].contains(&remote_project.display().to_string()),
+            "{warned:?}"
+        );
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), remote);
 
         let gone = dir.path().join("gone");
@@ -1177,11 +1181,12 @@ mod tests {
         let base = base(dir.path());
         let config = project(&dir.path().join("copy"), &base);
         let marker_path = owner_marker_path(&base).expect("marker path");
+        let remote_project = dir.path().join("elsewhere");
         let marker = serde_json::json!({
             "version": 2,
             "owners": [
                 {"machine": super::machine_hash("machine-a"), "host": "host", "project": config.base_path, "since": "2026-10-01T00:00:00Z"},
-                {"machine": super::machine_hash("machine-b"), "host": "build-agent", "project": "/srv/elsewhere", "since": "2026-10-01T00:00:00Z"}
+                {"machine": super::machine_hash("machine-b"), "host": "build-agent", "project": remote_project, "since": "2026-10-01T00:00:00Z"}
             ]
         })
         .to_string();
@@ -1198,7 +1203,10 @@ mod tests {
 
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(
-            warned[0].contains("To free the infobase: delete the record of '/srv/elsewhere'"),
+            warned[0].contains(&format!(
+                "To free the infobase: delete the record of '{}'",
+                remote_project.display()
+            )),
             "{warned:?}"
         );
         assert_eq!(fs::read_to_string(&marker_path).expect("marker"), marker);
