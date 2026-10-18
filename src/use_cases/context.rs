@@ -215,6 +215,7 @@ pub struct ExecutionContext {
     session: std::sync::Arc<std::sync::Mutex<Option<SessionEndpoint>>>,
     /// Глобальные ключи командной строки, которые ведут к той же цели.
     command_line: CommandLineTarget,
+    full_pull: Option<std::sync::Arc<super::full_pull_publication::ExternalFullPull>>,
 }
 
 impl ExecutionContext {
@@ -228,6 +229,7 @@ impl ExecutionContext {
             work: WorkGiven::for_command(),
             session: std::sync::Arc::default(),
             command_line: CommandLineTarget::default(),
+            full_pull: None,
         }
     }
 
@@ -246,6 +248,20 @@ impl ExecutionContext {
     #[cfg(test)]
     pub fn mcp_http(command: CommandName) -> Self {
         Self::new(command, ExecutionTransport::McpHttp)
+    }
+
+    pub fn with_external_full_pull(
+        mut self,
+        publication: std::sync::Arc<super::full_pull_publication::ExternalFullPull>,
+    ) -> Self {
+        self.full_pull = Some(publication);
+        self
+    }
+
+    pub(crate) fn external_full_pull(
+        &self,
+    ) -> Option<&super::full_pull_publication::ExternalFullPull> {
+        self.full_pull.as_deref()
     }
 
     /// Returns the command being executed.

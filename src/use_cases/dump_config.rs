@@ -79,11 +79,19 @@ pub fn execute(
         transport = ?context.transport(),
         "executing dump use case"
     );
+    let outcome = if context.external_full_pull().is_some()
+        && (config.format != SourceFormat::Designer
+            || !matches!(args.mode, DumpModeRequest::Full)
+            || !args.discard_uncommitted
+            || args.source_set.is_none()
+            || !args.objects.is_empty())
+    {
+        Err(UseCaseFailure::without_payload(AppError::Validation("external publication requires one explicit full DESIGNER source set with replacement consent".into())))
+    } else {
+        coordinator::run_dump_with_context(context, config, args)
+    };
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            coordinator::run_dump_with_context(context, config, args),
-            context,
-        ),
+        crate::use_cases::provider_selection::stamp_session(outcome, context),
         context.work(),
     )
 }
@@ -163,6 +171,25 @@ fn run_dump(config: &AppConfig, args: &DumpArgs) -> UseCaseResult<DumpResult> {
     execute(&context, config, args)
 }
 
+fn prepare_full_dump(
+    context: &ExecutionContext,
+    resolved: &ResolvedDumpTarget,
+) -> Result<StagedPublication, AppError> {
+    if let Some(external) = context.external_full_pull() {
+        StagedPublication::externally_owned_dir(
+            external.stage(),
+            &resolved.platform_target_path,
+            &resolved.platform_target_identity,
+        )
+    } else {
+        StagedPublication::prepare_dir(
+            &resolved.platform_target_path,
+            &resolved.platform_target_identity,
+            ".dump-stage",
+        )
+    }
+}
+
 /// Seal the platform output before publication; only that tree may become the baseline.
 /// No storage is opened until publication succeeds, including its Git and cancellation guards.
 fn publish_full_dump(
@@ -180,6 +207,15 @@ fn publish_full_dump(
     if let Some(error) = interruption_before_publish(context, "dump publication") {
         return Err(publication.cleanup_failure(error));
     }
+    let external_binding = context
+        .external_full_pull()
+        .map(|_| {
+            super::full_pull_publication::PreparedPublicationBinding::capture(
+                publication.staging_path(),
+                &resolved.target_path,
+            )
+        })
+        .transpose()?;
 
     let snapshot = if config.format == SourceFormat::Designer {
         SourceSetInventory::new(config)
@@ -193,6 +229,90 @@ fn publish_full_dump(
     validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
     validate_full_dump_work_path(config, resolved)
         .map_err(|error| publication.cleanup_failure(error))?;
+
+    if let Some(external) = context.external_full_pull() {
+        let inventory = SourceSetInventory::new(config);
+        let source = inventory.designer_context(&resolved.source_set_name);
+        let version =
+            source.and_then(|source| super::version_file::RunnerVersionFile::of(config, source));
+        let version_snapshot = version
+            .as_ref()
+            .map(|version| version.prepare_from(publication.staging_path()));
+        let binding = external_binding.expect("external publication captured its binding");
+        binding.validate_stage(publication.staging_path())?;
+        let published_source = crate::change_detection::source_sets::SourceSetsService::new(config)
+            .designer_context_for_published_root(
+                &resolved.source_set_name,
+                binding.canonical_target(),
+            );
+        let snapshot_prepared = snapshot.as_ref().is_some_and(|prepared| prepared.is_ok());
+        let snapshot_warning = snapshot.as_ref().and_then(|prepared| prepared.as_ref().err()).map(|error| format!("hash memory preparation failed: {error}; published sources will need a repeated full pull"));
+        let mut ready = super::full_pull_publication::FullPullReady {
+            command: context.command(),
+            requested_mode: DumpMode::Full,
+            mode: ReportedDumpMode::Full,
+            extension: resolved.extension.as_deref(),
+            mode_reason: None,
+            provider_dispatched: false,
+            source_set: &resolved.source_set_name,
+            target: &resolved.target_path,
+            stage: publication.staging_path(),
+            snapshot_prepared,
+            snapshot_warning: snapshot_warning.as_deref(),
+        };
+        super::result::stamp_prepared_dispatch(&mut ready, context.work());
+        external.publish(&ready)?;
+        // Published is irreversible. Every following action is local and uses
+        // prepared stage bytes; pending cancellation cannot abandon this finish.
+        if let Err(error) = binding.validate_published(&resolved.target_path) {
+            external.memory_finished(super::full_pull_publication::MemoryCommit::NotSaved);
+            return Ok(DumpNotes::message(merge_optional_messages(
+                Some(format!("publication was acknowledged but baseline was not updated: {error}; repeat a full pull")),
+                super::interruption::deferred_interruption_warning_after(context, "dump publication completed"),
+            )));
+        }
+        let published_source = published_source.as_ref();
+        let mut warnings = Vec::new();
+        if let Some(prepared) = snapshot {
+            let result = prepared.and_then(|prepared| {
+                if let Some(source) = published_source {
+                    commit_full_snapshot(source, &config.work_path, &prepared)
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = result {
+                warnings.push(format!("sources published but hash memory was not updated: {error}; repeat a full pull"));
+            }
+        }
+        if let Some(source) = published_source {
+            if let Some(warning) = external.record_generation(source, &config.work_path) {
+                warnings.push(warning);
+            }
+        }
+        let published_version = published_source
+            .and_then(|source| super::version_file::RunnerVersionFile::of(config, source));
+        if let (Some(version), Some(prepared)) = (published_version, version_snapshot) {
+            match prepared.and_then(|prepared| version.record_prepared(prepared)) {
+                Ok(()) => {}
+                Err(error) => warnings.push(format!(
+                    "sources published but the runner version copy was not updated: {error}"
+                )),
+            }
+        }
+        external.memory_finished(if snapshot_prepared && warnings.is_empty() {
+            super::full_pull_publication::MemoryCommit::Saved
+        } else {
+            super::full_pull_publication::MemoryCommit::NotSaved
+        });
+        return Ok(DumpNotes::message(merge_optional_messages(
+            (!warnings.is_empty()).then(|| warnings.join("; ")),
+            super::interruption::deferred_interruption_warning_after(
+                context,
+                "dump publication completed",
+            ),
+        )));
+    }
 
     let published = publication
         .publish_dir(
@@ -542,11 +662,7 @@ fn run_full_dump_designer(
         target = %resolved.platform_target_path.display(),
         "running full dump via staging directory"
     );
-    let publication = StagedPublication::prepare_dir(
-        &resolved.platform_target_path,
-        &resolved.platform_target_identity,
-        ".dump-stage",
-    )?;
+    let publication = prepare_full_dump(context, resolved)?;
     let staging_dir = publication.staging_path().to_path_buf();
     debug!(path = %staging_dir.display(), "created dump staging directory");
 
@@ -568,6 +684,16 @@ fn run_full_dump_designer(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
+    if let Some(external) = context.external_full_pull() {
+        external.generation_after(helpers::read_dump_generation(
+            context,
+            config,
+            crate::domain::capability::Provider::Designer,
+            binary,
+            runner,
+            resolved,
+        ));
+    }
     let notes = publish_full_dump(context, config, resolved, &publication)?;
     Ok((dump_result, notes))
 }
@@ -671,11 +797,7 @@ fn run_full_dump_ibcmd(
         target = %resolved.platform_target_path.display(),
         "running full ibcmd dump via staging directory"
     );
-    let publication = StagedPublication::prepare_dir(
-        &resolved.platform_target_path,
-        &resolved.platform_target_identity,
-        ".dump-stage",
-    )?;
+    let publication = prepare_full_dump(context, resolved)?;
     let staging_dir = publication.staging_path().to_path_buf();
     debug!(path = %staging_dir.display(), "created dump staging directory");
 
@@ -690,6 +812,16 @@ fn run_full_dump_ibcmd(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
+    if let Some(external) = context.external_full_pull() {
+        external.generation_after(helpers::read_dump_generation(
+            context,
+            config,
+            crate::domain::capability::Provider::Ibcmd,
+            binary,
+            runner,
+            resolved,
+        ));
+    }
     let notes = publish_full_dump(context, config, resolved, &publication)?;
     Ok((dump_result, notes))
 }
@@ -1437,7 +1569,7 @@ mod tests {
         parse_external_dump_descriptor, resolve_target, run_dump, run_external_dump_designer,
         validate_publish_target, validate_supported_matrix, DUMP_BACKUP_PREFIX, DUMP_COMMAND,
         NON_PARTIAL_OBJECTS_ERROR, ORPHAN_TTL, PARTIAL_OBJECTS_REQUIRED_ERROR,
-        PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
+        PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR, VERSION_FILE_NAME,
     };
     use crate::config::model::{
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
@@ -1506,6 +1638,330 @@ mod tests {
         )
         .expect("stage");
         (dir, config, resolved, publication)
+    }
+
+    #[derive(Debug)]
+    struct ExternalPublisher {
+        cancel_after_publish: Option<CancellationToken>,
+        ready: Mutex<Option<(bool, bool)>>,
+        saved: Mutex<Option<crate::use_cases::full_pull_publication::MemoryCommit>>,
+    }
+
+    impl crate::use_cases::full_pull_publication::FullPullControl for ExternalPublisher {
+        fn authorize(
+            &self,
+            _: &crate::use_cases::full_pull_publication::FullPullExecutor<'_>,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+        fn publish(
+            &self,
+            ready: &crate::use_cases::full_pull_publication::FullPullReady<'_>,
+        ) -> Result<(), AppError> {
+            *self.ready.lock().expect("ready state") =
+                Some((ready.snapshot_prepared, ready.snapshot_warning.is_some()));
+            let backup = ready.target.with_extension("external-before");
+            fs::rename(ready.target, &backup)
+                .map_err(|error| AppError::Runtime(error.to_string()))?;
+            fs::rename(ready.stage, ready.target)
+                .map_err(|error| AppError::Runtime(error.to_string()))?;
+            fs::remove_dir_all(backup).map_err(|error| AppError::Runtime(error.to_string()))?;
+            if let Some(cancel) = &self.cancel_after_publish {
+                cancel.cancel();
+            }
+            Ok(())
+        }
+        fn memory_finished(&self, outcome: crate::use_cases::full_pull_publication::MemoryCommit) {
+            *self.saved.lock().expect("saved state") = Some(outcome);
+        }
+    }
+
+    #[test]
+    fn an_external_published_decision_finishes_memory_despite_a_late_cancel() {
+        use crate::change_detection::analyzer::{analyze_context, AnalysisOutcome};
+        use crate::domain::capability::Provider;
+        use crate::use_cases::full_pull_publication::{ExternalFullPull, MemoryCommit};
+        let (_dir, config, resolved, publication) = publication_fixture();
+        fs::write(
+            publication.staging_path().join(VERSION_FILE_NAME),
+            "prepared version bytes",
+        )
+        .expect("version file");
+        let cancel = CancellationToken::new();
+        let publisher = Arc::new(ExternalPublisher {
+            cancel_after_publish: Some(cancel.clone()),
+            ready: Mutex::new(None),
+            saved: Mutex::new(None),
+        });
+        let external = Arc::new(ExternalFullPull::new(
+            publication.staging_path().to_path_buf(),
+            publisher.clone(),
+        ));
+        external.generation_before(Provider::Designer, Some("0".repeat(40)));
+        external.generation_after(Some("0".repeat(40)));
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
+            .with_cancellation(cancel.clone())
+            .with_external_full_pull(external);
+        let result = super::publish_full_dump(&context, &config, &resolved, &publication)
+            .expect("published finish");
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("cancel")),
+            "{:?}",
+            result.message
+        );
+        assert!(cancel.is_cancelled());
+        assert_eq!(*publisher.ready.lock().unwrap(), Some((true, false)));
+        assert_eq!(*publisher.saved.lock().unwrap(), Some(MemoryCommit::Saved));
+        let inventory = super::SourceSetInventory::new(&config);
+        let source = inventory.designer_context("main").expect("source");
+        assert!(matches!(
+            analyze_context(source, &config.work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        let generation =
+            fs::read_to_string(config.work_path.join("infobases/origin/generation.json"))
+                .expect("generation record");
+        let generation: serde_json::Value =
+            serde_json::from_str(&generation).expect("generation JSON");
+        assert_eq!(
+            generation["main"]["identity"].as_str(),
+            source.storage_identity()
+        );
+        assert_eq!(
+            fs::read_to_string(
+                config
+                    .work_path
+                    .join("infobases/origin/dump-info/main/ConfigDumpInfo.xml")
+            )
+            .expect("prepared version copy"),
+            "prepared version bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_publication_rebinds_all_memory_after_replacing_a_source_symlink() {
+        use crate::change_detection::analyzer::{analyze_context, AnalysisOutcome};
+        use crate::domain::capability::Provider;
+        use crate::use_cases::full_pull_publication::{ExternalFullPull, MemoryCommit};
+        let (_dir, config, resolved, publication) = publication_fixture();
+        let original_directory = resolved.target_path.with_extension("original-directory");
+        fs::rename(&resolved.target_path, &original_directory).unwrap();
+        std::os::unix::fs::symlink(&original_directory, &resolved.target_path).unwrap();
+        let old_identity = super::SourceSetInventory::new(&config)
+            .designer_context("main")
+            .unwrap()
+            .storage_identity()
+            .unwrap()
+            .to_owned();
+        let resolved = resolve_target(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".into()),
+                extension: None,
+                objects: vec![],
+                discard_uncommitted: true,
+                force_way_out: ForceWayOut::PullForce,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        fs::write(
+            publication.staging_path().join(VERSION_FILE_NAME),
+            "prepared version",
+        )
+        .unwrap();
+        let publisher = Arc::new(ExternalPublisher {
+            cancel_after_publish: None,
+            ready: Mutex::new(None),
+            saved: Mutex::new(None),
+        });
+        let external = Arc::new(ExternalFullPull::new(
+            publication.staging_path().to_path_buf(),
+            publisher.clone(),
+        ));
+        external.generation_before(Provider::Designer, Some("0".repeat(40)));
+        external.generation_after(Some("0".repeat(40)));
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
+            .with_external_full_pull(external);
+        super::publish_full_dump(&context, &config, &resolved, &publication).unwrap();
+        assert_eq!(*publisher.saved.lock().unwrap(), Some(MemoryCommit::Saved));
+        assert!(!fs::symlink_metadata(&resolved.target_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(original_directory.join("Module.bsl")).unwrap(),
+            "old source"
+        );
+        let inventory = super::SourceSetInventory::new(&config);
+        let source = inventory.designer_context("main").unwrap();
+        assert_ne!(source.storage_identity(), Some(old_identity.as_str()));
+        assert!(matches!(
+            analyze_context(source, &config.work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        let memory = config.work_path.join("infobases/origin");
+        let generation: serde_json::Value =
+            serde_json::from_slice(&fs::read(memory.join("generation.json")).unwrap()).unwrap();
+        assert_eq!(
+            generation["main"]["identity"].as_str(),
+            source.storage_identity()
+        );
+        assert_eq!(
+            fs::read_to_string(memory.join("dump-info/main/identity")).unwrap(),
+            source.storage_identity().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(memory.join("dump-info/main/ConfigDumpInfo.xml")).unwrap(),
+            "prepared version"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_publication_never_rebinds_prepared_memory_to_a_retargeted_infobase() {
+        use crate::change_detection::analyzer::{snapshot_memory, SnapshotMemory};
+        use crate::domain::capability::Provider;
+        use crate::use_cases::full_pull_publication::{
+            ExternalFullPull, FullPullControl, FullPullExecutor, FullPullReady, MemoryCommit,
+        };
+
+        #[derive(Debug)]
+        struct RetargetBase {
+            publisher: ExternalPublisher,
+            link: PathBuf,
+            other: PathBuf,
+        }
+        impl FullPullControl for RetargetBase {
+            fn authorize(&self, executor: &FullPullExecutor<'_>) -> Result<(), AppError> {
+                self.publisher.authorize(executor)
+            }
+            fn publish(&self, ready: &FullPullReady<'_>) -> Result<(), AppError> {
+                self.publisher.publish(ready)?;
+                fs::remove_file(&self.link).unwrap();
+                std::os::unix::fs::symlink(&self.other, &self.link).unwrap();
+                Ok(())
+            }
+            fn memory_finished(&self, outcome: MemoryCommit) {
+                self.publisher.memory_finished(outcome);
+            }
+        }
+
+        let (directory, mut config, resolved, publication) = publication_fixture();
+        let first = directory.path().join("database-a");
+        let second = directory.path().join("database-b");
+        let link = directory.path().join("database");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+        config.infobase.connection = format!("File={}", link.display());
+        let inventory = super::SourceSetInventory::new(&config);
+        let source_a = inventory.designer_context("main").unwrap();
+        let expected_identity = source_a.storage_identity().unwrap().to_owned();
+        fs::write(
+            publication.staging_path().join(VERSION_FILE_NAME),
+            "prepared version",
+        )
+        .unwrap();
+        let publisher = Arc::new(RetargetBase {
+            publisher: ExternalPublisher {
+                cancel_after_publish: None,
+                ready: Mutex::new(None),
+                saved: Mutex::new(None),
+            },
+            link,
+            other: second,
+        });
+        let external = Arc::new(ExternalFullPull::new(
+            publication.staging_path().to_path_buf(),
+            publisher.clone(),
+        ));
+        external.generation_before(Provider::Designer, Some("0".repeat(40)));
+        external.generation_after(Some("0".repeat(40)));
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
+            .with_external_full_pull(external);
+        super::publish_full_dump(&context, &config, &resolved, &publication).unwrap();
+        assert_eq!(
+            *publisher.publisher.saved.lock().unwrap(),
+            Some(MemoryCommit::Saved)
+        );
+        assert!(matches!(
+            snapshot_memory(source_a, &config.work_path),
+            SnapshotMemory::Own
+        ));
+        let other_inventory = super::SourceSetInventory::new(&config);
+        let source_b = other_inventory.designer_context("main").unwrap();
+        assert_ne!(
+            source_b.storage_identity(),
+            Some(expected_identity.as_str())
+        );
+        assert!(matches!(
+            snapshot_memory(source_b, &config.work_path),
+            SnapshotMemory::Foreign
+        ));
+        let memory = config.work_path.join("infobases/origin");
+        let generation: serde_json::Value =
+            serde_json::from_slice(&fs::read(memory.join("generation.json")).unwrap()).unwrap();
+        assert_eq!(
+            generation["main"]["identity"].as_str(),
+            Some(expected_identity.as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(memory.join("dump-info/main/identity")).unwrap(),
+            expected_identity
+        );
+    }
+
+    #[test]
+    fn external_publication_can_accept_a_failed_snapshot_scan_without_fabricating_memory() {
+        use crate::change_detection::analyzer::rescan_and_commit_full;
+        use crate::use_cases::full_pull_publication::{ExternalFullPull, MemoryCommit};
+        let (_dir, config, resolved, publication) = publication_fixture();
+        let inventory = super::SourceSetInventory::new(&config);
+        let source = inventory.designer_context("main").expect("source");
+        rescan_and_commit_full(source, &config.work_path).expect("old memory");
+        let memory_path = source.storage_path(&config.work_path).expect("memory path");
+        let before = fs::read(&memory_path).expect("old memory bytes");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(publication.staging_path().join("Module.bsl"))
+            .expect("staged file");
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH - Duration::from_secs(1))
+            .expect("pre-epoch file time");
+        assert!(file.metadata().unwrap().modified().unwrap() < std::time::SystemTime::UNIX_EPOCH);
+        let publisher = Arc::new(ExternalPublisher {
+            cancel_after_publish: None,
+            ready: Mutex::new(None),
+            saved: Mutex::new(None),
+        });
+        let external = Arc::new(ExternalFullPull::new(
+            publication.staging_path().to_path_buf(),
+            publisher.clone(),
+        ));
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
+            .with_external_full_pull(external);
+        let warning = super::publish_full_dump(&context, &config, &resolved, &publication)
+            .expect("publication succeeds")
+            .message
+            .expect("memory warning");
+        assert!(warning.contains("sources published"), "{warning}");
+        assert!(warning.contains("hash memory was not updated"), "{warning}");
+        assert_eq!(*publisher.ready.lock().unwrap(), Some((false, true)));
+        assert_eq!(
+            *publisher.saved.lock().unwrap(),
+            Some(MemoryCommit::NotSaved)
+        );
+        assert_eq!(fs::read(memory_path).expect("memory unchanged"), before);
+        assert_eq!(
+            fs::read_to_string(resolved.target_path.join("Module.bsl")).expect("published source"),
+            "database source"
+        );
     }
 
     #[test]

@@ -2,6 +2,8 @@
 pub mod args;
 /// CLI-to-use-case execution adapter and command rendering boundary.
 pub mod execute;
+/// Process protocol for caller-controlled full-pull publication.
+pub(crate) mod external_pull;
 /// Admissibility of the global keys, by leaf of the command tree.
 pub mod global_flags;
 /// CLI-facing output helpers.

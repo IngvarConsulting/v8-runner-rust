@@ -24,6 +24,7 @@ pub(super) struct StagedPublication {
     run_id: String,
     target_identity: String,
     previous_target_present: bool,
+    externally_owned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,25 @@ pub(super) struct StagedPublicationError {
 }
 
 impl StagedPublication {
+    pub fn externally_owned_dir(
+        stage: &Path,
+        target: &Path,
+        target_identity: &str,
+    ) -> Result<Self, AppError> {
+        let metadata = std::fs::symlink_metadata(stage).map_err(|error| {
+            AppError::Validation(format!("cannot inspect external full-pull stage: {error}"))
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(AppError::Validation(
+                "external full-pull stage must be an existing directory".into(),
+            ));
+        }
+        let mut publication =
+            Self::new(target, target_identity, stage.to_path_buf(), make_run_id());
+        publication.externally_owned = true;
+        Ok(publication)
+    }
+
     pub fn prepare_dir(
         target_path: &Path,
         target_identity: &str,
@@ -125,7 +145,11 @@ impl StagedPublication {
     }
 
     pub fn cleanup_failure(&self, error: AppError) -> AppError {
-        cleanup_staging_path(&self.staging_path, error)
+        if self.externally_owned {
+            error
+        } else {
+            cleanup_staging_path(&self.staging_path, error)
+        }
     }
 
     pub fn publish_dir(
@@ -266,6 +290,7 @@ impl StagedPublication {
             run_id,
             target_identity: target_identity.to_owned(),
             previous_target_present: target_path.exists(),
+            externally_owned: false,
         }
     }
 

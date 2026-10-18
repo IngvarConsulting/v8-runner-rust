@@ -689,6 +689,80 @@ mod tests {
         ThisCopy::on(Some(machine), Some(host.to_owned()), &config.base_path)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_whose_config_pair_changes_is_kept_alive_until_a_coherent_read() {
+        use crate::config::loader::{with_declared_read_hook, DeclaredReadPoint};
+        let directory = tempdir().unwrap();
+        let base = base(directory.path());
+        let first = project(&directory.path().join("first"), &base);
+        let first_copy = on("machine", "host", &first);
+        check_as(
+            &first_copy,
+            &first,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .unwrap();
+        let owner = marker(&base).owners.remove(0);
+        let other = project(&directory.path().join("other"), &base);
+        let other_copy = on("machine", "host", &other);
+        let primary = owner.project.join("v8project.yaml");
+        let local = owner.project.join("v8project.local.yaml");
+        fs::write(&primary, "format: DESIGNER\n").unwrap();
+        let original = fs::read(&primary).unwrap();
+        let held = owner.project.join("previous-primary");
+        let local_held = owner.project.join("previous-local");
+        let result = with_declared_read_hook(
+            move |point| match point {
+                DeclaredReadPoint::ProjectCaptured => {
+                    fs::rename(&primary, &held).unwrap();
+                    fs::write(&primary, "null\n").unwrap();
+                    fs::rename(&local, &local_held).unwrap();
+                }
+                DeclaredReadPoint::LocalCaptured => {
+                    fs::remove_file(&primary).unwrap();
+                    fs::write(&primary, &original).unwrap();
+                    fs::rename(&local_held, &local).unwrap();
+                }
+                DeclaredReadPoint::BeforeRecheck | DeclaredReadPoint::AfterProjectRecheck => {}
+            },
+            || super::standing(&other_copy, &owner, &base),
+        );
+        assert!(matches!(
+            result,
+            super::Standing::Alive(super::Alive::Unreadable(_))
+        ));
+        assert!(matches!(
+            super::standing(&other_copy, &owner, &base),
+            super::Standing::Alive(super::Alive::Declares)
+        ));
+
+        let local = owner.project.join("v8project.local.yaml");
+        fs::remove_file(&local).unwrap();
+        assert!(matches!(
+            super::standing(&other_copy, &owner, &base),
+            super::Standing::Gone(super::Gone::NoLongerDeclares)
+        ));
+        fs::write(
+            &local,
+            "infobases: [\nsecret: keep-this-out-of-the-answer\n",
+        )
+        .unwrap();
+        let super::Standing::Alive(super::Alive::Unreadable(reason)) =
+            super::standing(&other_copy, &owner, &base)
+        else {
+            panic!("malformed config must keep its owner alive")
+        };
+        assert!(!reason.contains("keep-this-out-of-the-answer"));
+        let this = with_declared_read_hook(
+            |_| panic!("this copy must not parse its own projection"),
+            || super::standing(&first_copy, &owner, &base),
+        );
+        assert!(matches!(this, super::Standing::This));
+    }
+
     /// Машину называет её идентификатор, а не имя хоста: после смены имени копия узнаёт
     /// себя, а копию этой машины, чей каталог исчез, сменяет как ушедшую — а не держит как
     /// копию с другой машины.

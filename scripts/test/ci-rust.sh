@@ -12,11 +12,14 @@ case "$CI_SCOPE" in
   contract)
     case "$TARGET_OS_LABEL" in
       Windows|MINGW*|MSYS*|CYGWIN*)
-        echo "Windows contract scope runs native infobase export CLI smoke, support::fs unit tests, and selected OS regressions; full cargo test remains Linux- and macOS-owned until the Windows test suite is hardened."
+        echo "Windows contract scope runs native infobase export and external full-pull CLI tests, support::fs unit tests, and selected OS regressions."
         # Сборочная проверка сюда не входит: на Windows шаг Lint в ci.yml прогоняет
         # `cargo clippy --locked --bins`, а тестовые цели собирает сам `cargo test` ниже.
         cargo test --locked --test cli_infobase_cross_platform
+        cargo test --locked --test cli_external_full_pull
         cargo test --locked --bin v8-runner 'support::fs::tests::'
+        cargo test --locked --bin v8-runner 'config::loader::tests::declared_infobases_'
+        cargo test --locked --bin v8-runner 'use_cases::infobase_owner::tests::'
         windows_contract_tests=(
           "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::managed_detached_child_does_not_hold_redirected_stdout_open"

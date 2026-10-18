@@ -387,11 +387,18 @@ carries_dispatch!(
     crate::domain::load::LoadResult,
     crate::domain::launch::LaunchResult,
     crate::domain::publish::PublishResult,
+    crate::use_cases::full_pull_publication::FullPullReady<'_>,
 );
 
-/// Ставит `provider_dispatched` ответа из отметки работы команды. Это единственное место, где
-/// признак получает значение: сценарии пишут в конструкторах `false`, а вход сценария отдаёт
-/// исход через этот штамп, так что ни CLI, ни MCP не видят признака, решённого по месту.
+/// The publisher inspects this intermediate receipt before the command can finish.
+/// Like the final answer, it takes its dispatch fact only from the platform's mark.
+pub(crate) fn stamp_prepared_dispatch<T: CarriesDispatch>(prepared: &mut T, work: &WorkGiven) {
+    prepared.stamp_work(work);
+}
+
+/// Ставит `provider_dispatched` итогового ответа из отметки работы команды. Сценарии пишут
+/// в конструкторах `false`, а вход отдаёт исход через этот штамп; промежуточную квитанцию
+/// публикации отмечает `stamp_prepared_dispatch` через того же владельца `stamp_work`.
 pub(crate) fn stamp_dispatch<T: CarriesDispatch>(
     mut outcome: UseCaseResult<T>,
     work: &WorkGiven,
@@ -467,6 +474,30 @@ mod tests {
 
     fn refusal() -> AppError {
         AppError::Runtime("the executor refused".to_owned())
+    }
+
+    #[test]
+    fn a_prepared_full_pull_receipt_takes_dispatch_only_from_the_actual_work_mark() {
+        use crate::domain::dump::{DumpMode, ReportedDumpMode};
+        let work = WorkGiven::for_command();
+        let mut ready = crate::use_cases::full_pull_publication::FullPullReady {
+            command: crate::use_cases::context::CommandName::Dump,
+            requested_mode: DumpMode::Full,
+            mode: ReportedDumpMode::Full,
+            extension: None,
+            mode_reason: None,
+            provider_dispatched: false,
+            source_set: "main",
+            target: std::path::Path::new("sources"),
+            stage: std::path::Path::new("stage"),
+            snapshot_prepared: true,
+            snapshot_warning: None,
+        };
+        super::stamp_prepared_dispatch(&mut ready, &work);
+        assert!(!ready.provider_dispatched);
+        work.mark_work_given();
+        super::stamp_prepared_dispatch(&mut ready, &work);
+        assert!(ready.provider_dispatched);
     }
 
     /// Отказ отвечает формой команды, только когда исполнитель уже получил работу: до неё —

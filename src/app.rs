@@ -89,8 +89,7 @@ pub fn run() -> i32 {
     };
     cli.command = canonical_command(cli.command);
     let output_format = cli_output_format(cli.json_message);
-    if let Some(error) =
-        global_flags::refusal(&leaf, cli.dry_run, cli.infobase.as_deref()).or_else(|| {
+    let startup_refusal = global_flags::refusal(&leaf, cli.dry_run, cli.infobase.as_deref()).or_else(|| {
             // Очистка рабочего каталога и превью об одном каталоге спорят одинаково у всякой
             // команды, поэтому спрашивается это один раз и до того, как каталог тронут.
             (cli.dry_run && cli.clean_before_execution).then(|| {
@@ -99,8 +98,13 @@ pub fn run() -> i32 {
                     "--clean-before-execution cannot be combined with --dry-run because preview must not modify workPath",
                 )
             })
-        })
-    {
+        });
+    if let Command::Dump(args) = &cli.command {
+        if args.publication_stdio.is_some() {
+            return crate::cli::external_pull::run(&cli, args, startup_refusal);
+        }
+    }
+    if let Some(error) = startup_refusal {
         return render_startup_refusal(&leaf, &cli.command, cli.no_color, output_format, error);
     }
 
@@ -325,7 +329,7 @@ pub fn run() -> i32 {
     }
 }
 
-fn load_cli_config(
+pub(crate) fn load_cli_config(
     cli: &Cli,
 ) -> Result<crate::config::loader::LoadedConfig, crate::config::loader::ConfigLoadError> {
     let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
@@ -801,7 +805,7 @@ fn map_config_format(value: &str) -> ConfigFormatRequest {
 /// Глобальные ключи, которыми командная строка попадёт в ту же цель, что этот запуск:
 /// конфиг абсолютным путём, база не по умолчанию и переопределённый рабочий каталог.
 /// Совет отказа, выполненный буквально из другого каталога, бьёт туда же.
-fn command_line_target(
+pub(crate) fn command_line_target(
     cli: &Cli,
     config_path: Option<std::path::PathBuf>,
     config: &crate::config::model::AppConfig,

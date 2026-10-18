@@ -1,0 +1,908 @@
+{
+  "$defs": {
+    "ArtifactKind": {
+      "description": "Stable artifact classification for runner/package outputs.",
+      "oneOf": [
+        {
+          "enum": [
+            "run_directory",
+            "config",
+            "package",
+            "report",
+            "runner_log",
+            "platform_log",
+            "sentinel"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "other"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Reference to a single retained artifact.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ArtifactSet": {
+      "additionalProperties": false,
+      "description": "A retained artifact collection for a single execution.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "root_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DumpMode": {
+      "enum": [
+        "FULL",
+        "INCREMENTAL",
+        "PARTIAL"
+      ],
+      "type": "string"
+    },
+    "DumpModeReason": {
+      "description": "Почему случившийся режим не тот, что просили.",
+      "oneOf": [
+        {
+          "const": "version_file",
+          "description": "Файла версий нет или версия формата в нём не распознана: выгрузка полная.",
+          "type": "string"
+        },
+        {
+          "const": "foreign_format",
+          "description": "Версия формата в файле версий не та, что пишет платформа: выгрузка полная.",
+          "type": "string"
+        },
+        {
+          "const": "platform_forecast",
+          "description": "Платформа предсказала полную выгрузку (`FullDump`, `modified: all`).",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Прогноз не распознан или не получен: режим не известен.",
+          "type": "string"
+        }
+      ]
+    },
+    "Envelope": {
+      "additionalProperties": false,
+      "description": "Shared machine-readable command payload for CLI JSON and MCP structured content.",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "data": true,
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvelopeError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/StepResult"
+          },
+          "type": "array"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ok",
+        "command",
+        "duration_ms",
+        "data",
+        "warnings",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "EnvelopeError": {
+      "additionalProperties": false,
+      "description": "Structured business error metadata carried by machine-readable command envelopes.",
+      "properties": {
+        "base_generation": {
+          "description": "Поколение конфигурации базы; заполняется отказом `non_fast_forward`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "kind": {
+          "$ref": "#/$defs/ErrorKind"
+        },
+        "local_generation": {
+          "description": "Поколение, записанное после прошлого обмена; заполняется тем же отказом.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "next": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextStep"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Шаг, которым вызывающий выходит из отказа. Проза остаётся человеку."
+        }
+      },
+      "required": [
+        "code",
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "description": "Код отказа — та же причина подробнее. Набор закрыт вместе с родом.",
+      "oneOf": [
+        {
+          "enum": [
+            "capability_unavailable",
+            "environment_unavailable",
+            "workspace_busy",
+            "invalid_output",
+            "cancelled",
+            "timed_out",
+            "invalid_argument",
+            "unsupported_value",
+            "runtime_failure",
+            "platform_failure"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "subject",
+          "description": "Предмет не тот, и другим он не станет.",
+          "type": "string"
+        },
+        {
+          "const": "target",
+          "description": "Не для этой цели.",
+          "type": "string"
+        },
+        {
+          "const": "soon",
+          "description": "Пока не умеет.",
+          "type": "string"
+        },
+        {
+          "const": "infobase_busy",
+          "description": "Файловую базу держит другая команда; как `workspace_busy`, можно повторить.",
+          "type": "string"
+        },
+        {
+          "const": "non_fast_forward",
+          "description": "Пара к роду `non_fast_forward`: база ушла вперёд записанного поколения.",
+          "type": "string"
+        },
+        {
+          "const": "no_memory",
+          "description": "Пара к роду `no_memory`: памяти о базе нет.",
+          "type": "string"
+        }
+      ]
+    },
+    "ErrorKind": {
+      "description": "Род отказа. Набор закрыт: новый род приходит вместе с версией конверта, а не молча.",
+      "oneOf": [
+        {
+          "enum": [
+            "capability",
+            "environment",
+            "workspace",
+            "invalid_output",
+            "interruption",
+            "validation",
+            "runtime",
+            "platform"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "non_fast_forward",
+          "description": "Отправка в базу, ушедшую вперёд записанного поколения.",
+          "type": "string"
+        },
+        {
+          "const": "no_memory",
+          "description": "Отправка в базу, о которой у рабочей копии нет памяти.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionError": {
+      "additionalProperties": false,
+      "description": "Structured execution error that can point to related artifacts.",
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "details": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ExecutionStepKind": {
+      "description": "Stable pipeline vocabulary for significant execution blocks.",
+      "enum": [
+        "validation",
+        "resolve_target",
+        "prepare_workspace",
+        "platform_command",
+        "parse_output",
+        "publish",
+        "cleanup",
+        "diagnostics",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ExecutionStepStatus": {
+      "description": "Richer step status beyond the legacy boolean `ok`.",
+      "enum": [
+        "succeeded",
+        "failed",
+        "skipped",
+        "degraded"
+      ],
+      "type": "string"
+    },
+    "Executor": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executable": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/WireExecutorKind"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Frame": {
+      "description": "One closed output type owns both serialization and the generated wire schema.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "executor": {
+              "$ref": "#/$defs/Executor"
+            },
+            "nonce": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "phase": {
+              "const": "selected",
+              "type": "string"
+            },
+            "provider": {
+              "$ref": "#/$defs/ProviderReceipt"
+            },
+            "version": {
+              "format": "uint32",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "phase",
+            "version",
+            "nonce",
+            "provider",
+            "executor"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "extension": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mode": {
+              "$ref": "#/$defs/ReportedDumpMode"
+            },
+            "mode_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DumpModeReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "nonce": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "phase": {
+              "const": "ready",
+              "type": "string"
+            },
+            "provider_dispatched": {
+              "type": "boolean"
+            },
+            "requested_mode": {
+              "$ref": "#/$defs/DumpMode"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/Snapshot"
+            },
+            "snapshot_warning": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_set": {
+              "type": "string"
+            },
+            "stage_path": {
+              "type": "string"
+            },
+            "target_path": {
+              "type": "string"
+            },
+            "version": {
+              "format": "uint32",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "phase",
+            "version",
+            "nonce",
+            "command",
+            "requested_mode",
+            "mode",
+            "provider_dispatched",
+            "source_set",
+            "target_path",
+            "stage_path",
+            "snapshot"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "memory": {
+              "$ref": "#/$defs/Memory"
+            },
+            "nonce": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "phase": {
+              "const": "terminal",
+              "type": "string"
+            },
+            "publication": {
+              "$ref": "#/$defs/Publication"
+            },
+            "result": {
+              "$ref": "#/$defs/Envelope"
+            },
+            "version": {
+              "format": "uint32",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "phase",
+            "version",
+            "nonce",
+            "publication",
+            "memory",
+            "result"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Memory": {
+      "enum": [
+        "unchanged",
+        "saved",
+        "not_saved"
+      ],
+      "type": "string"
+    },
+    "NextStep": {
+      "additionalProperties": false,
+      "description": "Шаг, которым вызывающий выходит из отказа: команда, при нужде набор исходников и ключи.\n\nПоле отвечает машине; человеку остаётся текст сообщения, и он не сокращается.",
+      "properties": {
+        "command": {
+          "description": "Имя команды словаря, как его печатает конверт: `launch web`, `pull`, `init`.",
+          "type": "string"
+        },
+        "keys": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Ключи команды со значениями: `--mode` → `combine`.",
+          "type": "object"
+        },
+        "source_set": {
+          "description": "Набор исходников, когда шаг относится к одному набору.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "Provider": {
+      "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
+      "oneOf": [
+        {
+          "const": "designer",
+          "description": "Конфигуратор пакетным процессом на операцию.",
+          "type": "string"
+        },
+        {
+          "const": "agent",
+          "description": "Агентский shell: Конфигуратор в агентском режиме или шлюз автономного сервера.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd",
+          "description": "Утилита `ibcmd`.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd-rs",
+          "description": "Конвертер XML ↔ CF без платформы.",
+          "type": "string"
+        },
+        {
+          "const": "webinst",
+          "description": "Публикация базы на веб-сервере.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProviderOrigin": {
+      "description": "Откуда взялся выбранный исполнитель.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Первый готовый из цепочки умолчаний.",
+          "properties": {
+            "kind": {
+              "const": "default",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Назначен ключом `providers.<операция>` в названном файле.",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "override",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProviderReceipt": {
+      "additionalProperties": false,
+      "description": "Квитанция о выборе исполнителя — одна форма у всех операций.\n\nОбъясняет принятое решение и не предлагает другого: неиспользованные альтернативы\nне перечисляются, потому что выбор вызывающему не принадлежит. `selected: null`\nзначит, что выбор состоялся и никто не подошёл: каждый пропущенный назван с причиной.",
+      "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Точка входа сессии агента, через которую шло исполнение. Нет — сессия не\nоткрывалась: исполнял процесс платформы, это превью или отказ до подключения."
+        },
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin"
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skipped": {
+          "items": {
+            "$ref": "#/$defs/SkippedProvider"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin"
+      ],
+      "type": "object"
+    },
+    "Publication": {
+      "enum": [
+        "not_published",
+        "published",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "PublicationDecision": {
+      "enum": [
+        "published",
+        "rejected"
+      ],
+      "type": "string"
+    },
+    "Reply": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "decision": {
+              "$ref": "#/$defs/SelectionDecision"
+            },
+            "nonce": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "phase": {
+              "const": "selected",
+              "type": "string"
+            },
+            "version": {
+              "format": "uint32",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "phase",
+            "version",
+            "nonce",
+            "decision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "decision": {
+              "$ref": "#/$defs/PublicationDecision"
+            },
+            "nonce": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "phase": {
+              "const": "ready",
+              "type": "string"
+            },
+            "version": {
+              "format": "uint32",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "phase",
+            "version",
+            "nonce",
+            "decision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ReportedDumpMode": {
+      "description": "Случившийся режим выгрузки в ответе. В отличие от [`DumpMode`] знает «неизвестен»:\nпрогноз платформы не распознан или не получен, и обещать «по изменившемуся» нельзя.\nПлана с таким режимом не бывает, поэтому значение живёт только в ответе.",
+      "enum": [
+        "FULL",
+        "INCREMENTAL",
+        "PARTIAL",
+        "UNKNOWN"
+      ],
+      "type": "string"
+    },
+    "SelectionDecision": {
+      "enum": [
+        "continue",
+        "reject"
+      ],
+      "type": "string"
+    },
+    "SessionEndpoint": {
+      "additionalProperties": false,
+      "description": "Точка входа открытой сессии: режим и `host:port`, к которому раннер подключился.\n\nАдрес строится из разобранных хоста и порта, а не из записи конфига, поэтому\nучётных данных в нём нет: ни `user:pass@`, ни пароля строки соединения.",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/SessionMode"
+        }
+      },
+      "required": [
+        "mode",
+        "address"
+      ],
+      "type": "object"
+    },
+    "SessionMode": {
+      "description": "Как раннер добрался до точки входа агента.",
+      "oneOf": [
+        {
+          "const": "managed",
+          "description": "Агента Конфигуратора поднял сам раннер.",
+          "type": "string"
+        },
+        {
+          "const": "attached",
+          "description": "Агент Конфигуратора поднят не раннером, раннер к нему подключился.",
+          "type": "string"
+        },
+        {
+          "const": "gate",
+          "description": "SSH-шлюз автономного сервера.",
+          "type": "string"
+        }
+      ]
+    },
+    "SkippedProvider": {
+      "additionalProperties": false,
+      "description": "Исполнитель, пропущенный до выбранного, и почему.",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Snapshot": {
+      "enum": [
+        "prepared",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "StepResult": {
+      "additionalProperties": false,
+      "description": "A transport-neutral execution step shared by CLI envelopes and use-case payloads.",
+      "properties": {
+        "artifacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/ExecutionError"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExecutionStepKind"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ExecutionStepStatus"
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "ok",
+        "status",
+        "kind",
+        "duration_ms"
+      ],
+      "type": "object"
+    },
+    "WireExecutorKind": {
+      "enum": [
+        "local",
+        "attached",
+        "remote"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/full-pull-publication.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/Frame"
+    },
+    {
+      "$ref": "#/$defs/Reply"
+    }
+  ],
+  "title": "v8-runner external full-pull publication protocol"
+}

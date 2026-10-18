@@ -568,6 +568,10 @@ pub enum TestScope {
     after_help = "Without keys: incremental dump - changed objects are written over the source tree; in a Designer-format project nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded, and the answer names them.\nEDT-format project: every dump replaces the whole project directory, with or without keys.\nWithout --force, in any format, uncommitted work there makes the dump refuse before the platform starts, and so does a source directory outside git that holds files: commit or stash it and repeat, or run the full replacement the refusal names: `pull <SET> --force` for the same set with the same global options and without --object (it discards that work). --dry-run names what would be lost.\nWith --all: every configuration and extension set in turn, each as `pull <SET>` (with --force, each one replaced); the infobase is asked which extensions it has, and each one without a set is declared in v8project.yaml as src/ext/<Name> once it has been pulled there (relative to basePath); the project with the new sets is validated before the first dump. --dry-run reads nothing from the infobase: it previews the configuration set, names the extension sets that would be pulled if installed and the src/ext/<Name> template."
 )]
 pub struct DumpArgs {
+    /// Let a caller authorize the executor and publish a full dump through versioned JSONL stdin/stdout.
+    #[arg(long, value_name = "STAGE-DIRECTORY", requires = "discard_uncommitted", conflicts_with_all = ["json_message", "all", "objects", "mode"])]
+    pub publication_stdio: Option<std::path::PathBuf>,
+
     /// Previous mode key; hidden from help for one release cycle. `incremental` and
     /// `partial` mean the same as no key; `full` is refused in favour of `--force`.
     #[arg(long, hide = true, value_enum)]

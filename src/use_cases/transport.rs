@@ -54,6 +54,28 @@ pub fn dispatch_with_workspace_lock<TResult>(
     Ok(run())
 }
 
+/// Shared CLI boundary: previews only inspect ownership; execution retains both
+/// command locks. The adapter receives the same notes without printing them here.
+pub(crate) fn dispatch_with_workspace_boundary<TResult>(
+    config: &AppConfig,
+    command: CommandName,
+    base: BaseAccess,
+    preview: bool,
+    before_dispatch: impl FnOnce(&[BoundaryNote]) -> Result<(), UseCaseError>,
+    run: impl FnOnce() -> TResult,
+) -> Result<TResult, BoundaryRefusal> {
+    if preview {
+        let notes = preview_boundary(config, command, base)?;
+        before_dispatch(&notes).map_err(|error| BoundaryRefusal {
+            phase: InfobaseTransferPhase::WorkspacePreparation,
+            error,
+        })?;
+        Ok(run())
+    } else {
+        dispatch_with_workspace_lock(config, command, base, before_dispatch, run)
+    }
+}
+
 /// Та же граница для асинхронного сценария: замки держатся, пока сценарий не дошёл до
 /// конечного состояния, и снимаются вместе с его будущим — раньше, чем вызывающий
 /// отпустит что-то своё. Сценарий создаётся уже под замками; то, что граница говорит

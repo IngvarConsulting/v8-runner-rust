@@ -118,6 +118,45 @@ pub(super) fn run_dump_with_context(
                 return Err(DumpExecutionFailure::with_payload(error, result));
             }
         };
+    if let Some(external) = context.external_full_pull() {
+        use crate::use_cases::full_pull_publication::{ExecutorKind, FullPullExecutor};
+        let remote = config
+            .infobase
+            .standalone
+            .as_ref()
+            .and_then(|base| base.gate.as_deref());
+        let attached = config.tools.designer_agent.attach.as_deref();
+        let (kind, endpoint) = if selected.provider != Provider::Agent {
+            (ExecutorKind::Local, None)
+        } else if remote.is_some() {
+            (ExecutorKind::Remote, remote)
+        } else if attached.is_some() {
+            (ExecutorKind::Attached, attached)
+        } else {
+            (ExecutorKind::Local, None)
+        };
+        if let Err(error) = external.authorize(&FullPullExecutor {
+            provider: &selected.receipt,
+            kind,
+            executable: selected
+                .location
+                .as_ref()
+                .map(|location| location.path.as_path()),
+            endpoint,
+        }) {
+            let mut result = empty_result(
+                mode,
+                started,
+                args.source_set.clone(),
+                args.extension.clone(),
+                selectors.clone(),
+                Some(resolved.target_path.clone()),
+                Some(error.to_string()),
+            );
+            result.provider = Some(selected.receipt);
+            return Err(DumpExecutionFailure::with_payload(error, result));
+        }
+    }
     let receipt = selected.receipt.clone();
     let outcome = run_dump_selected(
         context,
@@ -264,14 +303,26 @@ fn run_dump_selected(
         return Ok(preview);
     }
 
-    let lock_guard = match acquire_advisory_lock(&resolved.lock_path) {
-        Ok(lock_guard) => lock_guard,
-        Err(error) => {
-            let message = format!(
+    // The opt-in caller supplies public ancestors before Continue. Taking the
+    // ordinary target lock must not create them for it.
+    let target_lock = if context.external_full_pull().is_some()
+        && !resolved.lock_path.parent().is_some_and(Path::is_dir)
+    {
+        Err(AppError::Validation(
+            "external full-pull target parent must be an existing directory when the caller continues executor authorization".into(),
+        ))
+    } else {
+        acquire_advisory_lock(&resolved.lock_path).map_err(|error| {
+            AppError::Runtime(format!(
                 "failed to acquire dump lock '{}': {error}",
                 resolved.lock_path.display()
-            );
-            let app_error = AppError::Runtime(message.clone());
+            ))
+        })
+    };
+    let lock_guard = match target_lock {
+        Ok(lock_guard) => lock_guard,
+        Err(app_error) => {
+            let message = app_error.to_string();
             return Err(DumpExecutionFailure::with_payload(
                 app_error,
                 empty_result(
@@ -287,7 +338,11 @@ fn run_dump_selected(
         }
     };
 
-    if let Err(error) = cleanup_orphan_dirs(&resolved) {
+    if let Err(error) = if context.external_full_pull().is_none() {
+        cleanup_orphan_dirs(&resolved)
+    } else {
+        Ok(())
+    } {
         let message = format!("failed to cleanup stale dump temp dirs: {error}");
         let app_error = AppError::Runtime(message.clone());
         return Err(DumpExecutionFailure::with_payload(
@@ -303,7 +358,9 @@ fn run_dump_selected(
             ),
         ));
     }
-    if resolved.platform_target_path != resolved.target_path {
+    if context.external_full_pull().is_none()
+        && resolved.platform_target_path != resolved.target_path
+    {
         if let Err(error) = cleanup_platform_orphan_dirs(&resolved) {
             let message = format!("failed to cleanup stale dump platform temp dirs: {error}");
             let app_error = AppError::Runtime(message.clone());
@@ -361,7 +418,11 @@ fn run_dump_selected(
     // раннер не знает и копию ею не меняет.
     // Временные файлы прошлых замен файла версий убираются в начале любой выгрузки: их
     // видит `git status` и сторож замены каталога.
-    if let Err(error) = remove_left_candidates(&resolved.platform_target_path) {
+    if let Err(error) = if context.external_full_pull().is_none() {
+        remove_left_candidates(&resolved.platform_target_path)
+    } else {
+        Ok(())
+    } {
         let message = error.to_string();
         return Err(DumpExecutionFailure::with_payload(
             error,
@@ -510,6 +571,9 @@ fn run_dump_selected(
                 read_dump_generation(context, config, provider, &binary, tool_runner, &resolved)
             })
             .flatten();
+        if let Some(external) = context.external_full_pull() {
+            external.generation_before(provider, generation_before.clone());
+        }
         // Как у агента: поколение до выгрузки по изменившемуся совпало с записанным тем же
         // инструментом — выгружать нечего, и платформа больше не запускается.
         let unchanged = generation_before
@@ -715,20 +779,37 @@ fn run_dump_selected(
                 )),
             };
             let result = result.map(|(platform_result, mut notes)| {
-                let generation_after = generation_before.as_ref().and_then(|_| {
-                    read_dump_generation(context, config, provider, &binary, tool_runner, &resolved)
-                });
-                let note = SourceSetInventory::new(config)
-                    .designer_context(&resolved.source_set_name)
-                    .and_then(|set| {
-                        crate::use_cases::exchange_guard::record_after_dump(
-                            set,
-                            &config.work_path,
+                let generation_after = if context.external_full_pull().is_some() {
+                    None
+                } else {
+                    generation_before.as_ref().and_then(|_| {
+                        read_dump_generation(
+                            context,
+                            config,
                             provider,
-                            generation_before.as_deref(),
-                            generation_after.as_deref(),
+                            &binary,
+                            tool_runner,
+                            &resolved,
                         )
-                    });
+                    })
+                };
+                let note = context
+                    .external_full_pull()
+                    .is_none()
+                    .then(|| {
+                        SourceSetInventory::new(config)
+                            .designer_context(&resolved.source_set_name)
+                            .and_then(|set| {
+                                crate::use_cases::exchange_guard::record_after_dump(
+                                    set,
+                                    &config.work_path,
+                                    provider,
+                                    generation_before.as_deref(),
+                                    generation_after.as_deref(),
+                                )
+                            })
+                    })
+                    .flatten();
                 notes.message = merge_optional_messages(notes.message, note);
                 (platform_result.platform_log_path, notes)
             });
@@ -737,7 +818,11 @@ fn run_dump_selected(
     };
     // Копия меняется под тем же замком и только после удачи: сбой оставляет прежнюю.
     let result = result.map(|(platform_log_path, notes)| {
-        let copy_warning = version_file.as_ref().and_then(RunnerVersionFile::record);
+        let copy_warning = if context.external_full_pull().is_none() {
+            version_file.as_ref().and_then(RunnerVersionFile::record)
+        } else {
+            None
+        };
         // Уничтоженное называет вопрос к сторожу при публикации замены.
         let discarded = notes.discarded;
         let forecast = notes.forecast;
