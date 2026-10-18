@@ -765,11 +765,16 @@ struct CapturedConfigDirectory {
     stamp: ConfigObjectStamp,
 }
 
-/// Ownership reads one pair through its held project directory. Its generation
-/// detects entries moved out and back, including two transient absences; ancestor
+/// Ownership reads one pair through its held project directory. Its namespace
+/// witness detects entries moved out and back, including two transient absences; ancestor
 /// identities bind the directory without treating changes to siblings as changes
 /// to this project's declarations.
-struct CapturedConfigRoute(Vec<CapturedConfigDirectory>);
+struct CapturedConfigRoute {
+    // Field order keeps the route bound until its notification handle is closed.
+    #[cfg(windows)]
+    changes: ConfigDirectoryChanges,
+    directories: Vec<CapturedConfigDirectory>,
+}
 
 impl CapturedConfigRoute {
     fn capture(project: &Path) -> Result<Self, ConfigLoadError> {
@@ -789,11 +794,15 @@ impl CapturedConfigRoute {
                 stamp,
             });
         }
-        Ok(Self(route))
+        Ok(Self {
+            #[cfg(windows)]
+            changes: ConfigDirectoryChanges::capture(project)?,
+            directories: route,
+        })
     }
 
     fn recheck(&self) -> Result<(), ConfigLoadError> {
-        for directory in &self.0 {
+        for directory in &self.directories {
             let named = open_config_entry(&directory.path, true)?;
             if crate::support::path::open_file_identity(&directory.file)?
                 != directory.stamp.identity
@@ -802,15 +811,22 @@ impl CapturedConfigRoute {
                 return Err(changed_declared_config());
             }
         }
-        let project = self.project();
-        if ConfigObjectStamp::read(&project.file)? != project.stamp {
-            return Err(changed_declared_config());
+        #[cfg(not(windows))]
+        {
+            let project = self.project();
+            if ConfigObjectStamp::read(&project.file)? != project.stamp {
+                return Err(changed_declared_config());
+            }
         }
+        #[cfg(windows)]
+        self.changes.recheck()?;
         Ok(())
     }
 
     fn project(&self) -> &CapturedConfigDirectory {
-        self.0.last().expect("an absolute project path has a root")
+        self.directories
+            .last()
+            .expect("an absolute project path has a root")
     }
 
     fn open_yaml(&self, name: &'static str) -> std::io::Result<std::fs::File> {
@@ -843,6 +859,86 @@ impl CapturedConfigRoute {
         #[cfg(not(unix))]
         {
             open_config_entry(&self.project().path.join(name), false)
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ConfigDirectoryChanges(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ConfigDirectoryChanges {
+    fn capture(project: &Path) -> std::io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FindFirstChangeNotificationW, GetDriveTypeW, DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK,
+            DRIVE_REMOVABLE, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
+        };
+        let path = std::fs::canonicalize(project)?;
+        let ordinary = normalize_windows_verbatim_path(&path);
+        let unc = matches!(ordinary.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::UNC(..) | std::path::Prefix::VerbatimUNC(..))
+        );
+        let root = ordinary.ancestors().last().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "project route has no root",
+            )
+        })?;
+        let root: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: root is an absolute directory root, terminated by a live NUL.
+        let drive = unsafe { GetDriveTypeW(root.as_ptr()) };
+        if unc
+            || !matches!(
+                drive,
+                DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_CDROM | DRIVE_RAMDISK
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "project ownership cannot confirm configuration changes on this volume",
+            ));
+        }
+        let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: the NUL-terminated absolute path stays live for this call. All
+        // route handles already deny deletion, binding this watch to the held
+        // project directory. The guard owns the returned notification handle.
+        let handle = unsafe {
+            FindFirstChangeNotificationW(
+                path.as_ptr(),
+                0,
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(Self(handle))
+        }
+    }
+
+    fn recheck(&self) -> Result<(), ConfigLoadError> {
+        use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        // SAFETY: this guard retains its notification handle. A zero timeout
+        // checks the original watch; it is never reset between the two captures.
+        if unsafe { WaitForSingleObject(self.0, 0) } == WAIT_TIMEOUT {
+            Ok(())
+        } else {
+            Err(changed_declared_config())
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ConfigDirectoryChanges {
+    fn drop(&mut self) {
+        // SAFETY: this guard is the only owner of a FindFirstChangeNotification
+        // handle. This API stops monitoring and releases the native resource.
+        unsafe {
+            windows_sys::Win32::Storage::FileSystem::FindCloseChangeNotification(self.0);
         }
     }
 }
@@ -1353,7 +1449,9 @@ mod tests {
     }
 
     fn canonical(path: &Path) -> PathBuf {
-        std::fs::canonicalize(path).expect("canonical test path")
+        crate::support::path::normalize_windows_verbatim_path(
+            &std::fs::canonicalize(path).expect("canonical test path"),
+        )
     }
 
     fn minimal_config_without_base_path(extra: &str) -> String {
