@@ -2861,7 +2861,7 @@ mod tests {
         );
         assert_eq!(
             declared["origin"].connection,
-            format!("File={}", project.join("build/ib").display())
+            format!("File={}", project.join("build").join("ib").display())
         );
 
         std::fs::write(project.join(LOCAL_CONFIG_FILE_NAME), "infobases: [\n").expect("broken");
