@@ -252,7 +252,9 @@ jobs:
                    ["git", "rev-parse", "HEAD^{tree}"], cwd=checkout).stdout.decode().strip(), "sha256": source})
               env = os.environ.copy()
               env.pop("RUST_TEST_THREADS", None)
-              env["CARGO_TARGET_DIR"] = str(ROOT / "cargo-target")
+              target_dir=ROOT/"cargo-target"/lane
+              target_dir.mkdir(parents=True,exist_ok=False)
+              env["CARGO_TARGET_DIR"] = str(target_dir)
               build = run(lane + "-build", ["cargo", "+1.95.0", "test", "--locked", "--bin",
                           "v8-runner", "--no-run", "--message-format=json"], cwd=checkout, env=env)
               artifacts = []
@@ -262,12 +264,17 @@ jobs:
                       and data.get("profile", {}).get("test") is True
                       and data.get("target", {}).get("name") == "v8-runner"
                       and Path(data["target"]["src_path"]).resolve() == (checkout / "src/main.rs").resolve()):
-                      artifacts.append(Path(data["executable"]))
+                      artifacts.append(data)
               assert len(artifacts) == 1, artifacts
+              artifact=artifacts[0]
+              executable=Path(artifact["executable"]).resolve(strict=True)
+              assert artifact["fresh"] is False and executable.is_relative_to(target_dir.resolve()),artifact
+              save(lane+"-build-identity.json",{"sourceCommit":actual,"sourceSha256":source,
+                "cargoTargetDir":str(target_dir),"ownCompilerArtifact":artifact})
               binary = ROOT / (lane + "-test-binary")
-              shutil.copy2(artifacts[0], binary)
+              shutil.copy2(executable, binary)
               binary_sha = digest(binary)
-              save(lane + "-binary.json", {"cargoArtifact": str(artifacts[0]), "copy": str(binary),
+              save(lane + "-binary.json", {"cargoArtifact": str(executable), "copy": str(binary),
                                           "sha256": binary_sha, "bytes": binary.stat().st_size})
               assert not run(lane + "-status-after-build", ["git", "status", "--porcelain"], cwd=checkout).stdout
               assert source == {p: digest(checkout / p) for p in source}
