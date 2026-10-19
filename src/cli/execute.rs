@@ -92,7 +92,8 @@ use crate::use_cases::run_tests;
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
 use crate::use_cases::transport::{
-    dispatch_with_workspace_lock, hold_source_base, preview_boundary, BoundaryRefusal,
+    dispatch_with_workspace_boundary, dispatch_with_workspace_lock, hold_source_base,
+    preview_boundary, BoundaryRefusal,
 };
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
@@ -3053,9 +3054,8 @@ fn execute_launch(
 /// выстраивались бы в очередь. Прецедент — `infobase ... --dry-run` по DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED,
 /// который возвращается до блокировок вообще.
 ///
-/// Решение живёт здесь, а не в отдельном помощнике рядом: у границы один владелец,
-/// иначе её легко обойти новым вызовом. Спор превью с очисткой — вопрос не границы, а
-/// двух глобальных ключей, и отвечает на него `app::run` до загрузки конфига.
+/// Решение о замке задаёт общая граница `dispatch_with_workspace_boundary`; здесь
+/// адаптер печатает её сообщения. Спор превью с очисткой разрешает `app::run`.
 pub(crate) fn with_cli_workspace_lock<T>(
     config: &AppConfig,
     presenter: &Presenter,
@@ -3065,38 +3065,28 @@ pub(crate) fn with_cli_workspace_lock<T>(
     preview: bool,
     run: impl FnOnce() -> Result<T, UseCaseError>,
 ) -> Result<T, UseCaseError> {
-    if preview {
-        // Чистка меняет `workPath` и с превью не сочетается; спор двух глобальных ключей
-        // разрешается один раз на запуске (`app::run`) — до того, как каталог тронут, — и
-        // здесь уже не повторяется.
-        debug_assert!(
-            !clean_before_execution,
-            "очистка с превью отклонена на запуске"
-        );
-        // Превью замков не берёт, но предупреждение о базе другой копии и отказ нечитаемой
-        // метки называет заранее: метку оно читает без замка и ничего в неё не пишет.
-        match preview_boundary(config, command, base) {
-            Ok(notes) => {
-                for note in &notes {
-                    presenter.note_leading_warnings(
-                        note.phase.as_str(),
-                        std::slice::from_ref(&note.message),
-                    );
-                }
-            }
-            Err(refusal) => {
-                print_workspace_refusal(presenter, command, &refusal);
-                return Err(refusal.error);
-            }
-        }
-        return run();
-    }
-    match dispatch_under_cli_workspace_lock(
+    debug_assert!(
+        !preview || !clean_before_execution,
+        "очистка с превью отклонена на запуске"
+    );
+    match dispatch_with_workspace_boundary(
         config,
-        presenter,
         command,
         base,
-        clean_before_execution,
+        preview,
+        |notes| {
+            for note in notes {
+                presenter.note_leading_warnings(
+                    note.phase.as_str(),
+                    std::slice::from_ref(&note.message),
+                );
+            }
+            if clean_before_execution {
+                clean_platform_logs_under_lock(config)
+            } else {
+                Ok(())
+            }
+        },
         run,
     ) {
         Ok(outcome) => outcome,
@@ -3579,7 +3569,10 @@ fn dump_mode(args: &DumpArgs) -> Result<DumpModeRequest, UseCaseError> {
     })
 }
 
-fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCaseError> {
+pub(super) fn map_dump_request(
+    args: &DumpArgs,
+    dry_run: bool,
+) -> Result<DumpRequest, UseCaseError> {
     Ok(DumpRequest {
         dry_run,
         mode: dump_mode(args)?,
@@ -5550,6 +5543,7 @@ mod tests {
         assert_eq!(
             map_dump_request(
                 &DumpArgs {
+                    publication_stdio: None,
                     discard_uncommitted: false,
                     mode: Some(PreviousDumpMode::Incremental),
                     source_set: SourceSetArg::named("main"),
@@ -5566,6 +5560,7 @@ mod tests {
         assert_eq!(
             map_dump_request(
                 &DumpArgs {
+                    publication_stdio: None,
                     discard_uncommitted: false,
                     mode: None,
                     source_set: SourceSetArg::named("main"),
@@ -5776,6 +5771,7 @@ mod tests {
     #[test]
     fn a_previous_pull_mode_means_no_key_and_full_names_force() {
         let args = |mode: Option<PreviousDumpMode>, objects: &[&str], force: bool| DumpArgs {
+            publication_stdio: None,
             mode,
             source_set: SourceSetArg::named("main"),
             extension: None,

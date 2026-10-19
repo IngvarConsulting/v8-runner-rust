@@ -126,16 +126,28 @@ fn dump_through(
             let transcript = run_command(handle, &command, wait);
             // Результат забирается к раннеру под workPath и уже оттуда публикуется
             // ступенчато; на стороне точки входа следа не остаётся.
-            let produced = config.work_path.join("agent").join("exchange").join(&run);
-            let collected = transcript
-                .as_ref()
-                .ok()
-                .map(|_| collect_dir(handle, &exchange, &out_relative, &produced));
+            let produced = context
+                .external_full_pull()
+                .map(|external| external.stage().to_path_buf())
+                .unwrap_or_else(|| config.work_path.join("agent").join("exchange").join(&run));
+            let collected = transcript.as_ref().ok().map(|_| {
+                if context.external_full_pull().is_some() {
+                    collect_into_dir(handle, &exchange, &out_relative, &produced)
+                } else {
+                    collect_dir(handle, &exchange, &out_relative, &produced)
+                }
+            });
             tidy(handle, &exchange, &out_relative);
             let transcript = transcript?;
             collected.transpose()?;
+            if let Some(external) = context.external_full_pull() {
+                external.generation_before(Provider::Agent, Some(generation.clone()));
+                external.generation_after(generation_id(handle.session(), extension, wait).ok());
+            }
             let cleanup = publish_full(context, config, resolved, &produced);
-            let _ = std::fs::remove_dir(produced.parent().unwrap_or(&produced));
+            if context.external_full_pull().is_none() {
+                let _ = std::fs::remove_dir(produced.parent().unwrap_or(&produced));
+            }
             (transcript, cleanup?)
         }
         DumpPlan::OverDirectory(how) => {
@@ -309,11 +321,12 @@ fn dump_through(
     // сводит и поколения не пишет; после отмены поколение не спрашивается.
     let changed_note = match (set, plan) {
         (Some(set), DumpPlan::Full | DumpPlan::OverDirectory(_))
-            if crate::use_cases::interruption::pending_interruption_error(
-                context,
-                "the configuration generation",
-            )
-            .is_none() =>
+            if context.external_full_pull().is_none()
+                && crate::use_cases::interruption::pending_interruption_error(
+                    context,
+                    "the configuration generation",
+                )
+                .is_none() =>
         {
             let after = generation_id(handle.session(), extension, wait).ok();
             crate::use_cases::exchange_guard::record_after_dump(
@@ -418,6 +431,10 @@ fn publish_full(
     resolved: &ResolvedDumpTarget,
     produced: &Path,
 ) -> Result<DumpNotes, AppError> {
+    if context.external_full_pull().is_some() {
+        let publication = super::prepare_full_dump(context, resolved)?;
+        return publish_full_dump(context, config, resolved, &publication);
+    }
     let publication = StagedPublication::prepare_dir(
         &resolved.platform_target_path,
         &resolved.platform_target_identity,

@@ -67,6 +67,53 @@ pub fn open_file_identity(file: &std::fs::File) -> std::io::Result<FilesystemObj
     }
 }
 
+/// Native metadata-change time of an open object. Unlike the writable modification
+/// time, this also detects a rewrite whose original bytes and mtime were restored.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileChangeTime(i128);
+
+pub fn open_file_change_time(file: &std::fs::File) -> std::io::Result<FileChangeTime> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(FileChangeTime(
+            i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()),
+        ))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+        };
+        let mut information = FILE_BASIC_INFO::default();
+        // SAFETY: the file retains this valid handle, and the buffer and length
+        // describe one FILE_BASIC_INFO that the call only initializes.
+        let success = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                std::ptr::from_mut(&mut information).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        };
+        if success == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(FileChangeTime(i128::from(information.ChangeTime)))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "native file change time is not available on this platform",
+        ))
+    }
+}
+
 #[cfg(windows)]
 fn windows_filesystem_object_identity(path: &Path) -> std::io::Result<FilesystemObjectIdentity> {
     use std::os::windows::ffi::OsStrExt;

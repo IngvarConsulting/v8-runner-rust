@@ -174,7 +174,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 32,
+        report.accepted, 33,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -3305,22 +3305,48 @@ fn a_full_pull_records_the_staged_tree_it_publishes() {
         "a source dump is published outside `publish_full_dump`, which records its memory"
     );
     let tokens = owner_tokens.expect("publish_full_dump is indexed");
-    let prepared = tokens
-        .find("prepare_full_snapshot(")
-        .expect("hashes the staged tree");
-    let published = tokens.find(".publish_dir(").expect("publishes");
-    let committed = tokens
-        .find("commit_full_snapshot(")
-        .expect("records memory");
     assert!(
-        prepared < published && published < committed,
-        "publish_full_dump must hash staging, then publish, then record memory"
+        full_dump_memory_follows_each_publication(&tokens),
+        "publish_full_dump must prepare staging, then acknowledge external or finish native publication, then record that branch's memory"
     );
     for rescan in ["rescan_and_commit_full(", "scanner::", "analyze_context("] {
         assert!(
             !tokens.contains(rescan),
             "publish_full_dump must not scan the published tree again: `{rescan}`"
         );
+    }
+}
+
+fn full_dump_memory_follows_each_publication(tokens: &str) -> bool {
+    let Some(prepared) = tokens.find("prepare_full_snapshot(") else {
+        return false;
+    };
+    let Some(external) = tokens.find("external.publish(") else {
+        return false;
+    };
+    let Some(native) = tokens.find(".publish_dir(") else {
+        return false;
+    };
+    let commits: Vec<_> = tokens
+        .match_indices("commit_full_snapshot(")
+        .map(|(offset, _)| offset)
+        .collect();
+    matches!(commits.as_slice(), [external_commit, native_commit]
+        if prepared < external && external < *external_commit
+            && *external_commit < native && native < *native_commit)
+}
+
+#[test]
+fn the_full_dump_memory_guard_rejects_writes_before_either_publication() {
+    let valid = "prepare_full_snapshot( external.publish( commit_full_snapshot( .publish_dir( commit_full_snapshot(";
+    assert!(full_dump_memory_follows_each_publication(valid));
+    for invalid in [
+        "prepare_full_snapshot( commit_full_snapshot( external.publish( .publish_dir( commit_full_snapshot(",
+        "prepare_full_snapshot( external.publish( commit_full_snapshot( commit_full_snapshot( .publish_dir(",
+        "external.publish( prepare_full_snapshot( commit_full_snapshot( .publish_dir( commit_full_snapshot(",
+        "prepare_full_snapshot( external.publish( commit_full_snapshot( commit_full_snapshot(",
+    ] {
+        assert!(!full_dump_memory_follows_each_publication(invalid), "{invalid}");
     }
 }
 

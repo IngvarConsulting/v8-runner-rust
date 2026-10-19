@@ -43,9 +43,32 @@ impl<'a> SourceSetsService<'a> {
                         &ss.name,
                     ),
                 };
-                self.designer_context(ss, path, memory, &base_path)
+                self.designer_context(ss, path, memory, &source_identity(&ss.root_in(&base_path)))
             })
             .collect()
+    }
+
+    /// Bind a prepared full publication to its known future canonical root.
+    /// The caller retains and validates the publication's directories; all base
+    /// and source identity is frozen before handing the stage to the caller.
+    pub(crate) fn designer_context_for_published_root(
+        &self,
+        name: &str,
+        canonical_root: &Path,
+    ) -> Option<SourceSetContext> {
+        let source_set = self
+            .config
+            .source_sets
+            .iter()
+            .find(|set| set.name == name)?;
+        let base_path = absolutize_path(&self.config.base_path);
+        let memory = self.base_memory();
+        Some(self.designer_context(
+            source_set,
+            source_set.root_in(&base_path),
+            memory.as_ref(),
+            &crate::support::path::snapshot_path_identity(canonical_root),
+        ))
     }
 
     fn designer_context(
@@ -53,7 +76,7 @@ impl<'a> SourceSetsService<'a> {
         source_set: &SourceSetConfig,
         path: PathBuf,
         memory: Option<&BaseMemory>,
-        base_path: &Path,
+        source_identity: &str,
     ) -> SourceSetContext {
         let context = SourceSetContext::new(
             &source_set.name,
@@ -70,7 +93,7 @@ impl<'a> SourceSetsService<'a> {
         let identity = format!(
             "{}; source={}; purpose={}; set={}",
             memory.address,
-            source_identity(&source_set.root_in(base_path)),
+            source_identity,
             source_set.purpose.as_str(),
             source_set.name
         );

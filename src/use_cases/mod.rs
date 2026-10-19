@@ -38,6 +38,8 @@ pub mod extension_identity;
 pub mod extension_inventory;
 /// Shared discovery and preparation helpers for external artifacts.
 pub mod external_artifacts;
+/// Caller-controlled full-dump publication and deferred baseline commit.
+pub mod full_pull_publication;
 /// Единственный читатель поколения процессом платформы.
 pub(crate) mod generation_reader;
 /// Перенос записи журнала поколений после `apply` и `reset`.

@@ -63,7 +63,8 @@ live-mcp-http.py
 - Windows contract scope дополнительно запускает нативный CLI smoke выгрузок CFE и DT через
   test-only platform fixture; это сохраняет end-to-end проверку маршрутизации, staging и
   публикации на Windows без требования установленной платформы 1С. Тот же scope запускает
-  cross-process contention smoke и unit-регрессии общего OS/legacy lock protocol.
+  процессные тесты внешней публикации полного `pull`, cross-process contention smoke
+  и unit-регрессии общего OS/legacy lock protocol.
 - Linux и macOS contract scope запускают полный `cargo test --locked`; неизвестный OS label
   считается ошибкой конфигурации CI, а не неявным Linux/macOS fallback.
 - Не знает деталей live fixture и не должен дублировать live smoke-логику.
@@ -192,7 +193,7 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 
 `.github/workflows/ci.yml` запускает install/config/ibsrv/upload helpers only when `live_available=true`, то есть когда для текущей matrix OS настроены `V8TR_PLATFORM_BUNDLE_URL_*` и `V8TR_PLATFORM_BUNDLE_SHA256_*`. Без этой пары secrets happy-path остаётся blocking для Rust build/check, получает `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, полагается на contract job для Rust test coverage и soft-skips real 1C smoke.
 
-Windows contract scope runs `cli_infobase_cross_platform`, the `support::fs` unit tests and ten named OS regressions (detached and managed-detached stdio EOF, host-owned client termination before handoff and survival after release, directory identity, native config-path resolution, staged-file restore, orphan cleanup, partial-load list sharing, the real exit code of an interactive process whose streams closed before its exit was visible); it first verifies that each named test is present in the test list. Its lint step checks the production target only (`cargo clippy --bins`): most integration tests there sit under `#![cfg(unix)]`. Full `cargo test --locked` remains Linux- and macOS-owned until the Windows-specific test suite is hardened. Owner of this contract: this file. Exit criterion: switch Windows contract back to `cargo test --locked` after the path separator, fake-binary, ACL, and process-lifecycle failure groups pass on `windows-latest`.
+Windows contract scope runs `cli_infobase_cross_platform`, `cli_external_full_pull`, the `support::fs`, declared-infobase reader and infobase-owner unit tests, and ten named OS regressions (detached and managed-detached stdio EOF, host-owned client termination before handoff and survival after release, directory identity, native config-path resolution, staged-file restore, orphan cleanup, partial-load list sharing, the real exit code of an interactive process whose streams closed before its exit was visible); it first verifies that each named test is present in the test list. Its lint step checks the production target only (`cargo clippy --bins`): most integration tests there sit under `#![cfg(unix)]`. Full `cargo test --locked` remains Linux- and macOS-owned until the Windows-specific test suite is hardened. Owner of this contract: this file. Exit criterion: switch Windows contract back to `cargo test --locked` after the path separator, fake-binary, ACL, and process-lifecycle failure groups pass on `windows-latest`.
 
 ```bash
 bash scripts/test/ci-platform-install.sh

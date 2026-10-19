@@ -8,6 +8,7 @@
 use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -80,4 +81,24 @@ pub fn assert_data_matches_one_of<S: AsRef<str> + Debug>(data: &Value, context: 
 /// Формы, объявленные для команды, без общих.
 pub fn declared_forms(command: &str) -> Vec<String> {
     slug_list(&form_index()["forms"][command])
+}
+
+/// Сверяет живые JSONL-кадры и решения с опубликованной формой full pull.
+pub fn assert_full_pull_publication_contract(frame: &Value) {
+    static CONTRACT: OnceLock<jsonschema::Validator> = OnceLock::new();
+    let contract = CONTRACT.get_or_init(|| {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../docs/schemas/full-pull-publication.schema.json"
+        ))
+        .expect("published publication schema");
+        jsonschema::validator_for(&schema).expect("publication contract compiles")
+    });
+    let errors: Vec<String> = contract
+        .iter_errors(frame)
+        .map(|error| format!("{} at {}", error, error.instance_path))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "live publication frame violates its published contract: {frame}\n{errors:#?}"
+    );
 }

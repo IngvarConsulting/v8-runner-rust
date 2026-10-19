@@ -637,14 +637,22 @@ fn select_no_infobase(root: &mut serde_yaml::Value) -> Result<(), ConfigValidati
 /// Так владельца базы спрашивают, держит ли он её ещё. Местный слой проходит ту же границу,
 /// что у загрузки проекта, а от проектного файла берётся только прежний ключ: остальное
 /// проекта к объявлению баз не относится. Нет ни одного из файлов — пустая карта; файл,
-/// который не прочитать или не разобрать, — ошибка.
+/// который не прочитать или не разобрать, — ошибка. Подтвердить отсутствие объявления
+/// можно только у неизменившейся пары файлов с прямым маршрутом к каталогу проекта.
 pub fn load_declared_infobases(
     project_dir: &Path,
 ) -> Result<std::collections::BTreeMap<String, InfobaseConfig>, ConfigLoadError> {
+    let project_dir = std::path::absolute(project_dir)?;
+    let route = CapturedConfigRoute::capture(&project_dir)?;
     let mut declared = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
     let project_path = project_dir.join(DEFAULT_CONFIG_FILE_NAME);
-    if regular_file_exists(&project_path)? {
-        let mut project = read_yaml_file(&project_path)?;
+    let mut project_file = CapturedYamlFile::capture(&route, DEFAULT_CONFIG_FILE_NAME)?;
+    #[cfg(test)]
+    run_declared_read_hook(DeclaredReadPoint::ProjectCaptured);
+    let mut local_file = CapturedYamlFile::capture(&route, LOCAL_CONFIG_FILE_NAME)?;
+    #[cfg(test)]
+    run_declared_read_hook(DeclaredReadPoint::LocalCaptured);
+    if let Some(mut project) = project_file.parse()? {
         // Карта `infobases:` в проектном файле владельца даёт ошибку: такой проект не
         // загрузился бы и сам, и проверка владельца считает его живым.
         reject_local_keys_in_project_file(&project)?;
@@ -653,9 +661,7 @@ pub fn load_declared_infobases(
             root_mapping_mut(&mut declared)?.insert(yaml_key("infobases"), infobases);
         }
     }
-    let local_path = project_dir.join(LOCAL_CONFIG_FILE_NAME);
-    if regular_file_exists(&local_path)? {
-        let mut overlay = read_yaml_file(&local_path)?;
+    if let Some(mut overlay) = local_file.parse()? {
         reject_local_overlay_keys(&overlay)?;
         validate_local_overlay_schema_boundary(overlay.clone())
             .map_err(|error| ConfigLoadError::LocalOverlayUnsupportedShape(error.to_string()))?;
@@ -672,23 +678,404 @@ pub fn load_declared_infobases(
             _ => std::collections::BTreeMap::new(),
         };
     for infobase in infobases.values_mut() {
-        normalize_infobase_paths(infobase, project_dir);
+        normalize_infobase_paths(infobase, &project_dir);
     }
+    #[cfg(test)]
+    run_declared_read_hook(DeclaredReadPoint::BeforeRecheck);
+    project_file.recheck()?;
+    #[cfg(test)]
+    run_declared_read_hook(DeclaredReadPoint::AfterProjectRecheck);
+    local_file.recheck()?;
+    route.recheck()?;
     Ok(infobases)
 }
 
-/// Есть ли обычный файл по пути. Нет ничего — `false`; узнать нельзя или там не обычный
-/// файл (каталог, FIFO, на котором чтение повисло бы) — ошибка, а не «базу не объявляет».
-fn regular_file_exists(path: &Path) -> Result<bool, ConfigLoadError> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(true),
-        Ok(_) => Err(ConfigLoadError::ReadError(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("'{}' is not a regular file", path.display()),
-        ))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum DeclaredReadPoint {
+    ProjectCaptured,
+    LocalCaptured,
+    BeforeRecheck,
+    AfterProjectRecheck,
+}
+
+#[cfg(test)]
+type DeclaredReadHook = Box<dyn FnMut(DeclaredReadPoint)>;
+
+#[cfg(test)]
+thread_local! {
+    static DECLARED_READ_HOOK: std::cell::RefCell<Option<DeclaredReadHook>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn with_declared_read_hook<R>(
+    hook: impl FnMut(DeclaredReadPoint) + 'static,
+    read: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<DeclaredReadHook>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DECLARED_READ_HOOK.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
     }
+    let _restore = Restore(DECLARED_READ_HOOK.with(|slot| slot.replace(Some(Box::new(hook)))));
+    read()
+}
+
+#[cfg(test)]
+fn run_declared_read_hook(point: DeclaredReadPoint) {
+    DECLARED_READ_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(point);
+        }
+    });
+}
+
+struct CapturedYamlFile<'a> {
+    route: &'a CapturedConfigRoute,
+    name: &'static str,
+    content: Option<CapturedYamlContent>,
+}
+
+struct CapturedYamlContent {
+    file: std::fs::File,
+    text: String,
+    stamp: ConfigObjectStamp,
+}
+
+#[derive(PartialEq, Eq)]
+struct ConfigObjectStamp {
+    identity: crate::support::path::FilesystemObjectIdentity,
+    changed: crate::support::path::FileChangeTime,
+}
+
+impl ConfigObjectStamp {
+    fn read(file: &std::fs::File) -> std::io::Result<Self> {
+        Ok(Self {
+            identity: crate::support::path::open_file_identity(file)?,
+            changed: crate::support::path::open_file_change_time(file)?,
+        })
+    }
+}
+
+struct CapturedConfigDirectory {
+    path: PathBuf,
+    file: std::fs::File,
+    stamp: ConfigObjectStamp,
+}
+
+/// Ownership reads one pair through its held project directory. Its namespace
+/// witness detects entries moved out and back, including two transient absences; ancestor
+/// identities bind the directory without treating changes to siblings as changes
+/// to this project's declarations.
+struct CapturedConfigRoute {
+    // Field order keeps the route bound until its notification handle is closed.
+    #[cfg(windows)]
+    changes: ConfigDirectoryChanges,
+    directories: Vec<CapturedConfigDirectory>,
+}
+
+impl CapturedConfigRoute {
+    fn capture(project: &Path) -> Result<Self, ConfigLoadError> {
+        if project
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(changed_declared_config());
+        }
+        let mut route = Vec::new();
+        for path in project.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            let file = open_config_entry(path, true)?;
+            let stamp = ConfigObjectStamp::read(&file)?;
+            route.push(CapturedConfigDirectory {
+                path: path.to_path_buf(),
+                file,
+                stamp,
+            });
+        }
+        Ok(Self {
+            #[cfg(windows)]
+            changes: ConfigDirectoryChanges::capture(project)?,
+            directories: route,
+        })
+    }
+
+    fn recheck(&self) -> Result<(), ConfigLoadError> {
+        for directory in &self.directories {
+            let named = open_config_entry(&directory.path, true)?;
+            if crate::support::path::open_file_identity(&directory.file)?
+                != directory.stamp.identity
+                || crate::support::path::open_file_identity(&named)? != directory.stamp.identity
+            {
+                return Err(changed_declared_config());
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let project = self.project();
+            if ConfigObjectStamp::read(&project.file)? != project.stamp {
+                return Err(changed_declared_config());
+            }
+        }
+        #[cfg(windows)]
+        self.changes.recheck()?;
+        Ok(())
+    }
+
+    fn project(&self) -> &CapturedConfigDirectory {
+        self.directories
+            .last()
+            .expect("an absolute project path has a root")
+    }
+
+    fn open_yaml(&self, name: &'static str) -> std::io::Result<std::fs::File> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = std::ffi::CString::new(name)?;
+            // SAFETY: the project keeps its directory fd alive, and the name is
+            // one fixed YAML basename with no intermediate path components.
+            let fd = unsafe {
+                libc::openat(
+                    self.project().file.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                )
+            };
+            if fd == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: openat just returned this owned fd; this is its only owner.
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            if !file.metadata()?.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "project ownership configuration is not a regular file",
+                ));
+            }
+            Ok(file)
+        }
+        #[cfg(not(unix))]
+        {
+            open_config_entry(&self.project().path.join(name), false)
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ConfigDirectoryChanges(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ConfigDirectoryChanges {
+    fn capture(project: &Path) -> std::io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FindFirstChangeNotificationW, GetDriveTypeW, FILE_NOTIFY_CHANGE_DIR_NAME,
+            FILE_NOTIFY_CHANGE_FILE_NAME,
+        };
+        use windows_sys::Win32::System::WindowsProgramming::{
+            DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE,
+        };
+        let path = std::fs::canonicalize(project)?;
+        let ordinary = normalize_windows_verbatim_path(&path);
+        let unc = matches!(ordinary.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::UNC(..) | std::path::Prefix::VerbatimUNC(..))
+        );
+        let root = ordinary.ancestors().last().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "project route has no root",
+            )
+        })?;
+        let root: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: root is an absolute directory root, terminated by a live NUL.
+        let drive = unsafe { GetDriveTypeW(root.as_ptr()) };
+        if unc
+            || !matches!(
+                drive,
+                DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_CDROM | DRIVE_RAMDISK
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "project ownership cannot confirm configuration changes on this volume",
+            ));
+        }
+        let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: the NUL-terminated absolute path stays live for this call. All
+        // route handles already deny deletion, binding this watch to the held
+        // project directory. The guard owns the returned notification handle.
+        let handle = unsafe {
+            FindFirstChangeNotificationW(
+                path.as_ptr(),
+                0,
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(Self(handle))
+        }
+    }
+
+    fn recheck(&self) -> Result<(), ConfigLoadError> {
+        use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        // SAFETY: this guard retains its notification handle. A zero timeout
+        // checks the original watch; it is never reset between the two captures.
+        if unsafe { WaitForSingleObject(self.0, 0) } == WAIT_TIMEOUT {
+            Ok(())
+        } else {
+            Err(changed_declared_config())
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ConfigDirectoryChanges {
+    fn drop(&mut self) {
+        // SAFETY: this guard is the only owner of a FindFirstChangeNotification
+        // handle. This API stops monitoring and releases the native resource.
+        unsafe {
+            windows_sys::Win32::Storage::FileSystem::FindCloseChangeNotification(self.0);
+        }
+    }
+}
+
+fn config_entry_is_alias(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn open_config_entry(path: &Path, directory: bool) -> std::io::Result<std::fs::File> {
+    let reject_alias = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "project ownership configuration uses an indirect filesystem route",
+        )
+    };
+    if config_entry_is_alias(&std::fs::symlink_metadata(path)?) {
+        return Err(reject_alias());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            libc::O_NONBLOCK | libc::O_NOFOLLOW | if directory { libc::O_DIRECTORY } else { 0 },
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+        if directory {
+            options.access_mode(FILE_READ_ATTRIBUTES);
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        } else {
+            options.share_mode(FILE_SHARE_READ);
+        }
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if config_entry_is_alias(&metadata) {
+        return Err(reject_alias());
+    }
+    if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "project ownership configuration has an unexpected filesystem object",
+        ));
+    }
+    Ok(file)
+}
+
+impl<'a> CapturedYamlFile<'a> {
+    fn capture(
+        route: &'a CapturedConfigRoute,
+        name: &'static str,
+    ) -> Result<Self, ConfigLoadError> {
+        use std::io::Read;
+        let mut file = match route.open_yaml(name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    route,
+                    name,
+                    content: None,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let stamp = ConfigObjectStamp::read(&file)?;
+        let mut text = String::new();
+        file.read_to_string(&mut text)?;
+        if ConfigObjectStamp::read(&file)? != stamp {
+            return Err(changed_declared_config());
+        }
+        Ok(Self {
+            route,
+            name,
+            content: Some(CapturedYamlContent { file, text, stamp }),
+        })
+    }
+
+    fn parse(&self) -> Result<Option<serde_yaml::Value>, ConfigLoadError> {
+        self.content
+            .as_ref()
+            .map(|content| parse_yaml_text(&content.text))
+            .transpose()
+    }
+
+    fn recheck(&mut self) -> Result<(), ConfigLoadError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Some(content) = &mut self.content else {
+            return match self.route.open_yaml(self.name) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(changed_declared_config()),
+            };
+        };
+        let named = self.route.open_yaml(self.name)?;
+        if ConfigObjectStamp::read(&named)? != content.stamp
+            || ConfigObjectStamp::read(&content.file)? != content.stamp
+        {
+            return Err(changed_declared_config());
+        }
+        content.file.seek(SeekFrom::Start(0))?;
+        let mut current = Vec::new();
+        content.file.read_to_end(&mut current)?;
+        if current != content.text.as_bytes()
+            || ConfigObjectStamp::read(&content.file)? != content.stamp
+            || ConfigObjectStamp::read(&self.route.open_yaml(self.name)?)? != content.stamp
+        {
+            return Err(changed_declared_config());
+        }
+        Ok(())
+    }
+}
+
+fn changed_declared_config() -> ConfigLoadError {
+    ConfigLoadError::ReadError(std::io::Error::other(
+        "project configuration changed while its declared infobases were read",
+    ))
 }
 
 pub fn resolve_primary_config_path(config_path: Option<&str>) -> Result<PathBuf, ConfigLoadError> {
@@ -701,7 +1088,11 @@ pub fn resolve_primary_config_path(config_path: Option<&str>) -> Result<PathBuf,
 
 fn read_yaml_file(path: &Path) -> Result<serde_yaml::Value, ConfigLoadError> {
     let content = std::fs::read_to_string(path)?;
-    Ok(serde_yaml::from_str(&content)?)
+    parse_yaml_text(&content)
+}
+
+fn parse_yaml_text(content: &str) -> Result<serde_yaml::Value, ConfigLoadError> {
+    Ok(serde_yaml::from_str(content)?)
 }
 
 /// Ключи `providers.*` документа и имя файла, из которого они пришли.
@@ -1061,7 +1452,9 @@ mod tests {
     }
 
     fn canonical(path: &Path) -> PathBuf {
-        std::fs::canonicalize(path).expect("canonical test path")
+        crate::support::path::normalize_windows_verbatim_path(
+            &std::fs::canonicalize(path).expect("canonical test path"),
+        )
     }
 
     fn minimal_config_without_base_path(extra: &str) -> String {
@@ -2446,6 +2839,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).expect("project");
+        let project = canonical(&project);
         assert!(super::load_declared_infobases(&project)
             .expect("no files")
             .is_empty());
@@ -2467,10 +2861,374 @@ mod tests {
         );
         assert_eq!(
             declared["origin"].connection,
-            format!("File={}", project.join("build/ib").display())
+            format!("File={}", project.join("build").join("ib").display())
         );
 
         std::fs::write(project.join(LOCAL_CONFIG_FILE_NAME), "infobases: [\n").expect("broken");
         assert!(super::load_declared_infobases(&project).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_infobases_refuse_a_primary_aba_around_a_missing_local_layer() {
+        use super::DeclaredReadPoint;
+        use std::fs;
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let local = project.join(LOCAL_CONFIG_FILE_NAME);
+        fs::write(&primary, "format: DESIGNER\n").unwrap();
+        fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
+        let old_primary = fs::read(&primary).unwrap();
+        let captured_identity = crate::support::path::filesystem_object_identity(&primary).unwrap();
+        let during = project.clone();
+        let result = super::with_declared_read_hook(
+            move |point| match point {
+                DeclaredReadPoint::ProjectCaptured => {
+                    fs::rename(&primary, during.join("previous-primary")).unwrap();
+                    fs::write(&primary, "null\n").unwrap();
+                    fs::rename(&local, during.join("previous-local")).unwrap();
+                }
+                DeclaredReadPoint::LocalCaptured => {
+                    fs::remove_file(&primary).unwrap();
+                    fs::write(&primary, &old_primary).unwrap();
+                    fs::rename(during.join("previous-local"), &local).unwrap();
+                    assert_ne!(
+                        crate::support::path::filesystem_object_identity(&primary).unwrap(),
+                        captured_identity
+                    );
+                }
+                DeclaredReadPoint::BeforeRecheck | DeclaredReadPoint::AfterProjectRecheck => {}
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(
+            matches!(result, Err(ConfigLoadError::ReadError(_))),
+            "a mixed snapshot must not report that the owner stopped declaring its base"
+        );
+    }
+
+    #[test]
+    fn declared_infobases_refuse_an_absence_that_was_restored_before_recheck() {
+        use super::DeclaredReadPoint;
+        use std::fs;
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let local = project.join(LOCAL_CONFIG_FILE_NAME);
+        fs::write(&primary, "format: DESIGNER\n").unwrap();
+        fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
+        let during = project.clone();
+        let result = super::with_declared_read_hook(
+            move |point| match point {
+                DeclaredReadPoint::ProjectCaptured => {
+                    fs::rename(&local, during.join("previous-local")).unwrap();
+                }
+                DeclaredReadPoint::LocalCaptured => {
+                    fs::rename(during.join("previous-local"), &local).unwrap();
+                }
+                DeclaredReadPoint::BeforeRecheck | DeclaredReadPoint::AfterProjectRecheck => {}
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(
+            matches!(result, Err(ConfigLoadError::ReadError(_))),
+            "a transient local absence cannot retire an owner"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_infobases_refuse_a_rewrite_of_the_captured_local_file() {
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let local = project.join(LOCAL_CONFIG_FILE_NAME);
+        std::fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
+        let result = super::with_declared_read_hook(
+            move |point| {
+                if matches!(point, super::DeclaredReadPoint::BeforeRecheck) {
+                    std::fs::write(&local, "infobases: {}\n").unwrap();
+                }
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(matches!(result, Err(ConfigLoadError::ReadError(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_infobases_refuse_replacing_a_primary_with_identical_bytes() {
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let bytes = b"format: DESIGNER\n";
+        std::fs::write(&primary, bytes).unwrap();
+        let result = super::with_declared_read_hook(
+            move |point| {
+                if matches!(point, super::DeclaredReadPoint::BeforeRecheck) {
+                    std::fs::remove_file(&primary).unwrap();
+                    std::fs::write(&primary, bytes).unwrap();
+                }
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(
+            matches!(result, Err(ConfigLoadError::ReadError(_))),
+            "equal bytes on a replacement inode are not the captured file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_infobases_refuse_a_rewrite_even_when_bytes_and_mtime_are_restored() {
+        use std::io::{Seek, SeekFrom, Write};
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let bytes = b"format: DESIGNER\n";
+        std::fs::write(&primary, bytes).unwrap();
+        let result = super::with_declared_read_hook(
+            move |point| {
+                if matches!(point, super::DeclaredReadPoint::BeforeRecheck) {
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&primary)
+                        .unwrap();
+                    let modified = file.metadata().unwrap().modified().unwrap();
+                    file.write_all(b"format: TEMPORAR\n").unwrap();
+                    file.seek(SeekFrom::Start(0)).unwrap();
+                    file.write_all(bytes).unwrap();
+                    file.set_modified(modified).unwrap();
+                }
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(
+            matches!(result, Err(ConfigLoadError::ReadError(_))),
+            "restoring writable mtime cannot restore the native change generation"
+        );
+    }
+
+    #[test]
+    fn declared_infobases_refuse_a_file_that_appeared_after_captured_absence() {
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let result = super::with_declared_read_hook(
+            move |point| {
+                if matches!(point, super::DeclaredReadPoint::BeforeRecheck) {
+                    std::fs::write(&primary, "format: DESIGNER\n").unwrap();
+                }
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(matches!(result, Err(ConfigLoadError::ReadError(_))));
+    }
+
+    #[test]
+    fn declared_infobases_accept_a_completed_removal_of_the_base_declaration() {
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let local = project.join(LOCAL_CONFIG_FILE_NAME);
+        std::fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
+        assert_eq!(super::load_declared_infobases(&project).unwrap().len(), 1);
+        std::fs::remove_file(local).unwrap();
+        assert!(super::load_declared_infobases(&project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn declared_infobases_keep_a_stable_pair_with_both_declarations() {
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        std::fs::write(
+            project.join(super::DEFAULT_CONFIG_FILE_NAME),
+            "infobase:\n  connection: File=primary-ib\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(LOCAL_CONFIG_FILE_NAME),
+            "infobases:\n  second:\n    connection: File=local-ib\n",
+        )
+        .unwrap();
+        let declarations = super::load_declared_infobases(&project).unwrap();
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(
+            declarations["origin"].connection,
+            format!("File={}", project.join("primary-ib").display())
+        );
+        assert_eq!(
+            declarations["second"].connection,
+            format!("File={}", project.join("local-ib").display())
+        );
+    }
+
+    #[test]
+    fn declared_infobases_refuse_two_absences_that_never_existed_together() {
+        use super::DeclaredReadPoint;
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let local = project.join(LOCAL_CONFIG_FILE_NAME);
+        std::fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
+        let result = super::with_declared_read_hook(
+            move |point| match point {
+                DeclaredReadPoint::ProjectCaptured | DeclaredReadPoint::AfterProjectRecheck => {
+                    std::fs::write(&primary, "infobase:\n  connection: File=ib\n").unwrap();
+                    std::fs::remove_file(&local).unwrap();
+                }
+                DeclaredReadPoint::LocalCaptured => {
+                    std::fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n")
+                        .unwrap();
+                    std::fs::remove_file(&primary).unwrap();
+                }
+                DeclaredReadPoint::BeforeRecheck => {}
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(
+            matches!(result, Err(ConfigLoadError::ReadError(_))),
+            "two transient absences cannot retire a continuously declaring owner"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_infobases_do_not_retire_an_owner_through_two_immutable_symlink_targets() {
+        use super::DeclaredReadPoint;
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        let directory = tempdir().unwrap();
+        let project = canonical(directory.path());
+        let a = project.join("primary-empty");
+        let b = project.join("primary-declares");
+        let c = project.join("local-empty");
+        let d = project.join("local-declares");
+        fs::write(&a, "format: DESIGNER\n").unwrap();
+        fs::write(&b, "infobase:\n  connection: File=ib\n").unwrap();
+        fs::write(&c, "infobases: {}\n").unwrap();
+        fs::write(&d, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let local = project.join(LOCAL_CONFIG_FILE_NAME);
+        symlink(&a, &primary).unwrap();
+        symlink(&d, &local).unwrap();
+        let replace = |target: &Path, path: &Path| {
+            let next = path.with_extension("next");
+            symlink(target, &next).unwrap();
+            fs::rename(next, path).unwrap();
+        };
+        let result = super::with_declared_read_hook(
+            move |point| match point {
+                DeclaredReadPoint::ProjectCaptured | DeclaredReadPoint::AfterProjectRecheck => {
+                    replace(&b, &primary);
+                    replace(&c, &local);
+                }
+                DeclaredReadPoint::LocalCaptured => {
+                    replace(&d, &local);
+                    replace(&a, &primary);
+                }
+                DeclaredReadPoint::BeforeRecheck => {}
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(
+            matches!(result, Err(ConfigLoadError::ReadError(_))),
+            "an always-declared base cannot become a coherent empty pair by alias ABA"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_infobases_keep_alias_routes_unreadable_even_when_currently_empty() {
+        use std::os::unix::fs::symlink;
+        let directory = tempdir().unwrap();
+        let root = canonical(directory.path());
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let empty = root.join("empty.yaml");
+        std::fs::write(&empty, "format: DESIGNER\n").unwrap();
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        symlink(&empty, &primary).unwrap();
+        assert!(matches!(
+            super::load_declared_infobases(&project),
+            Err(ConfigLoadError::ReadError(_))
+        ));
+        std::fs::remove_file(primary).unwrap();
+        let alias = root.join("project-alias");
+        symlink(&project, &alias).unwrap();
+        write_minimal_project_config(&project, &minimal_config_without_base_path(""));
+        assert_eq!(
+            load_config(
+                alias.join(super::DEFAULT_CONFIG_FILE_NAME).to_str(),
+                None,
+                &InfobaseSelector::Default,
+            )
+            .expect("ordinary config loading still follows aliases")
+            .config
+            .base_path,
+            project
+        );
+        assert!(matches!(
+            super::load_declared_infobases(&alias),
+            Err(ConfigLoadError::ReadError(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_infobases_refuse_a_directory_aba_after_the_primary_recheck() {
+        let directory = tempdir().unwrap();
+        let root = canonical(directory.path());
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(
+            project.join(super::DEFAULT_CONFIG_FILE_NAME),
+            "format: DESIGNER\n",
+        )
+        .unwrap();
+        let held = root.join("held-project");
+        let during = project.clone();
+        let result = super::with_declared_read_hook(
+            move |point| {
+                if matches!(point, super::DeclaredReadPoint::AfterProjectRecheck) {
+                    std::fs::rename(&during, &held).unwrap();
+                    std::fs::rename(&held, &during).unwrap();
+                }
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert!(matches!(result, Err(ConfigLoadError::ReadError(_))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn declared_infobases_hold_the_windows_route_and_captured_files_against_mutation() {
+        let directory = tempdir().unwrap();
+        let root = canonical(directory.path());
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let local = project.join(LOCAL_CONFIG_FILE_NAME);
+        std::fs::write(&primary, "format: DESIGNER\n").unwrap();
+        std::fs::write(&local, "infobases:\n  origin:\n    connection: File=ib\n").unwrap();
+        let during = project.clone();
+        let held = root.join("held-project");
+        let local_after_read = local.clone();
+        let held_after_read = held.clone();
+        let result = super::with_declared_read_hook(
+            move |point| {
+                if matches!(point, super::DeclaredReadPoint::BeforeRecheck) {
+                    assert!(std::fs::write(&primary, "null\n").is_err());
+                    assert!(std::fs::remove_file(&primary).is_err());
+                    assert!(std::fs::write(&local, "infobases: {}\n").is_err());
+                    assert!(std::fs::remove_file(&local).is_err());
+                    assert!(std::fs::rename(&during, &held).is_err());
+                }
+            },
+            || super::load_declared_infobases(&project),
+        );
+        assert_eq!(result.unwrap().len(), 1);
+        std::fs::remove_file(local_after_read).expect("the read releases its sharing restriction");
+        std::fs::rename(&project, held_after_read)
+            .expect("the read releases its directory binding");
     }
 }

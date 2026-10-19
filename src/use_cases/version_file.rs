@@ -119,6 +119,39 @@ impl RunnerVersionFile {
         })
     }
 
+    /// Capture the version file before handing the stage to its publisher.
+    /// The private temporary file keeps a large inventory off the heap and
+    /// prevents a later user edit from becoming the runner's copy.
+    pub(crate) fn prepare_from(&self, stage: &Path) -> Result<Option<File>, AppError> {
+        let path = stage.join(VERSION_FILE_NAME);
+        let mut input = match File::open(&path) {
+            Ok(input) => input,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error("read", &path, &error)),
+        };
+        let mut prepared =
+            tempfile::tempfile().map_err(|error| io_error("prepare", &path, &error))?;
+        io::copy(&mut input, &mut prepared).map_err(|error| io_error("prepare", &path, &error))?;
+        Ok(Some(prepared))
+    }
+
+    pub(crate) fn record_prepared(&self, prepared: Option<File>) -> Result<(), AppError> {
+        use std::io::{Seek, SeekFrom};
+        let Some(mut prepared) = prepared else {
+            return Ok(());
+        };
+        prepared
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| io_error("read prepared", &self.copy, &error))?;
+        self.write_copy_using(
+            |path| {
+                write_file_atomically(path, |file| io::copy(&mut prepared, file).map(|_| ()))
+                    .map_err(|error| io_error("write", path, &error))
+            },
+            write_identity,
+        )
+    }
+
     /// После удачной выгрузки: копией становится то, что записала платформа.
     /// Возвращает предупреждение, если копию записать не удалось.
     #[must_use]
@@ -158,6 +191,17 @@ impl RunnerVersionFile {
         &self,
         identity_writer: impl FnOnce(&Path, &str) -> io::Result<()>,
     ) -> Result<(), AppError> {
+        self.write_copy_using(
+            |path| copy_atomically(&self.in_directory, path),
+            identity_writer,
+        )
+    }
+
+    fn write_copy_using(
+        &self,
+        copy_writer: impl FnOnce(&Path) -> Result<(), AppError>,
+        identity_writer: impl FnOnce(&Path, &str) -> io::Result<()>,
+    ) -> Result<(), AppError> {
         let dir = self
             .copy
             .parent()
@@ -174,7 +218,7 @@ impl RunnerVersionFile {
                 Err(error) => return Err(io_error("remove", &self.identity_file, &error)),
             }
         }
-        copy_atomically(&self.in_directory, &self.copy)?;
+        copy_writer(&self.copy)?;
         if !ours {
             identity_writer(&self.identity_file, &self.identity)
                 .map_err(|error| io_error("write", &self.identity_file, &error))?;
