@@ -394,6 +394,29 @@ impl Gone {
     }
 }
 
+/// Причина непроверяемых объявлений — без содержимого файлов и текста ошибки ОС.
+fn unreadable_declarations_reason(error: &ConfigLoadError) -> String {
+    match error {
+        ConfigLoadError::ReadError(error) if error.kind() == ErrorKind::Unsupported => {
+            "its coherent project declarations cannot be established on this volume".to_owned()
+        }
+        ConfigLoadError::ReadError(error) => format!(
+            "its v8project.yaml or v8project.local.yaml cannot be read: {}",
+            error.kind()
+        ),
+        ConfigLoadError::NotFound(_)
+        | ConfigLoadError::ParseError(_)
+        | ConfigLoadError::ValidationError(_)
+        | ConfigLoadError::LocalOverlayAsPrimaryConfig(_)
+        | ConfigLoadError::LocalOverlayForbiddenKey(_)
+        | ConfigLoadError::LocalOverlayUnsupportedKey(_)
+        | ConfigLoadError::LocalOverlayUnsupportedShape(_)
+        | ConfigLoadError::UnsupportedShape(_) => {
+            "its v8project.yaml or v8project.local.yaml cannot be parsed".to_owned()
+        }
+    }
+}
+
 fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
     if this.is(owner) {
         return Standing::This;
@@ -424,13 +447,7 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
     match load_declared_infobases(&owner.project) {
         // Текст ошибки разбора цитирует файл, а в местном слое лежат пароли: причина
         // называется без него.
-        Err(ConfigLoadError::ReadError(error)) => Standing::Alive(Alive::Unreadable(format!(
-            "its v8project.yaml or v8project.local.yaml cannot be read: {}",
-            error.kind()
-        ))),
-        Err(_) => Standing::Alive(Alive::Unreadable(
-            "its v8project.yaml or v8project.local.yaml cannot be parsed".to_owned(),
-        )),
+        Err(error) => Standing::Alive(Alive::Unreadable(unreadable_declarations_reason(&error))),
         Ok(declared) if declares(declared.values(), &owner.project, base_dir) => {
             Standing::Alive(Alive::Declares)
         }
@@ -473,11 +490,11 @@ fn describe_release(alive: &[(&OwnerRecord, &Alive)]) -> String {
     alive
         .iter()
         .map(|(owner, why)| match why {
-            Alive::Declares | Alive::Unreadable(_) => format!(
+            Alive::Declares => format!(
                 "remove the infobase from v8project.local.yaml of '{}' or remove that working copy",
                 owner.project.display()
             ),
-            Alive::Remote { .. } => format!(
+            Alive::Unreadable(_) | Alive::Remote { .. } => format!(
                 "delete the record of '{}' from the owner marker by hand",
                 owner.project.display()
             ),
@@ -687,6 +704,145 @@ mod tests {
 
     fn on(machine: &str, host: &str, config: &AppConfig) -> ThisCopy {
         ThisCopy::on(Some(machine), Some(host.to_owned()), &config.base_path)
+    }
+
+    /// Непроверяемую копию не сменяют; предупреждение называет рабочий способ убрать
+    /// именно её запись из метки, и ни превью, ни прогон не переписывают метку.
+    #[test]
+    fn an_unreadable_owner_names_its_marker_record_as_the_way_to_release_the_base() {
+        const SECRET: &str = "OWNER_DECLARATIONS_TEST_SECRET";
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let first = project(&dir.path().join("first"), &base);
+        let second = project(&dir.path().join("second"), &base);
+        check_as(
+            &on("machine-a", "host", &first),
+            &first,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("the first copy takes the base");
+        let marker_path = owner_marker_path(&base).expect("marker path");
+        let recorded = fs::read(&marker_path).expect("original marker bytes");
+        fs::write(
+            first.base_path.join("v8project.local.yaml"),
+            format!("infobases: [\npassword: {SECRET}\n"),
+        )
+        .expect("malformed owner declarations");
+
+        let warned = [OwnerCheck::Preview, OwnerCheck::Run].map(|check| {
+            check_as(
+                &on("machine-a", "host", &second),
+                &second,
+                "push",
+                BaseAccess::Writes,
+                check,
+            )
+            .expect("an unreadable owner warns without blocking the write")
+        });
+
+        assert_eq!(
+            warned[0], warned[1],
+            "preview and run give the same warning"
+        );
+        assert_eq!(
+            fs::read(&marker_path).expect("unchanged marker bytes"),
+            recorded,
+            "an unreadable owner's exact marker is preserved"
+        );
+        for notes in &warned {
+            assert_eq!(notes.len(), 1, "one ownership warning");
+            let warning = &notes[0];
+            assert!(warning.contains(&first.base_path.display().to_string()));
+            assert!(warning.contains(&marker_path.display().to_string()));
+            assert!(warning.contains("cannot be parsed"));
+            assert!(!warning.contains(SECRET), "owner contents stay private");
+            assert!(
+                warning.contains(&format!(
+                    "To free the infobase: delete the record of '{}' from the owner marker by hand",
+                    first.base_path.display()
+                )),
+                "an unreadable owner needs a working marker-record release instruction"
+            );
+            assert!(
+                !warning.contains(
+                    "To free the infobase: remove the infobase from v8project.local.yaml"
+                ),
+                "unreadable declarations cannot establish that the YAML edit released the base"
+            );
+        }
+    }
+
+    /// Ошибки чтения и разбора могут содержать чужие секреты: граница предупреждения
+    /// называет только безопасный вид причины, включая ограничение согласованного чтения.
+    #[test]
+    fn unreadable_declaration_errors_name_safe_causes_without_their_contents() {
+        use crate::config::loader::ConfigLoadError;
+        use std::io::{Error, ErrorKind};
+
+        const SECRET: &str = "OWNER_DECLARATIONS_TEST_SECRET";
+        let parse = serde_yaml::from_str::<u64>(SECRET).expect_err("a string is not a number");
+        let cases = [
+            (
+                ConfigLoadError::ReadError(Error::new(ErrorKind::Unsupported, SECRET)),
+                "its coherent project declarations cannot be established on this volume",
+            ),
+            (
+                ConfigLoadError::ReadError(Error::new(ErrorKind::PermissionDenied, SECRET)),
+                "its v8project.yaml or v8project.local.yaml cannot be read: permission denied",
+            ),
+            (
+                ConfigLoadError::ParseError(parse),
+                "its v8project.yaml or v8project.local.yaml cannot be parsed",
+            ),
+        ];
+        let dir = tempdir().expect("tempdir");
+        let base = base(dir.path());
+        let first = project(&dir.path().join("first"), &base);
+        check_as(
+            &on("machine-a", "host", &first),
+            &first,
+            "push",
+            BaseAccess::Writes,
+            OwnerCheck::Run,
+        )
+        .expect("the first copy takes the base");
+        let marker_path = owner_marker_path(&base).expect("marker path");
+        let recorded = fs::read(&marker_path).expect("original marker bytes");
+        let owner = marker(&base).owners.remove(0);
+
+        for (error, expected) in cases {
+            assert!(
+                error.to_string().contains(SECRET),
+                "the input error carries a secret"
+            );
+            let reason = super::unreadable_declarations_reason(&error);
+            assert!(
+                reason == expected,
+                "the warning uses only the fixed safe cause"
+            );
+            assert!(
+                !reason.contains(SECRET),
+                "the reason does not render the error"
+            );
+            let alive = super::Alive::Unreadable(reason);
+            let warning =
+                super::another_copy_warning("push", &base, &marker_path, &[(&owner, &alive)]);
+            assert!(
+                !warning.contains(SECRET),
+                "the full warning keeps the error private"
+            );
+            assert!(warning.contains(&format!(
+                "To free the infobase: delete the record of '{}' from the owner marker by hand",
+                owner.project.display()
+            )));
+            assert_eq!(
+                fs::read(&marker_path).expect("unchanged marker bytes"),
+                recorded,
+                "classifying a read failure leaves the owner marker alone"
+            );
+        }
     }
 
     #[cfg(unix)]

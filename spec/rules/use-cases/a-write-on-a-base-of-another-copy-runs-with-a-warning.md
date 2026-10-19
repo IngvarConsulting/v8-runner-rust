@@ -6,6 +6,8 @@ check:
   - tests/cli_infobase_owner.rs::an_owner_on_another_machine_is_never_replaced
   - src/use_cases/transport.rs::a_base_of_another_copy_warns_before_the_scenario
   - src/use_cases/infobase_owner.rs::the_refusal_and_the_warning_name_the_same_ways_out
+  - src/use_cases/infobase_owner.rs::an_unreadable_owner_names_its_marker_record_as_the_way_to_release_the_base
+  - src/use_cases/infobase_owner.rs::unreadable_declaration_errors_name_safe_causes_without_their_contents
   - src/use_cases/infobase_owner.rs::a_marker_with_this_copy_and_another_live_one_warns
   - tests/cli_infobase_owner.rs::reset_on_a_base_of_another_copy_warns_and_names_the_owner
 ---
@@ -17,7 +19,8 @@ check:
 подтверждения не просит: она выполняется, а её ответ несёт предупреждение. Оно называет
 копию-владельца, говорит, что команда меняет базу этой копии, называет метку, как освободить
 базу (убрать её из `v8project.local.yaml` копии-владельца или удалить эту копию; у копии с
-другой машины — удалить её запись из метки) и те же выходы к своей базе, что отказ
+другой машины или с непроверяемыми объявлениями — вручную удалить её запись из метки) и те же
+выходы к своей базе, что отказ
 `INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`, с источником копии `upstream`. Кода
 отказа для базы другой копии нет. Так же — когда в метке записана и эта копия: предупреждает
 любая другая живая копия-владелец.
