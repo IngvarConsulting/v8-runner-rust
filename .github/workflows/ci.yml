@@ -1,313 +1,218 @@
-name: CI
-
+name: Probe native owner root exclusion
+run-name: Native owner root exclusion causal probe
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - master
-  pull_request:
-
 permissions:
   contents: read
-
-defaults:
-  run:
-    shell: bash
-
 env:
-  CARGO_TERM_COLOR: always
-
-# Пуш в открытый PR отменяет предыдущий прогон той же ветки: без этого каждая правка
-# запускала полную матрицу из пяти джоб, а устаревшие прогоны никто не снимал.
-concurrency:
-  group: ci-${{ github.ref }}
-  # Отменяются только прогоны PR: два быстрых слияния в master иначе погасили бы
-  # проверку первого коммита, и у него осталась бы незелёная обязательная проверка.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
+  BASELINE_COMMIT: 458073a1120a607088851aae8a40ef6c5976b2ac
+  CANDIDATE_COMMIT: 8b90c6df042f87ec2a571a6b7df44f3ad07f6698
 jobs:
-  # Имя джобы входит в список обязательных проверок ветки master: переименование
-  # молча убрало бы её из списка, и слияния встали бы.
-  contract:
-    name: Contract (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target_os: Linux
-          - os: windows-latest
-            target_os: Windows
-          - os: macos-latest
-            target_os: Darwin
-    env:
-      V8TR_CI_TARGET_OS: ${{ matrix.target_os }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Test Windows installer (PowerShell 5.1)
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: ./scripts/test/test_site_install.ps1
-
-      - name: Test Windows installer (PowerShell 7)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: ./scripts/test/test_site_install.ps1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          # Тот же компилятор, которым собирается релиз: иначе гейт описывает набор
-          # замечаний одной версии, а выпуск собирается другой.
-          toolchain: "1.95.0"
-          components: clippy, rustfmt
-
-      - name: Cache cargo registry and build output
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-
-      - name: Check formatting
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt --all --check
-
-      # Линтер идёт и на Linux, и на Windows: код под `cfg(windows)` на Linux не
-      # компилируется вовсе, а под `cfg(unix)` — на Windows, поэтому одной площадки
-      # недостаточно. `-D warnings` передаётся аргументом, а не через RUSTFLAGS:
-      # RUSTFLAGS распространился бы на зависимости и обнулил общий кэш сборки.
-      - name: Lint
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      # На Windows линтуется боевая цель. Тестовая там полна мёртвого кода не по своей
-      # вине: 25 из 36 интеграционных файлов и часть модульных тестов стоят под
-      # `#![cfg(unix)]`, поэтому их помощники и импорты на Windows действительно никем
-      # не используются — первый прогон насчитал 112 таких мест против четырёх в боевом
-      # коде. Это снимется вместе с расгейчиванием Windows-тестов; до тех пор гейт
-      # держит боевой код, а не изображает покрытие тестового.
-      - name: Lint (production target)
-        if: matrix.os == 'windows-latest'
-        run: cargo clippy --locked --bins -- -D warnings
-
-      # Лицензии и источники считаются по Cargo.lock и в сеть не ходят, поэтому стоят
-      # гейтом. Уязвимости и дубли версий идут предупреждением: база RustSec тянется в
-      # рантайме, и блокирующая проверка краснела бы без единой правки кода.
-      - name: Install cargo-deny
-        if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@855644a7653423ffddd406c14064ba886514841d # cargo-deny
-        with:
-          # Версия инструмента фиксируется вместе с деревом: cargo-deny не раз убирал
-          # ключи конфигурации между мажорами, а неизвестный ключ для него — ошибка.
-          # Без пина блокирующий гейт покраснел бы при выходе такого релиза, то есть
-          # ровно так, как этот гейт обещает не краснеть.
-          tool: cargo-deny@0.18
-
-      - name: Check dependency licences and sources
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo deny check licenses sources
-
-      - name: Report dependency advisories and duplicates
-        if: matrix.os == 'ubuntu-latest'
-        continue-on-error: true
-        run: cargo deny check advisories bans
-
-      - name: Run contract regression scope
-        run: |
-          V8_RUNNER_CI_SCOPE=contract bash scripts/test/ci-rust.sh
-
-  # Имя джобы входит в список обязательных проверок ветки master — не переименовывать.
-  happy-path:
-    name: Happy Path (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target_os: Linux
-          - os: windows-latest
-            target_os: Windows
-    env:
-      V8TR_CI_TARGET_OS: ${{ matrix.target_os }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Install Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.x"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: "1.95.0"
-
-      - name: Cache cargo registry and build output
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-
-      - name: Evaluate trusted live execution mode
-        id: trust
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          ACTOR: ${{ github.actor }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          trusted="true"
-
-          if [[ "$ACTOR" == "dependabot[bot]" ]]; then
-            trusted="false"
-          elif [[ "$EVENT_NAME" == "pull_request" && "$HEAD_REPO" != "$REPOSITORY" ]]; then
-            trusted="false"
-          fi
-
-          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
-
-          if [[ "$trusted" != "true" ]]; then
-            echo "V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1" >> "$GITHUB_ENV"
-          fi
-
-      - name: Verify bash and python3 contract
-        run: |
-          bash --version
-          python3 --version
-
-      # Разбирает сами рабочие процессы: примета в `release_governance.py` сверяет
-      # их устройство — состав работ и разрешимость `needs`, — но синтаксис, имена
-      # выражений и контекстов знает только actionlint. Гейт появился после того,
-      # как удаление одного шага унесло с собой заголовок работы: оба набора тестов
-      # остались зелёными, потому что сверяли подстроки, а GitHub такой файл не
-      # запускает вовсе.
-      - name: Lint workflows
-        if: matrix.os == 'ubuntu-latest'
+  native-root-exclusion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
         shell: bash
-        run: |
-          set -euo pipefail
-          # Версия и сумма фиксируются вместе с деревом по той же причине, что и у
-          # cargo-deny: гейт блокирующий, а плавающий инструмент краснел бы без
-          # единой правки рабочего процесса.
-          version=1.7.12
-          archive="actionlint_${version}_linux_amd64.tar.gz"
-          expected=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${archive}" \
-            "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
-          echo "${expected}  ${archive}" | sha256sum --check --status
-          tar -xzf "${archive}" actionlint
-          ./actionlint
-
-      - name: Verify fork release contracts
-        run: |
-          python3 tests/release_governance.py
-          python3 tests/release_assets.py
-
-      # Сверка «сайт = матрица» (#225): цепочки умолчаний target() из docs/site/data.js и
-      # таблица architecture.html#d-ops против docs/schemas/capability-matrix.json — его
-      # держит равным src/domain/capability.rs тест generated_capability_matrix_is_current
-      # джобы Contract. Известные расхождения записаны с номерами задач в
-      # scripts/site_matrix_known.txt; новое роняет джобу. Сверяются тексты в репозитории,
-      # площадка не важна — хватает одной. node для data.js берётся из образа раннера.
-      - name: Verify site matches provider matrix
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          python3 tests/site_matrix_cases.py
-          python3 scripts/site_matrix.py
-
-      - name: Resolve platform bundle live mode
-        id: live
-        env:
-          MATRIX_OS: ${{ matrix.os }}
-          TRUSTED: ${{ steps.trust.outputs.trusted }}
-          V8TR_PLATFORM_BUNDLE_URL_LINUX: ${{ secrets.V8TR_PLATFORM_BUNDLE_URL_LINUX }}
-          V8TR_PLATFORM_BUNDLE_SHA256_LINUX: ${{ secrets.V8TR_PLATFORM_BUNDLE_SHA256_LINUX }}
-          V8TR_PLATFORM_BUNDLE_URL_WINDOWS: ${{ secrets.V8TR_PLATFORM_BUNDLE_URL_WINDOWS }}
-          V8TR_PLATFORM_BUNDLE_SHA256_WINDOWS: ${{ secrets.V8TR_PLATFORM_BUNDLE_SHA256_WINDOWS }}
-        run: |
-          live_available="false"
-
-          case "$MATRIX_OS" in
-            ubuntu-latest)
-              bundle_url="$V8TR_PLATFORM_BUNDLE_URL_LINUX"
-              bundle_sha256="$V8TR_PLATFORM_BUNDLE_SHA256_LINUX"
-              url_secret_name="V8TR_PLATFORM_BUNDLE_URL_LINUX"
-              sha_secret_name="V8TR_PLATFORM_BUNDLE_SHA256_LINUX"
-              ;;
-            windows-latest)
-              bundle_url="$V8TR_PLATFORM_BUNDLE_URL_WINDOWS"
-              bundle_sha256="$V8TR_PLATFORM_BUNDLE_SHA256_WINDOWS"
-              url_secret_name="V8TR_PLATFORM_BUNDLE_URL_WINDOWS"
-              sha_secret_name="V8TR_PLATFORM_BUNDLE_SHA256_WINDOWS"
-              ;;
-            *)
-              echo "Unsupported matrix.os: $MATRIX_OS" >&2
-              exit 2
-              ;;
-          esac
-
-          if [[ "$TRUSTED" == "true" && -n "$bundle_url" && -n "$bundle_sha256" ]]; then
-            live_available="true"
-            {
-              echo "V8TR_PLATFORM_BUNDLE_URL<<__V8TR_ENV__"
-              echo "$bundle_url"
-              echo "__V8TR_ENV__"
-              echo "V8TR_PLATFORM_BUNDLE_SHA256<<__V8TR_ENV__"
-              echo "$bundle_sha256"
-              echo "__V8TR_ENV__"
-            } >> "$GITHUB_ENV"
-          else
-            missing=()
-            if [[ "$TRUSTED" == "true" ]]; then
-              [[ -n "$bundle_url" ]] || missing+=("$url_secret_name")
-              [[ -n "$bundle_sha256" ]] || missing+=("$sha_secret_name")
-            fi
-
-            if [[ "${#missing[@]}" -gt 0 ]]; then
-              printf -v missing_text '%s, ' "${missing[@]}"
-              missing_text="${missing_text%, }"
-              echo "::notice title=Live Designer smoke skipped::$MATRIX_OS platform bundle secrets are not configured: $missing_text. Rust contract and non-live happy-path checks remain blocking."
-            fi
-
-            echo "V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1" >> "$GITHUB_ENV"
-            echo "V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1" >> "$GITHUB_ENV"
-          fi
-
-          echo "live_available=$live_available" >> "$GITHUB_OUTPUT"
-
-      - name: Install 1C platform bundle
-        if: steps.live.outputs.live_available == 'true'
-        run: |
-          bash scripts/test/ci-platform-install.sh
-
-      - name: Materialize dedicated Designer config
-        if: steps.live.outputs.live_available == 'true'
-        run: |
-          bash scripts/test/ci-designer-config.sh
-
-      - name: Bootstrap file infobase through ibsrv
-        if: steps.live.outputs.live_available == 'true'
-        run: |
-          bash scripts/test/ci-ibsrv.sh start
-
-      - name: Run happy-path scope
-        run: |
-          V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
-
-      - name: Stop ibsrv sidecar
-        if: always() && steps.live.outputs.live_available == 'true'
-        run: |
-          bash scripts/test/ci-ibsrv.sh stop
-
-      - name: Upload deploy-ready artifacts
-        if: success() && steps.live.outputs.live_available == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          name: deploy-ready-${{ runner.os }}
-          path: |
-            target/manual-tests/live-cli-designer/artifacts/configuration.cf
-            target/manual-tests/live-cli-designer/artifacts/extension.cfe
-            target/manual-tests/live-cli-designer/artifacts/external-processor/*.epf
-            target/manual-tests/live-cli-designer/artifacts/external-report/*.erf
+          ref: ${{ env.BASELINE_COMMIT }}
+          path: source/baseline
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          path: source/candidate
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: |
+            source/baseline -> target
+            source/candidate -> target
+          cache-targets: false
+          save-if: false
+      - name: Run the existing test once per real filesystem topology case
+        run: |
+          python3 - <<'PY_PROBE'
+          """Ignored source-only proposal; embedded verbatim in the manual workflow."""
+          from pathlib import Path
+          import hashlib
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+
+          TEST = "config::loader::tests::declared_infobases_keep_a_stable_pair_with_both_declarations"
+          ROOT = Path(os.environ["RUNNER_TEMP"]) / "owner-root-probe"
+          EVIDENCE = ROOT / "evidence"
+          EVIDENCE.mkdir(parents=True, exist_ok=False)
+          WORK = ROOT / "work"
+          (WORK / "tmp").mkdir(parents=True)
+          BASE = "458073a1120a607088851aae8a40ef6c5976b2ac"
+          CANDIDATE = os.environ["CANDIDATE_COMMIT"]
+          assert re.fullmatch(r"[0-9a-f]{40}", CANDIDATE) and CANDIDATE != BASE
+
+
+          def digest(path):
+              return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+          def save(name, data):
+              (EVIDENCE / name).write_text(json.dumps(data, indent=2) + "\n")
+
+
+          def run(name, argv, *, cwd=None, env=None, expected=0):
+              result = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+              (EVIDENCE / (name + ".stdout")).write_bytes(result.stdout)
+              (EVIDENCE / (name + ".stderr")).write_bytes(result.stderr)
+              save(name + ".command.json", {"argv": argv, "cwd": str(cwd) if cwd else None,
+                                           "exitCode": result.returncode})
+              if expected is not None and result.returncode != expected:
+                  raise RuntimeError(f"{name} exited {result.returncode}; see saved raw output")
+              return result
+
+
+          # The host loader and Python closure is mounted read-only, so BusyBox's libc
+          # variant is irrelevant: the image supplies only the actual overlay root.
+          launcher = r'''
+          from pathlib import Path
+          import hashlib,json,os,subprocess,sys
+          lane,binary,expected_sha,test = sys.argv[1:]
+          paths = ["/", "/work", "/work/tmp", os.environ["TMPDIR"]]
+          facts = {}
+          for path in paths:
+              line = subprocess.check_output(["/usr/bin/stat","-f","-c","%t %T",path],text=True).strip()
+              magic,name = line.split(maxsplit=1)
+              facts[path] = {"magic":int(magic,16),"name":name,"raw":line}
+          assert facts["/"]["magic"] == 0x794c7630, facts
+          assert all(facts[p]["magic"] in (0xef53,0x01021994) for p in paths[1:]), facts
+          assert str(Path(os.environ["TMPDIR"]).resolve()) == os.environ["TMPDIR"]
+          actual_sha = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+          assert actual_sha == expected_sha, (actual_sha,expected_sha)
+          facts.update(lane=lane,binary=binary,binarySha256=actual_sha,test=test,
+                       tmpdir=os.environ["TMPDIR"],uid=os.getuid(),gid=os.getgid())
+          print("PROBE_FACTS="+json.dumps(facts,sort_keys=True),flush=True)
+          try:
+              result = subprocess.run([binary,test,"--exact","--nocapture"],
+                                      stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=60)
+          except Exception as error:
+              print("PROBE_SETUP_ERROR="+repr(error),flush=True)
+              raise
+          sys.stdout.buffer.write(result.stdout)
+          sys.stdout.buffer.flush()
+          sys.exit(result.returncode)
+          '''
+          (ROOT / "container_launcher.py").write_text(launcher)
+          save("run-context.json", {k: os.environ.get(k) for k in
+               ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "GITHUB_REF", "RUNNER_OS",
+                "RUNNER_ARCH", "BASELINE_COMMIT", "CANDIDATE_COMMIT"]})
+          run("docker-version", ["docker", "version"])
+          run("rustc-version", ["rustc", "+1.95.0", "-vV"])
+          run("cargo-version", ["cargo", "+1.95.0", "-V"])
+          image_tag = "docker.io/library/busybox:stable"
+          run("image-pull", ["docker", "pull", "--platform=linux/amd64", image_tag])
+          inspected = run("image-inspect", ["docker", "image", "inspect", image_tag])
+          image = json.loads(inspected.stdout)[0]
+          digests = [x for x in image["RepoDigests"] if
+                     re.fullmatch(r"(?:docker.io/library/)?busybox@sha256:[0-9a-f]{64}", x)]
+          assert len(digests) == 1, image["RepoDigests"]
+          pinned = digests[0]
+          save("image-pin.json", {"requestedTag": image_tag, "pinnedRepoDigest": pinned,
+                                  "imageId": image["Id"], "architecture": image["Architecture"],
+                                  "os": image["Os"]})
+          assert image["Architecture"] == "amd64" and image["Os"] == "linux"
+          common = ["docker", "run", "--rm", "--pull=never", "--platform=linux/amd64",
+                    "--network=none", "--read-only", "--cap-drop=ALL",
+                    "--security-opt=no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}",
+                    "--workdir=/work", "--mount", f"type=bind,src={ROOT},dst=/probe,readonly",
+                    "--mount", f"type=bind,src={WORK},dst=/work"]
+          for path in ["/usr", "/lib", "/lib64"]:
+              source = Path(path)
+              if source.is_dir():
+                  common += ["--mount", f"type=bind,src={source.resolve()},dst={path},readonly"]
+          assert Path("/usr/bin/python3").is_file() and Path("/usr/bin/stat").is_file()
+          save("shared-container-config.json", {"commonArgv": common, "image": pinned,
+                                                "launcherSha256": digest(ROOT / "container_launcher.py")})
+          accepted = []
+          for lane, commit in [("baseline", BASE), ("candidate", CANDIDATE)]:
+              checkout = Path(os.environ["GITHUB_WORKSPACE"]) / "source" / lane
+              actual = run(lane + "-head", ["git", "rev-parse", "HEAD"], cwd=checkout).stdout.decode().strip()
+              assert actual == commit, (lane,actual,commit)
+              assert not run(lane + "-status-before", ["git", "status", "--porcelain"], cwd=checkout).stdout
+              source = {p: digest(checkout / p) for p in ["src/config/loader.rs", "Cargo.lock"]}
+              save(lane + "-source.json", {"commit": actual, "tree": run(lane + "-tree",
+                   ["git", "rev-parse", "HEAD^{tree}"], cwd=checkout).stdout.decode().strip(), "sha256": source})
+              env = os.environ.copy()
+              env.pop("RUST_TEST_THREADS", None)
+              env["CARGO_TARGET_DIR"] = str(ROOT / "cargo-target")
+              build = run(lane + "-build", ["cargo", "+1.95.0", "test", "--locked", "--bin",
+                          "v8-runner", "--no-run", "--message-format=json"], cwd=checkout, env=env)
+              artifacts = []
+              for line in build.stdout.splitlines():
+                  data = json.loads(line)
+                  if (data.get("reason") == "compiler-artifact" and data.get("executable")
+                      and data.get("profile", {}).get("test") is True
+                      and data.get("target", {}).get("name") == "v8-runner"
+                      and Path(data["target"]["src_path"]).resolve() == (checkout / "src/main.rs").resolve()):
+                      artifacts.append(Path(data["executable"]))
+              assert len(artifacts) == 1, artifacts
+              binary = ROOT / (lane + "-test-binary")
+              shutil.copy2(artifacts[0], binary)
+              binary_sha = digest(binary)
+              save(lane + "-binary.json", {"cargoArtifact": str(artifacts[0]), "copy": str(binary),
+                                          "sha256": binary_sha, "bytes": binary.stat().st_size})
+              assert not run(lane + "-status-after-build", ["git", "status", "--porcelain"], cwd=checkout).stdout
+              assert source == {p: digest(checkout / p) for p in source}
+              (WORK / "tmp" / lane).mkdir()
+              command = common + ["--env", f"TMPDIR=/work/tmp/{lane}",
+                          "--entrypoint=/usr/bin/python3", pinned, "/probe/container_launcher.py",
+                          lane, "/probe/" + binary.name, binary_sha, TEST]
+              result = run(lane + "-native", command, expected=None)
+              raw = result.stdout + result.stderr
+              text = raw.decode(errors="replace")
+              facts_lines = [x.removeprefix("PROBE_FACTS=") for x in text.splitlines() if x.startswith("PROBE_FACTS=")]
+              assert len(facts_lines) == 1 and "PROBE_SETUP_ERROR=" not in text, text[-4000:]
+              facts = json.loads(facts_lines[0])
+              assert facts["binarySha256"] == binary_sha and facts["lane"] == lane
+              assert len(re.findall(r"^running 1 test$", text, re.M)) == 1, text[-4000:]
+              if lane == "baseline":
+                  assert result.returncode == 101, result.returncode
+                  assert f"test {TEST} ... FAILED" in text, text[-4000:]
+                  assert "test result: FAILED. 0 passed; 1 failed; 0 ignored;" in text, text[-4000:]
+                  assert "ReadError(Custom { kind: Unsupported" in text, text[-4000:]
+                  assert "project ownership cannot confirm route changes on this volume" in text, text[-4000:]
+                  outcome = "SEMANTIC_UNSUPPORTED_ROOT_RED"
+              else:
+                  assert result.returncode == 0, result.returncode
+                  assert f"test {TEST} ... ok" in text, text[-4000:]
+                  assert "test result: ok. 1 passed; 0 failed; 0 ignored;" in text, text[-4000:]
+                  outcome = "ONE_EXISTING_NATIVE_TEST_PASS"
+              entry = {"lane": lane, "sourceCommit": commit, "sourceSha256": source,
+                       "binarySha256": binary_sha, "exitCode": result.returncode,
+                       "outcome": outcome, "facts": facts}
+              save(lane + "-accepted-result.json", entry)
+              accepted.append(entry)
+              print(json.dumps({"lane": lane, "outcome": outcome}), flush=True)
+          assert len(accepted) == 2
+          save("result.json", {"verdict": "SAME_NATIVE_TOPOLOGY_CAUSAL_RED_THEN_GREEN",
+                               "image": pinned, "cases": accepted,
+                               "retries": 0, "testExecutions": 2})
+          manifest = {p.name: {"sha256": digest(p), "bytes": p.stat().st_size}
+                      for p in sorted(EVIDENCE.iterdir()) if p.is_file()}
+          save("manifest.json", {"files": manifest})
+          PY_PROBE
+      - name: Save causal native proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: owner-root-exclusion-native-proof
+          path: ${{ runner.temp }}/owner-root-probe/evidence/
           if-no-files-found: error
+          retention-days: 7
