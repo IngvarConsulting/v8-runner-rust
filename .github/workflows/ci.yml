@@ -47,6 +47,7 @@ jobs:
           import shutil
           import subprocess
           import sys
+          import tarfile
 
           TEST = "config::loader::tests::declared_infobases_keep_a_stable_pair_with_both_declarations"
           ROOT = Path(os.environ["RUNNER_TEMP"]) / "owner-root-probe"
@@ -83,31 +84,79 @@ jobs:
           # variant is irrelevant: the image supplies only the actual overlay root.
           launcher = r'''
           from pathlib import Path
-          import hashlib,json,os,subprocess,sys
-          lane,binary,expected_sha,test = sys.argv[1:]
-          paths = ["/", "/work", "/work/tmp", os.environ["TMPDIR"]]
-          facts = {}
+          import ctypes,hashlib,json,locale,os,re,subprocess,sys
+          lane,binary,expected_sha,test,runtime_sha = sys.argv[1:]
+          assert hashlib.sha256(Path("/probe/runtime.json").read_bytes()).hexdigest() == runtime_sha
+          runtime = json.loads(Path("/probe/runtime.json").read_text())
+          assert {k:os.environ.get(k) for k in runtime["localeEnv"]}==runtime["localeEnv"]
+          assert locale.setlocale(locale.LC_CTYPE)==runtime["localeCtype"]
+          loader = runtime["loader"]["resolved"]
+          libpath = ":".join(runtime["libraryDirs"])
+          def invoke(path,*args):
+              return [loader,"--inhibit-cache","--library-path",libpath,path,*args]
+          def sha(path):
+              return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+          for path,expected in runtime["hashes"].items():
+              assert str(Path(path).resolve()) == path and sha(path) == expected, path
+          assert str(Path(sys.executable).resolve()) == runtime["python"]["resolved"]
+          assert sha(sys.executable) == runtime["python"]["sha256"]
+          assert sha(loader) == runtime["loader"]["sha256"]
+          assert sha(runtime["stat"]["resolved"]) == runtime["stat"]["sha256"]
+          assert sha(binary) == expected_sha
+          libc=ctypes.CDLL(None);libc.gnu_get_libc_version.restype=ctypes.c_char_p
+          closure={}
+          for label,path in [("python",runtime["python"]["resolved"]),("stat",runtime["stat"]["resolved"]),("test",binary)]:
+              subprocess.run([loader,"--verify",path],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+              listing=subprocess.check_output([loader,"--inhibit-cache","--library-path",libpath,"--list",path],text=True)
+              assert "not found" not in listing
+              actual={}
+              for line in listing.splitlines():
+                  match=re.search(r"=>\s+(/.+?)\s+\(0x[0-9a-fA-F]+\)",line)
+                  if match is None:
+                      match=re.fullmatch(r"\s*(/.+?)\s+\(0x[0-9a-fA-F]+\)\s*",line)
+                  if match is None:
+                      assert re.fullmatch(r"\s*linux-vdso\.so\.[0-9]+\s+\(0x[0-9a-fA-F]+\)\s*",line),line
+                      continue
+                  resolved=Path(match[1]).resolve(strict=True)
+                  assert resolved.is_relative_to("/usr") and resolved.is_file(),line
+                  path=str(resolved);actual[path]=sha(path)
+                  assert runtime["hashes"].get(path)==actual[path],(label,path)
+              assert actual==runtime["dependencyFiles"][label],(label,actual)
+              closure[label]={"raw":listing,"resolvedFiles":actual}
+          listed=subprocess.check_output(invoke(binary,test,"--exact","--list"),text=True)
+          assert test+": test" in listed and "1 test, 0 benchmarks" in listed, listed
+          mountinfo=Path("/proc/self/mountinfo").read_text()
+          mapped={}
+          for row in Path("/proc/self/maps").read_text().splitlines():
+              fields=row.split(maxsplit=5)
+              if len(fields)==6 and fields[5].startswith("/"):
+                  resolved=Path(fields[5]).resolve(strict=True)
+                  assert resolved.is_relative_to("/usr") and resolved.is_file(),row
+                  path=str(resolved);mapped[path]=sha(path)
+                  assert runtime["hashes"].get(path)==mapped[path],path
+          assert mapped==runtime["pythonMappedFiles"],mapped
+          preflight={"python":str(Path(sys.executable).resolve()),"pythonSha256":sha(sys.executable),
+           "loader":loader,"loaderSha256":sha(loader),"glibc":libc.gnu_get_libc_version().decode(),
+           "libraryDirs":runtime["libraryDirs"],"dependencyLists":closure,"mappedUsrFiles":mapped,
+           "localeEnv":{k:os.environ.get(k) for k in runtime["localeEnv"]},"localeCtype":locale.setlocale(locale.LC_CTYPE),
+           "rustListOnly":listed,"mountinfo":mountinfo,"runtimeSha256":runtime_sha}
+          print("RUNTIME_PREFLIGHT="+json.dumps(preflight,sort_keys=True),flush=True)
+          paths=["/","/work","/work/tmp",os.environ["TMPDIR"]];facts={}
           for path in paths:
-              line = subprocess.check_output(["/usr/bin/stat","-f","-c","%t %T",path],text=True).strip()
-              magic,name = line.split(maxsplit=1)
-              facts[path] = {"magic":int(magic,16),"name":name,"raw":line}
-          assert facts["/"]["magic"] == 0x794c7630, facts
-          assert all(facts[p]["magic"] in (0xef53,0x01021994) for p in paths[1:]), facts
-          assert str(Path(os.environ["TMPDIR"]).resolve()) == os.environ["TMPDIR"]
-          actual_sha = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
-          assert actual_sha == expected_sha, (actual_sha,expected_sha)
-          facts.update(lane=lane,binary=binary,binarySha256=actual_sha,test=test,
-                       tmpdir=os.environ["TMPDIR"],uid=os.getuid(),gid=os.getgid())
+              line=subprocess.check_output(invoke(runtime["stat"]["resolved"],"-f","-c","%t %T",path),text=True).strip()
+              magic,name=line.split(maxsplit=1);facts[path]={"magic":int(magic,16),"name":name,"raw":line}
+          assert facts["/"]["magic"]==0x794c7630,facts
+          assert all(facts[p]["magic"] in (0xef53,0x01021994) for p in paths[1:]),facts
+          assert str(Path(os.environ["TMPDIR"]).resolve())==os.environ["TMPDIR"]
+          facts.update(lane=lane,binary=binary,binarySha256=expected_sha,test=test,
+           tmpdir=os.environ["TMPDIR"],uid=os.getuid(),gid=os.getgid(),runtimeSha256=runtime_sha)
           print("PROBE_FACTS="+json.dumps(facts,sort_keys=True),flush=True)
           try:
-              result = subprocess.run([binary,test,"--exact","--nocapture"],
-                                      stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=60)
+              result=subprocess.run(invoke(binary,test,"--exact","--nocapture"),
+               stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=60)
           except Exception as error:
-              print("PROBE_SETUP_ERROR="+repr(error),flush=True)
-              raise
-          sys.stdout.buffer.write(result.stdout)
-          sys.stdout.buffer.flush()
-          sys.exit(result.returncode)
+              print("PROBE_SETUP_ERROR="+repr(error),flush=True);raise
+          sys.stdout.buffer.write(result.stdout);sys.stdout.buffer.flush();sys.exit(result.returncode)
           '''
           (ROOT / "container_launcher.py").write_text(launcher)
           save("run-context.json", {k: os.environ.get(k) for k in
@@ -116,7 +165,7 @@ jobs:
           run("docker-version", ["docker", "version"])
           run("rustc-version", ["rustc", "+1.95.0", "-vV"])
           run("cargo-version", ["cargo", "+1.95.0", "-V"])
-          image_tag = "docker.io/library/busybox:stable"
+          image_tag = "docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
           run("image-pull", ["docker", "pull", "--platform=linux/amd64", image_tag])
           inspected = run("image-inspect", ["docker", "image", "inspect", image_tag])
           image = json.loads(inspected.stdout)[0]
@@ -128,18 +177,70 @@ jobs:
                                   "imageId": image["Id"], "architecture": image["Architecture"],
                                   "os": image["Os"]})
           assert image["Architecture"] == "amd64" and image["Os"] == "linux"
+          locale_env={"LANG":"C.UTF-8","LC_ALL":"C.UTF-8"}
           common = ["docker", "run", "--rm", "--pull=never", "--platform=linux/amd64",
                     "--network=none", "--read-only", "--cap-drop=ALL",
                     "--security-opt=no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}",
+                    "--env","LANG=C.UTF-8","--env","LC_ALL=C.UTF-8",
                     "--workdir=/work", "--mount", f"type=bind,src={ROOT},dst=/probe,readonly",
                     "--mount", f"type=bind,src={WORK},dst=/work"]
-          for path in ["/usr", "/lib", "/lib64"]:
-              source = Path(path)
-              if source.is_dir():
-                  common += ["--mount", f"type=bind,src={source.resolve()},dst={path},readonly"]
-          assert Path("/usr/bin/python3").is_file() and Path("/usr/bin/stat").is_file()
-          save("shared-container-config.json", {"commonArgv": common, "image": pinned,
-                                                "launcherSha256": digest(ROOT / "container_launcher.py")})
+          # Inspect the pristine image without executing its possibly dynamic BusyBox.
+          created=run("image-create",["docker","create","--network=none","--read-only","--cap-drop=ALL",pinned])
+          cid=created.stdout.decode().strip();assert re.fullmatch(r"[0-9a-f]{64}",cid)
+          try:
+              archive=ROOT/"image-filesystem.tar"
+              run("image-export",["docker","export","--output",str(archive),cid])
+              with tarfile.open(archive) as image_fs:
+                  members={m.name.removeprefix("./").rstrip("/"):m for m in image_fs.getmembers()}
+                  topology={}
+                  for path in ["usr","lib","lib64","bin","bin/busybox"]:
+                      m=members.get(path)
+                      topology["/"+path]=None if m is None else {"type":m.type.decode(),"linkname":m.linkname,"mode":m.mode}
+                  assert members["usr"].isdir() and not members["usr"].issym(),topology
+                  save("image-path-topology.json",topology)
+                  busybox=ROOT/"image-busybox.elf"
+                  busybox.write_bytes(image_fs.extractfile(members["bin/busybox"]).read())
+                  run("image-busybox-elf",["/usr/bin/readelf","--program-headers","--wide",str(busybox)])
+          finally:
+              run("image-remove-inspection-container",["docker","rm",cid])
+          # One non-aliased runtime mount; /lib and /lib64 in the image stay untouched.
+          common += ["--mount","type=bind,src=/usr,dst=/usr,readonly"]
+          def elf_info(label,path):
+              path=Path(path);resolved=path.resolve(strict=True)
+              output=run(label+"-elf",["/usr/bin/readelf","--program-headers","--wide",str(resolved)]).stdout.decode()
+              matches=re.findall(r"Requesting program interpreter:\s*([^\]]+)",output)
+              assert len(matches)==1,(label,output)
+              interp=Path(matches[0]);loader=interp.resolve(strict=True)
+              assert loader.is_relative_to("/usr")
+              return {"literal":str(path),"literalSymlink":os.readlink(path) if path.is_symlink() else None,
+               "resolved":str(resolved),"sha256":digest(resolved),"ptInterp":str(interp),
+               "ptInterpSymlink":os.readlink(interp) if interp.is_symlink() else None,
+               "loader":{"resolved":str(loader),"sha256":digest(loader)}}
+          python=elf_info("python",Path("/usr/bin/python3"));stat_elf=elf_info("stat",Path("/usr/bin/stat"))
+          assert all(Path(x["resolved"]).is_relative_to("/usr") for x in [python,stat_elf])
+          assert python["loader"]==stat_elf["loader"]
+          loader=python["loader"]
+          run("loader-version",[loader["resolved"],"--version"])
+          def dependencies(label,program):
+              raw=run(label+"-host-dependencies",[loader["resolved"],"--list",program]).stdout.decode()
+              assert "not found" not in raw,raw
+              paths=re.findall(r"(?:=>\s+|^\s*)(/[^\s]+)",raw,re.M)
+              assert paths,(label,raw)
+              records={}
+              for path in paths:
+                  p=Path(path).resolve(strict=True);assert p.is_relative_to("/usr"),p
+                  records[str(p)]=digest(p)
+              return records
+          runtime={"python":python,"stat":stat_elf,"loader":loader,"hashes":{},"dependencyFiles":{},"localeEnv":locale_env}
+          library_dirs=set()
+          for label,x in [("python",python),("stat",stat_elf)]:
+              deps=dependencies(label,x["resolved"])
+              runtime["dependencyFiles"][label]=deps
+              library_dirs.update(str(Path(p).parent) for p in deps)
+              runtime["hashes"].update(deps)
+              runtime["hashes"][x["resolved"]]=x["sha256"]
+          runtime["hashes"][loader["resolved"]]=loader["sha256"]
+
           accepted = []
           for lane, commit in [("baseline", BASE), ("candidate", CANDIDATE)]:
               checkout = Path(os.environ["GITHUB_WORKSPACE"]) / "source" / lane
@@ -170,15 +271,65 @@ jobs:
                                           "sha256": binary_sha, "bytes": binary.stat().st_size})
               assert not run(lane + "-status-after-build", ["git", "status", "--porcelain"], cwd=checkout).stdout
               assert source == {p: digest(checkout / p) for p in source}
+              binary_elf=elf_info(lane+"-test",binary)
+              assert binary_elf["loader"]==loader
+              deps=dependencies(lane+"-test",str(binary))
+              if lane=="baseline":
+                  runtime["hashes"].update(deps)
+                  runtime["dependencyFiles"]["test"]=deps
+                  library_dirs.update(str(Path(p).parent) for p in deps)
+                  runtime["libraryDirs"]=sorted(library_dirs)
+                  assert all(":" not in p for p in runtime["libraryDirs"])
+                  # Capture the same launcher imports in the exact host Python/ld runtime.
+                  host_mapping_script=r'''from pathlib import Path
+          import ctypes,hashlib,json,locale,os,re,subprocess,sys
+          loader,libpath=sys.argv[1:]
+          libc=ctypes.CDLL(None);libc.gnu_get_libc_version.restype=ctypes.c_char_p
+          subprocess.run([loader,"--verify",sys.executable],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+          subprocess.check_output([loader,"--inhibit-cache","--library-path",libpath,"--list",sys.executable],text=True)
+          mapped={}
+          for row in Path("/proc/self/maps").read_text().splitlines():
+              fields=row.split(maxsplit=5)
+              if len(fields)==6 and fields[5].startswith("/"):
+                  path=Path(fields[5]).resolve(strict=True)
+                  assert path.is_relative_to("/usr") and path.is_file(),row
+                  mapped[str(path)]=hashlib.sha256(path.read_bytes()).hexdigest()
+          print(json.dumps({"python":str(Path(sys.executable).resolve()),"glibc":libc.gnu_get_libc_version().decode(),"mappedFiles":mapped,"localeEnv":{k:os.environ.get(k) for k in ["LANG","LC_ALL"]},"localeCtype":locale.setlocale(locale.LC_CTYPE)},sort_keys=True))
+          '''
+                  smoke_env=os.environ.copy();smoke_env.update(locale_env)
+                  smoke=run("host-python-runtime-smoke",[loader["resolved"],"--inhibit-cache",
+                    "--library-path",":".join(runtime["libraryDirs"]),python["resolved"],"-I","-B",
+                    "-c",host_mapping_script,loader["resolved"],":".join(runtime["libraryDirs"])],env=smoke_env)
+                  mappings=json.loads(smoke.stdout)
+                  assert mappings["python"]==python["resolved"]
+                  assert mappings["localeEnv"]==locale_env
+                  runtime["localeCtype"]=mappings["localeCtype"]
+                  runtime["pythonMappedFiles"]=mappings["mappedFiles"]
+                  for path,expected in runtime["pythonMappedFiles"].items():
+                      assert Path(path).is_relative_to("/usr") and digest(path)==expected,path
+                      assert path not in runtime["hashes"] or runtime["hashes"][path]==expected,path
+                      runtime["hashes"][path]=expected
+                  (ROOT/"runtime.json").write_text(json.dumps(runtime,sort_keys=True,indent=2)+"\n")
+                  save("host-runtime.json",runtime)
+                  save("shared-container-config.json",{"commonArgv":common,"image":pinned,
+                   "runtimeSha256":digest(ROOT/"runtime.json"),"launcherSha256":digest(ROOT/"container_launcher.py")})
+              else:
+                  assert deps==runtime["dependencyFiles"]["test"],deps
+              save(lane+"-test-elf.json",binary_elf)
               (WORK / "tmp" / lane).mkdir()
-              command = common + ["--env", f"TMPDIR=/work/tmp/{lane}",
-                          "--entrypoint=/usr/bin/python3", pinned, "/probe/container_launcher.py",
-                          lane, "/probe/" + binary.name, binary_sha, TEST]
+              runtime_sha=digest(ROOT/"runtime.json")
+              command=common+["--env",f"TMPDIR=/work/tmp/{lane}",
+               "--entrypoint="+loader["resolved"],pinned,"--inhibit-cache","--library-path",
+               ":".join(runtime["libraryDirs"]),python["resolved"],"-I","-B","/probe/container_launcher.py",
+               lane,"/probe/"+binary.name,binary_sha,TEST,runtime_sha]
               result = run(lane + "-native", command, expected=None)
               raw = result.stdout + result.stderr
               text = raw.decode(errors="replace")
               facts_lines = [x.removeprefix("PROBE_FACTS=") for x in text.splitlines() if x.startswith("PROBE_FACTS=")]
               assert len(facts_lines) == 1 and "PROBE_SETUP_ERROR=" not in text, text[-4000:]
+              preflight_lines=[x.removeprefix("RUNTIME_PREFLIGHT=") for x in text.splitlines() if x.startswith("RUNTIME_PREFLIGHT=")]
+              assert len(preflight_lines)==1,text[-4000:]
+              save(lane+"-runtime-preflight.json",json.loads(preflight_lines[0]))
               facts = json.loads(facts_lines[0])
               assert facts["binarySha256"] == binary_sha and facts["lane"] == lane
               assert len(re.findall(r"^running 1 test$", text, re.M)) == 1, text[-4000:]
