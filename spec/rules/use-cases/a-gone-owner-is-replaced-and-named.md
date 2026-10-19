@@ -11,6 +11,10 @@ check:
   - src/use_cases/infobase_owner.rs::a_host_rename_keeps_the_machine
   - src/use_cases/infobase_owner.rs::an_owner_whose_config_pair_changes_is_kept_alive_until_a_coherent_read
   - src/config/loader.rs::declared_infobases_refuse_two_absences_that_never_existed_together
+  - src/config/loader.rs::declared_infobases_refuse_an_ancestor_exchange_without_a_named_declaration_gap
+  - src/config/loader.rs::declared_infobases_keep_a_stable_pair_during_unrelated_ancestor_child_churn
+  - src/config/loader.rs::config_route_notifications_require_a_confirmed_native_filesystem
+  - src/config/loader.rs::config_route_move_witness_stays_invalid_after_rechecking
   - src/config/loader.rs::declared_infobases_keep_a_stable_pair_with_both_declarations
   - src/config/loader.rs::declared_infobases_hold_the_windows_route_and_captured_files_against_mutation
 ---

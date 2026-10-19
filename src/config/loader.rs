@@ -765,14 +765,15 @@ struct CapturedConfigDirectory {
     stamp: ConfigObjectStamp,
 }
 
-/// Ownership reads one pair through its held project directory. Its namespace
-/// witness detects entries moved out and back, including two transient absences; ancestor
-/// identities bind the directory without treating changes to siblings as changes
-/// to this project's declarations.
+/// Ownership reads one pair through its held project directory. Route identity
+/// and self-move witnesses reject an ancestor replaced and restored during the
+/// read; its namespace witness also protects captured missing files.
 struct CapturedConfigRoute {
     // Field order keeps the route bound until its notification handle is closed.
     #[cfg(windows)]
     changes: ConfigDirectoryChanges,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    route_changes: ConfigRouteChanges,
     directories: Vec<CapturedConfigDirectory>,
 }
 
@@ -797,6 +798,8 @@ impl CapturedConfigRoute {
         Ok(Self {
             #[cfg(windows)]
             changes: ConfigDirectoryChanges::capture(project)?,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            route_changes: ConfigRouteChanges::capture(&route)?,
             directories: route,
         })
     }
@@ -820,6 +823,8 @@ impl CapturedConfigRoute {
         }
         #[cfg(windows)]
         self.changes.recheck()?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.route_changes.recheck()?;
         Ok(())
     }
 
@@ -859,6 +864,180 @@ impl CapturedConfigRoute {
         #[cfg(not(unix))]
         {
             open_config_entry(&self.project().path.join(name), false)
+        }
+    }
+}
+
+/// One synchronous native queue binds the held route objects for this read.
+/// The route drops it before closing the directory descriptors it watches.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct ConfigRouteChanges {
+    queue: std::fs::File,
+    #[cfg(target_os = "macos")]
+    changed: std::cell::Cell<bool>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ConfigRouteChanges {
+    fn capture(directories: &[CapturedConfigDirectory]) -> std::io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        for directory in directories {
+            let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+            // SAFETY: the route retains this live directory fd; fstatfs writes
+            // only into the correctly sized, aligned statfs buffer.
+            if unsafe { libc::fstatfs(directory.file.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: fstatfs succeeded and the remaining buffer was zeroed.
+            if !Self::filesystem_supported(unsafe { &filesystem.assume_init() }) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "project ownership cannot confirm route changes on this volume",
+                ));
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        // SAFETY: inotify_init1 takes flags and returns a new owned descriptor.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        #[cfg(target_os = "macos")]
+        // SAFETY: kqueue has no arguments and returns a new owned descriptor.
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: this is the only owner of the new valid descriptor. File
+        // closes the queue on every registration failure and on normal drop.
+        let queue = unsafe { std::fs::File::from_raw_fd(fd) };
+        #[cfg(target_os = "macos")]
+        // SAFETY: fd is owned by queue and FD_CLOEXEC is a valid F_SETFD value.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        for directory in directories {
+            #[cfg(target_os = "linux")]
+            {
+                // Bind the watch to the held inode, not a name which could
+                // already designate another directory while watches are set up.
+                let path = std::ffi::CString::new(format!(
+                    "/proc/self/fd/{}",
+                    directory.file.as_raw_fd()
+                ))?;
+                // SAFETY: the fd and its NUL-terminated kernel link stay live.
+                // Deliberately follow this owned fd link; no project alias is read.
+                let watch = unsafe {
+                    libc::inotify_add_watch(
+                        fd,
+                        path.as_ptr(),
+                        libc::IN_MOVE_SELF | libc::IN_DELETE_SELF | libc::IN_ONLYDIR,
+                    )
+                };
+                if watch < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let change = libc::kevent {
+                    ident: directory.file.as_raw_fd() as libc::uintptr_t,
+                    filter: libc::EVFILT_VNODE,
+                    flags: libc::EV_ADD | libc::EV_ENABLE,
+                    fflags: libc::NOTE_RENAME | libc::NOTE_DELETE | libc::NOTE_REVOKE,
+                    data: 0,
+                    udata: std::ptr::null_mut(),
+                };
+                let immediate = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                // SAFETY: one initialized change names a retained live fd. With
+                // no event output this registers without consuming route events;
+                // registration failures are returned as -1, not hidden EV_ERRORs.
+                if unsafe { libc::kevent(fd, &change, 1, std::ptr::null_mut(), 0, &immediate) } < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+        }
+        Ok(Self {
+            queue,
+            #[cfg(target_os = "macos")]
+            changed: std::cell::Cell::new(false),
+        })
+    }
+
+    fn filesystem_supported(filesystem: &libc::statfs) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            // Linux UAPI include/uapi/linux/magic.h: native local filesystems
+            // with inode self-move events. Unknown and remote types stay unreadable.
+            matches!(
+                filesystem.f_type as u64,
+                0xef53 | 0x5846_5342 | 0x9123_683e | 0x0102_1994 | 0x8584_58f6
+            )
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let name = filesystem.f_fstypename.map(|byte| byte as u8);
+            filesystem.f_flags & libc::MNT_LOCAL as u32 != 0
+                && std::ffi::CStr::from_bytes_until_nul(&name)
+                    .is_ok_and(|name| name.to_bytes() == b"apfs" || name.to_bytes() == b"hfs")
+        }
+    }
+
+    fn recheck(&self) -> Result<(), ConfigLoadError> {
+        use std::os::fd::AsRawFd;
+        #[cfg(target_os = "linux")]
+        {
+            let mut state = libc::pollfd {
+                fd: self.queue.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: state is one live pollfd and a zero timeout never blocks.
+            // Poll does not drain the queue: move, deletion, overflow, ignored
+            // watch and unmount events all permanently invalidate this read.
+            match unsafe { libc::poll(&mut state, 1, 0) } {
+                0 => Ok(()),
+                -1 => Err(std::io::Error::last_os_error().into()),
+                _ => Err(changed_declared_config()),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if self.changed.get() {
+                return Err(changed_declared_config());
+            }
+            let mut event = std::mem::MaybeUninit::<libc::kevent>::uninit();
+            let immediate = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: event is one correctly aligned writable kevent slot; the
+            // queue is owned here and the zero timeout makes this a bounded poll.
+            let count = unsafe {
+                libc::kevent(
+                    self.queue.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    event.as_mut_ptr(),
+                    1,
+                    &immediate,
+                )
+            };
+            if count == 0 {
+                Ok(())
+            } else {
+                // kevent may consume a notification. Once observed, this read
+                // must stay invalid on every later check of the same route.
+                self.changed.set(true);
+                if count < 0 {
+                    Err(std::io::Error::last_os_error().into())
+                } else {
+                    Err(changed_declared_config())
+                }
+            }
         }
     }
 }
@@ -3063,6 +3242,66 @@ mod tests {
     }
 
     #[test]
+    fn declared_infobases_keep_a_stable_pair_during_unrelated_ancestor_child_churn() {
+        use super::DeclaredReadPoint;
+        use std::fs;
+
+        let directory = tempdir().unwrap();
+        let ancestor = canonical(directory.path());
+        let project = ancestor.join("project");
+        fs::create_dir(&project).unwrap();
+        let primary = project.join(super::DEFAULT_CONFIG_FILE_NAME);
+        let local = project.join(LOCAL_CONFIG_FILE_NAME);
+        fs::write(&primary, "infobase:\n  connection: File=primary-ib\n").unwrap();
+        fs::write(
+            &local,
+            "infobases:\n  second:\n    connection: File=local-ib\n",
+        )
+        .unwrap();
+        let primary_bytes = fs::read(&primary).unwrap();
+        let local_bytes = fs::read(&local).unwrap();
+        let project_directory = super::open_config_entry(&project, true).unwrap();
+        let project_stamp = super::ConfigObjectStamp::read(&project_directory).unwrap();
+        let sibling = ancestor.join("unrelated-sibling");
+        assert!(!sibling.exists());
+        let during = project.clone();
+        let declared = super::with_declared_read_hook(
+            move |point| {
+                if matches!(point, DeclaredReadPoint::BeforeRecheck) {
+                    // Work beside the project changes the ancestor's namespace,
+                    // while the named project route and both YAML files stay put.
+                    fs::create_dir(&sibling).unwrap();
+                    fs::remove_dir(&sibling).unwrap();
+                    assert!(!sibling.exists());
+                    assert_eq!(fs::read(&primary).unwrap(), primary_bytes);
+                    assert_eq!(fs::read(&local).unwrap(), local_bytes);
+                    let named_project = super::open_config_entry(&during, true).unwrap();
+                    assert!(
+                        super::ConfigObjectStamp::read(&named_project).unwrap() == project_stamp,
+                        "unrelated ancestor-child work does not change the named project"
+                    );
+                    assert!(
+                        super::ConfigObjectStamp::read(&project_directory).unwrap()
+                            == project_stamp,
+                        "the held project directory remains the same unchanged object"
+                    );
+                }
+            },
+            || super::load_declared_infobases(&project),
+        )
+        .expect("unrelated ancestor-child work must preserve a readable stable declaration pair");
+        assert_eq!(declared.len(), 2);
+        assert_eq!(
+            declared["origin"].connection,
+            format!("File={}", project.join("primary-ib").display())
+        );
+        assert_eq!(
+            declared["second"].connection,
+            format!("File={}", project.join("local-ib").display())
+        );
+    }
+
+    #[test]
     fn declared_infobases_refuse_two_absences_that_never_existed_together() {
         use super::DeclaredReadPoint;
         let directory = tempdir().unwrap();
@@ -3197,6 +3436,208 @@ mod tests {
             || super::load_declared_infobases(&project),
         );
         assert!(matches!(result, Err(ConfigLoadError::ReadError(_))));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn config_route_notifications_require_a_confirmed_native_filesystem() {
+        // SAFETY: statfs contains only integer fields and fixed integer arrays;
+        // a zeroed value is valid input to the pure filesystem classifier.
+        let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+        #[cfg(target_os = "linux")]
+        {
+            for kind in [
+                0xef53_u64,
+                0x5846_5342,
+                0x9123_683e,
+                0x0102_1994,
+                0x8584_58f6,
+            ] {
+                filesystem.f_type = kind as _;
+                assert!(super::ConfigRouteChanges::filesystem_supported(&filesystem));
+            }
+            for kind in [
+                0x6969_u64,
+                0xff53_4d42,
+                0xfe53_4d42,
+                0x6573_5546,
+                0x794c_7630,
+                0,
+            ] {
+                filesystem.f_type = kind as _;
+                assert!(!super::ConfigRouteChanges::filesystem_supported(&filesystem),
+                    "remote, userspace, overlay and unknown filesystems do not prove native route notifications");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            for name in [b"apfs".as_slice(), b"hfs".as_slice()] {
+                filesystem.f_fstypename.fill(0);
+                for (slot, byte) in filesystem.f_fstypename.iter_mut().zip(name) {
+                    *slot = *byte as libc::c_char;
+                }
+                filesystem.f_flags = libc::MNT_LOCAL as u32;
+                assert!(super::ConfigRouteChanges::filesystem_supported(&filesystem));
+                filesystem.f_flags = 0;
+                assert!(!super::ConfigRouteChanges::filesystem_supported(
+                    &filesystem
+                ));
+            }
+            for name in [b"nfs".as_slice(), b"smbfs", b"osxfuse", b"unknown", b""] {
+                filesystem.f_fstypename.fill(0);
+                for (slot, byte) in filesystem.f_fstypename.iter_mut().zip(name) {
+                    *slot = *byte as libc::c_char;
+                }
+                filesystem.f_flags = libc::MNT_LOCAL as u32;
+                assert!(!super::ConfigRouteChanges::filesystem_supported(
+                    &filesystem
+                ));
+            }
+            filesystem.f_fstypename.fill(b'a' as libc::c_char);
+            assert!(
+                !super::ConfigRouteChanges::filesystem_supported(&filesystem),
+                "an unterminated native name is not an admitted filesystem"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn config_route_move_witness_stays_invalid_after_rechecking() {
+        let directory = tempdir().unwrap();
+        let root = canonical(directory.path());
+        let ancestor = root.join("ancestor");
+        let project = ancestor.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let route = super::CapturedConfigRoute::capture(&project).unwrap();
+        let held = root.join("held-ancestor");
+        std::fs::rename(&ancestor, &held).unwrap();
+        std::fs::rename(&held, &ancestor).unwrap();
+        assert!(
+            super::ConfigObjectStamp::read(&route.project().file).unwrap() == route.project().stamp,
+            "only an ancestor was moved"
+        );
+        for _ in 0..2 {
+            assert!(
+                matches!(route.recheck(), Err(ConfigLoadError::ReadError(_))),
+                "an observed ancestor move stays invalid even if a native event was retrieved"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn declared_infobases_refuse_an_ancestor_exchange_without_a_named_declaration_gap() {
+        use super::DeclaredReadPoint;
+        use std::ffi::CString;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+
+        fn exchange_directories(left: &Path, right: &Path) {
+            let left = CString::new(left.as_os_str().as_bytes()).unwrap();
+            let right = CString::new(right.as_os_str().as_bytes()).unwrap();
+            // SAFETY: both absolute names are live NUL-terminated strings. The
+            // same-volume exchange is atomic; no missing-owner interval is used.
+            #[cfg(target_os = "macos")]
+            let status =
+                unsafe { libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP) };
+            // SAFETY: renameat2 receives live absolute names and valid AT_FDCWD
+            // sentinels. The syscall avoids a libc-symbol-version dependency.
+            #[cfg(target_os = "linux")]
+            let status = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    left.as_ptr(),
+                    libc::AT_FDCWD,
+                    right.as_ptr(),
+                    libc::RENAME_EXCHANGE,
+                )
+            };
+            assert_eq!(
+                status,
+                0,
+                "the causal test requires real atomic directory exchange: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        fn assert_named_owner_declares(project: &Path, primary: &[u8], local: &[u8]) {
+            let actual_primary = fs::read(project.join(super::DEFAULT_CONFIG_FILE_NAME)).unwrap();
+            let actual_local = fs::read(project.join(LOCAL_CONFIG_FILE_NAME)).unwrap();
+            assert!(
+                actual_primary == primary || actual_local == local,
+                "the named owner must declare the same base at every controlled step"
+            );
+        }
+
+        let directory = tempdir().unwrap();
+        let root = canonical(directory.path());
+        let original_ancestor = root.join("original-ancestor");
+        let decoy_ancestor = root.join("decoy-ancestor");
+        let project = original_ancestor.join("project");
+        let held_project = decoy_ancestor.join("project");
+        let base = root.join("base");
+        fs::create_dir(&base).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&held_project).unwrap();
+        let connection = format!("File={}", base.display()).replace('\'', "''");
+        let declaring_primary = format!("infobase:\n  connection: '{connection}'\n").into_bytes();
+        let declaring_local =
+            format!("infobases:\n  origin:\n    connection: '{connection}'\n").into_bytes();
+        for path in [&project, &held_project] {
+            fs::write(
+                path.join(super::DEFAULT_CONFIG_FILE_NAME),
+                "format: DESIGNER\n",
+            )
+            .unwrap();
+            fs::write(path.join(LOCAL_CONFIG_FILE_NAME), &declaring_local).unwrap();
+        }
+        let held_directory = super::open_config_entry(&project, true).unwrap();
+        let project_stamp = super::ConfigObjectStamp::read(&held_directory).unwrap();
+        assert_named_owner_declares(&project, &declaring_primary, &declaring_local);
+        let during = project.clone();
+        let result = super::with_declared_read_hook(
+            move |point| {
+                assert_named_owner_declares(&during, &declaring_primary, &declaring_local);
+                match point {
+                    DeclaredReadPoint::ProjectCaptured => {
+                        exchange_directories(&original_ancestor, &decoy_ancestor);
+                        assert_named_owner_declares(&during, &declaring_primary, &declaring_local);
+                        // B becomes empty before its capture through the held P fd.
+                        // Its existing inode and the P directory entries stay put.
+                        fs::write(held_project.join(LOCAL_CONFIG_FILE_NAME), "infobases: {}\n")
+                            .unwrap();
+                    }
+                    DeclaredReadPoint::AfterProjectRecheck => {
+                        // Restore a declaration in the held original P before it
+                        // returns to the named route, without changing P's entries.
+                        fs::write(
+                            held_project.join(super::DEFAULT_CONFIG_FILE_NAME),
+                            &declaring_primary,
+                        )
+                        .unwrap();
+                        assert_named_owner_declares(&during, &declaring_primary, &declaring_local);
+                        exchange_directories(&original_ancestor, &decoy_ancestor);
+                    }
+                    DeclaredReadPoint::LocalCaptured | DeclaredReadPoint::BeforeRecheck => {}
+                }
+                assert_named_owner_declares(&during, &declaring_primary, &declaring_local);
+                assert!(
+                    super::ConfigObjectStamp::read(&held_directory).unwrap() == project_stamp,
+                    "only an ancestor is exchanged; the held project directory stamp is unchanged"
+                );
+            },
+            || super::load_declared_infobases(&project),
+        );
+        match result {
+            Err(ConfigLoadError::ReadError(_)) => {}
+            Ok(declared) => panic!(
+                "a continuously declaring named owner was accepted as {} declarations through ancestor ABA",
+                declared.len()
+            ),
+            Err(error) => panic!("the causal fixture produced an unrelated error: {error}"),
+        }
     }
 
     #[cfg(windows)]
