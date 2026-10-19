@@ -2,10 +2,11 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -372,6 +373,189 @@ impl AttachedAgent {
     }
 }
 
+// This observer is local to the publication test: retain the gated dump process,
+// rather than infer its exit from a PID lookup, a fixture marker or pipe EOF.
+struct WriterExit {
+    #[cfg(target_os = "macos")]
+    pid: u32,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    event: std::os::fd::OwnedFd,
+    #[cfg(windows)]
+    event: std::os::windows::io::OwnedHandle,
+}
+
+impl WriterExit {
+    #[cfg(target_os = "linux")]
+    fn retain(pid: u32) -> io::Result<Self> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: pid names the fixture held by our connected gate; flags is zero.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            // SAFETY: pidfd_open returned a fresh descriptor owned by this observer.
+            event: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) },
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn retain(pid: u32) -> io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: kqueue has no pointer arguments.
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: kqueue returned a fresh descriptor owned by this observer.
+        let event = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let change = libc::kevent {
+            ident: pid as usize,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ONESHOT,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: change is initialized; no output events are requested. Register
+        // while the fixture is held, before its PID could be reaped or reused.
+        if unsafe {
+            libc::kevent(
+                event.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { pid, event })
+    }
+
+    #[cfg(windows)]
+    fn retain(pid: u32) -> io::Result<Self> {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+        // SAFETY: the gated fixture is alive; only synchronization access is requested.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            // SAFETY: OpenProcess returned a fresh handle owned by this observer.
+            event: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) },
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn exited(&self) -> io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        let mut descriptor = libc::pollfd {
+            fd: self.event.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        loop {
+            // SAFETY: descriptor is initialized and remains live for this poll.
+            let count = unsafe { libc::poll(&mut descriptor, 1, 0) };
+            if count < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                return Err(io::Error::other("invalid writer pidfd event"));
+            }
+            // A retained pidfd becomes readable on exit; HUP also covers reaping.
+            return Ok(descriptor.revents & (libc::POLLIN | libc::POLLHUP) != 0);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn exited(&self) -> io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        let mut event = std::mem::MaybeUninit::<libc::kevent>::uninit();
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        loop {
+            // SAFETY: one output slot and initialized zero timeout are valid;
+            // assume_init is used only when kevent reports one initialized event.
+            let count = unsafe {
+                libc::kevent(
+                    self.event.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    event.as_mut_ptr(),
+                    1,
+                    &timeout,
+                )
+            };
+            if count < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if count == 0 {
+                return Ok(false);
+            }
+            // SAFETY: count is one, so the single output slot was initialized.
+            let event = unsafe { event.assume_init() };
+            if event.flags & libc::EV_ERROR != 0 {
+                return Err(io::Error::from_raw_os_error(event.data as i32));
+            }
+            if event.ident != self.pid as usize || event.fflags & libc::NOTE_EXIT == 0 {
+                return Err(io::Error::other("unexpected writer process event"));
+            }
+            return Ok(true);
+        }
+    }
+
+    #[cfg(windows)]
+    fn exited(&self) -> io::Result<bool> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        // SAFETY: this observer retains the exact process handle throughout the wait.
+        match unsafe { WaitForSingleObject(self.event.as_raw_handle(), 0) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            WAIT_FAILED => Err(io::Error::last_os_error()),
+            _ => Err(io::Error::other("unexpected writer process wait result")),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    fn retain(_pid: u32) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "native writer-exit observer",
+        ))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    fn exited(&self) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "native writer-exit observer",
+        ))
+    }
+}
+
+enum WriterReadyCheck {
+    Disabled,
+    Waiting,
+    Watching(WriterExit),
+}
+
 struct Session {
     child: Child,
     input: Option<ChildStdin>,
@@ -379,6 +563,7 @@ struct Session {
     output_reader: Option<thread::JoinHandle<()>>,
     error_reader: Option<thread::JoinHandle<Vec<u8>>>,
     ready_receipt: Option<Value>,
+    writer_ready: Arc<Mutex<WriterReadyCheck>>,
 }
 
 impl Session {
@@ -393,11 +578,35 @@ impl Session {
         let stdout = child.stdout.take().expect("stdout pipe");
         let mut stderr = child.stderr.take().expect("stderr pipe");
         let (send, frames) = mpsc::channel();
+        let writer_ready = Arc::new(Mutex::new(WriterReadyCheck::Disabled));
+        let ready_check = Arc::clone(&writer_ready);
         let output_reader = thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let frame = line.map_err(|error| error.to_string()).and_then(|line| {
-                    serde_json::from_str(&line)
-                        .map_err(|error| format!("invalid protocol frame {line:?}: {error}"))
+                    let frame: Value = serde_json::from_str(&line)
+                        .map_err(|error| format!("invalid protocol frame {line:?}: {error}"))?;
+                    if frame["phase"] == "ready" {
+                        let check = ready_check.lock().map_err(|_| "writer observer poisoned")?;
+                        match &*check {
+                            WriterReadyCheck::Disabled => {}
+                            WriterReadyCheck::Waiting => {
+                                return Err(
+                                    "Ready received before retaining the held writer".into()
+                                );
+                            }
+                            WriterReadyCheck::Watching(writer) => {
+                                let exited = writer.exited().map_err(|error| {
+                                    format!("cannot observe writer exit at Ready: {error}")
+                                })?;
+                                if !exited {
+                                    return Err(
+                                        "Ready received while the dump writer is alive".into()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(frame)
                 });
                 if send.send(frame).is_err() {
                     return;
@@ -416,6 +625,7 @@ impl Session {
             output_reader: Some(output_reader),
             error_reader: Some(error_reader),
             ready_receipt: None,
+            writer_ready,
         }
     }
 
@@ -699,8 +909,105 @@ fn accepted_external_full_pull_remembers_the_original_source_for_the_next_push()
             .unwrap();
             let config = fs::read(&project.config).unwrap();
             let baseline = project.baseline();
-            let mut session = project.start();
-            let ready = project.ready(&mut session);
+            let gate = TcpListener::bind("127.0.0.1:0").expect("own dump-writer gate");
+            gate.set_nonblocking(true).expect("bounded gate accept");
+            let mut session = Session::start(
+                project
+                    .command()
+                    .env(
+                        "V8_RUNNER_FAKE_PLATFORM_DUMP_GATE",
+                        gate.local_addr().unwrap().to_string(),
+                    )
+                    .args(["pull", "main", "--force", "--publication-stdio"])
+                    .arg(&project.stage),
+            );
+            // Arm before Continue: any Ready before retaining the held writer is a failure.
+            *session.writer_ready.lock().unwrap() = WriterReadyCheck::Waiting;
+            let selected = project.selected(&mut session);
+            session.decide(&selected, "continue");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut writer_gate = loop {
+                match gate.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "dump writer never reached its gate"
+                        );
+                        assert!(
+                            session.child.try_wait().unwrap().is_none(),
+                            "CLI exited before dump gate"
+                        );
+                        let before_gate = session.frames.try_recv();
+                        assert!(
+                            matches!(&before_gate, Err(mpsc::TryRecvError::Empty)),
+                            "CLI produced a frame or EOF before dump gate: {before_gate:?}"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept own writer gate: {error}"),
+                }
+            };
+            // Winsock may inherit nonblocking mode from the listener.
+            writer_gate
+                .set_nonblocking(false)
+                .expect("blocking writer gate");
+            writer_gate
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            writer_gate
+                .set_write_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            let mut pid = [0; 4];
+            writer_gate
+                .read_exact(&mut pid)
+                .expect("held writing process PID");
+            let pid = u32::from_le_bytes(pid);
+            assert_ne!(
+                pid,
+                session.child.id(),
+                "writer must be the dispatched platform"
+            );
+            let writer = WriterExit::retain(pid).expect("retain held writer's native exit event");
+            assert!(
+                !writer.exited().unwrap(),
+                "fixture writer must still be held alive"
+            );
+            *session.writer_ready.lock().unwrap() = WriterReadyCheck::Watching(writer);
+            // Keep the finite writer held while the real reader can observe an
+            // illegal Ready. This bounded observation is not an emission-time proof.
+            let held_frame = session.frames.recv_timeout(Duration::from_secs(2));
+            assert!(
+                matches!(&held_frame, Err(mpsc::RecvTimeoutError::Timeout)),
+                "CLI produced Ready, terminal or EOF while the dump writer was held: {held_frame:?}"
+            );
+            {
+                let check = session.writer_ready.lock().unwrap();
+                match &*check {
+                    WriterReadyCheck::Watching(writer) => assert!(
+                        !writer.exited().unwrap(),
+                        "finite dump writer exited before its gate was released"
+                    ),
+                    WriterReadyCheck::Disabled | WriterReadyCheck::Waiting => {
+                        panic!("held writer observer changed before gate release");
+                    }
+                }
+            }
+            writer_gate
+                .write_all(&[1])
+                .expect("release finite dump writer");
+            drop(writer_gate);
+            // The stdout reader checks native exit BEFORE enqueueing this Ready.
+            let ready = project.prepared(&mut session, &selected);
+            assert!(
+                session.child.try_wait().unwrap().is_none(),
+                "coordinator must stay alive to receive Published"
+            );
+            let before_publication = session.frames.try_recv();
+            assert!(
+                matches!(&before_publication, Err(mpsc::TryRecvError::Empty)),
+                "coordinator sent a terminal frame or EOF before Published: {before_publication:?}"
+            );
             assert_eq!(project.baseline(), baseline);
             assert!(project.sources.join("local.bsl").is_file());
             let calls = project.calls();
