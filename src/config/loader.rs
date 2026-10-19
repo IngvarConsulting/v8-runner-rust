@@ -882,7 +882,12 @@ impl ConfigRouteChanges {
     fn capture(directories: &[CapturedConfigDirectory]) -> std::io::Result<Self> {
         use std::os::fd::{AsRawFd, FromRawFd};
 
-        for directory in directories {
+        // The absolute namespace root cannot move. Its identity and a root
+        // project's namespace stamp remain checked by CapturedConfigRoute.
+        let movable_directories = directories
+            .iter()
+            .filter(|entry| entry.path.parent().is_some());
+        for directory in movable_directories.clone() {
             let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::zeroed();
             // SAFETY: the route retains this live directory fd; fstatfs writes
             // only into the correctly sized, aligned statfs buffer.
@@ -915,7 +920,7 @@ impl ConfigRouteChanges {
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        for directory in directories {
+        for directory in movable_directories {
             #[cfg(target_os = "linux")]
             {
                 // Bind the watch to the held inode, not a name which could
