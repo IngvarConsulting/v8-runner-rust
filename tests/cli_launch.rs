@@ -124,75 +124,157 @@ struct FakeHttpRequest {
     body: Option<Value>,
 }
 
-fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
+#[derive(Default)]
+struct FakeMcpRequests {
+    initializes: usize,
+    tools_lists: usize,
+    deletes: usize,
+}
+
+struct FakeMcpServer {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<JoinHandle<FakeMcpRequests>>,
+}
+
+impl FakeMcpServer {
+    fn finish(mut self) -> FakeMcpRequests {
+        self.shutdown.store(true, Ordering::Release);
+        self.thread
+            .take()
+            .expect("fake MCP thread")
+            .join()
+            .expect("fake MCP server exits")
+    }
+}
+
+impl Drop for FakeMcpServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            // finish surfaces server panics; Drop also cleans up during test unwinding.
+            let result = thread.join();
+            if !thread::panicking() {
+                result.expect("fake MCP server exits");
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FakeMcpScenario {
+    Normal,
+    Unavailable,
+    Empty,
+    LostInitializeReply,
+}
+
+fn start_fake_mcp_server(tools: &[&str]) -> (u16, FakeMcpServer) {
+    start_fake_mcp_server_with_scenario(tools, FakeMcpScenario::Normal)
+}
+
+fn start_fake_mcp_server_with_scenario(
+    tools: &[&str],
+    scenario: FakeMcpScenario,
+) -> (u16, FakeMcpServer) {
     let tools = tools
         .iter()
         .map(|tool| (*tool).to_owned())
         .collect::<Vec<_>>();
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
     let port = listener.local_addr().expect("fake MCP local addr").port();
+    listener
+        .set_nonblocking(true)
+        .expect("fake MCP nonblocking listener");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let thread_shutdown = shutdown.clone();
     let handle = thread::spawn(move || {
-        listener
-            .set_nonblocking(true)
-            .expect("fake MCP nonblocking listener");
-        let started = Instant::now();
-        let mut initialize_count = 0;
+        let mut requests = FakeMcpRequests::default();
+        let mut session_id = None;
         let mut initialized_notification_seen = false;
-        let mut tools_list_seen = false;
-        loop {
-            let Ok((mut stream, _)) = listener.accept() else {
-                assert!(
-                    started.elapsed() <= Duration::from_millis(IDLE_WAIT_TIMEOUT_MS),
-                    "fake MCP server timed out waiting for requests"
-                );
-                thread::sleep(Duration::from_millis(10));
-                continue;
+        while !thread_shutdown.load(Ordering::Acquire) {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("fake MCP accept: {error}"),
             };
+            if thread_shutdown.load(Ordering::Acquire) {
+                break;
+            }
             stream
                 .set_nonblocking(false)
                 .expect("fake MCP blocking stream");
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .expect("fake MCP write timeout");
             let http_request = read_http_json_request(&mut stream);
             if http_request.method == "DELETE" {
-                assert_eq!(
-                    http_request.session_id.as_deref(),
-                    Some("fake-session"),
-                    "DELETE must reuse the initialized MCP session"
-                );
+                assert!(session_id.is_some(), "DELETE needs an active session");
+                assert_eq!(http_request.session_id, session_id);
                 let _ = write!(
                     stream,
                     "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 );
-                break;
+                requests.deletes += 1;
+                session_id = None;
+                initialized_notification_seen = false;
+                continue;
             }
+            assert_eq!(http_request.method, "POST");
             let request = http_request.body.expect("json rpc body");
-            let method = request["method"].as_str().unwrap_or_default();
+            let method = request["method"].as_str().expect("json rpc method");
+            if method != "initialize" {
+                assert!(session_id.is_some(), "request needs an active session");
+                assert_eq!(http_request.session_id, session_id);
+            }
             let result = match method {
                 "initialize" => {
-                    assert!(
-                        http_request.session_id.is_none(),
-                        "initialize must start without a previous MCP session"
-                    );
+                    assert!(http_request.session_id.is_none());
+                    requests.initializes += 1;
+                    session_id = Some(format!("fake-session-{}", requests.initializes));
+                    initialized_notification_seen = false;
+                    // A lost reply leaves the client without the session ID needed for DELETE.
+                    if requests.initializes == 1
+                        && matches!(scenario, FakeMcpScenario::LostInitializeReply)
+                    {
+                        continue;
+                    }
                     json!({
                         "protocolVersion": "2025-11-25",
                         "capabilities": {},
                         "serverInfo": { "name": "fake-client-mcp", "version": "1" }
                     })
                 }
-                "tools/list" => json!({
-                    "tools": tools.iter().map(|name| {
-                        json!({
-                            "name": name,
-                            "description": "",
-                            "inputSchema": { "type": "object" }
-                        })
-                    }).collect::<Vec<_>>()
-                }),
-                "notifications/initialized" => {
-                    assert_eq!(
-                        http_request.session_id.as_deref(),
-                        Some("fake-session"),
-                        "notifications/initialized must use the initialized MCP session"
+                "tools/list" => {
+                    assert!(
+                        initialized_notification_seen,
+                        "tools/list must follow this session's initialized notification"
                     );
+                    requests.tools_lists += 1;
+                    if requests.tools_lists == 1 && matches!(scenario, FakeMcpScenario::Unavailable)
+                    {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        continue;
+                    }
+                    json!({
+                        "tools": tools.iter().filter(|_| {
+                            requests.tools_lists != 1 || !matches!(scenario, FakeMcpScenario::Empty)
+                        }).map(|name| {
+                            json!({
+                                "name": name,
+                                "description": "",
+                                "inputSchema": { "type": "object" }
+                            })
+                        }).collect::<Vec<_>>()
+                    })
+                }
+                "notifications/initialized" => {
+                    assert!(!initialized_notification_seen);
                     initialized_notification_seen = true;
                     let _ = write!(
                         stream,
@@ -200,51 +282,33 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
                     );
                     continue;
                 }
-                _ => json!({}),
+                _ => panic!("unexpected fake MCP method: {method}"),
             };
-            if method == "initialize" {
-                initialize_count += 1;
-            }
-            if method == "tools/list" {
-                assert_eq!(
-                    http_request.session_id.as_deref(),
-                    Some("fake-session"),
-                    "tools/list must use the initialized MCP session"
-                );
-                assert!(
-                    initialized_notification_seen,
-                    "tools/list must be requested after notifications/initialized"
-                );
-                tools_list_seen = true;
-            }
             let body = serde_json::to_vec(&json!({
                 "jsonrpc": "2.0",
                 "id": request["id"].clone(),
                 "result": result,
             }))
             .expect("response json");
-            if write!(
+            let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: fake-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                session_id.as_deref().expect("response session"),
                 body.len()
             )
-            .and_then(|_| stream.write_all(&body))
-            .is_err()
-            {
-                continue;
-            }
+            .and_then(|_| stream.write_all(&body));
         }
-        assert!(
-            initialized_notification_seen,
-            "fake MCP server expected notifications/initialized"
-        );
-        assert_eq!(
-            initialize_count, 1,
-            "readiness polling must reuse one MCP session"
-        );
-        assert!(tools_list_seen, "fake MCP server expected tools/list");
+        assert!(requests.initializes > 0, "expected initialize");
+        assert!(requests.tools_lists > 0, "expected tools/list");
+        requests
     });
-    (port, handle)
+    (
+        port,
+        FakeMcpServer {
+            shutdown,
+            thread: Some(handle),
+        },
+    )
 }
 
 struct UnresponsiveEndpoint {
@@ -303,12 +367,15 @@ impl Drop for UnresponsiveEndpoint {
 }
 
 fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(IDLE_WAIT_TIMEOUT_MS)))
-        .expect("read timeout");
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut bytes = Vec::new();
     let mut buffer = [0; 1024];
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "fake MCP request deadline");
+        stream
+            .set_read_timeout(Some(remaining))
+            .expect("read timeout");
         let read = stream.read(&mut buffer).expect("read request");
         assert!(read > 0, "request closed before body");
         bytes.extend_from_slice(&buffer[..read]);
@@ -1402,14 +1469,17 @@ fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
 #[test]
 fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    let (port, server) = start_fake_mcp_server(&[
-        "infobase_info",
-        "load_features",
-        "open_feature_file",
-        "run_scenario",
-        "get_test_results",
-        "connect_test_client",
-    ]);
+    let (port, server) = start_fake_mcp_server_with_scenario(
+        &[
+            "infobase_info",
+            "load_features",
+            "open_feature_file",
+            "run_scenario",
+            "get_test_results",
+            "connect_test_client",
+        ],
+        FakeMcpScenario::Empty,
+    );
     write_bounded_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
     write_bounded_logging_script(&install_dir.join("bin").join("1cv8c"), &args_log);
 
@@ -1450,7 +1520,13 @@ fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
     assert!(tools.iter().any(|tool| tool == "load_features"));
     assert!(tools.iter().any(|tool| tool == "run_scenario"));
     assert!(tools.iter().any(|tool| tool == "get_test_results"));
-    server.join().expect("fake MCP server exits");
+    let requests = server.finish();
+    assert_eq!(
+        requests.initializes, 1,
+        "healthy polling reuses its session"
+    );
+    assert_eq!(requests.tools_lists, 2);
+    assert_eq!(requests.deletes, 1);
 }
 
 #[test]
@@ -1491,13 +1567,35 @@ fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
         error_message.contains("Vanessa MCP tools were not registered"),
         "unexpected error message: {error_message}; payload={payload}"
     );
-    server.join().expect("fake MCP server exits");
+    server.finish();
 }
 
 #[test]
 fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements() {
+    assert_client_mcp_ready(FakeMcpScenario::Normal);
+}
+
+#[test]
+fn launch_mcp_wait_ready_reinitializes_after_deleted_failed_session() {
+    let requests = assert_client_mcp_ready(FakeMcpScenario::Unavailable);
+    assert_eq!(requests.initializes, 2);
+    assert_eq!(requests.tools_lists, 2);
+    assert_eq!(requests.deletes, 2);
+}
+
+#[test]
+fn launch_mcp_wait_ready_retries_when_initialize_reply_is_lost() {
+    let requests = assert_client_mcp_ready(FakeMcpScenario::LostInitializeReply);
+    assert_eq!(requests.initializes, 2);
+    assert_eq!(requests.tools_lists, 1);
+    assert_eq!(requests.deletes, 1, "only the known session can be deleted");
+}
+
+fn assert_client_mcp_ready(scenario: FakeMcpScenario) -> FakeMcpRequests {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    let (port, server) = start_fake_mcp_server(&["infobase_info", "query_info"]);
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 5000\n");
+    let (port, server) =
+        start_fake_mcp_server_with_scenario(&["infobase_info", "query_info"], scenario);
 
     let output = v8_runner_command()
         .args([
@@ -1541,7 +1639,7 @@ fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements()
         .expect("tools");
     assert!(tools.iter().any(|tool| tool == "infobase_info"));
     assert!(tools.iter().any(|tool| tool == "query_info"));
-    server.join().expect("fake MCP server exits");
+    server.finish()
 }
 
 #[test]
