@@ -114,12 +114,15 @@ pub(in crate::use_cases) fn wait_for_readiness(
             match initialize_mcp_session(&client, url, deadline) {
                 Ok(probe_session) => session = Some(probe_session),
                 Err(message) => {
-                    last_message = format!("MCP endpoint did not become ready at {url}: {message}");
-                    last_tools = Vec::new();
-                    last_missing = required_tools
-                        .iter()
-                        .map(|tool| (*tool).to_owned())
-                        .collect();
+                    if !has_successful_tools_response {
+                        last_message =
+                            format!("MCP endpoint did not become ready at {url}: {message}");
+                        last_tools = Vec::new();
+                        last_missing = required_tools
+                            .iter()
+                            .map(|tool| (*tool).to_owned())
+                            .collect();
+                    }
                     sleep_until_next_mcp_probe(deadline);
                     continue;
                 }
@@ -520,6 +523,280 @@ mod tests {
     /// Граница зависания поддельного сервера: не дождавшись DELETE, он падает, а не висит.
     /// Она длиннее любого срока ожидания, иначе сервер сдался бы раньше клиента.
     const FAKE_SERVER_HANG_BOUND: Duration = Duration::from_secs(60);
+
+    enum ObservationStep {
+        Initialize,
+        Initialized,
+        Tools(&'static [&'static str]),
+        ListFailure,
+        Delete,
+        InitializeFailure,
+        CancelAfterInitializeFailure,
+    }
+
+    struct ObservationServer {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<usize>>,
+    }
+
+    impl ObservationServer {
+        fn start(
+            steps: Vec<ObservationStep>,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("observation listener");
+            let port = listener.local_addr().expect("observation address").port();
+            listener.set_nonblocking(true).expect("nonblocking accept");
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_stop = stop.clone();
+            let thread = thread::spawn(move || {
+                let mut completed = 0;
+                while !server_stop.load(Ordering::Acquire) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("observation accept: {error}"),
+                    };
+                    if server_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(1)))
+                        .expect("write timeout");
+                    let request = read_http_request(&mut stream);
+                    let step = steps
+                        .get(completed)
+                        .unwrap_or(&ObservationStep::InitializeFailure);
+                    let method = match step {
+                        ObservationStep::Initialize
+                        | ObservationStep::InitializeFailure
+                        | ObservationStep::CancelAfterInitializeFailure => "initialize",
+                        ObservationStep::Initialized => "notifications/initialized",
+                        ObservationStep::Tools(_) | ObservationStep::ListFailure => "tools/list",
+                        ObservationStep::Delete => "DELETE",
+                    };
+                    if method == "DELETE" {
+                        assert!(request.starts_with("DELETE "), "{request}");
+                    } else {
+                        let body: Value =
+                            serde_json::from_str(request.split_once("\r\n\r\n").expect("body").1)
+                                .expect("json request");
+                        assert_eq!(body["method"], method, "{request}");
+                    }
+                    if method == "initialize" {
+                        assert!(!request.to_ascii_lowercase().contains("mcp-session-id:"));
+                    } else {
+                        assert_protocol_header(&request);
+                        assert_session_header(&request);
+                    }
+                    match step {
+                        ObservationStep::Initialize => write_json_response(
+                            &mut stream,
+                            "200 OK",
+                            Some("fake-session"),
+                            &json!({"jsonrpc":"2.0", "id":1, "result": {
+                                "protocolVersion":"2025-06-18", "capabilities":{},
+                                "serverInfo":{"name":"observation", "version":"1"}
+                            }}),
+                        ),
+                        ObservationStep::Initialized | ObservationStep::Delete => {
+                            write_empty_response(&mut stream, "202 Accepted");
+                        }
+                        ObservationStep::Tools(tools) => write_json_response(
+                            &mut stream,
+                            "200 OK",
+                            Some("fake-session"),
+                            &json!({"jsonrpc":"2.0", "id":2, "result": {
+                                "tools":tools.iter().map(|name| json!({"name":name})).collect::<Vec<_>>()
+                            }}),
+                        ),
+                        ObservationStep::ListFailure | ObservationStep::InitializeFailure => {
+                            write_empty_response(&mut stream, "503 Service Unavailable");
+                        }
+                        ObservationStep::CancelAfterInitializeFailure => {
+                            // This request proves the preceding initialize error was processed.
+                            write_empty_response(&mut stream, "503 Service Unavailable");
+                            cancellation.cancel();
+                        }
+                    }
+                    completed += 1;
+                }
+                assert!(
+                    completed >= steps.len(),
+                    "script stopped at {completed}/{}",
+                    steps.len()
+                );
+                completed
+            });
+            Self {
+                port,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn finish(mut self) {
+            self.stop.store(true, Ordering::Release);
+            self.thread
+                .take()
+                .expect("observation thread")
+                .join()
+                .expect("observation server");
+        }
+    }
+
+    impl Drop for ObservationServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let result = thread.join();
+                if !thread::panicking() {
+                    result.expect("observation server");
+                }
+            }
+        }
+    }
+
+    fn observed_then_disconnected() -> Vec<ObservationStep> {
+        use ObservationStep::*;
+        vec![
+            Initialize,
+            Initialized,
+            Tools(&["load_features", "infobase_info"]),
+            ListFailure,
+            Delete,
+        ]
+    }
+
+    fn probe_observation_script(
+        steps: Vec<ObservationStep>,
+        timeout: Duration,
+    ) -> Result<McpReadinessResult, NotReady> {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let server = ObservationServer::start(steps, cancellation.clone());
+        let context = ExecutionContext::cli(CommandName::Launch).with_cancellation(cancellation);
+        let result = wait_for_readiness(
+            &context,
+            &endpoint_url(server.port),
+            &["load_features", "run_scenario"],
+            timeout,
+        );
+        server.finish();
+        result
+    }
+
+    #[test]
+    fn retains_last_tools_observation_after_reinitialize_failure_until_timeout() {
+        let mut steps = observed_then_disconnected();
+        // The subsequent initialize proves the previous error branch ran before timeout.
+        steps.extend([
+            ObservationStep::InitializeFailure,
+            ObservationStep::InitializeFailure,
+        ]);
+        let started = Instant::now();
+        let result = probe_observation_script(steps, SESSION_OUTLIVING_BUDGET);
+        let Err(NotReady::Failed(readiness)) = result else {
+            panic!("expected timeout: {result:?}")
+        };
+        assert!(!readiness.ok);
+        assert_eq!(readiness.tools, ["load_features", "infobase_info"]);
+        assert_eq!(readiness.missing_tools, ["run_scenario"]);
+        assert_eq!(
+            readiness.message.as_deref(),
+            Some("Vanessa MCP tools were not registered: missing run_scenario")
+        );
+        assert!(
+            started.elapsed() < SESSION_OUTLIVING_BUDGET + Duration::from_secs(1),
+            "retries must not renew the deadline"
+        );
+    }
+
+    #[test]
+    fn initialize_failure_before_any_tools_observation_reports_endpoint_error() {
+        let result = probe_observation_script(
+            vec![
+                ObservationStep::InitializeFailure,
+                ObservationStep::InitializeFailure,
+            ],
+            SESSION_OUTLIVING_BUDGET,
+        );
+        let Err(NotReady::Failed(readiness)) = result else {
+            panic!("expected endpoint failure: {result:?}")
+        };
+        assert!(!readiness.ok);
+        assert!(readiness.tools.is_empty());
+        assert_eq!(readiness.missing_tools, ["load_features", "run_scenario"]);
+        assert!(readiness
+            .message
+            .as_deref()
+            .expect("endpoint message")
+            .starts_with("MCP endpoint did not become ready at "));
+    }
+
+    #[test]
+    fn newer_incomplete_tools_observation_replaces_the_previous_one() {
+        use ObservationStep::*;
+        let mut steps = observed_then_disconnected();
+        steps.extend([
+            Initialize,
+            Initialized,
+            Tools(&["infobase_info"]),
+            ListFailure,
+            Delete,
+            InitializeFailure,
+            InitializeFailure,
+        ]);
+        let result = probe_observation_script(steps, SESSION_OUTLIVING_BUDGET);
+        let Err(NotReady::Failed(readiness)) = result else {
+            panic!("expected missing tools: {result:?}")
+        };
+        assert!(!readiness.ok);
+        assert_eq!(readiness.tools, ["infobase_info"]);
+        assert_eq!(readiness.missing_tools, ["load_features", "run_scenario"]);
+        assert_eq!(
+            readiness.message.as_deref(),
+            Some("Vanessa MCP tools were not registered: missing load_features, run_scenario")
+        );
+    }
+
+    #[test]
+    fn fresh_complete_tools_after_reinitialize_establish_readiness() {
+        use ObservationStep::*;
+        let mut steps = observed_then_disconnected();
+        steps.extend([
+            Initialize,
+            Initialized,
+            Tools(&["load_features", "run_scenario"]),
+            Delete,
+        ]);
+        let readiness =
+            probe_observation_script(steps, IDLE_BUDGET).expect("fresh complete response");
+        assert!(readiness.ok);
+        assert_eq!(readiness.tools, ["load_features", "run_scenario"]);
+        assert!(readiness.missing_tools.is_empty());
+        assert_eq!(readiness.message.as_deref(), Some("MCP endpoint is ready"));
+    }
+
+    #[test]
+    fn cancellation_after_reinitialize_failure_keeps_observation_and_cancel_message() {
+        let mut steps = observed_then_disconnected();
+        steps.extend([
+            ObservationStep::InitializeFailure,
+            ObservationStep::CancelAfterInitializeFailure,
+        ]);
+        let result = probe_observation_script(steps, IDLE_BUDGET);
+        let Err(NotReady::Cancelled(readiness)) = result else {
+            panic!("expected cancellation: {result:?}")
+        };
+        assert!(!readiness.ok);
+        assert_eq!(readiness.tools, ["load_features", "infobase_info"]);
+        assert_eq!(readiness.missing_tools, ["run_scenario"]);
+        assert_eq!(readiness.message.as_deref(), Some("execution cancelled before reaching a safe completion point for command 'launch' while waiting for MCP readiness"));
+    }
 
     #[test]
     fn the_operators_interrupt_ends_the_readiness_wait() {
