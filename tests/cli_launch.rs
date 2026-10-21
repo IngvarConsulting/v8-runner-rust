@@ -1704,6 +1704,66 @@ fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
 }
 
 #[test]
+fn thin_application_parameter_wait_preserves_values_without_execute() {
+    for value in [
+        "",
+        "\"\"",
+        "Обновить базу \"точно\"",
+        "--execute=ignored",
+        "$(touch NEVER)",
+    ] {
+        let (_dir, config_path, _install_dir, work_path) =
+            setup_project_with_thin_script("printf '%s\\n' \"$@\" >&2\nexit 7");
+        let stderr = work_path.join("runtime.stderr");
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "thin",
+                &format!("--c={value}"),
+                "--output",
+                &work_path.join("runtime.out").display().to_string(),
+                "--stderr-output",
+                &stderr.display().to_string(),
+                "--wait-for-exit",
+                "--wait-timeout-ms",
+                &IDLE_WAIT_TIMEOUT_MS.to_string(),
+            ])
+            .output()
+            .expect("launch");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert!(payload["data"].get("external_epf_wait").is_none());
+        let wait = &payload["data"]["client_wait"];
+        assert_eq!(wait["exit_code"], 7);
+        assert_eq!(wait["timed_out"], false);
+        assert_eq!(wait["pid"], payload["data"]["pid"]);
+        assert!(wait.get("execute_path").is_none());
+        let actual = fs::read_to_string(stderr).expect("argv");
+        // This stub observes argv; live 1C must additionally prove decoded LaunchParameter.
+        let expected = match value {
+            "" => "\"\"",
+            "\"\"" => "\"\"\"\"\"\"",
+            "Обновить базу \"точно\"" => "Обновить базу \"\"точно\"\"",
+            value => value,
+        };
+        let expected = if cfg!(target_os = "macos") {
+            expected
+        } else {
+            value
+        };
+        assert!(actual.contains(&format!("/C\n{expected}\n")), "{actual:?}");
+        assert!(!actual.contains("/Execute\n"));
+    }
+}
+
+#[test]
 fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
     let (_dir, config_path, _install_dir, work_path) =
         setup_project_with_thin_script("printf client-stderr >&2\nexit 7");
@@ -1719,6 +1779,7 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
             "--json-message",
             "launch",
             "thin",
+            "--c=Обновить базу",
             "--execute",
             &epf.display().to_string(),
             "--output",
@@ -1742,6 +1803,7 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
     // Клиент, которого ждали до выхода, — работа команды, каким бы ни был код выхода.
     assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert!(payload["data"].get("client_wait").is_none());
     let wait = &payload["data"]["external_epf_wait"];
     assert!(wait["pid"].as_u64().is_some());
     assert_eq!(wait["execute_path"], epf.display().to_string());
@@ -1757,6 +1819,15 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
 
 #[test]
 fn thin_external_epf_wait_timeout_terminates_client_group() {
+    thin_external_epf_wait_timeout_terminates_client_group_case(true);
+}
+
+#[test]
+fn thin_application_parameter_wait_timeout_terminates_client_group() {
+    thin_external_epf_wait_timeout_terminates_client_group_case(false);
+}
+
+fn thin_external_epf_wait_timeout_terminates_client_group_case(with_epf: bool) {
     let marker = temp_workspace();
     let descendant_pid = marker.path().join("descendant.pid");
     let script = format!(
@@ -1776,7 +1847,7 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
             "--json-message",
             "launch",
             "thin",
-            "--execute",
+            if with_epf { "--execute" } else { "--c" },
             &epf.display().to_string(),
             "--output",
             &output.display().to_string(),
@@ -1804,7 +1875,14 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["error"]["kind"], "runtime");
-    assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
+    assert_eq!(
+        payload["data"][if with_epf {
+            "external_epf_wait"
+        } else {
+            "client_wait"
+        }]["timed_out"],
+        true
+    );
     // Группу убивают, а снимают её записи асинхронно, поэтому исчезновение потомка —
     // тоже условие, а не мгновенный снимок.
     wait_until(
@@ -2811,6 +2889,15 @@ fn a_real_web_launch_passes_the_unmasked_address_to_the_client() {
 /// Выхода у клиента нет — ни кода, ни истёкшего срока.
 #[test]
 fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
+    an_epf_wait_interrupted_after_the_client_started_answers_in_its_form_case(true);
+}
+
+#[test]
+fn an_application_parameter_wait_interrupted_after_start_answers_in_its_form() {
+    an_epf_wait_interrupted_after_the_client_started_answers_in_its_form_case(false);
+}
+
+fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form_case(with_epf: bool) {
     let (dir, config_path, install_dir, work_path) = setup_project_with_thin_script("exit 0");
     let started = dir.path().join("client-started");
     let release = dir.path().join("client-release");
@@ -2829,7 +2916,7 @@ fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
                 "--json-message",
                 "launch",
                 "thin",
-                "--execute",
+                if with_epf { "--execute" } else { "--c" },
                 &epf.display().to_string(),
                 "--output",
                 &work_path.join("runtime.out").display().to_string(),
@@ -2873,7 +2960,11 @@ fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
     assert_eq!(runner.0.wait().expect("exit status").code(), Some(4));
     assert_eq!(payload["data"]["ok"], false, "{payload}");
     assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
-    let wait = &payload["data"]["external_epf_wait"];
+    let wait = &payload["data"][if with_epf {
+        "external_epf_wait"
+    } else {
+        "client_wait"
+    }];
     assert!(wait["exit_code"].is_null(), "{payload}");
     assert_eq!(wait["timed_out"], false, "{payload}");
     assert_data_matches_one_of(

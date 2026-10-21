@@ -1,11 +1,15 @@
 ---
 id: CTR.WIRE.LAUNCH-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/launch.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_launch.rs::an_epf_wait_interrupted_after_the_client_started_answers_in_its_form
+  - tests/cli_launch.rs::thin_application_parameter_wait_preserves_values_without_execute
+  - tests/cli_launch.rs::an_application_parameter_wait_interrupted_after_start_answers_in_its_form
+  - tests/cli_launch.rs::thin_application_parameter_wait_timeout_terminates_client_group
+  - src/domain/launch.rs::legacy_epf_wait_requires_its_string_identity_and_keeps_flat_shape
 ---
 
 # `data` команды `launch`
@@ -28,6 +32,16 @@ check:
 `web` — клиентским. Поле есть у каждого режима, а не только у тонкого клиента, где есть
 выбор: иначе его отсутствие пришлось бы толковать. `url` заполнен там, где адрес
 клиентский, и пароль из userinfo в нём замаскирован.
+
+Ожидание тонкого клиента с явным `--c=<value>` допускается без `--execute`.
+В этом случае результат содержит `client_wait`: PID, код выхода, признак таймаута
+и пути журналов; `execute_path` отсутствует. Пустая строка — явный параметр,
+NUL отклоняется до запуска. Сочетание `--c` и `--execute <file.epf>` сохраняет
+старое `external_epf_wait` с обязательным строковым `execute_path`. Два поля
+ожидания одновременно не публикуются; preview и запуск без ожидания не содержат
+ни одного. Оба варианта проходят один жизненный цикл ожидания, отмены и завершения
+группы процессов. Прерванное после старта ожидание содержит выбранный вариант
+с `exit_code: null`, `timed_out: false`, `provider_dispatched: true`.
 
 ## Пример
 

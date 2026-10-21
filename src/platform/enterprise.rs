@@ -198,7 +198,18 @@ pub fn build_launch_args(
     }
     if let Some(c) = &launch.c {
         args.push("/C".to_owned());
-        args.push(c.clone());
+        // macOS 1C 8.3.27 reparses /C and frames argv containing ASCII spaces.
+        // Other hosts retain their existing argv contract until measured there.
+        args.push(if cfg!(target_os = "macos") {
+            let escaped = c.replace('"', "\"\"");
+            if c.is_empty() || (c.contains('"') && !c.contains(' ')) {
+                format!("\"{escaped}\"")
+            } else {
+                escaped
+            }
+        } else {
+            c.clone()
+        });
     }
 
     let mut extra_args = Vec::new();
@@ -344,6 +355,63 @@ mod tests {
         );
         assert_eq!(&without[2..], ["/WS", "http://localhost/base"]);
         assert!(!with.iter().chain(&without).any(|arg| arg == "/S"));
+    }
+
+    #[test]
+    fn typed_application_parameter_encodes_only_platform_quotes() {
+        for (input, encoded) in [
+            ("", "\"\""),
+            ("Юника пробелы = тест", "Юника пробелы = тест"),
+            (
+                "Юника \"кавычки\" пробелы = тест",
+                "Юника \"\"кавычки\"\" пробелы = тест",
+            ),
+            ("\"", "\"\"\"\""),
+            ("\"\"", "\"\"\"\"\"\""),
+            ("\"abc", "\"\"\"abc\""),
+            ("abc\"", "\"abc\"\"\""),
+            ("abc\"def", "\"abc\"\"def\""),
+            ("\"abc def", "\"\"abc def"),
+            ("plain\tvalue", "plain\tvalue"),
+            ("\"abc\tdef", "\"\"\"abc\tdef\""),
+            ("\"abc\ndef", "\"\"\"abc\ndef\""),
+            ("--execute=ignored", "--execute=ignored"),
+        ] {
+            let args = build_launch_args(
+                LaunchClientMode::Thin,
+                &ClientAddress::Connection,
+                &V8Connection::from_connection_string("File=/tmp/ib"),
+                &[],
+                &LaunchOptions {
+                    c: Some(input.to_owned()),
+                    execute: Some("/tmp/unchanged \"processor\".epf".to_owned()),
+                    raw_args: vec!["/custom=\"unchanged\"".to_owned()],
+                    ..Default::default()
+                },
+            );
+            let position = args
+                .iter()
+                .position(|arg| arg == "/C")
+                .expect("typed parameter");
+            let expected = if cfg!(target_os = "macos") {
+                encoded
+            } else {
+                input
+            };
+            assert_eq!(args[position + 1], expected);
+            assert!(args.contains(&"/custom=\"unchanged\"".to_owned()));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["/Execute", "/tmp/unchanged \"processor\".epf"]));
+        }
+        let omitted = build_launch_args(
+            LaunchClientMode::Thin,
+            &ClientAddress::Connection,
+            &V8Connection::from_connection_string("File=/tmp/ib"),
+            &[],
+            &LaunchOptions::default(),
+        );
+        assert!(!omitted.iter().any(|arg| arg == "/C"));
     }
 
     #[test]

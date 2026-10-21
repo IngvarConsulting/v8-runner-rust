@@ -1,13 +1,9 @@
 {
   "$defs": {
-    "ExternalEpfWaitResult": {
+    "ClientWaitResult": {
       "additionalProperties": false,
-      "description": "Observed outcome of an opt-in bounded external EPF client launch.",
+      "description": "Observed outcome shared by both bounded thin-client launch forms.",
       "properties": {
-        "execute_path": {
-          "description": "The external data processor the client was asked to execute.",
-          "type": "string"
-        },
         "exit_code": {
           "description": "The client's exit code; `null` when the wait ended without one: the client was\nterminated at the timeout (`timed_out: true`), or the wait was interrupted before the\nclient exited (`timed_out: false`).",
           "format": "int32",
@@ -17,7 +13,7 @@
           ]
         },
         "output_path": {
-          "description": "Where the external data processor was asked to write its output.",
+          "description": "Where the client was asked to write its output.",
           "type": "string"
         },
         "pid": {
@@ -37,7 +33,49 @@
       },
       "required": [
         "pid",
+        "timed_out",
+        "output_path",
+        "stderr_path"
+      ],
+      "type": "object"
+    },
+    "ExternalEpfWaitResult": {
+      "additionalProperties": false,
+      "description": "Legacy EPF wire projection; execute_path remains required and non-null.",
+      "properties": {
+        "execute_path": {
+          "type": "string"
+        },
+        "exit_code": {
+          "description": "The client's exit code; `null` when the wait ended without one: the client was\nterminated at the timeout (`timed_out: true`), or the wait was interrupted before the\nclient exited (`timed_out: false`).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_path": {
+          "description": "Where the client was asked to write its output.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "Process identifier of the waited client.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stderr_path": {
+          "description": "Where the client's stderr was captured.",
+          "type": "string"
+        },
+        "timed_out": {
+          "description": "`true` when the client was terminated at the declared timeout.",
+          "type": "boolean"
+        }
+      },
+      "required": [
         "execute_path",
+        "pid",
         "timed_out",
         "output_path",
         "stderr_path"
@@ -195,6 +233,17 @@
     "binary": {
       "description": "Selected binary path used to spawn the process; for `web` — the system URL opener.",
       "type": "string"
+    },
+    "client_wait": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClientWaitResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Bounded thin-client wait without an external EPF."
     },
     "external_epf_wait": {
       "anyOf": [

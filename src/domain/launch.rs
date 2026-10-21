@@ -44,6 +44,9 @@ pub struct LaunchResult {
     /// Direct external EPF wait outcome when explicitly requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_epf_wait: Option<ExternalEpfWaitResult>,
+    /// Bounded thin-client wait without an external EPF.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_wait: Option<Box<ClientWaitResult>>,
 }
 
 /// Which of the target's two addresses opens the base.
@@ -84,20 +87,26 @@ pub struct LaunchPlan {
     pub args: Vec<String>,
 }
 
-/// Observed outcome of an opt-in bounded external EPF client launch.
+/// Legacy EPF wire projection; execute_path remains required and non-null.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExternalEpfWaitResult {
+    pub execute_path: String,
+    #[serde(flatten)]
+    pub wait: ClientWaitResult,
+}
+
+/// Observed outcome shared by both bounded thin-client launch forms.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClientWaitResult {
     /// Process identifier of the waited client.
     pub pid: u32,
-    /// The external data processor the client was asked to execute.
-    pub execute_path: String,
     /// The client's exit code; `null` when the wait ended without one: the client was
     /// terminated at the timeout (`timed_out: true`), or the wait was interrupted before the
     /// client exited (`timed_out: false`).
     pub exit_code: Option<i32>,
     /// `true` when the client was terminated at the declared timeout.
     pub timed_out: bool,
-    /// Where the external data processor was asked to write its output.
+    /// Where the client was asked to write its output.
     pub output_path: String,
     /// Where the client's stderr was captured.
     pub stderr_path: String,
@@ -153,4 +162,41 @@ pub enum LaunchMode {
     Ordinary,
     Mcp,
     Web,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_epf_wait_requires_its_string_identity_and_keeps_flat_shape() {
+        let old = json!({"execute_path":"/tmp/check.epf","pid":42,"exit_code":7,
+            "timed_out":false,"output_path":"out","stderr_path":"err"});
+        let parsed: ExternalEpfWaitResult = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), old);
+        for path in [None, Some(serde_json::Value::Null)] {
+            let mut malformed = old.clone();
+            malformed.as_object_mut().unwrap().remove("execute_path");
+            if let Some(path) = path {
+                malformed["execute_path"] = path;
+            }
+            assert!(serde_json::from_value::<ExternalEpfWaitResult>(malformed).is_err());
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(ExternalEpfWaitResult)).unwrap();
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("execute_path")));
+        assert_eq!(schema["properties"]["execute_path"]["type"], "string");
+        for field in ["pid", "timed_out", "output_path", "stderr_path"] {
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field)),
+                "{schema}"
+            );
+        }
+    }
 }

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use crate::config::model::AppConfig;
 use crate::domain::launch::{
-    ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, LaunchVia, PlatformResolution,
-    PlatformResolutionSource,
+    ClientWaitResult, ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, LaunchVia,
+    PlatformResolution, PlatformResolutionSource,
 };
 use crate::domain::next_step::NextStep;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
@@ -118,14 +118,19 @@ fn run_launch(
     let reported_url = web_url.map(mask_url_userinfo);
 
     let launch = effective_launch_options(config, args).map_err(UseCaseFailure::without_payload)?;
-    let external_epf_wait =
-        external_epf_wait_plan(config, args, &launch).map_err(UseCaseFailure::without_payload)?;
+    if launch.c.as_ref().is_some_and(|value| value.contains('\0')) {
+        return Err(UseCaseFailure::without_payload(AppError::Validation(
+            "--c must not contain NUL".to_owned(),
+        )));
+    }
+    let client_wait =
+        client_wait_plan(config, args, &launch).map_err(UseCaseFailure::without_payload)?;
     let readiness_url =
         client_mcp_readiness_url(config, args).map_err(UseCaseFailure::without_payload)?;
     if args.dry_run {
         // Both options report an outcome observed from a running client, which a preview
         // never starts; answering them with a plan would be a fabricated observation.
-        let conflicting = if external_epf_wait.is_some() {
+        let conflicting = if client_wait.is_some() {
             Some("--wait-for-exit")
         } else if readiness_url.is_some() {
             Some("--wait-ready")
@@ -159,10 +164,8 @@ fn run_launch(
         ),
         workdir: None,
         stdout_log_path: None,
-        stderr_log_path: external_epf_wait
-            .as_ref()
-            .map(|plan| plan.stderr_path.clone()),
-        startup_probe: external_epf_wait
+        stderr_log_path: client_wait.as_ref().map(|plan| plan.stderr_path.clone()),
+        startup_probe: client_wait
             .as_ref()
             .map(|_| None)
             .unwrap_or(Some(LAUNCH_STARTUP_PROBE)),
@@ -192,6 +195,7 @@ fn run_launch(
             message: Some(preview_message(config, args, &location.path)),
             mcp_readiness: None,
             external_epf_wait: None,
+            client_wait: None,
         });
     }
 
@@ -199,7 +203,7 @@ fn run_launch(
     log_live_stage("launch: start", "[Launch] starting client process");
     let runner = utilities.runner_for(utility);
 
-    if let Some(plan) = external_epf_wait {
+    if let Some(plan) = client_wait {
         let managed = runner
             .spawn_managed(
                 &process_request,
@@ -225,28 +229,35 @@ fn run_launch(
         };
         let (message, exit_code, timed_out) = match &end {
             WaitEnd::Exited(exit_code) => (
-                format!(
-                    "External EPF client exited with status {}",
-                    exit_code.unwrap_or(-1)
-                ),
+                format!("Thin client exited with status {}", exit_code.unwrap_or(-1)),
                 *exit_code,
                 false,
             ),
             WaitEnd::TimedOut(exit_code) => (
                 format!(
-                    "External EPF client timed out after {}ms and was terminated",
+                    "Thin client timed out after {}ms and was terminated",
                     plan.timeout_ms
                 ),
                 *exit_code,
                 true,
             ),
             WaitEnd::Interrupted(error) => (
-                format!(
-                    "External EPF client wait ended before the client exited on its own: {error}"
-                ),
+                format!("Thin client wait ended before the client exited on its own: {error}"),
                 None,
                 false,
             ),
+        };
+        let wait = ClientWaitResult {
+            pid,
+            exit_code,
+            timed_out,
+            output_path: plan.output_path,
+            stderr_path: plan.stderr_path.display().to_string(),
+        };
+        // Select the wire projection once for every terminal outcome.
+        let (external_epf_wait, client_wait) = match plan.execute_path {
+            Some(execute_path) => (Some(ExternalEpfWaitResult { execute_path, wait }), None),
+            None => (None, Some(Box::new(wait))),
         };
         let result = LaunchResult {
             ok: matches!(end, WaitEnd::Exited(_)),
@@ -260,14 +271,8 @@ fn run_launch(
             plan: None,
             message: Some(message.clone()),
             mcp_readiness: None,
-            external_epf_wait: Some(ExternalEpfWaitResult {
-                pid,
-                execute_path: plan.execute_path,
-                exit_code,
-                timed_out,
-                output_path: plan.output_path,
-                stderr_path: plan.stderr_path.display().to_string(),
-            }),
+            external_epf_wait,
+            client_wait,
         };
         return match end {
             WaitEnd::Exited(_) => Ok(result),
@@ -306,6 +311,7 @@ fn run_launch(
             message: Some(launch_message(config, args, &binary, pid)),
             mcp_readiness: None,
             external_epf_wait: None,
+            client_wait: None,
         };
         let required_tools = required_mcp_tools(args);
         match client_mcp_readiness::wait_for_readiness(
@@ -370,6 +376,7 @@ fn run_launch(
         message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
         mcp_readiness: None,
         external_epf_wait: None,
+        client_wait: None,
     })
 }
 
@@ -398,18 +405,18 @@ fn utility_version_string(version: &UtilityVersion) -> String {
     }
 }
 
-struct ExternalEpfWaitPlan {
+struct ClientWaitPlan {
     timeout_ms: u64,
-    execute_path: String,
+    execute_path: Option<String>,
     output_path: String,
     stderr_path: std::path::PathBuf,
 }
 
-fn external_epf_wait_plan(
+fn client_wait_plan(
     config: &AppConfig,
     args: &LaunchArgs,
     launch: &LaunchOptions,
-) -> Result<Option<ExternalEpfWaitPlan>, AppError> {
+) -> Result<Option<ClientWaitPlan>, AppError> {
     let Some(wait) = &launch.external_epf_wait else {
         return Ok(None);
     };
@@ -421,12 +428,14 @@ fn external_epf_wait_plan(
             "--wait-for-exit is supported only for `launch thin`".to_owned(),
         ));
     }
-    let execute = launch.execute.as_deref().ok_or_else(|| {
-        AppError::Validation(
-            "--wait-for-exit requires an explicit --execute <external.epf>".to_owned(),
-        )
-    })?;
-    if !execute.to_ascii_lowercase().ends_with(".epf") {
+    let execute = launch.execute.as_deref();
+    if execute.is_none() && launch.c.is_none() {
+        return Err(AppError::Validation(
+            "--wait-for-exit requires an explicit --execute <external.epf> or --c=<value>"
+                .to_owned(),
+        ));
+    }
+    if execute.is_some_and(|path| !path.to_ascii_lowercase().ends_with(".epf")) {
         return Err(AppError::Validation(
             "--wait-for-exit requires --execute to name an external .epf file".to_owned(),
         ));
@@ -445,9 +454,9 @@ fn external_epf_wait_plan(
             "--wait-for-exit does not support raw /C, /Execute, or /Out launch keys".to_owned(),
         ));
     }
-    Ok(Some(ExternalEpfWaitPlan {
+    Ok(Some(ClientWaitPlan {
         timeout_ms: wait.timeout_ms,
-        execute_path: normalize_launch_payload_path(Path::new(execute)),
+        execute_path: execute.map(|path| normalize_launch_payload_path(Path::new(path))),
         output_path,
         stderr_path: std::path::PathBuf::from(&wait.stderr_output),
     }))
@@ -622,6 +631,7 @@ fn execute_web(
             )),
             mcp_readiness: None,
             external_epf_wait: None,
+            client_wait: None,
         });
     }
 
@@ -641,6 +651,7 @@ fn execute_web(
         message: Some(format!("Opened веб-клиент at {reported_url} (pid {pid})")),
         mcp_readiness: None,
         external_epf_wait: None,
+        client_wait: None,
     })
 }
 
@@ -719,6 +730,30 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    #[test]
+    fn application_parameter_nul_is_refused_before_platform_lookup() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path(), dir.path(), &dir.path().join("missing-platform"));
+        let result = execute(
+            &ExecutionContext::cli(CommandName::Launch),
+            &config,
+            &LaunchRequest {
+                via: None,
+                target: LaunchTargetRequest::Enterprise(
+                    crate::use_cases::request::EnterpriseLaunchTarget::ThinClient,
+                ),
+                launch: crate::domain::runner::LaunchOptions {
+                    c: Some("bad\0value".into()),
+                    ..Default::default()
+                },
+                client_mcp: None,
+                dry_run: false,
+            },
+        )
+        .expect_err("NUL must fail before locating or dispatching the platform");
+        assert!(result.error.to_string().contains("must not contain NUL"));
+    }
 
     #[cfg(unix)]
     fn make_executable(path: &Path) {

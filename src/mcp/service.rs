@@ -2150,6 +2150,7 @@ mod tests {
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
+                client_wait: None,
             }));
             let config = sample_config();
             let service = McpService::with_port(&config, port);
@@ -2186,6 +2187,7 @@ mod tests {
             message: None,
             mcp_readiness: None,
             external_epf_wait: None,
+            client_wait: None,
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -2240,6 +2242,7 @@ mod tests {
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
+                client_wait: None,
             })),
         );
 
@@ -2286,6 +2289,7 @@ mod tests {
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
+                client_wait: None,
             })),
         );
 
@@ -2326,6 +2330,7 @@ mod tests {
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
+                client_wait: None,
             })),
         );
 
@@ -2371,6 +2376,7 @@ mod tests {
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
+                client_wait: None,
             })),
         );
 
@@ -2416,6 +2422,7 @@ mod tests {
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
+                client_wait: None,
             })),
         );
 
@@ -2462,6 +2469,7 @@ mod tests {
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
+                client_wait: None,
             })),
         );
 
