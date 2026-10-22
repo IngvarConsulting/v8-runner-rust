@@ -9,7 +9,7 @@ use crate::domain::launch::{
 use crate::domain::next_step::NextStep;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
-    build_launch_args, launch_verbatim_args, normalize_launch_payload_path, LaunchClientMode,
+    build_launch_command, normalize_launch_payload_path, LaunchClientMode, LaunchCommand,
 };
 use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
@@ -153,25 +153,17 @@ fn run_launch(
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     let platform_resolution = Some(platform_resolution(&location));
     let connection = config.v8_connection();
-    let launch_args = build_launch_args(
-        client_mode,
-        &address,
-        &connection,
-        &additional_launch_keys,
-        &launch,
+    let process_request = client_process_request(
+        build_launch_command(
+            client_mode,
+            &address,
+            &connection,
+            &additional_launch_keys,
+            &launch,
+        ),
+        location.path.clone(),
+        client_wait.as_ref(),
     );
-    let process_request = ProcessRequest {
-        program: location.path.clone(),
-        windows_verbatim_args: launch_verbatim_args(&launch_args),
-        args: launch_args,
-        workdir: None,
-        stdout_log_path: None,
-        stderr_log_path: client_wait.as_ref().map(|plan| plan.stderr_path.clone()),
-        startup_probe: client_wait
-            .as_ref()
-            .map(|_| None)
-            .unwrap_or(Some(LAUNCH_STARTUP_PROBE)),
-    };
 
     if args.dry_run {
         let connection = config.v8_connection();
@@ -404,6 +396,22 @@ fn utility_version_string(version: &UtilityVersion) -> String {
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join("."),
+    }
+}
+
+/// The client request: an awaited client mirrors its stderr and skips the startup
+/// probe, a detached one is probed; the `/C` value always stays verbatim.
+fn client_process_request(
+    command: LaunchCommand,
+    program: std::path::PathBuf,
+    client_wait: Option<&ClientWaitPlan>,
+) -> ProcessRequest {
+    ProcessRequest {
+        stderr_log_path: client_wait.map(|plan| plan.stderr_path.clone()),
+        startup_probe: client_wait
+            .map(|_| None)
+            .unwrap_or(Some(LAUNCH_STARTUP_PROBE)),
+        ..command.into_request(program)
     }
 }
 
@@ -717,7 +725,7 @@ fn build_client_mcp_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::{execute, platform_resolution};
+    use super::{client_process_request, execute, platform_resolution, ClientWaitPlan};
     use crate::config::model::{
         AppConfig, EnterpriseToolConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig,
@@ -732,6 +740,34 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    /// Both a detached and an awaited client keep the `/C` value verbatim.
+    #[test]
+    fn client_requests_keep_the_verbatim_launch_parameter() {
+        let command = crate::platform::enterprise::LaunchCommand {
+            args: vec!["ENTERPRISE".to_owned(), "/C".to_owned(), "\"v\"".to_owned()],
+            verbatim_args: vec![2],
+        };
+        let wait = ClientWaitPlan {
+            timeout_ms: 1,
+            execute_path: None,
+            output_path: String::new(),
+            stderr_path: PathBuf::from("client.stderr"),
+        };
+
+        let detached = client_process_request(command.clone(), PathBuf::from("1cv8c"), None);
+        assert_eq!(detached.windows_verbatim_args, vec![2]);
+        assert!(detached.startup_probe.is_some());
+        assert_eq!(detached.stderr_log_path, None);
+
+        let awaited = client_process_request(command, PathBuf::from("1cv8c"), Some(&wait));
+        assert_eq!(awaited.windows_verbatim_args, vec![2]);
+        assert_eq!(awaited.startup_probe, None);
+        assert_eq!(
+            awaited.stderr_log_path,
+            Some(PathBuf::from("client.stderr"))
+        );
+    }
 
     #[test]
     fn application_parameter_nul_is_refused_before_platform_lookup() {

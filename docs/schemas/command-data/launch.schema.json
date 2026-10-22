@@ -99,7 +99,7 @@
       "description": "Compact machine-facing plan produced by a non-executing launch preview.\n\nThe plan names what the runner selected, because only the runner discovers a\nplatform installation: a caller cannot compose these arguments itself.",
       "properties": {
         "args": {
-          "description": "Composed arguments with every credential value masked.",
+          "description": "Composed arguments with every credential value masked. The `/C` value is\nalready encoded for the 1C parser: on Windows the runner passes it to the\nclient as is, without the quoting a standard process spawn would add.",
           "items": {
             "type": "string"
           },

@@ -10,7 +10,6 @@ check:
   - tests/cli_launch.rs::an_application_parameter_wait_interrupted_after_start_answers_in_its_form
   - tests/cli_launch.rs::thin_application_parameter_wait_timeout_terminates_client_group
   - src/domain/launch.rs::legacy_epf_wait_requires_its_string_identity_and_keeps_flat_shape
-  - tests/cli_launch.rs::thin_wait_without_c_or_execute_and_with_a_non_epf_execute_are_refused_before_spawn
 ---
 
 # `data` команды `launch`
@@ -49,8 +48,6 @@ NUL отклоняется до запуска. Сочетание `--c` и `--e
 
 **Что изменила версия 6.** Схема запрещает `external_epf_wait` и `client_wait`
 в одном ответе (`not: {required: [...]}`): обещание выше теперь проверяет и форма.
-Ожидание без `--c` и без `--execute`, как и `--execute` не на `.epf`, отклоняется
-до запуска клиента.
 
 ## Пример
 

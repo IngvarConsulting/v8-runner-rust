@@ -87,7 +87,9 @@ impl LaunchVia {
 pub struct LaunchPlan {
     /// Program the runner would have spawned.
     pub program: PathBuf,
-    /// Composed arguments with every credential value masked.
+    /// Composed arguments with every credential value masked. The `/C` value is
+    /// already encoded for the 1C parser: on Windows the runner passes it to the
+    /// client as is, without the quoting a standard process spawn would add.
     pub args: Vec<String>,
 }
 
