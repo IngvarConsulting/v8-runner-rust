@@ -228,7 +228,13 @@
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/launch.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Structured result of a `launch` command.",
+  "description": "Structured result of a `launch` command.\n\nOne wait answers in one field: `external_epf_wait` for a wait on an\nexternal EPF, `client_wait` for a wait without one; never both.",
+  "not": {
+    "required": [
+      "external_epf_wait",
+      "client_wait"
+    ]
+  },
   "properties": {
     "binary": {
       "description": "Selected binary path used to spawn the process; for `web` — the system URL opener.",

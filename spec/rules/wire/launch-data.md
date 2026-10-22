@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.LAUNCH-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/launch.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -10,6 +10,7 @@ check:
   - tests/cli_launch.rs::an_application_parameter_wait_interrupted_after_start_answers_in_its_form
   - tests/cli_launch.rs::thin_application_parameter_wait_timeout_terminates_client_group
   - src/domain/launch.rs::legacy_epf_wait_requires_its_string_identity_and_keeps_flat_shape
+  - tests/cli_launch.rs::thin_wait_without_c_or_execute_and_with_a_non_epf_execute_are_refused_before_spawn
 ---
 
 # `data` команды `launch`
@@ -42,6 +43,14 @@ NUL отклоняется до запуска. Сочетание `--c` и `--e
 ни одного. Оба варианта проходят один жизненный цикл ожидания, отмены и завершения
 группы процессов. Прерванное после старта ожидание содержит выбранный вариант
 с `exit_code: null`, `timed_out: false`, `provider_dispatched: true`.
+
+**Что изменила версия 5.** Появилось `client_wait` — ожидание тонкого клиента
+с `--c` без `--execute`.
+
+**Что изменила версия 6.** Схема запрещает `external_epf_wait` и `client_wait`
+в одном ответе (`not: {required: [...]}`): обещание выше теперь проверяет и форма.
+Ожидание без `--c` и без `--execute`, как и `--execute` не на `.epf`, отклоняется
+до запуска клиента.
 
 ## Пример
 

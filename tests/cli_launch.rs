@@ -547,6 +547,19 @@ fn setup_project_with_failing_thin_binary() -> (tempfile::TempDir, PathBuf, Path
     (dir, config_path, install_dir, work_path)
 }
 
+/// The argv the runner gives a 1C client for one `/C` value on this host:
+/// quotes doubled; a value without an ASCII space framed by the runner, one
+/// with a space left for the platform to frame (Windows always frames, but
+/// these Unix-only tests never run there).
+fn encoded_launch_parameter(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    if value.contains(' ') {
+        escaped
+    } else {
+        format!("\"{escaped}\"")
+    }
+}
+
 fn setup_project_with_thin_script(
     thin_script: &str,
 ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
@@ -1274,7 +1287,7 @@ fn launch_ordinary_supports_typed_keys_and_filters_reserved_raw_duplicates() {
     assert!(args.contains("/UsePrivilegedMode"));
     assert!(args.contains("/Execute"));
     assert!(args.contains("/tmp/tool.epf"));
-    assert!(args.contains("/C\nDoWork\n"));
+    assert!(args.contains(&format!("/C\n{}\n", encoded_launch_parameter("DoWork"))));
     assert!(args.contains("/WA-"));
     assert!(args.contains("/tmp/user.out.log"));
     assert!(!args.contains("/tmp/ignored.out.log"));
@@ -1844,18 +1857,9 @@ fn thin_application_parameter_wait_preserves_values_without_execute() {
         assert_eq!(wait["pid"], payload["data"]["pid"]);
         assert!(wait.get("execute_path").is_none());
         let actual = fs::read_to_string(stderr).expect("argv");
-        // This stub observes argv; live 1C must additionally prove decoded LaunchParameter.
-        let expected = match value {
-            "" => "\"\"",
-            "\"\"" => "\"\"\"\"\"\"",
-            "Обновить базу \"точно\"" => "Обновить базу \"\"точно\"\"",
-            value => value,
-        };
-        let expected = if cfg!(target_os = "macos") {
-            expected
-        } else {
-            value
-        };
+        // This stub observes argv; the 1C decoding is proven by the platform
+        // model test and the live measurement.
+        let expected = encoded_launch_parameter(value);
         assert!(actual.contains(&format!("/C\n{expected}\n")), "{actual:?}");
         assert!(!actual.contains("/Execute\n"));
     }
@@ -2146,6 +2150,67 @@ fn thin_external_epf_wait_rejects_attached_c_alias_before_spawn() {
         !started.exists(),
         "validation must happen before client spawn"
     );
+}
+
+/// The bounded wait needs something the client was asked to do: a typed /C
+/// value or an external EPF. Without both it is refused before the client
+/// starts, and a non-EPF `--execute` next to `--c` is still refused.
+#[test]
+fn thin_wait_without_c_or_execute_and_with_a_non_epf_execute_are_refused_before_spawn() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let script = format!("printf started > '{}'\nsleep 1", started.display());
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let not_epf = work_path.join("runtime-check.txt");
+    fs::write(&not_epf, "txt").expect("txt");
+    let wait = [
+        "--output",
+        "/tmp/runtime.out",
+        "--stderr-output",
+        "/tmp/runtime.stderr",
+        "--wait-for-exit",
+        "--wait-timeout-ms",
+        "100",
+    ];
+    for (extra, expected) in [
+        (
+            vec![],
+            "--wait-for-exit requires an explicit --execute <external.epf> or --c=<value>",
+        ),
+        (
+            vec![
+                "--c=DoWork".to_owned(),
+                "--execute".to_owned(),
+                not_epf.display().to_string(),
+            ],
+            "--wait-for-exit requires --execute to name an external .epf file",
+        ),
+    ] {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "thin",
+            ])
+            .args(&extra)
+            .args(wait)
+            .output()
+            .expect("run command");
+
+        assert!(!output.status.success(), "{extra:?}");
+        let reported = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(reported.contains(expected), "{extra:?}: {reported}");
+        assert!(
+            !started.exists(),
+            "validation must happen before client spawn: {extra:?}"
+        );
+    }
 }
 
 #[test]

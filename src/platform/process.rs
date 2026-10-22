@@ -34,6 +34,12 @@ pub struct ProcessRequest {
     pub stderr_log_path: Option<PathBuf>,
     /// Optional grace period used by `spawn()` to detect immediate startup failures.
     pub startup_probe: Option<Duration>,
+    /// Indexes of `args` already encoded for the program's own command-line parser.
+    /// On Windows they are appended verbatim (`raw_arg`), because the platform's
+    /// `""` quoting differs from the MSVC rules `Command::arg` applies; elsewhere
+    /// they pass as ordinary arguments.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub windows_verbatim_args: Vec<usize>,
 }
 
 /// Result of a completed `run()` invocation.
@@ -965,6 +971,23 @@ fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<Chil
     cmd.spawn().map(ChildHandle::Standard)
 }
 
+#[cfg(windows)]
+fn append_args(cmd: &mut Command, request: &ProcessRequest) {
+    use std::os::windows::process::CommandExt;
+    for (index, arg) in request.args.iter().enumerate() {
+        if request.windows_verbatim_args.contains(&index) {
+            cmd.raw_arg(arg);
+        } else {
+            cmd.arg(arg);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn append_args(cmd: &mut Command, request: &ProcessRequest) {
+    cmd.args(&request.args);
+}
+
 fn build_command(
     request: &ProcessRequest,
     io_mode: ProcessIoMode,
@@ -973,7 +996,7 @@ fn build_command(
     let mut cmd = Command::new(&request.program);
     // This private host/runner protocol must never become a child's launch policy.
     cmd.env_remove("V8_RUNNER_CLIENT_OWNER");
-    cmd.args(&request.args);
+    append_args(&mut cmd, request);
     if let Some(workdir) = &request.workdir {
         cmd.current_dir(workdir);
     }
@@ -1651,7 +1674,35 @@ mod tests {
             stdout_log_path: None,
             stderr_log_path: None,
             startup_probe: None,
+            windows_verbatim_args: Vec::new(),
         }
+    }
+
+    /// A verbatim argument reaches the child's command line exactly as encoded:
+    /// `cmd /c echo` prints its raw tail, so `""` survives instead of MSVC `\"`.
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_args_reach_the_child_command_line_unescaped() {
+        let encoded = "\"x\"\" /Execute \"\"evil.epf\"";
+        let mut request = plain_request(PathBuf::from("cmd.exe"));
+        request.args = vec!["/d".into(), "/c".into(), "echo".into(), encoded.into()];
+        request.windows_verbatim_args = vec![3];
+        let output = build_command(&request, ProcessIoMode::Captured, "")
+            .expect("command")
+            .output()
+            .expect("cmd runs");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim_end(), encoded);
+
+        request.windows_verbatim_args.clear();
+        let output = build_command(&request, ProcessIoMode::Captured, "")
+            .expect("command")
+            .output()
+            .expect("cmd runs");
+        assert_ne!(
+            String::from_utf8_lossy(&output.stdout).trim_end(),
+            encoded,
+            "without the verbatim mark std quoting rewrites the argument"
+        );
     }
 
     /// Запущенный процесс — работа команды, чем бы он ни кончился. Отказ до запуска — отмена,
@@ -1896,6 +1947,7 @@ mod tests {
                     stdout_log_path: Some(stdout_log.clone()),
                     stderr_log_path: Some(stderr_log.clone()),
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 },
                 &ProcessExecutionPolicy::default(),
             )
@@ -1935,6 +1987,7 @@ mod tests {
             stdout_log_path: None,
             stderr_log_path: None,
             startup_probe: None,
+            windows_verbatim_args: Vec::new(),
         });
 
         assert!(rendered.contains("--user ***"));
@@ -1968,6 +2021,7 @@ mod tests {
             stdout_log_path: None,
             stderr_log_path: None,
             startup_probe: None,
+            windows_verbatim_args: Vec::new(),
         });
 
         assert_eq!(
@@ -1999,6 +2053,7 @@ mod tests {
                 stdout_log_path: None,
                 stderr_log_path: None,
                 startup_probe: None,
+                windows_verbatim_args: Vec::new(),
             });
 
             assert!(!rendered.contains(password), "{arg} -> {rendered}");
@@ -2022,6 +2077,7 @@ mod tests {
             stdout_log_path: None,
             stderr_log_path: None,
             startup_probe: None,
+            windows_verbatim_args: Vec::new(),
         });
 
         assert_eq!(rendered, "1cv8c /WSN *** /WSP ***");
@@ -2506,6 +2562,7 @@ mod tests {
                 "fixture".into(), std::env::current_exe().unwrap().display().to_string(), root.display().to_string()],
             workdir: None, stdout_log_path: None, stderr_log_path: None,
             startup_probe: Some(Duration::from_secs(2)),
+            windows_verbatim_args: Vec::new(),
         }
     }
 
@@ -2637,6 +2694,7 @@ mod tests {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: Some(Duration::from_millis(250)),
+                    windows_verbatim_args: Vec::new(),
                 },
                 &work,
             )
@@ -2695,6 +2753,7 @@ mod tests {
                 stdout_log_path: None,
                 stderr_log_path: None,
                 startup_probe: Some(Duration::from_secs(2)),
+                windows_verbatim_args: Vec::new(),
             },
             ManagedSpawnMode::Detached,
             Some(&work),
@@ -3234,6 +3293,7 @@ mod tests {
                     stdout_log_path: Some(dir.path().join("missing").join("stdout.log")),
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 },
                 &ProcessExecutionPolicy::default(),
             )
@@ -3259,6 +3319,7 @@ mod tests {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 },
                 &ProcessExecutionPolicy::new(
                     Some(Duration::from_millis(100)),
@@ -3320,6 +3381,7 @@ mod tests {
                             stdout_log_path: None,
                             stderr_log_path: None,
                             startup_probe: None,
+                            windows_verbatim_args: Vec::new(),
                         },
                         &ProcessExecutionPolicy::new(
                             timeout,
@@ -3405,6 +3467,7 @@ mod tests {
                             stdout_log_path: None,
                             stderr_log_path: None,
                             startup_probe: None,
+                            windows_verbatim_args: Vec::new(),
                         },
                         &ProcessExecutionPolicy::new(
                             None,
@@ -3469,6 +3532,7 @@ mod tests {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 },
                 &ProcessExecutionPolicy::new(
                     None,
@@ -3580,6 +3644,7 @@ mod tests {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 },
                 &ProcessExecutionPolicy::new(
                     Some(Duration::from_millis(10)),
@@ -3620,6 +3685,7 @@ mod tests {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 },
                 &ProcessExecutionPolicy::default(),
             )

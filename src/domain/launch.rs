@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Structured result of a `launch` command.
+///
+/// One wait answers in one field: `external_epf_wait` for a wait on an
+/// external EPF, `client_wait` for a wait without one; never both.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(extend("not" = {"required": ["external_epf_wait", "client_wait"]}))]
 pub struct LaunchResult {
     /// `true` when the process was spawned and, when the command waits on it, the wait
     /// succeeded: under `--wait-for-exit` the client exited on its own, under `--wait-ready`

@@ -608,6 +608,7 @@ impl<'a> IbcmdDsl<'a> {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 },
                 policy,
             )

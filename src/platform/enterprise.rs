@@ -65,6 +65,7 @@ impl<'a> EnterpriseDsl<'a> {
         launch: &LaunchOptions,
     ) -> Result<PlatformCommandResult, EnterpriseError> {
         let args = self.build_args(launch);
+        let windows_verbatim_args = launch_verbatim_args(&args);
         let process = self
             .runner
             .run_with_policy(
@@ -75,6 +76,7 @@ impl<'a> EnterpriseDsl<'a> {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args,
                 },
                 &self.execution_policy,
             )
@@ -198,18 +200,7 @@ pub fn build_launch_args(
     }
     if let Some(c) = &launch.c {
         args.push("/C".to_owned());
-        // macOS 1C 8.3.27 reparses /C and frames argv containing ASCII spaces.
-        // Other hosts retain their existing argv contract until measured there.
-        args.push(if cfg!(target_os = "macos") {
-            let escaped = c.replace('"', "\"\"");
-            if c.is_empty() || (c.contains('"') && !c.contains(' ')) {
-                format!("\"{escaped}\"")
-            } else {
-                escaped
-            }
-        } else {
-            c.clone()
-        });
+        args.push(encode_launch_parameter(c));
     }
 
     let mut extra_args = Vec::new();
@@ -224,6 +215,36 @@ pub fn build_launch_args(
         args.push(out.to_owned());
     }
     args
+}
+
+/// Encodes a `/C` value for the 1C command-line parser, so that the client
+/// receives it as exactly one launch parameter and no part of it can become
+/// another launch key. 1C reads `""` inside a quoted value as one quote.
+///
+/// Windows: the client parses its raw command line, so the value is always
+/// framed and must reach it verbatim (see [`launch_verbatim_args`]).
+/// macOS and Linux: the platform rebuilds a command line from argv and frames
+/// only an argument that contains an ASCII space itself; any other value —
+/// empty, with a tab or a line break — is framed here (measured on macOS
+/// 8.3.27, `references/1c/confirmed-runtime-measurements.md`).
+pub fn encode_launch_parameter(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    if cfg!(windows) || !value.contains(' ') {
+        format!("\"{escaped}\"")
+    } else {
+        escaped
+    }
+}
+
+/// Indexes of launch arguments already encoded for the 1C parser: the `/C`
+/// value that [`build_launch_args`] emits right after its `/C` key.
+pub fn launch_verbatim_args(args: &[String]) -> Vec<usize> {
+    args.iter()
+        .position(|arg| arg == "/C")
+        .map(|key| key + 1)
+        .filter(|value| *value < args.len())
+        .into_iter()
+        .collect()
 }
 
 pub fn normalize_launch_payload_path(path: &Path) -> String {
@@ -280,8 +301,8 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_launch_args, normalize_launch_payload_path, ClientAddress, EnterpriseDsl,
-        LaunchClientMode,
+        build_launch_args, encode_launch_parameter, launch_verbatim_args,
+        normalize_launch_payload_path, ClientAddress, EnterpriseDsl, LaunchClientMode,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -357,25 +378,77 @@ mod tests {
         assert!(!with.iter().chain(&without).any(|arg| arg == "/S"));
     }
 
+    /// The 1C command-line parser as measured: values are separated by any
+    /// whitespace, a quoted value reads `""` as one quote and ends at a lone
+    /// quote. On
+    /// macOS and Linux the platform first rebuilds a command line from argv,
+    /// framing only an argument that contains an ASCII space; Windows parses
+    /// the raw command line it was given.
+    fn platform_parameters(encoded: &str) -> Vec<String> {
+        let line = if !cfg!(windows) && encoded.contains(' ') {
+            format!("\"{encoded}\"")
+        } else {
+            encoded.to_owned()
+        };
+        let mut values = Vec::new();
+        let mut chars = line.chars().peekable();
+        while chars.peek().is_some() {
+            while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+                chars.next();
+            }
+            if chars.peek().is_none() {
+                break;
+            }
+            let mut value = String::new();
+            if chars.peek() == Some(&'"') {
+                chars.next();
+                loop {
+                    match chars.next() {
+                        Some('"') if chars.peek() == Some(&'"') => {
+                            chars.next();
+                            value.push('"');
+                        }
+                        Some('"') | None => break,
+                        Some(ch) => value.push(ch),
+                    }
+                }
+            } else {
+                while let Some(ch) = chars.peek().copied() {
+                    if ch.is_whitespace() {
+                        break;
+                    }
+                    value.push(ch);
+                    chars.next();
+                }
+            }
+            values.push(value);
+        }
+        values
+    }
+
     #[test]
-    fn typed_application_parameter_encodes_only_platform_quotes() {
-        for (input, encoded) in [
-            ("", "\"\""),
-            ("Юника пробелы = тест", "Юника пробелы = тест"),
-            (
-                "Юника \"кавычки\" пробелы = тест",
-                "Юника \"\"кавычки\"\" пробелы = тест",
-            ),
-            ("\"", "\"\"\"\""),
-            ("\"\"", "\"\"\"\"\"\""),
-            ("\"abc", "\"\"\"abc\""),
-            ("abc\"", "\"abc\"\"\""),
-            ("abc\"def", "\"abc\"\"def\""),
-            ("\"abc def", "\"\"abc def"),
-            ("plain\tvalue", "plain\tvalue"),
-            ("\"abc\tdef", "\"\"\"abc\tdef\""),
-            ("\"abc\ndef", "\"\"\"abc\ndef\""),
-            ("--execute=ignored", "--execute=ignored"),
+    fn typed_application_parameter_reaches_the_client_as_exactly_one_value() {
+        for input in [
+            "",
+            "plain",
+            "Юника пробелы = тест",
+            "Юника \"кавычки\" пробелы = тест",
+            "\"",
+            "\"\"",
+            "\"abc",
+            "abc\"",
+            "abc\"def",
+            "\"abc def",
+            "x\" /Execute \"evil.epf",
+            "x\"\t/Execute\t\"evil.epf",
+            "/Execute",
+            "/Execute evil.epf",
+            "plain\tvalue",
+            "a\t/Execute\tevil.epf",
+            "\"abc\tdef",
+            "\"abc\ndef",
+            "line\n/Execute evil.epf",
+            "--execute=ignored",
         ] {
             let args = build_launch_args(
                 LaunchClientMode::Thin,
@@ -393,12 +466,13 @@ mod tests {
                 .iter()
                 .position(|arg| arg == "/C")
                 .expect("typed parameter");
-            let expected = if cfg!(target_os = "macos") {
-                encoded
-            } else {
-                input
-            };
-            assert_eq!(args[position + 1], expected);
+            assert_eq!(args[position + 1], encode_launch_parameter(input));
+            assert_eq!(launch_verbatim_args(&args), vec![position + 1]);
+            assert_eq!(
+                platform_parameters(&args[position + 1]),
+                vec![input.to_owned()],
+                "{input:?} must reach 1C as exactly one /C value"
+            );
             assert!(args.contains(&"/custom=\"unchanged\"".to_owned()));
             assert!(args
                 .windows(2)
@@ -412,6 +486,30 @@ mod tests {
             &LaunchOptions::default(),
         );
         assert!(!omitted.iter().any(|arg| arg == "/C"));
+        assert!(launch_verbatim_args(&omitted).is_empty());
+    }
+
+    /// The measured macOS 8.3.27 table: the argv that delivered each value.
+    #[test]
+    #[cfg(not(windows))]
+    fn typed_application_parameter_matches_the_measured_macos_argv() {
+        for (input, measured) in [
+            ("", "\"\""),
+            (
+                "Юника \"кавычки\" пробелы = тест",
+                "Юника \"\"кавычки\"\" пробелы = тест",
+            ),
+            ("\"", "\"\"\"\""),
+            ("\"\"", "\"\"\"\"\"\""),
+            ("\"abc", "\"\"\"abc\""),
+            ("abc\"def", "\"abc\"\"def\""),
+            ("abc\"", "\"abc\"\"\""),
+            ("\"abc def", "\"\"abc def"),
+            ("\"abc\tdef", "\"\"\"abc\tdef\""),
+            ("\"abc\ndef", "\"\"\"abc\ndef\""),
+        ] {
+            assert_eq!(encode_launch_parameter(input), measured, "{input:?}");
+        }
     }
 
     #[test]
@@ -434,7 +532,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair
             == [
                 "/C".to_owned(),
-                "RunUnitTests=/tmp/path with space/тест config.json".to_owned(),
+                encode_launch_parameter("RunUnitTests=/tmp/path with space/тест config.json"),
             ]));
         assert!(!args
             .iter()
@@ -466,7 +564,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair
             == [
                 "/C".to_owned(),
-                "StartFeaturePlayer;VAParams=/tmp/va/va-params.json".to_owned(),
+                encode_launch_parameter("StartFeaturePlayer;VAParams=/tmp/va/va-params.json"),
             ]));
         assert!(!args
             .iter()

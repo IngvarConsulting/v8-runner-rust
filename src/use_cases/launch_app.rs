@@ -9,7 +9,7 @@ use crate::domain::launch::{
 use crate::domain::next_step::NextStep;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
-    build_launch_args, normalize_launch_payload_path, LaunchClientMode,
+    build_launch_args, launch_verbatim_args, normalize_launch_payload_path, LaunchClientMode,
 };
 use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
@@ -153,15 +153,17 @@ fn run_launch(
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     let platform_resolution = Some(platform_resolution(&location));
     let connection = config.v8_connection();
+    let launch_args = build_launch_args(
+        client_mode,
+        &address,
+        &connection,
+        &additional_launch_keys,
+        &launch,
+    );
     let process_request = ProcessRequest {
         program: location.path.clone(),
-        args: build_launch_args(
-            client_mode,
-            &address,
-            &connection,
-            &additional_launch_keys,
-            &launch,
-        ),
+        windows_verbatim_args: launch_verbatim_args(&launch_args),
+        args: launch_args,
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: client_wait.as_ref().map(|plan| plan.stderr_path.clone()),
@@ -1087,7 +1089,10 @@ mod tests {
             .contains("v8-runner build"));
         let args = read_args_log(&args_log);
         assert!(args.contains("ENTERPRISE"));
-        assert!(args.contains("/C\nrunMcp;mcpPort=9874"));
+        assert!(args.contains(&format!(
+            "/C\n{}",
+            crate::platform::enterprise::encode_launch_parameter("runMcp;mcpPort=9874")
+        )));
         assert!(!args.contains("/LoadCfg"));
         assert!(!args.contains("-Extension"));
     }
