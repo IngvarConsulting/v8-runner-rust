@@ -1665,7 +1665,7 @@ mod tests {
         policy.work.as_ref().is_some_and(WorkGiven::given)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn plain_request(program: PathBuf) -> ProcessRequest {
         ProcessRequest {
             program,
@@ -1687,14 +1687,14 @@ mod tests {
         let mut request = plain_request(PathBuf::from("cmd.exe"));
         request.args = vec!["/d".into(), "/c".into(), "echo".into(), encoded.into()];
         request.windows_verbatim_args = vec![3];
-        let output = build_command(&request, ProcessIoMode::Captured, "")
+        let output = super::build_command(&request, super::ProcessIoMode::Captured, "")
             .expect("command")
             .output()
             .expect("cmd runs");
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim_end(), encoded);
 
         request.windows_verbatim_args.clear();
-        let output = build_command(&request, ProcessIoMode::Captured, "")
+        let output = super::build_command(&request, super::ProcessIoMode::Captured, "")
             .expect("command")
             .output()
             .expect("cmd runs");
