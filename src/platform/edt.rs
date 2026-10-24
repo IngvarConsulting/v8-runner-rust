@@ -251,6 +251,7 @@ impl<'a> EdtDsl<'a> {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 };
                 let mut execution_policy = self.execution_policy.clone();
                 execution_policy.timeout = match (

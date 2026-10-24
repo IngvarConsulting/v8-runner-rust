@@ -18,10 +18,11 @@ pub struct LaunchOptions {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw_args: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    // Legacy internal name: applies to thin EPF or explicit typed /C launches.
     pub external_epf_wait: Option<ExternalEpfWaitOptions>,
 }
 
-/// Opt-in bounded observation settings for a direct external EPF launch.
+/// Opt-in bounded observation settings for a direct thin-client launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExternalEpfWaitOptions {
     pub timeout_ms: u64,

@@ -124,75 +124,157 @@ struct FakeHttpRequest {
     body: Option<Value>,
 }
 
-fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
+#[derive(Default)]
+struct FakeMcpRequests {
+    initializes: usize,
+    tools_lists: usize,
+    deletes: usize,
+}
+
+struct FakeMcpServer {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<JoinHandle<FakeMcpRequests>>,
+}
+
+impl FakeMcpServer {
+    fn finish(mut self) -> FakeMcpRequests {
+        self.shutdown.store(true, Ordering::Release);
+        self.thread
+            .take()
+            .expect("fake MCP thread")
+            .join()
+            .expect("fake MCP server exits")
+    }
+}
+
+impl Drop for FakeMcpServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            // finish surfaces server panics; Drop also cleans up during test unwinding.
+            let result = thread.join();
+            if !thread::panicking() {
+                result.expect("fake MCP server exits");
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FakeMcpScenario {
+    Normal,
+    Unavailable,
+    Empty,
+    LostInitializeReply,
+}
+
+fn start_fake_mcp_server(tools: &[&str]) -> (u16, FakeMcpServer) {
+    start_fake_mcp_server_with_scenario(tools, FakeMcpScenario::Normal)
+}
+
+fn start_fake_mcp_server_with_scenario(
+    tools: &[&str],
+    scenario: FakeMcpScenario,
+) -> (u16, FakeMcpServer) {
     let tools = tools
         .iter()
         .map(|tool| (*tool).to_owned())
         .collect::<Vec<_>>();
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
     let port = listener.local_addr().expect("fake MCP local addr").port();
+    listener
+        .set_nonblocking(true)
+        .expect("fake MCP nonblocking listener");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let thread_shutdown = shutdown.clone();
     let handle = thread::spawn(move || {
-        listener
-            .set_nonblocking(true)
-            .expect("fake MCP nonblocking listener");
-        let started = Instant::now();
-        let mut initialize_count = 0;
+        let mut requests = FakeMcpRequests::default();
+        let mut session_id = None;
         let mut initialized_notification_seen = false;
-        let mut tools_list_seen = false;
-        loop {
-            let Ok((mut stream, _)) = listener.accept() else {
-                assert!(
-                    started.elapsed() <= Duration::from_millis(IDLE_WAIT_TIMEOUT_MS),
-                    "fake MCP server timed out waiting for requests"
-                );
-                thread::sleep(Duration::from_millis(10));
-                continue;
+        while !thread_shutdown.load(Ordering::Acquire) {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("fake MCP accept: {error}"),
             };
+            if thread_shutdown.load(Ordering::Acquire) {
+                break;
+            }
             stream
                 .set_nonblocking(false)
                 .expect("fake MCP blocking stream");
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .expect("fake MCP write timeout");
             let http_request = read_http_json_request(&mut stream);
             if http_request.method == "DELETE" {
-                assert_eq!(
-                    http_request.session_id.as_deref(),
-                    Some("fake-session"),
-                    "DELETE must reuse the initialized MCP session"
-                );
+                assert!(session_id.is_some(), "DELETE needs an active session");
+                assert_eq!(http_request.session_id, session_id);
                 let _ = write!(
                     stream,
                     "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 );
-                break;
+                requests.deletes += 1;
+                session_id = None;
+                initialized_notification_seen = false;
+                continue;
             }
+            assert_eq!(http_request.method, "POST");
             let request = http_request.body.expect("json rpc body");
-            let method = request["method"].as_str().unwrap_or_default();
+            let method = request["method"].as_str().expect("json rpc method");
+            if method != "initialize" {
+                assert!(session_id.is_some(), "request needs an active session");
+                assert_eq!(http_request.session_id, session_id);
+            }
             let result = match method {
                 "initialize" => {
-                    assert!(
-                        http_request.session_id.is_none(),
-                        "initialize must start without a previous MCP session"
-                    );
+                    assert!(http_request.session_id.is_none());
+                    requests.initializes += 1;
+                    session_id = Some(format!("fake-session-{}", requests.initializes));
+                    initialized_notification_seen = false;
+                    // A lost reply leaves the client without the session ID needed for DELETE.
+                    if requests.initializes == 1
+                        && matches!(scenario, FakeMcpScenario::LostInitializeReply)
+                    {
+                        continue;
+                    }
                     json!({
                         "protocolVersion": "2025-11-25",
                         "capabilities": {},
                         "serverInfo": { "name": "fake-client-mcp", "version": "1" }
                     })
                 }
-                "tools/list" => json!({
-                    "tools": tools.iter().map(|name| {
-                        json!({
-                            "name": name,
-                            "description": "",
-                            "inputSchema": { "type": "object" }
-                        })
-                    }).collect::<Vec<_>>()
-                }),
-                "notifications/initialized" => {
-                    assert_eq!(
-                        http_request.session_id.as_deref(),
-                        Some("fake-session"),
-                        "notifications/initialized must use the initialized MCP session"
+                "tools/list" => {
+                    assert!(
+                        initialized_notification_seen,
+                        "tools/list must follow this session's initialized notification"
                     );
+                    requests.tools_lists += 1;
+                    if requests.tools_lists == 1 && matches!(scenario, FakeMcpScenario::Unavailable)
+                    {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        continue;
+                    }
+                    json!({
+                        "tools": tools.iter().filter(|_| {
+                            requests.tools_lists != 1 || !matches!(scenario, FakeMcpScenario::Empty)
+                        }).map(|name| {
+                            json!({
+                                "name": name,
+                                "description": "",
+                                "inputSchema": { "type": "object" }
+                            })
+                        }).collect::<Vec<_>>()
+                    })
+                }
+                "notifications/initialized" => {
+                    assert!(!initialized_notification_seen);
                     initialized_notification_seen = true;
                     let _ = write!(
                         stream,
@@ -200,51 +282,33 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
                     );
                     continue;
                 }
-                _ => json!({}),
+                _ => panic!("unexpected fake MCP method: {method}"),
             };
-            if method == "initialize" {
-                initialize_count += 1;
-            }
-            if method == "tools/list" {
-                assert_eq!(
-                    http_request.session_id.as_deref(),
-                    Some("fake-session"),
-                    "tools/list must use the initialized MCP session"
-                );
-                assert!(
-                    initialized_notification_seen,
-                    "tools/list must be requested after notifications/initialized"
-                );
-                tools_list_seen = true;
-            }
             let body = serde_json::to_vec(&json!({
                 "jsonrpc": "2.0",
                 "id": request["id"].clone(),
                 "result": result,
             }))
             .expect("response json");
-            if write!(
+            let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: fake-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                session_id.as_deref().expect("response session"),
                 body.len()
             )
-            .and_then(|_| stream.write_all(&body))
-            .is_err()
-            {
-                continue;
-            }
+            .and_then(|_| stream.write_all(&body));
         }
-        assert!(
-            initialized_notification_seen,
-            "fake MCP server expected notifications/initialized"
-        );
-        assert_eq!(
-            initialize_count, 1,
-            "readiness polling must reuse one MCP session"
-        );
-        assert!(tools_list_seen, "fake MCP server expected tools/list");
+        assert!(requests.initializes > 0, "expected initialize");
+        assert!(requests.tools_lists > 0, "expected tools/list");
+        requests
     });
-    (port, handle)
+    (
+        port,
+        FakeMcpServer {
+            shutdown,
+            thread: Some(handle),
+        },
+    )
 }
 
 struct UnresponsiveEndpoint {
@@ -303,12 +367,15 @@ impl Drop for UnresponsiveEndpoint {
 }
 
 fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(IDLE_WAIT_TIMEOUT_MS)))
-        .expect("read timeout");
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut bytes = Vec::new();
     let mut buffer = [0; 1024];
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "fake MCP request deadline");
+        stream
+            .set_read_timeout(Some(remaining))
+            .expect("read timeout");
         let read = stream.read(&mut buffer).expect("read request");
         assert!(read > 0, "request closed before body");
         bytes.extend_from_slice(&buffer[..read]);
@@ -478,6 +545,19 @@ fn setup_project_with_failing_thin_binary() -> (tempfile::TempDir, PathBuf, Path
     write_config(&config_path, &base_path, &work_path, &install_dir, None);
 
     (dir, config_path, install_dir, work_path)
+}
+
+/// The argv the runner gives a 1C client for one `/C` value on this host:
+/// quotes doubled; a value without an ASCII space framed by the runner, one
+/// with a space left for the platform to frame (Windows always frames, but
+/// these Unix-only tests never run there).
+fn encoded_launch_parameter(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    if value.contains(' ') {
+        escaped
+    } else {
+        format!("\"{escaped}\"")
+    }
 }
 
 fn setup_project_with_thin_script(
@@ -1207,7 +1287,7 @@ fn launch_ordinary_supports_typed_keys_and_filters_reserved_raw_duplicates() {
     assert!(args.contains("/UsePrivilegedMode"));
     assert!(args.contains("/Execute"));
     assert!(args.contains("/tmp/tool.epf"));
-    assert!(args.contains("/C\nDoWork\n"));
+    assert!(args.contains(&format!("/C\n{}\n", encoded_launch_parameter("DoWork"))));
     assert!(args.contains("/WA-"));
     assert!(args.contains("/tmp/user.out.log"));
     assert!(!args.contains("/tmp/ignored.out.log"));
@@ -1402,14 +1482,17 @@ fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
 #[test]
 fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    let (port, server) = start_fake_mcp_server(&[
-        "infobase_info",
-        "load_features",
-        "open_feature_file",
-        "run_scenario",
-        "get_test_results",
-        "connect_test_client",
-    ]);
+    let (port, server) = start_fake_mcp_server_with_scenario(
+        &[
+            "infobase_info",
+            "load_features",
+            "open_feature_file",
+            "run_scenario",
+            "get_test_results",
+            "connect_test_client",
+        ],
+        FakeMcpScenario::Empty,
+    );
     write_bounded_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
     write_bounded_logging_script(&install_dir.join("bin").join("1cv8c"), &args_log);
 
@@ -1450,7 +1533,13 @@ fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
     assert!(tools.iter().any(|tool| tool == "load_features"));
     assert!(tools.iter().any(|tool| tool == "run_scenario"));
     assert!(tools.iter().any(|tool| tool == "get_test_results"));
-    server.join().expect("fake MCP server exits");
+    let requests = server.finish();
+    assert_eq!(
+        requests.initializes, 1,
+        "healthy polling reuses its session"
+    );
+    assert_eq!(requests.tools_lists, 2);
+    assert_eq!(requests.deletes, 1);
 }
 
 #[test]
@@ -1491,13 +1580,35 @@ fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
         error_message.contains("Vanessa MCP tools were not registered"),
         "unexpected error message: {error_message}; payload={payload}"
     );
-    server.join().expect("fake MCP server exits");
+    server.finish();
 }
 
 #[test]
 fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements() {
+    assert_client_mcp_ready(FakeMcpScenario::Normal);
+}
+
+#[test]
+fn launch_mcp_wait_ready_reinitializes_after_deleted_failed_session() {
+    let requests = assert_client_mcp_ready(FakeMcpScenario::Unavailable);
+    assert_eq!(requests.initializes, 2);
+    assert_eq!(requests.tools_lists, 2);
+    assert_eq!(requests.deletes, 2);
+}
+
+#[test]
+fn launch_mcp_wait_ready_retries_when_initialize_reply_is_lost() {
+    let requests = assert_client_mcp_ready(FakeMcpScenario::LostInitializeReply);
+    assert_eq!(requests.initializes, 2);
+    assert_eq!(requests.tools_lists, 1);
+    assert_eq!(requests.deletes, 1, "only the known session can be deleted");
+}
+
+fn assert_client_mcp_ready(scenario: FakeMcpScenario) -> FakeMcpRequests {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    let (port, server) = start_fake_mcp_server(&["infobase_info", "query_info"]);
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 5000\n");
+    let (port, server) =
+        start_fake_mcp_server_with_scenario(&["infobase_info", "query_info"], scenario);
 
     let output = v8_runner_command()
         .args([
@@ -1541,7 +1652,7 @@ fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements()
         .expect("tools");
     assert!(tools.iter().any(|tool| tool == "infobase_info"));
     assert!(tools.iter().any(|tool| tool == "query_info"));
-    server.join().expect("fake MCP server exits");
+    server.finish()
 }
 
 #[test]
@@ -1704,6 +1815,57 @@ fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
 }
 
 #[test]
+fn thin_application_parameter_wait_preserves_values_without_execute() {
+    for value in [
+        "",
+        "\"\"",
+        "Обновить базу \"точно\"",
+        "--execute=ignored",
+        "$(touch NEVER)",
+    ] {
+        let (_dir, config_path, _install_dir, work_path) =
+            setup_project_with_thin_script("printf '%s\\n' \"$@\" >&2\nexit 7");
+        let stderr = work_path.join("runtime.stderr");
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "thin",
+                &format!("--c={value}"),
+                "--output",
+                &work_path.join("runtime.out").display().to_string(),
+                "--stderr-output",
+                &stderr.display().to_string(),
+                "--wait-for-exit",
+                "--wait-timeout-ms",
+                &IDLE_WAIT_TIMEOUT_MS.to_string(),
+            ])
+            .output()
+            .expect("launch");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert!(payload["data"].get("external_epf_wait").is_none());
+        let wait = &payload["data"]["client_wait"];
+        assert_eq!(wait["exit_code"], 7);
+        assert_eq!(wait["timed_out"], false);
+        assert_eq!(wait["pid"], payload["data"]["pid"]);
+        assert!(wait.get("execute_path").is_none());
+        let actual = fs::read_to_string(stderr).expect("argv");
+        // This stub observes argv; the 1C decoding is proven by the platform
+        // model test and the live measurement.
+        let expected = encoded_launch_parameter(value);
+        assert!(actual.contains(&format!("/C\n{expected}\n")), "{actual:?}");
+        assert!(!actual.contains("/Execute\n"));
+    }
+}
+
+#[test]
 fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
     let (_dir, config_path, _install_dir, work_path) =
         setup_project_with_thin_script("printf client-stderr >&2\nexit 7");
@@ -1719,6 +1881,7 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
             "--json-message",
             "launch",
             "thin",
+            "--c=Обновить базу",
             "--execute",
             &epf.display().to_string(),
             "--output",
@@ -1742,6 +1905,7 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
     // Клиент, которого ждали до выхода, — работа команды, каким бы ни был код выхода.
     assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert!(payload["data"].get("client_wait").is_none());
     let wait = &payload["data"]["external_epf_wait"];
     assert!(wait["pid"].as_u64().is_some());
     assert_eq!(wait["execute_path"], epf.display().to_string());
@@ -1757,6 +1921,15 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
 
 #[test]
 fn thin_external_epf_wait_timeout_terminates_client_group() {
+    thin_external_epf_wait_timeout_terminates_client_group_case(true);
+}
+
+#[test]
+fn thin_application_parameter_wait_timeout_terminates_client_group() {
+    thin_external_epf_wait_timeout_terminates_client_group_case(false);
+}
+
+fn thin_external_epf_wait_timeout_terminates_client_group_case(with_epf: bool) {
     let marker = temp_workspace();
     let descendant_pid = marker.path().join("descendant.pid");
     let script = format!(
@@ -1776,7 +1949,7 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
             "--json-message",
             "launch",
             "thin",
-            "--execute",
+            if with_epf { "--execute" } else { "--c" },
             &epf.display().to_string(),
             "--output",
             &output.display().to_string(),
@@ -1804,7 +1977,14 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["error"]["kind"], "runtime");
-    assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
+    assert_eq!(
+        payload["data"][if with_epf {
+            "external_epf_wait"
+        } else {
+            "client_wait"
+        }]["timed_out"],
+        true
+    );
     // Группу убивают, а снимают её записи асинхронно, поэтому исчезновение потомка —
     // тоже условие, а не мгновенный снимок.
     wait_until(
@@ -1970,6 +2150,67 @@ fn thin_external_epf_wait_rejects_attached_c_alias_before_spawn() {
         !started.exists(),
         "validation must happen before client spawn"
     );
+}
+
+/// The bounded wait needs something the client was asked to do: a typed /C
+/// value or an external EPF. Without both it is refused before the client
+/// starts, and a non-EPF `--execute` next to `--c` is still refused.
+#[test]
+fn thin_wait_without_c_or_execute_and_with_a_non_epf_execute_are_refused_before_spawn() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let script = format!("printf started > '{}'\nsleep 1", started.display());
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let not_epf = work_path.join("runtime-check.txt");
+    fs::write(&not_epf, "txt").expect("txt");
+    let wait = [
+        "--output",
+        "/tmp/runtime.out",
+        "--stderr-output",
+        "/tmp/runtime.stderr",
+        "--wait-for-exit",
+        "--wait-timeout-ms",
+        "100",
+    ];
+    for (extra, expected) in [
+        (
+            vec![],
+            "--wait-for-exit requires an explicit --execute <external.epf> or --c=<value>",
+        ),
+        (
+            vec![
+                "--c=DoWork".to_owned(),
+                "--execute".to_owned(),
+                not_epf.display().to_string(),
+            ],
+            "--wait-for-exit requires --execute to name an external .epf file",
+        ),
+    ] {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "thin",
+            ])
+            .args(&extra)
+            .args(wait)
+            .output()
+            .expect("run command");
+
+        assert!(!output.status.success(), "{extra:?}");
+        let reported = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(reported.contains(expected), "{extra:?}: {reported}");
+        assert!(
+            !started.exists(),
+            "validation must happen before client spawn: {extra:?}"
+        );
+    }
 }
 
 #[test]
@@ -2811,6 +3052,15 @@ fn a_real_web_launch_passes_the_unmasked_address_to_the_client() {
 /// Выхода у клиента нет — ни кода, ни истёкшего срока.
 #[test]
 fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
+    an_epf_wait_interrupted_after_the_client_started_answers_in_its_form_case(true);
+}
+
+#[test]
+fn an_application_parameter_wait_interrupted_after_start_answers_in_its_form() {
+    an_epf_wait_interrupted_after_the_client_started_answers_in_its_form_case(false);
+}
+
+fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form_case(with_epf: bool) {
     let (dir, config_path, install_dir, work_path) = setup_project_with_thin_script("exit 0");
     let started = dir.path().join("client-started");
     let release = dir.path().join("client-release");
@@ -2829,7 +3079,7 @@ fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
                 "--json-message",
                 "launch",
                 "thin",
-                "--execute",
+                if with_epf { "--execute" } else { "--c" },
                 &epf.display().to_string(),
                 "--output",
                 &work_path.join("runtime.out").display().to_string(),
@@ -2873,7 +3123,11 @@ fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
     assert_eq!(runner.0.wait().expect("exit status").code(), Some(4));
     assert_eq!(payload["data"]["ok"], false, "{payload}");
     assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
-    let wait = &payload["data"]["external_epf_wait"];
+    let wait = &payload["data"][if with_epf {
+        "external_epf_wait"
+    } else {
+        "client_wait"
+    }];
     assert!(wait["exit_code"].is_null(), "{payload}");
     assert_eq!(wait["timed_out"], false, "{payload}");
     assert_data_matches_one_of(

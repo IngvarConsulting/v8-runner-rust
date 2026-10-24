@@ -1,13 +1,9 @@
 {
   "$defs": {
-    "ExternalEpfWaitResult": {
+    "ClientWaitResult": {
       "additionalProperties": false,
-      "description": "Observed outcome of an opt-in bounded external EPF client launch.",
+      "description": "Observed outcome shared by both bounded thin-client launch forms.",
       "properties": {
-        "execute_path": {
-          "description": "The external data processor the client was asked to execute.",
-          "type": "string"
-        },
         "exit_code": {
           "description": "The client's exit code; `null` when the wait ended without one: the client was\nterminated at the timeout (`timed_out: true`), or the wait was interrupted before the\nclient exited (`timed_out: false`).",
           "format": "int32",
@@ -17,7 +13,7 @@
           ]
         },
         "output_path": {
-          "description": "Where the external data processor was asked to write its output.",
+          "description": "Where the client was asked to write its output.",
           "type": "string"
         },
         "pid": {
@@ -37,7 +33,49 @@
       },
       "required": [
         "pid",
+        "timed_out",
+        "output_path",
+        "stderr_path"
+      ],
+      "type": "object"
+    },
+    "ExternalEpfWaitResult": {
+      "additionalProperties": false,
+      "description": "Legacy EPF wire projection; execute_path remains required and non-null.",
+      "properties": {
+        "execute_path": {
+          "type": "string"
+        },
+        "exit_code": {
+          "description": "The client's exit code; `null` when the wait ended without one: the client was\nterminated at the timeout (`timed_out: true`), or the wait was interrupted before the\nclient exited (`timed_out: false`).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_path": {
+          "description": "Where the client was asked to write its output.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "Process identifier of the waited client.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stderr_path": {
+          "description": "Where the client's stderr was captured.",
+          "type": "string"
+        },
+        "timed_out": {
+          "description": "`true` when the client was terminated at the declared timeout.",
+          "type": "boolean"
+        }
+      },
+      "required": [
         "execute_path",
+        "pid",
         "timed_out",
         "output_path",
         "stderr_path"
@@ -61,7 +99,7 @@
       "description": "Compact machine-facing plan produced by a non-executing launch preview.\n\nThe plan names what the runner selected, because only the runner discovers a\nplatform installation: a caller cannot compose these arguments itself.",
       "properties": {
         "args": {
-          "description": "Composed arguments with every credential value masked.",
+          "description": "Composed arguments with every credential value masked. The `/C` value is\nalready encoded for the 1C parser: on Windows the runner passes it to the\nclient as is, without the quoting a standard process spawn would add.",
           "items": {
             "type": "string"
           },
@@ -190,11 +228,28 @@
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/launch.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Structured result of a `launch` command.",
+  "description": "Structured result of a `launch` command.\n\nOne wait answers in one field: `external_epf_wait` for a wait on an\nexternal EPF, `client_wait` for a wait without one; never both.",
+  "not": {
+    "required": [
+      "external_epf_wait",
+      "client_wait"
+    ]
+  },
   "properties": {
     "binary": {
       "description": "Selected binary path used to spawn the process; for `web` — the system URL opener.",
       "type": "string"
+    },
+    "client_wait": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClientWaitResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Bounded thin-client wait without an external EPF."
     },
     "external_epf_wait": {
       "anyOf": [

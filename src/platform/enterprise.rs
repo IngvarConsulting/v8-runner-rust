@@ -64,18 +64,10 @@ impl<'a> EnterpriseDsl<'a> {
         &self,
         launch: &LaunchOptions,
     ) -> Result<PlatformCommandResult, EnterpriseError> {
-        let args = self.build_args(launch);
         let process = self
             .runner
             .run_with_policy(
-                &ProcessRequest {
-                    program: self.binary.clone(),
-                    args,
-                    workdir: None,
-                    stdout_log_path: None,
-                    stderr_log_path: None,
-                    startup_probe: None,
-                },
+                &self.build_command(launch).into_request(self.binary.clone()),
                 &self.execution_policy,
             )
             .map_err(EnterpriseError::Spawn)?;
@@ -101,10 +93,10 @@ impl<'a> EnterpriseDsl<'a> {
         })
     }
 
-    fn build_args(&self, launch: &LaunchOptions) -> Vec<String> {
+    fn build_command(&self, launch: &LaunchOptions) -> LaunchCommand {
         let mut launch = launch.clone();
         launch.internal_out = Some(self.log_file.display().to_string());
-        build_launch_args(
+        build_launch_command(
             self.client_mode,
             &self.address,
             &self.connection,
@@ -170,6 +162,30 @@ impl ClientAddress {
     }
 }
 
+/// Client arguments together with the indexes of those already encoded for the
+/// 1C parser, which must reach the client verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchCommand {
+    pub args: Vec<String>,
+    pub verbatim_args: Vec<usize>,
+}
+
+impl LaunchCommand {
+    /// A request that carries the verbatim indexes along with the arguments.
+    pub fn into_request(self, program: PathBuf) -> ProcessRequest {
+        ProcessRequest {
+            program,
+            args: self.args,
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+            windows_verbatim_args: self.verbatim_args,
+        }
+    }
+}
+
+#[cfg(test)]
 pub fn build_launch_args(
     mode: LaunchClientMode,
     address: &ClientAddress,
@@ -177,6 +193,16 @@ pub fn build_launch_args(
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
 ) -> Vec<String> {
+    build_launch_command(mode, address, connection, additional_launch_keys, launch).args
+}
+
+pub fn build_launch_command(
+    mode: LaunchClientMode,
+    address: &ClientAddress,
+    connection: &V8Connection,
+    additional_launch_keys: &[String],
+    launch: &LaunchOptions,
+) -> LaunchCommand {
     let mut args = vec![match mode {
         LaunchClientMode::Designer => "DESIGNER",
         LaunchClientMode::Thin | LaunchClientMode::Thick | LaunchClientMode::Ordinary => {
@@ -196,9 +222,11 @@ pub fn build_launch_args(
         args.push("/Execute".to_owned());
         args.push(execute.clone());
     }
+    let mut verbatim_args = Vec::new();
     if let Some(c) = &launch.c {
         args.push("/C".to_owned());
-        args.push(c.clone());
+        verbatim_args.push(args.len());
+        args.push(encode_launch_parameter(c));
     }
 
     let mut extra_args = Vec::new();
@@ -212,7 +240,29 @@ pub fn build_launch_args(
         args.push("/Out".to_owned());
         args.push(out.to_owned());
     }
-    args
+    LaunchCommand {
+        args,
+        verbatim_args,
+    }
+}
+
+/// Encodes a `/C` value for the 1C command-line parser, so that the client
+/// receives it as exactly one launch parameter and no part of it can become
+/// another launch key. 1C reads `""` inside a quoted value as one quote.
+///
+/// Windows: the client parses its raw command line, so the value is always
+/// framed and must reach it verbatim (see [`LaunchCommand::verbatim_args`]).
+/// macOS and Linux: the platform rebuilds a command line from argv and frames
+/// only an argument that contains an ASCII space itself; any other value —
+/// empty, with a tab or a line break — is framed here (measured on macOS
+/// 8.3.27, `references/1c/confirmed-runtime-measurements.md`).
+pub fn encode_launch_parameter(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    if cfg!(windows) || !value.contains(' ') {
+        format!("\"{escaped}\"")
+    } else {
+        escaped
+    }
 }
 
 pub fn normalize_launch_payload_path(path: &Path) -> String {
@@ -269,12 +319,15 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_launch_args, normalize_launch_payload_path, ClientAddress, EnterpriseDsl,
-        LaunchClientMode,
+        build_launch_args, build_launch_command, encode_launch_parameter,
+        normalize_launch_payload_path, ClientAddress, EnterpriseDsl, LaunchClientMode,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
-    use crate::platform::process::{ProcessExecutor, ProcessRunner};
+    use crate::platform::process::{
+        ProcessError, ProcessExecutionPolicy, ProcessExecutor, ProcessRequest, ProcessResult,
+        ProcessRunner, SpawnResult, WorkGiven,
+    };
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -346,6 +399,227 @@ mod tests {
         assert!(!with.iter().chain(&without).any(|arg| arg == "/S"));
     }
 
+    /// The 1C command-line parser as measured: values are separated by any
+    /// whitespace, a quoted value reads `""` as one quote and ends at a lone
+    /// quote. On
+    /// macOS and Linux the platform first rebuilds a command line from argv,
+    /// framing only an argument that contains an ASCII space; Windows parses
+    /// the raw command line it was given.
+    fn platform_parameters(encoded: &str) -> Vec<String> {
+        let line = if !cfg!(windows) && encoded.contains(' ') {
+            format!("\"{encoded}\"")
+        } else {
+            encoded.to_owned()
+        };
+        let mut values = Vec::new();
+        let mut chars = line.chars().peekable();
+        while chars.peek().is_some() {
+            while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+                chars.next();
+            }
+            if chars.peek().is_none() {
+                break;
+            }
+            let mut value = String::new();
+            if chars.peek() == Some(&'"') {
+                chars.next();
+                loop {
+                    match chars.next() {
+                        Some('"') if chars.peek() == Some(&'"') => {
+                            chars.next();
+                            value.push('"');
+                        }
+                        Some('"') | None => break,
+                        Some(ch) => value.push(ch),
+                    }
+                }
+            } else {
+                while let Some(ch) = chars.peek().copied() {
+                    if ch.is_whitespace() {
+                        break;
+                    }
+                    value.push(ch);
+                    chars.next();
+                }
+            }
+            values.push(value);
+        }
+        values
+    }
+
+    #[test]
+    fn typed_application_parameter_reaches_the_client_as_exactly_one_value() {
+        for input in [
+            "",
+            "plain",
+            "Юника пробелы = тест",
+            "Юника \"кавычки\" пробелы = тест",
+            "\"",
+            "\"\"",
+            "\"abc",
+            "abc\"",
+            "abc\"def",
+            "\"abc def",
+            "x\" /Execute \"evil.epf",
+            "x\"\t/Execute\t\"evil.epf",
+            "/Execute",
+            "/Execute evil.epf",
+            "plain\tvalue",
+            "a\t/Execute\tevil.epf",
+            "\"abc\tdef",
+            "\"abc\ndef",
+            "line\n/Execute evil.epf",
+            "--execute=ignored",
+        ] {
+            let command = build_launch_command(
+                LaunchClientMode::Thin,
+                &ClientAddress::Connection,
+                &V8Connection::from_connection_string("File=/tmp/ib"),
+                &[],
+                &LaunchOptions {
+                    c: Some(input.to_owned()),
+                    execute: Some("/tmp/unchanged \"processor\".epf".to_owned()),
+                    raw_args: vec!["/custom=\"unchanged\"".to_owned()],
+                    ..Default::default()
+                },
+            );
+            let args = &command.args;
+            let position = args
+                .iter()
+                .position(|arg| arg == "/C")
+                .expect("typed parameter");
+            assert_eq!(args[position + 1], encode_launch_parameter(input));
+            assert_eq!(command.verbatim_args, vec![position + 1]);
+            assert_eq!(
+                platform_parameters(&args[position + 1]),
+                vec![input.to_owned()],
+                "{input:?} must reach 1C as exactly one /C value"
+            );
+            assert!(args.contains(&"/custom=\"unchanged\"".to_owned()));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["/Execute", "/tmp/unchanged \"processor\".epf"]));
+        }
+        let omitted = build_launch_command(
+            LaunchClientMode::Thin,
+            &ClientAddress::Connection,
+            &V8Connection::from_connection_string("File=/tmp/ib"),
+            &[],
+            &LaunchOptions::default(),
+        );
+        assert!(!omitted.args.iter().any(|arg| arg == "/C"));
+        assert!(omitted.verbatim_args.is_empty());
+    }
+
+    /// The verbatim index comes from where the `/C` value was emitted, not from a
+    /// search: a user name or password spelled `/C` must not take its place.
+    #[test]
+    fn credentials_spelled_like_the_launch_key_do_not_take_the_verbatim_slot() {
+        let mut connection = V8Connection::from_connection_string("File=/tmp/ib");
+        connection.user = Some("/C".to_owned());
+        connection.password = Some("/C".to_owned());
+        let command = build_launch_command(
+            LaunchClientMode::Thin,
+            &ClientAddress::Connection,
+            &connection,
+            &[],
+            &LaunchOptions {
+                c: Some("x\" /Execute \"evil.epf".to_owned()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(command.verbatim_args.len(), 1);
+        let value = command.verbatim_args[0];
+        assert_eq!(command.args[value - 1], "/C");
+        assert_eq!(
+            command.args[value],
+            encode_launch_parameter("x\" /Execute \"evil.epf")
+        );
+        assert!(command.args.windows(2).any(|pair| pair == ["/N", "/C"]));
+        assert!(command.args.windows(2).any(|pair| pair == ["/P", "/C"]));
+    }
+
+    /// The enterprise DSL hands the verbatim index to the process runner.
+    #[test]
+    fn enterprise_dsl_passes_the_verbatim_index_to_the_runner() {
+        struct Recorder(std::sync::Mutex<Option<ProcessRequest>>);
+        impl ProcessRunner for Recorder {
+            fn run_with_policy(
+                &self,
+                request: &ProcessRequest,
+                policy: &ProcessExecutionPolicy,
+            ) -> Result<ProcessResult, ProcessError> {
+                policy.mark_started_for_test();
+                *self.0.lock().expect("request lock") = Some(request.clone());
+                Ok(ProcessResult {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    interruption: None,
+                })
+            }
+
+            fn spawn(
+                &self,
+                _request: &ProcessRequest,
+                _work: &WorkGiven,
+            ) -> Result<SpawnResult, ProcessError> {
+                panic!("the enterprise DSL runs the client, it never spawns it")
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let runner = Recorder(std::sync::Mutex::new(None));
+        let dsl = EnterpriseDsl::new(
+            dir.path().join("1cv8c"),
+            V8Connection::from_connection_string("File=/tmp/ib"),
+            ClientAddress::Connection,
+            Vec::new(),
+            LaunchClientMode::Thin,
+            &runner as &dyn ProcessRunner,
+            dir.path().join("platform.log"),
+            ProcessExecutionPolicy::default(),
+        );
+        dsl.run_launch(&LaunchOptions {
+            c: Some("RunUnitTests=/tmp/test.json".to_owned()),
+            ..LaunchOptions::default()
+        })
+        .expect("launch runs");
+
+        let request = runner.0.lock().expect("request lock").take().expect("ran");
+        assert_eq!(request.windows_verbatim_args.len(), 1);
+        let value = request.windows_verbatim_args[0];
+        assert_eq!(request.args[value - 1], "/C");
+        assert_eq!(
+            request.args[value],
+            encode_launch_parameter("RunUnitTests=/tmp/test.json")
+        );
+    }
+
+    /// The measured macOS 8.3.27 table: the argv that delivered each value.
+    #[test]
+    #[cfg(not(windows))]
+    fn typed_application_parameter_matches_the_measured_macos_argv() {
+        for (input, measured) in [
+            ("", "\"\""),
+            (
+                "Юника \"кавычки\" пробелы = тест",
+                "Юника \"\"кавычки\"\" пробелы = тест",
+            ),
+            ("\"", "\"\"\"\""),
+            ("\"\"", "\"\"\"\"\"\""),
+            ("\"abc", "\"\"\"abc\""),
+            ("abc\"def", "\"abc\"\"def\""),
+            ("abc\"", "\"abc\"\"\""),
+            ("\"abc def", "\"\"abc def"),
+            ("\"abc\tdef", "\"\"\"abc\tdef\""),
+            ("\"abc\ndef", "\"\"\"abc\ndef\""),
+        ] {
+            assert_eq!(encode_launch_parameter(input), measured, "{input:?}");
+        }
+    }
+
     #[test]
     fn builds_expected_run_unit_tests_arguments() {
         let args = build_launch_args(
@@ -366,7 +640,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair
             == [
                 "/C".to_owned(),
-                "RunUnitTests=/tmp/path with space/тест config.json".to_owned(),
+                encode_launch_parameter("RunUnitTests=/tmp/path with space/тест config.json"),
             ]));
         assert!(!args
             .iter()
@@ -398,7 +672,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair
             == [
                 "/C".to_owned(),
-                "StartFeaturePlayer;VAParams=/tmp/va/va-params.json".to_owned(),
+                encode_launch_parameter("StartFeaturePlayer;VAParams=/tmp/va/va-params.json"),
             ]));
         assert!(!args
             .iter()
@@ -486,11 +760,13 @@ mod tests {
             crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
-        let args = dsl.build_args(&LaunchOptions {
-            c: Some("RunUnitTests=/tmp/test.json".to_owned()),
-            out: Some("user.log".to_owned()),
-            ..LaunchOptions::default()
-        });
+        let args = dsl
+            .build_command(&LaunchOptions {
+                c: Some("RunUnitTests=/tmp/test.json".to_owned()),
+                out: Some("user.log".to_owned()),
+                ..LaunchOptions::default()
+            })
+            .args;
 
         assert!(args.ends_with(&[
             "/Out".to_owned(),

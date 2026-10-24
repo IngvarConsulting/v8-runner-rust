@@ -678,7 +678,7 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ("wire/clone-data.md", "два,обоими"),
     ("wire/command-envelope.md", "два,четыре,обоими,два,два"),
     ("wire/infobase-restore-data.md", "двумя"),
-    ("wire/launch-data.md", "двух"),
+    ("wire/launch-data.md", "двух,два,оба"),
     ("wire/upload-data.md", "тремя"),
 ];
 

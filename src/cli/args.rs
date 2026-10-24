@@ -890,10 +890,10 @@ pub struct LaunchOptionsArgs {
 pub struct DirectLaunchOptionsArgs {
     #[command(flatten)]
     pub common: LaunchOptionsArgs,
-    /// Capture client stderr to this path while waiting for an external EPF to exit
+    /// Capture client stderr to this path while waiting for a thin client to exit
     #[arg(long = "stderr-output")]
     pub stderr_output: Option<String>,
-    /// Wait for a direct external EPF launch to exit
+    /// Wait for a thin launch with --execute <file.epf> or --c=<value> to exit
     #[arg(long = "wait-for-exit")]
     pub wait_for_exit: bool,
     /// Maximum wait time in milliseconds for --wait-for-exit

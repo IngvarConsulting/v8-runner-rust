@@ -156,6 +156,7 @@ fn run_publish(
         stdout_log_path: Some(log_path.clone()),
         stderr_log_path: Some(log_path.clone()),
         startup_probe: None,
+        windows_verbatim_args: Vec::new(),
     };
     let runner = utilities.runner_for(UtilityType::Webinst);
     let finished = runner

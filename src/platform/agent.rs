@@ -1461,6 +1461,7 @@ impl ManagedAgent {
             stdout_log_path: Some(launch.process_log.with_extension("stdout.log")),
             stderr_log_path: Some(launch.process_log.with_extension("stderr.log")),
             startup_probe: Some(Duration::from_millis(300)),
+            windows_verbatim_args: Vec::new(),
         };
         let mut process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
