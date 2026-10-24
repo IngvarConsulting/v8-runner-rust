@@ -2931,6 +2931,7 @@ mod tests {
                             } else {
                                 1
                             })),
+                            windows_verbatim_args: Vec::new(),
                         },
                         &work,
                     )
@@ -3103,6 +3104,7 @@ mod tests {
                 stdout_log_path: None,
                 stderr_log_path: None,
                 startup_probe: None,
+                windows_verbatim_args: Vec::new(),
             };
             let pid = match spawn_mode {
                 RedirectedStdoutSpawnMode::Detached => {
@@ -3209,6 +3211,7 @@ mod tests {
                     stdout_log_path: None,
                     stderr_log_path: None,
                     startup_probe: None,
+                    windows_verbatim_args: Vec::new(),
                 },
                 ManagedSpawnMode::Detached,
                 None,
@@ -3255,6 +3258,7 @@ mod tests {
                 stdout_log_path: None,
                 stderr_log_path: None,
                 startup_probe: Some(Duration::from_millis(200)),
+                windows_verbatim_args: Vec::new(),
             },
             ManagedSpawnMode::Detached,
             None,
