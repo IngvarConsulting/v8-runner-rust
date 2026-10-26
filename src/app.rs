@@ -280,6 +280,7 @@ pub fn run() -> i32 {
         | Command::Syntax(_)
         | Command::Launch(_)
         | Command::Publish(_)
+        | Command::Platforms
         | Command::Status(_) => execute::execute_command(
             &config,
             &cli.command,
@@ -359,6 +360,9 @@ pub(crate) fn load_cli_config(
             operation,
             cli.dry_run,
         )
+    } else if matches!(&cli.command, Command::Platforms) {
+        // `platforms` только читает: рабочего каталога он не готовит.
+        load_config_for_preview(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
     } else if cli.dry_run {

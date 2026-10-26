@@ -1,0 +1,267 @@
+{
+  "$defs": {
+    "InstalledComponents": {
+      "additionalProperties": false,
+      "description": "Какие компоненты есть в установке.",
+      "properties": {
+        "designer": {
+          "description": "Конфигуратор и толстый клиент (`1cv8`).",
+          "type": "boolean"
+        },
+        "ibcmd": {
+          "description": "Автономный сервер (`ibcmd`).",
+          "type": "boolean"
+        },
+        "thin_client": {
+          "description": "Тонкий клиент (`1cv8c`).",
+          "type": "boolean"
+        },
+        "web_extension": {
+          "description": "Расширение веб-сервера (`webinst`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "designer",
+        "thin_client",
+        "ibcmd",
+        "web_extension"
+      ],
+      "type": "object"
+    },
+    "PlatformChoice": {
+      "description": "Почему выбрана эта версия платформы.",
+      "oneOf": [
+        {
+          "const": "version",
+          "description": "Маска `tools.platform.version`.",
+          "type": "string"
+        },
+        {
+          "const": "source_format",
+          "description": "Выпуск, который пишет формат исходников проекта.",
+          "type": "string"
+        },
+        {
+          "const": "newest",
+          "description": "Новейшая из подходящих: версию ничто не задало.",
+          "type": "string"
+        }
+      ]
+    },
+    "PlatformInstallation": {
+      "additionalProperties": false,
+      "description": "Установка платформы: версия, каталог и состав.",
+      "properties": {
+        "components": {
+          "$ref": "#/$defs/InstalledComponents"
+        },
+        "root": {
+          "description": "Каталог версии.",
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "root",
+        "components"
+      ],
+      "type": "object"
+    },
+    "PlatformRequirement": {
+      "additionalProperties": false,
+      "description": "`tools.platform` проекта вместе с местным слоем.",
+      "properties": {
+        "path": {
+          "description": "Путь к установке или утилите; `null` — не задан.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strict": {
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Маска версии; `null` — не задана.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "strict"
+      ],
+      "type": "object"
+    },
+    "PlatformResolutionSource": {
+      "description": "Typed discovery sources exposed by `launch` resolution metadata.",
+      "oneOf": [
+        {
+          "const": "explicit",
+          "description": "The configured utility or installation hint.",
+          "type": "string"
+        },
+        {
+          "const": "default-root",
+          "description": "An operating-system-specific default installation root.",
+          "type": "string"
+        },
+        {
+          "const": "path",
+          "description": "A directory captured from `PATH` when the locator was created.",
+          "type": "string"
+        }
+      ]
+    },
+    "SelectedPlatform": {
+      "additionalProperties": false,
+      "description": "Выбранная утилита и почему выбрана её версия.",
+      "properties": {
+        "chosen_by": {
+          "$ref": "#/$defs/PlatformChoice"
+        },
+        "installation_root": {
+          "description": "Absolute canonical root shared by platform utilities from this installation.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute canonical path to the selected executable.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/PlatformResolutionSource",
+          "description": "Discovery source used for the selected executable."
+        },
+        "version": {
+          "description": "Platform version inferred from the canonical installation path, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "source",
+        "installation_root",
+        "chosen_by"
+      ],
+      "type": "object"
+    },
+    "SelectedPlatforms": {
+      "additionalProperties": false,
+      "description": "Выбор по утилитам: раннер ищет их по отдельности. `null` — утилиты нет ни в одной\nподходящей установке.",
+      "properties": {
+        "designer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelectedPlatform"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ibcmd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelectedPlatform"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thin_client": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelectedPlatform"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SourceFormatInfo": {
+      "additionalProperties": false,
+      "description": "Формат исходников проекта.",
+      "properties": {
+        "file": {
+          "description": "Прочитанный `Configuration.xml`.",
+          "type": "string"
+        },
+        "release": {
+          "description": "Выпуск платформы, который пишет этот формат; `null`, если раннер такого не знает.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "Версия формата; `null`, если файл есть, а версии в его корне нет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/platforms.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Ответ `platforms`.",
+  "properties": {
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "installations": {
+      "description": "Установки, которые видит поиск, новейшие первыми. Перечень полный.",
+      "items": {
+        "$ref": "#/$defs/PlatformInstallation"
+      },
+      "type": "array"
+    },
+    "requirement": {
+      "$ref": "#/$defs/PlatformRequirement",
+      "description": "Что о платформе сказано в настройках проекта (`tools.platform`)."
+    },
+    "selected": {
+      "$ref": "#/$defs/SelectedPlatforms",
+      "description": "Утилиты, которые раннер выбрал бы для этого проекта."
+    },
+    "source_format": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceFormatInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Формат исходников основного набора; `null`, если формат проекта не Конфигуратора или\n`Configuration.xml` основного набора нет."
+    }
+  },
+  "required": [
+    "installations",
+    "requirement",
+    "selected",
+    "duration_ms"
+  ],
+  "title": "PlatformsResult",
+  "type": "object"
+}

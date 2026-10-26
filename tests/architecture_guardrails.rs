@@ -274,6 +274,10 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
         "`init` пишет описание проекта, в `workPath` ничего",
     ),
     (
+        "crate::use_cases::platforms::execute",
+        "`platforms` только смотрит установки и формат исходников; ни платформы, ни `workPath`",
+    ),
+    (
         "crate::use_cases::bootstrap_project::plan",
         "план клона ничего не пишет; замок берётся по нему",
     ),

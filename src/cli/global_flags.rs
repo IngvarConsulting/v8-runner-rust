@@ -240,6 +240,11 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "platforms",
+        preview: Preview::Absent("it only reads and changes nothing"),
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "status",
         preview: Preview::Absent("it only reads and changes nothing"),
         base: Base::Resolves,

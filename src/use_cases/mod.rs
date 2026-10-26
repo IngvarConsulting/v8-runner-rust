@@ -64,6 +64,8 @@ pub mod launch_app;
 mod launch_keys;
 /// Load packaged artifacts into infobase.
 pub mod load_artifact;
+/// `platforms`: установленные платформы и выбор раннера для проекта.
+pub mod platforms;
 /// Text-mode live progress events shared by CLI-facing use cases.
 mod progress;
 pub mod provider_selection;

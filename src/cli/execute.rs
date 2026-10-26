@@ -239,6 +239,7 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::Platforms => execute_platforms(config, presenter),
         Command::Status(args) => execute_status(
             config,
             args,
@@ -248,6 +249,91 @@ pub fn execute_command(
         ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
     }
+}
+
+/// `platforms`: установки платформы и выбор раннера. Ничего не пишет и платформу не запускает,
+/// поэтому ни рабочего каталога, ни базы не занимает.
+fn execute_platforms(config: &AppConfig, presenter: &Presenter) -> Result<(), UseCaseError> {
+    let (result, warnings) = crate::use_cases::platforms::execute(config);
+    if presenter.is_json() {
+        let mut envelope =
+            Envelope::ok(CommandName::Platforms.as_str(), result.duration_ms, result);
+        envelope.warnings = warnings;
+        presenter.print_envelope(&envelope);
+    } else {
+        render_platforms_text(&result, &warnings, presenter);
+    }
+    Ok(())
+}
+
+fn render_platforms_text(
+    result: &crate::domain::platforms::PlatformsResult,
+    warnings: &[String],
+    presenter: &Presenter,
+) {
+    let mut lines: Vec<String> = result
+        .installations
+        .iter()
+        .map(|installation| {
+            let components = &installation.components;
+            let names: Vec<&str> = [
+                (components.designer, "designer"),
+                (components.thin_client, "thin client"),
+                (components.ibcmd, "ibcmd"),
+                (components.web_extension, "web extension"),
+            ]
+            .into_iter()
+            .filter_map(|(present, name)| present.then_some(name))
+            .collect();
+            format!(
+                "{} {} ({})",
+                installation.version,
+                installation.root.display(),
+                if names.is_empty() {
+                    "no components".to_owned()
+                } else {
+                    names.join(", ")
+                }
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push("no installed platform found".to_owned());
+    }
+    if let Some(format) = &result.source_format {
+        lines.push(format!(
+            "sources format: {} ({}){}",
+            format.version.as_deref().unwrap_or("unknown"),
+            format.file.display(),
+            format
+                .release
+                .as_deref()
+                .map(|release| format!(", written by {release}"))
+                .unwrap_or_default()
+        ));
+    }
+    for (name, selected) in [
+        ("designer", &result.selected.designer),
+        ("thin client", &result.selected.thin_client),
+        ("ibcmd", &result.selected.ibcmd),
+    ] {
+        lines.push(match selected {
+            Some(selected) => format!(
+                "{name}: {} ({})",
+                selected.resolution.path.display(),
+                match selected.chosen_by {
+                    crate::domain::platforms::PlatformChoice::Version => "tools.platform.version",
+                    crate::domain::platforms::PlatformChoice::SourceFormat => "sources format",
+                    crate::domain::platforms::PlatformChoice::Newest => "newest",
+                }
+            ),
+            None => format!("{name}: not found"),
+        });
+    }
+    lines.extend(warnings.iter().map(|warning| format!("warning: {warning}")));
+    presenter.print_timeline(&[
+        TimelineItem::new(TimelineStatus::Succeeded, "platforms").with_detail(lines.join("\n"))
+    ]);
 }
 
 /// `status`: без `--deep` базу не открывает; `--deep` — команда чтения базы, она берёт её
@@ -659,6 +745,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Syntax(_) => CommandName::Syntax,
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
+        Command::Platforms => CommandName::Platforms,
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
     }

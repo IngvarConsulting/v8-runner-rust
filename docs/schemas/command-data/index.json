@@ -40,6 +40,9 @@
       "make",
       "make-all"
     ],
+    "platforms": [
+      "platforms"
+    ],
     "publish": [
       "publish"
     ],

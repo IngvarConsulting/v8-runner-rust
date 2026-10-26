@@ -4,14 +4,13 @@ use std::time::Duration;
 use crate::config::model::AppConfig;
 use crate::domain::launch::{
     ClientWaitResult, ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, LaunchVia,
-    PlatformResolution, PlatformResolutionSource,
 };
 use crate::domain::next_step::NextStep;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
     build_launch_command, normalize_launch_payload_path, LaunchClientMode, LaunchCommand,
 };
-use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
+use crate::platform::locator::UtilityType;
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
 use crate::platform::secrets::{mask_preview_args, mask_url_userinfo};
 use crate::platform::utilities::PlatformUtilities;
@@ -20,6 +19,7 @@ use crate::use_cases::client_address;
 use crate::use_cases::client_mcp_readiness;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
+use crate::use_cases::platforms::platform_resolution;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, EnterpriseLaunchTarget,
@@ -374,31 +374,6 @@ fn run_launch(
     })
 }
 
-fn platform_resolution(location: &UtilityLocation) -> PlatformResolution {
-    PlatformResolution {
-        path: location.path.clone(),
-        version: location.version.as_ref().map(utility_version_string),
-        source: match location.source {
-            ResolutionSource::Explicit => PlatformResolutionSource::Explicit,
-            ResolutionSource::DefaultRoot => PlatformResolutionSource::DefaultRoot,
-            ResolutionSource::Path => PlatformResolutionSource::Path,
-        },
-        installation_root: location.installation_root.clone(),
-    }
-}
-
-fn utility_version_string(version: &UtilityVersion) -> String {
-    match version {
-        UtilityVersion::Platform(version) => version.to_string(),
-        UtilityVersion::Edt(version) => version
-            .parts
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join("."),
-    }
-}
-
 /// The client request: an awaited client mirrors its stderr and skips the startup
 /// probe, a detached one is probed; the `/C` value always stays verbatim.
 fn client_process_request(
@@ -725,7 +700,7 @@ fn build_client_mcp_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::{client_process_request, execute, platform_resolution, ClientWaitPlan};
+    use super::{client_process_request, execute, ClientWaitPlan};
     use crate::config::model::{
         AppConfig, EnterpriseToolConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig,
@@ -733,6 +708,7 @@ mod tests {
     };
     use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType};
     use crate::use_cases::context::{CommandName, ExecutionContext};
+    use crate::use_cases::platforms::platform_resolution;
     use crate::use_cases::request::{
         ClientMcpMode, ClientMcpOptionsRequest, LaunchRequest, LaunchTargetRequest,
     };
@@ -851,6 +827,7 @@ mod tests {
                 version: None,
                 source,
                 installation_root: PathBuf::from("/opt/1cv8"),
+                chosen_by: crate::domain::platforms::PlatformChoice::Newest,
             });
             let json = serde_json::to_value(resolution).expect("resolution JSON");
 
