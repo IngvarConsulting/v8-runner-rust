@@ -944,17 +944,22 @@ fn pull_json(config_path: &Path, extra: &[&str]) -> (std::process::Output, Value
     (output, envelope, rendered)
 }
 
-/// Потери, которые ответ называет полем `losses`, строками.
+/// Потери, которые называет поле `losses`, строками: первые имена. Заодно сверяет, что
+/// имён не больше двадцати, а счёт их не меньше.
 fn losses_of(envelope: &Value) -> Vec<String> {
-    envelope["data"]["losses"]
+    let losses = &envelope["data"]["losses"];
+    if losses.is_null() {
+        return Vec::new();
+    }
+    let named: Vec<String> = losses["named"]
         .as_array()
-        .map(|paths| {
-            paths
-                .iter()
-                .map(|path| path.as_str().expect("loss is a path").to_owned())
-                .collect()
-        })
-        .unwrap_or_default()
+        .expect("named losses")
+        .iter()
+        .map(|path| path.as_str().expect("loss is a path").to_owned())
+        .collect();
+    let count = losses["count"].as_u64().expect("count") as usize;
+    assert_eq!(named.len(), count.min(20), "{losses}");
+    named
 }
 
 /// Каталог вне системы контроля версий: ответа нет, и потерять можно всё. Отказ идёт на
@@ -1161,6 +1166,32 @@ fn a_pull_preview_names_the_losses_and_touches_nothing() {
     }
     assert!(base_path.join("main").join("old.txt").is_file());
     assert!(!calls_log.exists(), "a preview must not start the platform");
+}
+
+/// Размер ответа не растёт с числом потерь: ответ называет счёт и первые двадцать имён —
+/// и у превью, и у замены, в том числе в каталоге вне системы контроля версий, где
+/// потеря — каждый файл.
+#[test]
+fn a_pull_answer_does_not_grow_with_the_losses() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project();
+    let bulk = base_path.join("main").join("Catalogs");
+    fs::create_dir_all(&bulk).expect("bulk dir");
+    for i in 0..3000 {
+        fs::write(bulk.join(format!("Hand{i:04}.xml")), "written by hand\n").expect("bulk");
+    }
+
+    for extra in [
+        &["--dry-run"][..],
+        &["--force", "--dry-run"][..],
+        &["--force"][..],
+    ] {
+        let (output, envelope, rendered) = pull_json(&config_path, extra);
+        assert!(output.status.success(), "{extra:?}: {rendered}");
+        let data = envelope["data"].to_string();
+        assert!(data.len() < 16 * 1024, "{extra:?}: {} bytes", data.len());
+        assert_eq!(envelope["data"]["losses"]["count"], 3001, "{extra:?}");
+        assert_eq!(losses_of(&envelope).len(), 20, "{extra:?}");
+    }
 }
 
 /// У проекта EDT слияния нет: выгрузка заменяет проект по тем же правилам подтверждения.

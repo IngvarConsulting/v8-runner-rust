@@ -1,11 +1,12 @@
 ---
 id: CTR.WIRE.PULL-DATA
-version: 6
+version: 7
 artifact: docs/schemas/command-data/pull.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
+  - tests/cli_dump.rs::a_pull_answer_does_not_grow_with_the_losses
 ---
 
 # `data` команды `pull`
@@ -16,6 +17,14 @@ check:
 нормализует и вызывающий обязан видеть результат нормализации.
 
 Инструмент MCP `dump_config` отвечает этой же формой.
+
+Размер ответа не растёт с числом файлов в каталоге набора: потери он называет счётом и
+первыми именами, а не каждым путём.
+
+**Что изменила версия 7.** `losses` — объект, а не перечень: `count` — сколько путей
+пропадает, `named` — первые из них, не больше двадцати. Пути прежние: от корня рабочей копии,
+где гит ответил, полные, где нет. Прежде поле перечисляло каждый путь, и на каталоге в десятки
+тысяч файлов вне учёта ответ рос до мегабайтов одной строкой.
 
 **Что изменила версия 6.** Ответ называет и запрошенный режим (`requested_mode`), и
 случившийся (`mode`): по плану раннера и по прогнозу платформы
@@ -50,6 +59,6 @@ check:
   "target_path": "src/cf",
   "duration_ms": 0,
   "message": "would dump Full into 'src/cf' via /opt/1cv8/bin/1cv8; nothing written; it would discard in 'src/cf': 1 file(s) there exist nowhere else (src/cf/hand-written.xml)",
-  "losses": ["src/cf/hand-written.xml"]
+  "losses": {"count": 1, "named": ["src/cf/hand-written.xml"]}
 }
 ```
