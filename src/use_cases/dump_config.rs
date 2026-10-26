@@ -2456,6 +2456,7 @@ exit 0"#,
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
