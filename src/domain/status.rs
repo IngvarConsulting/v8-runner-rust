@@ -202,8 +202,8 @@ pub struct InstalledExtensionStatus {
 pub struct HoldersStatus {
     /// Файл метки рядом с каталогом базы.
     pub marker: PathBuf,
-    /// Записи метки; `null` — метку не прочитать, причина в `reason`. Пустой список — базу
-    /// никто не держит.
+    /// Записи метки; `null` — метку не прочитать или `working-copy` местного слоя не
+    /// проходит проверку, причина в `reason`. Пустой список — базу никто не держит.
     pub owners: Option<Vec<HolderStatus>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

@@ -1150,6 +1150,7 @@ mod tests {
             infobase: InfobaseConfig::file(format!("File={}", root.join("ib").display())),
             infobases: Default::default(),
             infobase_name: Some("origin".to_owned()),
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,

@@ -87,14 +87,24 @@ pub(crate) struct ThisCopy {
     machine: Option<String>,
     host: Option<String>,
     project: PathBuf,
+    /// Каталог проекта, когда копию называет `working-copy`: прежняя запись проекции под
+    /// своим именем — это она же до ключа.
+    projection: Option<PathBuf>,
 }
 
 impl ThisCopy {
-    /// Копия, которой принадлежит проект `config`, на этой машине.
+    /// Копия, которой принадлежит проект `config`, на этой машине: каталог проекта или
+    /// копия, которую называет `working-copy` местного слоя.
     fn of(config: &AppConfig) -> Self {
         let host = host_name();
         let identity = machine_id().or_else(|| host.as_ref().map(|host| format!("host:{host}")));
-        Self::on(identity.as_deref(), host, &config.base_path)
+        match config.working_copy.as_deref() {
+            Some(copy) => Self {
+                projection: Some(canonical(&config.base_path)),
+                ..Self::on(identity.as_deref(), host, copy)
+            },
+            None => Self::on(identity.as_deref(), host, &config.base_path),
+        }
     }
 
     /// Копия с идентификатором машины `identity` в открытом виде; в метку идёт его хеш.
@@ -103,7 +113,17 @@ impl ThisCopy {
             machine: identity.map(machine_hash),
             host,
             project: canonical(project),
+            projection: None,
         }
+    }
+
+    /// Запись проекции под её собственным каталогом, сделанная до ключа `working-copy`.
+    fn is_the_projection_of(&self, record: &OwnerRecord) -> bool {
+        self.is_on_the_machine_of(record)
+            && self
+                .projection
+                .as_deref()
+                .is_some_and(|projection| same_path(&record.project, projection))
     }
 
     fn is(&self, record: &OwnerRecord) -> bool {
@@ -164,6 +184,9 @@ fn check_as(
     let Some(marker_path) = owner_marker_path(&base_dir) else {
         return Ok(Vec::new());
     };
+    if let Some(copy) = config.working_copy.as_deref() {
+        named_copy_declares(copy, &base_dir)?;
+    }
     let beside = marker_path.parent().unwrap_or(&base_dir).to_path_buf();
     if !writes {
         if !beside.exists() {
@@ -318,6 +341,18 @@ pub(crate) fn holders(config: &AppConfig) -> Option<crate::domain::status::Holde
         .file_infobase_dir(&config.base_path)?;
     let marker = owner_marker_path(&base_dir)?;
     let beside = marker.parent().unwrap_or(&base_dir).to_path_buf();
+    // Названная копия проверяется так же, как у команд: не объявляющая базу ею не делает.
+    if let Some(error) = config
+        .working_copy
+        .as_deref()
+        .and_then(|copy| named_copy_declares(copy, &base_dir).err())
+    {
+        return Some(HoldersStatus {
+            marker,
+            owners: None,
+            reason: Some(error.to_string()),
+        });
+    }
     let this = ThisCopy::of(config);
     Some(match read_marker(&marker) {
         Ok(read) => HoldersStatus {
@@ -358,6 +393,44 @@ fn declares<'a>(
     })
 }
 
+/// Копия, которую называет `working-copy`, должна быть живой копией той же базы: её
+/// каталог есть и объявляет эту базу. Иначе назваться можно было бы любой копией и
+/// перехватить чужую базу.
+fn named_copy_declares(copy: &Path, base_dir: &Path) -> Result<(), UseCaseError> {
+    let refusal = |why: &str| {
+        UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            format!(
+                "working-copy '{}' of v8project.local.yaml {why}; it must name the working copy that declares the infobase '{}'",
+                copy.display(),
+                base_dir.display()
+            ),
+        )
+    };
+    // Объявления читаются так же, как у копии из метки: от канонического каталога.
+    let canonical = match std::fs::canonicalize(copy) {
+        Ok(canonical) if canonical.is_dir() => canonical,
+        Ok(_) => return Err(refusal("is not a directory")),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Err(refusal("does not exist")),
+        Err(error) => return Err(refusal(&format!("cannot be read: {}", error.kind()))),
+    };
+    match copy_declares(&canonical, base_dir) {
+        Err(error) => Err(refusal(&format!(
+            "cannot be checked: {}",
+            unreadable_declarations_reason(&error)
+        ))),
+        Ok(true) => Ok(()),
+        Ok(false) => Err(refusal("does not declare this infobase")),
+    }
+}
+
+/// Объявляет ли проект в каталоге `project` файловую базу `base_dir`. Объявленный путь
+/// разрешается от каталога проекта: у проекта, скопированного целиком, `File=build/ib`
+/// указывает на его собственную базу.
+fn copy_declares(project: &Path, base_dir: &Path) -> Result<bool, ConfigLoadError> {
+    load_declared_infobases(project).map(|declared| declares(declared.values(), project, base_dir))
+}
+
 /// Где копия-владелец по отношению к этой команде.
 enum Standing {
     /// Эта самая копия.
@@ -381,15 +454,18 @@ enum Alive {
 }
 
 enum Gone {
-    DirectoryIsGone,
+    NoDirectory,
     NoLongerDeclares,
+    /// Проекция, которая теперь выступает названной копией.
+    ActsAsTheNamedCopy,
 }
 
 impl Gone {
     fn describe(&self) -> &'static str {
         match self {
-            Self::DirectoryIsGone => "its directory is gone",
+            Self::NoDirectory => "its directory is gone",
             Self::NoLongerDeclares => "its local layer no longer declares the infobase",
+            Self::ActsAsTheNamedCopy => "it now acts as the working copy its working-copy names",
         }
     }
 }
@@ -421,6 +497,9 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
     if this.is(owner) {
         return Standing::This;
     }
+    if this.is_the_projection_of(owner) {
+        return Standing::Gone(Gone::ActsAsTheNamedCopy);
+    }
     if !this.is_on_the_machine_of(owner) {
         let maybe_this_machine = owner.host.is_some()
             && owner.host == this.host
@@ -431,9 +510,9 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
     // прочитать, ещё может объявлять базу.
     match std::fs::metadata(&owner.project) {
         Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Standing::Gone(Gone::DirectoryIsGone),
+        Ok(_) => return Standing::Gone(Gone::NoDirectory),
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Standing::Gone(Gone::DirectoryIsGone)
+            return Standing::Gone(Gone::NoDirectory)
         }
         Err(error) => {
             return Standing::Alive(Alive::Unreadable(format!(
@@ -442,16 +521,12 @@ fn standing(this: &ThisCopy, owner: &OwnerRecord, base_dir: &Path) -> Standing {
             )))
         }
     }
-    // Объявленный путь разрешается от каталога владельца: у проекта, скопированного
-    // целиком, `File=build/ib` указывает на его собственную базу, а не на копию.
-    match load_declared_infobases(&owner.project) {
+    match copy_declares(&owner.project, base_dir) {
         // Текст ошибки разбора цитирует файл, а в местном слое лежат пароли: причина
         // называется без него.
         Err(error) => Standing::Alive(Alive::Unreadable(unreadable_declarations_reason(&error))),
-        Ok(declared) if declares(declared.values(), &owner.project, base_dir) => {
-            Standing::Alive(Alive::Declares)
-        }
-        Ok(_) => Standing::Gone(Gone::NoLongerDeclares),
+        Ok(true) => Standing::Alive(Alive::Declares),
+        Ok(false) => Standing::Gone(Gone::NoLongerDeclares),
     }
 }
 
@@ -683,6 +758,7 @@ mod tests {
             infobase,
             infobases: Default::default(),
             infobase_name: Some("origin".to_owned()),
+            working_copy: None,
             source_sets: Vec::new(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),

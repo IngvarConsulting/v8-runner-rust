@@ -333,6 +333,11 @@ pub enum ConfigValidationError {
     InfobasesBelongToTheLocalLayer,
 
     #[error(
+        "`working-copy` is declared only in v8project.local.yaml: which working copy a generated projection acts as is known to this machine, not to the project"
+    )]
+    WorkingCopyBelongsToTheLocalLayer,
+
+    #[error(
         "{file} declares both `infobase` and `infobases`: `infobase` is the one-cycle synonym for `infobases.origin`, keep one of them"
     )]
     InfobaseKeysMixed { file: String },
@@ -1740,6 +1745,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: name.to_owned(),
                 purpose,
@@ -1844,6 +1850,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1883,6 +1890,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1922,6 +1930,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1965,6 +1974,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "../outside".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2001,6 +2011,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "bad/name".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2037,6 +2048,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main-config_01".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2069,6 +2081,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2106,6 +2119,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2465,6 +2479,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -2734,6 +2749,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2765,6 +2781,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2797,6 +2814,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("/F /tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2828,6 +2846,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2863,6 +2882,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![],
             tools: ToolsConfig::default(),
             mcp: Default::default(),
@@ -2895,6 +2915,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2938,6 +2959,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "hash-storages".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2992,6 +3014,7 @@ mod tests {
             },
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3031,6 +3054,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3091,6 +3115,7 @@ mod tests {
             infobase: serde_yaml::from_str("{}").expect("empty infobase"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3169,6 +3194,7 @@ mod tests {
             infobase: serde_yaml::from_str("{}").expect("empty infobase"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3502,6 +3528,7 @@ mod tests {
             ),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3538,6 +3565,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "Logs".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3572,6 +3600,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3605,6 +3634,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3642,6 +3672,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3691,6 +3722,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -3746,6 +3778,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4064,6 +4097,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4113,6 +4147,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4158,6 +4193,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -4210,6 +4246,7 @@ mod tests {
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,

@@ -360,6 +360,15 @@ struct MainConfigSchema {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     infobases: Option<BTreeMap<String, InfobaseSchema>>,
+    /// `working-copy` живёт в местном слое: в опубликованную схему проектного файла он не
+    /// входит, поле есть только ради проверки слитого корня.
+    #[serde(
+        rename = "working-copy",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(skip)]
+    working_copy: Option<PathBuf>,
     /// Project source sets to build, test, dump, or materialize.
     #[serde(rename = "source-set", default)]
     source_sets: Vec<SourceSetSchema>,
@@ -433,6 +442,17 @@ struct LocalOverlayConfigSchema {
         extend("propertyNames" = json!({ "pattern": INFOBASE_NAME_PATTERN }))
     )]
     infobases: Option<BTreeMap<String, InfobaseSchema>>,
+    /// The working copy this checkout acts as for the owner marker of a file infobase: a
+    /// generated projection names the checkout it was made from, which must declare the
+    /// same infobase. A relative path is resolved against this file's directory.
+    #[serde(
+        rename = "working-copy",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PathBuf")]
+    working_copy: Option<PathBuf>,
     /// One-cycle synonym for `infobases.origin`.
     #[deprecated = "declare the infobase as infobases.origin"]
     #[serde(

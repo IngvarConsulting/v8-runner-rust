@@ -172,6 +172,7 @@ mod tests {
             infobase,
             infobases: Default::default(),
             infobase_name: None,
+            working_copy: None,
             source_sets: Vec::new(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),

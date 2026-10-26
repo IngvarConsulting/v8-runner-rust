@@ -1125,6 +1125,10 @@
     "workPath": {
       "description": "Machine-local working directory override.",
       "type": "string"
+    },
+    "working-copy": {
+      "description": "The working copy this checkout acts as for the owner marker of a file infobase: a\ngenerated projection names the checkout it was made from, which must declare the\nsame infobase. A relative path is resolved against this file's directory.",
+      "type": "string"
     }
   },
   "title": "LocalOverlayConfigSchema",

@@ -989,3 +989,210 @@ fn infobase_create_records_the_created_base_for_this_copy() {
         [copy.canonical_root()]
     );
 }
+
+impl Copy {
+    /// Местный слой копии дополняется ключом `working-copy`: проекция называет копию, из
+    /// которой собрана.
+    fn act_as(&self, copy: &Path) {
+        let local = self.root.join("v8project.local.yaml");
+        let mut text = fs::read_to_string(&local).expect("local layer");
+        text.push_str(&format!("working-copy: '{}'\n", copy.display()));
+        fs::write(local, text).expect("local layer");
+    }
+}
+
+/// Проекция, которая называет рабочую копию владельца своей, — та же копия: её запись
+/// идёт без предупреждения, и владельцем остаётся названная копия (Unica #2215).
+#[test]
+fn a_projection_acting_as_the_owner_hears_no_warning_and_keeps_the_owner() {
+    let stand = Stand::new();
+    let root = stand.copy("root");
+    succeeded(&root.run(&["push"]));
+    let marker = stand.marker_text();
+    let projection = stand.copy("projection");
+    projection.act_as(&root.root);
+
+    let pushed = succeeded(&projection.run(&["push"]));
+
+    assert!(
+        !warnings(&pushed)
+            .iter()
+            .any(|warning| warning.contains("of another working copy")),
+        "{pushed}"
+    );
+    assert_eq!(stand.owners(), [root.canonical_root()]);
+    assert_eq!(
+        stand.marker_text(),
+        marker,
+        "the owner is not written again"
+    );
+}
+
+/// Проекция копии, которая базу не держит, — на базе другой копии: предупреждение
+/// называет настоящего владельца, метка не меняется.
+#[test]
+fn a_projection_of_another_copy_is_warned_like_that_copy() {
+    let stand = Stand::new();
+    let owner = stand.copy("owner");
+    succeeded(&owner.run(&["push"]));
+    let marker = stand.marker_text();
+    let root = stand.copy("root");
+    let projection = stand.copy("projection");
+    projection.act_as(&root.root);
+
+    let pushed = projection.run(&["push"]);
+
+    assert_warned(&pushed, "push", &owner, &stand);
+    assert_eq!(stand.marker_text(), marker, "the write leaves the marker");
+}
+
+/// Назваться можно только копией, которая объявляет эту же базу: иначе отказ до
+/// платформы, а метка не меняется. В проектном файле ключ не принимается вовсе.
+#[test]
+fn a_working_copy_that_does_not_declare_the_base_is_refused() {
+    let stand = Stand::new();
+    let root = stand.copy("root");
+    succeeded(&root.run(&["push"]));
+    let marker = stand.marker_text();
+    let stranger = Copy::at(stand.dir.path().join("stranger"));
+    stranger.declare(&format!(
+        "File={}",
+        stand.dir.path().join("bases").join("other").display()
+    ));
+    let projection = stand.copy("projection");
+    projection.act_as(&stranger.root);
+
+    let refused = projection.run(&["push"]);
+
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    let payload = envelope(&refused);
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("working-copy")),
+        "{payload}"
+    );
+    assert_eq!(stand.marker_text(), marker, "a refusal leaves the marker");
+
+    projection.declare(&format!("File={}", stand.base.display()));
+    projection.act_as(&stand.dir.path().join("missing"));
+    let refused = envelope(&projection.run(&["push"]));
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("does not exist")),
+        "{refused}"
+    );
+    assert_eq!(stand.marker_text(), marker, "a refusal leaves the marker");
+}
+
+/// Ключ живёт только в местном слое: в проектном файле он — ошибка конфигурации.
+#[test]
+fn a_working_copy_in_the_project_file_is_refused() {
+    let stand = Stand::new();
+    let root = stand.copy("root");
+    let project = stand.copy("shared");
+    let mut text = fs::read_to_string(&project.config).expect("project file");
+    text.push_str(&format!("working-copy: '{}'\n", root.root.display()));
+    fs::write(&project.config, text).expect("project file");
+
+    let refused = project.run(&["push"]);
+
+    assert_eq!(refused.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    assert!(
+        stdout.contains("`working-copy` is declared only in v8project.local.yaml"),
+        "{stdout}"
+    );
+}
+
+/// Относительный путь считается от каталога местного слоя.
+#[test]
+fn a_relative_working_copy_is_resolved_from_the_local_layer() {
+    let stand = Stand::new();
+    let root = stand.copy("root");
+    succeeded(&root.run(&["push"]));
+    let projection = Copy::at(root.root.join(".build").join("projection"));
+    projection.declare(&format!("File={}", stand.base.display()));
+    projection.act_as(Path::new("../.."));
+
+    let pushed = succeeded(&projection.run(&["push"]));
+
+    assert!(
+        !warnings(&pushed)
+            .iter()
+            .any(|warning| warning.contains("of another working copy")),
+        "{pushed}"
+    );
+    assert_eq!(stand.owners(), [root.canonical_root()]);
+}
+
+/// Без ключа проекция — своя копия, как прежде: на базе копии, из которой она собрана,
+/// её запись идёт с предупреждением.
+#[test]
+fn without_the_key_a_projection_is_another_copy() {
+    let stand = Stand::new();
+    let root = stand.copy("root");
+    succeeded(&root.run(&["push"]));
+    let projection = stand.copy("projection");
+
+    let pushed = projection.run(&["push"]);
+
+    assert_warned(&pushed, "push", &root, &stand);
+}
+
+/// База без метки: первая запись проекции с ключом делает владельцем названную копию, а
+/// не проекцию.
+#[test]
+fn the_first_write_of_a_projection_records_the_copy_it_names() {
+    let stand = Stand::new();
+    let root = stand.copy("root");
+    let projection = stand.copy("projection");
+    projection.act_as(&root.root);
+
+    succeeded(&projection.run(&["push"]));
+
+    assert_eq!(stand.owners(), [root.canonical_root()]);
+    let again = succeeded(&root.run(&["push"]));
+    assert!(
+        !warnings(&again)
+            .iter()
+            .any(|warning| warning.contains("of another working copy")),
+        "{again}"
+    );
+}
+
+/// Проекция успела записать себя до ключа: с ключом её прежняя запись уступает названной
+/// копии, и ни проекция, ни копия не получают предупреждения о самих себе.
+#[test]
+fn a_projection_recorded_before_the_key_gives_way_to_the_copy_it_names() {
+    let stand = Stand::new();
+    let root = stand.copy("root");
+    let projection = stand.copy("projection");
+    succeeded(&projection.run(&["push"]));
+    assert_eq!(stand.owners(), [projection.canonical_root()]);
+    projection.act_as(&root.root);
+
+    let pushed = succeeded(&projection.run(&["push"]));
+
+    assert!(
+        !warnings(&pushed)
+            .iter()
+            .any(|warning| warning.contains("of another working copy")),
+        "{pushed}"
+    );
+    assert_eq!(stand.owners(), [root.canonical_root()]);
+    let again = succeeded(&root.run(&["push"]));
+    assert!(
+        !warnings(&again)
+            .iter()
+            .any(|warning| warning.contains("of another working copy")),
+        "{again}"
+    );
+}
