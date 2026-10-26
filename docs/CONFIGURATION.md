@@ -1158,7 +1158,9 @@ SSH-клиент встроен в раннер: внешний `ssh` не ну�
 `/AgentSSHHostKeyAuto` на порту `1543`, и раннер принимал ключ любого ответившего.
 
 Управляемый агент поднимается как `1cv8 DESIGNER <база> /AgentMode /AgentPort <port>
-/AgentListenAddress 127.0.0.1 /AgentSSHHostKey <ключ> /AgentBaseDir <workPath>/agent/base`,
+/AgentListenAddress 127.0.0.1 /AgentSSHHostKey <ключ> /AgentBaseDir <workPath>/agent/base`
+с текущим каталогом `<workPath>/agent/workdir` (туда агент пишет файл настроек
+пользователя `1cv8u.pfl`, а не в каталог, откуда запущен раннер),
 поэтому для файловой и кластерной базы нужна локальная платформа. Агент читает и пишет
 только внутри `AgentBaseDir`, поэтому каталоги проекта выставляются ему символической
 ссылкой в каталоге пользователя агента (на Windows, где ссылку создать нельзя без

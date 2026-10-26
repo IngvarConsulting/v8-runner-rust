@@ -1023,6 +1023,23 @@ fn accepted_external_full_pull_remembers_the_original_source_for_the_next_push()
             assert_eq!(terminal["memory"], "saved");
             assert_eq!(terminal["result"]["ok"], true);
             assert_reported_path(&terminal["result"]["data"]["target_path"], &project.sources);
+            // Замену делает вызывающий, но ответ называет уничтоженное, как и своя замена.
+            let losses = &terminal["result"]["data"]["losses"];
+            assert!(losses["count"].as_u64() >= Some(1), "{terminal}");
+            assert!(
+                terminal["result"]["data"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("discarded on request")),
+                "{terminal}"
+            );
+            assert!(
+                losses["named"]
+                    .as_array()
+                    .is_some_and(|named| named.iter().any(|path| path
+                        .as_str()
+                        .is_some_and(|path| path.ends_with("local.bsl")))),
+                "{provider} extension={extension}: {terminal}"
+            );
             assert_eq!(
                 project.calls(),
                 calls,
