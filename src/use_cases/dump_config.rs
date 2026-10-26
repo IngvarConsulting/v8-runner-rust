@@ -28,7 +28,9 @@ use crate::support::path::{
 };
 use crate::support::source_descriptor::{self, ExternalDescriptorParseError};
 use crate::use_cases::context::{CommandName, ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::destruction_guard::{DestructionConsent, Losses, WaysOut};
+use crate::use_cases::destruction_guard::{
+    guard_replacement, Destruction, DestructionConsent, Losses, WaysOut,
+};
 use crate::use_cases::external_artifacts::ExternalArtifactKind;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
@@ -247,6 +249,16 @@ fn publish_full_dump(
             );
         let snapshot_prepared = snapshot.as_ref().is_some_and(|prepared| prepared.is_ok());
         let snapshot_warning = snapshot.as_ref().and_then(|prepared| prepared.as_ref().err()).map(|error| format!("hash memory preparation failed: {error}; published sources will need a repeated full pull"));
+        // Каталог заменяет вызывающий, но уничтожает замена то же, что и своя: сторож
+        // спрашивает до кадра `ready`, пока каталог не тронут, и ответ называет
+        // уничтоженное так же (`INV.USE-CASES.FORCE-NAMES-WHAT-IT-DESTROYED`).
+        let discarded = guard_replacement(
+            context,
+            &resolved.platform_target_path,
+            resolved.platform_consent(),
+            &[VERSION_FILE_NAME],
+            Destruction::Replace,
+        )?;
         let mut ready = super::full_pull_publication::FullPullReady {
             command: context.command(),
             requested_mode: DumpMode::Full,
@@ -266,10 +278,13 @@ fn publish_full_dump(
         // prepared stage bytes; pending cancellation cannot abandon this finish.
         if let Err(error) = binding.validate_published(&resolved.target_path) {
             external.memory_finished(super::full_pull_publication::MemoryCommit::NotSaved);
-            return Ok(DumpNotes::message(merge_optional_messages(
-                Some(format!("publication was acknowledged but baseline was not updated: {error}; repeat a full pull")),
-                super::interruption::deferred_interruption_warning_after(context, "dump publication completed"),
-            )));
+            return Ok(DumpNotes {
+                discarded,
+                ..DumpNotes::message(merge_optional_messages(
+                    Some(format!("publication was acknowledged but baseline was not updated: {error}; repeat a full pull")),
+                    super::interruption::deferred_interruption_warning_after(context, "dump publication completed"),
+                ))
+            });
         }
         let published_source = published_source.as_ref();
         let mut warnings = Vec::new();
@@ -305,13 +320,16 @@ fn publish_full_dump(
         } else {
             super::full_pull_publication::MemoryCommit::NotSaved
         });
-        return Ok(DumpNotes::message(merge_optional_messages(
-            (!warnings.is_empty()).then(|| warnings.join("; ")),
-            super::interruption::deferred_interruption_warning_after(
-                context,
-                "dump publication completed",
-            ),
-        )));
+        return Ok(DumpNotes {
+            discarded,
+            ..DumpNotes::message(merge_optional_messages(
+                (!warnings.is_empty()).then(|| warnings.join("; ")),
+                super::interruption::deferred_interruption_warning_after(
+                    context,
+                    "dump publication completed",
+                ),
+            ))
+        });
     }
 
     let published = publication
@@ -5280,7 +5298,7 @@ exit 0"#,
             platform_log_path: Some(PathBuf::from("/tmp/platform.log")),
             duration_ms: 5,
             message: Some("ok".to_owned()),
-            losses: Vec::new(),
+            losses: None,
         };
 
         let json = serde_json::to_value(result).expect("json");

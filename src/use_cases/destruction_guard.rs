@@ -6,8 +6,8 @@
 //! Спрашивают об этом систему контроля версий, и ответов у неё три: терять нечего, есть
 //! безвозвратное, ответа нет. Третий ответ — гита нет, каталог вне рабочей копии, вызов не
 //! удался — приравнен ко второму: потерять можно всё, что в каталоге лежит, и отказ идёт
-//! на тех же правах, с перечнем каждого файла. Пустой каталог терять нечего ни в каком
-//! случае.
+//! на тех же правах: потеря — каждый файл, отказ называет их счёт и первые имена. Пустой
+//! каталог терять нечего ни в каком случае.
 //!
 //! Согласие (`--force`) пропускает работу и называет уничтоженное: то, что нашла система
 //! контроля версий, или весь каталог, когда ответа нет.
@@ -16,13 +16,10 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
+use crate::domain::dump::{DumpLosses, NAMED_LOSS_LIMIT};
 use crate::platform::git::{uncommitted_work_in, NoAnswer, UncommittedWork};
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, ExecutionTransport};
-
-/// Сколько потерь перечислять в тексте, прежде чем считать их числом. Полный перечень
-/// несёт поле ответа.
-const NAMED_LOSS_LIMIT: usize = 20;
 
 /// Чьё содержимое лежит в каталоге и разрешено ли его уничтожить.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,8 +103,17 @@ impl Losses {
         self.paths.is_empty()
     }
 
+    #[cfg(test)]
     pub(super) fn into_paths(self) -> Vec<PathBuf> {
         self.paths
+    }
+
+    /// Поле ответа: счёт и первые имена; `None`, если терять нечего.
+    pub(super) fn report(&self) -> Option<DumpLosses> {
+        (!self.is_empty()).then(|| DumpLosses {
+            count: self.paths.len(),
+            named: self.paths.iter().take(NAMED_LOSS_LIMIT).cloned().collect(),
+        })
     }
 
     /// Перечень для текста: первые имена и счёт остальных.
@@ -778,5 +784,21 @@ mod tests {
         assert!(message.contains("and 5 more"), "{message}");
         assert!(message.contains("file19.xml"), "{message}");
         assert!(!message.contains("file20.xml"), "{message}");
+    }
+
+    /// Ответ называет счёт и первые имена, а не каждый путь: его размер не растёт с числом
+    /// файлов в каталоге.
+    #[test]
+    fn the_answer_names_the_count_and_a_bounded_part() {
+        let paths: Vec<PathBuf> = (0..NAMED_LOSS_LIMIT * 100)
+            .map(|i| PathBuf::from(format!("src/cf/Каталог с пробелом/file{i}.xml")))
+            .collect();
+        let report = answered(&paths).report().expect("a report");
+
+        assert_eq!(report.count, paths.len());
+        assert_eq!(report.named, paths[..NAMED_LOSS_LIMIT].to_vec());
+        let rendered = serde_json::to_string(&report).expect("json");
+        assert!(rendered.len() < 4096, "{} bytes", rendered.len());
+        assert!(Losses::default().report().is_none());
     }
 }
