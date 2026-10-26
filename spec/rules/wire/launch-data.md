@@ -10,6 +10,11 @@ check:
   - tests/cli_launch.rs::an_application_parameter_wait_interrupted_after_start_answers_in_its_form
   - tests/cli_launch.rs::thin_application_parameter_wait_timeout_terminates_client_group
   - src/domain/launch.rs::legacy_epf_wait_requires_its_string_identity_and_keeps_flat_shape
+  - src/use_cases/client_mcp_readiness.rs::retains_last_tools_observation_after_reinitialize_failure_until_timeout
+  - src/use_cases/client_mcp_readiness.rs::initialize_failure_before_any_tools_observation_reports_endpoint_error
+  - src/use_cases/client_mcp_readiness.rs::newer_incomplete_tools_observation_replaces_the_previous_one
+  - src/use_cases/client_mcp_readiness.rs::fresh_complete_tools_after_reinitialize_establish_readiness
+  - src/use_cases/client_mcp_readiness.rs::cancellation_after_reinitialize_failure_keeps_observation_and_cancel_message
 ---
 
 # `data` команды `launch`
@@ -48,6 +53,10 @@ NUL отклоняется до запуска. Сочетание `--c` и `--e
 
 **Что изменила версия 6.** Схема запрещает `external_epf_wait` и `client_wait`
 в одном ответе (`not: {required: [...]}`): обещание выше теперь проверяет и форма.
+
+## Наблюдение MCP
+
+При ожидании MCP готовность подтверждает только свежий успешный `tools/list` с нужными инструментами. После неудачного ожидания `tools` и `missing_tools` описывают последний успешный ответ в этом ожидании: ошибки повторного `initialize` или `tools/list` сохраняют это диагностическое наблюдение и сообщение о недостающих инструментах. Новый успешный список заменяет предыдущий. Сохранённый список не доказывает текущую доступность endpoint и не даёт `ok: true`; отмена сохраняет собственный исход и сообщение. Если успешного списка ещё не было, сообщается ошибка доступности endpoint.
 
 ## Пример
 

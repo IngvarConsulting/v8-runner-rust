@@ -1556,6 +1556,10 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
   со списком tools. Для `launch mcp va --wait-ready` дополнительно проверяется наличие
   Vanessa tools: `load_features`, `open_feature_file`, `run_scenario`, `get_test_results`,
   `connect_test_client`.
+- При неудачном ожидании `tools` и `missing_tools` сохраняют последний успешный
+  `tools/list`, даже если восстановление сессии затем завершилось ошибкой. Это
+  диагностическое наблюдение, а не подтверждение текущей доступности endpoint.
+  Новый успешный список заменяет предыдущий; отмена сохраняет своё сообщение.
 - Timeout ожидания задаётся `tools.client_mcp.wait_ready_timeout_ms`; если он не задан,
   ожидание длится пять минут. Это единственная его граница: срока у команды нет.
 - Если настроено `tools.client_mcp.extension`, `launch mcp` не устанавливает и не обновляет его;
