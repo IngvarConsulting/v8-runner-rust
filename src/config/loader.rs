@@ -363,6 +363,9 @@ fn reject_local_keys_in_project_file(
     if mapping_contains_key(mapping, "infobases") {
         return Err(ConfigValidationError::InfobasesBelongToTheLocalLayer);
     }
+    if mapping_contains_key(mapping, "working-copy") {
+        return Err(ConfigValidationError::WorkingCopyBelongsToTheLocalLayer);
+    }
     Ok(())
 }
 
@@ -1326,7 +1329,8 @@ fn reject_local_overlay_keys(root: &serde_yaml::Value) -> Result<(), ConfigLoadE
         match key {
             "source-set" => return Err(ConfigLoadError::LocalOverlayForbiddenKey("source-set")),
             "format" => return Err(ConfigLoadError::LocalOverlayForbiddenKey("format")),
-            "workPath" | "infobases" | "infobase" | "tools" | "tests" | "mcp" | "providers" => {}
+            "workPath" | "infobases" | "infobase" | "working-copy" | "tools" | "tests" | "mcp"
+            | "providers" => {}
             unsupported => {
                 return Err(ConfigLoadError::LocalOverlayUnsupportedKey(
                     unsupported.to_owned(),
@@ -1401,6 +1405,10 @@ fn normalize_infobase_paths(infobase: &mut InfobaseConfig, config_dir: &Path) {
 fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
     config.base_path = resolve_from(config_dir, &config.base_path);
     config.work_path = resolve_from(config_dir, &config.work_path);
+    // Местный слой лежит рядом с проектным файлом: путь копии — от того же каталога.
+    if let Some(working_copy) = config.working_copy.as_mut() {
+        *working_copy = resolve_from(config_dir, working_copy);
+    }
     normalize_infobase_paths(&mut config.infobase, config_dir);
     for infobase in config.infobases.values_mut() {
         normalize_infobase_paths(infobase, config_dir);

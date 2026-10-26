@@ -51,6 +51,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub infobase_name: Option<String>,
 
+    /// Рабочая копия, которой этот каталог выступает для метки владельца файловой базы
+    /// (`working-copy` местного слоя): проекция, собранная из копии, называет её. `None` —
+    /// копия этого каталога.
+    #[serde(rename = "working-copy", default)]
+    pub working_copy: Option<PathBuf>,
+
     /// Source sets (configuration + extensions)
     #[serde(rename = "source-set", default)]
     pub source_sets: Vec<SourceSetConfig>,
