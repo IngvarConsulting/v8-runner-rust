@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>publish — v8-runner</title>
+<title>web publish — v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
 <link rel="stylesheet" href="styles.css?v=41">
@@ -57,10 +57,11 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish" aria-current="page">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish" aria-current="page">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -69,19 +70,19 @@
 </div></div>
 
 <main class="page">
-<h1>publish</h1>
+<h1>web publish</h1>
 <p class="lede">Создайте веб-публикацию на Apache или IIS.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <p class="hint">Примеры ответов; пути и длительность зависят от запуска.</p>
-<h2 class="command-variant" id="op-publish">publish</h2>
-<pre data-output-command><code>v8-runner publish</code></pre>
+<h2 class="command-variant" id="op-web-publish">web publish</h2>
+<pre data-output-command><code>v8-runner web publish</code></pre>
 <p>публикует базу на Apache или IIS <span class="ref">(<a href="platform.html#t69">69</a>)</span>; базу при этом не открывает</p>
 <h3 id="response-classes">Классы ответов</h3>
 <p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
 <tbody><tr data-response-class="success"><td>Публикация создана или изменена</td><td><code>action: publish</code>; webinst выполнил операцию.</td></tr>
-<tr data-response-class="deleted"><td>Публикация снята</td><td>Только <code>publish --delete</code>: <code>action: delete</code>.</td></tr>
+<tr data-response-class="deleted"><td>Публикация снята</td><td>Только <code>web publish --delete</code>: <code>action: delete</code>.</td></tr>
 <tr data-response-class="preview"><td>План подготовлен</td><td><code>provider_dispatched: false</code>; публикация ещё не менялась.</td></tr>
 <tr data-response-class="refusal"><td>Нет доступа к управлению публикацией</td><td>Не заданы server/wsdir/dir или не найден исполнитель. Одного web.url хватает для открытия клиента, но не для publish.</td></tr>
 <tr data-response-class="failure"><td>webinst завершился ошибкой</td><td><code>ok: false</code>, <code>provider_dispatched: true</code>; action и настройки сохранены в результате.</td></tr>
@@ -102,8 +103,8 @@ dir: /var/www/demo</code></pre>
 <pre data-output-example="publish-failed" data-output-schema="publish"><code>action: publish
 provider dispatched: true
 ERROR: platform error: webinst failed with exit code 1</code></pre>
-<h2 class="command-variant" id="publish-preview">publish --dry-run</h2>
-<pre data-output-command><code>v8-runner publish --dry-run</code></pre>
+<h2 class="command-variant" id="publish-preview">web publish --dry-run</h2>
+<pre data-output-command><code>v8-runner web publish --dry-run</code></pre>
 <p>Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без <code>--dry-run</code> выполняется указанная операция. Требуются параметры управления <code>web.server</code>, <code>wsdir</code> и <code>dir</code>; одного <code>web.url</code> недостаточно. <code>--delete</code> удаляет публикацию.</p>
 <h3>Варианты ответа</h3>
 <h4 id="publish-example-outcome">План публикации подготовлен</h4>

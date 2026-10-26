@@ -99,7 +99,7 @@ TABLE_ROWS = {
     "sessions": "sessions",
     "test": "test",
     "launch": "launch",
-    "publish": "publish",
+    "web publish": "publish",
 }
 
 # Исполнители, которых таблица называет прозой, а не меткой.

@@ -52,10 +52,11 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -92,7 +93,7 @@
 <tr id="tool-thin-client"><td><code>1cv8c</code></td><td>Тонкий клиент 1С.</td><td>Запускает клиент по строке подключения или по веб-адресу через HTTP/HTTPS. Способы запуска описаны в <a href="cli-launch.html#op-launch">launch</a>.</td></tr>
 <tr id="tool-ibcmd"><td><code>ibcmd</code></td><td>Утилита администрирования информационной базы из поставки платформы 1С.</td><td>Запускает на операцию. Утилита работает с файловой базой или напрямую с СУБД по <code>dbms</code>; кластерная строка подключения для прямого доступа не используется. До прямой работы серверные процессы, обслуживающие эту базу, должны быть остановлены: кластер или <code>ibsrv</code>. СУБД остаётся запущенной. См. <a href="variant-cluster.html">условия работы с кластерной базой</a>.</td></tr>
 <tr id="tool-edt-cli"><td><code>1cedtcli</code></td><td>Командная строка 1C:Enterprise Development Tools (EDT).</td><td>Импортирует и экспортирует проекты EDT, проверяет исходники. Работает с проектами и рабочей областью EDT; раннер запускает разовую команду или управляет своей интерактивной сессией.</td></tr>
-<tr id="tool-webinst"><td><code>webinst</code></td><td>Утилита платформы 1С для веб-публикации базы на Apache или IIS.</td><td>Запускает локально для создания или удаления публикации, записи <code>default.vrd</code> и настройки веб-сервера. Нужен доступ к каталогу и требуемой конфигурации веб-сервера. См. <a href="cli-publish.html#op-publish">publish</a>.</td></tr>
+<tr id="tool-webinst"><td><code>webinst</code></td><td>Утилита платформы 1С для веб-публикации базы на Apache или IIS.</td><td>Запускает локально для создания или удаления публикации, записи <code>default.vrd</code> и настройки веб-сервера. Нужен доступ к каталогу и требуемой конфигурации веб-сервера. См. <a href="cli-web-publish.html#op-web-publish">web publish</a>.</td></tr>
 <tr id="tool-git"><td><code>git</code></td><td>Система контроля версий исходников.</td><td>Запрашивает правила игнорирования и состояние локальных файлов, чтобы оценить риск потери работы перед заменой каталога. Раннер не создаёт коммиты и не отправляет изменения в Git; работа без Git возможна.</td></tr>
 <tr id="tool-browser"><td>Браузер и обработчик ссылок ОС</td><td>Приложение по умолчанию для открытия веб-адреса.</td><td><code>launch web</code> передаёт URL системе: <code>open</code> на macOS, <code>xdg-open</code> на Linux, <code>rundll32.exe</code> на Windows. Раннер не управляет вкладками и не проверяет доступность публикации при таком открытии.</td></tr>
 </tbody></table></div>
@@ -101,7 +102,7 @@
 <div class="tablewrap"><table>
 <thead><tr><th>Компонент</th><th>Что это</th><th>Как используется</th></tr></thead>
 <tbody>
-<tr id="tool-cluster"><td>Кластер 1С: <code>ragent</code>, <code>rmngr</code>, <code>rphost</code></td><td>Агент сервера, менеджер кластера и рабочие процессы, обслуживающие информационные базы.</td><td>К базе через кластер подключаются Конфигуратор, агент и клиенты 1С. Кластер запущен вне раннера; раннер не управляет запуском и остановкой его серверных процессов.</td></tr>
+<tr id="tool-cluster"><td>Кластер 1С: <code>ragent</code>, <code>rmngr</code>, <code>rphost</code></td><td>Агент сервера, менеджер кластера и рабочие процессы, обслуживающие информационные базы.</td><td>К базе через кластер подключаются Конфигуратор, агент и клиенты 1С. Кластер запускаете вы — службой или из консоли, и тогда раннер его процессы не трогает, — или раннер на своей машине Windows или Linux <a href="variant-cluster.html#d-cluster-managed">командой <code>cluster start</code></a> <span class="plan-badge">План</span>.</td></tr>
 <tr id="tool-ibsrv"><td><code>ibsrv</code></td><td>Автономный сервер 1С: обслуживает базу, предоставляет прямой шлюз, агентский SSH-шлюз и HTTP-доступ.</td><td>Раннер использует SSH-шлюз; Конфигуратор и тонкий клиент могут подключаться по прямому шлюзу, клиенты — по HTTP. Сервер поднимаете вы, и тогда раннер его процесс не трогает, или раннер на своей машине <a href="variant-standalone.html#d-standalone-managed">командой <code>standalone start</code></a> <span class="plan-badge">План</span>. См. <a href="variant-standalone.html">варианты подключения</a>.</td></tr>
 <tr id="tool-apache"><td>Apache с модулем <code>wsap</code></td><td>Веб-сервер и модуль расширения 1С, обслуживающие веб-публикации.</td><td>Публикацию настраивает <code>webinst</code>; браузер и тонкий клиент открывают её по HTTP/HTTPS. Веб-сервер соединяется с базой через модуль 1С. Раннер не запускает и не останавливает Apache.</td></tr>
 <tr id="tool-iis"><td>IIS с модулем <code>wsisapi</code></td><td>Веб-сервер Windows и модуль расширения 1С для веб-публикаций.</td><td>Для публикации используется <code>webinst</code>, для открытия — веб-адрес. Запуском и остановкой IIS раннер не управляет. Готовую публикацию можно открыть без права менять её: достаточно <code>web.url</code>.</td></tr>

@@ -53,10 +53,11 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -188,8 +189,8 @@
 <div class="tablewrap"><table>
 <thead><tr><th>Цель</th><th>Строка подключения: раннер, Конфигуратор, толстый и тонкий клиент</th><th>Веб-адрес: веб-клиент и тонкий клиент</th></tr></thead>
 <tbody>
-<tr><td class="k">файловая</td><td><code>connection: File=…</code></td><td>после <code>publish</code> или объявленный вручную</td></tr>
-<tr><td class="k">кластер 1С</td><td><code>connection: Srvr=…;Ref=…</code></td><td>после <code>publish</code> или объявленный вручную</td></tr>
+<tr><td class="k">файловая</td><td><code>connection: File=…</code></td><td>после <code>web publish</code> или объявленный вручную</td></tr>
+<tr><td class="k">кластер 1С</td><td><code>connection: Srvr=…;Ref=…</code></td><td>после <code>web publish</code> или объявленный вручную</td></tr>
 <tr><td class="k">автономный сервер</td><td><code>connection: Srvr=…;Ref=…</code> — прямой шлюз, имя базы равно <code>--name</code> сервера; толстого клиента он не пускает <span class="ref">(<a href="platform.html#t65">65</a>)</span>. Рядом <code>standalone.gate</code> — SSH-шлюз для агентского набора <span class="ref">(<a href="platform.html#t61">61</a>)</span></td><td>HTTP-адрес самого сервера, известен сразу</td></tr>
 </tbody></table></div>
 <p>Кластер и автономный сервер могут стоять на другой машине, и их файловая система раннеру недоступна. Поэтому <code>workPath</code> всегда локален, пути в командах, адресованных цели, разрешаются на её стороне, а результат с удалённой цели, которую исполнял SSH-шлюз, забирается объявленным каналом обмена, а не чтением чужого пути. Конфигуратор по сети — в кластер или в прямой шлюз — читает и пишет файлы у раннера. Режим, где раннер сам поднимает процесс, работает только с локальной точкой входа.</p>
@@ -271,7 +272,7 @@
 <tr><td class="k">sessions</td><td><span class="pill no">нет</span> сервера, ведущего сеансы, нет</td><td><span class="pill neutral">rac</span></td><td><span class="pill ibcmd">ibcmd</span> session</td></tr>
 <tr><td class="k">test</td><td>клиент по строке подключения</td><td>клиент по строке подключения</td><td>тонкий клиент по строке подключения или по веб-адресу; толстого клиента прямой шлюз не пускает <span class="ref">(<a href="platform.html#t65">65</a>)</span></td></tr>
 <tr><td class="k">launch</td><td>designer · thin · thick · ordinary · mcp; web — когда объявлен <code>web.url</code></td><td>designer · thin · thick · ordinary · mcp; web — когда объявлен <code>web.url</code></td><td>designer · thin · mcp по строке подключения; thick и ordinary — нет: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает <span class="ref">(<a href="platform.html#t65">65</a>)</span>; web — браузером по HTTP сервера</td></tr>
-<tr><td class="k">publish</td><td><span class="pill neutral">webinst</span></td><td><span class="pill neutral">webinst</span></td><td>не нужна: сервер отдаёт HTTP сам</td></tr>
+<tr><td class="k">web publish</td><td><span class="pill neutral">webinst</span></td><td><span class="pill neutral">webinst</span></td><td>не нужна: сервер отдаёт HTTP сам</td></tr>
 </tbody></table></div>
 <p class="hint">У тонкого клиента два пути, и раннер умеет оба: по строке подключения — прямо в файловую базу, в кластер или в прямой шлюз автономного сервера, по веб-адресу — через Apache, IIS или HTTP автономного сервера. Без ключа <code>launch thin</code> берёт строку подключения; веб-адрес — когда строка не объявлена. Ключ <code>--via web|connection</code> умолчание переопределяет и принимается только там, где клиент тонкий: через веб-сервер ходят тонкий, веб- и мобильный клиенты, толстый и Конфигуратор — только по строке подключения <span class="ref">(<a href="platform.html#t67">67</a>)</span>; <code>launch web</code> открывает тот же веб-адрес браузером. <code>ibcmd</code> серверную цель открывает прямо в СУБД, мимо кластера, по секции <code>dbms</code>; у файловой базы ему хватает пути к каталогу, а у автономного сервера секция не принимается вовсе. Какие строки помечены экспериментальными и как их включить — в разделе <a href="#experiments">Эксперименты</a>.</p>
 

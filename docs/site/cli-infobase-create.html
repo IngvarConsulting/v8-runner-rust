@@ -57,7 +57,7 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
@@ -88,7 +88,7 @@
   </div>
   <div class="mode-row">
     <dt><a class="mode-label mode-cluster" href="glossary.html#mode-cluster"><span class="mode-icon" aria-hidden="true"></span>Кластер</a></dt>
-    <dd>Конфигуратор одной командой регистрирует базу в кластере и создаёт базу данных в СУБД <span class="ref">(<a href="platform.html#t73">73</a>)</span>.</dd>
+    <dd>Конфигуратор одной командой регистрирует базу в кластере и создаёт базу данных в СУБД <span class="ref">(<a href="platform.html#t73">73</a>)</span>. В <a href="#create-cluster-managed">кластере под управлением раннера</a> — так же, после <code>cluster start</code> <span class="plan-badge">План</span>.</dd>
   </div>
   <div class="mode-row">
     <dt><a class="mode-label mode-standalone" href="glossary.html#mode-standalone"><span class="mode-icon" aria-hidden="true"></span>Автономный</a></dt>
@@ -96,6 +96,8 @@
   </div>
 </dl>
 <p>Для формата EDT после шага создания команда подготавливает рабочую область. Оба шага имеют отдельные статусы; подготовка EDT выполняется и после ошибки создания базы. Если рабочая область не нужна, этот шаг пропускается.</p>
+<h3 id="create-cluster-managed">Кластер под управлением раннера <span class="plan-badge">План</span></h3>
+<p>Для базы, объявленной <a href="variant-cluster.html#d-cluster-managed"><code>cluster.managed</code></a>, команда регистрирует базу в кластере, который поднял раннер, и создаёт её данные в объявленной СУБД — так же, как в любом кластере <span class="ref">(<a href="platform.html#t73">73</a>)</span>. Кластер должен быть поднят: если нет, команда отказывает и называет <a href="cli-cluster.html#op-cluster-start"><code>cluster start</code></a> следующим шагом.</p>
 <h3 id="create-standalone-managed">Автономный сервер под управлением раннера <span class="plan-badge">План</span></h3>
 <p>Для базы, объявленной <a href="variant-standalone.html#d-standalone-managed"><code>standalone.managed</code></a>, команда создаёт файловую базу в <code>db-path</code> так, как этого требует платформа, — до запуска сервера <span class="ref">(<a href="platform.html#t75">75</a>)</span>: <code>ibcmd server config init</code>, затем <code>ibcmd infobase create</code> с конфигурацией из исходников: <code>--import</code> для XML, <code>--load</code> для <code>.cf</code>, <code>--restore</code> для <code>.dt</code>. Если сервер уже поднят раннером, команда отказывает: базу под работающим сервером не создают. Следующий шаг после создания — <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a>.</p>
 <p><span class="plan-badge">План</span> Созданную базу команда записывает в память, поэтому первый <code>push</code> после неё идёт как обычный.</p>

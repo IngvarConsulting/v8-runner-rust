@@ -48,10 +48,11 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html" aria-current="page">Расстановки</a>
@@ -62,7 +63,7 @@
 <main class="page">
 <h1>Расстановки</h1>
 <p class="lede">Четырнадцать способов расставить платформу, базу и веб-сервер по машинам. Варианты со схемами и конфигурациями собраны в разделе «Проект → Варианты». Здесь — выбор вида базы и общая карта. <a id="d-legend" href="glossary.html#d-legend">Обозначения схем</a> — в словаре.</p>
-<p>Вид цели решает, какими утилитами раннер работает, по какому каналу отдаёт команду и откуда забирает результат. Видов всего три, и различать их важнее, чем разбираться в схемах: пятнадцать вариантов в разделе «Проект → Варианты» — это те же три вида на разном железе.</p>
+<p>Вид цели решает, какими утилитами раннер работает, по какому каналу отдаёт команду и откуда забирает результат. Видов всего три, и различать их важнее, чем разбираться в схемах: шестнадцать вариантов в разделе «Проект → Варианты» — это те же три вида на разном железе.</p>
 <div class="tablewrap"><table>
 <thead><tr><th>вид</th><th>что это</th><th>кто держит базу</th></tr></thead>
 <tbody>
@@ -78,7 +79,7 @@
 <tr><td class="k">иначе: в строке соединения есть <code>File=</code>?</td><td>файловая база</td></tr>
 <tr><td class="k">иначе</td><td>кластер 1С</td></tr>
 </tbody></table></div>
-<p>От вида зависит, какие операции вам доступны и чем они исполняются — это <a href="architecture.html#d-ops">одна таблица</a> на все пятнадцать развёрток. Не зависит от него ничего из того, чем развёртки различаются между собой: на какой машине стоит база, кто владеет её процессом — служба, ваша консоль или контейнер, — и где поднят веб-сервер. Поэтому схемы вариантов нужны, чтобы узнать свою расстановку и понять, куда раннер пойдёт за результатом, а не чтобы выяснять свои возможности.</p>
+<p>От вида зависит, какие операции вам доступны и чем они исполняются — это <a href="architecture.html#d-ops">одна таблица</a> на все шестнадцать развёрток. Не зависит от него ничего из того, чем развёртки различаются между собой: на какой машине стоит база, кто владеет её процессом — служба, ваша консоль или контейнер, — и где поднят веб-сервер. Поэтому схемы вариантов нужны, чтобы узнать свою расстановку и понять, куда раннер пойдёт за результатом, а не чтобы выяснять свои возможности.</p>
 
 <ul class="toc">
   <li><a href="variant-file.html#d-file" id="d-file">1. Файловая база</a></li>
@@ -96,6 +97,7 @@
   <li><a href="variant-publication.html#d-web-remote" id="d-web-remote">13. Кластер с готовой веб-публикацией</a></li>
   <li><a href="variant-publication.html#d-web-docker" id="d-web-docker">14. Веб-сервер в контейнере</a></li>
   <li><a href="variant-standalone.html#d-standalone-managed" id="d-standalone-managed">15. Автономный сервер под управлением раннера</a> <span class="plan-badge">План</span></li>
+  <li><a href="variant-cluster.html#d-cluster-managed" id="d-cluster-managed">16. Кластер под управлением раннера</a> <span class="plan-badge">План</span></li>
 </ul>
 
 <h2 id="d-map">Общая карта</h2>

@@ -48,7 +48,7 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
@@ -258,7 +258,62 @@ source-set:
 <pre data-config-example="local"><code>infobases:
   origin:
     connection: &quot;Srvr=localhost:1541;Ref=demo&quot;  # кластер запущен в вашей консоли</code></pre>
-<p>Запустите сервер перед командой раннера и оставьте консоль открытой до её завершения. Файл проекта не управляет запуском и остановкой кластера.</p>
+<p>Запустите сервер перед командой раннера и оставьте консоль открытой до её завершения. Файл проекта не управляет запуском и остановкой кластера; чтобы его поднимал раннер, объявите <a href="#d-cluster-managed">кластер под управлением раннера</a>.</p>
+
+<h3 id="d-cluster-managed">Кластер под управлением раннера <span class="plan-badge">План</span></h3>
+<p>Кластер нужен для разработки и тестов на своей машине Windows или Linux, а запускать сервер 1С руками не хочется. Раннер запускает его как приложение, а не службой, — <code>ragent</code> с <code>rmngr</code> и рабочими процессами <code>rphost</code> — командой <a href="cli-cluster.html#op-cluster-start"><code>cluster start</code></a> и останавливает командой <a href="cli-cluster.html#op-cluster-stop"><code>cluster stop</code></a>. Каталог данных кластера раннер держит под <code>workPath</code>, порты агента, менеджера и диапазон рабочих процессов выбирает свободными и отдаёт ответ после того, как агент принял соединение. Кластер живёт между командами, пока его не остановит <code>cluster stop</code>. Данные базы хранит ваша СУБД: её раннер не запускает. На macOS серверных компонентов платформы нет, и этот вариант там недоступен.</p>
+<!-- diagram:d-cluster-managed -->
+<div class="diagram" role="img" aria-label="Кластер под управлением раннера: сервер 1С запущен раннером как приложение на его машине">
+<svg viewBox="-69.0 -48.0 1443.0 494.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1443px">
+<defs><marker id="arr-d-cluster-managed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-59.0" y="-38.0" width="1423.0" height="474.0" rx="12"/><text x="-45.0" y="-20.0">одна машина: Windows или Linux</text></g>
+<g class="fr fr-host"><rect x="-33.0" y="14.0" width="518.0" height="396.0" rx="12"/><text x="-19.0" y="32.0">раннер и утилиты</text></g>
+<g class="fr fr-srv"><rect x="707.0" y="81.0" width="326.0" height="286.0" rx="12"/><text x="721.0" y="99.0">сервер 1С</text></g>
+<path marker-end="url(#arr-d-cluster-managed)" class="e" d="M165.0,149.0 C242.4,149.0 259.6,80.0 337.0,80.0"/>
+<path marker-end="url(#arr-d-cluster-managed)" class="e" d="M165.0,171.0 C240.6,171.0 257.4,240.0 333.0,240.0"/>
+<path marker-end="url(#arr-d-cluster-managed)" class="e" d="M100.0,182.0 C100.0,229.7 100.0,240.3 100.0,288.0"/>
+<path marker-end="url(#arr-d-cluster-managed)" class="e" d="M165,182 C260,430 640,430 760,195"/>
+<path marker-end="url(#arr-d-cluster-managed)" class="e" d="M463.0,80.0 C580.9,80.0 607.1,146.0 725.0,146.0"/>
+<path marker-end="url(#arr-d-cluster-managed)" class="e" d="M467.0,240.0 C583.1,240.0 608.9,174.0 725.0,174.0"/>
+<path marker-end="url(#arr-d-cluster-managed)" class="e" d="M870.0,195.0 C870.0,238.2 870.0,247.8 870.0,291.0"/>
+<path marker-end="url(#arr-d-cluster-managed)" class="e" d="M970.0,320.0 C1037.5,320.0 1052.5,320.0 1120.0,320.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="337.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="400.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="333.0" y="218.0" width="134.0" height="44.0" rx="8"/><text><tspan x="400.0" y="240.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-doc"><path d="M-15.0,288.0 h230.0 v96.0 q-57.5,12.0 -115.0,0 q-57.5,-12.0 -115.0,0 z"/><text><tspan x="100.0" y="322.0">workPath</tspan><tspan x="100.0" y="340.0">каталог данных кластера,</tspan><tspan x="100.0" y="358.0">запись о процессе</tspan></text></g>
+<g class="n n-sw"><rect x="725.0" y="125.0" width="290.0" height="70.0" rx="8"/><text><tspan x="870.0" y="151.0">ragent · rmngr</tspan><tspan x="870.0" y="169.0">подняты раннером, свободные порты</tspan></text></g>
+<g class="n n-sw"><rect x="770.0" y="291.0" width="200.0" height="58.0" rx="8"/><text><tspan x="870.0" y="311.0">rphost</tspan><tspan x="870.0" y="329.0">свободный диапазон</tspan></text></g>
+<g class="n n-cyl"><path d="M1120.0,297.0 v46.0 a100.0,7.0 0 0 0 200.0,0 v-46.0"/><ellipse cx="1220.0" cy="297.0" rx="100.0" ry="7.0"/><text><tspan x="1220.0" y="311.0">ваша СУБД</tspan><tspan x="1220.0" y="329.0">PostgreSQL localhost:5432</tspan></text></g>
+<g class="lbl"><rect x="180.5" y="102.5" width="141" height="24" rx="4"/><text><tspan x="251.0" y="114.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="185.5" y="193.5" width="127" height="24" rx="4"/><text><tspan x="249.0" y="205.5">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="80.0" y="223.0" width="40" height="24" rx="4"/><text><tspan x="100.0" y="235.0">файл</tspan></text></g>
+<g class="lbl"><rect x="226.0" y="320.3" width="148" height="24" rx="4"/><text><tspan x="300.0" y="332.3">cluster start · stop</tspan></text></g>
+<g class="lbl"><rect x="500.0" y="101.0" width="188" height="24" rx="4"/><text><tspan x="594.0" y="113.0">TCP, Srvr=localhost:&lt;порт&gt;</tspan></text></g>
+<g class="lbl"><rect x="579.0" y="195.0" width="34" height="24" rx="4"/><text><tspan x="596.0" y="207.0">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-managed -->
+<p><code>v8project.local.yaml</code>:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    user: developer                 # пользователь базы
+    password: &quot;ib-password&quot;
+    cluster:
+      managed:                      # сервер 1С поднимает раннер
+        name: demo                  # имя базы в кластере, Ref=
+    dbms:                           # ваша СУБД для данных базы
+      kind: PostgreSQL
+      server: &quot;localhost:5432&quot;
+      name: demo_data               # физическое имя БД
+      user: dbadmin
+      password: &quot;db-password&quot;</code></pre>
+<p>Строка соединения не объявляется: адрес <code>Srvr=localhost:&lt;порт&gt;;Ref=demo</code> раннер знает сам, потому что сам выбрал порт, а называет его <a href="cli-cluster.html#op-cluster-status"><code>cluster status</code></a>. Серверные компоненты берутся из той же установки платформы, что выбирают остальные команды.</p>
+<pre class="sh"><code>v8-runner cluster start      # сервер 1С на своей машине, ждёт готовности
+v8-runner infobase create    # база в этом кластере, данные в вашей СУБД
+v8-runner push
+v8-runner test
+v8-runner cluster stop</code></pre>
+<p>В отличие от автономного сервера, базу кластера создают в работающем кластере, поэтому <a href="cli-infobase-create.html#create-cluster-managed"><code>infobase create</code></a> идёт после <code>cluster start</code>. Останавливает раннер только кластер, который запустил сам; кластер службы или вашей консоли на тех же портах он не трогает и называет в ответе.</p>
 
 <h2 id="direct-dbms">Прямой доступ к СУБД через ibcmd</h2>
 <p>Утилита <code>ibcmd</code> открывает базу непосредственно в СУБД. Перед её использованием остановите серверные процессы кластера, обслуживающего эту базу. Завершения сеансов или блокировки входа недостаточно: применение инструментов автономного сервера к базе под работающим кластером может разрушить базу данных <span class="ref">(<a href="platform.html#t60">60</a>)</span>.</p>
