@@ -56,6 +56,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-server.html#op-server-start">server</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -229,8 +230,8 @@
 <thead><tr><th></th><th>managed</th><th>attached</th></tr></thead>
 <tbody>
 <tr><td class="k">кто поднял</td><td>раннер</td><td>вы</td></tr>
-<tr><td class="k">где бывает</td><td>файловая база и кластер</td><td>автономный сервер — всегда, он держит свой шлюз сам; файловая база и кластер — только если агент Конфигуратора подняли вы</td></tr>
-<tr><td class="k">признак в конфиге</td><td>ключей <code>tools.designer_agent.attach</code> нет — раннер поднимает сам</td><td><code>standalone.gate</code> / <code>tools.designer_agent.attach</code></td></tr>
+<tr><td class="k">где бывает</td><td>файловая база и кластер; автономный сервер, который поднял раннер <span class="plan-badge">План</span></td><td>автономный сервер, который подняли вы, — он держит свой шлюз сам; файловая база и кластер — только если агент Конфигуратора подняли вы</td></tr>
+<tr><td class="k">признак в конфиге</td><td>ключей <code>tools.designer_agent.attach</code> нет — раннер поднимает сам; у автономного сервера — <code>standalone.server</code></td><td><code>standalone.gate</code> / <code>tools.designer_agent.attach</code></td></tr>
 <tr><td class="k">флаги запуска</td><td>раннер плюс ваши</td><td>только ваши</td></tr>
 <tr><td class="k">если недоступен</td><td>ошибка запуска</td><td><code>endpoint_unreachable</code>, свой рядом не поднимает</td></tr>
 </tbody></table></div>
