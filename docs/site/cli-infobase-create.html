@@ -57,9 +57,10 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -87,14 +88,18 @@
   </div>
   <div class="mode-row">
     <dt><a class="mode-label mode-cluster" href="glossary.html#mode-cluster"><span class="mode-icon" aria-hidden="true"></span>Кластер</a></dt>
-    <dd>Конфигуратор одной командой регистрирует базу в кластере и создаёт базу данных в СУБД <span class="ref">(<a href="platform.html#t73">73</a>)</span>.</dd>
+    <dd>Конфигуратор одной командой регистрирует базу в кластере и создаёт базу данных в СУБД <span class="ref">(<a href="platform.html#t73">73</a>)</span>. В <a href="#create-cluster-managed">кластере под управлением раннера</a> — так же, после <code>cluster start</code> <span class="plan-badge">План</span>.</dd>
   </div>
   <div class="mode-row">
     <dt><a class="mode-label mode-standalone" href="glossary.html#mode-standalone"><span class="mode-icon" aria-hidden="true"></span>Автономный</a></dt>
-    <dd><a href="#create-standalone-refused">Отказывает в создании</a>. Базу создают через <code>ibcmd</code> в автономном режиме на машине сервера, до запуска <code>ibsrv</code> <span class="ref">(<a href="platform.html#t75">75</a>)</span>.</dd>
+    <dd>Для вашего сервера <a href="#create-standalone-refused">отказывает в создании</a>: базу создают через <code>ibcmd</code> в автономном режиме на машине сервера, до запуска <code>ibsrv</code> <span class="ref">(<a href="platform.html#t75">75</a>)</span>. Для сервера <a href="#create-standalone-managed">под управлением раннера</a> создаёт базу сам <span class="plan-badge">План</span>.</dd>
   </div>
 </dl>
 <p>Для формата EDT после шага создания команда подготавливает рабочую область. Оба шага имеют отдельные статусы; подготовка EDT выполняется и после ошибки создания базы. Если рабочая область не нужна, этот шаг пропускается.</p>
+<h3 id="create-cluster-managed">Кластер под управлением раннера <span class="plan-badge">План</span></h3>
+<p>Для базы, объявленной <a href="variant-cluster.html#d-cluster-managed"><code>cluster.managed</code></a>, команда регистрирует базу в кластере, который поднял раннер, и создаёт её данные в объявленной СУБД — так же, как в любом кластере <span class="ref">(<a href="platform.html#t73">73</a>)</span>. Кластер должен быть поднят: если нет, команда отказывает и называет <a href="cli-cluster.html#op-cluster-start"><code>cluster start</code></a> следующим шагом.</p>
+<h3 id="create-standalone-managed">Автономный сервер под управлением раннера <span class="plan-badge">План</span></h3>
+<p>Для базы, объявленной <a href="variant-standalone.html#d-standalone-managed"><code>standalone.managed</code></a>, команда создаёт файловую базу в <code>db-path</code> так, как этого требует платформа, — до запуска сервера <span class="ref">(<a href="platform.html#t75">75</a>)</span>: <code>ibcmd server config init</code>, затем <code>ibcmd infobase create</code> с конфигурацией из исходников: <code>--import</code> для XML, <code>--load</code> для <code>.cf</code>, <code>--restore</code> для <code>.dt</code>. Если сервер уже поднят раннером, команда отказывает: базу под работающим сервером не создают. Следующий шаг после создания — <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a>.</p>
 <p><span class="plan-badge">План</span> Созданную базу команда записывает в память, поэтому первый <code>push</code> после неё идёт как обычный.</p>
 <h2 id="response-classes" class="response-classes">Успешные результаты</h2>
 <p>Варианты ответа показывают выполненные, пропущенные и запланированные шаги. Причины ошибок и поля ответа описаны в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
@@ -114,7 +119,7 @@ Init completed successfully</code></pre>
 <p>При <a href="#op-infobase-create">создании</a> или <a href="#infobase-create-preview">превью</a> настройки проекта не прочитаны либо <code>workPath</code> занят. Предметные шаги не начались; база и рабочая область не менялись. <code>invalid_argument</code> (настройки, выход CLI 2) или <code>workspace_busy</code> (каталог занят, выход CLI 3). Исправьте указанную настройку либо дождитесь завершения владельца каталога. Пример занятого рабочего каталога:</p>
 <pre data-output-example="create-preparation-refused" data-output-schema="refusal"><code>ERROR: workspace busy: workPath is locked by another command</code></pre>
 <h4 id="create-standalone-refused" data-response-class="refusal">Автономная цель не поддерживает создание</h4>
-<p><a href="#op-infobase-create">Команда создания</a> отказывает для автономной цели. База и рабочая область не создаются. <code>target</code>, выход CLI 2. Базу подготавливают на машине сервера до запуска <code>ibsrv</code>. Тот же отказ применим к <a href="#infobase-create-preview">превью</a>.</p>
+<p><a href="#op-infobase-create">Команда создания</a> отказывает для автономной цели, сервер которой поднимаете вы. База и рабочая область не создаются. <code>target</code>, выход CLI 2. Базу подготавливают на машине сервера до запуска <code>ibsrv</code>. Тот же отказ применим к <a href="#infobase-create-preview">превью</a>.</p>
 <pre data-output-example="create-standalone-refused" data-output-schema="refusal"><code>ERROR: capability unavailable: infobase create is not available for a standalone target</code></pre>
 <h4 id="create-failed" data-response-class="failure">Шаги создания и подготовки EDT завершились ошибкой</h4>
 <p>После <a href="#op-infobase-create">вызова создания</a> один или оба необходимых шага имеют статус <code>failed</code>: утилита завершилась ошибкой, исполнитель недоступен, маркер базы не появился или произошёл сбой EDT. <code>platform_failure</code> (сбой утилиты) или <code>invalid_output</code> (нет ожидаемого результата), выход CLI 4; при отсутствии исполнителя — <code>environment_unavailable</code>, выход CLI 2. Здесь оба шага не завершены; статусы не обещают удаления созданных файлов или общего отката. Проверьте журнал и оставшиеся файлы перед повтором.</p>

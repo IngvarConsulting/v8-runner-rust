@@ -48,9 +48,11 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -229,10 +231,10 @@ source-set:
       url: &quot;https://web.example/demo&quot;     # готовая веб-публикация</code></pre>
 <pre><code>v8-runner launch web             # открыть в браузере
 v8-runner launch thin --via web  # открыть тонким клиентом по HTTP</code></pre>
-<p>В этой конфигурации недоступны <code>publish</code> и <code>publish --delete</code>: параметры управления публикацией не заданы. Строка <code>connection</code> остаётся для операций с базой через кластер и не заменяется веб-адресом.</p>
+<p>В этой конфигурации недоступны <code>web publish</code> и <code>web publish --delete</code>: параметры управления публикацией не заданы. Строка <code>connection</code> остаётся для операций с базой через кластер и не заменяется веб-адресом.</p>
 
 <h2 id="d-web-mounted">Управление публикацией на отдельном веб-сервере</h2>
-<p><code>webinst</code> запускается на машине раннера. Для <code>publish</code> каталог публикации должен быть доступен раннеру; для Apache 2.0 и 2.2 также нужен файл конфигурации.</p>
+<p><code>webinst</code> запускается на машине раннера. Для <code>web publish</code> каталог публикации должен быть доступен раннеру; для Apache 2.0 и 2.2 также нужен файл конфигурации.</p>
 <p>Если каталог публикации смонтирован на машине раннера, можно задать параметры <code>server</code>, <code>wsdir</code> и <code>dir</code>. Для <code>apache24</code> и <code>iis</code> поле <code>conf</code> необязательно; для <code>apache2</code> и <code>apache22</code> оно обязательно.</p>
 <p>При монтировании каталога и конфигурации <code>webinst</code> записывает пути так, как их видит раннер. Веб-сервер должен видеть те же пути. Его модуль расширения должен соответствовать версии платформы; доступ к кластеру идёт по TCP, к файловой базе — по пути из <code>default.vrd</code>.</p>
 
@@ -334,7 +336,7 @@ v8-runner launch thin --via web  # открыть тонким клиентом 
 v8-runner launch web --infobase test               # публикация test
 v8-runner launch thin --via web --infobase origin  # тонкий клиент: origin
 v8-runner launch thin --via web --infobase test    # тонкий клиент: test</code></pre>
-<p><code>--infobase</code> выбирает базу вместе с её строкой подключения и веб-адресом. Публикациями управляют вне раннера: в примере заданы только адреса, без параметров <code>publish</code>.</p>
+<p><code>--infobase</code> выбирает базу вместе с её строкой подключения и веб-адресом. Публикациями управляют вне раннера: в примере заданы только адреса, без параметров <code>web publish</code>.</p>
 
 <h2 id="d-web-dual">Одна база, две веб-публикации <span class="pill">План</span></h2>
 <p>Одна кластерная база demo опубликована на Apache дважды: как <code>/demo</code> и <code>/demo_int</code>. У каждой публикации свой каталог и свой <code>default.vrd</code>; обе подключаются к одной базе <code>Ref=demo</code>. Публичный и внутренний доступ настраиваются в Apache; суффикс <code>_int</code> служит именем публикации.</p>
@@ -384,7 +386,7 @@ v8-runner launch web --publication demo_int
 v8-runner launch thin --via web --publication demo
 v8-runner launch thin --via web --publication demo_int</code></pre>
 <p>Если публикаций несколько, имя обязательно; неизвестное имя означает ошибку. Единственная публикация выбирается автоматически. Ключ <code>--publication</code> применяется к <code>launch web</code> и <code>launch thin --via web</code>; при прямом подключении к базе и в других режимах он недопустим.</p>
-<p>Прежний одиночный блок <code>web</code> сохраняется. В итоговой объединённой конфигурации его поля нельзя смешивать с <code>web.publications</code>. В этом примере заданы только адреса готовых публикаций; <code>publish</code> и <code>publish --delete</code> ими не управляют.</p>
+<p>Прежний одиночный блок <code>web</code> сохраняется. В итоговой объединённой конфигурации его поля нельзя смешивать с <code>web.publications</code>. В этом примере заданы только адреса готовых публикаций; <code>web publish</code> и <code>web publish --delete</code> ими не управляют.</p>
 
 </main>
 <script src="site.js?v=26" defer></script>

@@ -270,7 +270,7 @@ window.RUNNER_DATA = (function () {
     },
     {
       id: 'publish', verb: 'publish', title: 'Опубликовать базу на веб-сервере',
-      cmd: function (ctx) { return 'v8-runner publish'; },
+      cmd: function (ctx) { return 'v8-runner web publish'; },
       what: 'Публикует базу на Apache или IIS, чтобы открыть её веб-клиентом.',
       applies: function (ctx) {
         if (ctx.target === 'standalone') return { kind: 'subject', why: 'автономный сервер отдаёт HTTP сам', fix: 'публикация не нужна' };

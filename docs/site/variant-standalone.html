@@ -48,9 +48,11 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -60,10 +62,10 @@
 
 <main class="page">
 <h1>Автономный сервер</h1>
-<p>Автономный сервер <code>ibsrv</code> запущен вне раннера. Раннер не управляет его запуском и остановкой.</p>
+<p>Автономный сервер <code>ibsrv</code> поднимаете вы или раннер. Ваш сервер раннер только использует: подключается к работающим шлюзам и не запускает, не останавливает его процесс. Сервер <a href="#d-standalone-managed">под управлением раннера</a> раннер сам поднимает на своей машине и сам останавливает.</p>
 <p>Выберите вариант по расположению базы и утилит. <a href="glossary.html#d-legend">Обозначения схем</a> и <a href="project.html">настройки файлов проекта</a> описаны отдельно.</p>
 <h2 id="d-standalone-local">Автономный сервер на своей машине</h2>
-<p>Раннер подключается к <code>ibsrv</code> по двум шлюзам: Конфигуратор — по прямому, как в кластер; сессия SSH — по агентскому.</p>
+<p>Сервер поднимаете вы. Раннер подключается к <code>ibsrv</code> по двум шлюзам: Конфигуратор — по прямому, как в кластер; сессия SSH — по агентскому.</p>
 <!-- diagram:d-standalone-local -->
 <div class="diagram" role="img" aria-label="Автономный сервер на машине раннера: прямой шлюз для Конфигуратора и SSH-шлюз для агентского набора">
 <svg viewBox="-29.0 -122.0 1463.0 544.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1463px">
@@ -175,6 +177,60 @@ source-set:
     web:
       url: &quot;http://srv.example:8314/demo&quot;    # встроенный HTTP-сервер</code></pre>
 <p>srv.example — машина с ibsrv. Конфигуратор использует прямой шлюз и локальные файлы; агентский путь использует SSH и SFTP. Если на машине раннера нет платформы, оставьте standalone и уберите connection: обмен пойдёт через агентский шлюз.</p>
+<h2 id="d-standalone-managed">Автономный сервер под управлением раннера <span class="plan-badge">План</span></h2>
+<p>Сервер нужен для разработки и тестов на своей машине, а поднимать его руками не хочется. Раннер поднимает <code>ibsrv</code> командой <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a> и останавливает командой <a href="cli-standalone.html#op-standalone-stop"><code>standalone stop</code></a>. Порты прямого шлюза, SSH-шлюза и HTTP раннер выбирает свободными, для SSH-шлюза создаёт одноразовый ключ хоста, без которого сервер не стартует, а готовность проверяет пробой прямого шлюза <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами: <code>push</code>, <code>test</code> и остальные подключаются к нему так же, как к вашему.</p>
+<!-- diagram:d-standalone-managed -->
+<div class="diagram" role="img" aria-label="Автономный сервер под управлением раннера: ibsrv поднят на машине раннера командой standalone start">
+<svg viewBox="-69.0 -55.0 1508.0 447.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1508px">
+<defs><marker id="arr-d-standalone-managed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-59.0" y="-45.0" width="1488.0" height="427.0" rx="12"/><text x="-45.0" y="-27.0">одна машина</text></g>
+<g class="fr fr-host"><rect x="-33.0" y="16.0" width="544.0" height="340.0" rx="12"/><text x="-19.0" y="34.0">раннер</text></g>
+<g class="fr fr-srv"><rect x="607.0" y="7.0" width="796.0" height="231.0" rx="12"/><text x="621.0" y="25.0">автономный сервер</text></g>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M165,178 C420,262 880,262 1060,212"/>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M100,138 C100,85 180,80 635,80"/>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M165.0,160.0 C255.9,160.0 276.1,160.0 367.0,160.0"/>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M100.0,182.0 C100.0,222.0 100.0,222.0 100.0,262.0"/>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M493.0,160.0 C552.4,160.0 565.6,190.0 625.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M895.0,190.0 C937.3,190.0 946.7,190.0 989.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M885,90 C950,90 990,170 1000,178"/>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M1131.0,190.0 C1171.0,190.0 1175.0,190.0 1215.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-managed)" class="e" d="M1060.0,161.0 C1060.0,121.0 1060.0,149.0 1060.0,109.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="367.0" y="138.0" width="126.0" height="44.0" rx="8"/><text><tspan x="430.0" y="160.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-doc"><path d="M-15.0,262.0 h230.0 v68.0 q-57.5,12.0 -115.0,0 q-57.5,-12.0 -115.0,0 z"/><text><tspan x="100.0" y="291.0">workPath</tspan><tspan x="100.0" y="309.0">запись о сервере, ключ хоста</tspan></text></g>
+<g class="n n-svc"><rect x="635.0" y="51.0" width="250.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="71.0">SSH-шлюз</tspan><tspan x="760.0" y="89.0">свободный порт, ключ раннера</tspan></text></g>
+<g class="n n-svc"><rect x="625.0" y="161.0" width="270.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="181.0">прямой шлюз</tspan><tspan x="760.0" y="199.0">свободный порт, проба готовности</tspan></text></g>
+<g class="n n-sw"><rect x="989.0" y="161.0" width="142.0" height="58.0" rx="8"/><text><tspan x="1060.0" y="181.0">ibsrv</tspan><tspan x="1060.0" y="199.0">поднят раннером</tspan></text></g>
+<g class="n n-svc"><rect x="983.0" y="51.0" width="154.0" height="58.0" rx="29.0"/><text><tspan x="1060.0" y="71.0">HTTP</tspan><tspan x="1060.0" y="89.0">свободный порт</tspan></text></g>
+<g class="n n-cyl"><path d="M1215.0,167.0 v46.0 a85.0,7.0 0 0 0 170.0,0 v-46.0"/><ellipse cx="1300.0" cy="167.0" rx="85.0" ry="7.0"/><text><tspan x="1300.0" y="181.0">файловая база</tspan><tspan x="1300.0" y="199.0">managed.db-path</tspan></text></g>
+<g class="lbl"><rect x="246.0" y="205.1" width="168" height="24" rx="4"/><text><tspan x="330.0" y="217.1">standalone start · stop</tspan></text></g>
+<g class="lbl"><rect x="204.8" y="70.5" width="228" height="24" rx="4"/><text><tspan x="318.8" y="82.5">SSH: команда строкой, ответ JSON</tspan></text></g>
+<g class="lbl"><rect x="195.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="266.0" y="160.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="80.0" y="210.0" width="40" height="24" rx="4"/><text><tspan x="100.0" y="222.0">файл</tspan></text></g>
+<g class="lbl"><rect x="542.0" y="163.0" width="34" height="24" rx="4"/><text><tspan x="559.0" y="175.0">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-standalone-managed -->
+<h3>Конфигурация</h3>
+<p>Используйте тот же <code>v8project.yaml</code>, что в первом варианте этой страницы. Меняется локальный файл.</p>
+<p><code>v8project.local.yaml</code> рядом с основным файлом:</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    user: developer          # пользователь базы и SSH-шлюза
+    password: &quot;ib-password&quot;
+    standalone:
+      managed:               # ibsrv поднимает раннер
+        db-path: build/ib    # файловая база сервера, от каталога этого файла
+        name: demo           # имя базы на сервере, Ref= прямого шлюза</code></pre>
+<p>Шлюзы, адрес HTTP и каталог обмена не объявляются: раннер знает их сам, потому что сам поднял сервер, а называет их <a href="cli-standalone.html#op-standalone-status"><code>standalone status</code></a>. <code>ibsrv</code> берётся из той же установки платформы, что выбирают остальные команды. Запись о поднятом сервере — процесс, порты, ключ — раннер держит под <code>workPath</code>.</p>
+<h3 id="d-standalone-managed-cycle">Цикл работы</h3>
+<pre class="sh"><code>v8-runner infobase create   # база в db-path с конфигурацией из исходников
+v8-runner standalone start      # ibsrv над этой базой, ждёт готовности
+v8-runner push
+v8-runner test
+v8-runner standalone stop</code></pre>
+<p><a href="cli-infobase-create.html#create-standalone-managed"><code>infobase create</code></a> создаёт базу до запуска сервера, как того требует платформа <span class="ref">(<a href="platform.html#t75">75</a>)</span>. Команде, которой нужен сервер, а он не поднят, раннер отвечает отказом и называет <code>standalone start</code> следующим шагом.</p>
+<p>Останавливает раннер только сервер, который поднял сам. <code>ibsrv</code>, поднятый не раннером над той же базой или на том же порту, он не трогает и называет в ответе.</p>
 <p class="hint">Возможности операций — на странице <a href="architecture.html#d-ops">Компоненты</a>.</p>
 </main>
 <script src="site.js?v=26" defer></script>

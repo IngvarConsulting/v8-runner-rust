@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cluster — v8-runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=41">
+<style>
+  td.k { white-space: nowrap; }
+  td.k code { white-space: nowrap; }
+  table.map td:first-child { width: 30%; }
+  table.map td:last-child { white-space: nowrap; width: 12%; }
+  pre.sh { background: var(--code-bg); padding: 12px 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
+  pre.sh code { background: none; padding: 0; }
+  .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="glossary.html">Словарь</a>
+    <a href="project.html">v8project.yaml</a>
+    <a class="project-variant" href="variant-file.html">Файловая база</a>
+    <a class="project-variant" href="variant-cluster.html">Кластер 1С</a>
+
+    <a class="project-variant" href="variant-standalone.html">Автономный сервер</a>
+    <a class="project-variant" href="variant-containers.html">Контейнеры 1С</a>
+    <a class="project-variant" href="variant-publication.html">Веб-публикация</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-init.html#op-init">init</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-clone.html#op-clone">clone</a>
+    <a class="cli-operation" data-cli-group="Начало работы" href="cli-status.html#op-status">status</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-create.html#op-infobase-create">infobase create</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-dump.html#op-infobase-dump">infobase dump</a>
+    <a class="cli-operation" data-cli-group="Инфобаза" href="cli-infobase-restore.html#op-infobase-restore">infobase restore</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-diff.html#op-diff">diff</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-pull.html#op-pull">pull</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-push.html#op-push">push</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-apply.html#op-apply">apply</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-reset.html#op-reset">reset</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-upload.html#op-upload">upload</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-download.html#op-download">download</a>
+    <a class="cli-operation" data-cli-group="Конфигурация" href="cli-extensions.html#op-extensions">extensions</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-make.html#op-make">make</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-check.html#op-check">check</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-test.html#op-test">test</a>
+    <a class="cli-operation" data-cli-group="Сборка и проверки" href="cli-convert.html#op-convert">convert</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-list.html#op-sessions-list">sessions list</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-terminate.html#op-sessions-terminate">sessions terminate</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
+    <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start" aria-current="page">cluster</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>cluster</h1>
+<p class="lede">Команды <code>cluster</code> запускают и останавливают сервер 1С — <code>ragent</code>, <code>rmngr</code> и <code>rphost</code> — на машине раннера Windows или Linux для базы, объявленной <a href="variant-cluster.html#d-cluster-managed">кластером под управлением раннера</a>. Кластер службы или вашей консоли раннер только использует и не трогает его процессы.</p>
+<fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
+<h2 class="command-variant" id="op-cluster-start">cluster start <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner cluster start</code></pre>
+<p>Запускает сервер 1С как приложение той же платформы, что выбирают остальные команды (<code>tools.platform</code>). Каталог данных кластера лежит под <code>workPath</code>; порты агента, менеджера и диапазон рабочих процессов раннер выбирает свободными и отдаёт ответ после того, как агент принял соединение. Кластер живёт между командами, пока его не остановит <a href="#op-cluster-stop"><code>cluster stop</code></a>. Запись о процессе и портах раннер держит под <code>workPath</code>. На macOS серверных компонентов нет: команда отказывает.</p>
+<p>Если кластер уже запущен раннером этой копии, команда ничего не запускает и называет его. Порты, занятые чужим сервером 1С, раннер не берёт.</p>
+<pre data-output-command><code>v8-runner cluster start --dry-run</code></pre>
+<p>Показывает исполняемый файл, каталог данных и выбранные порты. Ничего не запускает.</p>
+<h2 class="command-variant" id="op-cluster-status">cluster status <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner cluster status</code></pre>
+<p>Отвечает, запущен ли кластер этой копии: не запущен или запущен раннером. Для своего кластера называет PID агента, версию платформы, адрес <code>Srvr=</code> и прошла ли проба готовности. Платформу команда не запускает.</p>
+<h2 class="command-variant" id="op-cluster-stop">cluster stop <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner cluster stop</code></pre>
+<p>Останавливает кластер, который запустил раннер этой копии, вместе с его рабочими процессами и ждёт их завершения. Данные базы в СУБД остаются. Кластер службы или консоли не останавливает. Если кластер не запущен, останавливать нечего, и команда успешна.</p>
+<h2 class="command-variant" id="op-cluster-restart">cluster restart <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner cluster restart</code></pre>
+<p>То же, что <code>cluster stop</code> и затем <code>cluster start</code>, для своего кластера.</p>
+<h3 id="response-classes">Классы ответов</h3>
+<div class="tablewrap"><table class="response-classes">
+<thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
+<tbody><tr data-response-class="planned"><td>Кластер запущен</td><td><code>cluster start</code> запустил сервер 1С, агент принял соединение. <a href="#cluster-started">Пример</a></td></tr>
+<tr data-response-class="planned"><td>Состояние</td><td><code>cluster status</code> называет свой кластер или говорит, что он не запущен. <a href="#cluster-status-own">Пример</a></td></tr>
+<tr data-response-class="planned"><td>Кластер остановлен</td><td><code>cluster stop</code> завершил свои процессы. <a href="#cluster-stopped">Пример</a></td></tr>
+<tr data-response-class="planned"><td>Нет серверных компонентов</td><td>На машине нет <code>ragent</code> выбранной платформы, в том числе на macOS: <code>environment_unavailable</code>, выход CLI 2. <a href="#cluster-no-server">Пример</a></td></tr>
+</tbody>
+</table></div>
+<p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
+<h3>Варианты ответа</h3>
+<h4 id="cluster-started">Кластер запущен</h4>
+<pre data-output-example="cluster-started" data-output-schema="planned"><code>✓ cluster: start - ragent 8.3.27.2074, pid 51220
+│   connection  Srvr=localhost:52541;Ref=demo
+│   agent       localhost:52540
+│   rphost      52560:52591
+│   ready in 6.8 s</code></pre>
+<h4 id="cluster-status-own">Состояние своего кластера</h4>
+<pre data-output-example="cluster-status-own" data-output-schema="planned"><code>origin: cluster, started by this working copy
+  pid 51220 · ragent 8.3.27.2074 · ready
+  connection  Srvr=localhost:52541;Ref=demo</code></pre>
+<h4 id="cluster-stopped">Кластер остановлен</h4>
+<pre data-output-example="cluster-stopped" data-output-schema="planned"><code>✓ cluster: stop - ragent pid 51220 and its workers stopped</code></pre>
+<h4 id="cluster-no-server">Нет серверных компонентов</h4>
+<pre data-output-example="cluster-no-server" data-output-schema="planned"><code>ERROR: environment unavailable: utility 'ragent' was not found: server components are not installed for 8.3.27.2074</code></pre>
+</main>
+<script type="application/json" id="output-examples">{
+  "cluster-started": {
+    "ok": true,
+    "command": "cluster start",
+    "duration_ms": 6810,
+    "data": {
+      "infobase": "origin",
+      "state": "started_by_this_copy",
+      "pid": 51220,
+      "platform_version": "8.3.27.2074",
+      "connection": "Srvr=localhost:52541;Ref=demo",
+      "agent": "localhost:52540",
+      "worker_range": "52560:52591",
+      "ready": true
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "cluster-status-own": {
+    "ok": true,
+    "command": "cluster status",
+    "duration_ms": 35,
+    "data": {
+      "infobase": "origin",
+      "state": "started_by_this_copy",
+      "pid": 51220,
+      "platform_version": "8.3.27.2074",
+      "connection": "Srvr=localhost:52541;Ref=demo",
+      "ready": true
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "cluster-stopped": {
+    "ok": true,
+    "command": "cluster stop",
+    "duration_ms": 2140,
+    "data": {
+      "infobase": "origin",
+      "state": "not_running",
+      "stopped_pid": 51220
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "cluster-no-server": {
+    "ok": false,
+    "command": "cluster start",
+    "duration_ms": 12,
+    "data": {
+      "infobase": "origin",
+      "state": "not_running"
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "kind": "environment",
+      "code": "environment_unavailable",
+      "message": "utility 'ragent' was not found: server components are not installed for 8.3.27.2074"
+    }
+  }
+}</script>
+<script src="site.js?v=26" defer></script>
+</body>
+</html>

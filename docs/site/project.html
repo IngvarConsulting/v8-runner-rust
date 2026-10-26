@@ -57,9 +57,11 @@
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-deny.html#op-sessions-deny">sessions deny</a>
     <a class="cli-operation" data-cli-group="Сеансы" href="cli-sessions-allow.html#op-sessions-allow">sessions allow</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-version.html#op-version">version</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-web-publish.html#op-web-publish">web publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -166,8 +168,8 @@ infobases:
       wsdir: demo                    # имя виртуального каталога
       dir: /var/www/demo             # существующий каталог публикации
       url: https://srv.example/demo  # адрес для открытия базы</code></pre>
-<p><code>server</code>, <code>wsdir</code> и <code>dir</code> нужны команде <a href="cli-publish.html"><code>publish</code></a>; <code>url</code> — команде <a href="cli-launch.html"><code>launch</code></a>. Для <code>apache2</code> и <code>apache22</code> также нужен <code>conf</code> — путь к файлу конфигурации Apache. Для IIS можно задать <code>os-auth: true</code> — аутентификацию средствами ОС.</p>
-<pre><code>v8-runner publish</code></pre>
+<p><code>server</code>, <code>wsdir</code> и <code>dir</code> нужны команде <a href="cli-web-publish.html"><code>web publish</code></a>; <code>url</code> — команде <a href="cli-launch.html"><code>launch</code></a>. Для <code>apache2</code> и <code>apache22</code> также нужен <code>conf</code> — путь к файлу конфигурации Apache. Для IIS можно задать <code>os-auth: true</code> — аутентификацию средствами ОС.</p>
+<pre><code>v8-runner web publish</code></pre>
 <h2 id="tools">Инструменты</h2>
 <p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С.</p>
 <h3 id="platform-selection">Выбор платформы <span class="plan-badge">План</span></h3>
