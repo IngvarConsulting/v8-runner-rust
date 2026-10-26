@@ -237,7 +237,7 @@ v8-runner infobase create
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.
 - `--dry-run` is a global key: it means the same before and after the command. Commands with no
-  preview — `version`, `init`, `tools download`, `test`, `status`, `mcp serve` — refuse it
+  preview — `version`, `init`, `tools download`, `test`, `platforms`, `status`, `mcp serve` — refuse it
   with a named reason instead of running.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
   what it would do: `clone`, `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`,

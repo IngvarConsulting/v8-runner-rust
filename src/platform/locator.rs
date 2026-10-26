@@ -687,6 +687,9 @@ impl Locator {
                 .chain(INVENTORIED_COMPONENTS.into_iter().flat_map(|utility| {
                     path_candidates(utility, &self.path_roots)
                         .into_iter()
+                        // Каталог в `PATH` без утилиты — не установка: запись могла пережить
+                        // удалённую платформу.
+                        .filter(|candidate| is_valid_executable(&candidate.path))
                         .filter_map(|candidate| match candidate.version {
                             Some(UtilityVersion::Platform(version)) => Some(version),
                             Some(UtilityVersion::Edt(_)) | None => None,
@@ -2264,6 +2267,24 @@ mod tests {
         std::fs::create_dir_all(root.join("8.3.27.2074")).expect("empty release");
         touch_versioned_platform_executable(&root, "8.5.4.1878", UtilityType::V8, false);
         let mut locator = format_locator(&root, None, "8.3.27");
+
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(location.chosen_by, PlatformChoice::Newest);
+    }
+
+    /// Каталог выпуска формата в `PATH`, где утилиты уже нет, установкой не считается: берётся
+    /// новейшая, а не отказ «не найдено».
+    #[test]
+    fn a_stale_path_entry_does_not_make_the_release_installed() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        touch_versioned_platform_executable(&root, "8.5.4.1878", UtilityType::V8, false);
+        let stale = dir.path().join("gone").join("8.3.27.2074").join("bin");
+        std::fs::create_dir_all(&stale).expect("stale PATH entry");
+        let mut locator = lenient_locator(None, None, vec![root], vec![stale]);
+        locator.format_releases = PlatformVersionRequirement::parse("8.3.27")
+            .into_iter()
+            .collect();
 
         let location = locator.locate(UtilityType::V8).expect("located");
         assert_eq!(location.chosen_by, PlatformChoice::Newest);
