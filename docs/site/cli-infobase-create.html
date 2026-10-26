@@ -60,7 +60,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-server.html#op-server-start">server</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -97,7 +97,7 @@
 </dl>
 <p>Для формата EDT после шага создания команда подготавливает рабочую область. Оба шага имеют отдельные статусы; подготовка EDT выполняется и после ошибки создания базы. Если рабочая область не нужна, этот шаг пропускается.</p>
 <h3 id="create-standalone-managed">Автономный сервер под управлением раннера <span class="plan-badge">План</span></h3>
-<p>Для базы, объявленной <a href="variant-standalone.html#d-standalone-managed"><code>standalone.server</code></a>, команда создаёт файловую базу в <code>db-path</code> так, как этого требует платформа, — до запуска сервера <span class="ref">(<a href="platform.html#t75">75</a>)</span>: <code>ibcmd server config init</code>, затем <code>ibcmd infobase create</code> с конфигурацией из исходников: <code>--import</code> для XML, <code>--load</code> для <code>.cf</code>, <code>--restore</code> для <code>.dt</code>. Если сервер уже поднят раннером, команда отказывает: базу под работающим сервером не создают. Следующий шаг после создания — <a href="cli-server.html#op-server-start"><code>server start</code></a>.</p>
+<p>Для базы, объявленной <a href="variant-standalone.html#d-standalone-managed"><code>standalone.managed</code></a>, команда создаёт файловую базу в <code>db-path</code> так, как этого требует платформа, — до запуска сервера <span class="ref">(<a href="platform.html#t75">75</a>)</span>: <code>ibcmd server config init</code>, затем <code>ibcmd infobase create</code> с конфигурацией из исходников: <code>--import</code> для XML, <code>--load</code> для <code>.cf</code>, <code>--restore</code> для <code>.dt</code>. Если сервер уже поднят раннером, команда отказывает: базу под работающим сервером не создают. Следующий шаг после создания — <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a>.</p>
 <p><span class="plan-badge">План</span> Созданную базу команда записывает в память, поэтому первый <code>push</code> после неё идёт как обычный.</p>
 <h2 id="response-classes" class="response-classes">Успешные результаты</h2>
 <p>Варианты ответа показывают выполненные, пропущенные и запланированные шаги. Причины ошибок и поля ответа описаны в <a href="glossary.html#command-responses">словаре ответов</a>.</p>

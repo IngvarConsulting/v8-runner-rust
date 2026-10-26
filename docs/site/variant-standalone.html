@@ -51,7 +51,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-server.html#op-server-start">server</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -177,9 +177,9 @@ source-set:
       url: &quot;http://srv.example:8314/demo&quot;    # встроенный HTTP-сервер</code></pre>
 <p>srv.example — машина с ibsrv. Конфигуратор использует прямой шлюз и локальные файлы; агентский путь использует SSH и SFTP. Если на машине раннера нет платформы, оставьте standalone и уберите connection: обмен пойдёт через агентский шлюз.</p>
 <h2 id="d-standalone-managed">Автономный сервер под управлением раннера <span class="plan-badge">План</span></h2>
-<p>Сервер нужен для разработки и тестов на своей машине, а поднимать его руками не хочется. Раннер поднимает <code>ibsrv</code> командой <a href="cli-server.html#op-server-start"><code>server start</code></a> и останавливает командой <a href="cli-server.html#op-server-stop"><code>server stop</code></a>. Порты прямого шлюза, SSH-шлюза и HTTP раннер выбирает свободными, для SSH-шлюза создаёт одноразовый ключ хоста, без которого сервер не стартует, а готовность проверяет пробой прямого шлюза <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами: <code>push</code>, <code>test</code> и остальные подключаются к нему так же, как к вашему.</p>
+<p>Сервер нужен для разработки и тестов на своей машине, а поднимать его руками не хочется. Раннер поднимает <code>ibsrv</code> командой <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a> и останавливает командой <a href="cli-standalone.html#op-standalone-stop"><code>standalone stop</code></a>. Порты прямого шлюза, SSH-шлюза и HTTP раннер выбирает свободными, для SSH-шлюза создаёт одноразовый ключ хоста, без которого сервер не стартует, а готовность проверяет пробой прямого шлюза <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами: <code>push</code>, <code>test</code> и остальные подключаются к нему так же, как к вашему.</p>
 <!-- diagram:d-standalone-managed -->
-<div class="diagram" role="img" aria-label="Автономный сервер под управлением раннера: ibsrv поднят на машине раннера командой server start">
+<div class="diagram" role="img" aria-label="Автономный сервер под управлением раннера: ibsrv поднят на машине раннера командой standalone start">
 <svg viewBox="-69.0 -55.0 1508.0 447.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1508px">
 <defs><marker id="arr-d-standalone-managed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
 <g class="fr fr-box"><rect x="-59.0" y="-45.0" width="1488.0" height="427.0" rx="12"/><text x="-45.0" y="-27.0">одна машина</text></g>
@@ -201,8 +201,8 @@ source-set:
 <g class="n n-svc"><rect x="625.0" y="161.0" width="270.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="181.0">прямой шлюз</tspan><tspan x="760.0" y="199.0">свободный порт, проба готовности</tspan></text></g>
 <g class="n n-sw"><rect x="989.0" y="161.0" width="142.0" height="58.0" rx="8"/><text><tspan x="1060.0" y="181.0">ibsrv</tspan><tspan x="1060.0" y="199.0">поднят раннером</tspan></text></g>
 <g class="n n-svc"><rect x="983.0" y="51.0" width="154.0" height="58.0" rx="29.0"/><text><tspan x="1060.0" y="71.0">HTTP</tspan><tspan x="1060.0" y="89.0">свободный порт</tspan></text></g>
-<g class="n n-cyl"><path d="M1215.0,167.0 v46.0 a85.0,7.0 0 0 0 170.0,0 v-46.0"/><ellipse cx="1300.0" cy="167.0" rx="85.0" ry="7.0"/><text><tspan x="1300.0" y="181.0">файловая база</tspan><tspan x="1300.0" y="199.0">server.db-path</tspan></text></g>
-<g class="lbl"><rect x="259.5" y="205.1" width="141" height="24" rx="4"/><text><tspan x="330.0" y="217.1">server start · stop</tspan></text></g>
+<g class="n n-cyl"><path d="M1215.0,167.0 v46.0 a85.0,7.0 0 0 0 170.0,0 v-46.0"/><ellipse cx="1300.0" cy="167.0" rx="85.0" ry="7.0"/><text><tspan x="1300.0" y="181.0">файловая база</tspan><tspan x="1300.0" y="199.0">managed.db-path</tspan></text></g>
+<g class="lbl"><rect x="246.0" y="205.1" width="168" height="24" rx="4"/><text><tspan x="330.0" y="217.1">standalone start · stop</tspan></text></g>
 <g class="lbl"><rect x="204.8" y="70.5" width="228" height="24" rx="4"/><text><tspan x="318.8" y="82.5">SSH: команда строкой, ответ JSON</tspan></text></g>
 <g class="lbl"><rect x="195.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="266.0" y="160.0">процесс на операцию</tspan></text></g>
 <g class="lbl"><rect x="80.0" y="210.0" width="40" height="24" rx="4"/><text><tspan x="100.0" y="222.0">файл</tspan></text></g>
@@ -218,17 +218,17 @@ source-set:
     user: developer          # пользователь базы и SSH-шлюза
     password: &quot;ib-password&quot;
     standalone:
-      server:                # ibsrv поднимает раннер
+      managed:               # ibsrv поднимает раннер
         db-path: build/ib    # файловая база сервера, от каталога этого файла
         name: demo           # имя базы на сервере, Ref= прямого шлюза</code></pre>
-<p>Шлюзы, адрес HTTP и каталог обмена не объявляются: раннер знает их сам, потому что сам поднял сервер, а называет их <a href="cli-server.html#op-server-status"><code>server status</code></a>. <code>ibsrv</code> берётся из той же установки платформы, что выбирают остальные команды. Запись о поднятом сервере — процесс, порты, ключ — раннер держит под <code>workPath</code>.</p>
+<p>Шлюзы, адрес HTTP и каталог обмена не объявляются: раннер знает их сам, потому что сам поднял сервер, а называет их <a href="cli-standalone.html#op-standalone-status"><code>standalone status</code></a>. <code>ibsrv</code> берётся из той же установки платформы, что выбирают остальные команды. Запись о поднятом сервере — процесс, порты, ключ — раннер держит под <code>workPath</code>.</p>
 <h3 id="d-standalone-managed-cycle">Цикл работы</h3>
 <pre class="sh"><code>v8-runner infobase create   # база в db-path с конфигурацией из исходников
-v8-runner server start      # ibsrv над этой базой, ждёт готовности
+v8-runner standalone start      # ibsrv над этой базой, ждёт готовности
 v8-runner push
 v8-runner test
-v8-runner server stop</code></pre>
-<p><a href="cli-infobase-create.html#create-standalone-managed"><code>infobase create</code></a> создаёт базу до запуска сервера, как того требует платформа <span class="ref">(<a href="platform.html#t75">75</a>)</span>. Команде, которой нужен сервер, а он не поднят, раннер отвечает отказом и называет <code>server start</code> следующим шагом.</p>
+v8-runner standalone stop</code></pre>
+<p><a href="cli-infobase-create.html#create-standalone-managed"><code>infobase create</code></a> создаёт базу до запуска сервера, как того требует платформа <span class="ref">(<a href="platform.html#t75">75</a>)</span>. Команде, которой нужен сервер, а он не поднят, раннер отвечает отказом и называет <code>standalone start</code> следующим шагом.</p>
 <p>Останавливает раннер только сервер, который поднял сам. <code>ibsrv</code>, поднятый не раннером над той же базой или на том же порту, он не трогает и называет в ответе.</p>
 <p class="hint">Возможности операций — на странице <a href="architecture.html#d-ops">Компоненты</a>.</p>
 </main>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>server — v8-runner</title>
+<title>standalone — v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
 <link rel="stylesheet" href="styles.css?v=41">
@@ -60,7 +60,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-publish.html#op-publish">publish</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-launch.html#op-launch">launch</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
-    <a class="cli-operation" data-cli-group="Окружение" href="cli-server.html#op-server-start" aria-current="page">server</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start" aria-current="page">standalone</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -69,65 +69,65 @@
 </div></div>
 
 <main class="page">
-<h1>server</h1>
-<p class="lede">Команды <code>server</code> поднимают и останавливают автономный сервер <code>ibsrv</code> на машине раннера для базы, объявленной <a href="variant-standalone.html#d-standalone-managed">сервером под управлением раннера</a>. К чужому <code>ibsrv</code> раннер только подключается и не трогает его процесс.</p>
+<h1>standalone</h1>
+<p class="lede">Команды <code>standalone</code> поднимают и останавливают автономный сервер <code>ibsrv</code> на машине раннера для базы, объявленной <a href="variant-standalone.html#d-standalone-managed">сервером под управлением раннера</a>. К чужому <code>ibsrv</code> раннер только подключается и не трогает его процесс.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
-<h2 class="command-variant" id="op-server-start">server start <span class="plan-badge">План</span></h2>
-<pre data-output-command><code>v8-runner server start</code></pre>
-<p>Поднимает <code>ibsrv</code> той же платформы, что выбирают остальные команды (<code>tools.platform</code>), над файловой базой из <code>standalone.server.db-path</code>. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами, пока его не остановит <a href="#op-server-stop"><code>server stop</code></a>. Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под <code>workPath</code>.</p>
+<h2 class="command-variant" id="op-standalone-start">standalone start <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner standalone start</code></pre>
+<p>Поднимает <code>ibsrv</code> той же платформы, что выбирают остальные команды (<code>tools.platform</code>), над файловой базой из <code>standalone.managed.db-path</code>. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами, пока его не остановит <a href="#op-standalone-stop"><code>standalone stop</code></a>. Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под <code>workPath</code>.</p>
 <p>Если сервер этой базы уже поднят раннером этой копии, команда ничего не запускает и называет его. Если базу держит чужой процесс <code>ibsrv</code>, команда отказывает и называет его: второй сервер над той же базой не поднимается.</p>
-<pre data-output-command><code>v8-runner server start --dry-run</code></pre>
+<pre data-output-command><code>v8-runner standalone start --dry-run</code></pre>
 <p>Показывает исполняемый файл, каталог данных, базу и выбранные порты. Ничего не запускает.</p>
-<h2 class="command-variant" id="op-server-status">server status <span class="plan-badge">План</span></h2>
-<pre data-output-command><code>v8-runner server status</code></pre>
+<h2 class="command-variant" id="op-standalone-status">standalone status <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner standalone status</code></pre>
 <p>Отвечает, поднят ли сервер этой базы и кем: не поднят, поднят раннером этой копии или поднят не раннером. Для своего сервера называет PID, версию платформы, адреса прямого шлюза, SSH-шлюза и HTTP и прошла ли проба готовности. Чужой сервер только называет: чей он, раннер не знает. Платформу команда не запускает.</p>
-<h2 class="command-variant" id="op-server-stop">server stop <span class="plan-badge">План</span></h2>
-<pre data-output-command><code>v8-runner server stop</code></pre>
+<h2 class="command-variant" id="op-standalone-stop">standalone stop <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner standalone stop</code></pre>
 <p>Останавливает сервер, который поднял раннер этой копии, и ждёт завершения его процесса. Сервер, поднятый не раннером, не останавливает: ответ называет его и говорит, что он не наш. Если сервер не поднят, останавливать нечего, и команда успешна.</p>
-<h2 class="command-variant" id="op-server-restart">server restart <span class="plan-badge">План</span></h2>
-<pre data-output-command><code>v8-runner server restart</code></pre>
-<p>То же, что <code>server stop</code> и затем <code>server start</code>, для своего сервера. Чужой сервер не перезапускает.</p>
+<h2 class="command-variant" id="op-standalone-restart">standalone restart <span class="plan-badge">План</span></h2>
+<pre data-output-command><code>v8-runner standalone restart</code></pre>
+<p>То же, что <code>standalone stop</code> и затем <code>standalone start</code>, для своего сервера. Чужой сервер не перезапускает.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
-<tbody><tr data-response-class="planned"><td>Сервер поднят</td><td><code>server start</code> поднял <code>ibsrv</code>, проба прямого шлюза прошла. <a href="#server-started">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Уже поднят этой копией</td><td>Свой сервер работает: новый не запускается. <a href="#server-already">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Состояние</td><td><code>server status</code> различает: не поднят, поднят раннером, поднят не раннером. <a href="#server-status-own">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Сервер остановлен</td><td><code>server stop</code> завершил свой процесс. <a href="#server-stopped">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Чужой сервер не тронут</td><td>Базу держит <code>ibsrv</code>, поднятый не раннером: <code>server start</code> отказывает, <code>server stop</code> его не останавливает. <a href="#server-foreign">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Сервер не стал готов</td><td>Процесс завершился или проба не прошла за отведённое время: <code>platform_failure</code>, выход CLI 4, в ответе — журнал <code>ibsrv</code>. <a href="#server-not-ready">Пример</a></td></tr>
+<tbody><tr data-response-class="planned"><td>Сервер поднят</td><td><code>standalone start</code> поднял <code>ibsrv</code>, проба прямого шлюза прошла. <a href="#standalone-started">Пример</a></td></tr>
+<tr data-response-class="planned"><td>Уже поднят этой копией</td><td>Свой сервер работает: новый не запускается. <a href="#standalone-already">Пример</a></td></tr>
+<tr data-response-class="planned"><td>Состояние</td><td><code>standalone status</code> различает: не поднят, поднят раннером, поднят не раннером. <a href="#standalone-status-own">Пример</a></td></tr>
+<tr data-response-class="planned"><td>Сервер остановлен</td><td><code>standalone stop</code> завершил свой процесс. <a href="#standalone-stopped">Пример</a></td></tr>
+<tr data-response-class="planned"><td>Чужой сервер не тронут</td><td>Базу держит <code>ibsrv</code>, поднятый не раннером: <code>standalone start</code> отказывает, <code>standalone stop</code> его не останавливает. <a href="#standalone-foreign">Пример</a></td></tr>
+<tr data-response-class="planned"><td>Сервер не стал готов</td><td>Процесс завершился или проба не прошла за отведённое время: <code>platform_failure</code>, выход CLI 4, в ответе — журнал <code>ibsrv</code>. <a href="#standalone-not-ready">Пример</a></td></tr>
 </tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h3>Варианты ответа</h3>
-<h4 id="server-started">Сервер поднят</h4>
-<pre data-output-example="server-started" data-output-schema="planned"><code>✓ server: start - ibsrv 8.3.27.2074, pid 48213
+<h4 id="standalone-started">Сервер поднят</h4>
+<pre data-output-example="standalone-started" data-output-schema="planned"><code>✓ standalone: start - ibsrv 8.3.27.2074, pid 48213
 │   direct gate  localhost:51541  Srvr=localhost:51541;Ref=demo
 │   ssh gate     127.0.0.1:51543
 │   http         http://localhost:51830/demo
 │   ready in 14.2 s</code></pre>
-<h4 id="server-already">Уже поднят этой копией</h4>
-<pre data-output-example="server-already" data-output-schema="planned"><code>○ server: start - already running for origin, pid 48213 (started by this working copy)</code></pre>
-<h4 id="server-status-own">Состояние своего сервера</h4>
-<pre data-output-example="server-status-own" data-output-schema="planned"><code>origin: standalone server, started by this working copy
+<h4 id="standalone-already">Уже поднят этой копией</h4>
+<pre data-output-example="standalone-already" data-output-schema="planned"><code>○ standalone: start - already running for origin, pid 48213 (started by this working copy)</code></pre>
+<h4 id="standalone-status-own">Состояние своего сервера</h4>
+<pre data-output-example="standalone-status-own" data-output-schema="planned"><code>origin: standalone server, started by this working copy
   pid 48213 · ibsrv 8.3.27.2074 · ready
   direct gate  Srvr=localhost:51541;Ref=demo
   ssh gate     127.0.0.1:51543
   http         http://localhost:51830/demo</code></pre>
-<h4 id="server-stopped">Сервер остановлен</h4>
-<pre data-output-example="server-stopped" data-output-schema="planned"><code>✓ server: stop - ibsrv pid 48213 stopped</code></pre>
-<h4 id="server-foreign">Чужой сервер не тронут</h4>
-<pre data-output-example="server-foreign" data-output-schema="planned"><code>ERROR: workspace busy: the infobase build/ib is served by ibsrv pid 30117, which this runner did not start; it is left running</code></pre>
-<h4 id="server-not-ready">Сервер не стал готов</h4>
-<pre data-output-example="server-not-ready" data-output-schema="planned"><code>✗ server: start - ibsrv exited before its direct gate accepted a connection
+<h4 id="standalone-stopped">Сервер остановлен</h4>
+<pre data-output-example="standalone-stopped" data-output-schema="planned"><code>✓ standalone: stop - ibsrv pid 48213 stopped</code></pre>
+<h4 id="standalone-foreign">Чужой сервер не тронут</h4>
+<pre data-output-example="standalone-foreign" data-output-schema="planned"><code>ERROR: workspace busy: the infobase build/ib is served by ibsrv pid 30117, which this runner did not start; it is left running</code></pre>
+<h4 id="standalone-not-ready">Сервер не стал готов</h4>
+<pre data-output-example="standalone-not-ready" data-output-schema="planned"><code>✗ standalone: start - ibsrv exited before its direct gate accepted a connection
 │   log  .build/logs/ibsrv/origin.log
 
 ERROR: platform error: the standalone server did not become ready</code></pre>
 </main>
 <script type="application/json" id="output-examples">{
-  "server-started": {
+  "standalone-started": {
     "ok": true,
-    "command": "server start",
+    "command": "standalone start",
     "duration_ms": 14230,
     "data": {
       "infobase": "origin",
@@ -143,9 +143,9 @@ ERROR: platform error: the standalone server did not become ready</code></pre>
     "warnings": [],
     "steps": []
   },
-  "server-already": {
+  "standalone-already": {
     "ok": true,
-    "command": "server start",
+    "command": "standalone start",
     "duration_ms": 3,
     "data": {
       "infobase": "origin",
@@ -156,9 +156,9 @@ ERROR: platform error: the standalone server did not become ready</code></pre>
     "warnings": [],
     "steps": []
   },
-  "server-status-own": {
+  "standalone-status-own": {
     "ok": true,
-    "command": "server status",
+    "command": "standalone status",
     "duration_ms": 41,
     "data": {
       "infobase": "origin",
@@ -173,9 +173,9 @@ ERROR: platform error: the standalone server did not become ready</code></pre>
     "warnings": [],
     "steps": []
   },
-  "server-stopped": {
+  "standalone-stopped": {
     "ok": true,
-    "command": "server stop",
+    "command": "standalone stop",
     "duration_ms": 1210,
     "data": {
       "infobase": "origin",
@@ -185,9 +185,9 @@ ERROR: platform error: the standalone server did not become ready</code></pre>
     "warnings": [],
     "steps": []
   },
-  "server-foreign": {
+  "standalone-foreign": {
     "ok": false,
-    "command": "server start",
+    "command": "standalone start",
     "duration_ms": 52,
     "data": {
       "infobase": "origin",
@@ -202,9 +202,9 @@ ERROR: platform error: the standalone server did not become ready</code></pre>
       "message": "the infobase build/ib is served by ibsrv pid 30117, which this runner did not start; it is left running"
     }
   },
-  "server-not-ready": {
+  "standalone-not-ready": {
     "ok": false,
-    "command": "server start",
+    "command": "standalone start",
     "duration_ms": 61000,
     "data": {
       "infobase": "origin",

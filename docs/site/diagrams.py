@@ -756,7 +756,7 @@ def d_standalone_remote(id):
 d_standalone_remote('d-standalone-remote')
 
 def d_standalone_managed(id):
-    d = diagram(id, 'Автономный сервер под управлением раннера: ibsrv поднят на машине раннера командой server start')
+    d = diagram(id, 'Автономный сервер под управлением раннера: ibsrv поднят на машине раннера командой standalone start')
     d.node('R', 'v8-runner', 'run', 100, 160, w=130)
     d.node('DES', '1cv8 DESIGNER', 'sw', 430, 160)
     d.node('WP', 'workPath\nзапись о сервере, ключ хоста', 'doc', 100, 300, w=230)
@@ -765,10 +765,10 @@ def d_standalone_managed(id):
     d.node('DGATE', 'прямой шлюз\nсвободный порт, проба готовности', 'svc', 760, 190, w=270)
     d.node('IBSRV', 'ibsrv\nподнят раннером', 'sw', 1060, 190)
     d.node('HTTPS', 'HTTP\nсвободный порт', 'svc', 1060, 80)
-    d.node('DB', 'файловая база\nserver.db-path', 'cyl', 1300, 190, w=170, h=60)
+    d.node('DB', 'файловая база\nmanaged.db-path', 'cyl', 1300, 190, w=170, h=60)
     d.frame('SRV', 'автономный сервер', ['GATE', 'DGATE', 'IBSRV', 'HTTPS', 'DB'], kind='srv')
     d.frame('BOX', 'одна машина', ['R', 'WP', 'DES', 'GATE', 'DGATE', 'IBSRV', 'HTTPS', 'DB'], kind='box', pad=44, top=52)
-    d.edge('R', 'IBSRV', 'server start · stop', path='M165,178 C420,262 880,262 1060,212', lx=330)
+    d.edge('R', 'IBSRV', 'standalone start · stop', path='M165,178 C420,262 880,262 1060,212', lx=330)
     d.edge('R', 'GATE', 'SSH: команда строкой, ответ JSON', path='M100,138 C100,85 180,80 635,80', t=0.7)
     d.edge('R', 'DES', FAN, t=0.5)
     d.edge('R', 'WP', 'файл', fa='b', fb='t')
