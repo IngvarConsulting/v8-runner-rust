@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PULL-ALL-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/pull-all.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -24,6 +24,9 @@ check:
 выгрузит, если их расширение в базе есть. `not_declared` — расширения без набора, которым
 набор не объявлен, полями `name` и `reason`. Пустые `not_installed`, `not_declared` и
 `if_installed` не пишутся.
+
+**Что изменила версия 3.** Каждая запись `sets` несёт форму `CTR.WIRE.PULL-DATA` версии 7:
+`losses` — счёт и первые имена вместо перечня каждого пути.
 
 **Что изменила версия 2.** Каждая запись `sets` несёт форму `CTR.WIRE.PULL-DATA` версии 6:
 `requested_mode`, случившийся `mode` со значением `UNKNOWN` и необязательное `mode_reason`.

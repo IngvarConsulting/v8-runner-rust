@@ -299,7 +299,7 @@ fn run_dump_selected(
         preview.ok = true;
         preview.mode = reported;
         preview.mode_reason = mode_reason;
-        preview.losses = losses.into_paths();
+        preview.losses = losses.report();
         return Ok(preview);
     }
 
@@ -833,7 +833,8 @@ fn run_dump_selected(
                 merge_optional_messages(notes.message, copy_warning),
             ),
         );
-        (platform_log_path, message, discarded.into_paths(), forecast)
+        let losses = discarded.report();
+        (platform_log_path, message, losses, forecast)
     });
     drop(lock_guard);
 
@@ -880,7 +881,7 @@ fn run_dump_selected(
                     platform_log_path: None,
                     duration_ms: started.elapsed().as_millis() as u64,
                     message: Some(message),
-                    losses: Vec::new(),
+                    losses: None,
                 },
             ))
         }

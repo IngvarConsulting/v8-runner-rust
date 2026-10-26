@@ -673,12 +673,17 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
         "use-cases/a-push-into-a-base-that-moved-ahead-is-refused.md",
         "оба",
     ),
+    (
+        "use-cases/an-untracked-directory-is-refused-not-replaced.md",
+        "двадцать",
+    ),
     ("use-cases/edt-keeps-two-change-contexts.md", "две"),
     ("wire/check-data.md", "двумя,три"),
     ("wire/clone-data.md", "два,обоими"),
     ("wire/command-envelope.md", "два,четыре,обоими,два,два"),
     ("wire/infobase-restore-data.md", "двумя"),
     ("wire/launch-data.md", "двух,два,оба"),
+    ("wire/pull-data.md", "двадцати"),
     ("wire/upload-data.md", "тремя"),
 ];
 
