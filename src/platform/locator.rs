@@ -224,7 +224,12 @@ pub struct LocatorOptions {
     pub edt_hint: Option<PathBuf>,
     /// Optional EDT discovery version.
     pub edt_version: Option<EdtVersion>,
+    /// Выпуски, которые пишут формат исходников проекта, — масками выпуска, новейшие первыми.
+    /// Действуют, только когда версия не задана ни маской, ни путём к установке.
+    pub format_releases: Vec<PlatformVersionRequirement>,
 }
+
+use crate::domain::platforms::PlatformChoice;
 
 /// Typed origin of a resolved executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -250,6 +255,23 @@ pub struct UtilityLocation {
     pub source: ResolutionSource,
     /// Canonical root shared by sibling executables from this installation.
     pub installation_root: PathBuf,
+    /// Почему выбрана эта версия.
+    pub chosen_by: PlatformChoice,
+}
+
+impl UtilityLocation {
+    fn chosen(self, chosen_by: PlatformChoice) -> Self {
+        Self { chosen_by, ..self }
+    }
+}
+
+/// Причина выбора по найденному требованию: маска задала версию, иначе взята новейшая.
+fn chosen_by_requirement(required: Option<&PlatformVersionRequirement>) -> PlatformChoice {
+    if required.is_some() {
+        PlatformChoice::Version
+    } else {
+        PlatformChoice::Newest
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -332,6 +354,10 @@ pub struct Locator {
     platform_policy: PlatformResolutionPolicy,
     edt_hint: Option<PathBuf>,
     edt_version: Option<EdtVersion>,
+    format_releases: Vec<PlatformVersionRequirement>,
+    /// Выпуск формата, найденный среди установок; считается один раз: выпуск закреплён за
+    /// всеми утилитами, а установки за время команды не меняются.
+    format_release: Option<Option<PlatformVersionRequirement>>,
     cache: HashMap<(UtilityType, Option<String>), UtilityLocation>,
     platform_roots: Vec<PathBuf>,
     edt_roots: Vec<PathBuf>,
@@ -348,11 +374,22 @@ impl Locator {
             platform_policy: options.platform_policy,
             edt_hint: options.edt_hint,
             edt_version: options.edt_version,
+            format_releases: options.format_releases,
+            format_release: None,
             cache: HashMap::new(),
             platform_roots: default_platform_roots(),
             edt_roots: default_edt_roots(),
             path_roots: captured_path_roots(),
             pinned_platform: None,
+        }
+    }
+
+    /// Установки платформы там, где их ищет поиск: под указанным путём, если он задан, иначе
+    /// в корнях по умолчанию; новейшие первыми.
+    pub fn installations(&self) -> Vec<InstalledPlatform> {
+        match self.platform_hint.as_deref() {
+            Some(hint) => hinted_installations(hint),
+            None => installed_platforms(&self.platform_roots),
         }
     }
 
@@ -437,6 +474,7 @@ impl Locator {
             ) => select_edt_candidate(vec![candidate], utility, None),
         }?;
 
+        let current = current.chosen(cached.chosen_by);
         (current == *cached).then_some(current)
     }
 
@@ -478,6 +516,8 @@ impl Locator {
             platform_policy,
             edt_hint,
             edt_version,
+            format_releases: Vec::new(),
+            format_release: None,
             cache: HashMap::new(),
             platform_roots,
             edt_roots,
@@ -514,12 +554,14 @@ impl Locator {
     fn locate_platform(&mut self, utility: UtilityType) -> Result<UtilityLocation, LocatorError> {
         if self.platform_policy == PlatformResolutionPolicy::Strict {
             if let Some(pinned) = self.pinned_platform.as_ref() {
+                let required = self.effective_platform_version_requirement();
                 return select_pinned_candidate(
                     utility,
                     pinned_platform_candidates(utility, pinned),
-                    self.effective_platform_version_requirement(),
+                    required,
                     &pinned.root,
                 )
+                .map(|location| location.chosen(chosen_by_requirement(required)))
                 .ok_or_else(|| LocatorError::MissingSibling {
                     utility,
                     installation_root: pinned.root.clone(),
@@ -572,6 +614,7 @@ impl Locator {
                 required,
                 strict_boundary.as_deref(),
             ) {
+                let location = location.chosen(chosen_by_requirement(required));
                 self.pin_platform(&location);
                 return Ok(location);
             }
@@ -605,7 +648,17 @@ impl Locator {
             ResolutionSource::DefaultRoot,
         );
         candidates.extend(path_candidates(utility, &self.path_roots));
-        let required = self.effective_platform_version_requirement();
+        let (required, chosen_by) = match self.effective_platform_version_requirement() {
+            Some(required) => (Some(required.clone()), PlatformChoice::Version),
+            // Версию ничто не задало: решает формат исходников, если его выпуск установлен.
+            // Выпуск закрепляется за всеми утилитами: компонента, которого в нём нет, нет
+            // вовсе — иначе утилита другого выпуска переписала бы формат.
+            None => match self.installed_format_release() {
+                Some(release) => (Some(release), PlatformChoice::SourceFormat),
+                None => (None, PlatformChoice::Newest),
+            },
+        };
+        let required = required.as_ref();
         let location = select_candidate(utility, candidates, required, None).ok_or_else(|| {
             LocatorError::NotFound {
                 utility,
@@ -617,8 +670,37 @@ impl Locator {
                 ),
             }
         })?;
+        let location = location.chosen(chosen_by);
         self.pin_platform(&location);
         Ok(location)
+    }
+
+    /// Новейший выпуск формата исходников, у которого есть установка в корнях поиска или в
+    /// `PATH` — любой утилиты платформы. Компонент ищут только в нём.
+    fn installed_format_release(&mut self) -> Option<PlatformVersionRequirement> {
+        if self.format_release.is_none() {
+            let installed: Vec<PlatformVersion> = installed_platforms(&self.platform_roots)
+                .into_iter()
+                // Каталог версии без единого компонента — не установка.
+                .filter(|installed| !installed.components.is_empty())
+                .map(|installed| installed.version)
+                .chain(INVENTORIED_COMPONENTS.into_iter().flat_map(|utility| {
+                    path_candidates(utility, &self.path_roots)
+                        .into_iter()
+                        .filter_map(|candidate| match candidate.version {
+                            Some(UtilityVersion::Platform(version)) => Some(version),
+                            Some(UtilityVersion::Edt(_)) | None => None,
+                        })
+                }))
+                .collect();
+            self.format_release = Some(
+                self.format_releases
+                    .iter()
+                    .find(|release| installed.iter().any(|version| release.matches(version)))
+                    .cloned(),
+            );
+        }
+        self.format_release.clone().flatten()
     }
 
     fn pin_platform(&mut self, location: &UtilityLocation) {
@@ -793,11 +875,20 @@ fn platform_candidates_any_version(
     candidates
 }
 
-/// Установка платформы, найденная в корне поиска: версия и состав компонентов.
-#[derive(Debug, Clone)]
-struct InstalledPlatform {
-    version: PlatformVersion,
+/// Установка платформы, найденная в корне поиска: версия, каталог и состав компонентов.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPlatform {
+    pub version: PlatformVersion,
+    /// Каталог версии, где установка найдена первой.
+    pub root: PathBuf,
     components: Vec<UtilityType>,
+}
+
+impl InstalledPlatform {
+    /// Есть ли в установке этот компонент.
+    pub fn has(&self, utility: UtilityType) -> bool {
+        self.components.contains(&utility)
+    }
 }
 
 /// Компоненты, состав которых различает опись.
@@ -881,6 +972,7 @@ fn record_installation(dir: &Path, found: &mut Vec<InstalledPlatform>) {
         }
         None => found.push(InstalledPlatform {
             version,
+            root: dir.to_path_buf(),
             components,
         }),
     }
@@ -1171,6 +1263,7 @@ fn choose_candidate(
             version: chosen.version,
             source: chosen.source,
             installation_root: chosen.installation_root,
+            chosen_by: chosen_by_requirement(required),
         })
 }
 
@@ -1450,8 +1543,8 @@ fn default_edt_roots() -> Vec<PathBuf> {
 mod tests {
     use super::{
         normalize_path_roots, normalize_windows_verbatim_path, EdtVersion, Locator, LocatorError,
-        PlatformResolutionPolicy, PlatformVersion, PlatformVersionRequirement, ResolutionSource,
-        UtilityType, UtilityVersion,
+        PlatformChoice, PlatformResolutionPolicy, PlatformVersion, PlatformVersionRequirement,
+        ResolutionSource, UtilityType, UtilityVersion,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2097,6 +2190,119 @@ mod tests {
 
         assert_eq!(location.path, canonical(&wanted));
         assert_eq!(location.source, ResolutionSource::DefaultRoot);
+    }
+
+    /// Поиск с предпочтением формата: выпуск, который пишет формат исходников.
+    fn format_locator(root: &Path, version: Option<&str>, release: &str) -> Locator {
+        let mut locator = lenient_locator(None, version, vec![root.to_path_buf()], Vec::new());
+        locator.format_releases = PlatformVersionRequirement::parse(release)
+            .into_iter()
+            .collect();
+        locator
+    }
+
+    /// Версию не задали: формат исходников выбирает свой выпуск, а не новейший, и выбор
+    /// называет причину.
+    #[test]
+    fn the_source_format_chooses_its_release_over_the_newest() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        for version in ["8.3.27.2074", "8.5.4.1878"] {
+            for utility in [UtilityType::V8, UtilityType::Ibcmd] {
+                touch_versioned_platform_executable(&root, version, utility, false);
+            }
+        }
+        let mut locator = format_locator(&root, None, "8.3.27");
+
+        for utility in [UtilityType::V8, UtilityType::Ibcmd] {
+            let location = locator.locate(utility).expect("located");
+            assert_eq!(
+                location.version,
+                Some(UtilityVersion::Platform(
+                    PlatformVersion::parse_strict("8.3.27.2074").expect("version")
+                )),
+                "{utility}"
+            );
+            assert_eq!(location.chosen_by, PlatformChoice::SourceFormat);
+        }
+    }
+
+    /// Выпуск формата закреплён за всеми утилитами: компонента, которого в нём нет, не
+    /// берут из другого выпуска — тот переписал бы формат исходников.
+    #[test]
+    fn a_release_of_the_source_format_does_not_borrow_a_component_from_another() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        touch_versioned_platform_executable(&root, "8.3.27.2074", UtilityType::V8, false);
+        touch_versioned_platform_executable(&root, "8.5.4.1878", UtilityType::Ibcmd, false);
+        let mut locator = format_locator(&root, None, "8.3.27");
+
+        assert!(matches!(
+            locator.locate(UtilityType::Ibcmd),
+            Err(LocatorError::NotFound { .. })
+        ));
+    }
+
+    /// Выпуска формата нет: берётся новейшая, и выбор говорит, что версию ничто не задало.
+    #[test]
+    fn without_the_release_of_the_source_format_the_newest_is_chosen() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        touch_versioned_platform_executable(&root, "8.5.4.1878", UtilityType::V8, false);
+        let mut locator = format_locator(&root, None, "8.3.27");
+
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(location.chosen_by, PlatformChoice::Newest);
+    }
+
+    /// Каталог версии без единого компонента — не установка: выпуск формата в нём не
+    /// найден, и берётся новейшая.
+    #[test]
+    fn an_empty_release_directory_is_not_an_installation() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        std::fs::create_dir_all(root.join("8.3.27.2074")).expect("empty release");
+        touch_versioned_platform_executable(&root, "8.5.4.1878", UtilityType::V8, false);
+        let mut locator = format_locator(&root, None, "8.3.27");
+
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(location.chosen_by, PlatformChoice::Newest);
+    }
+
+    /// Повторный поиск берёт утилиту из кэша и не теряет, почему выбрана её версия.
+    #[test]
+    fn a_cached_location_keeps_why_it_was_chosen() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        for version in ["8.3.27.2074", "8.5.4.1878"] {
+            touch_versioned_platform_executable(&root, version, UtilityType::V8, false);
+        }
+        let mut locator = format_locator(&root, None, "8.3.27");
+
+        let first = locator.locate(UtilityType::V8).expect("located");
+        let again = locator.locate(UtilityType::V8).expect("cached");
+        assert_eq!(again, first);
+        assert_eq!(again.chosen_by, PlatformChoice::SourceFormat);
+    }
+
+    /// Явная версия важнее формата исходников.
+    #[test]
+    fn an_explicit_version_outranks_the_source_format() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        for version in ["8.3.27.2074", "8.5.4.1878"] {
+            touch_versioned_platform_executable(&root, version, UtilityType::V8, false);
+        }
+        let mut locator = format_locator(&root, Some("8.5.4"), "8.3.27");
+
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(
+            location.version,
+            Some(UtilityVersion::Platform(
+                PlatformVersion::parse_strict("8.5.4.1878").expect("version")
+            ))
+        );
+        assert_eq!(location.chosen_by, PlatformChoice::Version);
     }
 
     #[test]

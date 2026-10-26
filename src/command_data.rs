@@ -101,6 +101,7 @@ command_data_forms! {
     "check", "check" => crate::domain::syntax::SyntaxCheckResult;
     "launch", "launch" => crate::domain::launch::LaunchResult;
     "publish", "publish" => crate::domain::publish::PublishResult;
+    "platforms", "platforms" => crate::domain::platforms::PlatformsResult;
     "status", "status" => crate::domain::status::StatusResult;
     "*", "refusal" => crate::cli::output::RefusalData;
     "*", "mcp-refusal" => crate::mcp::service::McpRefusalData;

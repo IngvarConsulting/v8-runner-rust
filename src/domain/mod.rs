@@ -34,6 +34,8 @@ pub mod load;
 pub mod next_step;
 /// Canonical selectors for partial dumps.
 pub mod partial_dump_selector;
+/// Установленные платформы и выбор раннера у `platforms`.
+pub mod platforms;
 /// Web publication domain models.
 pub mod publish;
 /// Ответ команды `reset`.

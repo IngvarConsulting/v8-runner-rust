@@ -1,15 +1,24 @@
-use crate::config::model::{AppConfig, EdtCliConfig};
+use crate::config::model::{AppConfig, EdtCliConfig, SourceFormat, SourceSetPurpose};
+use crate::domain::platforms::PlatformChoice;
+use crate::platform::dump_format::{
+    read_sources_format, releases_writing, FormatVersion, RecordedFormat,
+};
 use crate::platform::locator::{
     EdtVersion, Locator, LocatorOptions, PlatformResolutionPolicy, PlatformVersionRequirement,
-    UtilityLocation, UtilityType,
+    UtilityLocation, UtilityType, UtilityVersion,
 };
 use crate::platform::process::{ProcessExecutor, ProcessRunner};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Facade over utility discovery and standard executor selection.
 pub struct PlatformUtilities {
     locator: Locator,
     standard_runner: ProcessExecutor,
+    /// Формат исходников, когда версию платформы не задали ни маской, ни путём: по нему
+    /// выбирается выпуск, а с ним расходится выбор новейшей.
+    sources_format: Option<SourcesFormat>,
+    /// Расхождение уже записано в журнал: поиск зовут на каждую утилиту.
+    mismatch_logged: bool,
 }
 
 impl PlatformUtilities {
@@ -36,6 +45,10 @@ impl PlatformUtilities {
                     .and_then(|path| path.to_str())
                     .and_then(EdtVersion::parse_lenient)
             });
+        let sources_format = (config.tools.platform.version.is_none()
+            && config.tools.platform.path.is_none())
+        .then(|| sources_format(config))
+        .flatten();
         Self {
             locator: Locator::new(LocatorOptions {
                 platform_hint: config.tools.platform.path.clone(),
@@ -52,8 +65,14 @@ impl PlatformUtilities {
                 },
                 edt_hint,
                 edt_version,
+                format_releases: sources_format
+                    .as_ref()
+                    .map(SourcesFormat::releases)
+                    .unwrap_or_default(),
             }),
             standard_runner: ProcessExecutor,
+            sources_format,
+            mismatch_logged: false,
         }
     }
 
@@ -65,7 +84,52 @@ impl PlatformUtilities {
         debug!(utility = ?utility, "locating platform utility");
         let location = self.locator.locate(utility)?;
         debug!(utility = ?utility, path = %location.path.display(), "platform utility resolved");
+        if !self.mismatch_logged {
+            if let Some(mismatch) = self.format_mismatch(&location) {
+                warn!("{mismatch}");
+                self.mismatch_logged = true;
+            }
+        }
         Ok(location)
+    }
+
+    /// Расхождение формата исходников и выбранной платформы: версию не задали, а выпуска,
+    /// который пишет формат исходников, нет или формат раннеру не известен, и взята
+    /// новейшая. `None`, если версию выбрали маска или формат.
+    pub fn format_mismatch(&self, location: &UtilityLocation) -> Option<String> {
+        if location.chosen_by != PlatformChoice::Newest || !location.utility.is_platform() {
+            return None;
+        }
+        let format = self.sources_format.as_ref()?;
+        let newest = match &location.version {
+            Some(UtilityVersion::Platform(version)) => version.to_string(),
+            _ => location.path.display().to_string(),
+        };
+        Some(match (format.version, format.releases().first()) {
+            (None, _) => format!(
+                "the sources format in '{}' is not recognized; the newest platform {newest} is used",
+                format.file.display()
+            ),
+            (Some(version), None) => format!(
+                "the sources format {version} is not known to the runner; the newest platform {newest} is used and may rewrite the sources in its own format; set tools.platform.version"
+            ),
+            (Some(version), Some(release)) => format!(
+                "the sources format {version} is written by platform {release}, which is not installed; the newest platform {newest} is used and may rewrite the sources in its own format; set tools.platform.version"
+            ),
+        })
+    }
+
+    /// Без записи расхождения формата в журнал: его называет сам ответ.
+    pub fn without_mismatch_log(self) -> Self {
+        Self {
+            mismatch_logged: true,
+            ..self
+        }
+    }
+
+    /// Установки платформы там, где их ищет поиск.
+    pub fn installations(&self) -> Vec<crate::platform::locator::InstalledPlatform> {
+        self.locator.installations()
     }
 
     /// Return the standard runner path for the requested utility.
@@ -82,8 +146,50 @@ impl PlatformUtilities {
         Self {
             locator,
             standard_runner: ProcessExecutor,
+            sources_format: None,
+            mismatch_logged: false,
         }
     }
+}
+
+/// Формат исходников основного набора формата Конфигуратора — атрибут `version` корня его
+/// `Configuration.xml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcesFormat {
+    /// Прочитанный файл.
+    pub file: std::path::PathBuf,
+    /// Версия формата; `None`, если файл есть, а версии в его корне раннер не нашёл.
+    pub version: Option<FormatVersion>,
+}
+
+impl SourcesFormat {
+    /// Выпуски платформы, которые пишут этот формат, по таблице замеров, новейшие первыми.
+    pub fn releases(&self) -> Vec<PlatformVersionRequirement> {
+        self.version.map(releases_writing).unwrap_or_default()
+    }
+}
+
+/// Формат исходников проекта; `None`, если формат проекта не Конфигуратора, основного набора
+/// или его `Configuration.xml` нет или файл не читается.
+pub fn sources_format(config: &AppConfig) -> Option<SourcesFormat> {
+    if config.format != SourceFormat::Designer {
+        return None;
+    }
+    let main = config
+        .source_sets
+        .iter()
+        .find(|set| set.purpose == SourceSetPurpose::Configuration)?;
+    let file = main.root_in(&config.base_path).join("Configuration.xml");
+    let version = match read_sources_format(&file) {
+        Ok(RecordedFormat::Version(version)) => Some(version),
+        Ok(RecordedFormat::Unrecognized) => None,
+        Ok(RecordedFormat::Missing) => return None,
+        Err(error) => {
+            debug!(file = %file.display(), %error, "sources format was not read");
+            return None;
+        }
+    };
+    Some(SourcesFormat { file, version })
 }
 
 #[cfg(test)]

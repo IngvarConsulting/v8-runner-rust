@@ -57,6 +57,7 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
         "test yaxunit module",
     ),
     (&["test", "va"], "test va"),
+    (&["platforms"], "platforms"),
     (&["status"], "status"),
     (&["mcp", "serve", "stdio"], "mcp serve stdio"),
     (&["mcp", "serve", "http"], "mcp serve http"),

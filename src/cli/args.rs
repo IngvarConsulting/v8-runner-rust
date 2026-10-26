@@ -110,6 +110,9 @@ pub enum Command {
     Launch(LaunchArgs),
     /// Publish the infobase on a web server with webinst, or delete the publication
     Publish(PublishArgs),
+    /// List the installed 1C platforms and the utilities the runner would choose for this
+    /// project; starts nothing
+    Platforms,
     /// Show how the sources and the infobase relate: from the runner's memory, or with
     /// --deep by asking the platform
     Status(StatusArgs),
