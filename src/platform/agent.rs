@@ -1386,6 +1386,10 @@ pub struct AgentLaunch {
     /// (`/AgentSSHHostKeyAuto`) раннер не берёт: сессия закрепляется на отданном ключе.
     pub host_key: LaunchHostKey,
     pub base_dir: PathBuf,
+    /// Текущий каталог процесса агента. Агент пишет туда файл настроек пользователя
+    /// (`1cv8u.pfl`) при первой сессии, поэтому он свой, внутри `workPath`, а не каталог,
+    /// из которого запущен раннер (`INV.PLATFORM.A-MANAGED-AGENT-RUNS-IN-ITS-OWN-DIRECTORY`).
+    pub workdir: PathBuf,
     /// Куда зеркалится stdout/stderr процесса агента: улика при неудачном запуске. Рядом
     /// лежит `/Out` агента (`.out.log`): причину выхода до первой сессии агент пишет только
     /// туда.
@@ -1408,6 +1412,19 @@ impl AgentLaunch {
         args.push("/Out".to_owned());
         args.push(self.out_file().display().to_string());
         args
+    }
+
+    /// Запрос процесса агента: программа, ключи, свой текущий каталог и журналы.
+    pub fn request(&self) -> ProcessRequest {
+        ProcessRequest {
+            program: self.v8.clone(),
+            args: self.args(),
+            workdir: Some(self.workdir.clone()),
+            stdout_log_path: Some(self.process_log.with_extension("stdout.log")),
+            stderr_log_path: Some(self.process_log.with_extension("stderr.log")),
+            startup_probe: Some(Duration::from_millis(300)),
+            windows_verbatim_args: Vec::new(),
+        }
     }
 
     /// Файл `/Out` агента.
@@ -1443,10 +1460,12 @@ impl ManagedAgent {
         startup_timeout: Duration,
         policy: &WaitPolicy,
     ) -> Result<Self, AgentError> {
-        std::fs::create_dir_all(&launch.base_dir).map_err(|source| AgentError::Workspace {
-            path: launch.base_dir.clone(),
-            source,
-        })?;
+        for dir in [&launch.base_dir, &launch.workdir] {
+            std::fs::create_dir_all(dir).map_err(|source| AgentError::Workspace {
+                path: dir.clone(),
+                source,
+            })?;
+        }
         // `/Out` прошлого запуска не должен стать причиной этого.
         crate::support::fs::remove_path_if_exists(&launch.out_file()).map_err(|source| {
             AgentError::Workspace {
@@ -1454,15 +1473,7 @@ impl ManagedAgent {
                 source,
             }
         })?;
-        let request = ProcessRequest {
-            program: launch.v8.clone(),
-            args: launch.args(),
-            workdir: None,
-            stdout_log_path: Some(launch.process_log.with_extension("stdout.log")),
-            stderr_log_path: Some(launch.process_log.with_extension("stderr.log")),
-            startup_probe: Some(Duration::from_millis(300)),
-            windows_verbatim_args: Vec::new(),
-        };
+        let request = launch.request();
         let mut process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
             .spawn_managed(&request, ManagedSpawnMode::Wait, None)
@@ -2187,6 +2198,7 @@ mod tests {
             port: 1543,
             host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
             base_dir: PathBuf::from("/work/agent"),
+            workdir: PathBuf::from("/work/agent/workdir"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
         assert_eq!(
@@ -2210,6 +2222,27 @@ mod tests {
         );
     }
 
+    /// Агент работает в своём каталоге внутри `workPath`: файл настроек пользователя,
+    /// который он пишет в текущий каталог при первой сессии, не попадает туда, откуда
+    /// запущен раннер.
+    #[test]
+    fn a_managed_agent_runs_in_its_own_directory() {
+        let launch = AgentLaunch {
+            v8: PathBuf::from("/opt/1cv8/1cv8"),
+            infobase_args: vec!["/F".to_owned(), "/tmp/ib".to_owned()],
+            port: 1543,
+            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
+            base_dir: PathBuf::from("/work/agent/base"),
+            workdir: PathBuf::from("/work/agent/workdir"),
+            process_log: PathBuf::from("/work/logs/agent"),
+        };
+        let request = launch.request();
+        assert_eq!(
+            request.workdir.as_deref(),
+            Some(Path::new("/work/agent/workdir"))
+        );
+    }
+
     /// Адрес кластерной базы приходит к агенту в той же форме, в какой уходит
     /// Конфигуратору пакетно: `/S host\name` (#55). Агент разбирает строку не сам —
     /// он получает готовый адрес от `V8Connection`, и эти два пути не расходятся.
@@ -2224,6 +2257,7 @@ mod tests {
             port: 1543,
             host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
             base_dir: PathBuf::from("/work/agent"),
+            workdir: PathBuf::from("/work/agent/workdir"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
         let args = launch.args();

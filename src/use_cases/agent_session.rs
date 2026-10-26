@@ -274,6 +274,7 @@ fn open_handle(
                 infobase_args: connection.infobase_args(),
                 port,
                 base_dir: config.work_path.join("agent").join("base"),
+                workdir: config.work_path.join("agent").join("workdir"),
                 process_log: transcript_log.with_extension("process"),
                 // Агент публикует ключ из отданного файла как есть, поэтому открытая часть
                 // файла и есть ожидание.
