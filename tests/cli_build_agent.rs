@@ -14,8 +14,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use support::fake_agent::{
-    read_or_empty, serve_managed_launches_on_a_reserved_port, write_fake_designer, FakeAgent, Hold,
-    HoldReply, AGENT_PASSWORD,
+    read_or_empty, serve_managed_launches_on_a_reserved_port, write_fake_designer_for_user,
+    FakeAgent, Hold, HoldReply, AGENT_PASSWORD,
 };
 use support::{
     interrupt_at_hold, temp_workspace, v8_runner_command, CRITICAL_INTERRUPTION_DEFERRED,
@@ -37,6 +37,14 @@ fn harness() -> Harness {
 
 /// Стенд, двойник которого держит команду `hold`, пока тест её не отпустит.
 fn harness_holding(hold: Option<Hold>) -> Harness {
+    harness_holding_password(hold, AGENT_PASSWORD)
+}
+
+fn harness_holding_password(hold: Option<Hold>, password: &str) -> Harness {
+    harness_holding_credentials(hold, "", password)
+}
+
+fn harness_holding_credentials(hold: Option<Hold>, user: &str, password: &str) -> Harness {
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let sources = root.join("project").join("configuration");
@@ -60,23 +68,27 @@ fn harness_holding(hold: Option<Hold>) -> Harness {
         designer_pid_file.clone(),
     );
     agent.hold = hold;
+    agent.any_credentials = !user.is_empty() || password != AGENT_PASSWORD;
+    agent.connect_log = (password != AGENT_PASSWORD).then_some("previous connection diagnostic");
     // Двойник держит объявленный порт занятым весь прогон и отвечает ключом, который
     // раннер передал агенту.
     let port = serve_managed_launches_on_a_reserved_port(agent, None);
-    write_fake_designer(
+    write_fake_designer_for_user(
         &bin.join("1cv8"),
         &designer_args_log,
         &designer_pid_file,
         &base_dir_file,
+        user,
     );
     let config_path = root.join("v8project.yaml");
     fs::write(
         &config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\nproviders:\n  build: agent\n  dump: agent\ninfobase:\n  connection: 'File={ib}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
+            "workPath: {work}\nformat: DESIGNER\nproviders:\n  build: agent\n  dump: agent\ninfobase:\n  connection: 'File={ib}'\n  user: {user}\n  password: {password}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
             work = work_path.display(),
             ib = root.join("ib").display(),
-            password = AGENT_PASSWORD,
+            user = serde_json::to_string(user).expect("YAML user"),
+            password = serde_json::to_string(password).expect("YAML string"),
             platform = root.join("platform").display(),
         ),
     )
@@ -123,6 +135,336 @@ fn commands(harness: &Harness) -> Vec<String> {
         .lines()
         .map(str::to_owned)
         .collect()
+}
+
+/// The platform's diagnostic batch must survive a generic terminal error, with
+/// decoded credentials hidden in both the failed envelope and the transcript.
+#[test]
+fn failed_agent_load_keeps_the_file_reason_and_stage_without_escaped_credentials() {
+    let signals = temp_workspace();
+    let release = signals.path().join("release");
+    fs::write(&release, "").expect("release before dispatch");
+    let password = concat!("privatecredential", "\"", "\\", "\n", "pass");
+    let harness = harness_holding_password(
+        Some(Hold {
+            command: "config load-config-from-files".into(),
+            started: signals.path().join("started"),
+            release,
+            reply: HoldReply::JsonMessages(
+                r#"[{"type":"log","message":"Reports/Sales/Forms/Main/Ext/Form.xml: Invalid data path Rows.Reference; credential \u0070rivatecredential\"\\\npass","body":{"\u0070rivatecredential\"\\\npass":"private response"}}]
+[{"type":"error","error-type":"ConfigFilesError","message":"configuration files rejected"}]
+"#,
+            ),
+        }),
+        password,
+    );
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &harness.config_path.display().to_string(),
+            "--json-message",
+            "push",
+        ])
+        .output()
+        .expect("push");
+    assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("failed envelope");
+    assert_eq!(payload["error"]["code"], "platform_failure", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    for expected in [
+        "agent load",
+        "ConfigFilesError",
+        "Reports/Sales/Forms/Main/Ext/Form.xml",
+        "Invalid data path Rows.Reference",
+        "configuration files rejected",
+    ] {
+        assert!(message.contains(expected), "missing {expected}: {message}");
+    }
+    let transcript = fs::read_to_string(
+        harness
+            .dir
+            .path()
+            .join("work/logs/platform/build-agent.log"),
+    )
+    .expect("transcript");
+    let all_display = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        transcript
+    );
+    for private in [password, "privatecredential", "rivatecredential"] {
+        assert!(
+            !all_display.contains(private),
+            "credential leaked: {all_display}"
+        );
+    }
+    assert!(transcript.contains("previous connection diagnostic"));
+    assert!(
+        !message.contains("previous connection diagnostic"),
+        "another command must not contaminate this failure"
+    );
+    assert!(transcript.contains("Invalid data path Rows.Reference"));
+    assert!(transcript.contains("***"));
+    assert!(
+        !commands(&harness)
+            .iter()
+            .any(|line| line.starts_with("config update-db-cfg")),
+        "a refused load must not apply"
+    );
+}
+
+#[test]
+fn malformed_and_truncated_agent_replies_keep_their_class_without_raw_secrets() {
+    for text in [
+        r#"[{"type":"privatecredential\"\\\npass"}]"#,
+        r#"[{"type":"error","message":"privatecredential\"\\\npass"}"#,
+    ] {
+        let signals = temp_workspace();
+        let release = signals.path().join("release");
+        fs::write(&release, "").expect("release");
+        let password = concat!("privatecredential", "\"", "\\", "\n", "pass");
+        let harness = harness_holding_password(
+            Some(Hold {
+                command: "config load-config-from-files".into(),
+                started: signals.path().join("started"),
+                release,
+                reply: HoldReply::Prose { text, close: true },
+            }),
+            password,
+        );
+        let (code, payload) = run(&harness, &["push"]);
+        assert_ne!(code, 0);
+        assert_eq!(payload["error"]["code"], "invalid_output", "{payload}");
+        let transcript = fs::read_to_string(
+            harness
+                .dir
+                .path()
+                .join("work/logs/platform/build-agent.log"),
+        )
+        .expect("transcript");
+        for display in [payload.to_string(), transcript] {
+            assert!(!display.contains("privatecredential"), "{display}");
+            assert!(!display.contains(password), "{display}");
+        }
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("omitted"),
+            "{payload}"
+        );
+    }
+}
+
+#[test]
+fn agent_secrets_are_masked_before_the_terminal_excerpt_boundary() {
+    let password = concat!("privatecredential", "\"", "\\", "\n", "pass");
+    let reply = format!(
+        "{}\n",
+        serde_json::json!([
+            {"type":"log", "message":"Forms/Main/Ext/Form.xml: invalid data path"},
+            {"type":"error", "error-type":"ConfigFilesError", "message":format!("{}{password}", "д".repeat(2044))}
+        ])
+    );
+    // The asynchronous fake server needs a static reply. Retain one bounded
+    // diagnostic fixture for this integration-test process's lifetime.
+    let reply = Box::leak(reply.into_boxed_str());
+    let signals = temp_workspace();
+    let release = signals.path().join("release");
+    fs::write(&release, "").expect("release");
+    let harness = harness_holding_password(
+        Some(Hold {
+            command: "config load-config-from-files".into(),
+            started: signals.path().join("started"),
+            release,
+            reply: HoldReply::JsonMessages(reply),
+        }),
+        password,
+    );
+    let (_, payload) = run(&harness, &["push"]);
+    assert_eq!(payload["error"]["code"], "platform_failure", "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(
+        !message.contains("priv"),
+        "a secret prefix must not survive the excerpt boundary"
+    );
+    assert!(message.contains("Forms/Main/Ext/Form.xml"), "{payload}");
+    assert!(message.contains("***"));
+    let transcript = fs::read_to_string(
+        harness
+            .dir
+            .path()
+            .join("work/logs/platform/build-agent.log"),
+    )
+    .expect("transcript");
+    assert!(!transcript.contains("privatecredential"));
+}
+
+#[test]
+fn an_agent_closed_with_stderr_keeps_the_failure_class_and_omits_raw_bytes() {
+    let signals = temp_workspace();
+    let release = signals.path().join("release");
+    fs::write(&release, "").expect("release");
+    let harness = harness_holding(Some(Hold {
+        command: "config load-config-from-files".into(),
+        started: signals.path().join("started"),
+        release,
+        reply: HoldReply::StderrThenClose(r#"{"password":"\u0061gentpass"}"#),
+    }));
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &harness.config_path.display().to_string(),
+            "--json-message",
+            "push",
+        ])
+        .output()
+        .expect("push");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("envelope");
+    assert!(!output.status.success());
+    assert_eq!(payload["error"]["code"], "platform_failure", "{payload}");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("omitted"));
+    let transcript = fs::read_to_string(
+        harness
+            .dir
+            .path()
+            .join("work/logs/platform/build-agent.log"),
+    )
+    .expect("transcript");
+    let display = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        transcript
+    );
+    assert!(!display.contains("agentpass"));
+    assert!(!display.contains("gentpass"));
+}
+
+#[test]
+fn overlapping_agent_user_and_password_never_disclose_a_password_suffix() {
+    let signals = temp_workspace();
+    let release = signals.path().join("release");
+    fs::write(&release, "").expect("release");
+    let harness = harness_holding_credentials(
+        Some(Hold {
+            command: "config load-config-from-files".into(),
+            started: signals.path().join("started"),
+            release,
+            reply: HoldReply::JsonMessages(
+                r#"[{"type":"log","message":"Forms/Main/Ext/Form.xml: alicePrivateSuffix"}]
+[{"type":"error","error-type":"ConfigFilesError","message":"alice could not load files"}]
+"#,
+            ),
+        }),
+        "alice",
+        "alicePrivateSuffix",
+    );
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &harness.config_path.display().to_string(),
+            "--json-message",
+            "push",
+        ])
+        .output()
+        .expect("push");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("envelope");
+    assert_eq!(payload["error"]["code"], "platform_failure", "{payload}");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Forms/Main/Ext/Form.xml"));
+    let transcript = fs::read_to_string(
+        harness
+            .dir
+            .path()
+            .join("work/logs/platform/build-agent.log"),
+    )
+    .expect("transcript");
+    let all = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        transcript
+    );
+    assert!(!all.contains("alicePrivateSuffix"), "{all}");
+    assert!(!all.contains("PrivateSuffix"), "{all}");
+}
+
+#[test]
+fn agent_diagnostics_keep_the_cause_when_a_password_contains_structural_syntax() {
+    for (password, reply) in [
+        (
+            "prefix /P private",
+            r#"[{"type":"log","message":"Form.xml: prefix /P private parser rejected"}]
+[{"type":"error","error-type":"ConfigFilesError","message":"load failed"}]
+"#,
+        ),
+        (
+            "prefix Pwd=private; suffix",
+            r#"[{"type":"log","message":"Form.xml: prefix Pwd=private; suffix; parser rejected"}]
+[{"type":"error","error-type":"ConfigFilesError","message":"load failed"}]
+"#,
+        ),
+        (
+            "prefix http://alice:private@host suffix",
+            r#"[{"type":"log","message":"Form.xml: prefix http://alice:private@host suffix parser rejected"}]
+[{"type":"error","error-type":"ConfigFilesError","message":"load failed"}]
+"#,
+        ),
+    ] {
+        let signals = temp_workspace();
+        let release = signals.path().join("release");
+        fs::write(&release, "").expect("release");
+        let harness = harness_holding_password(
+            Some(Hold {
+                command: "config load-config-from-files".into(),
+                started: signals.path().join("started"),
+                release,
+                reply: HoldReply::JsonMessages(reply),
+            }),
+            password,
+        );
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &harness.config_path.display().to_string(),
+                "--json-message",
+                "push",
+            ])
+            .output()
+            .expect("push");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("envelope");
+        assert_eq!(payload["error"]["code"], "platform_failure", "{payload}");
+        let message = payload["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("Form.xml") && message.contains("parser rejected"),
+            "{message}"
+        );
+        let transcript = fs::read_to_string(
+            harness
+                .dir
+                .path()
+                .join("work/logs/platform/build-agent.log"),
+        )
+        .expect("transcript");
+        let display = format!(
+            "{}{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            transcript
+        );
+        assert!(!display.contains(password), "{display}");
+        assert!(
+            !display.contains("prefix"),
+            "a credential fragment survived: {display}"
+        );
+    }
 }
 
 /// Загрузка исходников и обновление базы — два шага одного разговора; после удачной
