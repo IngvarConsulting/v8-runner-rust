@@ -45,8 +45,12 @@ pub enum HoldReply {
     Normal,
     /// Сообщение об ошибке агента.
     Error,
+    /// Несколько JSON-массивов одного ответа: диагностические сообщения и итог.
+    JsonMessages(&'static str),
     /// Канал закрыт без итогового сообщения.
     Close,
+    /// Неразобранный stderr перед закрытием канала без ответа.
+    StderrThenClose(&'static str),
     /// Команда исполнена как обычно, но ответ о ней — проза вместо массива сообщений; с
     /// `close` двойник после неё закрывает канал.
     Prose { text: &'static str, close: bool },
@@ -107,6 +111,8 @@ pub struct FakeAgent {
     pub any_credentials: bool,
     /// Выгрузка в файлы отвечает ошибкой агента, пока флаг поднят.
     pub fail_dump: Arc<AtomicBool>,
+    /// Диагностика служебной команды подключения перед командой запроса.
+    pub connect_log: Option<&'static str>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -166,6 +172,7 @@ impl FakeAgent {
             sftp_hold: None,
             any_credentials: false,
             fail_dump: Arc::new(AtomicBool::new(false)),
+            connect_log: None,
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -311,6 +318,16 @@ impl FakeAgent {
             || line == "common connect-ib"
             || line == "common disconnect-ib"
         {
+            if let Some(message) = self.connect_log.filter(|_| line == "common connect-ib") {
+                return (
+                    format!(
+                        "{}\n{}",
+                        serde_json::json!([{"type":"log", "message":message}]),
+                        success()
+                    ),
+                    false,
+                );
+            }
             return (success(), false);
         }
         if line.starts_with("config generation-id") {
@@ -791,6 +808,18 @@ impl server::Handler for FakeAgent {
                         let failure = r#"[{"type":"error","error-type":"UnknownError","message":"held command failed"}]"#;
                         session.data(channel, format!("{failure}\n").into_bytes())?;
                         continue;
+                    }
+                    HoldReply::JsonMessages(messages) => {
+                        self.log(&line);
+                        session.data(channel, messages.as_bytes().to_vec())?;
+                        continue;
+                    }
+                    HoldReply::StderrThenClose(text) => {
+                        self.log(&line);
+                        session.extended_data(channel, 1, text.as_bytes().to_vec())?;
+                        session.eof(channel)?;
+                        session.close(channel)?;
+                        break;
                     }
                     HoldReply::Close => {
                         self.log(&line);

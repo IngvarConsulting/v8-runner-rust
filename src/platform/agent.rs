@@ -25,7 +25,7 @@ use crate::platform::process::{
 use russh::client;
 use russh::keys::ssh_key::{Fingerprint, HashAlg};
 use russh::ChannelMsg;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -62,7 +62,7 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// `extensions properties get --extension=`, итоговый (после него `success` не
 /// приходит); `generation-id` — промежуточное уведомление шлюза автономного сервера
 /// внутри ответа на `update-db-cfg` (новый токен), итог команды приходит после него.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentMessageType {
     Log,
@@ -143,8 +143,14 @@ impl<'de> Deserialize<'de> for AgentErrorType {
     }
 }
 
+impl Serialize for AgentErrorType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// Одно сообщение из массива ответа.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentMessage {
     #[serde(rename = "type")]
     pub kind: AgentMessageType,
@@ -201,7 +207,7 @@ impl AgentReply {
                     .error_type
                     .clone()
                     .unwrap_or(AgentErrorType::UnknownError),
-                message: message.message.clone().unwrap_or_default(),
+                message: self.failure_message(message),
             }),
             Some(message) if message.kind == AgentMessageType::Canceled => {
                 Err(AgentError::Canceled {
@@ -215,6 +221,59 @@ impl AgentReply {
                 count: self.messages.len(),
             }),
         }
+    }
+
+    /// Typed causes and nearby file logs have separate shares of the bounded
+    /// diagnostic budget; terminal prose cannot be displaced by either.
+    fn failure_message(&self, terminal: &AgentMessage) -> String {
+        let mut result = excerpt(terminal.message.as_deref().unwrap_or_default(), 2048);
+        let end = self
+            .messages
+            .iter()
+            .position(|message| std::ptr::eq(message, terminal))
+            .unwrap_or(self.messages.len());
+        // Reserve one global truncation marker, including its separator. Each
+        // selected message also pays for its separator before consuming text.
+        let mut remaining = 6144 - "\n[truncated]".chars().count();
+        let mut selected = Vec::new();
+        let mut omitted = false;
+        for kind in [AgentMessageType::LoadingIssue, AgentMessageType::Log] {
+            let mut budget = if kind == AgentMessageType::LoadingIssue {
+                remaining.min(4096)
+            } else {
+                remaining
+            };
+            for (index, message) in self.messages[..end].iter().enumerate().rev() {
+                if message.kind != kind {
+                    continue;
+                }
+                let Some(text) = message.message.as_deref().filter(|text| !text.is_empty()) else {
+                    continue;
+                };
+                if budget <= 1 {
+                    omitted = true;
+                    continue;
+                }
+                let mut chars = text.chars();
+                let part: String = chars.by_ref().take(budget - 1).collect();
+                omitted |= chars.next().is_some();
+                let cost = part.chars().count() + 1;
+                budget -= cost;
+                remaining -= cost;
+                selected.push((index, part));
+            }
+        }
+        selected.sort_unstable_by_key(|(index, _)| *index);
+        for (_, part) in selected {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&part);
+        }
+        if omitted {
+            result.push_str("\n[truncated]");
+        }
+        result
     }
 
     /// Журнал ответа как улика: все `message` по порядку.
@@ -634,6 +693,7 @@ pub struct AgentSession {
     stderr: Vec<u8>,
     endpoint: AgentEndpoint,
     transcript: Option<std::fs::File>,
+    known_secrets: Vec<String>,
     ended: bool,
     /// Прерывание, защёлкнутое в критической фазе за время сессии; первое побеждает.
     /// Сессия помнит его, потому что результат платформы собирают после её закрытия.
@@ -777,6 +837,11 @@ impl AgentSession {
             stderr: Vec::new(),
             endpoint,
             transcript,
+            known_secrets: [&request.user, &request.password]
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .collect(),
             ended: false,
             deferred_interruption: None,
             command_deferral: None,
@@ -801,7 +866,7 @@ impl AgentSession {
         // идут и после неё, иначе сессию было бы не закрыть.
         if policy.work.is_some() && policy.cancellation.is_cancelled() {
             return Err(AgentError::NotSent {
-                command: command.to_owned(),
+                command: self.display_command(command),
             });
         }
         self.send(command)?;
@@ -813,7 +878,18 @@ impl AgentSession {
         let mut messages = Vec::new();
         loop {
             let raw = self.read_reply(command, policy)?;
-            let batch = parse_batch(&raw)?;
+            let mut batch = parse_batch(&raw)?;
+            let secrets: Vec<&str> = self.known_secrets.iter().map(String::as_str).collect();
+            if let Some(log) = self.transcript.as_mut() {
+                let mut display = serde_json::to_value(&batch).expect("agent messages serialize");
+                mask_agent_display(&mut display, &secrets);
+                let _ = writeln!(log, "{display}");
+            }
+            for message in &mut batch {
+                if let Some(text) = &mut message.message {
+                    *text = crate::platform::secrets::mask_text(text, &secrets);
+                }
+            }
             let done = batch.iter().any(AgentMessage::is_terminal);
             messages.extend(batch);
             if done {
@@ -821,7 +897,7 @@ impl AgentSession {
             }
         }
         let reply = AgentReply { messages };
-        debug!(command, messages = reply.messages.len(), "agent replied");
+        debug!(command = %self.display_command(command), messages = reply.messages.len(), "agent replied");
         Ok(reply)
     }
 
@@ -1142,11 +1218,11 @@ impl AgentSession {
     /// Недочитанное от прежней команды — например, неверный ответ, на котором она
     /// кончилась, — ответом на служебную команду (`disconnect-ib`, `shutdown`) не является:
     /// без сброса разбор упал бы на нём сразу (`InvalidReply`), не дождавшись ответа агента.
-    /// Сброшенное остаётся в журнале сессии.
+    /// Журнал сохраняет только размер сброшенного: неразобранные байты могут содержать секреты.
     fn discard_stale(&mut self) {
         let stale = std::mem::take(&mut self.pending);
         if let Some(log) = self.transcript.as_mut() {
-            let _ = log.write_all(&stale);
+            let _ = writeln!(log, "[stale agent bytes omitted: {} bytes]", stale.len());
         }
     }
 
@@ -1177,8 +1253,9 @@ impl AgentSession {
                 stderr: self.stderr_text(),
             });
         }
+        let display = self.display_command(command);
         if let Some(log) = self.transcript.as_mut() {
-            let _ = writeln!(log, "> {command}");
+            let _ = writeln!(log, "> {display}");
         }
         let payload = format!("{command}\n");
         let channel = &self.channel;
@@ -1199,14 +1276,14 @@ impl AgentSession {
     /// миг: ответ, который потом не дочитан, этого факта не теряет. Первое побеждает.
     fn defer(&mut self, command: &str, reason: ProcessInterruptionReason) {
         if self.command_deferral.is_none() {
-            warn!(command, reason = ?reason, "{}", CRITICAL_INTERRUPTION_DEFERRED);
+            warn!(command = %self.display_command(command), reason = ?reason, "{}", CRITICAL_INTERRUPTION_DEFERRED);
         }
         self.command_deferral.get_or_insert(reason);
         self.deferred_interruption.get_or_insert(reason);
     }
 
     /// Читает канал до первого полного JSON-массива. Всё до открывающей скобки — не
-    /// ответ (баннер или приглашение до JSON-режима) и записывается только в журнал.
+    /// ответ (баннер или приглашение до JSON-режима); в журнал идёт только его размер.
     fn read_reply(&mut self, command: &str, policy: &WaitPolicy) -> Result<Vec<u8>, AgentError> {
         let started = Instant::now();
         // Критическая фаза меняет базу, и бросать её на полпути дороже, чем ждать
@@ -1220,10 +1297,6 @@ impl AgentSession {
         );
         loop {
             if let Some(reply) = self.take_complete_array()? {
-                if let Some(log) = self.transcript.as_mut() {
-                    let _ = log.write_all(&reply);
-                    let _ = log.write_all(b"\n");
-                }
                 return Ok(reply);
             }
             if self.ended {
@@ -1234,11 +1307,11 @@ impl AgentSession {
                     // Служебные команды уборки тоже бросаются по отмене, но строка журнала —
                     // о брошенной работе команды.
                     if policy.work.is_some() {
-                        info!(command, "{}", AGENT_COMMAND_ABANDONED);
+                        info!(command = %self.display_command(command), "{}", AGENT_COMMAND_ABANDONED);
                     }
                     // Ответ читается после отправки: команда запроса уже работа команды.
                     return Err(AgentError::Cancelled {
-                        command: command.to_owned(),
+                        command: self.display_command(command),
                         delivered: policy.work.is_some(),
                     });
                 }
@@ -1250,7 +1323,7 @@ impl AgentSession {
                     match (remaining.is_zero(), critical) {
                         (true, false) => {
                             return Err(AgentError::TimedOut {
-                                command: command.to_owned(),
+                                command: self.display_command(command),
                                 timeout_ms: started.elapsed().as_millis() as u64,
                             })
                         }
@@ -1282,7 +1355,9 @@ impl AgentSession {
     fn take_complete_array(&mut self) -> Result<Option<Vec<u8>>, AgentError> {
         let skipped = skip_to_array(&mut self.pending);
         if let Some(log) = self.transcript.as_mut() {
-            let _ = log.write_all(&skipped);
+            if !skipped.is_empty() {
+                let _ = writeln!(log, "[agent banner omitted: {} bytes]", skipped.len());
+            }
         }
         let reply = take_array(&mut self.pending)?;
         self.json_seen |= reply.is_some();
@@ -1295,7 +1370,7 @@ impl AgentSession {
         match unread_reply(&self.pending, self.json_seen) {
             Some(detail) => AgentError::InvalidReply {
                 detail: detail.to_owned(),
-                head: head_of(&self.pending),
+                head: omitted_output(&self.pending),
             },
             None => AgentError::SessionClosed {
                 endpoint: self.endpoint.to_string(),
@@ -1304,8 +1379,17 @@ impl AgentSession {
         }
     }
 
+    fn display_command(&self, command: &str) -> String {
+        let secrets: Vec<&str> = self.known_secrets.iter().map(String::as_str).collect();
+        crate::platform::secrets::mask_text(command, &secrets)
+    }
+
     fn stderr_text(&self) -> String {
-        String::from_utf8_lossy(&self.stderr).trim().to_owned()
+        if self.stderr.is_empty() {
+            String::new()
+        } else {
+            omitted_output(&self.stderr)
+        }
     }
 }
 
@@ -1316,7 +1400,7 @@ impl Drop for AgentSession {
 }
 
 /// Снимает с начала буфера всё до открывающей скобки. Эти байты — не ответ (баннер или
-/// приглашение до JSON-режима): они идут только в журнал и итогом команды не становятся.
+/// приглашение до JSON-режима): в журнал идёт их размер, итогом команды они не становятся.
 /// Без скобки буфер остаётся как есть: массив может прийти следующим пакетом.
 fn skip_to_array(pending: &mut Vec<u8>) -> Vec<u8> {
     match pending.iter().position(|byte| *byte == b'[') {
@@ -1340,8 +1424,8 @@ fn take_array(pending: &mut Vec<u8>) -> Result<Option<Vec<u8>>, AgentError> {
         }
         Some(Err(error)) if error.is_eof() => Ok(None),
         Some(Err(error)) => Err(AgentError::InvalidReply {
-            detail: error.to_string(),
-            head: head_of(pending),
+            detail: safe_json_error(&error),
+            head: omitted_output(pending),
         }),
         None => Ok(None),
     }
@@ -1365,14 +1449,56 @@ fn unread_reply(pending: &[u8], json_seen: bool) -> Option<&'static str> {
 /// Массив ответа — только массив сообщений известного типа: всё иное — неверный ответ.
 fn parse_batch(raw: &[u8]) -> Result<Vec<AgentMessage>, AgentError> {
     serde_json::from_slice(raw).map_err(|error| AgentError::InvalidReply {
-        detail: error.to_string(),
-        head: head_of(raw),
+        detail: safe_json_error(&error),
+        head: omitted_output(raw),
     })
 }
 
-fn head_of(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    text.chars().take(200).collect()
+fn safe_json_error(error: &serde_json::Error) -> String {
+    format!(
+        "invalid agent message array ({:?}, line {}, column {})",
+        error.classify(),
+        error.line(),
+        error.column()
+    )
+}
+
+fn omitted_output(bytes: &[u8]) -> String {
+    format!("[unparsed agent output omitted: {} bytes]", bytes.len())
+}
+
+/// Bound the displayed text without first joining the complete transcript.
+fn excerpt(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut result: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        result.push_str("\n[truncated]");
+    }
+    result
+}
+
+/// Protocol values stay intact; only this display copy masks decoded strings and keys.
+fn mask_agent_display(value: &mut serde_json::Value, secrets: &[&str]) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = crate::platform::secrets::mask_text(text, secrets)
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                mask_agent_display(value, secrets);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            *values = std::mem::take(values)
+                .into_iter()
+                .map(|(key, mut value)| {
+                    mask_agent_display(&mut value, secrets);
+                    (crate::platform::secrets::mask_text(&key, secrets), value)
+                })
+                .collect();
+        }
+        _ => {}
+    }
 }
 
 /// Запуск Конфигуратора в агентском режиме. Из ключей базы берётся только адрес:
@@ -2141,6 +2267,212 @@ mod tests {
                 .and_then(|body| body.get("name")),
             Some(&serde_json::Value::String("Зонд".to_owned()))
         );
+    }
+
+    #[test]
+    fn command_error_keeps_preceding_file_diagnostics() {
+        for terminal in ["", "Configuration files could not be loaded"] {
+            let reply = AgentReply {
+                messages: serde_json::from_value(serde_json::json!([
+                    {"type":"log", "message":"Reports/Sales/Forms/Main/Ext/Form.xml"},
+                    {"type":"loading-issue", "message":"Invalid data path: Rows.Reference"},
+                    {"type":"error", "error-type":"ConfigFilesError", "message":terminal}
+                ]))
+                .expect("messages"),
+            };
+            match reply.outcome().expect_err("the terminal error decides") {
+                AgentError::Command {
+                    error_type,
+                    message,
+                } => {
+                    assert_eq!(error_type, AgentErrorType::ConfigFilesError);
+                    assert!(
+                        message.contains("Reports/Sales/Forms/Main/Ext/Form.xml"),
+                        "{message}"
+                    );
+                    assert!(
+                        message.contains("Invalid data path: Rows.Reference"),
+                        "{message}"
+                    );
+                    assert!(message.contains(terminal), "{message}");
+                }
+                other => panic!("wrong refusal: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn failure_diagnostics_keep_the_nearest_file_and_typed_cause_after_long_logs() {
+        let reply = AgentReply {
+            messages: serde_json::from_value(serde_json::json!([
+                {"type":"log", "message":"noise".repeat(1400)},
+                {"type":"log", "message":"Reports/Sales/Forms/Main/Ext/Form.xml"},
+                {"type":"loading-issue", "message":"Invalid data path: Rows.Reference"},
+                {"type":"error", "error-type":"ConfigFilesError", "message":""}
+            ]))
+            .expect("messages"),
+        };
+        let AgentError::Command {
+            error_type,
+            message,
+        } = reply.outcome().unwrap_err()
+        else {
+            panic!("expected a typed command error");
+        };
+        assert_eq!(error_type, AgentErrorType::ConfigFilesError);
+        let file = message
+            .find("Reports/Sales/Forms/Main/Ext/Form.xml")
+            .expect("closest filename must survive preceding logs");
+        let cause = message
+            .find("Invalid data path: Rows.Reference")
+            .expect("typed cause must survive preceding logs");
+        assert!(file < cause, "diagnostics retain chronological order");
+        assert!(message.contains("[truncated]"));
+        assert!(message.chars().count() <= 6144);
+    }
+
+    #[test]
+    fn typed_diagnostics_reserve_log_space_and_return_their_unused_share() {
+        for long_typed in [false, true] {
+            let log = format!("closest-file.xml {} end-of-file-context", "л".repeat(5000));
+            let cause = if long_typed {
+                format!("closest typed cause {}", "п".repeat(7000))
+            } else {
+                "closest typed cause".to_owned()
+            };
+            let reply = AgentReply {
+                messages: serde_json::from_value(serde_json::json!([
+                    {"type":"loading-issue", "message":"older typed cause"},
+                    {"type":"log", "message":"older log"},
+                    {"type":"log", "message":log},
+                    {"type":"loading-issue", "message":cause},
+                    {"type":"error", "error-type":"ConfigFilesError", "message":""}
+                ]))
+                .expect("messages"),
+            };
+            let AgentError::Command { message, .. } = reply.outcome().unwrap_err() else {
+                panic!("expected command error");
+            };
+            assert!(
+                message.find("closest-file.xml").unwrap()
+                    < message.find("closest typed cause").unwrap()
+            );
+            assert!(message.chars().count() <= 6144);
+            if long_typed {
+                assert!(!message.contains("older typed cause"));
+                assert!(!message.contains("older log"));
+                assert!(message.chars().filter(|ch| *ch == 'л').count() >= 1900);
+                assert!(message.contains("[truncated]"));
+            } else {
+                assert!(
+                    message.contains("end-of-file-context"),
+                    "unused typed capacity goes to logs"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn long_agent_diagnostics_keep_the_terminal_message_with_a_bounded_unicode_excerpt() {
+        let reply = AgentReply {
+            messages: serde_json::from_value(serde_json::json!([
+                {"type":"log", "message":"д".repeat(20_000)},
+                {"type":"error", "error-type":"ConfigFilesError", "message":"terminal cause"}
+            ]))
+            .expect("messages"),
+        };
+        match reply.outcome().expect_err("refusal") {
+            AgentError::Command { message, .. } => {
+                assert!(
+                    message.starts_with("terminal cause"),
+                    "terminal must have its own budget"
+                );
+                assert!(message.contains("[truncated]"));
+                assert!(message.chars().count() < 8_300);
+            }
+            other => panic!("wrong refusal: {other}"),
+        }
+        let success = AgentReply {
+            messages: serde_json::from_value(serde_json::json!([
+                {"type":"log", "message":"ConfigFilesError: alarming prose"},
+                {"type":"success", "body":{"unchanged":true}}
+            ]))
+            .expect("messages"),
+        };
+        assert_eq!(success.outcome().unwrap().unwrap()["unchanged"], true);
+    }
+
+    #[test]
+    fn agent_display_masks_decoded_values_and_keys_without_changing_protocol_body() {
+        let secret = format!("private{}{}{}пароль", '"', '\\', '\n');
+        let original = serde_json::json!({
+            "type":"error", "error-type":"ConfigFilesError",
+            "message": format!("Forms/Main/Ext/Form.xml: {secret}"),
+            "body": {(secret.clone()): format!("quoted value: {secret}"), "source":"Forms/Main/Ext/Form.xml"}
+        });
+        let encoded = original.to_string().replace("private", "\\u0070rivate");
+        let decoded: serde_json::Value = serde_json::from_str(&encoded).expect("escaped JSON");
+        assert_eq!(decoded, original);
+        let mut display = decoded.clone();
+        mask_agent_display(&mut display, &[&secret]);
+        assert_eq!(decoded, original, "semantic fields must stay intact");
+        let text = display.to_string();
+        assert!(!text.contains("private"), "{text}");
+        assert!(!text.contains("rivate"), "{text}");
+        assert!(!text.contains("пароль"), "{text}");
+        assert!(text.contains("Forms/Main/Ext/Form.xml"));
+        assert_eq!(display["error-type"], "ConfigFilesError");
+        assert!(
+            display["body"].get("***").is_some(),
+            "decoded object key is masked"
+        );
+    }
+
+    #[test]
+    fn malformed_agent_output_never_echoes_the_unparsed_input() {
+        for raw in [
+            br#"[{"type":"secret-password"}]"#.as_slice(),
+            br#"[{"type":"error",not-json-secret-password}]"#.as_slice(),
+        ] {
+            let error = parse_batch(raw).expect_err("not a message array");
+            let shown = error.to_string();
+            assert!(!shown.contains("secret-password"), "{shown}");
+            assert!(shown.contains("omitted"), "{shown}");
+            assert!(matches!(error, AgentError::InvalidReply { .. }));
+        }
+        let mut malformed = b"[secret-password]".to_vec();
+        let error = take_array(&mut malformed).expect_err("malformed JSON");
+        assert!(!error.to_string().contains("secret-password"));
+        assert_eq!(
+            malformed, b"[secret-password]",
+            "display must not alter input"
+        );
+    }
+
+    #[test]
+    fn many_short_diagnostics_share_the_same_bounded_budget() {
+        let mut messages: Vec<AgentMessage> = (0..20_000)
+            .map(|_| AgentMessage {
+                kind: AgentMessageType::Log,
+                error_type: None,
+                message: Some("д".into()),
+                body: None,
+            })
+            .collect();
+        messages.push(AgentMessage {
+            kind: AgentMessageType::Error,
+            error_type: Some(AgentErrorType::ConfigFilesError),
+            message: Some("terminal cause".into()),
+            body: None,
+        });
+        match (AgentReply { messages }).outcome().unwrap_err() {
+            AgentError::Command { message, .. } => {
+                assert!(message.starts_with("terminal cause"));
+                assert!(message.contains("[truncated]"));
+                assert!(message.chars().count() < 8_300);
+            }
+            other => panic!("wrong refusal: {other}"),
+        }
     }
 
     #[test]
