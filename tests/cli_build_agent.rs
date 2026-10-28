@@ -806,3 +806,45 @@ fn an_agent_push_into_a_base_that_moved_ahead_is_refused_before_the_load() {
         "nothing is loaded"
     );
 }
+
+#[test]
+fn failed_agent_load_keeps_the_nearest_filename_and_typed_cause_after_long_logs() {
+    let reply = format!(
+        "{}\n",
+        serde_json::json!([
+            {"type":"log", "message":"noise".repeat(1400)},
+            {"type":"log", "message":"Reports/Sales/Forms/Main/Ext/Form.xml"},
+            {"type":"loading-issue", "message":"Invalid data path: Rows.Reference"},
+            {"type":"error", "error-type":"ConfigFilesError", "message":""}
+        ])
+    );
+    let reply = Box::leak(reply.into_boxed_str());
+    let signals = temp_workspace();
+    let release = signals.path().join("release");
+    fs::write(&release, "").expect("release");
+    let harness = harness_holding(Some(Hold {
+        command: "config load-config-from-files".into(),
+        started: signals.path().join("started"),
+        release,
+        reply: HoldReply::JsonMessages(reply),
+    }));
+    let (code, payload) = run(&harness, &["push"]);
+    assert_ne!(code, 0);
+    assert_eq!(payload["error"]["code"], "platform_failure", "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("agent load") && message.contains("ConfigFilesError"),
+        "{message}"
+    );
+    let file = message
+        .find("Reports/Sales/Forms/Main/Ext/Form.xml")
+        .expect("filename");
+    let cause = message
+        .find("Invalid data path: Rows.Reference")
+        .expect("typed cause");
+    assert!(file < cause);
+    assert!(message.contains("[truncated]"));
+    assert!(!commands(&harness)
+        .iter()
+        .any(|line| line.starts_with("config update-db-cfg")));
+}

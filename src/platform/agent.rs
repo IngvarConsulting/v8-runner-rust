@@ -223,35 +223,55 @@ impl AgentReply {
         }
     }
 
-    /// Terminal prose gets its own budget: a long progress log cannot displace it.
+    /// Typed causes and nearby file logs have separate shares of the bounded
+    /// diagnostic budget; terminal prose cannot be displaced by either.
     fn failure_message(&self, terminal: &AgentMessage) -> String {
         let mut result = excerpt(terminal.message.as_deref().unwrap_or_default(), 2048);
-        let mut remaining: usize = 6144;
-        for message in self
+        let end = self
             .messages
             .iter()
-            .take_while(|message| !std::ptr::eq(*message, terminal))
-        {
-            if !matches!(
-                message.kind,
-                AgentMessageType::Log | AgentMessageType::LoadingIssue
-            ) {
-                continue;
-            }
-            let Some(text) = message.message.as_deref().filter(|text| !text.is_empty()) else {
-                continue;
+            .position(|message| std::ptr::eq(message, terminal))
+            .unwrap_or(self.messages.len());
+        // Reserve one global truncation marker, including its separator. Each
+        // selected message also pays for its separator before consuming text.
+        let mut remaining = 6144 - "\n[truncated]".chars().count();
+        let mut selected = Vec::new();
+        let mut omitted = false;
+        for kind in [AgentMessageType::LoadingIssue, AgentMessageType::Log] {
+            let mut budget = if kind == AgentMessageType::LoadingIssue {
+                remaining.min(4096)
+            } else {
+                remaining
             };
-            if remaining == 0 {
-                result.push_str("\n[truncated]");
-                break;
+            for (index, message) in self.messages[..end].iter().enumerate().rev() {
+                if message.kind != kind {
+                    continue;
+                }
+                let Some(text) = message.message.as_deref().filter(|text| !text.is_empty()) else {
+                    continue;
+                };
+                if budget <= 1 {
+                    omitted = true;
+                    continue;
+                }
+                let mut chars = text.chars();
+                let part: String = chars.by_ref().take(budget - 1).collect();
+                omitted |= chars.next().is_some();
+                let cost = part.chars().count() + 1;
+                budget -= cost;
+                remaining -= cost;
+                selected.push((index, part));
             }
+        }
+        selected.sort_unstable_by_key(|(index, _)| *index);
+        for (_, part) in selected {
             if !result.is_empty() {
                 result.push('\n');
-                remaining = remaining.saturating_sub(1);
             }
-            let part = excerpt(text, remaining);
-            remaining = remaining.saturating_sub(part.chars().count());
             result.push_str(&part);
+        }
+        if omitted {
+            result.push_str("\n[truncated]");
         }
         result
     }
@@ -2277,6 +2297,77 @@ mod tests {
                     assert!(message.contains(terminal), "{message}");
                 }
                 other => panic!("wrong refusal: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn failure_diagnostics_keep_the_nearest_file_and_typed_cause_after_long_logs() {
+        let reply = AgentReply {
+            messages: serde_json::from_value(serde_json::json!([
+                {"type":"log", "message":"noise".repeat(1400)},
+                {"type":"log", "message":"Reports/Sales/Forms/Main/Ext/Form.xml"},
+                {"type":"loading-issue", "message":"Invalid data path: Rows.Reference"},
+                {"type":"error", "error-type":"ConfigFilesError", "message":""}
+            ]))
+            .expect("messages"),
+        };
+        let AgentError::Command {
+            error_type,
+            message,
+        } = reply.outcome().unwrap_err()
+        else {
+            panic!("expected a typed command error");
+        };
+        assert_eq!(error_type, AgentErrorType::ConfigFilesError);
+        let file = message
+            .find("Reports/Sales/Forms/Main/Ext/Form.xml")
+            .expect("closest filename must survive preceding logs");
+        let cause = message
+            .find("Invalid data path: Rows.Reference")
+            .expect("typed cause must survive preceding logs");
+        assert!(file < cause, "diagnostics retain chronological order");
+        assert!(message.contains("[truncated]"));
+        assert!(message.chars().count() <= 6144);
+    }
+
+    #[test]
+    fn typed_diagnostics_reserve_log_space_and_return_their_unused_share() {
+        for long_typed in [false, true] {
+            let log = format!("closest-file.xml {} end-of-file-context", "л".repeat(5000));
+            let cause = if long_typed {
+                format!("closest typed cause {}", "п".repeat(7000))
+            } else {
+                "closest typed cause".to_owned()
+            };
+            let reply = AgentReply {
+                messages: serde_json::from_value(serde_json::json!([
+                    {"type":"loading-issue", "message":"older typed cause"},
+                    {"type":"log", "message":"older log"},
+                    {"type":"log", "message":log},
+                    {"type":"loading-issue", "message":cause},
+                    {"type":"error", "error-type":"ConfigFilesError", "message":""}
+                ]))
+                .expect("messages"),
+            };
+            let AgentError::Command { message, .. } = reply.outcome().unwrap_err() else {
+                panic!("expected command error");
+            };
+            assert!(
+                message.find("closest-file.xml").unwrap()
+                    < message.find("closest typed cause").unwrap()
+            );
+            assert!(message.chars().count() <= 6144);
+            if long_typed {
+                assert!(!message.contains("older typed cause"));
+                assert!(!message.contains("older log"));
+                assert!(message.chars().filter(|ch| *ch == 'л').count() >= 1900);
+                assert!(message.contains("[truncated]"));
+            } else {
+                assert!(
+                    message.contains("end-of-file-context"),
+                    "unused typed capacity goes to logs"
+                );
             }
         }
     }
