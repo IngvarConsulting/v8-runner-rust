@@ -336,12 +336,24 @@ impl<'a> DesignerDsl<'a> {
     ///
     /// Ответ без токена — неудачный выход, файл `/Out` не прочитан или в нём нет строки из
     /// сорока шестнадцатеричных знаков — это отсутствие ответа, `None`: так и у базы в
-    /// кластере, где формат ответа Конфигуратора не замерен.
+    /// кластере, где формат ответа Конфигуратора не замерен. Платформа, которой команда не
+    /// знакома (она реализована в 8.3.20), ключ не узнаёт: пакетной операции в запуске нет,
+    /// Конфигуратор уходит в интерактивный режим и сам не кончается, — такую платформу не
+    /// спрашивают (`knows_generation_id`). Снятый по пределу чтения запуск тоже отвечает
+    /// отсутствием ответа, а не отказом
+    /// (`INV.USE-CASES.A-GENERATION-READ-DECLARES-ITS-OWN-CAP`); отмена остаётся отменой.
     pub fn config_generation_id(
         &self,
         extension: Option<&str>,
     ) -> Result<Option<String>, DesignerError> {
         if self.log_file.is_none() {
+            return Ok(None);
+        }
+        if !crate::platform::generation::knows_generation_id(&self.binary) {
+            tracing::debug!(
+                binary = %self.binary.display(),
+                "the platform knows no generation command: the probe is not asked"
+            );
             return Ok(None);
         }
         let mut args = self.base_args();
@@ -350,7 +362,13 @@ impl<'a> DesignerDsl<'a> {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
         }
-        let result = self.run(&args)?;
+        let result = match self.run(&args) {
+            Ok(result) => result,
+            // Запуск, снятый по пределу, ответа не дал: платформа без команды уходит в
+            // интерактив и сама не кончается. Отмена и прочие отказы остаются отказами.
+            Err(DesignerError::Spawn(ProcessError::TimedOut { .. })) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if result.process.exit_code != 0 {
             return Ok(None);
         }
@@ -1328,5 +1346,159 @@ mod tests {
             args[load_pos + 2],
             dir.path().join("artifact.epf").display().to_string()
         );
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::{DesignerDsl, DesignerError};
+    use crate::platform::connection::V8Connection;
+    use crate::platform::process::{
+        ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
+        SpawnResult, WorkGiven,
+    };
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+    use tempfile::tempdir;
+
+    /// Вопрос, который задавать нельзя: запуск фиксирует, обращение падает.
+    struct RefusingRunner(RefCell<Vec<ProcessRequest>>);
+
+    impl ProcessRunner for RefusingRunner {
+        fn run_with_policy(
+            &self,
+            request: &ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            self.0.borrow_mut().push(request.clone());
+            panic!("the platform without the generation command must not be asked");
+        }
+
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
+            panic!("the generation read runs synchronously")
+        }
+    }
+
+    /// Платформа, чей запуск конца не имеет: предел чтения снимает её.
+    struct TimedOutRunner;
+
+    impl ProcessRunner for TimedOutRunner {
+        fn run_with_policy(
+            &self,
+            _request: &ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            Err(ProcessError::TimedOut {
+                cmd: "1cv8".to_owned(),
+                timeout_ms: 30_000,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
+            panic!("the generation read runs synchronously")
+        }
+    }
+
+    fn dsl<'a>(
+        binary: PathBuf,
+        runner: &'a dyn ProcessRunner,
+        log_file: PathBuf,
+    ) -> DesignerDsl<'a> {
+        DesignerDsl::new(
+            binary,
+            V8Connection::from_connection_string("File=C:/ib"),
+            runner,
+            Some(log_file),
+            ProcessExecutionPolicy::default(),
+        )
+    }
+
+    /// Платформа старше команды (`/GetConfigGenerationID` реализован в 8.3.20) о поколении
+    /// не спрашивают: запуска нет, ответа нет.
+    #[test]
+    fn a_platform_without_the_generation_command_is_not_asked() {
+        let dir = tempdir().expect("temp dir");
+        let binary = PathBuf::from("C:")
+            .join("Program Files")
+            .join("1cv8")
+            .join("8.3.12.1855")
+            .join("bin")
+            .join("1cv8.exe");
+        let runner = RefusingRunner(RefCell::new(Vec::new()));
+
+        let answer = dsl(binary, &runner, dir.path().join("generation.log"))
+            .config_generation_id(None)
+            .expect("no answer is not an error");
+
+        assert_eq!(answer, None);
+        assert!(
+            runner.0.borrow().is_empty(),
+            "the probe must not be launched"
+        );
+    }
+
+    /// Запуск, снятый по пределу чтения, отвечает отсутствием ответа, а не отказом;
+    /// отмена и прочие отказы остаются отказами.
+    #[test]
+    fn a_generation_read_past_its_cap_is_no_answer() {
+        let dir = tempdir().expect("temp dir");
+        let binary = PathBuf::from("C:")
+            .join("1cv8")
+            .join("8.3.27.2074")
+            .join("bin")
+            .join("1cv8.exe");
+        let answer = dsl(binary, &TimedOutRunner, dir.path().join("generation.log"))
+            .config_generation_id(None)
+            .expect("a timed-out probe is not an error");
+
+        assert_eq!(answer, None);
+    }
+
+    /// Отказ не снятого по пределу запуска остаётся отказом.
+    #[test]
+    fn another_spawn_failure_stays_a_failure() {
+        struct FailingRunner;
+        impl ProcessRunner for FailingRunner {
+            fn run_with_policy(
+                &self,
+                _request: &ProcessRequest,
+                _policy: &ProcessExecutionPolicy,
+            ) -> Result<ProcessResult, ProcessError> {
+                Err(ProcessError::SpawnFailed {
+                    cmd: "1cv8".to_owned(),
+                    source: std::io::Error::other("denied"),
+                })
+            }
+
+            fn spawn(
+                &self,
+                _request: &ProcessRequest,
+                _work: &WorkGiven,
+            ) -> Result<SpawnResult, ProcessError> {
+                panic!("the generation read runs synchronously")
+            }
+        }
+
+        let dir = tempdir().expect("temp dir");
+        let error = dsl(
+            Path::new("1cv8.exe").to_path_buf(),
+            &FailingRunner,
+            dir.path().join("generation.log"),
+        )
+        .config_generation_id(None)
+        .expect_err("a spawn failure stays a failure");
+
+        assert!(matches!(
+            error,
+            DesignerError::Spawn(ProcessError::SpawnFailed { .. })
+        ));
     }
 }

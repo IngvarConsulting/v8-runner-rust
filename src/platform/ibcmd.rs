@@ -266,15 +266,33 @@ impl<'a> IbcmdDsl<'a> {
     /// `config generation-id [--extension <имя>]`: токен поколения — последняя непустая
     /// строка stdout. Чтение базы, а не запись: отмена снимает его, как всякое чтение.
     /// Неудачный выход или строка не из сорока шестнадцатеричных знаков — отсутствие ответа.
+    /// Платформа, которой команда не знакома (она реализована в 8.3.20), не спрашивается
+    /// (`knows_generation_id`); у `ibcmd` незнакомая подкоманда отвечает отказом запуска,
+    /// а не зависанием, — гейт здесь экономит запуск. Снятый по пределу чтения запуск тоже
+    /// отвечает отсутствием ответа
+    /// (`INV.USE-CASES.A-GENERATION-READ-DECLARES-ITS-OWN-CAP`); отмена остаётся отменой.
     pub fn config_generation_id(
         &self,
         extension: Option<&str>,
     ) -> Result<Option<String>, IbcmdError> {
+        if !crate::platform::generation::knows_generation_id(&self.binary) {
+            tracing::debug!(
+                binary = %self.binary.display(),
+                "the platform knows no generation command: the probe is not asked"
+            );
+            return Ok(None);
+        }
         let mut args = self.authenticated_infobase_args(&["config", "generation-id"]);
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
-        let result = self.run_with(&args, &self.execution_policy.for_reading())?;
+        let result = match self.run_with(&args, &self.execution_policy.for_reading()) {
+            Ok(result) => result,
+            // Запуск, снятый по пределу, ответа не дал. Отмена и прочие отказы остаются
+            // отказами.
+            Err(IbcmdError::Spawn(ProcessError::TimedOut { .. })) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if result.process.exit_code != 0 {
             return Ok(None);
         }
@@ -1594,5 +1612,160 @@ mod tests {
         assert!(args.contains("--name\nclient_mcp"));
         assert!(args.contains("--safe-mode\nno"));
         assert!(args.contains("--unsafe-action-protection\nno"));
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::{IbcmdConnection, IbcmdDsl, IbcmdError};
+    use crate::config::model::InfobaseConfig;
+    use crate::platform::generation::knows_generation_id;
+    use crate::platform::process::{
+        ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
+        SpawnResult, WorkGiven,
+    };
+    use std::cell::RefCell;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    /// Вопрос, который задавать нельзя: запуск фиксирует, обращение падает.
+    struct RefusingRunner(RefCell<Vec<ProcessRequest>>);
+
+    impl ProcessRunner for RefusingRunner {
+        fn run_with_policy(
+            &self,
+            request: &ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            self.0.borrow_mut().push(request.clone());
+            panic!("the platform without the generation command must not be asked");
+        }
+
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
+            panic!("the generation read runs synchronously")
+        }
+    }
+
+    /// Платформа, чей запуск конца не имеет: предел чтения снимает её.
+    struct TimedOutRunner;
+
+    impl ProcessRunner for TimedOutRunner {
+        fn run_with_policy(
+            &self,
+            _request: &ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            Err(ProcessError::TimedOut {
+                cmd: "ibcmd".to_owned(),
+                timeout_ms: 30_000,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
+            panic!("the generation read runs synchronously")
+        }
+    }
+
+    fn connection() -> IbcmdConnection {
+        IbcmdConnection::from_infobase(&InfobaseConfig::file("File=/ib")).expect("connection")
+    }
+
+    /// Платформа старше команды (`config generation-id` реализован в 8.3.20) о поколении
+    /// не спрашивают: у `ibcmd` незнакомая подкоманда отвечает отказом, а не зависанием,
+    /// но запуск и его расход лишние.
+    #[test]
+    fn a_platform_without_the_generation_command_is_not_asked() {
+        let dir = tempdir().expect("temp dir");
+        let binary = dir.path().join("8.3.13.1809").join("ibcmd");
+        let runner = RefusingRunner(RefCell::new(Vec::new()));
+        let dsl = IbcmdDsl::new(
+            binary,
+            connection(),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        let answer = dsl
+            .config_generation_id(None)
+            .expect("no answer is not an error");
+
+        assert_eq!(answer, None);
+        assert!(
+            runner.0.borrow().is_empty(),
+            "the probe must not be launched"
+        );
+    }
+
+    /// Запуск, снятый по пределу чтения, отвечает отсутствием ответа, а не отказом.
+    #[test]
+    fn a_generation_read_past_its_cap_is_no_answer() {
+        let dir = tempdir().expect("temp dir");
+        let binary = dir.path().join("8.3.27.2074").join("ibcmd");
+        assert!(
+            knows_generation_id(&binary),
+            "the test asks a knowing platform"
+        );
+        let dsl = IbcmdDsl::new(
+            binary,
+            connection(),
+            &TimedOutRunner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        let answer = dsl
+            .config_generation_id(None)
+            .expect("a timed-out probe is not an error");
+
+        assert_eq!(answer, None);
+    }
+
+    /// Отказ не снятого по пределу запуска остаётся отказом.
+    #[test]
+    fn another_spawn_failure_stays_a_failure() {
+        struct FailingRunner;
+        impl ProcessRunner for FailingRunner {
+            fn run_with_policy(
+                &self,
+                _request: &ProcessRequest,
+                _policy: &ProcessExecutionPolicy,
+            ) -> Result<ProcessResult, ProcessError> {
+                Err(ProcessError::SpawnFailed {
+                    cmd: "ibcmd".to_owned(),
+                    source: std::io::Error::other("denied"),
+                })
+            }
+
+            fn spawn(
+                &self,
+                _request: &ProcessRequest,
+                _work: &WorkGiven,
+            ) -> Result<SpawnResult, ProcessError> {
+                panic!("the generation read runs synchronously")
+            }
+        }
+
+        let dsl = IbcmdDsl::new(
+            Path::new("ibcmd").to_path_buf(),
+            connection(),
+            &FailingRunner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        let error = dsl
+            .config_generation_id(None)
+            .expect_err("a spawn failure stays a failure");
+
+        assert!(matches!(
+            error,
+            IbcmdError::Spawn(ProcessError::SpawnFailed { .. })
+        ));
     }
 }

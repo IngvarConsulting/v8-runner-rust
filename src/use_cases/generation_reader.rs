@@ -7,10 +7,18 @@
 //! (`agent_session::generation_id`). Что ответ значит для обмена, решает
 //! `exchange_guard::predict`.
 //!
+//! Чтение объявляет собственный предел (`GENERATION_PROBE_CAP`,
+//! `INV.USE-CASES.A-GENERATION-READ-DECLARES-ITS-OWN-CAP`): это вопрос, а не работа, а у
+//! платформы, которой команда поколения не знакома, запуск Конфигуратора конца не имеет —
+//! без своего предела чтение держало бы команду вечно. Снятый по пределу запуск —
+//! отсутствие ответа, а не отказ; платформу без команды и не спрашивают
+//! (`generation::knows_generation_id`).
+//!
 //! Здесь же — признак непринятого для `status --deep` ([`read_unapplied`]): тот же процесс
 //! сохраняет основную конфигурацию и конфигурацию базы данных в файлы.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
@@ -21,6 +29,13 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+
+/// Собственный предел чтения поколения
+/// (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE: предел объявляет шаг). Ответ приходит за
+/// секунды — отдельным процессом за четыре и больше
+/// ([замер](../../references/1c/confirmed-runtime-measurements.md)); предел много больше, а
+/// у платформы без команды поколения снятый им запуск конца не имел бы вовсе.
+const GENERATION_PROBE_CAP: Duration = Duration::from_secs(30);
 
 /// Процесс, который спрашивает поколение.
 pub(crate) enum GenerationProcess<'a> {
@@ -41,7 +56,8 @@ pub(crate) enum GenerationProcess<'a> {
 
 /// Поколение основной конфигурации или расширения `extension`; `None` — ответа нет. После
 /// отмены процесс не запускается: ответа нет. `process` собирается только после проверки
-/// отмены — его файлы и каталоги после отмены не создаются.
+/// отмены — его файлы и каталоги после отмены не создаются. Запуск, снятый собственным
+/// пределом шага (`GENERATION_PROBE_CAP`), — тоже отсутствие ответа, а не отказ.
 pub(crate) fn read_generation<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -56,7 +72,10 @@ pub(crate) fn read_generation<'a>(
     {
         return Ok(None);
     }
-    let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
+    let policy = context.process_policy(
+        InterruptionSafetyClass::GracefulThenKill,
+        Some(GENERATION_PROBE_CAP),
+    );
     match process()? {
         GenerationProcess::Designer {
             binary,
