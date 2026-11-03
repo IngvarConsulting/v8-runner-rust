@@ -446,4 +446,36 @@ mod tests {
             AppError::PlatformProcess(ProcessError::Cancelled { .. })
         ));
     }
+
+    /// Предел доходит и до `ibcmd`-маршрута: политика одна на оба чтения, но у
+    /// `IbcmdDsl` она проходит через `for_reading` — если предел обронен там, этот
+    /// тест падает.
+    #[test]
+    fn the_ibcmd_generation_read_declares_its_own_cap() {
+        let config = config();
+        let context = ExecutionContext::cli(CommandName::Build);
+        let runner = CapturingRunner(RefCell::new(None));
+        let binary = PathBuf::from("/opt/1cv8/x86_64")
+            .join("8.3.27.2074")
+            .join("ibcmd");
+
+        let answer = read_generation(
+            &context,
+            &config,
+            || {
+                Ok(GenerationProcess::Ibcmd {
+                    binary: &binary,
+                    runner: &runner,
+                    data_path: None,
+                })
+            },
+            None,
+        )
+        .expect("a successful run of the probe");
+
+        let policy = runner.0.borrow().as_ref().expect("the probe ran").clone();
+        assert_eq!(policy.timeout, Some(GENERATION_PROBE_CAP));
+        assert_eq!(policy.safety, ProcessInterruptionSafety::GracefulThenKill);
+        assert_eq!(answer, None, "stdout without a token: no answer");
+    }
 }
