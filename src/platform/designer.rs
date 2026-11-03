@@ -366,7 +366,16 @@ impl<'a> DesignerDsl<'a> {
             Ok(result) => result,
             // Запуск, снятый по пределу, ответа не дал: платформа без команды уходит в
             // интерактив и сама не кончается. Отмена и прочие отказы остаются отказами.
-            Err(DesignerError::Spawn(ProcessError::TimedOut { .. })) => return Ok(None),
+            Err(DesignerError::Spawn(ProcessError::TimedOut { timeout_ms, .. })) => {
+                // Предупреждение отличает снятый по пределу зонд от обычного отсутствия
+                // ответа: у медленного, но честного чтения исход тот же.
+                tracing::warn!(
+                    binary = %self.binary.display(),
+                    timeout_ms,
+                    "the generation probe hit its cap: no answer"
+                );
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         if result.process.exit_code != 0 {

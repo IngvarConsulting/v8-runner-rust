@@ -289,8 +289,16 @@ impl<'a> IbcmdDsl<'a> {
         let result = match self.run_with(&args, &self.execution_policy.for_reading()) {
             Ok(result) => result,
             // Запуск, снятый по пределу, ответа не дал. Отмена и прочие отказы остаются
-            // отказами.
-            Err(IbcmdError::Spawn(ProcessError::TimedOut { .. })) => return Ok(None),
+            // отказами. Предупреждение отличает снятый по пределу зонд от обычного
+            // отсутствия ответа: у медленного, но честного чтения исход тот же.
+            Err(IbcmdError::Spawn(ProcessError::TimedOut { timeout_ms, .. })) => {
+                tracing::warn!(
+                    binary = %self.binary.display(),
+                    timeout_ms,
+                    "the generation probe hit its cap: no answer"
+                );
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         if result.process.exit_code != 0 {

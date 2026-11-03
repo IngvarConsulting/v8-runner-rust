@@ -297,3 +297,153 @@ pub(crate) fn designer_log_file(config: &AppConfig, name: &str) -> Result<PathBu
         .map(|dir| dir.join(format!("{name}.log")))
         .map_err(|error| AppError::Runtime(format!("failed to create platform logs dir: {error}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{designer_log_file, read_generation, GenerationProcess, GENERATION_PROBE_CAP};
+    use crate::config::loader::load_config;
+    use crate::config::model::{AppConfig, InfobaseSelector};
+    use crate::platform::process::{
+        ProcessError, ProcessExecutionPolicy, ProcessInterruptionSafety, ProcessRequest,
+        ProcessResult, ProcessRunner, SpawnResult, WorkGiven,
+    };
+    use crate::support::error::AppError;
+    use crate::use_cases::context::{CommandName, ExecutionContext};
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    /// Запоминает политику, с которой шаг запустил чтение.
+    struct CapturingRunner(RefCell<Option<ProcessExecutionPolicy>>);
+
+    impl ProcessRunner for CapturingRunner {
+        fn run_with_policy(
+            &self,
+            _request: &ProcessRequest,
+            policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            *self.0.borrow_mut() = Some(policy.clone());
+            Ok(ProcessResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: None,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
+            panic!("the generation read runs synchronously")
+        }
+    }
+
+    /// Запуск, которого отменили.
+    struct CancellingRunner;
+
+    impl ProcessRunner for CancellingRunner {
+        fn run_with_policy(
+            &self,
+            _request: &ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            Err(ProcessError::Cancelled {
+                cmd: "1cv8".to_owned(),
+                delivered: false,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
+            panic!("the generation read runs synchronously")
+        }
+    }
+
+    fn config() -> AppConfig {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
+        std::fs::write(
+            dir.path().join("v8project.yaml"),
+            "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: \"File=build/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .expect("write config");
+        load_config(
+            dir.path().join("v8project.yaml").to_str(),
+            None,
+            &InfobaseSelector::Default,
+        )
+        .map(|loaded| loaded.config)
+        .expect("load config")
+    }
+
+    /// Предел чтения поколения объявляет сам шаг: политика, с которой запускается
+    /// Конфигуратор, несёт `GENERATION_PROBE_CAP`, а не наследует срок команды
+    /// (`DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`). Если предел убрать, тест падает.
+    #[test]
+    fn the_generation_read_declares_its_own_cap() {
+        let config = config();
+        let context = ExecutionContext::cli(CommandName::Build);
+        let runner = CapturingRunner(RefCell::new(None));
+        let binary = PathBuf::from("C:")
+            .join("1cv8")
+            .join("8.3.27.2074")
+            .join("bin")
+            .join("1cv8.exe");
+
+        let answer = read_generation(
+            &context,
+            &config,
+            || {
+                Ok(GenerationProcess::Designer {
+                    binary: &binary,
+                    runner: &runner,
+                    log_file: designer_log_file(&config, "test-cap")?,
+                })
+            },
+            None,
+        )
+        .expect("a successful run of the probe");
+
+        let policy = runner.0.borrow().as_ref().expect("the probe ran").clone();
+        assert_eq!(policy.timeout, Some(GENERATION_PROBE_CAP));
+        assert_eq!(policy.safety, ProcessInterruptionSafety::GracefulThenKill);
+        assert_eq!(answer, None, "the platform log is missing: no answer");
+    }
+
+    /// Отмена остаётся отменой, как обещает правило: снятый отменой запуск — не
+    /// отсутствие ответа.
+    #[test]
+    fn a_cancelled_generation_read_stays_a_failure() {
+        let config = config();
+        let context = ExecutionContext::cli(CommandName::Build);
+        let binary = PathBuf::from("C:")
+            .join("1cv8")
+            .join("8.3.27.2074")
+            .join("bin")
+            .join("1cv8.exe");
+
+        let error = read_generation(
+            &context,
+            &config,
+            || {
+                Ok(GenerationProcess::Designer {
+                    binary: &binary,
+                    runner: &CancellingRunner,
+                    log_file: designer_log_file(&config, "test-cancel")?,
+                })
+            },
+            None,
+        )
+        .expect_err("cancellation stays a failure");
+
+        assert!(matches!(
+            error,
+            AppError::PlatformProcess(ProcessError::Cancelled { .. })
+        ));
+    }
+}

@@ -1,6 +1,8 @@
 ---
 id: INV.USE-CASES.A-GENERATION-READ-DECLARES-ITS-OWN-CAP
 check:
+  - src/use_cases/generation_reader.rs::the_generation_read_declares_its_own_cap
+  - src/use_cases/generation_reader.rs::a_cancelled_generation_read_stays_a_failure
   - src/platform/designer.rs::a_generation_read_past_its_cap_is_no_answer
   - src/platform/ibcmd.rs::a_generation_read_past_its_cap_is_no_answer
   - src/platform/designer.rs::another_spawn_failure_stays_a_failure
