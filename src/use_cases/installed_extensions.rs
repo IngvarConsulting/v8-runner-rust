@@ -1,12 +1,12 @@
-//! Состав расширений базы для обходов по составу базы: `pull --all` и `download` без набора.
+//! Состав расширений базы для `pull --all` и команд без набора.
 //!
 //! Вызов выбирает исполнитель команды (замер #187: у каждого свой), ответ разбирается по
 //! структуре, а не по тексту сообщений.
 
-use std::path::Path;
-
 use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider};
+use crate::domain::extensions::InstalledExtension;
+use crate::platform::agent::WaitPolicy;
 use crate::platform::extension_inventory::{
     is_extension_identifier, parse_extension_inventory, parse_extension_name_list,
 };
@@ -14,15 +14,29 @@ use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
+use crate::use_cases::agent_session::AgentHandle;
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config::helpers::{
     build_designer_dsl, build_ibcmd_dsl, ensure_success_of, map_ibcmd_error,
 };
 use crate::use_cases::extension_agent::ExtensionAgent;
+use crate::use_cases::generation_reader::LocatedTool;
 use crate::use_cases::progress::log_live_stage;
 
+pub(crate) enum InventorySource<'a> {
+    Selected {
+        tool: LocatedTool<'a>,
+        utilities: &'a PlatformUtilities,
+    },
+    /// Сессию оставляем открытой для дальнейшей работы вызывающего сценария.
+    OpenAgent {
+        handle: &'a mut AgentHandle,
+        wait: &'a WaitPolicy,
+    },
+}
+
 /// Имена расширений, установленных в базе, — вызовом исполнителя команды (замер #187).
-/// Читатель один: им спрашивают базу `pull --all` и `download` без набора.
+/// Читатель один: им спрашивают базу `pull --all`, `download`, `apply` и `reset` без набора.
 ///
 /// Имя, которое не является идентификатором 1С, — неверный вывод: оно станет каталогом и
 /// доводом платформы, и угадывать его нельзя.
@@ -30,9 +44,7 @@ pub(crate) fn read_installed_extensions(
     context: &ExecutionContext,
     config: &AppConfig,
     operation: Operation,
-    provider: Provider,
-    binary: Option<&Path>,
-    utilities: &PlatformUtilities,
+    source: InventorySource<'_>,
 ) -> Result<Vec<String>, AppError> {
     // Подпись и журнал `pull --all` — прежние (`[Pull]`, `dump-extensions-list.log`); у
     // `download` — те же по своему имени.
@@ -45,7 +57,32 @@ pub(crate) fn read_installed_extensions(
         &format!("{command}: extensions"),
         &format!("[{label}] reading the extensions installed in the infobase"),
     );
-    let names = match (provider, binary) {
+    let names = match source {
+        InventorySource::OpenAgent { handle, wait } => {
+            extension_names(ExtensionAgent::inventory_on(handle, wait, None)?)
+        }
+        InventorySource::Selected {
+            tool: LocatedTool { provider, binary },
+            utilities,
+        } => read_with_selected_tool(context, config, operation, provider, binary, utilities)?,
+    };
+    if let Some(name) = names.iter().find(|name| !is_extension_identifier(name)) {
+        return Err(AppError::InvalidOutput(format!(
+            "the infobase lists an extension whose name is not an identifier: {name:?}"
+        )));
+    }
+    Ok(names)
+}
+
+fn read_with_selected_tool(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    operation: Operation,
+    provider: Provider,
+    binary: Option<&std::path::Path>,
+    utilities: &PlatformUtilities,
+) -> Result<Vec<String>, AppError> {
+    match (provider, binary) {
         (Provider::Designer, Some(binary)) => {
             let dsl = build_designer_dsl(
                 context,
@@ -68,7 +105,7 @@ pub(crate) fn read_installed_extensions(
                         .unwrap_or("no /Out log")
                 )));
             };
-            parse_extension_name_list(out).map_err(AppError::InvalidOutput)?
+            parse_extension_name_list(out).map_err(AppError::InvalidOutput)
         }
         (Provider::Ibcmd, Some(binary)) => {
             let dsl = build_ibcmd_dsl(
@@ -80,35 +117,29 @@ pub(crate) fn read_installed_extensions(
             let listed = dsl.infobase_extension_list().map_err(map_ibcmd_error)?;
             ensure_listed(&listed)?;
             parse_extension_inventory(&listed.process.stdout)
-                .map_err(AppError::InvalidOutput)?
-                .into_iter()
-                .map(|extension| extension.name)
-                .collect()
+                .map(extension_names)
+                .map_err(AppError::InvalidOutput)
         }
         (Provider::Agent, binary) => {
             let mut agent = ExtensionAgent::open(context, config, binary)?;
             let inventory = agent.inventory(None);
             agent.close();
-            inventory?
-                .into_iter()
-                .map(|extension| extension.name)
-                .collect()
+            inventory.map(extension_names)
         }
         // Без утилиты исполнитель списка не прочтёт, а прочие исполнители выгрузку не
         // делают: тот же отказ, что у выгрузки без адаптера.
         (provider @ (Provider::Designer | Provider::Ibcmd), None)
-        | (provider @ (Provider::IbcmdRs | Provider::Webinst), _) => {
-            return Err(crate::use_cases::unimplemented_provider(
-                operation, provider,
-            ))
-        }
-    };
-    if let Some(name) = names.iter().find(|name| !is_extension_identifier(name)) {
-        return Err(AppError::InvalidOutput(format!(
-            "the infobase lists an extension whose name is not an identifier: {name:?}"
-        )));
+        | (provider @ (Provider::IbcmdRs | Provider::Webinst), _) => Err(
+            crate::use_cases::unimplemented_provider(operation, provider),
+        ),
     }
-    Ok(names)
+}
+
+fn extension_names(inventory: Vec<InstalledExtension>) -> Vec<String> {
+    inventory
+        .into_iter()
+        .map(|extension| extension.name)
+        .collect()
 }
 
 /// Список прочитан, только когда процесс завершился удачно.
