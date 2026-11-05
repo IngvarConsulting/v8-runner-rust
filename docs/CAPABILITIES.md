@@ -1690,10 +1690,19 @@ v8-runner mcp serve http
 
 - Публикация CLI-only команд в MCP без отдельного решения владельца.
 - Object-scoped partial dump через `ibcmd`.
+- `infobase create` через `ibcmd` на кластерной базе.
+- `push` через `ibcmd` на кластерной базе.
+- `apply` через `ibcmd` на кластерной базе.
+- `reset` через `ibcmd` на кластерной базе.
+- `pull` через `ibcmd` на кластерной базе.
+- `download` через `ibcmd` на кластерной базе.
+- `infobase dump` через `ibcmd` на кластерной базе.
+- `infobase restore` через `ibcmd` на кластерной базе.
 - `upload` через `ibcmd`.
 - `check` через `ibcmd`.
 - `make` через `ibcmd-rs`: сборка пакета из XML без базы только по ключу `providers.make: ibcmd-rs` ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
-- `extensions` через `designer`.
+- `extensions` через `designer` на файловой базе.
+- `convert` через `designer`.
 - `convert` через `ibcmd-rs`: пакет ↔ XML без платформы ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
 - `convert` файла пакета в `edt` и внешних наборов в пакет.
 - `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).

@@ -1090,8 +1090,9 @@ fn database_configuration_plan(
         .map(Provider::as_str)
         .collect::<Vec<_>>()
         .join(" or ");
+    let verb = if skipped.len() == 1 { "has" } else { "have" };
     let reason = format!(
-        "{operation} --state db takes the database configuration, which only {named} exports: {unable} has no command for it"
+        "{operation} --state db takes the database configuration, which only {named} exports: {unable} {verb} no command for it"
     );
     let refusal = match &plan {
         ProviderPlan::Override { provider, file } => format!(
@@ -1949,6 +1950,49 @@ mod tests {
         );
         let result = failure.payload.expect("typed payload");
         crate::use_cases::interruption::assert_stopped_at_a_safe_point(&result.execution);
+    }
+
+    #[test]
+    fn database_configuration_refusal_agrees_with_the_number_of_excluded_providers() {
+        use crate::domain::capability::{ProviderOrigin, ProviderPlan};
+
+        let config = config(Path::new("/project"), Path::new("/work"));
+        // IbcmdRs не входит в реальную цепочку download: синтетический план проверяет
+        // согласование отказа, не расширяя матрицу исполнителей.
+        for (chain, expected_reason) in [
+            (
+                vec![Provider::Agent],
+                "download --state db takes the database configuration, which only designer or ibcmd exports: agent has no command for it",
+            ),
+            (
+                vec![Provider::Agent, Provider::IbcmdRs],
+                "download --state db takes the database configuration, which only designer or ibcmd exports: agent and ibcmd-rs have no command for it",
+            ),
+        ] {
+            let (error, receipt) = super::database_configuration_plan(
+                &config,
+                ProviderPlan::Default { chain: chain.clone() },
+            )
+            .expect_err("a plan without database exporters must refuse");
+
+            let AppError::CapabilityUnavailable(refusal) = error else {
+                panic!("expected a capability refusal, got {error}");
+            };
+            assert!(refusal.message.starts_with(expected_reason), "{refusal}");
+            assert!(
+                refusal.message.ends_with("omit --state db to export the working configuration"),
+                "{refusal}"
+            );
+            assert_eq!(receipt.selected, None);
+            assert_eq!(receipt.origin, ProviderOrigin::Default);
+            assert_eq!(
+                receipt.skipped.iter().map(|skip| skip.provider).collect::<Vec<_>>(),
+                chain
+            );
+            assert!(receipt.skipped.iter().all(|skip| skip.reason.contains(
+                "has no command for the database configuration that download --state db takes"
+            )));
+        }
     }
 
     /// Исполнитель, выбранный под рабочее состояние, конфигурацию базы данных не исполняет:

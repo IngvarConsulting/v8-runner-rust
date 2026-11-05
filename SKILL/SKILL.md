@@ -303,6 +303,17 @@ v8-runner infobase create
 
 ## Output Discipline
 
+Agent command failures retain the terminal message plus a bounded excerpt of the
+same command's diagnostics, prioritizing nearby typed loading issues and log
+messages while keeping their order; a failed `push` load names `agent load`.
+Use the reported file and reason when available. The session transcript under
+`workPath/logs/platform/` contains re-encoded parsed messages with credentials
+masked. Unparsed replies, banners and raw stderr are omitted with their byte
+count, so malformed output cannot disclose escaped credentials. A bare
+`ConfigFilesError` without diagnostic messages does not identify a specific
+source validation rule.
+
+
 When reporting results, distinguish:
 
 - project source failures;
