@@ -3671,8 +3671,10 @@ exit 0"#,
         assert_eq!(result.requested_mode, DumpMode::Partial);
         assert_eq!(result.mode, ReportedDumpMode::Incremental);
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("--sync"));
-        assert!(calls.contains("--extension ext"));
+        assert!(
+            calls.contains(" export --threads=1 --extension ext --sync "),
+            "{calls}"
+        );
         assert!(result
             .message
             .as_deref()
