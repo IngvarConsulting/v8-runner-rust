@@ -27,6 +27,7 @@ case "$CI_SCOPE" in
           "platform::designer::tests::dt_export_passes_windows_drive_path_without_verbatim_prefix"
           "platform::designer::tests::dt_export_passes_windows_unc_path_without_verbatim_prefix"
           "platform::designer::tests::dt_export_preserves_regular_windows_target"
+          "platform::ibcmd::tests::config_save_passes_windows_paths_without_verbatim_prefix"
           "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::managed_detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::windows_client_owner::host_job_terminates_client_before_startup_handoff"
@@ -36,6 +37,8 @@ case "$CI_SCOPE" in
           "support::fs::tests::replace_file_restores_original_bytes_when_stage_disappeared"
           "use_cases::staged_publication::tests::orphan_cleanup_requires_exact_target_kind_and_run_name_contract"
           "use_cases::build_project::tests::partial_load_list_releases_writer_before_reader_and_cleans_up_after_use"
+          "use_cases::dump_config::tests::a_partial_dump_hands_the_designer_a_closed_object_list"
+          "use_cases::dump_config::tests::a_forecast_hands_the_designer_a_closed_changes_file"
           "platform::interactive::tests::closed_streams_on_windows_answer_with_the_exit_code_seen_after_them"
         )
         listed_tests="$(cargo test --locked -- --list)"
