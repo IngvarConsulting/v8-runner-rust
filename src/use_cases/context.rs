@@ -214,7 +214,7 @@ pub struct ExecutionContext {
     /// Точка входа сессии агента, которую открыла эта команда; отмечает подключение,
     /// читает квитанция исполнителя. Клоны контекста делят этот слот, как и `work`:
     /// клон для другой команды унаследовал бы отметку.
-    session: std::sync::Arc<std::sync::Mutex<Option<SessionEndpoint>>>,
+    session: std::sync::Arc<std::sync::OnceLock<SessionEndpoint>>,
     /// Глобальные ключи командной строки, которые ведут к той же цели.
     command_line: CommandLineTarget,
     full_pull: Option<std::sync::Arc<super::full_pull_publication::ExternalFullPull>>,
@@ -371,19 +371,12 @@ impl ExecutionContext {
     /// Отмечает точку входа открытой сессии агента. Сессий у команды бывает несколько,
     /// но конфиг у неё один, и точка входа у них общая: первая отметка остаётся.
     pub(crate) fn note_session(&self, endpoint: SessionEndpoint) {
-        self.session_slot().get_or_insert(endpoint);
+        let _ = self.session.set(endpoint);
     }
 
     /// Точка входа сессии агента, если команда её открывала.
     pub(crate) fn opened_session(&self) -> Option<SessionEndpoint> {
-        self.session_slot().clone()
-    }
-
-    /// Отметка — простое значение: паника другого потока его не портит.
-    fn session_slot(&self) -> std::sync::MutexGuard<'_, Option<SessionEndpoint>> {
-        self.session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.session.get().cloned()
     }
 
     /// Returns the pending command-boundary interruption, if any.
@@ -423,6 +416,32 @@ mod tests {
         AdvisedInfobase, CommandLineTarget, CommandName, ExecutionContext, ExecutionInterruption,
         ExecutionTransport, InterruptionSafetyClass,
     };
+
+    #[test]
+    fn the_first_session_endpoint_is_shared_by_context_clones() {
+        use crate::domain::capability::{SessionEndpoint, SessionMode};
+
+        let context = ExecutionContext::cli(CommandName::Build);
+        let clone = context.clone();
+        assert_eq!(context.opened_session(), None);
+        assert_eq!(clone.opened_session(), None);
+        let first = SessionEndpoint {
+            mode: SessionMode::Attached,
+            address: "127.0.0.1:1545".into(),
+        };
+        clone.note_session(first.clone());
+        context.note_session(SessionEndpoint {
+            mode: SessionMode::Managed,
+            address: "127.0.0.1:1546".into(),
+        });
+        assert_eq!(context.opened_session(), Some(first.clone()));
+        assert_eq!(clone.opened_session(), Some(first.clone()));
+        assert_eq!(context.clone().opened_session(), Some(first));
+        assert_eq!(
+            ExecutionContext::cli(CommandName::Build).opened_session(),
+            None
+        );
+    }
 
     /// Команда называет только те глобальные ключи, что меняют цель, и каждое значение
     /// переживает оболочку POSIX: пробел, кавычка и обратная косая черта не дробят слово.

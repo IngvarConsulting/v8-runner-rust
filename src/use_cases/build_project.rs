@@ -1,3 +1,4 @@
+use crate::use_cases::provider_selection::stamp_session;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,10 +67,7 @@ pub fn execute(
         "executing build use case"
     );
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_build_branch(context, config, args),
-            context,
-        ),
+        stamp_session(run_build_branch(context, config, args), context),
         context.work(),
     )
 }
