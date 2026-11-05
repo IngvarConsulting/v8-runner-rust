@@ -74,6 +74,7 @@ pub(crate) fn read_installed_extensions(
     Ok(names)
 }
 
+/// Чтение без готовой сессии: при выборе агента читатель сам открывает и закрывает её.
 fn read_with_selected_tool(
     context: &ExecutionContext,
     config: &AppConfig,

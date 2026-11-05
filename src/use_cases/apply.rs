@@ -484,6 +484,7 @@ impl Executor {
         }
     }
 
+    /// Открывает сессию при первом обращении и даёт её взаймы до следующего шага команды.
     fn session(
         &mut self,
         context: &ExecutionContext,

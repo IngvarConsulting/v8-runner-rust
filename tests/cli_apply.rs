@@ -185,6 +185,8 @@ fn succeeded(output: &Output) -> Value {
     payload
 }
 
+/// Применение использует ответ списка: обновляет установленное расширение и пропускает
+/// отсутствующее, не запуская второй управляемый агент.
 #[test]
 fn an_apply_without_a_set_uses_one_managed_agent_session() {
     let project = Project::new().with_extension();
@@ -208,9 +210,19 @@ fn an_apply_without_a_set_uses_one_managed_agent_session() {
         &designer_pid_file,
         &base_dir_file,
     );
+    fs::create_dir(root.join("absent")).expect("absent extension directory");
+    fs::copy(
+        root.join("ext/Configuration.xml"),
+        root.join("absent/Configuration.xml"),
+    )
+    .expect("absent extension sources");
     let config = fs::read_to_string(&project.config)
         .expect("config")
-        .replace("  apply: designer\n", "  apply: agent\n");
+        .replace("  apply: designer\n", "  apply: agent\n")
+        .replace(
+            "    path: ext\n",
+            "    path: ext\n  - name: absent\n    type: EXTENSION\n    path: absent\n",
+        );
     fs::write(
         &project.config,
         format!("{config}  designer_agent:\n    port: {port}\n"),
@@ -229,6 +241,9 @@ fn an_apply_without_a_set_uses_one_managed_agent_session() {
         applied["data"]["provider"]["selected"], "agent",
         "{applied}"
     );
+    let absent = &applied["data"]["steps"][2];
+    assert_eq!(absent["source_set"], "absent", "{applied}");
+    assert_eq!(absent["outcome"], "skipped", "{applied}");
     let commands = fs::read_to_string(commands_log).expect("agent commands");
     let apply_commands: Vec<_> = commands
         .lines()
