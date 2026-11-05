@@ -2,7 +2,7 @@ use super::helpers::{fail_with_remaining_steps, AnalysisByName};
 use super::*;
 use crate::domain::capability::{Operation, Provider};
 use crate::use_cases::context::shell_word;
-use crate::use_cases::exchange_guard::{GenerationGate, LoadExtent};
+use crate::use_cases::exchange_guard::{BeforeLoad, GenerationGate, LoadExtent};
 use crate::use_cases::request::ApplyPolicy;
 use crate::use_cases::version_file::{remove_left_candidates, RunnerVersionFile};
 
@@ -478,6 +478,9 @@ fn run_build_with(
                     });
                 match loaded {
                     Ok((before, mut warnings, token, apply)) => {
+                        if before == BeforeLoad::Unanswered {
+                            warnings.insert(0, gate.unanswered_note(&source_set.name, tool));
+                        }
                         let recorded = gate.after_load(
                             &source_context,
                             loader.tool(),

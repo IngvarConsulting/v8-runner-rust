@@ -971,6 +971,90 @@ mod tests {
         assert_eq!(ledger.read(), Recorded::Nothing);
     }
 
+    /// Запись поколения есть, а база не ответила (платформа без команды поколения или
+    /// чтение снято пределом шага): сверки нет, загрузка не отказывает, а шаг получает
+    /// строку о несверенном поколении (`INV.USE-CASES.A-GENERATION-READ-DECLARES-ITS-OWN-CAP`).
+    #[test]
+    fn an_unanswered_generation_before_a_load_is_named_not_refused() {
+        use crate::domain::capability::Provider;
+        use crate::domain::status::GenerationAfter;
+        use crate::use_cases::agent_session::GenerationLedger;
+        use crate::use_cases::exchange_guard::BeforeLoad;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        create_source_tree(&base);
+        let config = build_config(
+            &base,
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        let set = SourceSetsService::new(&config)
+            .designer_contexts()
+            .into_iter()
+            .find(|set| set.name() == "main")
+            .expect("main");
+        GenerationLedger::of(&set, &config.work_path)
+            .expect("ledger")
+            .record(Provider::Designer, &"1".repeat(40), GenerationAfter::Build)
+            .expect("record");
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = crate::use_cases::exchange_guard::GenerationGate::new(
+            &context,
+            &config,
+            PushMode::Changes,
+        );
+
+        let before = gate
+            .before_load(&set, Provider::Designer, || Ok(None))
+            .expect("no answer does not refuse the load");
+
+        assert_eq!(before, BeforeLoad::Unanswered);
+        let note = gate.unanswered_note("main", Provider::Designer);
+        assert!(
+            note.contains("was not checked before loading source-set 'main'"),
+            "{note}"
+        );
+        assert!(note.contains("did not verify"), "{note}");
+    }
+
+    /// Без записи поколения сравнивать не с чем: это не «нет ответа», и строки нет.
+    #[test]
+    fn a_load_without_a_generation_record_is_not_named_unanswered() {
+        use crate::domain::capability::Provider;
+        use crate::use_cases::exchange_guard::BeforeLoad;
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        create_source_tree(&base);
+        let config = build_config(
+            &base,
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        let set = SourceSetsService::new(&config)
+            .designer_contexts()
+            .into_iter()
+            .find(|set| set.name() == "main")
+            .expect("main");
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = crate::use_cases::exchange_guard::GenerationGate::new(
+            &context,
+            &config,
+            PushMode::Changes,
+        );
+
+        let before = gate
+            .before_load(&set, Provider::Designer, || {
+                panic!("nothing to compare with")
+            })
+            .expect("no record does not refuse the load");
+
+        assert_eq!(before, BeforeLoad::Unchecked);
+    }
+
     #[cfg(unix)]
     fn make_executable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;

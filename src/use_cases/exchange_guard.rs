@@ -535,8 +535,12 @@ pub(crate) enum LoadExtent {
 /// Что показало поколение перед загрузкой.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BeforeLoad {
-    /// Сверки не было: `--force`, записи того же инструмента нет или нет ответа.
+    /// Сверки не было: `--force` или записи того же инструмента нет.
     Unchecked,
+    /// Сверки не было: запись есть, а база не ответила — платформа не знает команды
+    /// поколения или чтение снято собственным пределом шага. Загрузка идёт, ответ называет
+    /// несверенное поколение (`INV.USE-CASES.A-GENERATION-READ-DECLARES-ITS-OWN-CAP`).
+    Unanswered,
     /// Поколение совпало с записанным тем же инструментом.
     Matched,
 }
@@ -654,7 +658,7 @@ impl<'a> GenerationGate<'a> {
             return Ok(BeforeLoad::Unchecked);
         };
         let Some(token) = read()? else {
-            return Ok(BeforeLoad::Unchecked);
+            return Ok(BeforeLoad::Unanswered);
         };
         match predict(Some(&record), Some((tool, &token))) {
             GenerationVerdict::Unchanged => Ok(BeforeLoad::Matched),
@@ -663,6 +667,15 @@ impl<'a> GenerationGate<'a> {
             | GenerationVerdict::NoRecord
             | GenerationVerdict::NoAnswer => Ok(BeforeLoad::Unchecked),
         }
+    }
+
+    /// Строка ответа о несверенном поколении: запись набора есть, а база не ответила, и
+    /// загрузка не проверила, что база не ушла вперёд с прошлого обмена.
+    pub(crate) fn unanswered_note(&self, set: &str, tool: Provider) -> String {
+        let target = self.config.v8_connection().describe_target();
+        format!(
+            "the configuration generation of {target} was not checked before loading source-set '{set}': {tool} gave no answer (the platform knows no generation command or the read hit its cap), so the push did not verify that the infobase has not moved ahead since the last exchange"
+        )
     }
 
     /// Запись набора, сделанная тем же инструментом.
