@@ -3,8 +3,7 @@
 //! Единственный источник для валидации конфига и выбора исполнителя перед запуском.
 //! Таблица возможностей в документации написана вручную; пробелы сверяет тест.
 //! Строка матрицы — данные, а не код: порядок в цепочке назначает владелец проекта,
-//! и правка порядка — изменение
-//! поведения, видимое в квитанции.
+//! и правка порядка — изменение поведения, видимое в квитанции.
 //!
 //! Порядок цепочек повторяет `target()` сайта (`docs/site/data.js`): у файловой базы
 //! `agent → designer → ibcmd`, у кластера `agent → designer` (#206). Замер каждой строки
@@ -711,6 +710,8 @@ mod tests {
 
     const MATRIX_ARTIFACT: &str = "docs/schemas/capability-matrix.json";
 
+    /// Отсутствующий исполнитель из пары `designer`/`ibcmd`, если второй есть в строке,
+    /// включая экспериментальную возможность.
     fn missing_executors(operation: Operation, target: TargetKind) -> Vec<Provider> {
         match (
             capability_of(operation, target, Provider::Designer).is_some(),
@@ -722,6 +723,8 @@ mod tests {
         }
     }
 
+    /// Сверяет пробелы матрицы с разделом документа в обе стороны с учётом вида базы;
+    /// повторная строка и неизвестное уточнение цели также считаются ошибками.
     fn assert_executor_gaps_are_documented(document: &str) {
         let expected: BTreeSet<_> = Operation::ALL
             .into_iter()
@@ -753,13 +756,11 @@ mod tests {
                     .then(|| (format!("`{command}` через `{provider}`"), qualifier))
             })
             .flat_map(|(gap, qualifier)| {
-                let targets: &[_] = if qualifier.starts_with(" на кластерной базе")
-                {
-                    &[TargetKind::Cluster]
-                } else if qualifier.starts_with(" на файловой базе") {
-                    &[TargetKind::File]
-                } else {
-                    &[TargetKind::File, TargetKind::Cluster]
+                let targets: &[_] = match qualifier {
+                    "." => &[TargetKind::File, TargetKind::Cluster],
+                    " на кластерной базе." => &[TargetKind::Cluster],
+                    " на файловой базе." => &[TargetKind::File],
+                    _ => panic!("unknown target qualifier for {gap}: {qualifier:?}"),
                 };
                 targets
                     .iter()
@@ -822,10 +823,30 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "executor gaps in CAPABILITIES.md must match the matrix")]
+    fn a_duplicate_executor_gap_is_rejected() {
+        let document = include_str!("../../docs/CAPABILITIES.md").replace(
+            "- `upload` через `ibcmd`.",
+            "- `upload` через `ibcmd`.\n- `upload` через `ibcmd`.",
+        );
+        assert_executor_gaps_are_documented(&document);
+    }
+
+    #[test]
+    #[should_panic(expected = "executor gaps in CAPABILITIES.md must match the matrix")]
     fn an_executor_gap_with_the_wrong_target_is_rejected() {
         let document = include_str!("../../docs/CAPABILITIES.md").replace(
             "- `push` через `ibcmd` на кластерной базе.",
             "- `push` через `ibcmd` на файловой базе.",
+        );
+        assert_executor_gaps_are_documented(&document);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown target qualifier")]
+    fn an_executor_gap_with_an_unknown_target_qualifier_is_rejected() {
+        let document = include_str!("../../docs/CAPABILITIES.md").replace(
+            "- `upload` через `ibcmd`.",
+            "- `upload` через `ibcmd` только на кластерной базе.",
         );
         assert_executor_gaps_are_documented(&document);
     }
