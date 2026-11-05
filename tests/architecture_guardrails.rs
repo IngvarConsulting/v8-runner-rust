@@ -914,6 +914,8 @@ struct SourceIndex {
     uses: std::collections::HashMap<Vec<String>, std::collections::HashMap<String, Vec<String>>>,
     /// Имена, объявленные в модуле: функции, модули, типы.
     items: std::collections::HashMap<Vec<String>, std::collections::HashSet<String>>,
+    /// Определения `type A = B` в области объявления. `uses` остаётся таблицей импортов.
+    type_aliases: std::collections::BTreeMap<Vec<String>, syn::Type>,
     /// Свободные функции по полному пути.
     functions: std::collections::HashMap<Vec<String>, IndexedFunction>,
 }
@@ -972,6 +974,7 @@ impl SourceIndex {
             units: Vec::new(),
             uses: Default::default(),
             items: Default::default(),
+            type_aliases: Default::default(),
             functions: Default::default(),
         };
         for unit in &units {
@@ -1013,7 +1016,14 @@ impl SourceIndex {
                 syn::Item::Const(item) => Some(item.ident.to_string()),
                 syn::Item::Static(item) => Some(item.ident.to_string()),
                 syn::Item::Trait(item) => Some(item.ident.to_string()),
-                syn::Item::Type(item) => Some(item.ident.to_string()),
+                syn::Item::Type(item) => {
+                    let name = item.ident.to_string();
+                    self.type_aliases.insert(
+                        [module, std::slice::from_ref(&name)].concat(),
+                        item.ty.as_ref().clone(),
+                    );
+                    Some(name)
+                }
                 _ => None,
             };
             if let Some(name) = name {
@@ -1219,6 +1229,8 @@ struct Body<'a> {
     enclosing: Option<Vec<String>>,
     /// Тип, чей это метод: `Self::` в теле ведёт к нему.
     owner: Option<String>,
+    /// Путь self-типа из заголовка `impl` до раскрытия реэкспортов.
+    impl_self: Option<Vec<String>>,
     block: &'a syn::Block,
     globs: Vec<Vec<String>>,
 }
@@ -1277,6 +1289,7 @@ fn production_bodies(index: &SourceIndex) -> Vec<Body<'_>> {
         let mut push = |context: String,
                         enclosing: Option<Vec<String>>,
                         owner: Option<String>,
+                        impl_self: Option<Vec<String>>,
                         block: &'a syn::Block| {
             bodies.push(Body {
                 unit,
@@ -1284,6 +1297,7 @@ fn production_bodies(index: &SourceIndex) -> Vec<Body<'_>> {
                 context,
                 enclosing,
                 owner,
+                impl_self,
                 block,
                 globs: globs.clone(),
             });
@@ -1300,19 +1314,20 @@ fn production_bodies(index: &SourceIndex) -> Vec<Body<'_>> {
                         name.clone(),
                         Some([module, &[name]].concat()),
                         None,
+                        None,
                         &item_fn.block,
                     );
                 }
                 syn::Item::Impl(item_impl) => {
-                    let owner = match item_impl.self_ty.as_ref() {
-                        syn::Type::Path(type_path) => type_path
-                            .path
-                            .segments
-                            .last()
-                            .map(|segment| segment.ident.to_string()),
+                    let self_type = match item_impl.self_ty.as_ref() {
+                        syn::Type::Path(type_path) => Some(&type_path.path),
                         _ => None,
-                    }
-                    .unwrap_or_else(|| "_".to_owned());
+                    };
+                    let owner = self_type
+                        .and_then(|path| path.segments.last())
+                        .map_or_else(|| "_".to_owned(), |segment| segment.ident.to_string());
+                    let impl_self =
+                        self_type.and_then(|path| index.resolve(module, &Default::default(), path));
                     for impl_item in &item_impl.items {
                         if let syn::ImplItem::Fn(method) = impl_item {
                             if !has_cfg_test(&method.attrs) {
@@ -1320,6 +1335,7 @@ fn production_bodies(index: &SourceIndex) -> Vec<Body<'_>> {
                                     format!("{owner}::{}", method.sig.ident),
                                     None,
                                     Some(owner.clone()),
+                                    impl_self.clone(),
                                     &method.block,
                                 );
                             }
@@ -1333,6 +1349,7 @@ fn production_bodies(index: &SourceIndex) -> Vec<Body<'_>> {
                                 if !has_cfg_test(&method.attrs) {
                                     push(
                                         format!("{}::{}", item_trait.ident, method.sig.ident),
+                                        None,
                                         None,
                                         None,
                                         block,
@@ -4259,10 +4276,11 @@ fn dispatch_macros(index: &SourceIndex) -> Vec<String> {
 /// Формы, несущие признак: типы, перечисленные в единственном `carries_dispatch!`, по
 /// последнему сегменту пути.
 fn dispatch_forms(index: &SourceIndex) -> Vec<String> {
-    carried_forms(index, "carries_dispatch")
+    carried_forms(index, &carrier_types(index, "carries_dispatch"))
 }
 
-fn carried_forms(index: &SourceIndex, macro_name: &str) -> Vec<String> {
+/// Единственный список форм каждого признака берём из макроса, который их реализует.
+fn carrier_types(index: &SourceIndex, macro_name: &str) -> Vec<syn::Path> {
     let invocations = index
         .units
         .iter()
@@ -4280,9 +4298,14 @@ fn carried_forms(index: &SourceIndex, macro_name: &str) -> Vec<String> {
         1,
         "the forms are listed once, in {macro_name}!"
     );
-    let types = invocations[0]
+    invocations[0]
         .parse_body_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
-        .expect("the carrier macro lists type paths");
+        .expect("the carrier macro lists type paths")
+        .into_iter()
+        .collect()
+}
+
+fn carried_forms(index: &SourceIndex, types: &[syn::Path]) -> Vec<String> {
     let mut forms = types
         .iter()
         .filter_map(|path| path.segments.last())
@@ -4290,14 +4313,20 @@ fn carried_forms(index: &SourceIndex, macro_name: &str) -> Vec<String> {
         .collect::<Vec<_>>();
     // Псевдоним, чьё определение называет форму, — тоже форма: вход, отвечающий
     // `Result<_, SyntaxExecutionFailure>`, несёт признак так же.
-    let aliases = index
+    let file_modules = index
         .units
         .iter()
-        .flat_map(|unit| &unit.syntax.items)
-        .filter(|item| !item_has_cfg_test(item))
-        .filter_map(|item| match item {
-            syn::Item::Type(alias) => Some((alias.ident.to_string(), normalize_tokens(&alias.ty))),
-            _ => None,
+        .map(|unit| unit.module.as_slice())
+        .collect::<std::collections::BTreeSet<_>>();
+    let aliases = index
+        .type_aliases
+        .iter()
+        .filter_map(|(path, definition)| {
+            let (name, module) = path.split_last()?;
+            // Как и прежний обход файлов, здесь учитываем их верхний уровень.
+            file_modules
+                .contains(module)
+                .then(|| (name.clone(), normalize_tokens(definition)))
         })
         .collect::<Vec<_>>();
     loop {
@@ -4325,6 +4354,15 @@ fn names_a_form(text: &str, forms: &[String]) -> bool {
 /// возвращают такую форму и могут дать работу: берут контекст команды или заводят свою
 /// отметку. Выводятся из типов, а не перечнем: вход, забывший штамп, не ускользнёт.
 fn dispatch_entries(index: &SourceIndex, forms: &[String]) -> Vec<String> {
+    scenario_entries(index, |function| {
+        names_a_form(&normalize_tokens(&function.item.sig.output), forms)
+    })
+}
+
+fn scenario_entries(
+    index: &SourceIndex,
+    carries_form: impl Fn(&IndexedFunction) -> bool,
+) -> Vec<String> {
     let scenarios = path_of("crate::use_cases");
     let mcp = path_of("crate::mcp");
     let mut entries = index
@@ -4340,7 +4378,7 @@ fn dispatch_entries(index: &SourceIndex, forms: &[String]) -> Vec<String> {
             }
             syn::Visibility::Inherited => false,
         })
-        .filter(|(_, function)| names_a_form(&normalize_tokens(&function.item.sig.output), forms))
+        .filter(|(_, function)| carries_form(function))
         .filter(|(_, function)| {
             let inputs = normalize_tokens(&function.item.sig.inputs);
             inputs.contains("ExecutionContext")
@@ -5921,28 +5959,88 @@ fn the_session_stamp_guard_sees_indirection_and_return_bypasses() {
         let source = format!("pub fn execute(c: &ExecutionContext) -> UseCaseResult<Receipt> {{ {body} }}");
         assert!(check(&source).is_empty(), "flagged valid entry: {body}");
     }
+
+    let scoped = SourceIndex::from_sources(&[
+        ("crate::domain::build", "pub struct BuildResult;"),
+        ("crate::use_cases::agent_session", "pub fn connect() {} pub fn with_session() { connect() }"),
+        ("crate::use_cases::provider_selection", "carries_receipt!(crate::domain::build::BuildResult);"),
+        ("crate::use_cases::bridge", "pub struct Link; pub struct Other; impl Other { pub fn attach() { crate::use_cases::agent_session::connect(); } }"),
+        ("crate::use_cases::adapters", "use crate::use_cases::agent_session; impl crate::use_cases::bridge::Link { pub fn attach() { agent_session::connect(); } }"),
+        ("crate::use_cases::alias", "pub use crate::domain::build::BuildResult as Receipt; pub type Loader = crate::use_cases::bridge::Other;"),
+        ("crate::use_cases::sample", "
+            use crate::domain::build::BuildResult;
+            use crate::use_cases::alias::{Loader, Receipt as Answer};
+            type Wrapped = UseCaseResult<Answer>;
+            pub fn impl_elsewhere(c: &ExecutionContext) -> UseCaseResult<BuildResult> { crate::use_cases::bridge::Link::attach(); Ok(BuildResult) }
+            pub fn renamed_receipt(c: &ExecutionContext) -> UseCaseResult<Answer> { crate::use_cases::agent_session::connect(); Ok(Answer) }
+            pub fn type_alias(c: &ExecutionContext) -> UseCaseResult<BuildResult> { Loader::attach(); Ok(BuildResult) }
+            pub fn wrapped_alias(c: &ExecutionContext) -> Wrapped { crate::use_cases::agent_session::connect(); Ok(Answer) }
+        "),
+        ("crate::use_cases::unrelated", "pub struct Answer; pub fn execute(c: &ExecutionContext) -> UseCaseResult<Answer> { crate::use_cases::agent_session::connect(); Ok(Answer) }"),
+    ]);
+    assert_eq!(
+        unstamped_session_entries(&scoped),
+        [
+            "crate::use_cases::sample::impl_elsewhere",
+            "crate::use_cases::sample::renamed_receipt",
+            "crate::use_cases::sample::type_alias",
+            "crate::use_cases::sample::wrapped_alias",
+        ]
+    );
 }
 
+/// Импортированное имя формы проверяем в модуле сигнатуры. Реэкспорт ведёт к полному
+/// пути из `carries_receipt!` и не добавляет новое имя в общий список форм.
+fn receipt_entries(index: &SourceIndex) -> Vec<String> {
+    let types = carrier_types(index, "carries_receipt");
+    let forms = carried_forms(index, &types);
+    let mut paths: std::collections::BTreeSet<Vec<String>> = types
+        .iter()
+        .map(|path| {
+            path.segments
+                .iter()
+                .map(|part| part.ident.to_string())
+                .collect()
+        })
+        .collect();
+    // У `type Reply = UseCaseResult<Renamed>` форма внутри аргумента, а `Renamed`
+    // разрешается там, где объявлен Reply. Замыкание множества также покрывает цепочки.
+    loop {
+        let aliases = index
+            .type_aliases
+            .iter()
+            .filter(|(path, _)| !paths.contains(*path))
+            .filter_map(|(path, definition)| {
+                let (_, module) = path.split_last()?;
+                let mut references = SessionReferences::for_module(index, module, &paths);
+                syn::visit::Visit::visit_type(&mut references, definition);
+                (!references.found.is_empty()).then(|| path.clone())
+            })
+            .collect::<Vec<_>>();
+        if aliases.is_empty() {
+            break;
+        }
+        paths.extend(aliases);
+    }
+    scenario_entries(index, |function| {
+        let output = &function.item.sig.output;
+        if names_a_form(&normalize_tokens(output), &forms) {
+            return true;
+        }
+        let mut references = SessionReferences::for_module(index, &function.module, &paths);
+        syn::visit::Visit::visit_return_type(&mut references, output);
+        !references.found.is_empty()
+    })
+}
+
+/// Отбирает входы с квитанцией, которые могут открыть сессию, затем проверяет их выход.
 fn unstamped_session_entries(index: &SourceIndex) -> Vec<String> {
     use std::collections::{BTreeMap, BTreeSet};
 
     let bodies = production_bodies(index);
     // Все методы типа — один консервативный узел: создание загрузчика учитывает и
     // подключение в его trait-методе, без попытки угадать тип приёмника `.load()`.
-    let node_of = |body: &Body<'_>| {
-        if let Some(owner) = &body.owner {
-            [body.module.as_slice(), std::slice::from_ref(owner)].concat()
-        } else {
-            body.enclosing
-                .clone()
-                .unwrap_or_else(|| [body.module.clone(), path_of(&body.context)].concat())
-        }
-    };
-    let mut nodes: BTreeSet<_> = bodies
-        .iter()
-        .filter(|body| is_scenario_module(&body.module))
-        .map(&node_of)
-        .collect();
+    let mut nodes = BTreeSet::new();
     let mut edges: BTreeMap<Vec<String>, BTreeSet<Vec<String>>> = BTreeMap::new();
     // Пустой impl наследует тела trait по умолчанию: у него нет собственного Body,
     // но создание его типа всё равно может привести к подключению. Связываем тип с
@@ -5997,6 +6095,25 @@ fn unstamped_session_entries(index: &SourceIndex) -> Vec<String> {
             }
         }
     }
+    // Для impl в соседнем модуле узел берём от объявления типа. Если имя не
+    // разрешилось, сохраняем прежний узел, построенный от лексического модуля.
+    let body_nodes = bodies
+        .iter()
+        .filter(|body| is_scenario_module(&body.module))
+        .map(|body| {
+            let node = if let Some(path) = &body.impl_self {
+                SessionReferences::node(index, &nodes, path.clone()).unwrap_or_else(|| path.clone())
+            } else if let Some(owner) = &body.owner {
+                [body.module.as_slice(), std::slice::from_ref(owner)].concat()
+            } else {
+                body.enclosing
+                    .clone()
+                    .unwrap_or_else(|| [body.module.clone(), path_of(&body.context)].concat())
+            };
+            (body, node)
+        })
+        .collect::<Vec<_>>();
+    nodes.extend(body_nodes.iter().map(|(_, node)| node.clone()));
     for (module, self_type, trait_path) in implementations {
         let resolve = |path| {
             index
@@ -6007,31 +6124,13 @@ fn unstamped_session_entries(index: &SourceIndex) -> Vec<String> {
             edges.entry(owner).or_default().insert(defaults);
         }
     }
-    for body in &bodies {
-        if !is_scenario_module(&body.module) {
-            continue;
-        }
-        let mut references = SessionReferences {
-            index,
-            body,
-            nodes: &nodes,
-            local_uses: body.local_uses(index),
-            globs: body
-                .globs
-                .iter()
-                .cloned()
-                .chain(block_uses(index, &body.module, body.block).globs)
-                .collect(),
-            found: BTreeSet::new(),
-        };
+    for (body, node) in body_nodes {
+        let mut references = SessionReferences::for_body(index, body, &nodes);
         syn::visit::Visit::visit_block(&mut references, body.block);
         if let Some(function) = body.enclosing.as_ref().and_then(|p| index.functions.get(p)) {
             syn::visit::Visit::visit_signature(&mut references, &function.item.sig);
         }
-        edges
-            .entry(node_of(body))
-            .or_default()
-            .extend(references.found);
+        edges.entry(node).or_default().extend(references.found);
     }
     let mut reaching: BTreeSet<_> = [
         path_of("crate::use_cases::agent_session::connect"),
@@ -6057,7 +6156,7 @@ fn unstamped_session_entries(index: &SourceIndex) -> Vec<String> {
             break;
         }
     }
-    dispatch_entries(index, &carried_forms(index, "carries_receipt"))
+    receipt_entries(index)
         .into_iter()
         .filter(|entry| is_scenario_module(&path_of(entry)))
         .filter(|entry| reaching.contains(&path_of(entry)))
@@ -6066,19 +6165,7 @@ fn unstamped_session_entries(index: &SourceIndex) -> Vec<String> {
                 .iter()
                 .find(|body| body.enclosing.as_ref() == Some(&path_of(entry)))
                 .expect("indexed entry has a body");
-            let references = SessionReferences {
-                index,
-                body,
-                nodes: &nodes,
-                local_uses: body.local_uses(index),
-                globs: body
-                    .globs
-                    .iter()
-                    .cloned()
-                    .chain(block_uses(index, &body.module, body.block).globs)
-                    .collect(),
-                found: BTreeSet::new(),
-            };
+            let references = SessionReferences::for_body(index, body, &nodes);
             !session_stamped_exit(&references, body.block)
         })
         .collect()
@@ -6086,20 +6173,55 @@ fn unstamped_session_entries(index: &SourceIndex) -> Vec<String> {
 
 /// Общий SourceIndex разрешает импорты; здесь выбирается узел графа, в том числе тип
 /// перед `::new`, и прослеживается его реэкспорт теми же таблицами `use`.
-struct SessionReferences<'a, 'b> {
+struct SessionReferences<'a> {
     index: &'a SourceIndex,
-    body: &'a Body<'b>,
+    module: &'a [String],
     nodes: &'a std::collections::BTreeSet<Vec<String>>,
     local_uses: std::collections::HashMap<String, Vec<String>>,
     globs: Vec<Vec<String>>,
     found: std::collections::BTreeSet<Vec<String>>,
 }
 
-impl SessionReferences<'_, '_> {
+impl<'a> SessionReferences<'a> {
+    fn for_module(
+        index: &'a SourceIndex,
+        module: &'a [String],
+        nodes: &'a std::collections::BTreeSet<Vec<String>>,
+    ) -> Self {
+        Self {
+            index,
+            module,
+            nodes,
+            local_uses: Default::default(),
+            globs: Vec::new(),
+            found: Default::default(),
+        }
+    }
+
+    /// Сохраняет область видимости тела, подставляя в `Self` путь из `impl`.
+    fn for_body(
+        index: &'a SourceIndex,
+        body: &'a Body<'_>,
+        nodes: &'a std::collections::BTreeSet<Vec<String>>,
+    ) -> Self {
+        let mut references = Self::for_module(index, &body.module, nodes);
+        references.local_uses = body.local_uses(index);
+        if let Some(path) = &body.impl_self {
+            references
+                .local_uses
+                .insert("Self".to_owned(), path.clone());
+        }
+        references.globs = body
+            .globs
+            .iter()
+            .cloned()
+            .chain(block_uses(index, &body.module, body.block).globs)
+            .collect();
+        references
+    }
+
     fn targets(&self, path: &syn::Path) -> Vec<Vec<String>> {
-        let resolved = self
-            .index
-            .resolve(&self.body.module, &self.local_uses, path);
+        let resolved = self.index.resolve(self.module, &self.local_uses, path);
         let written = path
             .segments
             .iter()
@@ -6116,6 +6238,8 @@ impl SessionReferences<'_, '_> {
             .collect()
     }
 
+    /// Раскрывает реэкспорты и `type` в модуле объявления, сохраняя хвост `::method`.
+    /// Узел типа заменяет узел отдельного метода, если тот не индексируется отдельно.
     fn node(
         index: &SourceIndex,
         nodes: &std::collections::BTreeSet<Vec<String>>,
@@ -6129,7 +6253,21 @@ impl SessionReferences<'_, '_> {
             let mut next = None;
             for end in (1..=path.len()).rev() {
                 let (name, module) = path[..end].split_last()?;
-                if let Some(target) = index.uses.get(module).and_then(|uses| uses.get(name)) {
+                let target = index
+                    .uses
+                    .get(module)
+                    .and_then(|uses| uses.get(name))
+                    .cloned()
+                    .or_else(|| {
+                        let syn::Type::Path(alias) = index.type_aliases.get(&path[..end])? else {
+                            return None;
+                        };
+                        if alias.qself.is_some() {
+                            return None;
+                        }
+                        index.resolve(module, &Default::default(), &alias.path)
+                    });
+                if let Some(target) = target {
                     next = Some([target.as_slice(), &path[end..]].concat());
                     break;
                 }
@@ -6143,7 +6281,7 @@ impl SessionReferences<'_, '_> {
     }
 }
 
-impl<'ast> syn::visit::Visit<'ast> for SessionReferences<'_, '_> {
+impl<'ast> syn::visit::Visit<'ast> for SessionReferences<'_> {
     fn visit_item_use(&mut self, _node: &'ast syn::ItemUse) {}
 
     fn visit_path(&mut self, path: &'ast syn::Path) {
@@ -6152,8 +6290,9 @@ impl<'ast> syn::visit::Visit<'ast> for SessionReferences<'_, '_> {
     }
 }
 
-fn session_stamped_exit(references: &SessionReferences<'_, '_>, block: &syn::Block) -> bool {
-    fn stamped(references: &SessionReferences<'_, '_>, expr: &syn::Expr) -> bool {
+/// Принимает штамп в хвосте функции и отбрасывает выходы, которые могут его обойти.
+fn session_stamped_exit(references: &SessionReferences<'_>, block: &syn::Block) -> bool {
+    fn stamped(references: &SessionReferences<'_>, expr: &syn::Expr) -> bool {
         let syn::Expr::Call(call) = expr else {
             return false;
         };
@@ -6204,7 +6343,7 @@ fn the_session_stamp_guard_rejects_each_real_entry_without_its_stamp() {
     }
     let index = SourceIndex::of_src();
     let mut checked = Vec::new();
-    for entry in dispatch_entries(&index, &carried_forms(&index, "carries_receipt")) {
+    for entry in receipt_entries(&index) {
         let path = path_of(&entry);
         if !is_scenario_module(&path) {
             continue;
