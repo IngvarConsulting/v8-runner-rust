@@ -9,7 +9,7 @@ use crate::domain::issue::{EdtIssue, Issue, IssueSeverity, ObjectIssue};
 use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::designer_validation;
 use crate::parsers::edt_validation;
-use crate::platform::designer::{syntax_check_status, DesignerDsl};
+use crate::platform::designer::{syntax_check_outcome, syntax_check_status, DesignerDsl};
 use crate::platform::edt::{render_interactive_validate_command, EdtDsl, EdtError};
 use crate::platform::edt_session::{
     EdtSessionError, EdtSessionHostOptions, EdtSessionManager, EdtSessionRequest,
@@ -1017,20 +1017,12 @@ fn session_status(
     }
 }
 
-/// Код замечаний, который ответ сессии берёт у Конфигуратора.
-const SESSION_ISSUES_FOUND: NonZeroI32 = NonZeroI32::new(101).unwrap();
 /// `-1` — принятый здесь знак «кода выхода не наблюдалось».
 const SESSION_EXIT_NOT_OBSERVED: NonZeroI32 = NonZeroI32::new(-1).unwrap();
 
 /// Исход команды общей сессии: кода выхода у неё нет, и его заменяет знак по вердикту.
 fn session_exit(status: SyntaxCheckStatus) -> Result<(), NonZeroI32> {
-    match status {
-        SyntaxCheckStatus::Clean => Ok(()),
-        SyntaxCheckStatus::IssuesFound => Err(SESSION_ISSUES_FOUND),
-        SyntaxCheckStatus::ToolFailed | SyntaxCheckStatus::Planned => {
-            Err(SESSION_EXIT_NOT_OBSERVED)
-        }
-    }
+    syntax_check_outcome(status).unwrap_or(Err(SESSION_EXIT_NOT_OBSERVED))
 }
 
 /// Отказ общей сессии на проекте.

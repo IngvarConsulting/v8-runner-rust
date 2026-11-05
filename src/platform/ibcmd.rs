@@ -302,7 +302,7 @@ impl<'a> IbcmdDsl<'a> {
     pub fn ensure_infobase_create(&self) -> Result<IbcmdInfobaseCreateOutcome, IbcmdError> {
         let args = self.create_infobase_args();
         let result = self.run(&args)?;
-        if result.process.exit_code == 0 {
+        if result.process.outcome().is_ok() {
             return Ok(IbcmdInfobaseCreateOutcome {
                 status: IbcmdInfobaseCreateStatus::Created,
                 result,
@@ -310,7 +310,9 @@ impl<'a> IbcmdDsl<'a> {
         }
         let question = self.authenticated_infobase_args(&["config", "generation-id"]);
         let status = match self.run_with(&question, &self.execution_policy.for_reading()) {
-            Ok(probe) if probe.process.exit_code == 0 => IbcmdInfobaseCreateStatus::AlreadyExists,
+            Ok(probe) if probe.process.outcome().is_ok() => {
+                IbcmdInfobaseCreateStatus::AlreadyExists
+            }
             Ok(_) => IbcmdInfobaseCreateStatus::Failed,
             Err(IbcmdError::Spawn(error)) => IbcmdInfobaseCreateStatus::Unconfirmed(error),
             Err(error) => return Err(error),
