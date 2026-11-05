@@ -201,7 +201,7 @@ v8-runner infobase create
   each check only the key of their own operation (`download`, `infobase.dump` or
   `infobase.restore`), so a key of another operation does not block them; `test --no-push` and `launch` check no key; every
   other command that loads the project checks all keys.
-- `provider.endpoint` (`mode`: `managed`/`attached`/`gate`, `address`: `host:port`, never credentials) appears only when the command opened an agent session; previews and platform-process runs omit it.
+- `provider.endpoint` (`mode`: `managed`/`attached`/`gate`, `address`: `host:port`, never credentials) appears only when the command opened an agent session, including an `upload` extension-presence probe on a server target; previews and commands without an opened session omit it.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
@@ -302,6 +302,17 @@ v8-runner infobase create
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.
 
 ## Output Discipline
+
+Agent command failures retain the terminal message plus a bounded excerpt of the
+same command's diagnostics, prioritizing nearby typed loading issues and log
+messages while keeping their order; a failed `push` load names `agent load`.
+Use the reported file and reason when available. The session transcript under
+`workPath/logs/platform/` contains re-encoded parsed messages with credentials
+masked. Unparsed replies, banners and raw stderr are omitted with their byte
+count, so malformed output cannot disclose escaped credentials. A bare
+`ConfigFilesError` without diagnostic messages does not identify a specific
+source validation rule.
+
 
 When reporting results, distinguish:
 

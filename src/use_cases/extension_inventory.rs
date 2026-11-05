@@ -3,6 +3,7 @@
 //! Provider selection chooses the standalone agent or IBCMD. Designer has no
 //! batch key for installed extensions, so it cannot serve this family.
 
+use crate::use_cases::provider_selection::stamp_session;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -37,10 +38,7 @@ pub fn execute(
     request: &ExtensionInventoryRequest,
 ) -> UseCaseResult<ExtensionInventoryResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_read(context, config, request),
-            context,
-        ),
+        stamp_session(run_read(context, config, request), context),
         context.work(),
     )
 }
@@ -562,10 +560,7 @@ pub fn change(
     dry_run: bool,
 ) -> UseCaseResult<ExtensionsResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_change(context, config, request, dry_run),
-            context,
-        ),
+        stamp_session(run_change(context, config, request, dry_run), context),
         context.work(),
     )
 }

@@ -776,6 +776,14 @@ fn an_unreachable_attached_agent_is_refused_and_no_process_is_launched_instead()
         "{payload}"
     );
     assert_ne!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    assert!(
+        payload["data"]["provider"].get("endpoint").is_none(),
+        "{payload}"
+    );
     assert!(
         !harness.designer_args_log.exists(),
         "an attached endpoint must never be replaced by a managed launch"
@@ -869,5 +877,58 @@ fn pull_all_through_the_agent_refuses_a_name_that_is_not_an_identifier() {
     assert_eq!(
         fs::read_to_string(&harness.config_path).expect("project file"),
         before
+    );
+}
+
+/// `upload` исполняется Конфигуратором, но наличие расширения у кластера спрашивает
+/// агент. Даже последующий отказ процесса не должен потерять адрес уже открытой сессии.
+#[test]
+fn an_upload_receipt_names_the_agent_used_by_its_extension_probe() {
+    let harness = harness(true, Some(true), true);
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(
+        &harness.config_path,
+        config.replace(
+            &format!("File={}", harness.dir.path().join("ib").display()),
+            "Srvr=127.0.0.1:1541;Ref=receipt",
+        ),
+    )
+    .expect("cluster config");
+    let artifact = harness.dir.path().join("receipt.cfe");
+    fs::write(&artifact, "fixture").expect("artifact");
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &harness.config_path.display().to_string(),
+            "--json-message",
+            "upload",
+            "--path",
+            &artifact.display().to_string(),
+            "--extension",
+            "NewReceiptExtension",
+        ])
+        .output()
+        .expect("upload");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    // Двойник Конфигуратора обслуживает только запуск агента, обычную загрузку отвергает.
+    assert!(!output.status.success(), "{payload}");
+    assert!(
+        harness.designer_args_log.exists(),
+        "upload reached the Designer: {payload}"
+    );
+    assert!(
+        read_or_empty(&harness.commands_log).contains("config extensions properties get"),
+        "the agent was asked: {payload}"
+    );
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "designer",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["data"]["provider"]["endpoint"],
+        serde_json::json!({
+            "mode": "attached", "address": format!("127.0.0.1:{}", harness.port),
+        }),
+        "{payload}"
     );
 }
