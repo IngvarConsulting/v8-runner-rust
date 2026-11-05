@@ -30,6 +30,7 @@ use crate::use_cases::interruption::{
     cancelled_outcome, deferred_process_interruption, SafePoint, SafePointCancel,
 };
 use crate::use_cases::progress::log_live_stage;
+use crate::use_cases::provider_selection::stamp_session;
 use crate::use_cases::request::LoadRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
@@ -54,7 +55,10 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing load use case"
     );
-    stamp_dispatch(run_load(context, config, args), context.work())
+    stamp_dispatch(
+        stamp_session(run_load(context, config, args), context),
+        context.work(),
+    )
 }
 
 type LoadExecutionFailure = UseCaseFailure<LoadResult>;

@@ -1,3 +1,4 @@
+use crate::use_cases::provider_selection::stamp_session;
 use std::time::Instant;
 
 use crate::config::model::{AppConfig, SourceSetPurpose};
@@ -33,10 +34,7 @@ pub fn execute(
     args: &ConfigureExtensionsRequest,
 ) -> UseCaseResult<ExtensionsResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_configure(context, config, args),
-            context,
-        ),
+        stamp_session(run_configure(context, config, args), context),
         context.work(),
     )
 }
