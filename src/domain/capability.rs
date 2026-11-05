@@ -614,7 +614,7 @@ impl ProviderReceipt {
         }
     }
 
-    /// Никто не готов: пропущены все, кого пробовали.
+    /// Никто не подошёл: пропущенные с причиной, в том числе исключённые без попытки.
     pub fn nobody(origin: ProviderOrigin, skipped: Vec<SkippedProvider>) -> Self {
         Self {
             selected: None,

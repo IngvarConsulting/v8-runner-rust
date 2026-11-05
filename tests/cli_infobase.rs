@@ -1135,6 +1135,10 @@ fn download_state_db_follows_a_providers_key_naming_designer_or_ibcmd() {
         assert_eq!(envelope["ok"], true, "{provider}: {envelope}");
         assert_eq!(envelope["data"]["state"], "database", "{envelope}");
         assert_eq!(envelope["data"]["provider"]["selected"], provider);
+        assert!(
+            envelope["data"]["provider"].get("skipped").is_none(),
+            "{provider}: {envelope}"
+        );
         assert_eq!(
             envelope["data"]["provider"]["origin"],
             serde_json::json!({"kind": "override", "file": "v8project.yaml"})
