@@ -10,9 +10,13 @@ below. This test is the reintroduction guard for equivalent release paths.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
+import subprocess
+import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,6 +32,108 @@ def load_release_verifier():
 
 
 class ReleaseGovernanceTest(unittest.TestCase):
+    def test_release_refuses_tags_github_cannot_verify(self) -> None:
+        verifier = load_release_verifier()
+        repo = "IngvarConsulting/v8-runner-rust"
+        version = re.search(
+            r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(encoding="utf-8"), re.M
+        )[1]
+        tag = f"v{version}"
+        commit, tag_sha, other = "1" * 40, "2" * 40, "3" * 40
+        ref = f"refs/tags/{tag}"
+        ref_path = f"repos/{repo}/git/ref/tags/{tag.replace('+', '%2B')}"
+        tag_path = f"repos/{repo}/git/tags/{tag_sha}"
+        tag_ref = {"ref": ref, "object": {"type": "tag", "sha": tag_sha}}
+        tag_object = {
+            "tag": tag,
+            "sha": tag_sha,
+            "object": {"type": "commit", "sha": commit},
+            "verification": {"verified": True, "reason": "valid"},
+        }
+        git = {
+            ("status", "--porcelain"): "",
+            ("rev-parse", "HEAD"): commit,
+            ("rev-parse", f"{ref}^{{commit}}"): commit,
+            ("rev-parse", f"{ref}^{{tag}}"): tag_sha,
+            ("rev-parse", "refs/remotes/origin/master"): commit,
+        }
+
+        cases = (
+            ("bad_email", tag_ref, {**tag_object, "verification": {
+                "verified": False, "reason": "bad_email",
+            }}, "bad_email"),
+            ("unsigned", tag_ref, {**tag_object, "verification": {
+                "verified": False, "reason": "unsigned",
+            }}, "unsigned"),
+            ("not a boolean", tag_ref, {**tag_object, "verification": {
+                "verified": "true",
+            }}, "verification.verified"),
+            ("missing verification", tag_ref, {**tag_object, "verification": None},
+             "verification.verified"),
+            ("lightweight", {**tag_ref, "object": {"type": "commit", "sha": commit}},
+             tag_object, "annotated tag"),
+            ("different tag object", {**tag_ref, "object": {"type": "tag", "sha": other}},
+             tag_object, "tag object"),
+            ("mismatched API object", tag_ref, {**tag_object, "sha": other}, "tag object"),
+            ("alias", tag_ref, {**tag_object, "tag": "v9.9.9"}, "tag object"),
+            ("wrong commit", tag_ref, {**tag_object, "object": {"type": "commit", "sha": other}},
+             "source commit"),
+            ("nested tag", tag_ref, {**tag_object, "object": {"type": "tag", "sha": tag_sha}},
+             "source commit"),
+            ("malformed response", tag_ref, "not JSON", "GitHub API"),
+            ("unavailable API", tag_ref, None, "GitHub API"),
+            ("verified", tag_ref, tag_object, None),
+        )
+        for label, ref_response, tag_response, error in cases:
+            with self.subTest(label=label):
+                def run(args, **_kwargs):
+                    if args[0] == "git":
+                        output = git[tuple(args[1:])]
+                    else:
+                        self.assertEqual(args[:2], ["gh", "api"])
+                        response = {ref_path: ref_response, tag_path: tag_response}[args[-1]]
+                        if response is None:
+                            raise subprocess.CalledProcessError(1, args)
+                        output = response if isinstance(response, str) else json.dumps(response)
+                    return subprocess.CompletedProcess(args, 0, stdout=output)
+
+                with (
+                    patch.object(verifier.subprocess, "run", side_effect=run),
+                    patch.object(sys, "argv", ["verify-release-contract.py", tag]),
+                    patch.dict("os.environ", {"GITHUB_SHA": commit, "GITHUB_REPOSITORY": repo}),
+                ):
+                    if error:
+                        with self.assertRaisesRegex(SystemExit, error):
+                            verifier.main()
+                    else:
+                        verifier.main()
+
+    def test_signature_gate_blocks_draft_operations_from_trusted_source(self) -> None:
+        """Guard against executing the verifier from the unverified tag again."""
+        jobs = self._release_jobs()
+        preflight = jobs["preflight"]
+        steps = preflight.split("\n      - name: ")
+        verify = next(i for i, step in enumerate(steps) if
+                      "run: python3 scripts/release/verify-release-contract.py" in step)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", steps[verify])
+        self.assertIn("fetch-depth: 0", preflight)
+        for operation in ("gh release view", "gh release delete"):
+            self.assertLess(verify, next(i for i, step in enumerate(steps) if operation in step))
+        self.assertNotIn("continue-on-error:", preflight)
+        self.assertNotIn("\n        if:", preflight)
+        for job, needs in {
+            "build": "preflight",
+            "publish": "build",
+            "audit-native": "publish",
+            "audit-draft": "[publish, audit-native]",
+            "freeze": "audit-draft",
+        }.items():
+            self.assertIn(f"\n    needs: {needs}\n", "\n" + jobs[job])
+            self.assertNotIn("\n    if:", jobs[job])
+        for job in jobs.values():
+            self.assertIn("ref: ${{ github.sha }}", job)
+            self.assertNotIn("ref: ${{ inputs.tag }}", job)
+
     def test_release_is_verified_and_self_describing(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         self.assertIn("preflight:", workflow)

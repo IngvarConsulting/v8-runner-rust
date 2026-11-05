@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag on the current protected master commit"
+        description: "Existing GitHub-verified signed tag on the current protected master commit"
         required: true
         type: string
       prerelease:
@@ -34,10 +34,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout exact release tag
+      - name: Checkout approved release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Fetch protected master identity
@@ -53,7 +53,11 @@ jobs:
         with:
           toolchain: "1.95.0"
 
-      - name: Verify tag, protected source, license, and package metadata
+      # The repository's Immutable release tags ruleset protects v* refs from updates
+      # and deletions between this check and the draft/publish jobs.
+      - name: Verify signed tag, protected source, license, and package metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release/verify-release-contract.py "${RELEASE_TAG}"
 
       - name: Refuse a published release and remove only a stale draft
@@ -120,10 +124,10 @@ jobs:
             macos_deployment_target: "11.0"
 
     steps:
-      - name: Checkout exact release tag
+      - name: Checkout approved release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: Install Linux build dependencies
         if: ${{ matrix.linux_deps != '' }}
@@ -195,10 +199,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Checkout exact release tag
+      - name: Checkout approved release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -277,10 +281,10 @@ jobs:
             target: aarch64-apple-darwin
             asset: v8-runner-macos-aarch64.tar.gz
     steps:
-      - name: Checkout exact release tag
+      - name: Checkout approved release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: Download draft release assets
         env:
@@ -308,10 +312,10 @@ jobs:
       contents: write
       attestations: read
     steps:
-      - name: Checkout exact release tag
+      - name: Checkout approved release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: Download and verify draft
         env:
@@ -342,10 +346,10 @@ jobs:
       contents: write
       attestations: read
     steps:
-      - name: Checkout exact release tag
+      - name: Checkout approved release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: Download audited snapshot
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
