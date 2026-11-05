@@ -1,9 +1,9 @@
 //! Матрица возможностей: кто исполняет операцию на цели данного вида.
 //!
-//! Единственный источник для трёх потребителей — валидации конфига, выбора исполнителя
-//! перед запуском и таблицы возможностей в документации. Строка матрицы — данные, а не
-//! код: порядок в цепочке назначает владелец проекта, и правка порядка — изменение
-//! поведения, видимое в квитанции.
+//! Единственный источник для валидации конфига и выбора исполнителя перед запуском.
+//! Таблица возможностей в документации написана вручную; пробелы сверяет тест.
+//! Строка матрицы — данные, а не код: порядок в цепочке назначает владелец проекта,
+//! и правка порядка — изменение поведения, видимое в квитанции.
 //!
 //! Порядок цепочек повторяет `target()` сайта (`docs/site/data.js`): у файловой базы
 //! `agent → designer → ibcmd`, у кластера `agent → designer` (#206). Замер каждой строки
@@ -706,8 +706,156 @@ pub fn ibcmd_for_every_choice_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     const MATRIX_ARTIFACT: &str = "docs/schemas/capability-matrix.json";
+
+    /// Отсутствующий исполнитель из пары `designer`/`ibcmd`, если второй есть в строке,
+    /// включая экспериментальную возможность.
+    fn missing_executors(operation: Operation, target: TargetKind) -> Vec<Provider> {
+        match (
+            capability_of(operation, target, Provider::Designer).is_some(),
+            capability_of(operation, target, Provider::Ibcmd).is_some(),
+        ) {
+            (true, false) => vec![Provider::Ibcmd],
+            (false, true) => vec![Provider::Designer],
+            _ => vec![],
+        }
+    }
+
+    /// Сверяет пробелы матрицы с разделом документа в обе стороны с учётом вида базы;
+    /// повторная строка и неизвестное уточнение цели также считаются ошибками.
+    fn assert_executor_gaps_are_documented(document: &str) {
+        let expected: BTreeSet<_> = Operation::ALL
+            .into_iter()
+            .flat_map(|operation| {
+                [TargetKind::File, TargetKind::Cluster]
+                    .into_iter()
+                    .flat_map(move |target| {
+                        missing_executors(operation, target)
+                            .into_iter()
+                            .map(move |provider| {
+                                let path = operation.as_str().replace('.', " ");
+                                let command = crate::cli::synonyms::dictionary_path(&path);
+                                (format!("`{command}` через `{provider}`"), target.as_str())
+                            })
+                    })
+            })
+            .collect();
+        let mut lines = document.lines();
+        assert!(
+            lines.any(|line| line == "## Пока не поддерживается"),
+            "CAPABILITIES.md must have the unsupported section"
+        );
+        let mut documented: Vec<_> = lines
+            .take_while(|line| !line.starts_with("## "))
+            .filter_map(|line| {
+                let (command, rest) = line.strip_prefix("- `")?.split_once("` через `")?;
+                let (provider, qualifier) = rest.split_once('`')?;
+                matches!(provider, "designer" | "ibcmd")
+                    .then(|| (format!("`{command}` через `{provider}`"), qualifier))
+            })
+            .flat_map(|(gap, qualifier)| {
+                let targets: &[_] = match qualifier {
+                    "." => &[TargetKind::File, TargetKind::Cluster],
+                    " на кластерной базе." => &[TargetKind::Cluster],
+                    " на файловой базе." => &[TargetKind::File],
+                    _ => panic!("unknown target qualifier for {gap}: {qualifier:?}"),
+                };
+                targets
+                    .iter()
+                    .map(move |target| (gap.clone(), target.as_str()))
+            })
+            .collect();
+        documented.sort();
+        assert_eq!(
+            documented,
+            expected.into_iter().collect::<Vec<_>>(),
+            "executor gaps in CAPABILITIES.md must match the matrix (including experimental providers)"
+        );
+    }
+
+    // Reintroduction guard: ручной список отставал от матрицы. Единственный владелец —
+    // capabilities; сравнение в обе стороны ловит новый пробел и устаревшую строку.
+    #[test]
+    fn executor_gaps_are_named_in_the_docs() {
+        assert_executor_gaps_are_documented(include_str!("../../docs/CAPABILITIES.md"));
+    }
+
+    #[test]
+    fn executor_gaps_are_target_specific_and_include_experimental_providers() {
+        assert!(missing_executors(Operation::Build, TargetKind::File).is_empty());
+        assert_eq!(
+            missing_executors(Operation::Build, TargetKind::Cluster),
+            [Provider::Ibcmd]
+        );
+        for operation in [Operation::InfobaseDump, Operation::InfobaseRestore] {
+            assert!(missing_executors(operation, TargetKind::File).is_empty());
+            assert_eq!(
+                missing_executors(operation, TargetKind::Cluster),
+                [Provider::Ibcmd]
+            );
+        }
+        assert_eq!(
+            missing_executors(Operation::Extensions, TargetKind::File),
+            [Provider::Designer]
+        );
+        assert!(missing_executors(Operation::Extensions, TargetKind::Cluster).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "executor gaps in CAPABILITIES.md must match the matrix")]
+    fn a_missing_executor_gap_is_rejected() {
+        let document =
+            include_str!("../../docs/CAPABILITIES.md").replace("- `upload` через `ibcmd`.", "");
+        assert_executor_gaps_are_documented(&document);
+    }
+
+    #[test]
+    #[should_panic(expected = "executor gaps in CAPABILITIES.md must match the matrix")]
+    fn an_extra_executor_gap_is_rejected() {
+        let document = include_str!("../../docs/CAPABILITIES.md").replace(
+            "## Пока не поддерживается",
+            "## Пока не поддерживается\n\n- `unknown-command` через `designer`.",
+        );
+        assert_executor_gaps_are_documented(&document);
+    }
+
+    #[test]
+    #[should_panic(expected = "executor gaps in CAPABILITIES.md must match the matrix")]
+    fn a_duplicate_executor_gap_is_rejected() {
+        let document = include_str!("../../docs/CAPABILITIES.md").replace(
+            "- `upload` через `ibcmd`.",
+            "- `upload` через `ibcmd`.\n- `upload` через `ibcmd`.",
+        );
+        assert_executor_gaps_are_documented(&document);
+    }
+
+    #[test]
+    #[should_panic(expected = "executor gaps in CAPABILITIES.md must match the matrix")]
+    fn an_executor_gap_with_the_wrong_target_is_rejected() {
+        let document = include_str!("../../docs/CAPABILITIES.md").replace(
+            "- `push` через `ibcmd` на кластерной базе.",
+            "- `push` через `ibcmd` на файловой базе.",
+        );
+        assert_executor_gaps_are_documented(&document);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown target qualifier")]
+    fn an_executor_gap_with_an_unknown_target_qualifier_is_rejected() {
+        let document = include_str!("../../docs/CAPABILITIES.md").replace(
+            "- `upload` через `ibcmd`.",
+            "- `upload` через `ibcmd` только на кластерной базе.",
+        );
+        assert_executor_gaps_are_documented(&document);
+    }
+
+    #[test]
+    #[should_panic(expected = "CAPABILITIES.md must have the unsupported section")]
+    fn a_missing_unsupported_section_is_rejected() {
+        assert_executor_gaps_are_documented("# Other documentation\n");
+    }
 
     /// Матрица как данные: операция → вид цели → исполнители строки по порядку с флагом
     /// `implemented`. Читает её сверка сайта `scripts/site_matrix.py`.
