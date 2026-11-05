@@ -4259,13 +4259,17 @@ fn dispatch_macros(index: &SourceIndex) -> Vec<String> {
 /// Формы, несущие признак: типы, перечисленные в единственном `carries_dispatch!`, по
 /// последнему сегменту пути.
 fn dispatch_forms(index: &SourceIndex) -> Vec<String> {
+    carried_forms(index, "carries_dispatch")
+}
+
+fn carried_forms(index: &SourceIndex, macro_name: &str) -> Vec<String> {
     let invocations = index
         .units
         .iter()
         .flat_map(|unit| &unit.syntax.items)
         .filter(|item| !item_has_cfg_test(item))
         .filter_map(|item| match item {
-            syn::Item::Macro(item_macro) if item_macro.mac.path.is_ident("carries_dispatch") => {
+            syn::Item::Macro(item_macro) if item_macro.mac.path.is_ident(macro_name) => {
                 Some(&item_macro.mac)
             }
             _ => None,
@@ -4274,11 +4278,11 @@ fn dispatch_forms(index: &SourceIndex) -> Vec<String> {
     assert_eq!(
         invocations.len(),
         1,
-        "the forms that carry the flag are listed once, in carries_dispatch!"
+        "the forms are listed once, in {macro_name}!"
     );
     let types = invocations[0]
         .parse_body_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
-        .expect("carries_dispatch! lists type paths");
+        .expect("the carrier macro lists type paths");
     let mut forms = types
         .iter()
         .filter_map(|path| path.segments.last())
@@ -5859,5 +5863,388 @@ fn the_apply_act_has_one_owner() {
         offenders.is_empty(),
         "these modules apply the configuration on their own instead of through apply::act:\n{}",
         offenders.join("\n")
+    );
+}
+
+/// Корень #383: подключение запоминало адрес, но новый вход мог вернуть квитанцию без
+/// штампа. Подключением владеет agent_session::connect, переносом в квитанцию — только
+/// provider_selection::stamp_session. Страж выводит входы из carries_receipt!, а пути —
+/// из AST, включая ссылки на функции, импорты и типы с методами подключения. Имена
+/// сценариев и посредников не перечисляются: переименование не скрывает обход.
+/// Граф консервативен по значениям аргументов: например, init копирует только через
+/// Designer, но зовёт общий исполнитель снимка. Его штамп без сессии ничего не добавляет.
+#[test]
+fn every_agent_receipt_passes_through_the_session_stamp() {
+    let missing = unstamped_session_entries(&SourceIndex::of_src());
+    assert!(
+        missing.is_empty(),
+        "agent receipts bypass stamp_session:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn the_session_stamp_guard_sees_indirection_and_return_bypasses() {
+    let check = |body: &str| {
+        unstamped_session_entries(&SourceIndex::from_sources(&[
+            ("crate::use_cases::agent_session", "pub fn connect() {} pub fn with_session() { connect() }"),
+            ("crate::use_cases::provider_selection", "carries_receipt!(Receipt); pub fn stamp_session(x: R, c: &ExecutionContext) -> R { x }"),
+            ("crate::use_cases::result", "pub fn stamp_dispatch(x: R, w: W) -> R { x }"),
+            ("crate::use_cases::bridge", "pub use crate::use_cases::agent_session::connect as open; pub struct Link; impl Link { pub fn new() -> Self { Self } fn hidden(&self) { open() } } pub trait Dial { fn dial(&self) { open() } } pub struct DefaultLink; impl Dial for DefaultLink {} pub fn renamed() { open() }"),
+            ("crate::use_cases::alias", "pub use crate::use_cases::bridge::Link as Loader; pub use crate::use_cases::bridge::DefaultLink as DefaultLoader; pub use crate::use_cases::bridge::renamed as run;"),
+            ("crate::use_cases::sample", body),
+        ]))
+    };
+    for body in [
+        "crate::use_cases::agent_session::connect(); Ok(Receipt)",
+        "use crate::use_cases::agent_session::with_session as go; go(); Ok(Receipt)",
+        "use crate::use_cases::alias::run as go; let f = go; f(); Ok(Receipt)",
+        "use crate::use_cases::alias::Loader; let _ = Loader::new(); Ok(Receipt)",
+        "use crate::use_cases::alias::Loader; let _ = Loader {}; Ok(Receipt)",
+        "let _: Option<crate::use_cases::bridge::Link> = None; Ok(Receipt)",
+        "use crate::use_cases::bridge::{DefaultLink, Dial}; let link = DefaultLink; link.dial(); Ok(Receipt)",
+        "use crate::use_cases::alias::DefaultLoader; use crate::use_cases::bridge::Dial; let link = DefaultLoader; link.dial(); Ok(Receipt)",
+        "crate::use_cases::bridge::renamed(); let _ = crate::use_cases::provider_selection::stamp_session(Ok(Receipt), c); Ok(Receipt)",
+        "crate::use_cases::bridge::renamed(); if flag { return Ok(Receipt); } crate::use_cases::provider_selection::stamp_session(Ok(Receipt), c)",
+        "crate::use_cases::bridge::renamed(); fallible()?; crate::use_cases::provider_selection::stamp_session(Ok(Receipt), c)",
+        "crate::use_cases::bridge::renamed(); stamp_session(Ok(Receipt), c)",
+        "let _ = inner(c); Ok(Receipt)",
+    ] {
+        let source = format!("fn stamp_session(x: R, c: &ExecutionContext) -> R {{ x }} fn inner(c: &ExecutionContext) -> UseCaseResult<Receipt> {{ crate::use_cases::provider_selection::stamp_session({{ crate::use_cases::bridge::renamed(); Ok(Receipt) }}, c) }} pub fn renamed_entry(c: &ExecutionContext) -> UseCaseResult<Receipt> {{ {body} }}");
+        assert_eq!(check(&source), ["crate::use_cases::sample::renamed_entry"], "missed bypass: {body}");
+    }
+    for body in [
+        "crate::use_cases::provider_selection::stamp_session({ crate::use_cases::bridge::renamed(); Ok(Receipt) }, c)",
+        "use crate::use_cases::provider_selection::stamp_session as stamp; crate::use_cases::result::stamp_dispatch(stamp({ crate::use_cases::bridge::renamed(); Ok(Receipt) }, c), c.work())",
+        "Ok(Receipt)",
+    ] {
+        let source = format!("pub fn execute(c: &ExecutionContext) -> UseCaseResult<Receipt> {{ {body} }}");
+        assert!(check(&source).is_empty(), "flagged valid entry: {body}");
+    }
+}
+
+fn unstamped_session_entries(index: &SourceIndex) -> Vec<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let bodies = production_bodies(index);
+    // Все методы типа — один консервативный узел: создание загрузчика учитывает и
+    // подключение в его trait-методе, без попытки угадать тип приёмника `.load()`.
+    let node_of = |body: &Body<'_>| {
+        if let Some(owner) = &body.owner {
+            [body.module.as_slice(), std::slice::from_ref(owner)].concat()
+        } else {
+            body.enclosing
+                .clone()
+                .unwrap_or_else(|| [body.module.clone(), path_of(&body.context)].concat())
+        }
+    };
+    let mut nodes: BTreeSet<_> = bodies
+        .iter()
+        .filter(|body| is_scenario_module(&body.module))
+        .map(&node_of)
+        .collect();
+    let mut edges: BTreeMap<Vec<String>, BTreeSet<Vec<String>>> = BTreeMap::new();
+    // Пустой impl наследует тела trait по умолчанию: у него нет собственного Body,
+    // но создание его типа всё равно может привести к подключению. Связываем тип с
+    // trait, а trait — с прежними узлами его методов, не сопоставляя имена `.method()`.
+    let mut items = index
+        .units
+        .iter()
+        .map(|unit| (unit.module.clone(), unit.syntax.items.as_slice()))
+        .collect::<Vec<_>>();
+    let mut implementations = Vec::new();
+    while let Some((module, declarations)) = items.pop() {
+        if !is_scenario_module(&module) {
+            continue;
+        }
+        for item in declarations.iter().filter(|item| !item_has_cfg_test(item)) {
+            match item {
+                syn::Item::Struct(item) => {
+                    nodes.insert([module.clone(), vec![item.ident.to_string()]].concat());
+                }
+                syn::Item::Enum(item) => {
+                    nodes.insert([module.clone(), vec![item.ident.to_string()]].concat());
+                }
+                syn::Item::Trait(item) => {
+                    let owner = [module.clone(), vec![item.ident.to_string()]].concat();
+                    nodes.insert(owner.clone());
+                    for member in &item.items {
+                        if let syn::TraitItem::Fn(method) = member {
+                            if method.default.is_some() && !has_cfg_test(&method.attrs) {
+                                edges.entry(owner.clone()).or_default().insert(
+                                    [owner.clone(), vec![method.sig.ident.to_string()]].concat(),
+                                );
+                            }
+                        }
+                    }
+                }
+                syn::Item::Impl(item) => {
+                    if let (syn::Type::Path(self_type), Some((_, trait_path, _))) =
+                        (item.self_ty.as_ref(), &item.trait_)
+                    {
+                        implementations.push((module.clone(), &self_type.path, trait_path));
+                    }
+                }
+                syn::Item::Mod(item) => {
+                    if let Some((_, nested)) = &item.content {
+                        items.push((
+                            [module.clone(), vec![item.ident.to_string()]].concat(),
+                            nested.as_slice(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for (module, self_type, trait_path) in implementations {
+        let resolve = |path| {
+            index
+                .resolve(&module, &Default::default(), path)
+                .and_then(|path| SessionReferences::node(index, &nodes, path))
+        };
+        if let (Some(owner), Some(defaults)) = (resolve(self_type), resolve(trait_path)) {
+            edges.entry(owner).or_default().insert(defaults);
+        }
+    }
+    for body in &bodies {
+        if !is_scenario_module(&body.module) {
+            continue;
+        }
+        let mut references = SessionReferences {
+            index,
+            body,
+            nodes: &nodes,
+            local_uses: body.local_uses(index),
+            globs: body
+                .globs
+                .iter()
+                .cloned()
+                .chain(block_uses(index, &body.module, body.block).globs)
+                .collect(),
+            found: BTreeSet::new(),
+        };
+        syn::visit::Visit::visit_block(&mut references, body.block);
+        if let Some(function) = body.enclosing.as_ref().and_then(|p| index.functions.get(p)) {
+            syn::visit::Visit::visit_signature(&mut references, &function.item.sig);
+        }
+        edges
+            .entry(node_of(body))
+            .or_default()
+            .extend(references.found);
+    }
+    let mut reaching: BTreeSet<_> = [
+        path_of("crate::use_cases::agent_session::connect"),
+        path_of("crate::use_cases::agent_session::with_session"),
+    ]
+    .into_iter()
+    .collect();
+    for seed in &reaching {
+        assert!(
+            nodes.contains(seed),
+            "session owner disappeared: {}",
+            seed.join("::")
+        );
+    }
+    loop {
+        let before = reaching.len();
+        for (caller, callees) in &edges {
+            if callees.iter().any(|callee| reaching.contains(callee)) {
+                reaching.insert(caller.clone());
+            }
+        }
+        if reaching.len() == before {
+            break;
+        }
+    }
+    dispatch_entries(index, &carried_forms(index, "carries_receipt"))
+        .into_iter()
+        .filter(|entry| is_scenario_module(&path_of(entry)))
+        .filter(|entry| reaching.contains(&path_of(entry)))
+        .filter(|entry| {
+            let body = bodies
+                .iter()
+                .find(|body| body.enclosing.as_ref() == Some(&path_of(entry)))
+                .expect("indexed entry has a body");
+            let references = SessionReferences {
+                index,
+                body,
+                nodes: &nodes,
+                local_uses: body.local_uses(index),
+                globs: body
+                    .globs
+                    .iter()
+                    .cloned()
+                    .chain(block_uses(index, &body.module, body.block).globs)
+                    .collect(),
+                found: BTreeSet::new(),
+            };
+            !session_stamped_exit(&references, body.block)
+        })
+        .collect()
+}
+
+/// Общий SourceIndex разрешает импорты; здесь выбирается узел графа, в том числе тип
+/// перед `::new`, и прослеживается его реэкспорт теми же таблицами `use`.
+struct SessionReferences<'a, 'b> {
+    index: &'a SourceIndex,
+    body: &'a Body<'b>,
+    nodes: &'a std::collections::BTreeSet<Vec<String>>,
+    local_uses: std::collections::HashMap<String, Vec<String>>,
+    globs: Vec<Vec<String>>,
+    found: std::collections::BTreeSet<Vec<String>>,
+}
+
+impl SessionReferences<'_, '_> {
+    fn targets(&self, path: &syn::Path) -> Vec<Vec<String>> {
+        let resolved = self
+            .index
+            .resolve(&self.body.module, &self.local_uses, path);
+        let written = path
+            .segments
+            .iter()
+            .map(|part| part.ident.to_string())
+            .collect::<Vec<_>>();
+        resolved
+            .into_iter()
+            .chain(
+                self.globs
+                    .iter()
+                    .map(|glob| [glob.as_slice(), &written].concat()),
+            )
+            .filter_map(|candidate| Self::node(self.index, self.nodes, candidate))
+            .collect()
+    }
+
+    fn node(
+        index: &SourceIndex,
+        nodes: &std::collections::BTreeSet<Vec<String>>,
+        mut path: Vec<String>,
+    ) -> Option<Vec<String>> {
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(path.clone()) {
+            if nodes.contains(&path) {
+                return Some(path);
+            }
+            let mut next = None;
+            for end in (1..=path.len()).rev() {
+                let (name, module) = path[..end].split_last()?;
+                if let Some(target) = index.uses.get(module).and_then(|uses| uses.get(name)) {
+                    next = Some([target.as_slice(), &path[end..]].concat());
+                    break;
+                }
+                if nodes.contains(&path[..end]) {
+                    return Some(path[..end].to_vec());
+                }
+            }
+            path = next?;
+        }
+        None
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for SessionReferences<'_, '_> {
+    fn visit_item_use(&mut self, _node: &'ast syn::ItemUse) {}
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.found.extend(self.targets(path));
+        syn::visit::visit_path(self, path);
+    }
+}
+
+fn session_stamped_exit(references: &SessionReferences<'_, '_>, block: &syn::Block) -> bool {
+    fn stamped(references: &SessionReferences<'_, '_>, expr: &syn::Expr) -> bool {
+        let syn::Expr::Call(call) = expr else {
+            return false;
+        };
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            return false;
+        };
+        references.targets(&path.path).iter().any(|target| {
+            target == &path_of("crate::use_cases::provider_selection::stamp_session")
+                || (target == &path_of("crate::use_cases::result::stamp_dispatch")
+                    && call
+                        .args
+                        .first()
+                        .is_some_and(|arg| stamped(references, arg)))
+        })
+    }
+    #[derive(Default)]
+    struct Bypasses(bool);
+    impl<'ast> syn::visit::Visit<'ast> for Bypasses {
+        fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
+        fn visit_item(&mut self, _node: &'ast syn::Item) {}
+        fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
+            self.0 = true;
+        }
+        fn visit_expr_try(&mut self, _node: &'ast syn::ExprTry) {
+            self.0 = true;
+        }
+    }
+    let mut bypasses = Bypasses::default();
+    syn::visit::Visit::visit_block(&mut bypasses, block);
+    !bypasses.0
+        && matches!(block.stmts.last(), Some(syn::Stmt::Expr(expr, None)) if stamped(references, expr))
+}
+
+/// Удаляем штамп каждого настоящего входа отдельно: граф должен довести до подключения
+/// и apply/reset, и обходы all. Мутанты живут только в памяти; дерево проекта не меняется.
+#[test]
+fn the_session_stamp_guard_rejects_each_real_entry_without_its_stamp() {
+    fn remove_stamp(expr: &mut syn::Expr) -> bool {
+        let syn::Expr::Call(call) = expr else {
+            return false;
+        };
+        if matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.is_ident("stamp_session"))
+        {
+            *expr = call.args.first().expect("stamp has an outcome").clone();
+            return true;
+        }
+        call.args.first_mut().is_some_and(remove_stamp)
+    }
+    let index = SourceIndex::of_src();
+    let mut checked = Vec::new();
+    for entry in dispatch_entries(&index, &carried_forms(&index, "carries_receipt")) {
+        let path = path_of(&entry);
+        if !is_scenario_module(&path) {
+            continue;
+        }
+        let function = &index.functions[&path];
+        let mut units = index
+            .units
+            .iter()
+            .map(|unit| SourceUnit {
+                file: unit.file.clone(),
+                module: unit.module.clone(),
+                syntax: unit.syntax.clone(),
+            })
+            .collect::<Vec<_>>();
+        let unit = units
+            .iter_mut()
+            .find(|unit| unit.module == function.module)
+            .expect("entry source");
+        let mut removed = false;
+        for item in &mut unit.syntax.items {
+            if let syn::Item::Fn(item) = item {
+                if item.sig.ident == function.item.sig.ident {
+                    if let Some(syn::Stmt::Expr(tail, None)) = item.block.stmts.last_mut() {
+                        removed = remove_stamp(tail);
+                    }
+                }
+            }
+        }
+        if removed {
+            assert_eq!(
+                unstamped_session_entries(&SourceIndex::build(units)).as_slice(),
+                std::slice::from_ref(&entry),
+                "missed real entry {entry}"
+            );
+            checked.push(entry);
+        }
+    }
+    assert_eq!(
+        checked.len(),
+        14,
+        "the stamped entry surface changed: {checked:?}"
     );
 }

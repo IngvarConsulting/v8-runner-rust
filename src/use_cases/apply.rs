@@ -5,6 +5,7 @@
 
 pub(crate) mod act;
 
+use crate::use_cases::provider_selection::stamp_session;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -62,7 +63,7 @@ pub fn execute(
     request: &ApplyRequest,
 ) -> UseCaseResult<ApplyResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(run(context, config, request), context),
+        stamp_session(run(context, config, request), context),
         context.work(),
     )
 }

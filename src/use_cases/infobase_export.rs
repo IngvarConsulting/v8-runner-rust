@@ -1,3 +1,4 @@
+use crate::use_cases::provider_selection::stamp_session;
 use std::io::ErrorKind;
 mod agent;
 mod all;
@@ -77,7 +78,7 @@ pub fn execute_configuration_export(
     request: &ExportConfigurationPackageRequest,
     prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportConfigurationPackageResult> {
-    crate::use_cases::provider_selection::stamp_session(
+    stamp_session(
         run_configuration_export(context, config, request, prepared),
         context,
     )
@@ -290,7 +291,7 @@ pub fn execute_infobase_snapshot(
     request: &ExportInfobaseSnapshotRequest,
     prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportInfobaseSnapshotResult> {
-    crate::use_cases::provider_selection::stamp_session(
+    stamp_session(
         run_infobase_snapshot(context, config, request, prepared),
         context,
     )
@@ -594,7 +595,7 @@ pub fn execute_infobase_restore(
     request: &RestoreInfobaseSnapshotRequest,
     prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
-    crate::use_cases::provider_selection::stamp_session(
+    stamp_session(
         run_infobase_restore(context, config, request, prepared),
         context,
     )

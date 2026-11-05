@@ -25,6 +25,7 @@ use crate::use_cases::exchange_guard::{remember_created_base, AssembledMemory, E
 use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
 use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStageStatus};
+use crate::use_cases::provider_selection::stamp_session;
 use crate::use_cases::request::InitRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
@@ -43,7 +44,10 @@ pub fn execute(
         transport = ?context.transport(),
         "executing init use case"
     );
-    stamp_dispatch(run_init(context, config, args), context.work())
+    stamp_dispatch(
+        stamp_session(run_init(context, config, args), context),
+        context.work(),
+    )
 }
 
 pub(crate) type InitExecutionFailure = UseCaseFailure<InitResult>;
