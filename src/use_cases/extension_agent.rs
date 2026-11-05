@@ -17,11 +17,14 @@ use serde_json::Value;
 
 use crate::config::model::AppConfig;
 use crate::domain::extensions::InstalledExtension;
-use crate::platform::agent::{AgentMessageType, AgentReply, WaitPolicy};
+use crate::platform::agent::{
+    AgentError, AgentErrorType, AgentMessageType, AgentReply, WaitPolicy,
+};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    argument, connect, run_command, run_critical, transcript_log, wait_policy, AgentHandle,
+    argument, connect, critical_failure, run_command, run_critical, run_critical_typed,
+    transcript_log, wait_policy, AgentHandle,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::Deferrals;
@@ -90,10 +93,12 @@ impl ExtensionAgent {
         self.run(action, &command, deferrals)
     }
 
-    /// Агент требует синоним в форме `NStr()` и не принимает ни пустой, ни простую строку
-    /// (замер 15.09.2026: `--synonym="ru='X'; en='X'"` проходит, `--synonym=X` — нет).
-    /// Простой синоним заворачивается в обе поставляемые локали; без синонима им
-    /// становится имя.
+    /// Агент требует синоним в форме `NStr()` и не принимает ни пустой, ни простую строку, а
+    /// код языка, которого нет в конфигурации, отвергает `LanguageNotFound`, ничего не создав
+    /// (замер 06.11.2026: 8.3.24, 8.3.26, 8.3.27). Узнать
+    /// языки конфигурации у агента нечем, поэтому простой синоним пробует формы по очереди
+    /// (`synonym_forms`). Многоязычная строка пользователя уходит один раз: её языки названы
+    /// им самим. Без синонима им становится имя.
     pub(crate) fn create(
         &mut self,
         action: &str,
@@ -103,16 +108,34 @@ impl ExtensionAgent {
         purpose: Option<&str>,
         deferrals: &mut Deferrals,
     ) -> Result<(), AppError> {
-        let mut command = format!(
-            "config extensions create --extension={} --name-prefix={} --synonym={}",
-            argument(name),
-            argument(name_prefix),
-            argument(&nstr_synonym(synonym.unwrap_or(name)))
-        );
-        if let Some(purpose) = purpose {
-            command.push_str(&format!(" --purpose={}", argument(purpose)));
+        let (mut form, fallbacks) = synonym_forms(synonym.unwrap_or(name));
+        let tried_every_language = !fallbacks.is_empty();
+        for fallback in fallbacks {
+            let command = create_command(name, name_prefix, &form, purpose);
+            match run_critical_typed(&mut self.handle, action, &command, &self.wait, deferrals) {
+                Ok(_) => return Ok(()),
+                // Отмена, пришедшая за время отказа, останавливает перебор: база не тронута.
+                Err(error) if is_language_refusal(&error) => {
+                    self.wait
+                        .refuse_if_cancelled(action)
+                        .map_err(AppError::from)?;
+                    form = fallback;
+                }
+                Err(error) => return Err(critical_failure(action, error)),
+            }
         }
-        self.run(action, &command, deferrals)
+        let command = create_command(name, name_prefix, &form, purpose);
+        run_critical_typed(&mut self.handle, action, &command, &self.wait, deferrals)
+            .map(|_| ())
+            .map_err(|error| {
+                let hint = (tried_every_language && is_language_refusal(&error))
+                    .then_some(NO_SHIPPED_LANGUAGE);
+                let failure = critical_failure(action, error);
+                match hint {
+                    Some(hint) => failure.with_context(hint),
+                    None => failure,
+                }
+            })
     }
 
     pub(crate) fn delete(
@@ -163,14 +186,45 @@ fn straighten_gate_record(record: &Value) -> Value {
     fixed
 }
 
-/// Уже многоязычная строка (`ru='…'`) передаётся как есть, простая — заворачивается.
-fn nstr_synonym(value: &str) -> String {
+/// Отказ простому синониму, когда в конфигурации нет ни одного из языков, которыми раннер
+/// заворачивает его.
+const NO_SHIPPED_LANGUAGE: &str = "the configuration has neither the ru nor the en language: pass --synonym in the NStr form with a language it has, for example --synonym \"uk='...'\"";
+
+/// Формы синонима в порядке проб: первая и запасные. Уже многоязычная строка (`ru='…'`)
+/// передаётся как есть и без запасных; простая заворачивается в обе поставляемые локали, а
+/// конфигурации, где какой-то из них нет, достаётся форма с одной.
+fn synonym_forms(value: &str) -> (String, Vec<String>) {
     if value.contains("='") {
-        value.to_owned()
-    } else {
-        let escaped = value.replace('\'', "''");
-        format!("ru='{escaped}'; en='{escaped}'")
+        return (value.to_owned(), Vec::new());
     }
+    let escaped = value.replace('\'', "''");
+    (
+        format!("ru='{escaped}'; en='{escaped}'"),
+        vec![format!("ru='{escaped}'"), format!("en='{escaped}'")],
+    )
+}
+
+fn create_command(name: &str, name_prefix: &str, synonym: &str, purpose: Option<&str>) -> String {
+    let mut command = format!(
+        "config extensions create --extension={} --name-prefix={} --synonym={}",
+        argument(name),
+        argument(name_prefix),
+        argument(synonym)
+    );
+    if let Some(purpose) = purpose {
+        command.push_str(&format!(" --purpose={}", argument(purpose)));
+    }
+    command
+}
+
+fn is_language_refusal(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::Command {
+            error_type: AgentErrorType::LanguageNotFound,
+            ..
+        }
+    )
 }
 
 fn parse_properties(reply: &AgentReply) -> Result<Vec<InstalledExtension>, AppError> {
@@ -235,12 +289,21 @@ fn parse_properties(reply: &AgentReply) -> Result<Vec<InstalledExtension>, AppEr
 
 #[cfg(test)]
 mod tests {
-    use super::{nstr_synonym, parse_properties};
+    use super::{parse_properties, synonym_forms};
 
     #[test]
-    fn a_plain_synonym_is_wrapped_and_an_nstr_one_is_kept() {
-        assert_eq!(nstr_synonym("Проба"), "ru='Проба'; en='Проба'");
-        assert_eq!(nstr_synonym("ru='Проба'"), "ru='Проба'");
+    fn a_plain_synonym_is_wrapped_with_fallbacks_and_an_nstr_one_is_kept() {
+        assert_eq!(
+            synonym_forms("Про'ба"),
+            (
+                "ru='Про''ба'; en='Про''ба'".to_owned(),
+                vec!["ru='Про''ба'".to_owned(), "en='Про''ба'".to_owned()],
+            )
+        );
+        assert_eq!(
+            synonym_forms("uk='Проба'"),
+            ("uk='Проба'".to_owned(), Vec::new())
+        );
     }
 
     fn reply(json: &str) -> crate::platform::agent::AgentReply {
