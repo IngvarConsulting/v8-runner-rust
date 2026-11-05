@@ -25,6 +25,7 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "test va",
     "platforms",
     "status",
+    "diff",
     "mcp serve stdio",
     "mcp serve http",
 ];

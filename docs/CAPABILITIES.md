@@ -1716,6 +1716,7 @@ v8-runner mcp serve http
 - `push` через `ibcmd` на кластерной базе.
 - `apply` через `ibcmd` на кластерной базе.
 - `reset` через `ibcmd` на кластерной базе.
+- `diff` через `ibcmd` на кластерной базе.
 - `pull` через `ibcmd` на кластерной базе.
 - `download` через `ibcmd` на кластерной базе.
 - `infobase dump` через `ibcmd` на кластерной базе.
