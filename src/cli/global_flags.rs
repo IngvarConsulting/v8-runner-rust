@@ -140,6 +140,11 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "diff",
+        preview: Preview::Absent("it reads the selected infobase to obtain the answer"),
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "upload",
         preview: Preview::Runs,
         base: Base::Resolves,

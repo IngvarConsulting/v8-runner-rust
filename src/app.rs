@@ -272,6 +272,7 @@ pub fn run() -> i32 {
         | Command::Build(_)
         | Command::Apply(_)
         | Command::Reset(_)
+        | Command::Diff(_)
         | Command::Load(_)
         | Command::Test(_)
         | Command::Dump(_)
@@ -345,6 +346,13 @@ pub(crate) fn load_cli_config(
         load_config_for_tools_download(config_path, workdir, &selector)
     } else if let Some(operation) = execute::infobase_transfer_operation(&cli.command) {
         load_config_for_infobase_export(config_path, workdir, &selector, operation)
+    } else if matches!(&cli.command, Command::Diff(args) if args.against.is_some()) {
+        load_config_for_infobase_export(
+            config_path,
+            workdir,
+            &selector,
+            crate::domain::capability::Operation::Diff,
+        )
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(config_path, workdir, &selector)
     } else if let Some(operation) = match &cli.command {

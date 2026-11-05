@@ -85,6 +85,8 @@ pub enum Command {
     /// Discard the unapplied changes: roll the main configuration (or an extension) back to
     /// the database configuration; the database configuration stays as it is
     Reset(ResetArgs),
+    /// List metadata changes since the version file, or write a comparison report
+    Diff(DiffArgs),
     /// Upload a built package (.cf/.cfe) into the infobase
     #[command(name = "upload", alias = "load")]
     Load(LoadArgs),
@@ -338,6 +340,13 @@ pub struct ResetArgs {
     /// configuration — an extension is reset only by its set
     #[arg(value_name = "SET")]
     pub set: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    /// Compare the working configuration with db, vendor:<name>, or a package file
+    #[arg(long, value_name = "TARGET")]
+    pub against: Option<String>,
 }
 
 /// Файл пакета обязателен: позиционно или прежним ключом `--path`, но не обоими сразу.

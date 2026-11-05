@@ -84,6 +84,7 @@ command_data_forms! {
     "push", "push" => crate::domain::build::BuildResult;
     "apply", "apply" => crate::domain::apply::ApplyResult;
     "reset", "reset" => crate::domain::reset::ResetResult;
+    "diff", "diff" => crate::domain::diff::DiffResult;
     "upload", "upload" => crate::cli::execute::LoadJsonData<'static>;
     "test", "test" => crate::command_envelope::TestEnvelopeData;
     "pull", "pull" => crate::domain::dump::DumpResult;

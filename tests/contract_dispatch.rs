@@ -241,6 +241,8 @@ fn rows(dir: &Path) -> Vec<Dispatching> {
         // Откат основной конфигурации: исполнитель получает сохранения признака
         // непринятого; заглушка файлов не пишет, и команда отказывает после работы.
         given(&["reset"], "reset"),
+        // A zero exit without a report is invalid output after Designer got work.
+        given(&["diff", "--against", "db"], "diff"),
         given(&["load", "--path", &artifact], "upload"),
         // Формы выгрузки несут признак только в превью: боевой ответ его не называет,
         // хотя работу исполнитель получил.

@@ -158,6 +158,13 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::Diff(args) => execute_diff(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
         Command::Load(args) => execute_load(
             config,
             args,
@@ -721,6 +728,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Build(_) => CommandName::Build,
         Command::Apply(_) => CommandName::Apply,
         Command::Reset(_) => CommandName::Reset,
+        Command::Diff(_) => CommandName::Diff,
         Command::Load(_) => CommandName::Load,
         Command::Test(_) => CommandName::Test,
         Command::Dump(_) => CommandName::Dump,
@@ -1441,6 +1449,101 @@ fn execute_reset(
             }
         },
     )
+}
+
+fn execute_diff(
+    config: &AppConfig,
+    args: &crate::cli::args::DiffArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::domain::diff::DiffAgainst;
+
+    let command = CommandName::Diff;
+    let against = match args.against.as_deref() {
+        None => None,
+        Some("db") => Some(DiffAgainst::Database),
+        Some(value) if value.starts_with("vendor:") => {
+            let name = &value["vendor:".len()..];
+            if name.trim().is_empty() {
+                let error =
+                    AppError::Validation("--against vendor: requires a supplier name".to_owned());
+                return Err(render_pre_dispatch_error(presenter, command, error));
+            }
+            Some(DiffAgainst::Vendor(name.to_owned()))
+        }
+        Some(value) => Some(DiffAgainst::File(crate::support::path::resolve_from(
+            &config.base_path,
+            Path::new(value),
+        ))),
+    };
+    let access = if against.is_some() {
+        BaseAccess::Reads
+    } else {
+        BaseAccess::Writes
+    };
+    let context = cli_context(config, command, cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        command,
+        access,
+        clean_before_execution,
+        false,
+        || match crate::use_cases::diff::execute(&context, config, against.as_ref()) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        command.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    render_diff_text(&result, presenter);
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    print_failure(
+                        presenter,
+                        command,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
+                } else {
+                    presenter.print_error(&error.to_string());
+                }
+                Err(error)
+            }
+        },
+    )
+}
+
+fn render_diff_text(result: &crate::domain::diff::DiffResult, presenter: &Presenter) {
+    let mut details = provider_receipt_details(Some(&result.provider));
+    let summary = if let Some(report) = &result.report {
+        details.push(format!("Report: {}", report.display()));
+        "Configuration comparison completed"
+    } else if result.full_dump {
+        "The platform requires a full dump and returned no object list"
+    } else if result.changes.is_empty() {
+        "No metadata version changes"
+    } else {
+        details.extend(result.changes.iter().map(|change| {
+            use crate::domain::diff::ChangeKind;
+            let kind = match change.kind {
+                ChangeKind::Added => "Added",
+                ChangeKind::Modified => "Modified",
+            };
+            format!("{kind}: {}", change.object)
+        }));
+        "Metadata version changes"
+    };
+    single_timeline(presenter, TimelineStatus::Succeeded, summary, details);
 }
 
 fn execute_test(

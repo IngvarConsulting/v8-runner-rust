@@ -174,7 +174,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 33,
+        report.accepted, 34,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -369,6 +369,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
         (
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
             "шаг `ibcmd` выгрузки и состав базы, когда `pull --all` или `download` без набора выбрали `ibcmd`",
+        ),
+        (
+            "crate::use_cases::diff::run_provider",
+            "запрос списка изменений, когда `diff` выбрал `ibcmd`",
         ),
         (
             "crate::use_cases::tool_extension::build_ibcmd_dsl",

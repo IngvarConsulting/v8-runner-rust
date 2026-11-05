@@ -202,6 +202,59 @@ impl<'a> DesignerDsl<'a> {
         second_name: Option<&str>,
         report_file: &Path,
     ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.compare_args(
+            first_configuration_type,
+            first_name,
+            second_configuration_type,
+            second_name,
+        );
+        args.extend(["-ReportType".to_owned(), "Brief".to_owned()]);
+        self.run_compare(args, report_file)
+    }
+
+    /// Full text report comparing the main configuration with the named target.
+    pub(crate) fn compare_full_report(
+        &self,
+        against: &crate::domain::diff::DiffAgainst,
+        report_file: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        use crate::domain::diff::DiffAgainst;
+
+        let (configuration_type, name) = match against {
+            DiffAgainst::Database => ("DBConfiguration", None),
+            DiffAgainst::Vendor(name) => ("VendorConfiguration", Some(name.as_str())),
+            DiffAgainst::File(_) => ("File", None),
+        };
+        let mut args = self.compare_args("MainConfiguration", None, configuration_type, name);
+        if let DiffAgainst::File(file) = against {
+            args.push("-SecondFile".to_owned());
+            args.push(
+                crate::support::path::normalize_windows_verbatim_path(file)
+                    .display()
+                    .to_string(),
+            );
+        }
+        args.extend(
+            [
+                "-ReportType",
+                "Full",
+                "-IncludeChangedObjects",
+                "-IncludeAddedObjects",
+                "-IncludeDeletedObjects",
+            ]
+            .map(str::to_owned),
+        );
+        let report_file = crate::support::path::normalize_windows_verbatim_path(report_file);
+        self.run_compare(args, &report_file)
+    }
+
+    fn compare_args(
+        &self,
+        first_configuration_type: &str,
+        first_name: Option<&str>,
+        second_configuration_type: &str,
+        second_name: Option<&str>,
+    ) -> Vec<String> {
         let mut args = self.base_args();
         args.push("/CompareCfg".to_owned());
         args.push("-FirstConfigurationType".to_owned());
@@ -216,8 +269,14 @@ impl<'a> DesignerDsl<'a> {
             args.push("-SecondName".to_owned());
             args.push(second_name.to_owned());
         }
-        args.push("-ReportType".to_owned());
-        args.push("Brief".to_owned());
+        args
+    }
+
+    fn run_compare(
+        &self,
+        mut args: Vec<String>,
+        report_file: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
         args.push("-ReportFormat".to_owned());
         args.push("txt".to_owned());
         args.push("-ReportFile".to_owned());
@@ -271,10 +330,18 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpConfigToFiles".to_owned());
-        args.push(target_dir.display().to_string());
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(target_dir)
+                .display()
+                .to_string(),
+        );
         args.push("-update".to_owned());
         args.push("-getChanges".to_owned());
-        args.push(list_file.display().to_string());
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(list_file)
+                .display()
+                .to_string(),
+        );
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -573,11 +640,9 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
 
-    #[cfg(windows)]
     #[derive(Default)]
     struct CapturingRunner(std::cell::RefCell<Vec<crate::platform::process::ProcessRequest>>);
 
-    #[cfg(windows)]
     impl ProcessRunner for CapturingRunner {
         fn run_with_policy(
             &self,
@@ -610,6 +675,75 @@ mod tests {
         assert_cf_export_target(
             r"\\?\C:\Каталог с пробелами\конфигурация.cf",
             r"C:\Каталог с пробелами\конфигурация.cf",
+        );
+    }
+
+    #[test]
+    fn full_comparison_passes_windows_paths_without_verbatim_prefix() {
+        let runner = CapturingRunner::default();
+        let dsl = DesignerDsl::new(
+            "1cv8.exe".into(),
+            V8Connection::from_connection_string("File=C:/ib"),
+            &runner,
+            None,
+            ProcessExecutionPolicy::default(),
+        );
+        let package =
+            crate::domain::diff::DiffAgainst::File(r"\\?\C:\Каталог с пробелами\пакет.cf".into());
+        dsl.compare_full_report(
+            &package,
+            Path::new(r"\\?\UNC\server\share\Каталог с пробелами\отчёт.txt"),
+        )
+        .expect("compare package");
+        dsl.compare_cfg(
+            "ExtensionConfiguration",
+            Some("SalesAddon"),
+            "ExtensionDBConfiguration",
+            Some("SalesAddon"),
+            Path::new("probe.txt"),
+        )
+        .expect("upload probe");
+        let requests = runner.0.borrow();
+        assert_eq!(
+            &requests[0].args[5..],
+            [
+                "/CompareCfg",
+                "-FirstConfigurationType",
+                "MainConfiguration",
+                "-SecondConfigurationType",
+                "File",
+                "-SecondFile",
+                r"C:\Каталог с пробелами\пакет.cf",
+                "-ReportType",
+                "Full",
+                "-IncludeChangedObjects",
+                "-IncludeAddedObjects",
+                "-IncludeDeletedObjects",
+                "-ReportFormat",
+                "txt",
+                "-ReportFile",
+                r"\\server\share\Каталог с пробелами\отчёт.txt",
+            ]
+        );
+        assert_eq!(
+            &requests[1].args[5..],
+            [
+                "/CompareCfg",
+                "-FirstConfigurationType",
+                "ExtensionConfiguration",
+                "-FirstName",
+                "SalesAddon",
+                "-SecondConfigurationType",
+                "ExtensionDBConfiguration",
+                "-SecondName",
+                "SalesAddon",
+                "-ReportType",
+                "Brief",
+                "-ReportFormat",
+                "txt",
+                "-ReportFile",
+                "probe.txt",
+            ]
         );
     }
 

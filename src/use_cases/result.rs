@@ -384,6 +384,7 @@ carries_dispatch!(
     crate::domain::build::BuildResult,
     crate::domain::apply::ApplyResult,
     crate::domain::reset::ResetResult,
+    crate::domain::diff::DiffResult,
     crate::domain::load::LoadResult,
     crate::domain::launch::LaunchResult,
     crate::domain::publish::PublishResult,
