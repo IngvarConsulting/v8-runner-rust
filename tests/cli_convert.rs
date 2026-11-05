@@ -1689,7 +1689,7 @@ fn convert_a_package_file_to_xml_exports_it_in_a_throwaway_base() {
         "{calls:?}"
     );
     assert!(
-        calls[1].contains(&format!(" export --file={}", package.display())),
+        calls[1].contains(&format!(" export --threads=1 --file={}", package.display())),
         "{calls:?}"
     );
     assert_eq!(project.bases_left(), 0);

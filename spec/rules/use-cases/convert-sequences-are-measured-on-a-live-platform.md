@@ -7,11 +7,13 @@ check:
 
 # Последовательности `convert` с пакетом замерены на живой платформе
 
-Разбор пакета `convert` (`INV.USE-CASES.IBCMD-EXPORTS-A-PACKAGE-IN-A-THROWAWAY-BASE`)
-проходит на живой платформе в том виде, в каком его вызывает раннер: `ibcmd infobase
-create --data <d> --db-path <ib>`, затем `ibcmd config --data <d> --db-path <ib> export
---file=<пакет> <каталог>` в пустой свежей базе, для `.cf` и для `.cfe`, и XML совпадает по
-содержимому с выгрузкой Конфигуратора. Сборку пакета с `--data` держит
+Для разбора пакета `convert` (`INV.USE-CASES.IBCMD-EXPORTS-A-PACKAGE-IN-A-THROWAWAY-BASE`)
+раннер создаёт пустую базу командой `ibcmd infobase --data <d> --db-path <ib> create`, затем
+разбирает пакет командой `ibcmd config --data <d> --db-path <ib> export --threads=1
+--file=<пакет> <каталог>`. Проверки держат аргументы в форме, замеренной для `.cf` в #471
+и #476. В исходном замере #416 XML из `.cf` и `.cfe` совпал по содержимому с выгрузкой
+Конфигуратора.
+Замеры приведены в [`confirmed-runtime-measurements.md`](../../../references/1c/confirmed-runtime-measurements.md)
+в разделах «Разбор пакета `convert` во временной базе» и «Инкрементальная сборка в постоянной
+базе сборки». Сборку пакета с `--data` держит
 `INV.USE-CASES.MAKE-SEQUENCES-ARE-MEASURED-ON-A-LIVE-PLATFORM`.
-
-Замер — [`confirmed-runtime-measurements.md`](../../../references/1c/confirmed-runtime-measurements.md), раздел «Разбор пакета `convert` во временной базе». Проверки держат командные строки в замеренной форме.

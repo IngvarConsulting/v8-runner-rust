@@ -3581,7 +3581,7 @@ exit 0"#,
             .expect("warning")
             .contains("IBCMD does not support object-scoped partial dump"));
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("--sync"));
+        assert!(calls.contains(" export --threads=1 --sync "), "{calls}");
     }
 
     #[test]
@@ -4176,7 +4176,11 @@ exit 0"#,
         assert_eq!(result.mode, ReportedDumpMode::Full);
         assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformForecast));
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("export status"), "{calls}");
+        let forecast = calls
+            .lines()
+            .find(|call| call.contains(" export status "))
+            .expect("forecast call");
+        assert!(!forecast.contains("--threads"), "{forecast}");
         assert!(!calls.contains("--sync"), "{calls}");
         assert!(calls.contains(".dump-stage-"), "{calls}");
         assert_eq!(

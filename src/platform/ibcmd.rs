@@ -9,6 +9,9 @@ use crate::platform::process::{
 };
 use crate::platform::result::PlatformCommandResult;
 
+// Parallel config export can fail on valid packages (#476).
+const CONFIG_EXPORT_THREADS_ARG: &str = "--threads=1";
+
 #[derive(Debug, Error)]
 pub enum IbcmdError {
     #[error(transparent)]
@@ -475,6 +478,7 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -516,6 +520,7 @@ impl<'a> IbcmdDsl<'a> {
         args.push("export".to_owned());
         args.extend(self.connection.auth_args());
         args.extend(self.connection.dbms_auth_args());
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         args.push(format!("--file={}", source_file.display()));
         args.push(target_dir.display().to_string());
         self.run(&args)
@@ -544,6 +549,7 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -923,6 +929,7 @@ mod tests {
                 "--db-path",
                 "/ib",
                 "export",
+                "--threads=1",
                 format!("--file={}", source.display()).as_str(),
                 target.to_str().expect("utf8 target"),
             ]
@@ -1061,6 +1068,7 @@ mod tests {
                 "/ib".to_owned(),
                 "config".to_owned(),
                 "export".to_owned(),
+                "--threads=1".to_owned(),
                 "--force".to_owned(),
                 dir.path().display().to_string(),
             ]
@@ -1162,8 +1170,7 @@ mod tests {
             .expect("export");
 
         let args = fs::read_to_string(args_log).expect("args");
-        assert!(args.contains("export"));
-        assert!(args.contains("--sync"));
+        assert!(args.contains("export\n--threads=1\n--sync\n"), "{args}");
         assert!(!args.contains("--force"), "{args}");
     }
 
