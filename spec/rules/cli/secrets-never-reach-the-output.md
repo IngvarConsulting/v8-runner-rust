@@ -13,6 +13,7 @@ check:
   - tests/cli_launch.rs::launch_failure_never_echoes_the_password_inside_the_connection_string
   - tests/cli_launch.rs::launch_dry_run_text_masks_credentials_and_says_nothing_was_dispatched
   - tests/cli_extensions.rs::extension_preview_never_echoes_the_infobase_password
+  - tests/cli_extensions.rs::cluster_designer_invalid_list_output_does_not_echo_credentials
   - tests/cli_init.rs::server_infobase_create_never_echoes_the_connection_string_credentials
   - tests/cli_init.rs::a_failed_cluster_create_never_echoes_the_passwords
   - src/platform/secrets.rs::masks_the_dbms_and_cluster_passwords_of_a_creation_string

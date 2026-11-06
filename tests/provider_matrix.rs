@@ -420,7 +420,7 @@ fn a_cluster_base_refuses_ibcmd_for_every_operation_it_left() {
         ),
         (
             "extensions",
-            "agent",
+            "agent, designer",
             vec!["extensions", "list", "--dry-run"],
         ),
         (

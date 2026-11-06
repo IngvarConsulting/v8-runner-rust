@@ -51,6 +51,23 @@ pub struct InstalledExtension {
     pub hash_sum: String,
 }
 
+/// A full platform record or the name reported by batch Designer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ExtensionInventoryEntry {
+    Full(InstalledExtension),
+    NameOnly { name: String },
+}
+
+impl ExtensionInventoryEntry {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Full(extension) => &extension.name,
+            Self::NameOnly { name } => name,
+        }
+    }
+}
+
 /// What the read was asked for, named as data.
 ///
 /// A change preview names its `target` and `action` as fields; the read names its
@@ -94,6 +111,6 @@ pub struct ExtensionInventoryResult {
     ///
     /// That order is not the creation order and the platform does not document one,
     /// so callers must not rely on it.
-    pub extensions: Vec<InstalledExtension>,
+    pub extensions: Vec<ExtensionInventoryEntry>,
     pub duration_ms: u64,
 }

@@ -77,6 +77,7 @@
 <h2 class="command-variant" id="op-extensions">extensions list <img class="unica-usage" src="assets/unica-mark-blue.svg" width="24" height="24" alt="Используется в Unica 0.13" title="Используется в Unica 0.13"></h2>
 <pre data-output-command><code>v8-runner extensions list</code></pre>
 <p>состав установленных расширений и их свойства: активность, безопасный режим, защита от опасных действий <span class="ref">(<a href="platform.html#t44">44</a>)</span></p>
+<p>Свойства отдаёт агент. Конфигуратор на кластере перечисляет только имена: запись содержит <code>name</code>, а <code>status --deep</code> показывает у такого расширения <code>active: null</code>. Остальные действия с расширениями Конфигуратор не выполняет: отказ называет агента.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
 <div class="tablewrap"><table class="response-classes">
