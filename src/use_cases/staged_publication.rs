@@ -384,6 +384,7 @@ pub(super) fn cleanup_owned_orphan_files(
                 .to_std()
                 .unwrap_or_default()
                 < ORPHAN_TTL
+                || backup_is_the_only_copy(&metadata.kind, &temp_path, &metadata.target_path)
             {
                 continue;
             }
@@ -403,6 +404,15 @@ pub(super) fn cleanup_owned_orphan_files(
         }
     }
     Ok(())
+}
+
+/// A process that died between the two renames of a replacement leaves the backup and no
+/// target: then the backup is not a leftover but the only copy, whatever its age. A target
+/// that cannot be inspected counts as missing: the backup goes only beside a target seen.
+fn backup_is_the_only_copy(kind: &TempDirKind, backup: &Path, target: &Path) -> bool {
+    matches!(kind, TempDirKind::Backup)
+        && std::fs::symlink_metadata(backup).is_ok()
+        && std::fs::symlink_metadata(target).is_err()
 }
 
 fn orphan_name_matches_contract(
@@ -665,6 +675,8 @@ mod tests {
         make_stale(&wrong_kind_stage);
         make_stale(&unrelated_backup);
 
+        // Рядом с целью резерв — обычный след: выжить он может только по договору об имени.
+        fs::write(&target, "target").expect("target");
         cleanup_owned_orphan_files(
             &[dir.path().to_path_buf()],
             &target,
@@ -678,6 +690,70 @@ mod tests {
         assert!(wrong_target_stage.exists());
         assert!(wrong_kind_stage.exists());
         assert!(unrelated_backup.exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_a_stale_backup_when_its_target_is_gone() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target.cf");
+        let backup = dir.path().join(".target.cf.backup-run");
+        fs::write(&backup, "kept").expect("backup");
+        write_temp_dir_metadata(&backup, TempDirKind::Backup, "run", &target, "identity")
+            .expect("metadata");
+        let sidecar = metadata_sidecar_path(&backup);
+        let mut metadata: crate::support::fs::TempDirMetadata =
+            serde_json::from_slice(&fs::read(&sidecar).expect("read")).expect("json");
+        metadata.created_at = chrono::Utc::now() - chrono::Duration::days(2);
+        fs::write(&sidecar, serde_json::to_vec(&metadata).expect("json")).expect("rewrite");
+
+        cleanup_owned_orphan_files(
+            &[dir.path().to_path_buf()],
+            &target,
+            "identity",
+            &[],
+            &[],
+            false,
+        )
+        .expect("cleanup");
+        assert!(backup.exists(), "the target is gone: this is the only copy");
+
+        fs::write(&target, "target").expect("target");
+        cleanup_owned_orphan_files(
+            &[dir.path().to_path_buf()],
+            &target,
+            "identity",
+            &[],
+            &[],
+            false,
+        )
+        .expect("cleanup");
+        assert!(
+            !backup.exists(),
+            "beside its target the backup is a leftover"
+        );
+    }
+
+    /// Проверяется цель из записи резерва, а не корень уборки: у потомка он есть всегда.
+    #[test]
+    fn cleanup_looks_at_the_target_named_by_the_backup() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).expect("root");
+        let target = root.join("child.cf");
+        let backup = root.join(".child.cf.backup-run");
+        fs::write(&backup, "kept").expect("backup");
+        write_temp_dir_metadata(&backup, TempDirKind::Backup, "run", &target, "identity")
+            .expect("metadata");
+        let sidecar = metadata_sidecar_path(&backup);
+        let mut metadata: crate::support::fs::TempDirMetadata =
+            serde_json::from_slice(&fs::read(&sidecar).expect("read")).expect("json");
+        metadata.created_at = chrono::Utc::now() - chrono::Duration::days(2);
+        fs::write(&sidecar, serde_json::to_vec(&metadata).expect("json")).expect("rewrite");
+
+        cleanup_owned_orphan_files(&[root.clone()], &root, "identity", &[], &[], true)
+            .expect("cleanup");
+
+        assert!(backup.exists());
     }
 
     #[test]
