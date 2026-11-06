@@ -498,7 +498,7 @@ impl Copy<'_> {
                 Err(_) => {
                     let mut secrets = infobase_secrets(self.config);
                     secrets.extend(infobase_secrets(self.source));
-                    secrets.extend(cluster.secrets());
+                    secrets.extend(cluster.creation.passwords());
                     AppError::Platform(failure_details(
                         "load the snapshot",
                         "infobase",
