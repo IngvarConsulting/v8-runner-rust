@@ -2,6 +2,8 @@
 id: INV.USE-CASES.IBCMD-BUILDS-A-PACKAGE-IN-THE-BUILD-INFOBASE
 check:
   - src/use_cases/artifacts.rs::ibcmd_imports_and_saves_the_working_configuration_with_its_own_data_directory
+  - src/use_cases/artifacts.rs::ibcmd_build_expands_objects_with_the_build_scan_scope
+  - src/use_cases/artifacts.rs::ibcmd_build_reports_oversized_argv_and_rebuilds_on_the_next_run
   - tests/cli_convert.rs::convert_a_set_to_a_package_builds_it_with_ibcmd_in_the_build_infobase
   - tests/cli_convert.rs::convert_an_edt_set_to_a_package_goes_through_xml_in_the_build_infobase
   - tests/cli_convert.rs::convert_loads_a_changed_module_with_ibcmd_files_partial
@@ -15,3 +17,7 @@ check:
 выгружает рабочую конфигурацию. Для загрузки команда не передаёт `--out`, для
 выгрузки — `--db`. Замер #471 подтвердил эти команды, в том числе при смене
 исполнителя той же версии платформы.
+
+Если ОС отклонила запуск частичного импорта из-за лимита командной строки,
+раннер сообщает об отказе и предлагает повторить текущую команду. Следующий
+запуск начнёт с полной сборки в свежей базе.

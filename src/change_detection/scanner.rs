@@ -135,7 +135,7 @@ pub(super) fn scan_in_scope(
     let mut files = Vec::new();
     let mut has_untracked_links = false;
 
-    for entry in source_entries_in_scope(root, scope) {
+    for entry in source_entries(root, scope) {
         check_interruption(interrupted)?;
         let entry = entry.map_err(|e| ScanError::Walk {
             path: root.to_path_buf(),
@@ -147,7 +147,7 @@ pub(super) fn scan_in_scope(
             has_untracked_links = true;
         }
 
-        if !is_source_file_in_scope(&entry, scope) {
+        if !is_source_file(&entry, root, scope) {
             continue;
         }
         let path = entry.path();
@@ -241,12 +241,6 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
 
 pub(super) fn source_entries(
     root: &Path,
-) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
-    source_entries_in_scope(root, ScanScope::Push)
-}
-
-fn source_entries_in_scope(
-    root: &Path,
     scope: ScanScope,
 ) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
     WalkDir::new(root)
@@ -255,16 +249,13 @@ fn source_entries_in_scope(
         .filter_entry(move |entry| entry.depth() == 0 || !is_ignored_dir(entry, scope))
 }
 
-pub(super) fn is_source_file(entry: &walkdir::DirEntry) -> bool {
-    is_source_file_in_scope(entry, ScanScope::Push)
-}
-
-fn is_source_file_in_scope(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
+pub(super) fn is_source_file(entry: &walkdir::DirEntry, root: &Path, scope: ScanScope) -> bool {
     entry.file_type().is_file()
         && !entry.file_name().to_str().is_some_and(|name| match scope {
             ScanScope::Push => is_ignored_file(name),
             ScanScope::Build => {
-                entry.depth() == 1 && is_ignored_file(name) || is_build_artifact(entry, name)
+                entry.path().parent() == Some(root) && is_ignored_file(name)
+                    || is_build_artifact(entry, name)
             }
         })
 }

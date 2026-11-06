@@ -16,6 +16,7 @@ use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::artifacts::{BuildMode, BuildReport};
 use crate::domain::capability::Provider;
 use crate::domain::source_set::SourceSetContext;
+use crate::platform::ibcmd::IbcmdError;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::support::error::AppError;
@@ -322,7 +323,7 @@ impl BuildSession {
                 match analyze(env.context, &root, &sources)? {
                     AnalysisOutcome::NoChanges => Load::Skip,
                     AnalysisOutcome::Changes { changes, prepared } => {
-                        match partial_load::decide(&changes, sources.path()) {
+                        match partial_load::decide_build(&changes, sources.path()) {
                             LoadDecision::Partial(paths) => Load::Partial(paths, prepared),
                             LoadDecision::Full => Load::Full,
                         }
@@ -458,7 +459,14 @@ impl BuildSession {
                                 InterruptionSafetyClass::CriticalNonAbortable,
                             )
                             .config_import_partial(item.context.path(), &relative, item.extension)
-                            .map_err(AppError::from)?
+                            .map_err(|error| match error {
+                                IbcmdError::PartialImportCommandLineTooLong { file_count } => {
+                                    AppError::SourceLoadNotStarted(format!(
+                                        "cannot start partial ibcmd import of {file_count} files: operating-system command-line or executable path limit exceeded. Rerun the command for a full build in a fresh build infobase"
+                                    ))
+                                }
+                                error => AppError::from(error),
+                            })?
                         }
                         other => {
                             return Err(crate::use_cases::unimplemented_provider(

@@ -3,7 +3,7 @@ use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 
 use crate::change_detection::analyzer::{ChangeKind, FileChange};
-use crate::change_detection::scanner;
+use crate::change_detection::scanner::{self, ScanScope};
 use crate::support::path::{
     canonical_caseless, is_safe_path_segment, nearest_existing_canonical_path,
 };
@@ -76,7 +76,15 @@ pub enum LoadDecision {
 
 /// Decide whether a partial or full load is appropriate for `changes`.
 pub fn decide(changes: &[FileChange], source_root: &Path) -> LoadDecision {
-    match expand_files(changes, source_root) {
+    decide_in_scope(changes, source_root, ScanScope::Push)
+}
+
+pub(crate) fn decide_build(changes: &[FileChange], source_root: &Path) -> LoadDecision {
+    decide_in_scope(changes, source_root, ScanScope::Build)
+}
+
+fn decide_in_scope(changes: &[FileChange], source_root: &Path, scope: ScanScope) -> LoadDecision {
+    match expand_files(changes, source_root, scope) {
         Some(paths) if !paths.is_empty() => LoadDecision::Partial(paths),
         _ => LoadDecision::Full,
     }
@@ -173,16 +181,32 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
         push_file_if_safe(&mut paths, &descriptor, source_root, &root_real)
             .ok_or_else(|| invalid(&descriptor))?;
         let payload = group.join(name);
-        expand_optional_directory(&mut paths, &payload, source_root, &root_real)
-            .ok_or_else(|| invalid(&payload))?;
+        expand_optional_directory(
+            &mut paths,
+            &payload,
+            source_root,
+            &root_real,
+            ScanScope::Push,
+        )
+        .ok_or_else(|| invalid(&payload))?;
     }
     let root_payload = source_root.join("Ext");
-    expand_optional_directory(&mut paths, &root_payload, source_root, &root_real)
-        .ok_or_else(|| invalid(&root_payload))?;
+    expand_optional_directory(
+        &mut paths,
+        &root_payload,
+        source_root,
+        &root_real,
+        ScanScope::Push,
+    )
+    .ok_or_else(|| invalid(&root_payload))?;
     Ok(paths)
 }
 
-fn expand_files(changes: &[FileChange], source_root: &Path) -> Option<Vec<PathBuf>> {
+fn expand_files(
+    changes: &[FileChange],
+    source_root: &Path,
+    scope: ScanScope,
+) -> Option<Vec<PathBuf>> {
     let root_real = canonicalize_existing(source_root)?;
     let relative_changes = changes
         .iter()
@@ -207,7 +231,7 @@ fn expand_files(changes: &[FileChange], source_root: &Path) -> Option<Vec<PathBu
         let path = source_root.join(relative);
         if path.is_dir() {
             let before = paths.len();
-            expand_directory(&mut paths, &path, source_root, &root_real)?;
+            expand_directory(&mut paths, &path, source_root, &root_real, scope)?;
             if paths.len() == before {
                 return None;
             }
@@ -221,7 +245,7 @@ fn expand_files(changes: &[FileChange], source_root: &Path) -> Option<Vec<PathBu
                 // A previously orphaned subtree can already be in the file snapshot.
                 // The new object still needs all of its sources, including on SFTP.
                 let object_dir = path.with_extension("");
-                expand_optional_directory(&mut paths, &object_dir, source_root, &root_real)?;
+                expand_optional_directory(&mut paths, &object_dir, source_root, &root_real, scope)?;
             }
             push_with_descriptors(&mut paths, path, source_root, &root_real)?;
         }
@@ -248,9 +272,10 @@ fn expand_optional_directory(
     directory: &Path,
     source_root: &Path,
     root_real: &Path,
+    scope: ScanScope,
 ) -> Option<()> {
     match std::fs::symlink_metadata(directory) {
-        Ok(_) => expand_directory(paths, directory, source_root, root_real),
+        Ok(_) => expand_directory(paths, directory, source_root, root_real, scope),
         Err(error) if error.kind() == ErrorKind::NotFound => Some(()),
         Err(_) => None,
     }
@@ -261,15 +286,16 @@ fn expand_directory(
     directory: &Path,
     source_root: &Path,
     root_real: &Path,
+    scope: ScanScope,
 ) -> Option<()> {
     // The scanner does not select symlink directories within a source set.
     if directory != source_root && !std::fs::symlink_metadata(directory).ok()?.is_dir() {
         return None;
     }
-    for entry in scanner::source_entries(directory) {
+    for entry in scanner::source_entries(directory, scope) {
         let entry = entry.ok()?;
         let relative = safe_relative_path(entry.path(), source_root, root_real)?;
-        if scanner::is_source_file(&entry) {
+        if scanner::is_source_file(&entry, source_root, scope) {
             paths.push(source_root.join(relative));
         }
     }

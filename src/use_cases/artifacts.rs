@@ -1451,6 +1451,7 @@ mod tests {
         ARTIFACT_ROLE_STAGE_FILE,
     };
     use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
+    use crate::domain::capability::Provider;
     use crate::domain::execution::{ExecutionInterruptionPhase, ExecutionStatus};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
@@ -1462,6 +1463,7 @@ mod tests {
     };
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::{ArtifactsModeRequest, ArtifactsRequest};
+    use crate::use_cases::throwaway_infobase::Builder;
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -2142,6 +2144,7 @@ fi"#;
         calls: std::sync::Mutex<Vec<Vec<String>>>,
         cancel_on: Option<&'static str>,
         dump_effect: DumpEffect,
+        reject_partial_argv: bool,
     }
 
     impl Recorder {
@@ -2150,6 +2153,7 @@ fi"#;
                 calls: std::sync::Mutex::new(Vec::new()),
                 cancel_on: None,
                 dump_effect: DumpEffect::Normal,
+                reject_partial_argv: false,
             }
         }
 
@@ -2171,8 +2175,18 @@ fi"#;
             request: &ProcessRequest,
             policy: &ProcessExecutionPolicy,
         ) -> Result<ProcessResult, ProcessError> {
-            policy.mark_started_for_test();
             self.calls.lock().expect("calls").push(request.args.clone());
+            if self.reject_partial_argv && request.args.iter().any(|arg| arg == "--partial") {
+                #[cfg(windows)]
+                let code = windows_sys::Win32::Foundation::ERROR_FILENAME_EXCED_RANGE as i32;
+                #[cfg(unix)]
+                let code = libc::E2BIG;
+                return Err(ProcessError::SpawnFailed {
+                    cmd: "ibcmd".to_owned(),
+                    source: std::io::Error::from_raw_os_error(code),
+                });
+            }
+            policy.mark_started_for_test();
             record_creation(&request.args);
             if matches!(self.dump_effect, DumpEffect::Fail)
                 && after(&request.args, "/DumpCfg").is_some()
@@ -2589,9 +2603,86 @@ fi"#;
         assert_eq!(calls.len(), 5, "{calls:?}");
     }
 
-    /// `ibcmd` создаёт базу со своим каталогом данных и собирает пакет `config import` с
-    /// `--out`; основная конфигурация расширению не нужна, общий `workPath/ibcmd-data` не
-    /// трогается.
+    #[test]
+    fn ibcmd_build_expands_objects_with_the_build_scan_scope() {
+        let dir = tempdir().expect("tempdir");
+        let (config, _) = project(dir.path());
+        let xml = config.base_path.join("configuration");
+        let payload = "Catalogs/Items/Ext/build/payload.xml";
+        let path = xml.join(payload);
+        fs::create_dir_all(path.parent().expect("payload parent")).expect("payload directory");
+        fs::write(path, "<payload/>").expect("payload");
+        fs::write(xml.join("Catalogs/Items/Ext/old.cf"), "old package").expect("artifact");
+        fs::write(xml.join("Configuration.xml"), "<Configuration/>").expect("configuration");
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let build = |runner: &Recorder| {
+            build_package_in(
+                &ExecutionContext::cli(CommandName::Artifacts),
+                &config,
+                &resolved,
+                Builder {
+                    provider: Provider::Ibcmd,
+                    binary: PathBuf::from("/tmp/8.3.27.2074/bin/ibcmd"),
+                },
+                &mut BuildSession::default(),
+                runner,
+            )
+            .expect("built");
+        };
+        build(&Recorder::new());
+        fs::write(xml.join("Catalogs/Items.xml"), "<Catalog/>").expect("descriptor");
+        let partial = Recorder::new();
+        build(&partial);
+        let calls = partial.calls();
+        let args = &calls[0];
+        assert!(args.iter().any(|arg| arg == "--partial"), "{calls:?}");
+        assert!(
+            args.iter().any(|arg| arg.replace('\\', "/") == payload),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|arg| arg.ends_with("old.cf")), "{args:?}");
+    }
+
+    #[test]
+    fn ibcmd_build_reports_oversized_argv_and_rebuilds_on_the_next_run() {
+        let dir = tempdir().expect("tempdir");
+        let (config, work) = project(dir.path());
+        let xml = config.base_path.join("configuration");
+        let descriptor = xml.join("Configuration.xml");
+        fs::write(&descriptor, "<Configuration/>").expect("configuration");
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let build = |runner: &Recorder| {
+            build_package_in(
+                &ExecutionContext::cli(CommandName::Artifacts),
+                &config,
+                &resolved,
+                Builder {
+                    provider: Provider::Ibcmd,
+                    binary: PathBuf::from("/tmp/8.3.27.2074/bin/ibcmd"),
+                },
+                &mut BuildSession::default(),
+                runner,
+            )
+        };
+        build(&Recorder::new()).expect("first build");
+        fs::write(descriptor, "<Configuration><!-- change --></Configuration>")
+            .expect("change configuration");
+        let rejected = Recorder {
+            reject_partial_argv: true,
+            ..Recorder::new()
+        };
+        let (error, _, _) = build(&rejected).expect_err("oversized invocation");
+        let message = error.to_string();
+        assert!(message.contains("Rerun the command"), "{message}");
+        assert!(!message.contains("push"), "{message}");
+        assert_eq!(rejected.calls().len(), 1);
+        assert!(!build_root(&work).join("ready.json").exists());
+        let (_, _, _, report, _) = build(&Recorder::new()).expect("rebuild");
+        assert_eq!(report.mode, crate::domain::artifacts::BuildMode::Full);
+    }
+
     #[test]
     fn ibcmd_imports_and_saves_the_working_configuration_with_its_own_data_directory() {
         let dir = tempdir().expect("tempdir");

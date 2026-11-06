@@ -8,6 +8,7 @@ check:
   - src/use_cases/artifacts.rs::an_ibcmd_walk_and_designer_share_the_build_infobase
   - src/use_cases/artifacts.rs::a_second_make_only_dumps_and_a_modified_module_loads_partially
   - src/use_cases/artifacts.rs::a_failed_dump_invalidates_the_build_base_for_the_next_make
+  - src/use_cases/artifacts.rs::a_dump_that_resized_the_database_keeps_the_staged_package_and_old_target
   - src/use_cases/artifacts.rs::a_cancellation_during_creation_stops_before_load_and_leaves_no_ready_memory
   - tests/cli_make_download_all.rs::make_without_a_set_builds_every_package_in_one_build_infobase
   - tests/cli_make_download_all.rs::make_reuses_an_edt_build_infobase_until_forced
@@ -24,7 +25,8 @@ check:
 
 Раннер пропускает перевод EDT при совпадении исходников и сохранённого XML. По
 изменённому XML он решает, возможна ли частичная загрузка, тем же планировщиком,
-что `push`. Без изменений сразу выгружает пакет. При `make --full`, несовместимой
+что `push`, с фильтром файлов сборки. Без изменений сразу выгружает пакет.
+При `make --full`, несовместимой
 версии платформы, повреждении базы или отсутствии безопасного списка изменений
 раннер создаёт свежую базу. Неудачная загрузка оставляет её память неготовой.
 Превью только проверяет цель и наличие инструментов.
