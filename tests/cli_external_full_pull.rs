@@ -225,6 +225,8 @@ impl Project {
         ));
         assert_reported_path(&selected["executor"]["executable"], &expected_executable);
         assert!(selected["executor"]["endpoint"].is_null());
+        #[cfg(windows)]
+        assert!(!selected.to_string().contains(r"\\\\?\\"), "{selected}");
         assert!(self.calls().is_empty(), "provider ran before authorization");
         selected
     }
@@ -1023,6 +1025,14 @@ fn accepted_external_full_pull_remembers_the_original_source_for_the_next_push()
             assert_eq!(terminal["memory"], "saved");
             assert_eq!(terminal["result"]["ok"], true);
             assert_reported_path(&terminal["result"]["data"]["target_path"], &project.sources);
+            // `ready` отдаёт вызывающему операнд публикации как есть, а конверт в `result` —
+            // обычный ответ команды: путь в нём без приставки.
+            #[cfg(windows)]
+            {
+                let stage = ready["stage_path"].as_str().expect("stage path");
+                assert!(stage.starts_with(r"\\?\"), "{ready}");
+                assert!(!terminal.to_string().contains(r"\\\\?\\"), "{terminal}");
+            }
             // Замену делает вызывающий, но ответ называет уничтоженное, как и своя замена.
             let losses = &terminal["result"]["data"]["losses"];
             assert!(losses["count"].as_u64() >= Some(1), "{terminal}");

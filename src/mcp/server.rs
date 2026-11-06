@@ -51,6 +51,7 @@ use crate::mcp::telemetry::{
     McpEdtSessionObserver, McpTelemetry, SemaphoreWaitErrorKind, SemaphoreWaitOutcome,
 };
 use crate::support::authority::{host_of_authority, host_of_url, Host};
+use crate::support::path::{response_text, response_value};
 use crate::use_cases::check_syntax::{self, EdtSessionMiss};
 use crate::use_cases::context::CommandLineTarget;
 use crate::use_cases::context::CommandName;
@@ -460,7 +461,7 @@ impl McpToolServer {
                 .with_edt_timeout(Some(edt_timeout)),
             CommandName::Syntax,
         )
-        .map_err(|error| ErrorData::internal_error(error.message, None))?;
+        .map_err(internal_error_to_mcp)?;
         let use_case_request = normalize_check_syntax_edt_request(&request);
         let base = use_case_request.base_access();
         let config = self.config.clone();
@@ -859,7 +860,7 @@ impl ServerHandler for McpToolServer {
 }
 
 fn internal_error_to_mcp(error: McpInternalError) -> ErrorData {
-    ErrorData::internal_error(error.message, None)
+    ErrorData::internal_error(response_text(&error.message).into_owned(), None)
 }
 
 fn map_tool_result<TResponse>(
@@ -869,15 +870,15 @@ where
     TResponse: serde::Serialize + Send + 'static,
 {
     match result {
-        Ok(response) => Ok(CallToolResult::structured(
+        Ok(response) => Ok(CallToolResult::structured(response_value(
             serde_json::to_value(response)
                 .map_err(|error| ErrorData::internal_error(error.to_string(), None))?,
-        )),
+        ))),
         Err(crate::mcp::error::McpServiceError::Business(failure)) => {
-            Ok(CallToolResult::structured_error(
+            Ok(CallToolResult::structured_error(response_value(
                 serde_json::to_value(failure.response)
                     .map_err(|error| ErrorData::internal_error(error.to_string(), None))?,
-            ))
+            )))
         }
         Err(crate::mcp::error::McpServiceError::Internal(error)) => {
             Err(internal_error_to_mcp(error))
@@ -1867,5 +1868,50 @@ mod tests {
             },
             tests: TestsConfig::default(),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_mcp_answer_names_paths_without_the_verbatim_prefix() {
+        use crate::mcp::error::{
+            McpBusinessError, McpBusinessErrorKind, McpBusinessFailure, McpErrorCode,
+            McpInternalError, McpServiceError,
+        };
+        use serde_json::{json, Value};
+
+        let path = r"\\?\E:\proj\main.cf";
+        let ordinary = r"E:\proj\main.cf";
+        let answered = |result| {
+            super::map_tool_result::<Value>(result)
+                .expect("tool result")
+                .structured_content
+                .expect("structured content")
+        };
+
+        assert_eq!(
+            answered(Ok(json!({"data": {"output": path}}))),
+            json!({"data": {"output": ordinary}})
+        );
+        let failure = McpBusinessFailure::new(
+            McpBusinessError {
+                code: McpErrorCode::RuntimeFailure,
+                kind: McpBusinessErrorKind::Runtime,
+                message: path.to_owned(),
+                next: None,
+            },
+            json!({"warnings": [format!("held by {path}")]}),
+        );
+        assert_eq!(
+            answered(Err(McpServiceError::Business(failure))),
+            json!({"warnings": [format!("held by {ordinary}")]})
+        );
+        assert_eq!(
+            super::map_tool_result::<Value>(Err(McpServiceError::Internal(McpInternalError::new(
+                path
+            ))))
+            .expect_err("internal error")
+            .message,
+            ordinary
+        );
     }
 }
