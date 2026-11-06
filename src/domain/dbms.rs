@@ -30,9 +30,6 @@ pub enum DbmsAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DbmsResult {
     pub ok: bool,
-    /// Получил ли исполнитель работу этой команды
-    /// (`INV.WIRE.PROVIDER-DISPATCHED-SAYS-WHETHER-AN-EXECUTOR-GOT-WORK`).
-    pub provider_dispatched: bool,
     pub infobase: String,
     pub state: DbmsState,
     pub action: DbmsAction,

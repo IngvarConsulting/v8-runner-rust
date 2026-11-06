@@ -19,7 +19,6 @@ check:
 ```json
 {
   "ok": true,
-  "provider_dispatched": true,
   "infobase": "origin",
   "state": "started_by_this_copy",
   "action": "started",

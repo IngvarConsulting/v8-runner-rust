@@ -59,6 +59,7 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["test", "va"], "test va"),
     (&["platforms"], "platforms"),
     (&["status"], "status"),
+    (&["dbms", "status"], "dbms status"),
     (&["diff"], "diff"),
     (&["mcp", "serve", "stdio"], "mcp serve stdio"),
     (&["mcp", "serve", "http"], "mcp serve http"),

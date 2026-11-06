@@ -21,9 +21,7 @@ use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::{
     deferred_process_interruption, interruption_before_safe_point,
 };
-use crate::use_cases::result::{
-    stamp_dispatch, UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult,
-};
+use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 use record::{
     machine_fingerprint, read_json, write_json, PinnedPorts, RecordState, ServicePaths,
     ServiceRecord,
@@ -240,7 +238,6 @@ impl<'a> Stand<'a> {
     fn result(&self, state: DbmsState, action: DbmsAction) -> DbmsResult {
         DbmsResult {
             ok: true,
-            provider_dispatched: false,
             infobase: self.infobase.clone(),
             state,
             action,
@@ -741,32 +738,26 @@ pub fn execute_dbms(
     command: DbmsCommand,
     dry_run: bool,
 ) -> UseCaseResult<DbmsResult> {
-    stamp_dispatch(
-        run_dbms(
-            context,
-            config,
-            command,
-            dry_run,
-            &ProcessExecutor,
-            &RealHost,
-        ),
-        context.work(),
+    run_dbms(
+        context,
+        config,
+        command,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost,
     )
 }
 
 /// `dbms status`: читает запись без замка, чтобы отвечать и пока идёт другая команда
 /// (`INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK`).
 pub fn dbms_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseResult<DbmsResult> {
-    stamp_dispatch(
-        run_dbms(
-            context,
-            config,
-            DbmsCommand::Status,
-            false,
-            &ProcessExecutor,
-            &RealHost,
-        ),
-        context.work(),
+    run_dbms(
+        context,
+        config,
+        DbmsCommand::Status,
+        false,
+        &ProcessExecutor,
+        &RealHost,
     )
 }
 
@@ -1421,7 +1412,6 @@ mod tests {
         for command in [DbmsCommand::Start, DbmsCommand::Stop, DbmsCommand::Restart] {
             let plan = setup.run(command, true, &runner, &host).unwrap();
             assert_eq!(plan.action, DbmsAction::Planned);
-            assert!(!plan.provider_dispatched);
         }
         assert!(runner.calls.borrow().is_empty());
         assert!(!setup.config.work_path.exists());

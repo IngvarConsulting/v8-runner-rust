@@ -18,7 +18,6 @@ check:
 ```json
 {
   "ok": true,
-  "provider_dispatched": false,
   "infobase": "origin",
   "state": "started_by_this_copy",
   "action": "reported",

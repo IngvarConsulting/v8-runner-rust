@@ -99,10 +99,6 @@
         "null"
       ]
     },
-    "provider_dispatched": {
-      "description": "Получил ли исполнитель работу этой команды\n(`INV.WIRE.PROVIDER-DISPATCHED-SAYS-WHETHER-AN-EXECUTOR-GOT-WORK`).",
-      "type": "boolean"
-    },
     "ready": {
       "type": "boolean"
     },
@@ -143,7 +139,6 @@
   },
   "required": [
     "ok",
-    "provider_dispatched",
     "infobase",
     "state",
     "action",

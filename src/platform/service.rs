@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Что запустить службой.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "читает только запуск на Windows")
+)]
 #[derive(Debug, Clone)]
 pub struct ServiceRequest {
     pub program: PathBuf,

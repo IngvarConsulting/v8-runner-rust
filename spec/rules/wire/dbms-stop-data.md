@@ -19,7 +19,6 @@ check:
 ```json
 {
   "ok": true,
-  "provider_dispatched": true,
   "infobase": "origin",
   "state": "not_running",
   "action": "stopped",
