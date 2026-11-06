@@ -482,30 +482,29 @@ pub(crate) fn designer_child_objects(content: &str) -> Option<Vec<(String, Strin
     let mut seen_configuration = false;
 
     loop {
-        match reader.read_event().ok()? {
+        let event = reader.read_event().ok()?;
+        let opens_child_objects = stack.len() == 2
+            && match &event {
+                Event::Start(tag) => xml_local_name(tag.name().as_ref()) == "ChildObjects",
+                Event::Empty(tag) => tag.local_name().as_ref() == b"ChildObjects",
+                _ => false,
+            };
+        if opens_child_objects && names.replace(Vec::new()).is_some() {
+            return None;
+        }
+
+        match event {
             Event::Start(event) => {
                 let tag = xml_local_name(event.name().as_ref());
                 match stack.len() {
                     0 if !seen_root && tag == "MetaDataObject" => seen_root = true,
                     1 if !seen_configuration && tag == "Configuration" => seen_configuration = true,
                     0 | 1 => return None,
-                    2 if tag == "ChildObjects" => {
-                        if names.replace(Vec::new()).is_some() {
-                            return None;
-                        }
-                    }
                     3 if stack[2] == "ChildObjects" => name.clear(),
                     4.. if stack[2] == "ChildObjects" => return None,
                     _ => {}
                 }
                 stack.push(tag);
-            }
-            Event::Empty(event)
-                if stack.len() == 2 && event.local_name().as_ref() == b"ChildObjects" =>
-            {
-                if names.replace(Vec::new()).is_some() {
-                    return None;
-                }
             }
             Event::Text(text) if stack.len() == 4 && stack[2] == "ChildObjects" => {
                 name.push_str(&text.unescape().ok()?);

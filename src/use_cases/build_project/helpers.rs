@@ -406,8 +406,6 @@ fn plan_partial_or_full_load(
                 mode: BuildMode::Full,
                 message: if edt_extension {
                     "full load required for EDT extension source-set"
-                } else if nothing_to_compare {
-                    "full load required without a prior file snapshot"
                 } else {
                     "full load selected by partial-load rules"
                 }
