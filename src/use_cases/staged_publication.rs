@@ -750,7 +750,7 @@ mod tests {
         metadata.created_at = chrono::Utc::now() - chrono::Duration::days(2);
         fs::write(&sidecar, serde_json::to_vec(&metadata).expect("json")).expect("rewrite");
 
-        cleanup_owned_orphan_files(&[root.clone()], &root, "identity", &[], &[], true)
+        cleanup_owned_orphan_files(std::slice::from_ref(&root), &root, "identity", &[], &[], true)
             .expect("cleanup");
 
         assert!(backup.exists());
