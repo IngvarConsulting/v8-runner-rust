@@ -651,7 +651,10 @@ fn normative_numerals() -> Vec<(String, String)> {
 /// расти ему можно: новое правило с числом — обычное дело, а долг по прозе только
 /// сокращают.
 const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
-    ("cli/a-cluster-copy-is-created-in-two-steps.md", "два,двумя,двух,оба,оба"),
+    (
+        "cli/a-cluster-copy-is-created-in-two-steps.md",
+        "два,двумя,двух,двух,оба",
+    ),
     ("cli/a-refusal-names-the-missing-credential-level.md", "три"),
     ("cli/apply-is-a-separate-step.md", "два,оба,три"),
     ("cli/concurrent-processes-are-serialized.md", "два"),
