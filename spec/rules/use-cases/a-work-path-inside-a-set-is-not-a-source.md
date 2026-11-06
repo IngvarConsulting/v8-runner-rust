@@ -4,6 +4,7 @@ check:
   - src/change_detection/scanner.rs::the_build_directory_is_not_a_source_below_the_root
   - src/change_detection/scanner.rs::a_work_path_inside_the_root_is_not_a_source_whatever_its_name
   - src/change_detection/analyzer.rs::a_service_file_in_a_work_path_inside_the_set_is_not_a_change
+  - src/use_cases/exchange_guard.rs::a_created_base_does_not_remember_a_work_path_inside_its_set
   - src/use_cases/agent_session.rs::a_root_copied_for_the_agent_leaves_the_agent_directory_behind
 ---
 
@@ -16,4 +17,8 @@ check:
 (`INV.USE-CASES.A-SELECTED-ROOT-IS-SCANNED-WHATEVER-ITS-NAME`).
 
 Там, где символическую ссылку создать нельзя, агент получает копию набора. Если его каталог лежит
-внутри этого набора, копия не входит в собственное назначение и не несёт порождённых каталогов.
+внутри этого набора, копия не входит в собственное назначение и не несёт `workPath` и порождённых
+каталогов верхнего уровня. Глубже такое имя принадлежит метаданным, и они копируются.
+
+Память, записанная прежней версией, может называть файлы этих каталогов. Следующая отправка видит
+их удалёнными и выполняет полную загрузку; потом память чиста.

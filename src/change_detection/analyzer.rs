@@ -279,9 +279,17 @@ pub fn rescan_and_commit_full(
     if !context.persists_snapshot() {
         return Ok(());
     }
-    let excluded = scanner::work_path_inside(context.path(), work_path);
-    let prepared = prepare_snapshot(context, context.path(), excluded)?;
+    let prepared = prepare_source_snapshot(context, work_path)?;
     commit_full_snapshot(context, work_path, &prepared)
+}
+
+/// Hash the source-set directory itself, which can hold `workPath`.
+pub fn prepare_source_snapshot(
+    context: &SourceSetContext,
+    work_path: &Path,
+) -> Result<FullSnapshot, ChangeDetectionError> {
+    let excluded = scanner::work_path_inside(context.path(), work_path);
+    prepare_snapshot(context, context.path(), excluded)
 }
 
 /// Hash an exported tree before publishing it; does not open or mutate storage.

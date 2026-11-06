@@ -70,6 +70,7 @@ pub struct ScanSnapshot {
 /// Hash every selected regular file, including equal-size edits with exactly the old
 /// remembered mtime (#447). The predicate is the caller's existing interruption policy;
 /// successful post-publication bookkeeping supplies an always-false predicate.
+#[cfg(test)]
 pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSnapshot, ScanError> {
     scan_excluding(root, None, interrupted)
 }
@@ -198,6 +199,22 @@ pub(super) fn source_entries(
     root: &Path,
 ) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
     source_entries_excluding(root, None)
+}
+
+/// A set copied for the agent keeps a form named `build`: below the top level such a name is
+/// metadata. Generated directories live at the top, the others are named by their paths.
+pub(crate) fn top_level_source_entries(
+    root: &Path,
+    excluded: Vec<PathBuf>,
+) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(move |entry| {
+            entry.depth() == 0
+                || !((entry.depth() == 1 && is_ignored_dir(entry))
+                    || excluded.iter().any(|path| path == entry.path()))
+        })
 }
 
 /// The entries of a source tree, without the generated directories and `excluded`.
