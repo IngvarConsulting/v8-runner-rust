@@ -11,13 +11,13 @@ use crate::domain::capability::{
 use crate::domain::diff::{DiffAgainst, DiffResult, MetadataChange};
 use crate::platform::designer::DesignerDsl;
 use crate::platform::dump_forecast::{parse_designer_diff, parse_export_status, ChangeList};
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::process::ProcessExecutor;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::temp::{platform_logs_dir, temp_root};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::ignored_files::VERSION_FILE_NAME;
 use crate::use_cases::infobase_export::validate_platform_artifact;
 use crate::use_cases::interruption::pending_interruption_error;
@@ -180,11 +180,12 @@ fn run_provider(
     let policy = context.process_policy(InterruptionSafetyClass::Interruptible, None);
     match (selected.provider, input) {
         (Provider::Ibcmd, DiffInput::VersionFile(version_file)) => {
-            let connection = IbcmdConnection::from_infobase(&config.infobase)?;
-            let result = IbcmdDsl::new(binary, connection, &runner, policy)
-                .config_export_status(version_file, None)?;
+            let stage = list_stage(config)?;
+            let list = stage.path().join("changes.txt");
+            let result = build_ibcmd_dsl(context, config, &binary, &runner)?
+                .config_export_status_to_file(version_file, &list)?;
             check_result(context, config, &result)?;
-            metadata_changes(parse_export_status(&result.process.stdout))
+            metadata_changes(parse_export_status(&read_list(&list)?))
         }
         (Provider::Designer, _) => {
             let log = platform_logs_dir(&config.work_path)
@@ -212,20 +213,27 @@ fn designer_changes(
     designer: &DesignerDsl<'_>,
     version_file: &Path,
 ) -> Result<DiffOutput, AppError> {
-    let root = temp_root(&config.work_path).map_err(io_error)?;
-    let stage = tempfile::tempdir_in(root).map_err(io_error)?;
+    let stage = list_stage(config)?;
     // Designer takes a directory, while the version-file owner may have selected its own copy.
     fs::copy(version_file, stage.path().join(VERSION_FILE_NAME)).map_err(io_error)?;
     let list = stage.path().join("changes.txt");
     let result = designer.dump_changes_list(stage.path(), &list, None)?;
     check_result(context, config, &result)?;
-    validate_platform_artifact(&list)?;
-    let text = fs::read_to_string(&list).map_err(|error| {
+    metadata_changes(parse_designer_diff(&read_list(&list)?))
+}
+
+fn list_stage(config: &AppConfig) -> Result<tempfile::TempDir, AppError> {
+    let root = temp_root(&config.work_path).map_err(io_error)?;
+    tempfile::tempdir_in(root).map_err(io_error)
+}
+
+fn read_list(list: &Path) -> Result<String, AppError> {
+    validate_platform_artifact(list)?;
+    fs::read_to_string(list).map_err(|error| {
         AppError::InvalidOutput(format!(
-            "cannot read the Designer change list as UTF-8: {error}"
+            "cannot read the platform change list as UTF-8: {error}"
         ))
-    })?;
-    metadata_changes(parse_designer_diff(&text))
+    })
 }
 
 fn metadata_changes(list: Option<ChangeList<'_>>) -> Result<DiffOutput, AppError> {

@@ -324,6 +324,7 @@ command-specific validation, а не ослабление `push`, source `pull`,
     владельца; до первой удачной отправки отказы обмена выгрузку не предлагают
 - `workPath/hash-storages` — общий кеш EDT и внешних артефактов
 - `workPath/logs`
+- `workPath/reports/diff` — отчёты `diff --against`; раннер их не удаляет, каталог можно очистить
 - `workPath/temp`
 - `workPath/edt-workspace`
 - `workPath/designer` — выгрузки внешних обработок и отчётов формата EDT

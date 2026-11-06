@@ -1465,7 +1465,7 @@ fn execute_diff(
         None => None,
         Some("db") => Some(DiffAgainst::Database),
         Some(value) if value.starts_with("vendor:") => {
-            let name = &value["vendor:".len()..];
+            let name = value.strip_prefix("vendor:").unwrap_or_default();
             if name.trim().is_empty() {
                 let error =
                     AppError::Validation("--against vendor: requires a supplier name".to_owned());

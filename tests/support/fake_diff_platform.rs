@@ -22,7 +22,19 @@ fn main() {
             .find_map(|arg| arg.strip_prefix("--base="))
             .unwrap();
         record_baseline(Path::new(base));
-        print!("{}", output.replace("\\n", "\n"));
+        let list = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--out="))
+            .unwrap();
+        match output.as_str() {
+            "missing" => {}
+            "empty" => fs::write(list, []).unwrap(),
+            _ => fs::write(
+                list,
+                format!("\u{feff}{}", output.replace("\\n", "\r\n")),
+            )
+            .unwrap(),
+        }
         return;
     }
     let target = if let Some(list) = value("-getChanges") {

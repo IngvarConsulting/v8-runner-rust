@@ -595,8 +595,8 @@ impl ProcessExecutor {
 
         Ok(ProcessResult {
             exit_code: output.status.code().unwrap_or(-1),
-            stdout: decode_output(&output.stdout),
-            stderr: decode_output(&output.stderr),
+            stdout: decode_output(output.stdout),
+            stderr: decode_output(output.stderr),
             interruption: output.interruption,
         })
     }
@@ -604,23 +604,32 @@ impl ProcessExecutor {
 
 /// Text of a child's stream. A Windows console utility such as `ibcmd` writes in the OEM code
 /// page even into a pipe, so bytes that are not UTF-8 are read in that page.
-fn decode_output(bytes: &[u8]) -> String {
-    match std::str::from_utf8(bytes) {
-        Ok(text) => text.to_owned(),
-        Err(_) => decode_legacy_output(bytes),
-    }
+fn decode_output(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|error| decode_legacy_output(error.as_bytes()))
 }
 
 #[cfg(windows)]
 fn decode_legacy_output(bytes: &[u8]) -> String {
-    use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_OEMCP};
+    decode_in_code_page(bytes, windows_sys::Win32::Globalization::CP_OEMCP)
+}
+
+#[cfg(windows)]
+fn decode_in_code_page(bytes: &[u8], code_page: u32) -> String {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
 
     let Ok(length) = i32::try_from(bytes.len()) else {
         return String::from_utf8_lossy(bytes).into_owned();
     };
     // SAFETY: the pointer and length describe `bytes`; a null output asks only for the size.
     let needed = unsafe {
-        MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), length, std::ptr::null_mut(), 0)
+        MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr(),
+            length,
+            std::ptr::null_mut(),
+            0,
+        )
     };
     let mut wide = vec![0u16; usize::try_from(needed).unwrap_or(0)];
     if wide.is_empty() {
@@ -629,7 +638,7 @@ fn decode_legacy_output(bytes: &[u8]) -> String {
     // SAFETY: `wide` holds exactly `needed` UTF-16 units, as the call above reported.
     let written = unsafe {
         MultiByteToWideChar(
-            CP_OEMCP,
+            code_page,
             0,
             bytes.as_ptr(),
             length,
@@ -1651,7 +1660,7 @@ mod tests {
     #[test]
     fn utf8_output_is_kept_as_written() {
         assert_eq!(
-            super::decode_output("Справочник1".as_bytes()),
+            super::decode_output("Справочник1".as_bytes().to_vec()),
             "Справочник1"
         );
     }
@@ -1659,21 +1668,17 @@ mod tests {
     /// The bytes `ibcmd` wrote on Windows for `modified: Catalog.Справочник1`.
     #[cfg(windows)]
     #[test]
-    fn output_outside_utf8_is_read_in_the_oem_code_page() {
-        use windows_sys::Win32::Globalization::GetOEMCP;
-
+    fn output_outside_utf8_is_read_in_the_given_code_page() {
         let bytes = [
             b"modified: Catalog.".as_slice(),
             &[0x91, 0xAF, 0xE0, 0xA0, 0xA2, 0xAE, 0xE7, 0xAD, 0xA8, 0xAA],
             b"1",
         ]
         .concat();
-        let text = super::decode_output(&bytes);
-        assert!(!text.contains('\u{FFFD}'), "{text}");
-        // SAFETY: the call takes no arguments and only reads the system setting.
-        if unsafe { GetOEMCP() } == 866 {
-            assert_eq!(text, "modified: Catalog.Справочник1");
-        }
+        assert_eq!(
+            super::decode_in_code_page(&bytes, 866),
+            "modified: Catalog.Справочник1"
+        );
     }
 
     use super::{

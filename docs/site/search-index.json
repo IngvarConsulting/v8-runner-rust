@@ -1509,7 +1509,7 @@
     "url": "cli-diff.html#diff-success",
     "page": "diff",
     "section": "Объекты изменились",
-    "text": "Объекты изменились Версия объекта изменилась относительно файла версий. Список описывает версии, а не содержимое. После push версии всех загруженных объектов новые, поэтому список называет все объекты, пока выгрузка не обновит файл версий. ✓ Metadata version changes provider: ibcmd (default) Modified: Catalog.Products"
+    "text": "Объекты изменились Версия объекта изменилась относительно файла версий. Список описывает версии, а не содержимое. После push версии всех загруженных объектов новые, поэтому список называет все объекты, пока выгрузка не обновит файл версий. pull при неизменном поколении не выгружает; файл обновляет pull --force , который заменяет дерево исходников. ✓ Metadata version changes provider: ibcmd (default) Modified: Catalog.Products"
   },
   {
     "url": "cli-diff.html#diff-alternative",
@@ -1533,7 +1533,7 @@
     "url": "cli-diff.html#diff-against-success",
     "page": "diff",
     "section": "Сравнение завершено",
-    "text": "Сравнение завершено Раннер сохраняет отчёт Конфигуратора и возвращает путь к файлу. Результаты сравнения находятся в самом отчёте. ✓ Configuration comparison completed provider: designer (default) Report: /work/reports/diff/.tmp7p8CvR/report.txt Настройка исполнителей и конфигурации проекта ."
+    "text": "Сравнение завершено Раннер сохраняет отчёт Конфигуратора в UTF-16LE с BOM и возвращает путь к файлу. Результаты сравнения находятся в самом отчёте. ✓ Configuration comparison completed provider: designer (default) Report: /work/reports/diff/.tmp7p8CvR/report.txt Настройка исполнителей и конфигурации проекта ."
   },
   {
     "url": "cli-pull.html",

@@ -15,7 +15,6 @@ check:
   - tests/cli_diff.rs::owner_boundary_warns_for_status_and_preserves_marker_for_both_forms
   - tests/cli_diff.rs::version_file_is_resolved_without_rewriting_the_sources
   - src/platform/designer.rs::full_comparison_passes_windows_paths_without_verbatim_prefix
-  - src/platform/process.rs::output_outside_utf8_is_read_in_the_oem_code_page
 ---
 
 # `data` команды `diff`
@@ -30,13 +29,14 @@ check:
 `full_dump: true` и пустой `changes` означают, что платформа требует полную выгрузку и не
 перечислила объекты. `full_dump: false` и пустой `changes` у успешного обычного `diff` означают,
 что платформа не нашла изменений версий. Список описывает версии, а не содержимое: после
-`push` в нём все загруженные объекты, пока выгрузка не обновит файл версий. Неизвестный ответ платформы даёт `invalid_output`.
-Designer обозначает пустой список одной сигнатурой UTF-8 BOM. Имена объектов приходят без
-искажений: на Windows `ibcmd` пишет ответ в кодовой странице OEM.
+`push` в нём все загруженные объекты, пока выгрузка не обновит файл версий: `pull` при
+неизменном поколении не выгружает, файл обновляет `pull --force`. Неизвестный ответ платформы даёт `invalid_output`.
+Designer обозначает пустой список одной сигнатурой UTF-8 BOM. `ibcmd` отдаёт список файлом
+`--out` в UTF-8: stdout на Windows идёт в кодовой странице OEM и теряет символы вне неё.
 [Замер на платформе 8.3.27.2074](../../../references/1c/confirmed-runtime-measurements.md).
 
 `diff --against db|vendor:<имя>|<файл>` при успехе возвращает абсолютный путь `report` к
-полному TXT-отчёту Конфигуратора. Раннер сохраняет байты отчёта. В этой форме `changes`
+полному TXT-отчёту Конфигуратора в UTF-16LE с BOM. Раннер сохраняет байты отчёта. В этой форме `changes`
 пуст и `full_dump` равен `false`. Путь появляется только у успешного непустого файла.
 
 `provider` объясняет выбор. `provider_dispatched` берётся из отметки работы исполнителя.
