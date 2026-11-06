@@ -13,12 +13,11 @@ use std::path::{Path, PathBuf};
 use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::process::ProcessRunner;
 use crate::support::error::AppError;
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::dump_config::helpers::ibcmd_data_path;
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::ibcmd_diagnostics::ensure_succeeded;
 use crate::use_cases::interruption::{self, Deferrals};
 
@@ -87,7 +86,6 @@ pub(crate) fn roll_back(
         &format!("[{executor}] Возврат к конфигурации базы данных"),
         TimelineStageStatus::Running,
     );
-    let policy = context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
     let (action, result) = match tool {
         RollingBack::Designer {
             binary,
@@ -100,22 +98,23 @@ pub(crate) fn roll_back(
                 config.v8_connection(),
                 runner,
                 Some(log_file),
-                policy,
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             )
             .rollback_cfg(extension)
             .map_err(AppError::from)?,
         ),
-        RollingBack::Ibcmd { binary, runner } => {
-            let connection =
-                IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-            (
-                "config reset",
-                IbcmdDsl::new(binary.to_path_buf(), connection, runner, policy)
-                    .with_data_path(ibcmd_data_path(config)?)
-                    .config_reset(extension)
-                    .map_err(AppError::from)?,
-            )
-        }
+        RollingBack::Ibcmd { binary, runner } => (
+            "config reset",
+            build_ibcmd_dsl(
+                context,
+                config,
+                binary,
+                runner,
+                InterruptionSafetyClass::CriticalNonAbortable,
+            )?
+            .config_reset(extension)
+            .map_err(AppError::from)?,
+        ),
     };
     deferrals.note_result(action, &result);
     ensure_succeeded(action, "source-set", set, &result).map_err(|error| match error {

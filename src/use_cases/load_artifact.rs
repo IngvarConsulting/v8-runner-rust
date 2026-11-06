@@ -16,7 +16,6 @@ use crate::domain::load::{
 };
 use crate::platform::designer::DesignerDsl;
 use crate::platform::extension_inventory::parse_extension_inventory;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
@@ -25,6 +24,7 @@ use crate::support::error::{AppError, CancelledAt};
 use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
     cancelled_outcome, deferred_process_interruption, SafePoint, SafePointCancel,
@@ -684,14 +684,14 @@ fn installed_extension_state(
             Err(error) => Err(error),
         };
     }
-    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
     let binary = utilities.locate(UtilityType::Ibcmd)?.path;
-    let dsl = IbcmdDsl::new(
-        binary,
-        connection,
+    let dsl = build_ibcmd_dsl(
+        context,
+        config,
+        &binary,
         utilities.runner_for(UtilityType::Ibcmd),
-        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-    );
+        InterruptionSafetyClass::GracefulThenKill,
+    )?;
     let result = match dsl.infobase_extension_list() {
         Ok(result) => result,
         // Refused before the start or stopped after it: the runner has already marked the

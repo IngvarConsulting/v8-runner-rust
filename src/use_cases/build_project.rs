@@ -22,6 +22,7 @@ use crate::use_cases::build_progress::{
     build_mode_label, log_build_step_timeline, log_timeline_stage, TimelineStageStatus,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
@@ -39,12 +40,12 @@ mod helpers;
 
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
-    apply_subject, build_designer_dsl, build_ibcmd_dsl, change_detection_failure,
-    commit_step_state, designer_log_file, dump_designer_version_file, extension_name,
-    fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
-    plan_configurator_load_step, plan_edt_export_step, plan_generated_designer_load_step,
-    push_build_step, push_loaded_step, read_designer_generation, read_ibcmd_generation,
-    remove_storage_path, AfterLoad, AnalysisByName, Loaded, StepCommit, StepPlan,
+    apply_subject, build_designer_dsl, change_detection_failure, commit_step_state,
+    designer_log_file, dump_designer_version_file, extension_name, fail_from_source_set_index,
+    interruption_before_safe_point, map_ibcmd_error, plan_configurator_load_step,
+    plan_edt_export_step, plan_generated_designer_load_step, push_build_step, push_loaded_step,
+    read_designer_generation, read_ibcmd_generation, remove_storage_path, AfterLoad,
+    AnalysisByName, Loaded, StepCommit, StepPlan,
 };
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 
@@ -2806,7 +2807,10 @@ mod tests {
             step.source_set == "main" && matches!(step.mode, BuildMode::Full) && step.ok
         }));
         assert!(edt_calls_text.contains("export --project-name main"));
-        assert!(ibcmd_calls_text.contains("infobase --db-path /tmp/ib config import"));
+        assert!(ibcmd_calls_text.contains(&format!(
+            "infobase --data {} --db-path /tmp/ib config import",
+            config.work_path.join("ibcmd-data").display()
+        )));
         assert!(!ibcmd_calls_text.contains("config import files"));
         assert!(!ibcmd_calls_text.contains("--partial"));
         assert!(ibcmd_calls_text.contains(&format!(

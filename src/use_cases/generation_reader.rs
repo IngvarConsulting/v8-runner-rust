@@ -15,13 +15,12 @@ use std::path::{Path, PathBuf};
 use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::dump_config::helpers::ibcmd_data_path;
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 
 /// Процесс, который спрашивает поколение.
 pub(crate) enum GenerationProcess<'a> {
@@ -31,12 +30,10 @@ pub(crate) enum GenerationProcess<'a> {
         runner: &'a dyn ProcessRunner,
         log_file: PathBuf,
     },
-    /// `ibcmd` отвечает в stdout; `data_path` — каталог данных автономного сервера, если
-    /// команда держит свой.
+    /// `ibcmd` отвечает в stdout.
     Ibcmd {
         binary: &'a Path,
         runner: &'a dyn ProcessRunner,
-        data_path: Option<PathBuf>,
     },
 }
 
@@ -57,7 +54,6 @@ pub(crate) fn read_generation<'a>(
     {
         return Ok(None);
     }
-    let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
     match process()? {
         GenerationProcess::Designer {
             binary,
@@ -68,17 +64,19 @@ pub(crate) fn read_generation<'a>(
             config.v8_connection(),
             runner,
             Some(log_file),
-            policy,
+            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
         )
         .config_generation_id(extension)
         .map_err(AppError::from),
-        GenerationProcess::Ibcmd {
+        GenerationProcess::Ibcmd { binary, runner } => build_ibcmd_dsl(
+            context,
+            config,
             binary,
             runner,
-            data_path,
-        } => ibcmd_dsl(config, binary, runner, data_path, policy)?
-            .config_generation_id(extension)
-            .map_err(AppError::from),
+            InterruptionSafetyClass::GracefulThenKill,
+        )?
+        .config_generation_id(extension)
+        .map_err(AppError::from),
     }
 }
 
@@ -147,7 +145,6 @@ pub(crate) fn read_by_record_tool(
                 Process::Ibcmd => GenerationProcess::Ibcmd {
                     binary: &binary,
                     runner,
-                    data_path: Some(ibcmd_data_path(config)?),
                 },
                 Process::Designer => GenerationProcess::Designer {
                     binary: &binary,
@@ -158,22 +155,6 @@ pub(crate) fn read_by_record_tool(
         },
         extension,
     )
-}
-
-/// `ibcmd` к базе проекта — для обоих чтений этого модуля.
-fn ibcmd_dsl<'a>(
-    config: &AppConfig,
-    binary: &Path,
-    runner: &'a dyn ProcessRunner,
-    data_path: Option<PathBuf>,
-    policy: crate::platform::process::ProcessExecutionPolicy,
-) -> Result<IbcmdDsl<'a>, AppError> {
-    let connection = IbcmdConnection::from_infobase(&config.infobase)?;
-    let dsl = IbcmdDsl::new(binary.to_path_buf(), connection, runner, policy);
-    Ok(match data_path {
-        Some(data_path) => dsl.with_data_path(data_path),
-        None => dsl,
-    })
 }
 
 /// Есть ли непринятое: основная конфигурация (или расширение `extension`) отличается от
@@ -201,7 +182,6 @@ pub(crate) fn read_unapplied<'a>(
         .map_err(|error| AppError::Runtime(format!("failed to create temp dir: {error}")))?;
     let main = dir.path().join("main.cf");
     let database = dir.path().join("database.cf");
-    let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
     match process()? {
         GenerationProcess::Designer {
             binary,
@@ -213,7 +193,7 @@ pub(crate) fn read_unapplied<'a>(
                 config.v8_connection(),
                 runner,
                 Some(log_file),
-                policy,
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             );
             let first = dsl.dump_cfg(&main, extension).map_err(AppError::from)?;
             saved("configuration", first.process.outcome())?;
@@ -223,12 +203,14 @@ pub(crate) fn read_unapplied<'a>(
                 .map_err(AppError::from)?;
             saved("database configuration", second.process.outcome())?;
         }
-        GenerationProcess::Ibcmd {
-            binary,
-            runner,
-            data_path,
-        } => {
-            let dsl = ibcmd_dsl(config, binary, runner, data_path, policy)?;
+        GenerationProcess::Ibcmd { binary, runner } => {
+            let dsl = build_ibcmd_dsl(
+                context,
+                config,
+                binary,
+                runner,
+                InterruptionSafetyClass::GracefulThenKill,
+            )?;
             let first = dsl
                 .config_save(&main, false, extension)
                 .map_err(AppError::from)?;

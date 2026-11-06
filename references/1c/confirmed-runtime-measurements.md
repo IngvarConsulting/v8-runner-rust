@@ -563,6 +563,16 @@ Windows, клиент и кластер 8.3.27.2074, MS SQL Server 2022. Коп�
 получает `rc=255`. Время: создание базы `ibcmd infobase create` ~5 с, импорт ~5 с
 (`.cfe` — 5–8 с).
 
+**Снятый процесс блокировку не оставляет.** Замер 06.11.2026, Windows, 8.3.24.1819 и
+8.3.27.2342, ответы одинаковы. Пока `ibcmd infobase --data <d> --db-path <ib> config export
+<dir>` работает, второй запуск с тем же `--data` получает отказ по блокировке. После
+`taskkill /F /T` следующий `config generation-id` с тем же `--data` проходит, `rc=0`; в
+каталоге остались `ipc-data`, `perf-data`, `temp`, `users-data`, удалять их не понадобилось.
+На Unix не мерено.
+
+Код выхода отказа по блокировке на Windows процесс сообщает как −2, это 254 в младшем байте.
+Git Bash показывает вместо него 127: коды `ibcmd` снимают не через него.
+
 ```text
 ibcmd config import --out=$W/out182/a1.cf $W/xml_cf                                   # rc=255
 ibcmd config import --db-path=$W/e_empty --out=$W/out182/a2.cf $W/xml_cf              # rc=255

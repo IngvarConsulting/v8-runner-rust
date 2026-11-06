@@ -456,7 +456,6 @@ impl Asker {
                     Ok(GenerationProcess::Ibcmd {
                         binary,
                         runner: utilities.runner_for(UtilityType::Ibcmd),
-                        data_path: None,
                     })
                 },
                 extension,
@@ -495,7 +494,6 @@ impl Asker {
                     Ok(GenerationProcess::Ibcmd {
                         binary,
                         runner: utilities.runner_for(UtilityType::Ibcmd),
-                        data_path: None,
                     })
                 },
                 extension,

@@ -1561,7 +1561,7 @@ v8-runner status [--deep | --all]
   `selected: true`. База, пришедшая строкой соединения в `--infobase`, в местном слое не
   объявлена и в перечень не входит. С `--deep` не сочетается.
 - `--deep` — команда чтения базы: берёт её замок, метку владельца только читает и ничего,
-  кроме журналов Конфигуратора и сессии агента, не пишет. К набору добавляется `base`: поколение, спрошенное исполнителем `push`, и сверка с
+  кроме журналов Конфигуратора, сессии агента и каталога данных `workPath/ibcmd-data`, не пишет. К набору добавляется `base`: поколение, спрошенное исполнителем `push`, и сверка с
   записью — `unchanged`, `moved_ahead` (`push`, который грузит этот набор без `--force`, откажет `non_fast_forward`), `other_tool`,
   `no_record`, `no_answer`; где `push` этим исполнителем проект не грузит, сверки нет и
   причина названа. К базе — `extensions` (расширения базы с `source_set: null` у тех,
@@ -1746,7 +1746,7 @@ v8-runner mcp serve http
   же и называет этот каталог в `data.workspace_path`.
 - `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert` между форматами
   исходников.
-- `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD: выгрузка, `diff`, `reset`, `apply` и применение в `push`; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
+- `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD: каждая команда к базе проекта; у временной базы `make` и `convert` каталог свой; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/reports/diff/`: отчёты `diff --against`; раннер их не удаляет, каталог можно очистить.
 - `workPath/logs/platform/`: platform logs.
 - `workPath/logs/mcp/actions.log`: журнал действий; пишется при выводе JSON — у MCP-сервера и
