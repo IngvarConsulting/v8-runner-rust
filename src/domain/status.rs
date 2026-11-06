@@ -188,7 +188,9 @@ pub struct ExtensionsStatus {
 pub struct InstalledExtensionStatus {
     /// Имя расширения в базе.
     pub name: String,
-    pub active: bool,
+    /// `null` — пакетный Конфигуратор сообщает только имя.
+    #[schemars(required, extend("type" = ["boolean", "null"]))]
+    pub active: Option<bool>,
     /// Набор проекта с тем же именем; `null` — набора нет: расширение-инструмент или
     /// расширение, которое есть в базе и нет в проекте.
     pub source_set: Option<String>,

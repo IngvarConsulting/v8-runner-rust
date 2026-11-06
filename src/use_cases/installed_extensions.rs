@@ -106,7 +106,8 @@ fn read_with_selected_tool(
                         .unwrap_or("no /Out log")
                 )));
             };
-            parse_extension_name_list(out).map_err(AppError::InvalidOutput)
+            parse_extension_name_list(out, config.infobase.password.as_deref().as_slice())
+                .map_err(AppError::InvalidOutput)
         }
         (Provider::Ibcmd, Some(binary)) => {
             let dsl = build_ibcmd_dsl(

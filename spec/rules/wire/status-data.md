@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STATUS-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -8,6 +8,7 @@ check:
   - tests/cli_status.rs::status_names_a_load_without_apply
   - tests/cli_status.rs::status_deep_predicts_the_push_generation_check
   - tests/cli_status.rs::status_deep_without_a_platform_answers_null_with_a_reason
+  - tests/cli_extensions.rs::cluster_designer_names_are_used_by_status_and_extension_upload
 ---
 
 # `data` команды `status`
@@ -25,6 +26,9 @@ check:
 расширения-инструмента клиентского MCP `tool: true`, — и, у файловой
 базы, `holders` — копии из метки владельца. Без `--deep` этих полей нет. Что платформа не
 ответила, форма называет `null` с причиной в `reason`, а не отказом команды.
+
+**Что изменила версия 5.** У расширения из пакетного списка Конфигуратора `active: null`.
+Имя из списка участвует в сопоставлении с наборами проекта.
 
 **Что изменила версия 4.** У записи `recorded` новое обязательное поле `applied`: `false` —
 набор загружен без применения к конфигурации базы данных (`push --no-apply` или отказ

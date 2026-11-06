@@ -122,6 +122,10 @@
         {
           "implemented": true,
           "provider": "agent"
+        },
+        {
+          "implemented": true,
+          "provider": "designer"
         }
       ],
       "file": [

@@ -13,7 +13,6 @@
 convert cluster | сайт: ibcmd ibcmd-rs | матрица: ibcmd | #413
 convert file | сайт: ibcmd ibcmd-rs | матрица: ibcmd | #413
 convert standalone | сайт: ibcmd ibcmd-rs | матрица: ibcmd | #413
-extensions cluster | сайт: agent designer | матрица: agent | #428
 
 # Целевые цепочки справки; реализация отслеживается общим планом #233.
 extensions standalone | сайт: agent designer | матрица: agent | #233

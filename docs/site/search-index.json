@@ -2007,7 +2007,7 @@
     "url": "cli-extensions.html#op-extensions",
     "page": "extensions",
     "section": "extensions list",
-    "text": "extensions list v8-runner extensions list состав установленных расширений и их свойства: активность, безопасный режим, защита от опасных действий ( 44 )"
+    "text": "extensions list v8-runner extensions list состав установленных расширений и их свойства: активность, безопасный режим, защита от опасных действий ( 44 ) Свойства отдаёт агент. Конфигуратор на кластере перечисляет только имена: запись содержит name , а status --deep показывает у такого расширения active: null . Остальные действия с расширениями Конфигуратор не выполняет: отказ называет агента."
   },
   {
     "url": "cli-extensions.html#response-classes",
