@@ -227,14 +227,15 @@ pub fn is_windows_device_name(value: &str) -> bool {
 /// расширения не становится.
 pub fn parse_extension_name_list(output: &str) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
-    for line in output.lines() {
+    for (index, line) in output.lines().enumerate() {
         let name = line.trim();
         if name.is_empty() {
             continue;
         }
         if !is_extension_identifier(name) {
             return Err(format!(
-                "extension list line is not an extension name: {name:?}"
+                "extension list line {} is not an extension name",
+                index + 1,
             ));
         }
         names.push(name.to_owned());

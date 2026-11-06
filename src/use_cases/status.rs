@@ -307,7 +307,7 @@ fn extensions(
         .map(|tool| tool.name.to_lowercase());
     let installed: Vec<(String, _)> = installed
         .into_iter()
-        .map(|extension| (extension.name.to_lowercase(), extension))
+        .map(|extension| (extension.name().to_lowercase(), extension))
         .collect();
     let missing_in_base = project
         .iter()
@@ -319,14 +319,23 @@ fn extensions(
         installed: Some(
             installed
                 .into_iter()
-                .map(|(key, extension)| InstalledExtensionStatus {
-                    source_set: project
-                        .iter()
-                        .find(|(project, _)| *project == key)
-                        .map(|(_, set)| (*set).to_owned()),
-                    tool: tool.as_deref() == Some(key.as_str()),
-                    active: extension.active,
-                    name: extension.name,
+                .map(|(key, extension)| {
+                    use crate::domain::extensions::ExtensionInventoryEntry;
+                    let (name, active) = match extension {
+                        ExtensionInventoryEntry::Full(extension) => {
+                            (extension.name, Some(extension.active))
+                        }
+                        ExtensionInventoryEntry::NameOnly { name } => (name, None),
+                    };
+                    InstalledExtensionStatus {
+                        source_set: project
+                            .iter()
+                            .find(|(project, _)| *project == key)
+                            .map(|(_, set)| (*set).to_owned()),
+                        tool: tool.as_deref() == Some(key.as_str()),
+                        active,
+                        name,
+                    }
                 })
                 .collect(),
         ),

@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "ExtensionInventoryEntry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InstalledExtension"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A full platform record or the name reported by batch Designer."
+    },
     "InstalledExtension": {
       "additionalProperties": false,
       "description": "One extension installed in the target infobase, as reported by the platform.\n\n`ibcmd` reads the applied name prefix from a saved DB configuration.\nThe agent provider cannot attest that property and reports `None`.",
@@ -274,7 +294,7 @@
     "extensions": {
       "description": "Extensions in the order the platform reported them.\n\nThat order is not the creation order and the platform does not document one,\nso callers must not rely on it.",
       "items": {
-        "$ref": "#/$defs/InstalledExtension"
+        "$ref": "#/$defs/ExtensionInventoryEntry"
       },
       "type": "array"
     },

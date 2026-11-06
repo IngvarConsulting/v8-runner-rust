@@ -10,7 +10,9 @@ use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::extension_identity::platform_extension_name;
-use crate::use_cases::extension_inventory::Executor;
+use crate::use_cases::extension_inventory::{
+    designer_refusal, select_executor, Executor, ExtensionAction,
+};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
     self, append_warnings, collecting_deferrals, prefix_warnings,
@@ -58,10 +60,10 @@ fn run_configure(
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected = match crate::use_cases::provider_selection::select(
+    let selected = match select_executor(
         config,
         &mut utilities,
-        crate::domain::capability::Operation::Extensions,
+        ExtensionAction::RequiresAgentOrIbcmd("property changes"),
     ) {
         Ok(selected) => selected,
         Err((error, receipt)) => {
@@ -105,6 +107,11 @@ fn run_configure(
     }
 
     let mut setter = match executor {
+        Executor::Designer { .. } => {
+            return Err(UseCaseFailure::without_payload(designer_refusal(
+                "property changes",
+            )));
+        }
         Executor::Agent { v8 } => match ExtensionAgent::open(context, config, v8.as_deref()) {
             Ok(agent) => SafetySetter::Agent(Box::new(agent)),
             Err(error) => return Err(UseCaseFailure::without_payload(error)),

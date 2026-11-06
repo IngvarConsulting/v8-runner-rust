@@ -665,12 +665,12 @@ fn installed_extension_state(
     };
     // У кластера и автономного сервера `ibcmd` в строке `extensions` нет
     // (`INV.USE-CASES.A-CLUSTER-ROW-DOES-NOT-NAME-IBCMD`): список спрашивает исполнитель
-    // `extensions` этой цели — агент (#431).
+    // `extensions list` этой цели (#431, #428).
     if config.target_kind() != crate::domain::capability::TargetKind::File {
         let (_, read) = crate::use_cases::extension_inventory::read_installed(context, config);
         return match read {
             Ok(extensions) => Ok(
-                if extensions.iter().any(|extension| extension.name == name) {
+                if extensions.iter().any(|extension| extension.name() == name) {
                     ExtensionPresence::Present
                 } else {
                     ExtensionPresence::Absent

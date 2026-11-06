@@ -130,6 +130,193 @@ fn write_inventory_ibcmd(ibcmd_path: &Path, calls_log: &Path, inventory: &str) {
 
 const MEASURED_INVENTORY: &str = "name                         : \"Проба\"\nversion                      : \nactive                       : yes\npurpose                      : add-on\nsafe-mode                    : yes\nsecurity-profile-name        : \nunsafe-action-protection     : yes\nused-in-distributed-infobase : no\nscope                        : infobase\nhash-sum                     : \"9hfFb6YVX2OwLKZaL1L69Eq0Vrg=\"\n";
 
+fn use_cluster_designer(config_path: &Path, platform: &Path) {
+    let config = fs::read_to_string(config_path).expect("config");
+    let start = config.find("  connection:").expect("connection");
+    let end = config.find("source-set:").expect("source sets");
+    let tools = config.find("tools:").expect("tools");
+    fs::write(
+        config_path,
+        format!(
+            "{}  connection: 'Srvr=server;Ref=demo'\n{}providers:\n  extensions: designer\ntools:\n  platform:\n    path: '{}'\n",
+            &config[..start], &config[end..tools], platform.display()
+        ),
+    )
+    .expect("cluster config");
+}
+
+#[test]
+fn cluster_designer_lists_only_names_with_batch_argv() {
+    let (dir, config_path, calls_log, _) = setup_extensions_project();
+    let platform = dir.path().join("1cv8");
+    use_cluster_designer(&config_path, &platform);
+    write_script(
+        &platform,
+        &format!(
+            "printf '%s\\n' \"$@\" > '{}'\nwhile [ \"$1\" != /Out ]; do shift; done\nprintf '\\357\\273\\277Проба\\r\\nВторое\\r\\n' > \"$2\"",
+            calls_log.display()
+        ),
+    );
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args(["--json-message", "extensions", "list"])
+        .output()
+        .expect("list extensions");
+    assert!(output.status.success(), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["provider"]["selected"], "designer");
+    assert_eq!(payload["data"]["provider_dispatched"], true);
+    assert_eq!(
+        payload["data"]["extensions"],
+        serde_json::json!([{"name": "Проба"}, {"name": "Второе"}])
+    );
+    assert_data_matches_one_of(&payload["data"], "Designer list", &["extensions-inventory"]);
+    let calls = fs::read_to_string(calls_log).expect("argv");
+    let args = calls.lines().collect::<Vec<_>>();
+    assert!(
+        args.windows(2).any(|args| args == ["/S", "server\\demo"]),
+        "{args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["/DumpDBCfgList", "-AllExtensions"]),
+        "{args:?}"
+    );
+    assert!(args.contains(&"/Out"), "{args:?}");
+}
+
+#[test]
+fn cluster_designer_refuses_extension_operations_other_than_list() {
+    let (dir, config_path, calls_log, _) = setup_extensions_project();
+    let platform = dir.path().join("1cv8");
+    use_cluster_designer(&config_path, &platform);
+    write_script(
+        &platform,
+        &format!("touch '{}'; exit 99", calls_log.display()),
+    );
+    for args in [
+        &["info", "--name", "Проба"][..],
+        &["create", "--name", "Проба", "--name-prefix", "Пр_"],
+        &["delete", "--name", "Проба"],
+        &["activate", "--name", "Проба", "--active", "yes"],
+        &["activate", "--name", "Проба", "--active", "no"],
+        &["--installed-name", "Проба"],
+    ] {
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(&config_path)
+            .args(["--json-message", "extensions"])
+            .args(args)
+            .output()
+            .expect("run extensions command");
+        assert!(!output.status.success(), "{args:?}");
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(
+            payload["error"]["code"], "capability_unavailable",
+            "{args:?}: {payload}"
+        );
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("agent"),
+            "{args:?}: {payload}"
+        );
+    }
+    assert!(
+        !calls_log.exists(),
+        "a refused operation started the platform"
+    );
+}
+
+#[test]
+fn cluster_designer_invalid_list_output_does_not_echo_credentials() {
+    let (dir, config_path, _, _) = setup_extensions_project();
+    let platform = dir.path().join("1cv8");
+    use_cluster_designer(&config_path, &platform);
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace("Ref=demo", "Ref=demo;Usr=admin;Pwd=TestPassword428"),
+    )
+    .expect("configured credentials");
+    write_script(
+        &platform,
+        "while [ \"$1\" != /Out ]; do shift; done\nprintf '%s\\n' 'connection failed /P TestPassword428' > \"$2\"",
+    );
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args(["--json-message", "extensions", "list"])
+        .output()
+        .expect("list extensions");
+    assert!(!output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).expect("JSON text");
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
+    assert_eq!(payload["data"]["provider_dispatched"], true);
+    assert!(stdout.contains("extension list line 1 is not an extension name"));
+    assert!(!stdout.contains("TestPassword428"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("TestPassword428"));
+}
+
+#[test]
+fn cluster_designer_names_are_used_by_status_and_extension_upload() {
+    let (dir, config_path, calls_log, _) = setup_extensions_project();
+    let platform = dir.path().join("1cv8");
+    use_cluster_designer(&config_path, &platform);
+    write_script(
+        &platform,
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\nout=\nprev=\nfor arg in \"$@\"; do\n  if [ \"$prev\" = /Out ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncase \"$*\" in\n  *'/DumpDBCfgList -AllExtensions'*) printf 'Проба\\r\\n' > \"$out\" ;;\n  *) if [ -n \"$out\" ]; then : > \"$out\"; fi ;;\nesac",
+            calls_log.display()
+        ),
+    );
+    let status = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args(["--json-message", "status", "--deep"])
+        .output()
+        .expect("deep status");
+    assert!(status.status.success(), "{status:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
+    let installed = &payload["data"]["infobases"][0]["extensions"]["installed"];
+    assert_eq!(
+        installed,
+        &serde_json::json!([{"name": "Проба", "active": null, "source_set": null, "tool": false}])
+    );
+    assert_data_matches_one_of(&payload["data"], "Designer deep status", &["status"]);
+
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace("format: EDT", "format: DESIGNER"),
+    )
+    .expect("Designer upload config");
+    let cfe = dir.path().join("release.cfe");
+    fs::write(&cfe, "cfe").expect("artifact");
+    let upload = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args(["--json-message", "upload", "--path"])
+        .arg(&cfe)
+        .args(["--extension", "Проба"])
+        .output()
+        .expect("upload extension");
+    assert!(upload.status.success(), "{upload:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&upload.stdout).expect("upload JSON");
+    assert_eq!(
+        payload["data"]["compatibility_state"], "supported",
+        "{payload}"
+    );
+    let calls = fs::read_to_string(calls_log).expect("argv");
+    assert_eq!(
+        calls.matches("/DumpDBCfgList -AllExtensions").count(),
+        2,
+        "{calls}"
+    );
+}
+
 #[test]
 fn extensions_read_is_previewed_because_it_starts_the_platform() {
     let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
