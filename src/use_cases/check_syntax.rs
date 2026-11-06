@@ -9,7 +9,7 @@ use crate::domain::issue::{EdtIssue, Issue, IssueSeverity, ObjectIssue};
 use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::designer_validation;
 use crate::parsers::edt_validation;
-use crate::platform::designer::{syntax_check_status, DesignerDsl};
+use crate::platform::designer::{syntax_check_outcome, syntax_check_status, DesignerDsl};
 use crate::platform::edt::{render_interactive_validate_command, EdtDsl, EdtError};
 use crate::platform::edt_session::{
     EdtSessionError, EdtSessionHostOptions, EdtSessionManager, EdtSessionRequest,
@@ -188,8 +188,40 @@ fn run_syntax_branch(
     };
 
     let mut result = build_result(CheckName::DesignerConfig, platform_result, started);
+    if let Some(password) = config
+        .infobase
+        .password
+        .as_deref()
+        .filter(|p| !p.is_empty())
+    {
+        mask_designer_diagnostics(&mut result, password);
+    }
     result.provider = Some(receipt);
     conclude(result)
+}
+
+/// Маскирует поля после разбора отчёта, чтобы пароль не менял его структуру.
+fn mask_designer_diagnostics(result: &mut SyntaxCheckResult, password: &str) {
+    use crate::platform::secrets::mask_known_secrets;
+
+    if let Some(stderr) = &mut result.stderr {
+        *stderr = mask_known_secrets(stderr, &[password]);
+    }
+    // The parser splits the report into lines and trims the fields it keeps.
+    let mut parsed_secrets = vec![password];
+    parsed_secrets.extend(password.lines().map(str::trim));
+    let redact_parsed = |text: &mut String| {
+        *text = mask_known_secrets(text, &parsed_secrets);
+    };
+    for issue in &mut result.issues {
+        let (subject, message) = match issue {
+            Issue::Module(issue) => (&mut issue.path, &mut issue.message),
+            Issue::Object(issue) => (&mut issue.object, &mut issue.message),
+            Issue::Edt(_) => continue,
+        };
+        redact_parsed(subject);
+        redact_parsed(message);
+    }
 }
 
 /// Исполнитель, выбранный для проверки конфигурации: та же квитанция и тот же путь, что
@@ -1017,20 +1049,12 @@ fn session_status(
     }
 }
 
-/// Код замечаний, который ответ сессии берёт у Конфигуратора.
-const SESSION_ISSUES_FOUND: NonZeroI32 = NonZeroI32::new(101).unwrap();
 /// `-1` — принятый здесь знак «кода выхода не наблюдалось».
 const SESSION_EXIT_NOT_OBSERVED: NonZeroI32 = NonZeroI32::new(-1).unwrap();
 
 /// Исход команды общей сессии: кода выхода у неё нет, и его заменяет знак по вердикту.
 fn session_exit(status: SyntaxCheckStatus) -> Result<(), NonZeroI32> {
-    match status {
-        SyntaxCheckStatus::Clean => Ok(()),
-        SyntaxCheckStatus::IssuesFound => Err(SESSION_ISSUES_FOUND),
-        SyntaxCheckStatus::ToolFailed | SyntaxCheckStatus::Planned => {
-            Err(SESSION_EXIT_NOT_OBSERVED)
-        }
-    }
+    syntax_check_outcome(status).unwrap_or(Err(SESSION_EXIT_NOT_OBSERVED))
 }
 
 /// Отказ общей сессии на проекте.

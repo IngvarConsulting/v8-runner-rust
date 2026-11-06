@@ -162,3 +162,49 @@ fn without_a_version_the_sources_format_chooses_the_release() {
     );
     assert!(!calls.exists(), "the platform was started");
 }
+
+/// Строки таблицы от минимума до 8.5.4: каждый формат выбирает свой выпуск, а не новейшую
+/// установку. Цена этого — и более старая платформа, и компонент только из этого выпуска.
+#[test]
+fn every_measured_format_chooses_its_release_over_the_newest() {
+    let dir = temp_workspace();
+    let root = dir.path().join("platforms");
+    let calls = dir.path().join("calls.log");
+    let releases = [
+        ("2.17", "8.3.24.1819"),
+        ("2.18", "8.3.25.1633"),
+        ("2.19", "8.3.26.1656"),
+        ("2.20", "8.3.27.2342"),
+        ("2.21", "8.5.1.1529"),
+        ("2.22", "8.5.4.1878"),
+    ];
+    let path = releases
+        .iter()
+        .rev()
+        .map(|(_, version)| {
+            install(&root, version, &["1cv8"], &calls)
+                .display()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(":");
+
+    for (format, version) in releases {
+        let config = project(dir.path(), format, "");
+        let envelope = platforms(&config, Some(&path));
+        let designer = &envelope["data"]["selected"]["designer"];
+        // Выпуск, а не сборка: поиск видит и настоящие установки машины в корнях по умолчанию.
+        let release = version.rsplit_once('.').expect("release").0;
+        assert!(
+            designer["version"]
+                .as_str()
+                .is_some_and(|found| found.starts_with(&format!("{release}."))),
+            "{format}: {envelope}"
+        );
+        assert_eq!(
+            designer["chosen_by"], "source_format",
+            "{format}: {envelope}"
+        );
+    }
+    assert!(!calls.exists(), "the platform was started");
+}

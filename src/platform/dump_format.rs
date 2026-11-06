@@ -48,10 +48,15 @@ impl fmt::Display for FormatVersion {
 /// по замеру (`references/1c/confirmed-runtime-measurements.md`, раздел о версии формата
 /// файла версий, #403); платформы вне таблицы раннер не угадывает. Конфигуратор, `ibcmd` и
 /// агент одной платформы пишут одну и ту же версию, а выгрузка по изменившемуся принимает
-/// только её. Строка — выпуск, а не сборка: замерены 8.3.27.2074 и 8.5.4.1306, .1683,
-/// .1878, остальные сборки выпуска считаются пишущими ту же версию.
+/// только её. Строка — выпуск, а не сборка: замерены 8.3.24.1819, 8.3.25.1633, 8.3.26.1656,
+/// 8.3.27.2074, .2342, 8.5.1.1529 и 8.5.4.1306, .1683, .1878, остальные сборки выпуска
+/// считаются пишущими ту же версию.
 const WRITTEN_FORMATS: &[WrittenFormat] = &[
+    WrittenFormat::new((8, 3, 24), FormatVersion::new(2, 17)),
+    WrittenFormat::new((8, 3, 25), FormatVersion::new(2, 18)),
+    WrittenFormat::new((8, 3, 26), FormatVersion::new(2, 19)),
     WrittenFormat::new((8, 3, 27), FormatVersion::new(2, 20)),
+    WrittenFormat::new((8, 5, 1), FormatVersion::new(2, 21)),
     WrittenFormat::new((8, 5, 4), FormatVersion::new(2, 22)),
 ];
 
@@ -245,7 +250,8 @@ mod tests {
         assert_eq!(written_in(&table, &platform(26)), None);
     }
 
-    /// Строки таблицы — замеры #403: 8.3.27 пишет 2.20, 8.5.4 — 2.22.
+    /// Строки таблицы — замеры #403 и раздела «Раннер на 8.3.24–8.3.26»: от 8.3.24 (2.17)
+    /// до 8.5.4 (2.22); выпуск вне таблицы формата не получает.
     #[test]
     fn the_table_holds_the_measured_platforms() {
         let platform = |minor, patch, build| PlatformVersion {
@@ -256,14 +262,30 @@ mod tests {
         };
         let written = |version: PlatformVersion| known_format(Some(&version)).map(|(_, f)| f);
         assert_eq!(
+            written(platform(3, 24, 1819)),
+            Some(FormatVersion::new(2, 17))
+        );
+        assert_eq!(
+            written(platform(3, 25, 1633)),
+            Some(FormatVersion::new(2, 18))
+        );
+        assert_eq!(
+            written(platform(3, 26, 1656)),
+            Some(FormatVersion::new(2, 19))
+        );
+        assert_eq!(
             written(platform(3, 27, 2074)),
             Some(FormatVersion::new(2, 20))
+        );
+        assert_eq!(
+            written(platform(5, 1, 1529)),
+            Some(FormatVersion::new(2, 21))
         );
         assert_eq!(
             written(platform(5, 4, 1878)),
             Some(FormatVersion::new(2, 22))
         );
-        assert_eq!(written(platform(5, 1, 1519)), None);
+        assert_eq!(written(platform(5, 2, 1000)), None);
         assert_eq!(known_format(None), None);
     }
 

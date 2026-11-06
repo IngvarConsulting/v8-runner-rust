@@ -28,6 +28,47 @@ fn main() {
         }
     }
 
+    let checking = arguments.iter().any(|arg| arg == "/CheckConfig");
+    if std::env::var_os("V8_RUNNER_FAKE_PLATFORM_FAIL_WITH_PASSWORD").is_some()
+        && (directory_output.is_some() || checking)
+    {
+        let password = arguments
+            .windows(2)
+            .find(|pair| pair[0] == "/P")
+            .expect("password from Designer argv")[1]
+            .to_str()
+            .expect("UTF-8 test password");
+        let log = platform_log.expect("Designer /Out");
+        if checking {
+            let first_line = password.lines().next().expect("first password line").trim();
+            let suffix = if first_line.contains(char::is_whitespace) {
+                ""
+            } else {
+                first_line
+            };
+            write_artifact(
+                Path::new(log),
+                format!(
+                    "{{CommonModules.TestModule{suffix}(4,2)}}: compile error: {password}\n\
+                     Catalogs.Demo{suffix} object error: {password}\n"
+                )
+                .as_bytes(),
+            );
+            eprintln!("Designer stderr rejected [{password}]");
+            std::process::exit(101);
+        }
+        write_artifact(
+            Path::new(log),
+            format!(
+                "Designer /Out authentication rejected [{password}] DBPwd=fake-database-secret;SPwd=fake-cluster-secret;\n"
+            )
+            .as_bytes(),
+        );
+        println!("Designer stdout rejected [{password}]");
+        eprintln!("Designer stderr rejected [{password}]");
+        std::process::exit(1);
+    }
+
     let ibcmd_generation = arguments
         .windows(2)
         .any(|pair| pair[0] == "config" && pair[1] == "generation-id");

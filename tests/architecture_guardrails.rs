@@ -90,6 +90,56 @@ fn raw_process_spawn_apis_stay_inside_platform_layer() {
     }
 }
 
+/// Приставку `\\?\` снимает один проход на выходе: новый писатель в stdout обошёл бы его.
+/// Журнал действий ответом не считается.
+#[test]
+fn a_response_reaches_stdout_only_through_its_owners() {
+    const OWNERS: &[&str] = &[
+        "src/output/text.rs",
+        "src/cli/external_pull.rs",
+        "src/support/logging.rs",
+    ];
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let terminal_probe = Regex::new(r"stdout\s*\(\s*\)\s*\.\s*is_terminal").expect("regex");
+    let writer =
+        Regex::new(r"\b(?:println|print)\s*!|(?:^|[^.\s])\s*\bstdout\s*\(\s*\)").expect("regex");
+    // Токены разделены пробелами. `eprintln` и чужой `child.stdout()` не пишут в stdout раннера.
+    for (sample, writes) in [
+        ("println ! (\"x\")", true),
+        ("print ! (\"x\")", true),
+        ("std :: io :: stdout ()", true),
+        ("let out = stdout ()", true),
+        ("eprintln ! (\"x\")", false),
+        ("child . stdout ()", false),
+    ] {
+        assert_eq!(writer.is_match(sample), writes, "{sample}");
+    }
+    for file in collect_rust_files(&repo_path("src")) {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if OWNERS.contains(&relative.as_str()) {
+            continue;
+        }
+        let source = production_source(&file);
+        let without_terminal_probe = terminal_probe.replace_all(&source, "");
+        assert!(
+            !writer.is_match(&without_terminal_probe),
+            "{relative} writes to stdout past the response gate in src/support/path.rs"
+        );
+    }
+    for (owner, gate) in [
+        ("src/output/text.rs", "response_text ("),
+        ("src/output/text.rs", "response_json ("),
+        ("src/cli/external_pull.rs", "response_json ("),
+        ("src/mcp/server.rs", "response_value ("),
+    ] {
+        assert!(
+            production_source(&repo_path(owner)).contains(gate),
+            "{owner} must pass its response through {gate}"
+        );
+    }
+}
+
 #[test]
 fn mcp_surface_snapshot_stays_explicit_and_documented() {
     let source = read("src/mcp/server.rs");
@@ -619,8 +669,8 @@ fn path_sites_see_a_call_behind_a_glob_import() {
 /// Корень #285: сценарии сами сравнивали код выхода утилиты с нулём, и знание о том, что
 /// код значит, расползлось по ним. Код читает слой `platform` — `ProcessResult::outcome`
 /// и вердикты адаптеров, — а сценарий получает исход. Проверка узнаёт чтение кода в
-/// сценарии под любым именем носителя: сравнение кода с числом, `match` кода с числовым
-/// образцом, `.success()`, `NonZero*::new` над кодом — в том числе внутри макросов.
+/// сценарии по имени кода: сравнения, числовые шаблоны и методы, `.success()`,
+/// `NonZero*::new` над кодом — в том числе внутри поддерживаемых форм макросов.
 #[test]
 fn scenarios_receive_an_outcome_not_an_exit_code() {
     assert_eq!(
@@ -643,9 +693,20 @@ fn the_exit_code_finder_sees_every_reading_in_a_scenario() {
              fn status(status: S) -> bool { status.success() }\n\
              fn method(status: S) -> bool { status.code() == 101 }\n\
              fn matched(result: R) -> u8 { match result.process.exit_code { 0 => 1, _ => 2 } }\n\
+             fn let_pattern(exit_code: i32) -> bool { if let 0 = exit_code { true } else { false } }\n\
+             fn method_eq(exit_code: i32) -> bool { exit_code.eq(&0) }\n\
+             fn method_positive(exit_code: i32) -> bool { exit_code.is_positive() }\n\
+             fn method_signum(exit_code: i32) -> i32 { exit_code.signum() }\n\
+             const SUCCESS: i32 = 0;\n\
+             fn named_constant(exit_code: i32) -> bool { SUCCESS == exit_code }\n\
              fn wrapped(result: R) -> Option<std::num::NonZeroI32> { std::num::NonZeroI32::new(result.process.exit_code) }\n\
              fn in_macro(result: R) -> bool { matches!(result.process.exit_code, 0) }\n\
+             fn macro_named_constant(exit_code: i32) -> bool { matches!(exit_code, SUCCESS) }\n\
+             fn macro_guard(x: Option<i32>, exit_code: i32) -> bool { matches!(x, Some(_) if exit_code == 0,) }\n\
+             fn macro_scrutinee(status: S, ready: bool) -> bool { matches!(status.code(), Some(0) if ready) }\n\
+             fn macro_outcome(x: Option<i32>, result: R) -> bool { matches!(x, Some(_) if result.process.outcome().is_ok()) }\n\
              fn asserted(result: R) { debug_assert!(result.process.exit_code != 0); }\n\
+             fn macro_assertion_message(x: Option<i32>, exit_code: i32) { assert_matches!(x, Some(0), \"{}\", exit_code == 0); }\n\
              fn message(result: R) -> String { format!(\"exit code {}\", result.process.exit_code) }\n\
              fn outcome(result: R) -> bool { result.process.outcome().is_ok() }\n\
              struct Step;\n\
@@ -668,9 +729,18 @@ fn the_exit_code_finder_sees_every_reading_in_a_scenario() {
             "crate::use_cases::family::field",
             "crate::use_cases::family::in_macro",
             "crate::use_cases::family::inner::eager",
+            "crate::use_cases::family::let_pattern",
             "crate::use_cases::family::local",
+            "crate::use_cases::family::macro_assertion_message",
+            "crate::use_cases::family::macro_guard",
+            "crate::use_cases::family::macro_named_constant",
+            "crate::use_cases::family::macro_scrutinee",
             "crate::use_cases::family::matched",
             "crate::use_cases::family::method",
+            "crate::use_cases::family::method_eq",
+            "crate::use_cases::family::method_positive",
+            "crate::use_cases::family::method_signum",
+            "crate::use_cases::family::named_constant",
             "crate::use_cases::family::reversed",
             "crate::use_cases::family::status",
             "crate::use_cases::family::wrapped",
@@ -709,10 +779,13 @@ impl<'ast> syn::visit::Visit<'ast> for ExitCodeReading {
                 | syn::BinOp::Gt(_)
                 | syn::BinOp::Ge(_)
         );
-        self.0 |= comparison
-            && ((names_exit_code(&node.left) && is_int_literal(&node.right))
-                || (names_exit_code(&node.right) && is_int_literal(&node.left)));
+        self.0 |= comparison && (names_exit_code(&node.left) || names_exit_code(&node.right));
         syn::visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+        self.0 |= names_exit_code(&node.expr) && has_int_literal_pattern(&node.pat);
+        syn::visit::visit_expr_let(self, node);
     }
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
@@ -725,7 +798,22 @@ impl<'ast> syn::visit::Visit<'ast> for ExitCodeReading {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        self.0 |= node.method == "success" && node.args.is_empty();
+        let numeric_tests = [
+            "eq",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "cmp",
+            "partial_cmp",
+            "is_positive",
+            "is_negative",
+            "signum",
+        ];
+        self.0 |= (node.method == "success" && node.args.is_empty())
+            || (names_exit_code(&node.receiver)
+                && numeric_tests.iter().any(|method| node.method == *method));
         syn::visit::visit_expr_method_call(self, node);
     }
 
@@ -748,23 +836,28 @@ impl<'ast> syn::visit::Visit<'ast> for ExitCodeReading {
         syn::visit::visit_expr_call(self, node);
     }
 
-    /// Макрос читается как список выражений через запятую; `matches!` над кодом — тоже
-    /// сравнение.
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        use syn::parse::Parser;
-        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-        if let Ok(arguments) = parser.parse2(node.tokens.clone()) {
-            let is_matches = node
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "matches");
-            self.0 |= is_matches && arguments.first().is_some_and(names_exit_code);
+        let parts = node
+            .path
+            .segments
+            .last()
+            .filter(|segment| segment.ident == "matches")
+            .and_then(|_| match_macro_expressions(node));
+        if let Some((scrutinee, guard)) = parts {
+            self.0 |= names_exit_code(&scrutinee);
+            syn::visit::visit_expr(self, &scrutinee);
+            if let Some(guard) = &guard {
+                syn::visit::visit_expr(self, guard);
+            }
+            return;
+        }
+        if let Ok(arguments) = node.parse_body_with(
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+        ) {
             for argument in &arguments {
                 syn::visit::visit_expr(self, argument);
             }
         }
-        syn::visit::visit_macro(self, node);
     }
 }
 
@@ -785,14 +878,34 @@ fn names_exit_code(expr: &syn::Expr) -> bool {
     }
 }
 
-fn is_int_literal(expr: &syn::Expr) -> bool {
-    match expr {
-        syn::Expr::Lit(literal) => matches!(literal.lit, syn::Lit::Int(_)),
-        syn::Expr::Unary(inner) => is_int_literal(&inner.expr),
-        syn::Expr::Paren(inner) => is_int_literal(&inner.expr),
-        syn::Expr::Group(inner) => is_int_literal(&inner.expr),
-        _ => false,
+/// У макросов сопоставления между проверяемым выражением и условием стоит шаблон.
+fn match_macro_expressions(node: &syn::Macro) -> Option<(syn::Expr, Option<syn::Expr>)> {
+    let name = &node.path.segments.last()?.ident;
+    if name != "matches" && name != "assert_matches" && name != "debug_assert_matches" {
+        return None;
     }
+
+    node.parse_body_with(|input: syn::parse::ParseStream| {
+        let scrutinee = input.parse()?;
+        input.parse::<syn::Token![,]>()?;
+        syn::Pat::parse_multi_with_leading_vert(input)?;
+        let guard = if input.peek(syn::Token![if]) {
+            input.parse::<syn::Token![if]>()?;
+            Some(input.parse()?)
+        } else {
+            None
+        };
+        // Остаток — завершающая запятая или сообщение макроса-утверждения.
+        input.step(|cursor| {
+            let mut rest = *cursor;
+            while let Some((_, next)) = rest.token_tree() {
+                rest = next;
+            }
+            Ok(((), rest))
+        })?;
+        Ok((scrutinee, guard))
+    })
+    .ok()
 }
 
 fn has_int_literal_pattern(pat: &syn::Pat) -> bool {
@@ -4015,36 +4128,12 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
             .last()
             .map(|segment| segment.ident.to_string())
             .unwrap_or_default();
-        if matches!(
-            name.as_str(),
-            "matches" | "assert_matches" | "debug_assert_matches"
-        ) {
-            let parts = node.parse_body_with(|input: syn::parse::ParseStream| {
-                let scrutinee: syn::Expr = input.parse()?;
-                input.parse::<syn::Token![,]>()?;
-                syn::Pat::parse_multi_with_leading_vert(input)?;
-                let guard = if input.peek(syn::Token![if]) {
-                    input.parse::<syn::Token![if]>()?;
-                    Some(input.parse::<syn::Expr>()?)
-                } else {
-                    None
-                };
-                input.step(|cursor| {
-                    let mut rest = *cursor;
-                    while let Some((_, next)) = rest.token_tree() {
-                        rest = next;
-                    }
-                    Ok(((), rest))
-                })?;
-                Ok((scrutinee, guard))
-            });
-            if let Ok((scrutinee, guard)) = parts {
-                syn::visit::Visit::visit_expr(self, &scrutinee);
-                if let Some(guard) = &guard {
-                    syn::visit::Visit::visit_expr(self, guard);
-                }
-                return;
+        if let Some((scrutinee, guard)) = match_macro_expressions(node) {
+            syn::visit::Visit::visit_expr(self, &scrutinee);
+            if let Some(guard) = &guard {
+                syn::visit::Visit::visit_expr(self, guard);
             }
+            return;
         }
         let logging = matches!(
             name.as_str(),

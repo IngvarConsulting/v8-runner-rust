@@ -72,6 +72,17 @@ pub struct PlatformVersion {
     pub build: u32,
 }
 
+/// Первая поддерживаемая платформа (`INV.PLATFORM.A-PLATFORM-BELOW-THE-MINIMUM-IS-REFUSED`):
+/// решение владельца, граница проверена запуском всех исполнителей (замер «Раннер на
+/// 8.3.24–8.3.26»). Ниже неё у `push` нет частичной загрузки, а незнакомая команда может
+/// не отказать, а зависнуть.
+pub const MINIMUM_PLATFORM: PlatformVersion = PlatformVersion {
+    major: 8,
+    minor: 3,
+    patch: 24,
+    build: 0,
+};
+
 impl PlatformVersion {
     /// Parse a strict `major.minor.patch.build` string.
     pub fn parse_strict(value: &str) -> Option<Self> {
@@ -318,6 +329,18 @@ pub enum LocatorError {
         utility: UtilityType,
         installation_root: PathBuf,
     },
+    #[error(
+        "utility '{utility}' at '{}' has platform version {found}; the runner supports platform {}.{}.{} and newer: install a newer platform or point tools.platform to it",
+        path.display(),
+        MINIMUM_PLATFORM.major,
+        MINIMUM_PLATFORM.minor,
+        MINIMUM_PLATFORM.patch
+    )]
+    BelowMinimumPlatform {
+        utility: UtilityType,
+        path: PathBuf,
+        found: PlatformVersion,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -409,6 +432,7 @@ impl Locator {
         } else {
             self.locate_edt(utility)?
         };
+        refuse_below_minimum(&selected)?;
         self.cache.insert(cache_key, selected.clone());
         Ok(selected)
     }
@@ -752,6 +776,21 @@ impl Locator {
                 detail: None,
             },
         )
+    }
+}
+
+/// Отказ утилите платформы ниже минимума. Все запуски платформы получают путь отсюда, поэтому
+/// отказ приходит раньше запуска; версии в пути нет — судить не о чем, утилита проходит.
+fn refuse_below_minimum(location: &UtilityLocation) -> Result<(), LocatorError> {
+    match &location.version {
+        Some(UtilityVersion::Platform(found)) if *found < MINIMUM_PLATFORM => {
+            Err(LocatorError::BelowMinimumPlatform {
+                utility: location.utility,
+                path: location.path.clone(),
+                found: found.clone(),
+            })
+        }
+        Some(UtilityVersion::Platform(_) | UtilityVersion::Edt(_)) | None => Ok(()),
     }
 }
 
@@ -2851,9 +2890,9 @@ mod tests {
             let _older_build =
                 touch_versioned_platform_executable(&root, "8.3.27.1000", utility, false);
             let patch_best =
-                touch_versioned_platform_executable(&root, "8.3.20.9999", utility, false);
+                touch_versioned_platform_executable(&root, "8.3.24.9999", utility, false);
             let _patch_older =
-                touch_versioned_platform_executable(&root, "8.3.20.1000", utility, true);
+                touch_versioned_platform_executable(&root, "8.3.24.1000", utility, true);
             let _other_minor =
                 touch_versioned_platform_executable(&root, "8.4.1.1", utility, false);
 
@@ -2872,7 +2911,7 @@ mod tests {
 
             let mut patch_locator = Locator::with_roots(
                 None,
-                Some(PlatformVersionRequirement::parse("8.3.20").expect("version")),
+                Some(PlatformVersionRequirement::parse("8.3.24").expect("version")),
                 None,
                 None,
                 vec![root.clone()],
@@ -3131,5 +3170,94 @@ mod tests {
             locator.locate(UtilityType::EdtCli).expect("locate").path,
             canonical(&wanted)
         );
+    }
+
+    /// Минимум проверяет сам поиск: 8.3.23 не выдаётся ни одной утилитой платформы, отказ
+    /// называет версию, путь и минимум, а 8.3.24 проходит.
+    #[test]
+    fn a_platform_below_the_minimum_is_refused_and_the_minimum_is_accepted() {
+        for utility in [
+            UtilityType::V8,
+            UtilityType::V8C,
+            UtilityType::Ibcmd,
+            UtilityType::Webinst,
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path().join("platform");
+            let old = touch_versioned_platform_executable(&root, "8.3.23.9999", utility, true);
+            let accepted = touch_versioned_platform_executable(&root, "8.3.24.1", utility, true);
+            let locator_for = |version: &str| {
+                Locator::with_roots(
+                    None,
+                    Some(PlatformVersionRequirement::parse(version).expect("version")),
+                    None,
+                    None,
+                    vec![root.clone()],
+                    vec![],
+                )
+            };
+
+            let error = locator_for("8.3.23")
+                .locate(utility)
+                .expect_err("below the minimum");
+            assert_eq!(
+                error,
+                LocatorError::BelowMinimumPlatform {
+                    utility,
+                    path: canonical(&old),
+                    found: PlatformVersion::parse_strict("8.3.23.9999").expect("version"),
+                }
+            );
+            let message = error.to_string();
+            assert!(message.contains("8.3.23.9999"), "{message}");
+            assert!(message.contains("platform 8.3.24 and newer"), "{message}");
+
+            let location = locator_for("8.3.24").locate(utility).expect("the minimum");
+            assert_eq!(location.path, canonical(&accepted));
+        }
+    }
+
+    /// Явный путь минимум не обходит, строгий он или нет.
+    #[test]
+    fn an_explicit_path_does_not_bypass_the_minimum() {
+        let dir = tempdir().expect("tempdir");
+        let install = dir.path().join("8.3.12.1855");
+        let binary = install.join("bin").join(UtilityType::V8.executable_name());
+        touch_executable(&binary);
+
+        let mut locator = Locator::with_roots(Some(install), None, None, None, vec![], vec![]);
+
+        assert!(matches!(
+            locator.locate(UtilityType::V8),
+            Err(LocatorError::BelowMinimumPlatform { .. })
+        ));
+    }
+
+    /// Версии в пути нет — судить о минимуме не по чему, утилита проходит. EDT минимум
+    /// платформы не касается, даже если номер его версии меньше.
+    #[test]
+    fn the_minimum_judges_only_a_visible_platform_version() {
+        let dir = tempdir().expect("tempdir");
+        let binary = dir
+            .path()
+            .join("custom")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&binary);
+        let mut locator = Locator::with_roots(Some(binary), None, None, None, vec![], vec![]);
+        assert_eq!(
+            locator
+                .locate(UtilityType::V8)
+                .expect("no visible version")
+                .version,
+            None
+        );
+
+        let edt = dir
+            .path()
+            .join("1c-edt-2023.3.1")
+            .join(UtilityType::EdtCli.executable_name());
+        touch_executable(&edt);
+        let mut locator = Locator::with_roots(None, None, Some(edt), None, vec![], vec![]);
+        locator.locate(UtilityType::EdtCli).expect("EDT");
     }
 }
