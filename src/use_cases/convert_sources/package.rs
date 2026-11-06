@@ -596,7 +596,7 @@ fn build_package(
         .and_then(|result| {
             ensure_platform_success(&source.name, "designer-to-package", &result)?;
             if staging_file.is_file() {
-                Ok(())
+                prepared.record_successful_access()
             } else {
                 Err(AppError::Platform(format!(
                     "{} did not produce package file '{}'",

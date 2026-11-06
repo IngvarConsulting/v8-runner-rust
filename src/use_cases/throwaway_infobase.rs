@@ -237,6 +237,10 @@ impl FileInfobase {
         Self { dir, builder }
     }
 
+    pub(crate) fn root(&self) -> &Path {
+        &self.dir
+    }
+
     pub(crate) fn connection(&self) -> V8Connection {
         V8Connection::from_connection_string(&format!("File={}", self.database_path().display()))
     }

@@ -21,7 +21,7 @@ use crate::platform::result::PlatformCommandResult;
 use crate::support::error::AppError;
 use crate::support::fs::{remove_path_if_exists, write_file_atomically};
 use crate::support::path::{
-    filesystem_object_identity, nearest_existing_canonical_path, stable_path_identity,
+    nearest_existing_canonical_path, open_file_identity, stable_path_identity,
 };
 use crate::support::temp::partial_list_file;
 use crate::use_cases::context::{CommandName, ExecutionContext, InterruptionSafetyClass};
@@ -114,21 +114,22 @@ struct DatabaseStamp {
 
 fn database_stamp(root: &Path) -> Result<Option<DatabaseStamp>, AppError> {
     let path = child(&child(root, "ib")?, "1Cv8.1CD")?;
-    Ok(std::fs::metadata(&path)
-        .ok()
-        .filter(|m| m.is_file() && m.len() > 0)
-        .and_then(|m| {
-            Some(DatabaseStamp {
-                bytes: m.len(),
-                object: format!("{:?}", filesystem_object_identity(&path).ok()?),
-                modified_ns: m
-                    .modified()
-                    .ok()?
-                    .duration_since(UNIX_EPOCH)
-                    .ok()?
-                    .as_nanos(),
-            })
-        }))
+    Ok(std::fs::File::open(path).ok().and_then(|file| {
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return None;
+        }
+        Some(DatabaseStamp {
+            bytes: metadata.len(),
+            object: format!("{:?}", open_file_identity(&file).ok()?),
+            modified_ns: metadata
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_nanos(),
+        })
+    }))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -136,6 +137,19 @@ struct Ready {
     platform: String,
     database: DatabaseStamp,
     slots: BTreeSet<String>,
+}
+
+impl Ready {
+    fn read(path: &Path) -> io::Result<Self> {
+        serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)
+    }
+
+    fn save(&self, path: &Path) -> Result<(), AppError> {
+        write_file_atomically(path, |file| {
+            serde_json::to_writer(file, self).map_err(io::Error::other)
+        })
+        .map_err(|error| io_failure("save build infobase memory", path, error))
+    }
 }
 
 enum Load {
@@ -208,6 +222,30 @@ pub(super) struct PreparedBuild {
 }
 
 impl PreparedBuild {
+    /// Opening a file infobase to export a package can update its on-disk stamp
+    /// even without a configuration change (Designer on Windows). A successful
+    /// read may advance the timestamp when the file identity and size still match.
+    pub(super) fn record_successful_access(&self) -> Result<(), AppError> {
+        let root = self.base.root();
+        let path = child(root, READY)?;
+        let mut ready = Ready::read(&path)
+            .map_err(|error| io_failure("read build infobase memory after export", &path, error))?;
+        let current = database_stamp(root)?.ok_or_else(|| {
+            AppError::Runtime("build infobase file disappeared during export".to_owned())
+        })?;
+        if ready.database.object != current.object || ready.database.bytes != current.bytes {
+            remove(&path)?;
+            return Err(AppError::Runtime(
+                "build infobase file was replaced or changed size during export".to_owned(),
+            ));
+        }
+        if ready.database != current {
+            ready.database = current;
+            ready.save(&path)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn dump(
         &self,
         env: &BuildEnvironment<'_>,
@@ -228,8 +266,7 @@ impl PreparedBuild {
         {
             // A platform failure can be the first signal of a damaged base whose file stamp
             // still matches. The next invocation must start fresh. Keep the original error.
-            let invalidated =
-                child(&root(&env.config.work_path), READY).and_then(|ready| remove(&ready));
+            let invalidated = child(self.base.root(), READY).and_then(|ready| remove(&ready));
             if let Err(error) = invalidated {
                 tracing::warn!(%error, "could not invalidate the build infobase");
             }
@@ -259,9 +296,7 @@ impl BuildSession {
         let base = FileInfobase::new(root.clone(), env.builder.clone());
         let ready_path = child(&root, READY)?;
         let platform = env.builder.platform_identity();
-        let loaded = std::fs::read(&ready_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Ready>(&bytes).ok());
+        let loaded = Ready::read(&ready_path).ok();
         let database = database_stamp(&root)?;
         let mut reset = match (&loaded, &database) {
             _ if forced => Some("full requested"),
@@ -458,10 +493,7 @@ impl BuildSession {
             database,
             slots,
         };
-        write_file_atomically(&ready_path, |file| {
-            serde_json::to_writer(file, &state).map_err(io::Error::other)
-        })
-        .map_err(|error| io_failure("save build infobase memory", &ready_path, error))?;
+        state.save(&ready_path)?;
         Ok(PreparedBuild {
             base,
             report,

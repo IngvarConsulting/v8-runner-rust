@@ -609,6 +609,14 @@ fn build_package_in(
         ));
     }
 
+    prepared.record_successful_access().map_err(|error| {
+        (
+            error,
+            artifacts.clone(),
+            build_result.platform_log_path.clone(),
+        )
+    })?;
+
     if let Some(error) = refusal_before_publication(
         context,
         resolved,
@@ -833,6 +841,14 @@ fn build_external_in(
             )
         })?;
     }
+
+    prepared.record_successful_access().map_err(|error| {
+        (
+            error,
+            artifacts.clone(),
+            last_result.platform_log_path.clone(),
+        )
+    })?;
 
     if let Some(error) = refusal_before_publication(
         context,
@@ -2113,10 +2129,19 @@ fi"#;
 
     /// Подставной исполнитель, который записывает каждый вызов: пишет пакет по доводу
     /// `/DumpCfg` и по ключу `--out=`, а на шаге `cancel_on` просит остановиться.
+    #[derive(Default)]
+    enum DumpEffect {
+        #[default]
+        Normal,
+        Fail,
+        TouchDatabase,
+        ResizeDatabase,
+    }
+
     struct Recorder {
         calls: std::sync::Mutex<Vec<Vec<String>>>,
         cancel_on: Option<&'static str>,
-        fail_dump: bool,
+        dump_effect: DumpEffect,
     }
 
     impl Recorder {
@@ -2124,7 +2149,7 @@ fi"#;
             Self {
                 calls: std::sync::Mutex::new(Vec::new()),
                 cancel_on: None,
-                fail_dump: false,
+                dump_effect: DumpEffect::Normal,
             }
         }
 
@@ -2149,13 +2174,36 @@ fi"#;
             policy.mark_started_for_test();
             self.calls.lock().expect("calls").push(request.args.clone());
             record_creation(&request.args);
-            if self.fail_dump && after(&request.args, "/DumpCfg").is_some() {
+            if matches!(self.dump_effect, DumpEffect::Fail)
+                && after(&request.args, "/DumpCfg").is_some()
+            {
                 return Ok(ProcessResult {
                     exit_code: 17,
                     stdout: String::new(),
                     stderr: "failed to open cached infobase".to_owned(),
                     interruption: None,
                 });
+            }
+            if matches!(
+                self.dump_effect,
+                DumpEffect::TouchDatabase | DumpEffect::ResizeDatabase
+            ) && after(&request.args, "/DumpCfg").is_some()
+            {
+                let database = after(&request.args, "/IBConnectionString")
+                    .and_then(|argument| argument.strip_prefix("File="))
+                    .expect("database path");
+                let file = fs::File::options()
+                    .write(true)
+                    .open(Path::new(database).join("1Cv8.1CD"))
+                    .expect("database file");
+                let metadata = file.metadata().expect("metadata");
+                if matches!(self.dump_effect, DumpEffect::ResizeDatabase) {
+                    file.set_len(metadata.len() + 1).expect("resize database");
+                } else {
+                    let modified = metadata.modified().expect("modified");
+                    file.set_modified(modified + std::time::Duration::from_secs(1))
+                        .expect("touch database");
+                }
             }
             let external_load = after(&request.args, "/LoadExternalDataProcessorOrReportFromFiles")
                 .and_then(|_| request.args.last());
@@ -2343,7 +2391,8 @@ fi"#;
         let resolved = resolve_target(&config, &request).expect("resolved");
 
         let run = || {
-            let runner = Recorder::new();
+            let mut runner = Recorder::new();
+            runner.dump_effect = DumpEffect::TouchDatabase;
             build_package_in(
                 &ExecutionContext::cli(CommandName::Artifacts),
                 &config,
@@ -2397,7 +2446,7 @@ fi"#;
         assert!(ready.is_file());
 
         let mut rejected = Recorder::new();
-        rejected.fail_dump = true;
+        rejected.dump_effect = DumpEffect::Fail;
         let (error, _, _) = build(&rejected).expect_err("dump rejected");
         assert!(error.to_string().contains("exit code 17"), "{error}");
         assert_eq!(position(&rejected.calls(), "/DumpCfg"), [0]);
@@ -2411,6 +2460,37 @@ fi"#;
         let (_, _, _, report, _) = build(&recovered).expect("recovered");
         assert_eq!(position(&recovered.calls(), "CREATEINFOBASE"), [0]);
         assert_eq!(report.mode, crate::domain::artifacts::BuildMode::Full);
+    }
+
+    #[test]
+    fn a_dump_that_resized_the_database_keeps_the_staged_package_and_old_target() {
+        let dir = tempdir().expect("tempdir");
+        let (config, work) = project(dir.path());
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        fs::create_dir_all(resolved.output_path.parent().expect("output parent"))
+            .expect("output dir");
+        fs::write(&resolved.output_path, "previous package").expect("previous package");
+        let mut runner = Recorder::new();
+        runner.dump_effect = DumpEffect::ResizeDatabase;
+
+        let (error, artifacts, _) = build_package_in(
+            &context,
+            &config,
+            &resolved,
+            fake_designer(),
+            &mut BuildSession::default(),
+            &runner,
+        )
+        .expect_err("a resized database invalidates the export");
+        assert!(error.to_string().contains("changed size"), "{error}");
+        assert!(artifacts.get_by_role(ARTIFACT_ROLE_STAGE_FILE).is_some());
+        assert_eq!(
+            fs::read_to_string(&resolved.output_path).expect("package"),
+            "previous package"
+        );
+        assert!(!build_root(&work).join("ready.json").exists());
     }
 
     /// Расширение Конфигуратор загружает поверх основной конфигурации: сперва она, затем
