@@ -209,7 +209,7 @@ fn publish_refuses_before_webinst_when_a_precondition_is_missing() {
     }
 }
 
-/// У публикации нет выбора исполнителя: ключ отклоняется как ключ без развилки.
+/// У публикации нет ключа выбора исполнителя: загрузчик отклоняет его до запуска `webinst`.
 #[test]
 fn publish_rejects_a_provider_override_because_there_is_no_choice() {
     let dir = temp_workspace();
@@ -219,14 +219,13 @@ fn publish_rejects_a_provider_override_because_there_is_no_choice() {
         &format!("{}providers:\n  publish: webinst\n", web_yaml(&www, "")),
     );
 
-    let (code, payload) = run(&project.config, &["publish", "--dry-run"]);
+    let (code, payload) = run(&project.config, &["publish"]);
 
     assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["code"], "invalid_argument");
     let message = payload["error"]["message"].as_str().expect("message");
-    assert!(
-        message.contains("providers.publish is not allowed"),
-        "{message}"
-    );
+    assert!(message.contains("unknown field `publish`"), "{message}");
+    assert!(!project.calls.exists(), "webinst must not run");
 }
 
 /// Без секции `infobase.web` публиковать нечего, и отказ говорит, что объявить.
