@@ -2842,17 +2842,18 @@ fi"#;
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
         let resolved = resolve_target(&config, &request).expect("resolved");
         let runner = Recorder::new();
-        let mut base = BuildSession::default();
-
-        build_package_in(
-            &ExecutionContext::cli(CommandName::Artifacts),
-            &config,
-            &resolved,
-            fake_designer(),
-            &mut base,
-            &runner,
-        )
-        .expect("built");
+        {
+            let mut base = BuildSession::default();
+            build_package_in(
+                &ExecutionContext::cli(CommandName::Artifacts),
+                &config,
+                &resolved,
+                fake_designer(),
+                &mut base,
+                &runner,
+            )
+            .expect("built");
+        }
 
         let edt_calls = fs::read_to_string(&edt_calls).expect("edt calls");
         assert!(
@@ -2869,7 +2870,6 @@ fi"#;
             "{loaded}"
         );
         assert!(Path::new(loaded).join("Configuration.xml").is_file());
-        drop(base);
         assert!(build_root(&work).join("ib/1Cv8.1CD").is_file());
     }
 
