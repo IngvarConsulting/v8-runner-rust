@@ -952,13 +952,19 @@ fn a_cluster_base_is_created_by_the_designer_with_the_client_server_string() {
         .map(str::to_owned)
         .collect();
     assert_eq!(
-        calls,
+        calls[..4],
         [
             "CREATEINFOBASE",
             "Srvr=cluster:1541;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo_db;DBUID=postgres;DBPwd=pg-s3cret;CrSQLDB=Y;Locale=ru;SchJobDn=Y;SUsr=cadm;SPwd=c-s3cret",
             "/DisableStartupDialogs",
+            "/Out",
         ]
     );
+    assert_eq!(calls.len(), 5);
+    assert!(!Path::new(&calls[4])
+        .parent()
+        .expect("scratch directory")
+        .exists());
     for secret in ["pg-s3cret", "c-s3cret"] {
         assert!(!stdout.contains(secret), "{secret} in {stdout}");
     }
@@ -1037,11 +1043,9 @@ fn a_cluster_preview_names_the_target_and_starts_nothing() {
     assert!(!calls_log.exists());
 }
 
-/// Кластер с заполненным списком администраторов: без `SUsr` платформа отказывает. Раннер
-/// причину по её прозе не угадывает, но без объявленного администратора кластера отказ
-/// называет этот уровень и его ключи.
+/// Без диагностики платформы раннер даёт условную подсказку для кластера с администраторами.
 #[test]
-fn a_cluster_with_administrators_refuses_naming_the_cluster_administrator_level() {
+fn cluster_creation_without_diagnostics_suggests_credentials_conditionally() {
     let (_dir, config_path, _work_path, calls_log) = setup_cluster_init_project(
         "if printf '%s' \"$*\" | grep -F -q 'SUsr='; then exit 0; fi\nexit 1",
         FULL_DBMS,
@@ -1054,7 +1058,8 @@ fn a_cluster_with_administrators_refuses_naming_the_cluster_administrator_level(
     let payload = json_of(&output);
     let message = payload["error"]["message"].as_str().expect("message");
     assert!(
-        message.contains("cluster administrator level")
+        message.contains("if the cluster has administrators")
+            && message.contains("cluster administrator level")
             && message.contains("infobase.cluster.user")
             && message.contains("infobase.cluster.password"),
         "{message}"
@@ -1062,6 +1067,56 @@ fn a_cluster_with_administrators_refuses_naming_the_cluster_administrator_level(
     assert!(!fs::read_to_string(calls_log)
         .expect("calls")
         .contains("SUsr="));
+}
+
+#[test]
+fn cluster_creation_reports_the_masked_platform_log_without_guessing_the_cause() {
+    for reason in [
+        "Неверные или отсутствующие параметры соединения с информационной базой",
+        "Запрещено использование окон. Передан ключ DisableStartupDialogs.",
+    ] {
+        let script = format!(
+            "[ \"$4\" = /Out ] || exit 1\n\
+             printf 'Создание информационной базы (\"%s\") не выполнено\\n%s\\n' \"$2\" '{reason}' > \"$5\"\n\
+             exit 1"
+        );
+        let (_dir, config_path, work_path, calls_log) =
+            setup_cluster_init_project(&script, FULL_DBMS, "");
+
+        let action_log = work_path.join("actions.log");
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(&config_path)
+            .args([
+                "--log-level",
+                "debug",
+                "--json-message",
+                "infobase",
+                "create",
+            ])
+            .env("V8TR_ACTION_LOG_FILE", &action_log)
+            .output()
+            .expect("create infobase");
+
+        assert!(!output.status.success());
+        let payload = json_of(&output);
+        let message = payload["error"]["message"].as_str().expect("message");
+        assert!(message.contains("platform log:"), "{message}");
+        assert!(message.contains(reason), "{message}");
+        assert!(message.contains("DBPwd=***"), "{message}");
+        assert!(!message.contains("infobase.cluster.user"), "{message}");
+        assert!(!message.contains("platform log path"), "{message}");
+        for stream in [&output.stdout, &output.stderr] {
+            assert!(!String::from_utf8_lossy(stream).contains("pg-s3cret"));
+        }
+        let actions = fs::read_to_string(action_log).expect("action log");
+        assert!(actions.contains("DBPwd=***"), "{actions}");
+        assert!(!actions.contains("pg-s3cret"));
+        let calls = fs::read_to_string(calls_log).expect("calls");
+        let log_path = Path::new(calls.lines().nth(4).expect("/Out path"));
+        assert!(log_path.starts_with(work_path.join("temp")));
+        assert!(!log_path.parent().expect("scratch directory").exists());
+    }
 }
 
 /// Отказ создания в кластере повторяет вывод платформы, а она бывает и со всей строкой
@@ -1074,7 +1129,7 @@ fn a_failed_cluster_create_never_echoes_the_passwords() {
     let (_dir, config_path, _work_path, _calls_log) = setup_cluster_init_project(
         concat!(
             "printf 'authentication rejected [%s]\\n' 'db-prefix Pwd=pg-private; db-tail'\n",
-            "printf 'Создание информационной базы (\"%s\") не выполнено\\n' \"$2\"\n",
+            "printf 'Создание информационной базы (\"%s\") не выполнено\\nСервер баз данных не обнаружен\\n' \"$2\" > \"$5\"\n",
             "printf '%s\\n' \"$2\" >&2\n",
             "exit 1",
         ),
@@ -1091,6 +1146,15 @@ fn a_failed_cluster_create_never_echoes_the_passwords() {
     let message = payload["error"]["message"].as_str().expect("message");
     assert!(message.contains("exit code 1"), "{message}");
     assert!(message.contains("DBPwd=***"), "{message}");
+    assert!(
+        message.contains("platform log: Создание информационной базы"),
+        "{message}"
+    );
+    assert!(message.contains("SPwd=***"), "{message}");
+    assert!(
+        message.contains("Сервер баз данных не обнаружен"),
+        "{message}"
+    );
     assert!(
         message.contains("authentication rejected [***]"),
         "{message}"
