@@ -385,7 +385,7 @@ pub struct LoadArgs {
     #[arg(long)]
     pub settings: Option<String>,
 
-    /// Extension name required for .cfe artifacts
+    /// Extension source-set or platform name required for .cfe artifacts
     #[arg(long = "ref", alias = "extension", value_name = "NAME")]
     pub extension: Option<String>,
 

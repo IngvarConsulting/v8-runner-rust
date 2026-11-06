@@ -505,6 +505,106 @@ fn merge_cfe_json_success_requires_extension_and_settings() {
 }
 
 #[test]
+fn upload_resolves_an_extension_source_set_before_probing() {
+    let extension = "<MetaDataObject><Configuration><Properties><Name>ExistingExt</Name><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose></Properties></Configuration></MetaDataObject>";
+    let main = "<MetaDataObject><Configuration><Properties><Name>ExistingExt</Name></Properties></Configuration></MetaDataObject>";
+    let invalid_name = extension.replace("ExistingExt", "Bad Name");
+    let nested_marker = main.replace(
+        "</Properties>",
+        "<Comment><ObjectBelonging>Adopted</ObjectBelonging></Comment></Properties>",
+    );
+    let second_root =
+        format!("{main}<ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose>");
+    for (flag, reference, descriptor, target) in [
+        ("--ref", "sales-alias", Some(extension), Some("ExistingExt")),
+        (
+            "--extension",
+            "sales-alias",
+            Some(extension),
+            Some("ExistingExt"),
+        ),
+        ("--ref", "main", None, Some("main")),
+        ("--ref", "sales-alias", None, None),
+        (
+            "--ref",
+            "sales-alias",
+            Some("<MetaDataObject><Configuration>"),
+            None,
+        ),
+        ("--ref", "sales-alias", Some(main), None),
+        ("--ref", "sales-alias", Some(nested_marker.as_str()), None),
+        ("--ref", "sales-alias", Some(invalid_name.as_str()), None),
+        ("--ref", "sales-alias", Some(second_root.as_str()), None),
+    ] {
+        let (dir, config_path, _binary_path, base_path, calls_log) = setup_project();
+        let project = fs::read_to_string(&config_path).expect("read project");
+        fs::write(
+            &config_path,
+            project.replacen(
+                "\ntools:",
+                "\n  - name: sales-alias\n    type: EXTENSION\n    path: addon\ntools:",
+                1,
+            ),
+        )
+        .expect("declare extension source set");
+        let addon = base_path.join("addon");
+        fs::create_dir(&addon).expect("extension source directory");
+        if let Some(xml) = descriptor {
+            fs::write(addon.join("Configuration.xml"), xml).expect("extension descriptor");
+        }
+        let mut installed = vec!["ExistingExt", "main"];
+        if target.is_none() {
+            installed.push("sales-alias");
+        }
+        write_extension_list_ibcmd(&dir.path().join("ibcmd"), &installed);
+        fs::write(base_path.join("release.cfe"), "cfe").expect("package");
+        fs::write(base_path.join("settings.xml"), "<Settings/>").expect("settings");
+
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "upload",
+                "release.cfe",
+                "--mode",
+                "combine",
+                "--settings",
+                "settings.xml",
+                flag,
+                reference,
+            ])
+            .output()
+            .expect("upload");
+        let answer: Value = serde_json::from_slice(&output.stdout).expect("json");
+        if let Some(target) = target {
+            assert!(output.status.success(), "{flag} {reference}: {answer}");
+            assert_eq!(answer["data"]["extension"], target, "{answer}");
+            assert_eq!(
+                answer["data"]["compatibility_state"], "supported",
+                "{answer}"
+            );
+            let calls = fs::read_to_string(&calls_log).expect("Designer calls");
+            assert!(
+                calls.lines().any(|line| line.contains("/MergeCfg")
+                    && line.ends_with(&format!("-Extension {target}"))),
+                "{calls}"
+            );
+            assert!(
+                calls.contains(&format!("/UpdateDBCfg -Extension {target}")),
+                "{calls}"
+            );
+        } else {
+            assert_eq!(output.status.code(), Some(2), "{answer}");
+            assert_eq!(answer["data"]["provider_dispatched"], false, "{answer}");
+            let message = answer["data"]["message"].as_str().expect("message");
+            assert!(message.contains("Configuration.xml"), "{message}");
+            assert!(!calls_log.exists());
+        }
+    }
+}
+
+#[test]
 fn upload_update_without_settings_returns_validation_payload() {
     let (_dir, config_path, _binary_path, base_path, _calls_log) = setup_project();
     fs::write(base_path.join("release.cf"), "cf").expect("artifact");

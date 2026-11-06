@@ -77,6 +77,7 @@
 <h2 class="command-variant" id="op-upload">upload build/main.cf</h2>
 <pre data-output-command><code>v8-runner upload build/main.cf</code></pre>
 <p>целиком заменяет основную конфигурацию пакетом <code>.cf</code> или загружает расширение пакетом <code>.cfe</code> с <code>--ref &lt;имя&gt;</code> <span class="ref">(<a href="platform.html#t11">11</a>)</span></p>
+<p>Если <code>--ref</code> совпадает с именем набора <code>EXTENSION</code>, раннер читает имя расширения из <code>Configuration.xml</code> набора. Если подходящего набора нет, использует указанное имя расширения в базе.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
 <div class="tablewrap"><table class="response-classes">
@@ -84,7 +85,7 @@
 <tbody><tr data-response-class="success"><td>Пакет загружен</td><td><code>execution.payload.applied: true</code>. <code>update_db_cfg_ran</code> отдельно сообщает о применении к конфигурации БД.</td></tr>
 <tr data-response-class="preview"><td>План подготовлен</td><td><code>applied: false</code>; совместимость может оставаться <code>not_probed</code>.</td></tr>
 <tr data-response-class="refusal"><td>Пакет или режим не подходят</td><td>Неверный CF/CFE/файл настроек, нет имени расширения; несовместимый режим при supported/absent или состояние совместимости <code>not_established</code>.</td></tr>
-<tr data-response-class="failure"><td>Загрузка не завершилась</td><td>execution.status — failed; пакет мог быть загружен до ошибки следующего шага. <code>applied</code> отражает выполненную загрузку, <code>update_db_cfg_ran</code> — выполнение обновления конфигурации базы данных. Ошибка следующего шага не отменяет уже выполненные изменения.</td></tr>
+<tr data-response-class="failure"><td>Загрузка не завершилась</td><td>execution.status — failed; пакет мог быть загружен до ошибки следующего шага. <code>applied</code> отражает выполненную загрузку, <code>update_db_cfg_ran</code> — выполнение обновления конфигурации базы данных. Ошибка следующего шага не отменяет уже выполненные изменения. Если <code>/UpdateCfg</code> вернул 0, а рабочая версия осталась прежней, результат остаётся неподтверждённым, <code>applied</code> и <code>update_db_cfg_ran</code> равны <code>false</code>.</td></tr>
 <tr data-response-class="interruption"><td>Выполнение прервано</td><td>execution.status — cancelled / timed_out. В критической фазе прерывание может быть отложено до безопасного завершения.</td></tr></tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
@@ -99,9 +100,9 @@ artifact: build/main.cf</code></pre>
 <pre data-output-example="upload-failed" data-output-schema="upload"><code>target: configuration
 action: load cf
 ERROR: platform error: artifact load failed</code></pre>
-<h2 class="command-variant" id="upload-variant-2">upload --mode combine / update</h2>
+<h2 class="command-variant" id="upload-variant-2">upload --mode combine</h2>
 <pre data-output-command><code>v8-runner upload build/main.cf --mode combine --settings combine.xml --vendor-name Vendor</code></pre>
-<p>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t49">49</a>)</span></p>
+<p>объединяет конфигурацию с пакетом по файлу настроек <span class="ref">(<a href="platform.html#t49">49</a>)</span></p>
 <h3>Варианты ответа</h3>
 <h4 id="upload-variant-2-outcome">Операция завершилась успешно</h4>
 <p>Фрагмент успешного текстового ответа:</p>

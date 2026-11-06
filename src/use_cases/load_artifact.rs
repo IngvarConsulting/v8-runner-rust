@@ -28,6 +28,7 @@ use crate::support::error::{AppError, CancelledAt};
 use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::extension_identity::resolve_upload_extension_ref;
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
     cancelled_outcome, deferred_process_interruption, SafePoint, SafePointCancel,
@@ -755,7 +756,7 @@ fn installed_extension_state(
     utilities: &mut PlatformUtilities,
     resolved: &ResolvedLoadRequest,
 ) -> Result<ExtensionPresence, AppError> {
-    // `resolve_request` already refuses a `.cfe` without `--extension`; this keeps the same
+    // `resolve_request` already refuses a `.cfe` without `--ref`; this keeps the same
     // answer should that ever change.
     let Some(name) = resolved.extension.as_deref() else {
         return Err(AppError::Validation(
@@ -1017,9 +1018,12 @@ fn resolve_request(
             (LoadTargetKind::Configuration, None)
         }
         UploadArtifactType::Package(ArtifactBuildMode::ExtensionCfe) => {
-            let extension = extension
+            let reference = extension
                 .ok_or_else(|| AppError::Validation(CFE_REQUIRES_EXTENSION_ERROR.to_owned()))?;
-            (LoadTargetKind::Extension, Some(extension))
+            (
+                LoadTargetKind::Extension,
+                Some(resolve_upload_extension_ref(config, reference)?),
+            )
         }
         UploadArtifactType::Package(ArtifactBuildMode::ExternalDataProcessorEpf)
         | UploadArtifactType::Package(ArtifactBuildMode::ExternalReportErf) => {
