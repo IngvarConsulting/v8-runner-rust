@@ -461,8 +461,20 @@ pub(crate) fn run_critical(
     wait: &WaitPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<agent::AgentReply, AppError> {
-    let outcome = run_command(handle, command, &wait.critical())
-        .map_err(|error| error.with_context(format!("agent {action}")));
+    run_critical_typed(handle, action, command, wait, deferrals)
+        .map_err(|error| critical_failure(action, error))
+}
+
+/// То же, что `run_critical`, но отказ остаётся типизированным: сценарий, которому важен род
+/// отказа, решает по нему, а не по тексту. Текст отказа даёт `critical_failure`.
+pub(crate) fn run_critical_typed(
+    handle: &mut AgentHandle,
+    action: &str,
+    command: &str,
+    wait: &WaitPolicy,
+    deferrals: &mut Deferrals,
+) -> Result<agent::AgentReply, AgentError> {
+    let outcome = run_checked(handle, command, &wait.critical());
     let deferral = handle
         .session()
         .last_command_deferral()
@@ -471,17 +483,27 @@ pub(crate) fn run_critical(
     outcome
 }
 
+/// Отказ критической команды в словах сценария.
+pub(crate) fn critical_failure(action: &str, error: AgentError) -> AppError {
+    AppError::from(error).with_context(format!("agent {action}"))
+}
+
 /// Одна команда с проверкой итога; журнал ответа возвращается как улика.
 pub(crate) fn run_command(
     handle: &mut AgentHandle,
     command: &str,
     wait: &WaitPolicy,
 ) -> Result<agent::AgentReply, AppError> {
-    let reply = handle
-        .session()
-        .run(command, wait)
-        .map_err(AppError::from)?;
-    reply.outcome().map_err(AppError::from)?;
+    run_checked(handle, command, wait).map_err(AppError::from)
+}
+
+fn run_checked(
+    handle: &mut AgentHandle,
+    command: &str,
+    wait: &WaitPolicy,
+) -> Result<agent::AgentReply, AgentError> {
+    let reply = handle.session().run(command, wait)?;
+    reply.outcome()?;
     Ok(reply)
 }
 
