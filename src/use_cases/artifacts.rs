@@ -544,7 +544,7 @@ fn build_package_in(
         builder: &builder,
         runner,
     };
-    let prepared = bases
+    let mut prepared = bases
         .prepare(&env, source_set, extension, parent, log_file.clone())
         .map_err(fail)?;
 
@@ -715,7 +715,7 @@ fn build_external_in(
                 None,
             )
         })?;
-    let prepared = bases
+    let mut prepared = bases
         .prepare(&env, main, None, None, Some(main_log))
         .map_err(|error| (error, ArtifactSet::default(), None))?;
 
@@ -2253,29 +2253,22 @@ fi"#;
                 }
                 previous = arg;
             }
-            use crate::platform::process::{
-                ProcessInterruption, ProcessInterruptionAction, ProcessInterruptionReason,
-                ProcessInterruptionSafety,
-            };
-            let interruption = self
+            if self
                 .cancel_on
-                .filter(|step| request.args.iter().any(|arg| arg == step))
-                .map(|_| {
-                    assert_eq!(
-                        policy.safety,
-                        ProcessInterruptionSafety::CriticalNonAbortable
-                    );
-                    policy.cancellation.cancel();
-                    ProcessInterruption {
-                        reason: ProcessInterruptionReason::Cancelled,
-                        action: ProcessInterruptionAction::Deferred,
-                    }
-                });
+                .is_some_and(|step| request.args.iter().any(|arg| arg == step))
+            {
+                // Сборка снимаема: зависшую загрузку отмена обязана останавливать.
+                assert_ne!(
+                    policy.safety,
+                    crate::platform::process::ProcessInterruptionSafety::CriticalNonAbortable
+                );
+                policy.cancellation.cancel();
+            }
             Ok(ProcessResult {
                 exit_code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
-                interruption,
+                interruption: None,
             })
         }
 
@@ -2477,7 +2470,7 @@ fi"#;
     }
 
     #[test]
-    fn a_dump_that_resized_the_database_keeps_the_staged_package_and_old_target() {
+    fn a_dump_that_resized_the_database_publishes_the_package_and_drops_the_memory() {
         let dir = tempdir().expect("tempdir");
         let (config, work) = project(dir.path());
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
@@ -2489,7 +2482,7 @@ fi"#;
         let mut runner = Recorder::new();
         runner.dump_effect = DumpEffect::ResizeDatabase;
 
-        let (error, artifacts, _) = build_package_in(
+        let (_, _, _, _, warnings) = build_package_in(
             &context,
             &config,
             &resolved,
@@ -2497,14 +2490,83 @@ fi"#;
             &mut BuildSession::default(),
             &runner,
         )
-        .expect_err("a resized database invalidates the export");
-        assert!(error.to_string().contains("changed size"), "{error}");
-        assert!(artifacts.get_by_role(ARTIFACT_ROLE_STAGE_FILE).is_some());
-        assert_eq!(
+        .unwrap_or_else(|(error, _, _)| panic!("the export succeeded: {error}"));
+
+        assert!(
+            warnings.iter().any(|note| note.contains("changed size")),
+            "{warnings:?}"
+        );
+        assert_ne!(
             fs::read_to_string(&resolved.output_path).expect("package"),
             "previous package"
         );
         assert!(!build_root(&work).join("ready.json").exists());
+    }
+
+    /// Другая платформа не доверяет прежней базе сборки: команда создаёт свежую и называет причину.
+    #[test]
+    fn another_platform_rebuilds_the_build_infobase() {
+        let dir = tempdir().expect("tempdir");
+        let (config, work) = project(dir.path());
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        let runner = Recorder::new();
+        build_package_in(
+            &context,
+            &config,
+            &resolved,
+            fake_designer(),
+            &mut BuildSession::default(),
+            &runner,
+        )
+        .unwrap_or_else(|(error, _, _)| panic!("first build: {error}"));
+        let ready = build_root(&work).join("ready.json");
+        let mut memory: serde_json::Value =
+            serde_json::from_slice(&fs::read(&ready).expect("memory")).expect("json");
+        memory["platform"] = serde_json::json!("another platform");
+        fs::write(&ready, serde_json::to_vec(&memory).expect("json")).expect("rewrite");
+
+        let (_, _, _, build, _) = build_package_in(
+            &context,
+            &config,
+            &resolved,
+            fake_designer(),
+            &mut BuildSession::default(),
+            &runner,
+        )
+        .unwrap_or_else(|(error, _, _)| panic!("second build: {error}"));
+
+        assert_eq!(build.mode, crate::domain::artifacts::BuildMode::Full);
+        assert_eq!(build.reason, "platform version changed");
+    }
+
+    /// Перевод EDT — результат конкретной установки: другая установка меняет тождество памяти.
+    #[test]
+    fn another_edt_installation_changes_the_identity_of_the_translation() {
+        let dir = tempdir().expect("tempdir");
+        let (mut config, _work) = project(dir.path());
+        let identity_at = |config: &mut crate::config::model::AppConfig, name: &str| {
+            let install = dir.path().join(name);
+            fs::create_dir_all(&install).expect("installation");
+            let edt = install.join(format!("1cedtcli{}", std::env::consts::EXE_SUFFIX));
+            fs::write(&edt, "").expect("edt");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&edt, fs::Permissions::from_mode(0o755)).expect("executable");
+            }
+            config.tools.edt_cli = crate::config::model::EdtCliConfig {
+                path: Some(edt),
+                auto_start: false,
+                ..Default::default()
+            };
+            crate::use_cases::build_infobase::edt_identity(config)
+        };
+
+        let first = identity_at(&mut config, "edt-one");
+        assert_ne!(first, "no-edt");
+        assert_ne!(first, identity_at(&mut config, "edt-two"));
     }
 
     /// Расширение Конфигуратор загружает поверх основной конфигурации: сперва она, затем
@@ -2788,12 +2850,6 @@ fi"#;
         .expect_err("cancelled");
 
         assert!(error.to_string().contains("sources load"), "{error}");
-        assert!(
-            error
-                .to_string()
-                .contains("after cancellation request during critical phase"),
-            "{error}"
-        );
         assert!(error.cancellation().is_some(), "{error}");
         assert_eq!(runner.calls().len(), 1, "{:?}", runner.calls());
         assert!(!resolved.output_path.exists());
@@ -2821,12 +2877,6 @@ fi"#;
         .expect_err("cancelled");
 
         assert!(error.to_string().contains("package dump"), "{error}");
-        assert!(
-            error
-                .to_string()
-                .contains("after cancellation request during critical phase"),
-            "{error}"
-        );
         assert_eq!(runner.calls().len(), 2, "{:?}", runner.calls());
     }
 

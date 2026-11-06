@@ -465,7 +465,7 @@ fn cleanup_orphans(root: &Path) -> Result<(), AppError> {
 
 fn creation_failure(result: &PlatformCommandResult) -> AppError {
     let mut details = vec![format!(
-        "failed to create the throwaway infobase: exit code {}",
+        "failed to create the runner infobase: exit code {}",
         result.process.exit_code
     )];
     for (name, text) in [

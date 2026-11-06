@@ -76,7 +76,7 @@
 <p class="hint">Примеры ответов; пути и длительность зависят от запуска.</p>
 <h2 class="command-variant" id="op-make">make --output build/main.cf --source-set main <img class="unica-usage" src="assets/unica-mark-blue.svg" width="24" height="24" alt="Используется в Unica 0.13" title="Используется в Unica 0.13"></h2>
 <pre data-output-command><code>v8-runner make --output build/main.cf --source-set main</code></pre>
-<p>собирает пакет из исходников: <code>.cf</code>, <code>.cfe</code>, <code>.epf</code>, <code>.erf</code>. Для конфигурации и внешних обработок платформа делает это без информационной базы <span class="ref">(<a href="platform.html#t30">30</a>)</span></p>
+<p>собирает пакет из исходников: <code>.cf</code>, <code>.cfe</code>, <code>.epf</code>, <code>.erf</code>. База проекта не нужна: раннер держит свою базу сборки в <code>workPath/temp/build-infobase</code>. Повторная сборка без изменений только выгружает пакет, изменённое загружается частично. Ответ называет в <code>execution.payload</code> режим <code>build.mode</code> (<code>full</code>, <code>partial</code>, <code>unchanged</code>) и причину <code>build.reason</code>.</p>
 <h3 id="make-external-format">Формат исходников внешних обработок и отчётов</h3>
 <p>При сборке <code>.epf</code> и <code>.erf</code> подготовка исходников различается:</p>
 <dl class="mode-behavior" aria-label="Поведение по форматам исходников">
@@ -106,6 +106,9 @@ output: build/main.cf</code></pre>
 <pre data-output-example="make-failed" data-output-schema="make"><code>output: build/main.cf
 execution status: invalid_output
 ERROR: invalid output: expected output artifact was not produced</code></pre>
+<h2 class="command-variant" id="make-full">make --full</h2>
+<pre data-output-command><code>v8-runner make --output build/main.cf --source-set main --full</code></pre>
+<p>Пересоздаёт базу сборки и заново переводит исходники EDT каждого набора прогона. Без ключа раннер делает то же сам, если сменилась платформа, память о базе неверна или изменения нельзя загрузить частично.</p>
 <h2 class="command-variant" id="make-preview">make --output build/main.cf --source-set main --dry-run <img class="unica-usage" src="assets/unica-mark-blue.svg" width="24" height="24" alt="Используется в Unica 0.13" title="Используется в Unica 0.13"></h2>
 <pre data-output-command><code>v8-runner make --output build/main.cf --source-set main --dry-run</code></pre>
 <p>Превью проверяет настройки и доступность исполнителя. Платформа не запускается; база и выходные файлы не меняются. Без <code>--dry-run</code> выполняется указанная операция.</p>

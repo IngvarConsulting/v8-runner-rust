@@ -322,7 +322,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Designer, ArgvTested),
     ];
     const DIFF_SERVER: &[Capability] = &[implemented(Designer, ArgvTested)];
-    // `make` собирает пакет из исходников во временной базе раннера, а не выгружает базу
+    // `make` собирает пакет из исходников в базе сборки раннера.
     // #471/#472: Designer leads incremental assembly in the persistent build infobase.
     // Both providers assemble the working configuration; neither applies it.
     const MAKE: &[Capability] = &[
@@ -494,7 +494,7 @@ pub fn has_a_choice(operation: Operation, target: TargetKind) -> bool {
 }
 
 /// Не зависит ли строка операции от вида цели: такой операции база проекта не нужна
-/// (`make` и `convert` работают во временной базе раннера), и вид цели её не касается.
+/// (`make` и `convert` работают в своей базе раннера), и вид цели её не касается.
 pub fn needs_no_target(operation: Operation) -> bool {
     TargetKind::ALL
         .into_iter()
@@ -514,10 +514,10 @@ pub struct RemovedProvider {
 /// конфигурации и называет выход.
 pub const fn removed_provider(operation: Operation, provider: Provider) -> Option<RemovedProvider> {
     match (operation, provider) {
-        // `make` собирает пакет из исходников во временной базе раннера (#364), а агент
+        // `make` собирает пакет из исходников в базе сборки раннера (#364), а агент
         // работает только с базой проекта: пакет этой базы выгружает `download`.
         (Operation::Make, Provider::Agent) => Some(RemovedProvider {
-            reason: "make builds the package from the sources in a throwaway infobase of the runner, and the agent works only with the project infobase",
+            reason: "make builds the package from the sources in the build infobase of the runner, and the agent works only with the project infobase",
             way_out: "download",
         }),
         _ => None,

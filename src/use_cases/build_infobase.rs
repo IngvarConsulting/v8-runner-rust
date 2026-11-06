@@ -17,8 +17,10 @@ use crate::domain::artifacts::{BuildMode, BuildReport};
 use crate::domain::capability::Provider;
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::ibcmd::IbcmdError;
+use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::fs::{remove_path_if_exists, write_file_atomically};
 use crate::support::path::{
@@ -102,6 +104,9 @@ fn mkdir(path: &Path) -> Result<(), AppError> {
 pub(super) struct BuildSession {
     started: bool,
     force_pending: bool,
+    /// `--full`: every EDT set of this run is translated again, each once.
+    full_translation: bool,
+    translated: BTreeSet<String>,
 }
 
 pub(super) struct BuildEnvironment<'a> {
@@ -230,9 +235,12 @@ pub(super) struct PreparedBuild {
 impl PreparedBuild {
     /// Opening a file infobase to export a package can update its on-disk stamp
     /// even without a configuration change (Designer on Windows). A successful
-    /// read may advance the timestamp when the file identity and size still match.
-    pub(super) fn record_successful_access(&self) -> Result<(), AppError> {
-        let root = self.base.root();
+    /// read may advance the timestamp when the file identity and size still match. If they
+    /// do not, the export itself succeeded: its package stands, and only the memory of the
+    /// base is dropped, so the next run starts fresh.
+    pub(super) fn record_successful_access(&mut self) -> Result<(), AppError> {
+        let root = self.base.root().to_path_buf();
+        let root = root.as_path();
         let path = child(root, READY)?;
         let mut ready = Ready::read(&path)
             .map_err(|error| io_failure("read build infobase memory after export", &path, error))?;
@@ -241,9 +249,11 @@ impl PreparedBuild {
         })?;
         if ready.database.object != current.object || ready.database.bytes != current.bytes {
             remove(&path)?;
-            return Err(AppError::Runtime(
-                "build infobase file was replaced or changed size during export".to_owned(),
-            ));
+            self.warnings.push(
+                "the build infobase file was replaced or changed size during the export; the package was published and the next build starts from a fresh base"
+                    .to_owned(),
+            );
+            return Ok(());
         }
         if ready.database != current {
             ready.database = current;
@@ -284,6 +294,12 @@ impl PreparedBuild {
 impl BuildSession {
     pub(super) fn request_full(&mut self) {
         self.force_pending = !self.started;
+        self.full_translation = !self.started;
+    }
+
+    /// `--full` translates every EDT set of the run again, each of them once.
+    fn takes_full_translation(&mut self, set: &str) -> bool {
+        self.translated.insert(set.to_owned()) && self.full_translation
     }
 
     /// Synchronize the needed slots before exporting a package or building external files.
@@ -320,7 +336,8 @@ impl BuildSession {
             .map(|parent| (parent, None))
             .chain(std::iter::once((set, extension)))
         {
-            let (xml, identity, notes) = sources_in_xml(env, &root, set, forced)?;
+            let translate_again = self.takes_full_translation(&set.name);
+            let (xml, identity, notes) = sources_in_xml(env, &root, set, translate_again)?;
             warnings.extend(notes);
             let slot = slot_key(extension);
             let sources = snapshot(set, xml, &slot, &memory, &identity)?;
@@ -406,7 +423,7 @@ impl BuildSession {
             let created = base.create(
                 env.context,
                 env.runner,
-                InterruptionSafetyClass::CriticalNonAbortable,
+                InterruptionSafetyClass::GracefulThenKill,
             )?;
             if let Some(error) = interruption_before_safe_point(env.context, "sources load") {
                 return Err(if created.is_empty() {
@@ -433,7 +450,7 @@ impl BuildSession {
                         item.context.path(),
                         item.extension,
                         log_file.clone(),
-                        InterruptionSafetyClass::CriticalNonAbortable,
+                        InterruptionSafetyClass::GracefulThenKill,
                     )?,
                     Load::Partial(ref paths, _) => match env.builder.provider {
                         Provider::Designer => {
@@ -450,7 +467,7 @@ impl BuildSession {
                                 env.context,
                                 env.runner,
                                 log_file.clone(),
-                                InterruptionSafetyClass::CriticalNonAbortable,
+                                InterruptionSafetyClass::GracefulThenKill,
                             )
                             .load_config_from_files_partial_untouched(
                                 item.context.path(),
@@ -467,7 +484,7 @@ impl BuildSession {
                             base.ibcmd(
                                 env.context,
                                 env.runner,
-                                InterruptionSafetyClass::CriticalNonAbortable,
+                                InterruptionSafetyClass::GracefulThenKill,
                             )
                             .config_import_partial(item.context.path(), &relative, item.extension)
                             .map_err(|error| match error {
@@ -537,6 +554,18 @@ pub(super) fn validate_project(config: &AppConfig) -> Result<(), AppError> {
     Ok(())
 }
 
+/// A process killed while creating the directory leaves nothing but its markers.
+fn holds_only_its_markers(root: &Path) -> io::Result<bool> {
+    for entry in std::fs::read_dir(root)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(".gitignore") && !name.starts_with(".build-cache") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn open_root(env: &BuildEnvironment<'_>) -> Result<PathBuf, AppError> {
     if let Some(error) = interruption_before_safe_point(env.context, "build infobase creation") {
         return Err(error);
@@ -556,10 +585,16 @@ fn open_root(env: &BuildEnvironment<'_>) -> Result<PathBuf, AppError> {
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             if std::fs::read_to_string(&layout).as_deref().ok() != Some(CACHE_LAYOUT) {
-                return Err(AppError::Validation(format!(
-                    "build infobase directory '{}' has no recognized cache layout",
-                    root.display()
-                )));
+                if !holds_only_its_markers(&root)
+                    .map_err(|error| io_failure("read build infobase directory", &root, error))?
+                {
+                    return Err(AppError::Validation(format!(
+                        "build infobase directory '{}' has no recognized cache layout; it holds only a rebuildable cache, so remove the directory and repeat the command",
+                        root.display()
+                    )));
+                }
+                write_file_atomically(&layout, |file| file.write_all(CACHE_LAYOUT.as_bytes()))
+                    .map_err(|error| io_failure("record build cache layout", &layout, error))?;
             }
             if std::fs::read_to_string(&ignore).as_deref().ok() != Some("*\n") {
                 write_file_atomically(&ignore, |file| file.write_all(b"*\n"))
@@ -571,6 +606,18 @@ fn open_root(env: &BuildEnvironment<'_>) -> Result<PathBuf, AppError> {
     // ibcmd also writes its own catalogue here when opening a Designer-created database.
     child(&root, "data")?;
     Ok(root)
+}
+
+pub(super) fn edt_identity(config: &AppConfig) -> String {
+    PlatformUtilities::from_config(config)
+        .locate(UtilityType::EdtCli)
+        .map_or_else(
+            |_| "no-edt".to_owned(),
+            |location| {
+                let path = location.path;
+                stable_path_identity(&path.canonicalize().unwrap_or(path))
+            },
+        )
 }
 
 fn sources_in_xml(
@@ -590,6 +637,8 @@ fn sources_in_xml(
     if env.config.format == SourceFormat::Designer {
         return Ok((input, identity, Vec::new()));
     }
+    // The XML is the output of this EDT: its installation is part of what the memory describes.
+    let identity = format!("{identity}:{}", edt_identity(env.config));
 
     // Keep this cache across database replacement. The XML and the EDT inputs each have
     // a snapshot: a partial/externally changed export never authorizes a skipped translation.
@@ -674,4 +723,53 @@ pub(super) fn ensure_platform_success(
     }
 
     Err(AppError::Platform(details.join("; ")))
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::child;
+    use super::{holds_only_its_markers, BuildSession};
+
+    #[test]
+    fn a_full_build_translates_every_set_of_the_run_once() {
+        let mut session = BuildSession::default();
+        session.request_full();
+
+        assert!(session.takes_full_translation("main"));
+        assert!(session.takes_full_translation("ext"));
+        assert!(!session.takes_full_translation("main"));
+    }
+
+    #[test]
+    fn a_build_without_the_key_translates_only_what_changed() {
+        let mut session = BuildSession::default();
+
+        assert!(!session.takes_full_translation("main"));
+    }
+
+    /// Прерванное создание каталога не должно закрывать сборку навсегда, а чужой каталог
+    /// раннер не присваивает.
+    #[test]
+    fn only_the_markers_of_a_killed_creation_count_as_a_new_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(holds_only_its_markers(dir.path()).expect("empty"));
+        std::fs::write(dir.path().join(".gitignore"), "*\n").expect("marker");
+        assert!(holds_only_its_markers(dir.path()).expect("marker only"));
+        std::fs::write(dir.path().join("1Cv8.1CD"), "base").expect("foreign");
+        assert!(!holds_only_its_markers(dir.path()).expect("foreign file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_build_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join("ib")).expect("link");
+
+        let error = child(dir.path(), "ib").expect_err("a link is refused");
+
+        assert!(error.to_string().contains("link or junction"), "{error}");
+    }
 }

@@ -578,7 +578,7 @@ fn build_package(
     source: &SourceSetConfig,
     extension: Option<&str>,
 ) -> Result<Vec<String>, AppError> {
-    let prepared = session.prepare(env, source, extension, None, None)?;
+    let mut prepared = session.prepare(env, source, extension, None, None)?;
     let file_extension = item
         .target_path
         .extension()

@@ -246,8 +246,8 @@ v8-runner infobase dump --output dist/base.dt --dry-run
 Позиционный аргумент `push`, `pull`, `make`, `download` и `convert` — набор исходников
 (`v8-runner push my-ext`), никогда не база: базу называет `--infobase`. У `convert` на этом
 месте может стоять и файл пакета: `convert main.cf --to xml` разбирает пакет в XML, а
-`convert my-ext --to package` собирает пакет из набора — без базы проекта, через `ibcmd` во
-временной базе раннера. Пакет `.cf`/`.cfe`
+`convert my-ext --to package` собирает пакет из набора — без базы проекта, через `ibcmd` в
+базе сборки раннера под `workPath/temp/build-infobase`. Пакет `.cf`/`.cfe`
 забирает `download`, образ `.dt` — `infobase dump`. `infobase dump --output *.cf|*.cfe`
 отказывает до запуска платформы и называет `download`, `upload *.dt` — `infobase restore`.
 
