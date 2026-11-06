@@ -236,8 +236,11 @@ pub(crate) fn build_ibcmd_dsl<'a>(
     .with_data_path(data_path))
 }
 
-/// Каталог данных автономного сервера `ibcmd` у выгрузки — один на все её вызовы.
-fn ibcmd_data_path(config: &AppConfig) -> Result<PathBuf, AppError> {
+/// Каталог данных автономного сервера `ibcmd` в `workPath` проекта. Блокируется он, а не база,
+/// и умолчательный — один на пользователя: без своего каталога запуски в разных проектах
+/// отказывают друг другу (`rc=254`). Запись в базу берёт отсюда только каталог: класс прерывания
+/// у неё критический, а [`build_ibcmd_dsl`] строит снимаемый процесс.
+pub(crate) fn ibcmd_data_path(config: &AppConfig) -> Result<PathBuf, AppError> {
     let data_path = config.work_path.join("ibcmd-data");
     std::fs::create_dir_all(&data_path).map_err(|error| {
         AppError::Runtime(format!(

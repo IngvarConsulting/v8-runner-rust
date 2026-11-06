@@ -1570,13 +1570,7 @@ fn run_configuration_provider(
             let executable = executable_of(executable)?;
             let connection =
                 IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-            let data_path = config.work_path.join("ibcmd-data");
-            std::fs::create_dir_all(&data_path).map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to create IBCMD data directory '{}': {error}",
-                    data_path.display()
-                ))
-            })?;
+            let data_path = crate::use_cases::dump_config::helpers::ibcmd_data_path(config)?;
             IbcmdDsl::new(
                 executable.to_path_buf(),
                 connection,

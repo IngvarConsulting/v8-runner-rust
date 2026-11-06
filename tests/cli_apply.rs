@@ -551,6 +551,48 @@ fn providers_apply_assigns_the_executor_of_the_apply() {
     );
 }
 
+/// `apply` основной конфигурации держит каталог данных проекта в каждом вызове `ibcmd`:
+/// блокируется он, а не база, и умолчательный — один на пользователя, так что два проекта
+/// конфликтуют (`rc=254`). Это и применение, и чтения поколения инструментом записи вокруг него.
+#[test]
+fn an_ibcmd_apply_of_the_main_configuration_holds_the_data_directory_of_the_project() {
+    let project = Project::new();
+    let log = project.root().join("ibcmd.log");
+    write_shell_script(
+        &project.root().join("ibcmd"),
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'config generation-id'*) printf '%s\\n' '{FIRST}' ;; esac\nexit 0",
+            log.display()
+        ),
+    );
+    fs::write(
+        &project.config,
+        fs::read_to_string(&project.config)
+            .expect("config")
+            .replace("  push: designer\n", "  push: ibcmd\n")
+            .replace("  apply: designer\n", "  apply: ibcmd\n"),
+    )
+    .expect("config");
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    succeeded(&project.run(&["push", "--no-apply"]));
+    fs::remove_file(&log).expect("forget ibcmd calls");
+
+    succeeded(&project.run(&["apply"]));
+
+    let calls = fs::read_to_string(&log).expect("ibcmd calls");
+    for step in ["config generation-id", "config apply"] {
+        assert!(calls.contains(step), "{step}: {calls}");
+    }
+    for call in calls.lines() {
+        let data = call
+            .split_once("--data ")
+            .and_then(|(_, rest)| rest.split(' ').next())
+            .unwrap_or_else(|| panic!("no --data in: {call}"));
+        assert!(data.ends_with("/work/ibcmd-data"), "{call}");
+    }
+}
+
 /// Конфигуратор читает поколение применённого расширения: загрузка без применения его не
 /// меняет, применение меняет. Запись после `push --no-apply` — прежнее поколение; `apply`
 /// переносит её на новое, и следующая отправка не отказывает.

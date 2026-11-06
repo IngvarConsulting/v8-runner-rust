@@ -21,6 +21,7 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::ibcmd_data_path;
 
 /// Процесс, который спрашивает поколение.
 pub(crate) enum GenerationProcess<'a> {
@@ -146,7 +147,7 @@ pub(crate) fn read_by_record_tool(
                 Process::Ibcmd => GenerationProcess::Ibcmd {
                     binary: &binary,
                     runner,
-                    data_path: None,
+                    data_path: Some(ibcmd_data_path(config)?),
                 },
                 Process::Designer => GenerationProcess::Designer {
                     binary: &binary,
