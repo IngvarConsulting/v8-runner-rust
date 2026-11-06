@@ -2670,6 +2670,273 @@ config`). В справке пакетного Конфигуратора тож
   Признак «есть сеанс» по-прежнему даёт `1Cv8.1CD` (раздел #435). Признак блокировки сеансов —
   наличие `1Cv8.cdn`. Коды выхода у всех отказов общие (1 и 255), различает их только текст.
 
+## Блокировка начала сеансов в кластере и на автономном сервере
+
+Замер 06.11.2026. Задача [#469](https://github.com/IngvarConsulting/v8-runner-rust/issues/469).
+Платформа 8.3.27.2074, Windows 11. Кластер работал в отдельных процессах с собственным
+реестром, портами и базой SQL Server. Для него сняли `.dt` с локальной копии DemoTrd
+и восстановили в новую БД. У автономного сервера была своя файловая копия DemoTrd.
+Во всех клиентских командах `<user>` — администратор ИБ с пустым паролем.
+
+### Кластер
+
+Воспроизведение стенда. `<p>` — каталог `bin` платформы,
+`<work>` — отдельный рабочий каталог, `<copy>` — каталог
+копии. Порты заранее проверяются. `<db>` — имя новой БД, одноимённого
+SQL-логина с правами владельца этой БД и регистрации ИБ. `<cl>` и
+`<ib>` — UUID из ответов `cluster list` и `infobase create`.
+`<ras>` = `127.0.0.1:24692`.
+
+До регистрации ИБ подготовили пустую БД и её владельца. Команды для новой БД
+подавались через `sqlcmd -S localhost -d master -E -C -b -i <sql-файл>` или `-Q`.
+
+```sql
+IF DB_ID(N'<db>') IS NOT NULL OR SUSER_ID(N'<db>') IS NOT NULL
+    THROW 51000, 'Refusing an existing DB or login', 1;
+CREATE LOGIN [<db>] WITH PASSWORD=N'<db-pwd>', CHECK_POLICY=ON;
+GO
+CREATE DATABASE [<db>];
+GO
+ALTER AUTHORIZATION ON DATABASE::[<db>] TO [<db>];
+```
+
+```text
+<p>\ragent.exe /agent /port 24690 /regport 24691 /range 24710:24720 /d "<work>\registry"
+<p>\ras.exe cluster --port=24692 --monitor-port=24693 127.0.0.1:24690
+<p>\rac.exe cluster list <ras>
+<p>\rac.exe cluster admin register --cluster=<cl> --name=i469cluster --pwd=<cluster-pwd> --auth=pwd <ras>
+<p>\rac.exe agent admin register --name=i469agent --pwd=<agent-pwd> --auth=pwd <ras>
+<p>\rac.exe infobase create --cluster=<cl> --cluster-user=i469cluster --cluster-pwd=<cluster-pwd> --name=<db> --dbms=MSSQLServer --db-server=localhost --db-name=<db> --db-user=<db> --db-pwd=<db-pwd> --locale=ru --scheduled-jobs-deny=on --license-distribution=allow <ras>
+<p>\1cv8.exe DESIGNER /F "<copy>" /N <user> /P "" /DisableStartupDialogs /DisableStartupMessages /Out "<work>\dump.log" /DumpIB "<work>\copy.dt" /Exit
+<p>\1cv8.exe DESIGNER /S localhost:24691\<db> /DisableStartupDialogs /DisableStartupMessages /Out "<work>\restore.log" /RestoreIB "<work>\copy.dt" /Exit
+```
+
+`cluster list`, регистрация обоих администраторов и `infobase create`
+вернули код `0`. Список показал один кластер с `port : 24691`,
+создание вернуло `infobase : <ib>`. `/DumpIB` вернул `0`
+и «Выгрузка информационной базы успешно завершена».
+
+Клиент `/RestoreIB` сняли по лимиту 360 с, поэтому кода платформы нет.
+`rac session list` ещё показывал `SystemBackgroundJob`, а SQL Server
+выполнял `CREATE INDEX` в новой БД. Дождались завершения этой работы, после чего
+`rac session terminate --cluster=<cl> <cluster-auth> --session=<uuid> <ras>`
+вернул `0` для оставшегося сеанса клиента восстановления (`Designer`,
+`hibernate : yes`, пустой пользователь). Новый пакетный Конфигуратор вошёл с
+администратором ИБ, вернул `0` и записал в `/Out` тот же идентификатор
+поколения, что и на файловой копии.
+
+**Права и проверка состояния.** В списках `rac cluster admin list` и
+`rac agent admin list` подтверждены оба зарегистрированных администратора.
+Команды с `<cluster-auth>` получают
+`--cluster-user=i469cluster --cluster-pwd=<cluster-pwd>`, с `<ib-auth>` —
+`--infobase-user=<user> --infobase-pwd=`.
+
+```text
+<p>\rac.exe infobase update --cluster=<cl> --infobase=<ib> <auth> --sessions-deny=on --scheduled-jobs-deny=on "--denied-message=I469 maintenance" --permission-code=i469pass <ras>
+<p>\rac.exe infobase info --cluster=<cl> --infobase=<ib> <cluster-auth> <ib-auth> <ras>
+<p>\rac.exe infobase update --cluster=<cl> --infobase=<ib> <cluster-auth> <ib-auth> --sessions-deny=off --scheduled-jobs-deny=on --denied-message= --permission-code= <ras>
+```
+
+| `<auth>` для запрета | Код выхода | Вывод |
+| --- | --- | --- |
+| Без реквизитов, только `<ib-auth>` или неверный пароль кластера вместе с `<ib-auth>` | `−1` (`0xFFFFFFFF`) | `Администратор кластера не аутентифицирован` |
+| `--agent-user=i469agent --agent-pwd=<agent-pwd>` | `−1` | `Ошибка разбора параметра: --agent-user=i469agent` |
+| Только `<cluster-auth>` или он же с `--infobase-user=i469_missing --infobase-pwd=wrong` | `−1` | `Недостаточно прав пользователя на информационную базу …` |
+| `<cluster-auth> <ib-auth>` | `0` | Пустой вывод |
+
+`infobase info` до изменения показал `sessions-deny : off`. После успешного
+запрета он вернул `0` и показал `sessions-deny : on`,
+`denied-message : "I469 maintenance"`, `permission-code : "i469pass"` и
+`scheduled-jobs-deny : on`. Последний флаг был включён уже при создании ИБ.
+Проверка регламентных заданий ограничилась параметром управления и чтением его состояния.
+Снятие запрета с двумя администраторами вернуло `0` с пустым выводом, повторный
+`info` показал `sessions-deny : off`, пустые сообщение и код.
+Флаг регламентных заданий оставили включённым. Результат по `--infobase-user` и
+`--infobase-pwd` относится к 8.3.27.2074. В замере #180 у 8.5.4.1878 этих ключей нет.
+
+Отдельный вызов `rac infobase update --cluster=<cl> --infobase=<ib> <auth> --scheduled-jobs-deny=on <ras>`
+вернул `−1` с тем же отказом ИБ только с администратором кластера и `0`
+с обоими администраторами. Оба списка и `infobase info` проверялись через
+собственный RAS.
+
+**Новые сеансы.** Для всех запусков использовали `<target>` =
+`localhost:24691\<db>`. В пакетных командах `<uc>` отсутствовал,
+равнялся `/UC wrongcode` или `/UC i469pass`.
+
+```text
+<p>\1cv8.exe DESIGNER /S <target> /N <user> /P "" <uc> /DisableStartupDialogs /DisableStartupMessages /Out "<work>\batch.log" /GetConfigGenerationID /Exit
+<p>\1cv8.exe DESIGNER /S <target> /N <user> /P "" /Out "<work>\designer.log"
+<p>\1cv8c.exe ENTERPRISE /S <target> /N <user> /P "" /DisableStartupDialogs /DisableStartupMessages /Out "<work>\thin.log"
+<p>\rac.exe session list --cluster=<cl> --infobase=<ib> <cluster-auth> <ras>
+```
+
+Пакетный Конфигуратор до запрета вернул `0` и идентификатор поколения в
+`/Out`. Под запретом без `/UC` и с неверным кодом вернул `1`
+и «Начало сеанса с информационной базой запрещено.» с сообщением `I469 maintenance`.
+С правильным `/UC i469pass` вернул `0` и тот же идентификатор.
+Интерактивный Конфигуратор до запрета появился в списке сеансов с `app-id : Designer`.
+Под запретом окно «Ожидание запуска» оставалось открытым 20 с, нового сеанса
+`Designer` в списке не было. Оба процесса завершил стенд после наблюдения.
+Естественного кода выхода для них нет.
+
+До запрета тонкий клиент появился с новым UUID, `app-id : 1CV8C` и
+`hibernate : no`. Под запретом `/Out` содержал `I469 maintenance`,
+нового UUID в списке сеансов не было. Старый сеанс с `hibernate : yes` исключили по UUID.
+Отдельный запуск с теми же ключами завершился сам с кодом `1` и тем же сообщением.
+
+Агент запускался на том же адресе ИБ. Для пути к ключу и каталога агента использовали
+ASCII-псевдоним `X:` временного каталога через `subst X: "<work>"`.
+С путём к ключу, содержащим кириллицу, запуск завершался с кодом `0` и ошибкой
+«Фатальная ошибка SSH-сервера: Ошибка установки ключа хоста» до открытия порта.
+
+```text
+ssh-keygen -q -t ed25519 -N "" -f X:\agent-host-ed25519
+<p>\1cv8.exe DESIGNER /S <target> /Out "<work>\agent.log" /AgentMode /AgentListenAddress 127.0.0.1 /AgentPort 24694 /AgentSSHHostKey X:\agent-host-ed25519 /AgentBaseDir X:\agent-data
+```
+
+Клиент Paramiko подключался к `127.0.0.1:24694`, сверял ключ с
+`agent-host-ed25519.pub`, вызывал `auth_password("<user>", "")`
+и открывал shell через `invoke_shell()`. До запрета команды
+`options set --show-prompt=no --output-format=json`, `common connect-ib`,
+`config generation-id` и `common disconnect-ib` вернули
+`"type": "success"`. Поколение совпало с пакетным прогоном.
+Под запретом SSH дошёл до проверки ключа хоста, но на аутентификации клиент получил
+`Authentication failed: transport shut down or saw EOF`. Shell не открылся, до
+`common connect-ib` не дошли. `/Out` был пуст, процесс агента завершил стенд в обоих случаях.
+
+**Авария владельца окна.** В отдельном процессе Python запустили приведённый
+`infobase update … --sessions-deny=on` с обоими администраторами. После его кода
+`0` процесс записал файл готовности и ждал. Независимый `infobase info`
+подтвердил запрет, затем владелец был принудительно завершён (`Popen.terminate()`).
+Новый `infobase info` вернул `0` с `sessions-deny : on`,
+а новый пакетный Конфигуратор без кода снова вернул `1` с текстом запрета.
+Независимый `infobase update … --sessions-deny=off` вернул `0`,
+`info` показал выключенный запрет, следующий пакетный вход вернул `0`
+и тот же идентификатор поколения.
+
+Для пакетного Конфигуратора кластерный запрет пригоден как явное окно обслуживания.
+Нужны RAS и два уровня учётных данных на проверенной версии, проверка состояния перед
+изменением и явное снятие запрета. После сбоя потребуется отдельный вызов снятия.
+`/UC` пропускает свой пакетный процесс. Новый агент без кода не вошёл.
+Замер относится к началу сеансов. Сохранение уже открытых сеансов и рестарт
+кластера в этой серии не проверялись.
+
+### Автономный сервер
+
+Windows, 1С 8.3.27.2074. Автономный сервер работал с копией DemoTrd. HTTP и SSH слушали только loopback, прямой шлюз для основных проб отключён. Регламентные задания отключены отдельно настройкой запуска.
+
+```powershell
+$P = 'C:\Program Files\1cv8\8.3.27.2074\bin'
+$W = '<каталог опыта>'
+ssh-keygen -t rsa -b 2048 -m PEM -N "" -f "$W\ssh-host"
+& "$P\ibsrv.exe" "--data=$W\data" "--db-path=$W\ib" --name=probe469aut --http-address=localhost --http-port=24842 --ssh-address=localhost --ssh-port=24841 "--ssh-host-key=$W\ssh-host" --disable-direct-gate --schedule-jobs=deny
+```
+
+Для SSH использовали отдельный файл доверия. Свободную букву отобразили командой `subst Z: "$W\ssh-profile"`, из `Z:\` запустили `ibcmd`. В `Z:\etc\ssh\ssh_config` указали `Host 127.0.0.1` и `UserKnownHostsFile Z:/known_hosts`, в `Z:\known_hosts` записали `[127.0.0.1]:24841 ssh-rsa <открытый ключ собственного сервера>`. После прогона `subst Z: /D`. В команды просмотра и завершения сеансов подавали на stdin UTF-8 `Администратор\n\n`. Вторая строка задаёт пустой пароль.
+
+```text
+ibcmd --pid=<ibsrv-pid> session list
+ibcmd --remote=ssh://127.0.0.1:24841 session list
+ibcmd --pid=<ibsrv-pid> lock list
+ibcmd --remote=ssh://127.0.0.1:24841 lock list
+ibcmd --remote=ssh://127.0.0.1:24841 session terminate --session=<UUID> --error-message=probe469terminate
+ibcmd --pid=<ibsrv-pid> session deny
+ibcmd --pid=<ibsrv-pid> session allow
+ibcmd --pid=<ibsrv-pid> lock set
+ibcmd --pid=<ibsrv-pid> lock create
+ibcmd --remote=ssh://127.0.0.1:24841 session deny
+ibcmd --remote=ssh://127.0.0.1:24841 lock set
+1cv8c ENTERPRISE /WS http://127.0.0.1:24842 /N Администратор /P "" /DisableStartupDialogs /DisableStartupMessages /Out <log>
+```
+
+- `session list` и `lock list` по PID и SSH с указанным stdin вернули 0. Вывод начинается с приглашений аутентификации. `session list` показал живой сеанс с `app-id: 1CV8C`, `user-name: Администратор` и `client-ip: 127.0.0.1`. `lock list` вывел поля `connection`, `session`, `object`, `locked` и `descr`, включая разделяемые блокировки ИБ и БД, открытые этим клиентом.
+- При закрытом stdin оба просмотра по PID вернули Windows DWORD 4294967295 (−1) и «Идентификация пользователя не выполнена». `--user=Администратор` в командах просмотра вернул 2 и «Ошибка разбора параметра». SSH с неизвестным ключом и ответом `n` вернул 1 после запроса доверия.
+- `session deny` и `lock set` через оба транспорта вернули 2 и «Указана неполная команда…». `session allow` и `lock create` проверены по PID с тем же результатом. Справка `ibcmd help session` перечисляет `info`, `list`, `terminate` и `interrupt-current-server-call`. `ibcmd help lock` перечисляет только `list`.
+- `session terminate` по SSH для нового сеанса `3da44238-aef2-4e0f-9939-76757c3c9530` вернул 0 и только приглашения аутентификации. Следующий список сеансов вернул 0, UUID исчез, процесс клиента оставался жив. Новый запуск тонкого клиента вошёл без кода и появился в списке с UUID `43ee5608-e1f4-4a6b-b51c-65e867cd4285`.
+
+**Файловая блокировка на тех же данных.** На остановленном `ibsrv` запустили штатный толстый клиент с внешней обработкой. Для сборки скопировали дерево `tests/fixtures/designer/external/processor` в рабочий каталог. `<root.xml>` — файл `ВнешняяОбработка1.xml` из этого дерева. В `ВнешняяОбработка1/Forms/Форма/Ext/Form.xml` добавили `<Events><Event name="OnOpen">ПриОткрытии</Event></Events>` перед `<Attributes>`. В `Ext/Form/Module.bsl` записали следующий модуль. В строке с путём замените `<work>` на абсолютный путь к каталогу опыта на машине клиента. Перед каждым запуском удаляйте результат предыдущего запуска того же режима.
+
+```bsl
+&НаКлиенте
+Процедура ПриОткрытии(Отказ)
+	Результат = ПробаНаСервере(ПараметрЗапуска);
+	Запись = Новый ТекстовыйДокумент;
+	Запись.УстановитьТекст(Результат);
+	Запись.Записать("<work>\" + ПараметрЗапуска + ".result", КодировкаТекста.UTF8);
+	ЗавершитьРаботуСистемы(Ложь);
+КонецПроцедуры
+
+&НаСервереБезКонтекста
+Функция ПробаНаСервере(Режим)
+	Попытка
+		Если Режим = "set" Тогда
+			Блок = Новый БлокировкаСеансов;
+			Блок.Установлена = Истина;
+			Блок.Начало = ТекущаяДата() - 10;
+			Блок.Конец = ТекущаяДата() + 600;
+			Блок.КодРазрешения = "R469";
+			Блок.Сообщение = "probe469aut";
+			УстановитьБлокировкуСеансов(Блок);
+		ИначеЕсли Режим = "clear" Тогда
+			Блок = ПолучитьБлокировкуСеансов();
+			Блок.Установлена = Ложь;
+			УстановитьБлокировкуСеансов(Блок);
+		КонецЕсли;
+		Блок = ПолучитьБлокировкуСеансов();
+		Возврат Строка(Блок.Установлена) + "|" + Блок.КодРазрешения + "|" + Строка(Блок.Сообщение);
+	Исключение
+		Возврат "error|" + ОписаниеОшибки();
+	КонецПопытки;
+КонецФункции
+```
+
+```text
+1cv8 DESIGNER /F <копия> /N Администратор /P "" /DisableStartupDialogs /DisableStartupMessages /LoadExternalDataProcessorOrReportFromFiles <root.xml> <probe.epf> /Out <log>
+1cv8 ENTERPRISE /F <копия> /N Администратор /P "" /RunModeManagedApplication /DisableStartupDialogs /DisableStartupMessages /Execute <probe.epf> /C set /Out <log>
+1cv8 DESIGNER /F <копия> /N Администратор /P "" /DisableStartupDialogs /DisableStartupMessages [/UC R469] /GetConfigGenerationID /Out <log>
+```
+
+Сборка обработки вернула 0. У запущенного отдельно клиента код завершения не снят. Обработка записала `Да|R469|probe469aut`, а платформа создала `1Cv8.cdn` со сроком действия с 10:09:22 до 10:19:32. Конфигуратор без `/UC` вернул 1 и «Начало сеанса с информационной базой запрещено.» / `probe469aut`. С `/UC R469` вернул 0 и 40-символьный идентификатор поколения.
+
+Свежий `ibsrv` запустили с новым `--data` и прежним `--db-path`. Пока файловый запрет действовал, `ibcmd --pid=<pid> session list` с кодом 0 показал новый UUID `8a6b78a6-38c4-4a95-8121-5d13ac2ce859` и `app-id: 1CV8C` после запуска тонкого клиента без `/UC`. В этом снимке `user-name` ещё пуст. Успешный вход без `/UC` подтвердил следующий опыт с вызовом `get` через HTTP. Содержимое `1Cv8.cdn` осталось прежним. Для отдельного прогона раннера использовали такой проект.
+
+```yaml
+# v8project.yaml
+workPath: build
+format: DESIGNER
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: main
+# v8project.local.yaml
+infobases:
+  origin:
+    user: Администратор
+    password: ''
+    standalone:
+      gate: 127.0.0.1:24841
+      host-fingerprint: 'SHA256:<собственный ключ>'
+      exchange: sftp
+```
+
+`v8-runner --workdir <проект> --config <проект>\v8project.yaml --json-message extensions list` вернул 0 и `ok: true`, `provider_dispatched: true`, `extensions: []` как в контрольном запуске, так и при действующем файловом запрете. Квитанция выбрала `agent` с `mode: gate`. Этот результат относится к запуску `ibsrv` поверх файла с готовой файловой блокировкой.
+
+**Блокировка, выставленная внутри автономного сервера.** Ту же обработку запустили через HTTP `ibsrv`. Режим `get` только вызывает `ПолучитьБлокировкуСеансов()`. Режим `clear` получает объект, задаёт `Установлена = Ложь` и передаёт объект в `УстановитьБлокировкуСеансов`.
+
+```text
+1cv8c ENTERPRISE /WS http://127.0.0.1:24842 /N Администратор /P "" /DisableStartupDialogs /DisableStartupMessages /Execute <probe.epf> /C get /Out <log>
+1cv8c ENTERPRISE /WS http://127.0.0.1:24842 /N Администратор /P "" /DisableStartupDialogs /DisableStartupMessages /Execute <probe.epf> /C set /Out <log>
+1cv8c ENTERPRISE /WS http://127.0.0.1:24842 /N Администратор /P "" /DisableStartupDialogs /DisableStartupMessages /Execute <probe.epf> /C clear /UC R469 /Out <log>
+```
+
+- Первый `get` вернул 0 и `Нет||` при действующем файловом запрете. `set` вернул 0 и `Да|R469|probe469aut`. Журнал регистрации записал `_$InfoBase$_.SessionLockChange` в 10:12:18. Файловый `1Cv8.cdn` не изменился.
+- После `set` новый прогон `v8-runner … --json-message extensions list` через SSH вернул 0, `ok: true`, `provider_dispatched: true` и `extensions: []`. Новый запуск тонкого клиента без `/UC` тоже вернул 0 и прочитал `Да|R469|probe469aut`. Журнал регистрации показал `_$Session$_.Start` и `_$Session$_.Authentication` для `1CV8C` в 10:12:24, после установки флага.
+- `clear /UC R469` вернул 0 и `Нет|R469|probe469aut`. Журнал записал снятие флага в 10:12:44, файловый маркер не изменился.
+
+В замере `ibcmd` подходит для наблюдения и принудительного завершения существующих сеансов. Управление запретом начала сеансов через `ibcmd` отсутствует. BSL-флаг можно поставить и прочитать, но проверенные новый тонкий клиент администратора и команда раннера через SSH прошли при выставленном флаге. Эти механизмы не дают раннеру проверенного удержания базы между шагами.
+
+В повторе с `/WA-` у всех трёх запусков `set`, `get` и `clear /UC R469` те же коды 0 и значения. Журнал снова показал новый сеанс без `/UC` после установки флага (10:15:11 и 10:15:14), но записал «АутентификацияОС» для HTTP даже при `/WA-`. Вывод о допуске относится к проверенному администратору и каналу HTTP. При выставленном флаге `ibcmd --pid=<pid> lock list` с кодом 0 показал обычные разделяемые строки ИБ/БД, отдельной строки запрета начала сеансов в этом выводе не было.
+
 ## Инкрементальная сборка в постоянной базе сборки
 
 Замер 08.10.2026. Задача: [#471](https://github.com/IngvarConsulting/v8-runner-rust/issues/471).
