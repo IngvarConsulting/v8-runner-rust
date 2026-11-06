@@ -9,6 +9,9 @@ use crate::platform::process::{
 };
 use crate::platform::result::PlatformCommandResult;
 
+// Parallel config export can fail on valid packages (#476).
+const CONFIG_EXPORT_THREADS_ARG: &str = "--threads=1";
+
 #[derive(Debug, Error)]
 pub enum IbcmdError {
     #[error(transparent)]
@@ -475,6 +478,7 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -497,7 +501,12 @@ impl<'a> IbcmdDsl<'a> {
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
-        args.push(target_file.display().to_string());
+        // Цель может быть канонической, а `ibcmd` не находит путь с приставкой `\\?\`.
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(target_file)
+                .display()
+                .to_string(),
+        );
         self.run(&args)
     }
 
@@ -516,6 +525,7 @@ impl<'a> IbcmdDsl<'a> {
         args.push("export".to_owned());
         args.extend(self.connection.auth_args());
         args.extend(self.connection.dbms_auth_args());
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         args.push(format!("--file={}", source_file.display()));
         args.push(target_dir.display().to_string());
         self.run(&args)
@@ -544,6 +554,7 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -923,10 +934,80 @@ mod tests {
                 "--db-path",
                 "/ib",
                 "export",
+                "--threads=1",
                 format!("--file={}", source.display()).as_str(),
                 target.to_str().expect("utf8 target"),
             ]
         );
+    }
+
+    #[cfg(windows)]
+    #[derive(Default)]
+    struct CapturingRunner(std::cell::RefCell<Vec<crate::platform::process::ProcessRequest>>);
+
+    #[cfg(windows)]
+    impl ProcessRunner for CapturingRunner {
+        fn run_with_policy(
+            &self,
+            request: &crate::platform::process::ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
+        {
+            self.0.borrow_mut().push(request.clone());
+            Ok(crate::platform::process::ProcessResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: None,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &crate::platform::process::ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
+        {
+            panic!("config save must run synchronously")
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn config_save_passes_windows_paths_without_verbatim_prefix() {
+        for (target, expected) in [
+            (
+                r"\\?\C:\Каталог с пробелами\конфигурация.cf",
+                r"C:\Каталог с пробелами\конфигурация.cf",
+            ),
+            (
+                r"\\?\UNC\server\share\Каталог с пробелами\конфигурация.cf",
+                r"\\server\share\Каталог с пробелами\конфигурация.cf",
+            ),
+            (
+                r"C:\Каталог с пробелами\конфигурация.cf",
+                r"C:\Каталог с пробелами\конфигурация.cf",
+            ),
+        ] {
+            let runner = CapturingRunner::default();
+            let dsl = IbcmdDsl::new(
+                "ibcmd.exe".into(),
+                file_connection("File=C:/ib"),
+                &runner,
+                ProcessExecutionPolicy::default(),
+            );
+
+            dsl.config_save(Path::new(target), false, None)
+                .expect("save configuration");
+
+            let requests = runner.0.borrow();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0].args.last().map(String::as_str),
+                Some(expected),
+                "{target}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1061,6 +1142,7 @@ mod tests {
                 "/ib".to_owned(),
                 "config".to_owned(),
                 "export".to_owned(),
+                "--threads=1".to_owned(),
                 "--force".to_owned(),
                 dir.path().display().to_string(),
             ]
@@ -1162,8 +1244,7 @@ mod tests {
             .expect("export");
 
         let args = fs::read_to_string(args_log).expect("args");
-        assert!(args.contains("export"));
-        assert!(args.contains("--sync"));
+        assert!(args.contains("export\n--threads=1\n--sync\n"), "{args}");
         assert!(!args.contains("--force"), "{args}");
     }
 

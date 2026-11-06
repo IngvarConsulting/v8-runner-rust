@@ -13,6 +13,7 @@ use crate::command_envelope::Envelope;
 use crate::config::model::SourceFormat;
 use crate::domain::capability::ProviderReceipt;
 use crate::support::error::AppError;
+use crate::support::path::{response_json, response_text};
 use crate::use_cases::context::{CommandName, ExecutionContext};
 use crate::use_cases::full_pull_publication::{
     ExecutorKind, ExternalFullPull, FullPullControl, FullPullExecutor, FullPullReady, MemoryCommit,
@@ -242,12 +243,19 @@ impl StdioControl {
     }
 
     fn emit<T: Serialize>(&self, frame: Frame<'_, T>) -> Result<(), AppError> {
-        let mut output = std::io::stdout().lock();
-        serde_json::to_writer(&mut output, &frame).map_err(|error| {
+        let encoded = serde_json::to_string(&frame).map_err(|error| {
             AppError::Runtime(format!("cannot write publication control: {error}"))
         })?;
+        // Пути `ready` — операнды публикации, а не показ: вызывающий пишет по ним, и путь
+        // длиннее 260 знаков без приставки не открылся бы.
+        let encoded = match frame {
+            Frame::Ready { .. } => encoded,
+            _ => response_json(&encoded).into_owned(),
+        };
+        let mut output = std::io::stdout().lock();
         output
-            .write_all(b"\n")
+            .write_all(encoded.as_bytes())
+            .and_then(|_| output.write_all(b"\n"))
             .and_then(|_| output.flush())
             .map_err(|error| {
                 AppError::Runtime(format!("cannot flush publication control: {error}"))
@@ -346,6 +354,7 @@ impl FullPullControl for StdioControl {
             .lock()
             .map_err(|_| AppError::Runtime("publication state lock poisoned".into()))?
             .publication = Publication::Unknown;
+        let snapshot_warning = ready.snapshot_warning.map(response_text);
         self.emit::<Value>(Frame::Ready {
             version: VERSION,
             nonce: &self.nonce,
@@ -363,7 +372,7 @@ impl FullPullControl for StdioControl {
             } else {
                 Snapshot::Unavailable
             },
-            snapshot_warning: ready.snapshot_warning,
+            snapshot_warning: snapshot_warning.as_deref(),
         })?;
         match self.receive(Phase::Ready)? {
             Decision::Published => {

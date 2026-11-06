@@ -49,6 +49,15 @@ impl ExtensionAgent {
         &mut self,
         name: Option<&str>,
     ) -> Result<Vec<InstalledExtension>, AppError> {
+        Self::inventory_on(&mut self.handle, &self.wait, name)
+    }
+
+    /// Тот же запрос в сессии, которой владеет вызывающий сценарий.
+    pub(crate) fn inventory_on(
+        handle: &mut AgentHandle,
+        wait: &WaitPolicy,
+        name: Option<&str>,
+    ) -> Result<Vec<InstalledExtension>, AppError> {
         let command = match name {
             Some(name) => format!(
                 "config extensions properties get --extension={}",
@@ -56,7 +65,7 @@ impl ExtensionAgent {
             ),
             None => "config extensions properties get --all-extensions".to_owned(),
         };
-        let reply = run_command(&mut self.handle, &command, &self.wait)?;
+        let reply = run_command(handle, &command, wait)?;
         parse_properties(&reply)
     }
 
