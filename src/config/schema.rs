@@ -543,6 +543,9 @@ struct ProvidersSchema {
     /// Executor for `reset`: the Designer `/RollbackCfg` or `ibcmd config reset`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reset: Option<ProviderSchema>,
+    /// Executor for `diff` on a file infobase. Comparison reports require Designer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diff: Option<ProviderSchema>,
     /// Executor for `upload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     upload: Option<ProviderSchema>,

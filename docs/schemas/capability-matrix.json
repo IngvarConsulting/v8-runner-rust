@@ -57,6 +57,30 @@
         }
       ]
     },
+    "diff": {
+      "cluster": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ],
+      "file": [
+        {
+          "implemented": true,
+          "provider": "ibcmd"
+        },
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ],
+      "standalone": [
+        {
+          "implemented": true,
+          "provider": "designer"
+        }
+      ]
+    },
     "download": {
       "cluster": [
         {
@@ -98,6 +122,10 @@
         {
           "implemented": true,
           "provider": "agent"
+        },
+        {
+          "implemented": true,
+          "provider": "designer"
         }
       ],
       "file": [

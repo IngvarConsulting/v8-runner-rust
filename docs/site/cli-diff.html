@@ -73,41 +73,43 @@
 <h1>diff</h1>
 <p class="lede">Посмотрите изменённые объекты или сравните конфигурации.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
-<h2 class="command-variant" id="op-diff">diff <span class="plan-badge">План</span></h2>
+<h2 class="command-variant" id="op-diff">diff</h2>
 <pre data-output-command><code>v8-runner diff</code></pre>
-<p>какие объекты изменились в базе с последней синхронизации, без выгрузки <span class="ref">(<a href="platform.html#t29">29</a>)</span></p>
+<p>Список объектов основной конфигурации с изменившимися версиями относительно <code>ConfigDumpInfo.xml</code> основного набора, без выгрузки <span class="ref">(<a href="platform.html#t29">29</a>)</span>.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <p>Классы относятся ко всем вариантам этой команды; условия отдельных ключей указаны в строках. Примеры ниже показывают форму ответа, а не все сочетания настроек.</p>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
-<tbody><tr data-response-class="planned"><td>Объекты изменились</td><td>Список содержит объекты, изменившиеся с последней синхронизации; сравнение с другой конфигурацией не запрошено. <a href="#diff-success">Пример ответа</a>.</td></tr>
-<tr data-response-class="planned"><td>Изменений нет</td><td>Пустой список изменённых объектов является успешным результатом. <a href="#diff-alternative">Пример ответа</a>.</td></tr>
-<tr data-response-class="planned"><td>Различия найдены</td><td>Сравнение с конфигурацией базы данных нашло различия в указанных объектах. <a href="#diff-against-success">Пример ответа</a>.</td></tr>
-<tr data-response-class="planned"><td>Конфигурации совпадают</td><td>Сравнение завершено успешно; конфигурации совпадают. <a href="#diff-against-alternative">Пример ответа</a>.</td></tr>
+<tbody><tr data-response-class="objects"><td>Объекты изменились</td><td>Список называет объекты и вид изменения версии. <a href="#diff-success">Пример ответа</a>.</td></tr>
+<tr data-response-class="empty"><td>Изменений нет</td><td>Пустой список изменённых объектов является успешным результатом. <a href="#diff-alternative">Пример ответа</a>.</td></tr>
+<tr data-response-class="full-dump"><td>Требуется полная выгрузка</td><td>Платформа не перечислила отдельные объекты. <a href="#diff-full-dump">Пример ответа</a>.</td></tr>
+<tr data-response-class="report"><td>Сравнение завершено</td><td>Ответ содержит путь к полному отчёту Конфигуратора. <a href="#diff-against-success">Пример ответа</a>.</td></tr>
 </tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h3>Варианты ответа</h3>
 <h4 id="diff-success">Объекты изменились</h4>
-<p>Список содержит объекты, изменившиеся с последней синхронизации; сравнение с другой конфигурацией не запрошено.</p>
-<pre data-output-example="diff-success" data-output-schema="planned"><code>origin: выбранная база
-Изменён объект Catalog.Products.</code></pre>
+<p>Версия объекта изменилась относительно файла версий. Список описывает версии, а не содержимое. После <code>push</code> версии всех загруженных объектов новые, поэтому список называет все объекты, пока выгрузка не обновит файл версий. <code>pull</code> при неизменном поколении не выгружает; файл обновляет <code>pull --force</code>, который заменяет дерево исходников.</p>
+<pre data-output-example="diff-success" data-output-schema="diff"><code>✓ Metadata version changes
+  provider: ibcmd (default)
+  Modified: Catalog.Products</code></pre>
 <h4 id="diff-alternative">Изменений нет</h4>
 <p>Пустой список изменённых объектов является успешным результатом.</p>
-<pre data-output-example="diff-alternative" data-output-schema="planned"><code>origin: выбранная база
-С последней синхронизации объекты не изменились.</code></pre>
-<h2 class="command-variant" id="diff-against">diff --against db|vendor:&lt;имя&gt;|&lt;файл&gt; <span class="plan-badge">План</span></h2>
+<pre data-output-example="diff-alternative" data-output-schema="diff"><code>✓ No metadata version changes
+  provider: ibcmd (default)</code></pre>
+<h4 id="diff-full-dump">Требуется полная выгрузка</h4>
+<p>Платформа потребовала полной выгрузки и не перечислила отдельные объекты.</p>
+<pre data-output-example="diff-full-dump" data-output-schema="diff"><code>✓ The platform requires a full dump and returned no object list
+  provider: ibcmd (default)</code></pre>
+<h2 class="command-variant" id="diff-against">diff --against db|vendor:&lt;имя&gt;|&lt;файл&gt;</h2>
 <pre data-output-command><code>v8-runner diff --against db</code></pre>
-<p>отчёт сравнения основной конфигурации с базой данных, с названной конфигурацией поставщика или с пакетом <span class="ref">(<a href="platform.html#t8">8</a>)</span></p>
+<p>Полный TXT-отчёт сравнения основной конфигурации с конфигурацией базы данных, с названной конфигурацией поставщика или с пакетом <span class="ref">(<a href="platform.html#t8">8</a>)</span>. Относительный путь пакета считается от каталога проекта.</p>
 <h3>Варианты ответа</h3>
-<h4 id="diff-against-success">Различия найдены</h4>
-<p>Сравнение с конфигурацией базы данных нашло различия в указанных объектах.</p>
-<pre data-output-example="diff-against-success" data-output-schema="planned"><code>origin: выбранная база
-Основная конфигурация отличается от конфигурации базы данных.</code></pre>
-<h4 id="diff-against-alternative">Конфигурации совпадают</h4>
-<p>Сравнение завершено успешно; конфигурации совпадают.</p>
-<pre data-output-example="diff-against-alternative" data-output-schema="planned"><code>origin: выбранная база
-Различий с конфигурацией базы данных нет.</code></pre>
+<h4 id="diff-against-success">Сравнение завершено</h4>
+<p>Раннер сохраняет отчёт Конфигуратора в UTF-16LE с BOM и возвращает путь к файлу. Результаты сравнения находятся в самом отчёте.</p>
+<pre data-output-example="diff-against-success" data-output-schema="diff"><code>✓ Configuration comparison completed
+  provider: designer (default)
+  Report: /work/reports/diff/.tmp7p8CvR/report.txt</code></pre>
 <p><a href="project.html#keys">Настройка исполнителей и конфигурации проекта</a>.</p>
 </main>
 <script type="application/json" id="output-examples">{
@@ -116,11 +118,11 @@
     "command": "diff",
     "duration_ms": 120,
     "data": {
-      "infobase": "origin",
-      "changed_objects": [
-        "Catalog.Products"
-      ],
-      "comparison": null
+      "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
+      "provider_dispatched": true,
+      "changes": [{"object": "Catalog.Products", "kind": "modified"}],
+      "full_dump": false,
+      "duration_ms": 120
     },
     "warnings": [],
     "steps": []
@@ -130,9 +132,25 @@
     "command": "diff",
     "duration_ms": 120,
     "data": {
-      "infobase": "origin",
-      "changed_objects": [],
-      "comparison": null
+      "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
+      "provider_dispatched": true,
+      "changes": [],
+      "full_dump": false,
+      "duration_ms": 120
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "diff-full-dump": {
+    "ok": true,
+    "command": "diff",
+    "duration_ms": 120,
+    "data": {
+      "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
+      "provider_dispatched": true,
+      "changes": [],
+      "full_dump": true,
+      "duration_ms": 120
     },
     "warnings": [],
     "steps": []
@@ -142,29 +160,12 @@
     "command": "diff",
     "duration_ms": 120,
     "data": {
-      "infobase": "origin",
-      "changed_objects": [
-        "Catalog.Products"
-      ],
-      "comparison": {
-        "against": "db",
-        "equal": false
-      }
-    },
-    "warnings": [],
-    "steps": []
-  },
-  "diff-against-alternative": {
-    "ok": true,
-    "command": "diff",
-    "duration_ms": 120,
-    "data": {
-      "infobase": "origin",
-      "changed_objects": [],
-      "comparison": {
-        "against": "db",
-        "equal": true
-      }
+      "provider": {"selected": "designer", "origin": {"kind": "default"}},
+      "provider_dispatched": true,
+      "changes": [],
+      "full_dump": false,
+      "report": "/work/reports/diff/.tmp7p8CvR/report.txt",
+      "duration_ms": 120
     },
     "warnings": [],
     "steps": []

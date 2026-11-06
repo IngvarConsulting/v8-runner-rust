@@ -68,7 +68,7 @@ impl UseCaseErrorKind {
             | AppError::ValidationIbcmdContext { .. }
             | AppError::Config(_)
             | AppError::ConfigContext { .. } => Self::Validation,
-            AppError::Runtime(_) => Self::Runtime,
+            AppError::Runtime(_) | AppError::SourceLoadNotStarted(_) => Self::Runtime,
             AppError::Platform(_)
             | AppError::PlatformDesigner(_)
             | AppError::PlatformDesignerContext { .. }
@@ -275,6 +275,7 @@ impl UseCaseError {
             | AppError::InvalidOutput(message)
             | AppError::Validation(message)
             | AppError::Runtime(message)
+            | AppError::SourceLoadNotStarted(message)
             | AppError::Platform(message) => message,
             AppError::ValidationIbcmd(error) => error.to_string(),
             AppError::PlatformDesigner(error) => error.to_string(),
@@ -384,6 +385,7 @@ carries_dispatch!(
     crate::domain::build::BuildResult,
     crate::domain::apply::ApplyResult,
     crate::domain::reset::ResetResult,
+    crate::domain::diff::DiffResult,
     crate::domain::load::LoadResult,
     crate::domain::launch::LaunchResult,
     crate::domain::publish::PublishResult,
@@ -754,6 +756,15 @@ mod tests {
             assert_eq!(error.exit_code(), 2, "{error}");
             assert!(error.message().contains("required"), "{error}");
         }
+
+        let error = UseCaseError::from(AppError::from(LocatorError::BelowMinimumPlatform {
+            utility: UtilityType::V8,
+            path: PathBuf::from("/opt/1cv8/8.3.23.1000/1cv8"),
+            found: PlatformVersion::parse_strict("8.3.23.1000").expect("version"),
+        }));
+        assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+        assert_eq!(error.exit_code(), 2, "{error}");
+        assert!(error.message().contains("8.3.24"), "{error}");
     }
 
     #[test]

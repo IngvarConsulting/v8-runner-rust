@@ -6,6 +6,8 @@
 //! разделы о прогнозе режима): от языка интерфейса они не зависят. Решение берётся по ключу
 //! строки, а не по прозе; всё, что словарю не принадлежит, — прогноз «неизвестен».
 
+use crate::domain::diff::ChangeKind;
+
 /// Что платформа сделает с выгрузкой по изменившемуся.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DumpForecast {
@@ -20,58 +22,100 @@ pub enum DumpForecast {
 /// Список `-getChanges`: одиночная `FullDump` — полная; только `New:` и `Modified:` или
 /// пусто — изменившееся.
 pub fn read_changes_list(bytes: &[u8]) -> DumpForecast {
-    let text = String::from_utf8_lossy(bytes);
-    let lines = entries(&text);
-    if lines == ["FullDump"] {
-        return DumpForecast::Full;
-    }
-    let changes = lines.iter().all(|line| {
-        matches!(
-            line.split_once(' '),
-            Some(("New:" | "Modified:", object)) if !object.is_empty()
-        )
-    });
-    if changes {
-        DumpForecast::Changes
-    } else {
-        DumpForecast::Unknown
-    }
+    forecast(parse_changes_list(&String::from_utf8_lossy(bytes)))
 }
 
 /// Ответ `ibcmd config export status` в полной форме: `modified: all` — полная; только
 /// `added: <объект>` и `modified: <объект>` или пусто — изменившееся.
 pub fn read_export_status(text: &str) -> DumpForecast {
-    let lines = entries(text);
-    if let [only] = lines.as_slice() {
-        if only.split_once(": ") == Some(("modified", "all")) {
-            return DumpForecast::Full;
-        }
-    }
-    let changes = lines.iter().all(|line| {
-        matches!(
-            line.split_once(": "),
-            Some(("added" | "modified", object)) if !object.is_empty() && object != "all"
-        )
-    });
-    if changes {
-        DumpForecast::Changes
-    } else {
-        DumpForecast::Unknown
+    forecast(parse_export_status(text))
+}
+
+pub(crate) enum ChangeList<'a> {
+    FullDump,
+    Objects(Vec<(ChangeKind, &'a str)>),
+}
+
+fn forecast(list: Option<ChangeList<'_>>) -> DumpForecast {
+    match list {
+        Some(ChangeList::FullDump) => DumpForecast::Full,
+        Some(ChangeList::Objects(_)) => DumpForecast::Changes,
+        None => DumpForecast::Unknown,
     }
 }
 
-/// Непустые строки ответа без BOM и концов строк обеих платформ.
-fn entries(text: &str) -> Vec<&str> {
-    text.trim_start_matches('\u{feff}')
+/// An empty list produced by Designer consists solely of the UTF-8 signature.
+/// Keep this stricter check out of the `pull` forecast, which also accepts an empty response.
+pub(crate) fn parse_designer_diff(text: &str) -> Option<ChangeList<'_>> {
+    let list = parse_changes_list(text)?;
+    match &list {
+        ChangeList::Objects(objects)
+            if objects.is_empty() && text.as_bytes() != b"\xEF\xBB\xBF" =>
+        {
+            None
+        }
+        _ => Some(list),
+    }
+}
+
+fn parse_changes_list(text: &str) -> Option<ChangeList<'_>> {
+    parse(text, "FullDump", |line| match line.split_once(' ')? {
+        ("New:", object) if !object.is_empty() => Some((ChangeKind::Added, object)),
+        ("Modified:", object) if !object.is_empty() => Some((ChangeKind::Modified, object)),
+        _ => None,
+    })
+}
+
+pub(crate) fn parse_export_status(text: &str) -> Option<ChangeList<'_>> {
+    parse(text, "modified: all", |line| {
+        let (key, object) = line.split_once(": ")?;
+        if object.is_empty() || object == "all" {
+            return None;
+        }
+        match key {
+            "added" => Some((ChangeKind::Added, object)),
+            "modified" => Some((ChangeKind::Modified, object)),
+            _ => None,
+        }
+    })
+}
+
+fn parse<'a>(
+    text: &'a str,
+    full_dump: &str,
+    parse_line: impl Fn(&'a str) -> Option<(ChangeKind, &'a str)>,
+) -> Option<ChangeList<'a>> {
+    let mut lines = text
+        .trim_start_matches('\u{feff}')
         .lines()
         .map(|line| line.trim_end_matches('\r'))
         .filter(|line| !line.is_empty())
-        .collect()
+        .peekable();
+    if lines.peek() == Some(&full_dump) {
+        lines.next();
+        return lines.next().is_none().then_some(ChangeList::FullDump);
+    }
+    lines
+        .map(parse_line)
+        .collect::<Option<_>>()
+        .map(ChangeList::Objects)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{read_changes_list, read_export_status, DumpForecast};
+    use super::{
+        parse_designer_diff, read_changes_list, read_export_status, ChangeList, DumpForecast,
+    };
+
+    #[test]
+    fn only_the_utf8_signature_is_a_valid_empty_designer_diff() {
+        assert!(
+            matches!(parse_designer_diff("\u{feff}"), Some(ChangeList::Objects(objects)) if objects.is_empty())
+        );
+        for unexpected in ["", "\r\n", "\u{feff}\r\n"] {
+            assert!(parse_designer_diff(unexpected).is_none(), "{unexpected:?}");
+        }
+    }
 
     /// Замеренные ответы Конфигуратора и агента (UTF-8 с BOM, CRLF).
     #[test]

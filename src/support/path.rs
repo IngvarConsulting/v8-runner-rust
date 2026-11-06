@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -293,15 +294,18 @@ pub fn snapshot_path_identity(path: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// A comparison key for caseless names with canonically equivalent spellings.
+pub(crate) fn canonical_caseless(value: &str) -> String {
+    use unicode_casefold::UnicodeCaseFold;
+    use unicode_normalization::UnicodeNormalization;
+    value.nfd().case_fold().nfd().collect()
+}
+
 pub fn stable_path_identity(path: &Path) -> String {
     let mut hasher = Sha256::new();
     let path = path.to_string_lossy();
     #[cfg(any(windows, target_os = "macos"))]
-    let path = {
-        use unicode_casefold::UnicodeCaseFold;
-        use unicode_normalization::UnicodeNormalization;
-        path.nfd().case_fold().nfd().collect::<String>()
-    };
+    let path = canonical_caseless(&path);
     hasher.update(path.as_bytes());
     let digest = hasher.finalize();
     digest[..16]
@@ -324,16 +328,94 @@ pub fn is_filesystem_root(path: &Path) -> bool {
     path.parent().is_none()
 }
 
+const VERBATIM_PREFIX: &str = r"\\?\";
+const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
+
 pub fn strip_windows_verbatim_prefix(value: &str) -> String {
-    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+    if let Some(rest) = value.strip_prefix(VERBATIM_UNC_PREFIX) {
         return format!(r"\\{rest}");
     }
 
-    if let Some(rest) = value.strip_prefix(r"\\?\") {
+    if let Some(rest) = value.strip_prefix(VERBATIM_PREFIX) {
         return rest.to_owned();
     }
 
     value.to_owned()
+}
+
+/// Текст ответа команды без приставки `\\?\` у путей. Единственный проход на выходе: канонический
+/// путь хранит приставку, потому что на его тексте стоят замки и хеш-память, а человеку и
+/// агенту она не нужна. Вне Windows такая запись — допустимое имя файла, и текст не меняется.
+pub fn response_text(text: &str) -> Cow<'_, str> {
+    if cfg!(windows) {
+        without_verbatim_prefixes(text, r"\")
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// [`response_text`] для уже сериализованного JSON: там каждая обратная косая записана двумя.
+/// Текст, а не `Value`: через `Value` у ответа поменялся бы порядок ключей.
+pub fn response_json(json: &str) -> Cow<'_, str> {
+    if cfg!(windows) {
+        without_verbatim_prefixes(json, r"\\")
+    } else {
+        Cow::Borrowed(json)
+    }
+}
+
+/// [`response_text`] для ответа, уже разобранного в `Value`.
+pub fn response_value(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => Value::String(response_text(&text).into_owned()),
+        Value::Array(items) => Value::Array(items.into_iter().map(response_value).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, field)| (response_text(&key).into_owned(), response_value(field)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Снимает приставку перед диском и у `UNC`. У `\\?\Volume{…}\` обычного написания нет, и он
+/// остаётся как есть. Конца пути в тексте не видно, поэтому имена, которые без приставки
+/// значат другое (`con.cf`, `out.`), не различаются: это принятый риск показанного пути.
+fn without_verbatim_prefixes<'a>(text: &'a str, backslash: &str) -> Cow<'a, str> {
+    let prefix = VERBATIM_PREFIX.replace('\\', backslash);
+    if !text.contains(&prefix) {
+        return Cow::Borrowed(text);
+    }
+    let unc = VERBATIM_UNC_PREFIX.replace('\\', backslash);
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(&prefix) {
+        plain.push_str(&rest[..at]);
+        let found = &rest[at..];
+        if let Some(tail) = found.strip_prefix(&unc) {
+            plain.push_str(backslash);
+            plain.push_str(backslash);
+            rest = tail;
+        } else {
+            let tail = &found[prefix.len()..];
+            if !names_a_drive(tail, backslash) {
+                plain.push_str(&prefix);
+            }
+            rest = tail;
+        }
+    }
+    plain.push_str(rest);
+    Cow::Owned(plain)
+}
+
+fn names_a_drive(text: &str, backslash: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && text[2..].starts_with(backslash)
 }
 
 /// Путь не в UTF-8 возвращается как есть: через `display()` он потерял бы байты, а
@@ -392,11 +474,13 @@ pub fn lexically_normal_absolute(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::response_value;
     use super::{
         filesystem_object_identity, hashed_lock_path, is_filesystem_root, is_safe_path_segment,
         lexically_normal_absolute, nearest_existing_canonical_path,
-        normalize_windows_verbatim_path, resolve_from, stable_path_identity,
-        strip_windows_verbatim_prefix,
+        normalize_windows_verbatim_path, resolve_from, response_json, response_text,
+        stable_path_identity, strip_windows_verbatim_prefix, without_verbatim_prefixes,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -639,6 +723,50 @@ mod tests {
         assert_eq!(
             resolved(r"E:\proj", r"D:\other\.\va.epf"),
             r"D:\other\va.epf"
+        );
+    }
+
+    #[test]
+    fn verbatim_prefixes_leave_text_before_a_drive_and_at_a_unc_name() {
+        for (text, plain) in [
+            (r"\\?\E:\proj\main.cf", r"E:\proj\main.cf"),
+            (r"\\?\UNC\srv\share\main.cf", r"\\srv\share\main.cf"),
+            (
+                r"output '\\?\E:\a b\м.cf' is held by '\\?\UNC\srv\s'",
+                r"output 'E:\a b\м.cf' is held by '\\srv\s'",
+            ),
+            (r"\\?\Volume{1234}\main.cf", r"\\?\Volume{1234}\main.cf"),
+            (r"\\?\E:", r"\\?\E:"),
+            (r"E:\proj\main.cf", r"E:\proj\main.cf"),
+        ] {
+            assert_eq!(without_verbatim_prefixes(text, r"\"), plain, "{text}");
+            let json = serde_json::to_string(text).expect("json");
+            let parsed: String =
+                serde_json::from_str(&without_verbatim_prefixes(&json, r"\\")).expect("still JSON");
+            assert_eq!(parsed, plain, "{json}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_response_off_windows_keeps_a_file_name_spelled_like_the_prefix() {
+        let name = r"/tmp/\\?\E:\file";
+        assert_eq!(response_text(name), name);
+        let json = serde_json::to_string(name).expect("json");
+        assert_eq!(response_json(&json), json);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_response_on_windows_names_paths_without_the_verbatim_prefix() {
+        assert_eq!(response_text(r"at \\?\E:\p"), r"at E:\p");
+        assert_eq!(
+            response_json(r#"{"output":"\\\\?\\E:\\p"}"#),
+            r#"{"output":"E:\\p"}"#
+        );
+        assert_eq!(
+            response_value(serde_json::json!({"output": [r"\\?\E:\p"], "n": 1})),
+            serde_json::json!({"output": [r"E:\p"], "n": 1})
         );
     }
 

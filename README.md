@@ -162,10 +162,9 @@ v8-runner infobase create
 v8-runner push
 ```
 
-Команда выполняет incremental build (инкрементальную сборку) или full path (полную сборку) по
-текущим изменениям и настройкам проекта. Ключ `push.partialLoadThreshold` отвергается — удалите
-строку; полную загрузку даёт `push --full`. Загрузка станет частичной всегда, когда есть с чем
-сравнить, — [#379](https://github.com/IngvarConsulting/v8-runner-rust/issues/379).
+При наличии снимка исходников `push` загружает изменения без порога числа файлов.
+`push --full` загружает набор целиком. Если в файле проекта остался ключ
+`push.partialLoadThreshold`, удалите эту строку. [Условия выбора режима](docs/CAPABILITIES.md#push).
 
 `push` загружает в основную конфигурацию и применяет её к конфигурации базы данных.
 `push --no-apply` только загружает — открытые сеансы продолжают работать, — а
@@ -175,6 +174,10 @@ v8-runner push
 основная конфигурация (без набора) или расширение набора возвращается к конфигурации базы
 данных, а следующий `push` загружает отброшенное заново
 ([CAPABILITIES](docs/CAPABILITIES.md#reset)).
+
+`v8-runner diff` показывает изменения версий объектов по `ConfigDumpInfo.xml` без выгрузки.
+`v8-runner diff --against db|vendor:<имя>|<файл>` сохраняет полный TXT-отчёт сравнения
+основной конфигурации. [Исполнители и форма ответа](docs/CAPABILITIES.md#diff).
 
 **Несовместимо с 0.13.0:** у файловой базы и кластера `push`, `pull`, `download`, `clone` и
 `infobase dump|restore` без ключа идут через агента Конфигуратора, которого раннер поднимает
@@ -194,6 +197,11 @@ v8-runner platforms        # установки, формат исходнико
 Без `tools.platform.version` раннер берёт выпуск, который пишет формат исходников проекта
 (`Configuration.xml`), а не самый новый; иначе новая платформа переписала бы исходники в свой
 формат.
+
+Раннер поддерживает платформу 8.3.24 и новее: установку ниже минимума он не запускает и называет
+причину. Минимум проверяется по версии в пути установки, поэтому указывайте каталог версии: у пути без
+версии отказа нет, и платформа ниже минимума может зависнуть. Запуском на 8.3.24 проверена файловая база; кластер, автономный сервер и EDT на этой версии не
+прогонялись.
 
 ### Посмотрите, как связаны каталог и база:
 
@@ -344,14 +352,15 @@ v8-runner mcp serve stdio
 | Direct launch (прямой запуск) | `launch <designer\|thin\|thick\|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
 | MCP automation (автоматизация через MCP) | `mcp serve stdio`, `mcp serve http` | Открывает 8 MCP tools для агентных workflow |
 
-Команды названы словарём гита. Прежние имена приняты ещё один цикл выпуска и в справке не
-печатаются: `bootstrap` → `clone`, `config init` → `init`, `build` → `push`, `load` → `upload`,
-`dump` → `pull`, `syntax` → `check`; прежний путь `infobase configuration export` тоже
-принимается. То же с ключами: `--full-rebuild` → `--full`, `--discard-uncommitted` → `--force`,
+Прежние имена команд принимаются в течение одного цикла выпуска и скрыты в `--help` на
+всех уровнях. Например: `bootstrap` → `clone`, `config init` → `init`, `build` → `push`, `load` → `upload`,
+`dump` → `pull`, `syntax` → `check`, `infobase configuration export` → `download`.
+Примеры прежних ключей: `--full-rebuild` → `--full`, `--discard-uncommitted` → `--force`,
 `--no-build` → `--no-push`, `--mode merge` → `--mode combine`, `--source-set <NAME>` →
 позиционный набор, `--state working` → без ключа, `--state database` → `--state db`,
 `pull --mode incremental|partial` → без ключа. `pull --mode full` не отображается, а
-отказывает и называет `pull [SET] --force` для того же набора. Ответ приходит под новым именем.
+отказывает и называет `pull [SET] --force` для того же набора.
+Для команды, вызванной прежним именем, поле `command` JSON-ответа содержит новое имя.
 Создание базы синонима не имеет: имя `init` занято подготовкой проекта, база создаётся командой
 `infobase create`.
 

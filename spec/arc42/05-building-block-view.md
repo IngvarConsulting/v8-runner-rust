@@ -63,7 +63,7 @@ flowchart TB
 `init_project` (в `CommandName` — `Init`; копия базы `--from` — `init_project/copy.rs`), `download`, `infobase dump` и `restore` —
 `infobase_export`, `extensions` — `configure_extensions` и `extension_inventory`, `test` —
 `run_tests`; остальные названы по команде: `convert_sources`, `launch_app`, `publish_infobase`,
-`tools_download`, `status`, `apply`, `reset`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит
+`tools_download`, `status`, `diff`, `apply`, `reset`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит
 [правило](../rules/mcp/published-tool-surface.md).
 
 ### 5.4 Общее в `use_cases`

@@ -461,7 +461,20 @@ pub(crate) fn run_critical(
     wait: &WaitPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<agent::AgentReply, AppError> {
-    let outcome = run_command(handle, command, &wait.critical());
+    run_critical_typed(handle, action, command, wait, deferrals)
+        .map_err(|error| critical_failure(action, error))
+}
+
+/// То же, что `run_critical`, но отказ остаётся типизированным: сценарий, которому важен род
+/// отказа, решает по нему, а не по тексту. Текст отказа даёт `critical_failure`.
+pub(crate) fn run_critical_typed(
+    handle: &mut AgentHandle,
+    action: &str,
+    command: &str,
+    wait: &WaitPolicy,
+    deferrals: &mut Deferrals,
+) -> Result<agent::AgentReply, AgentError> {
+    let outcome = run_checked(handle, command, &wait.critical());
     let deferral = handle
         .session()
         .last_command_deferral()
@@ -470,17 +483,27 @@ pub(crate) fn run_critical(
     outcome
 }
 
+/// Отказ критической команды в словах сценария.
+pub(crate) fn critical_failure(action: &str, error: AgentError) -> AppError {
+    AppError::from(error).with_context(format!("agent {action}"))
+}
+
 /// Одна команда с проверкой итога; журнал ответа возвращается как улика.
 pub(crate) fn run_command(
     handle: &mut AgentHandle,
     command: &str,
     wait: &WaitPolicy,
 ) -> Result<agent::AgentReply, AppError> {
-    let reply = handle
-        .session()
-        .run(command, wait)
-        .map_err(AppError::from)?;
-    reply.outcome().map_err(AppError::from)?;
+    run_checked(handle, command, wait).map_err(AppError::from)
+}
+
+fn run_checked(
+    handle: &mut AgentHandle,
+    command: &str,
+    wait: &WaitPolicy,
+) -> Result<agent::AgentReply, AgentError> {
+    let reply = handle.session().run(command, wait)?;
+    reply.outcome()?;
     Ok(reply)
 }
 
@@ -538,11 +561,9 @@ pub(crate) fn stage_dir(
     }
 }
 
-/// Часть каталога раннера — на сторону точки входа: корневые описатели и названные
-/// файлы, каждый под своим относительным путём. По сети частичной загрузке хватает
-/// `Configuration.xml`, `ConfigDumpInfo.xml` и самих изменённых файлов (замер
-/// 16.09.2026 на агенте Конфигуратора 8.3.27); в каталог точки входа, видимый
-/// раннеру, каталог по-прежнему выставляется целиком ссылкой.
+/// По SFTP передаём файлы списка и корневые описатели. Когда сам корень в
+/// списке, дополнительно передаём файлы объявленных объектов: платформа
+/// может прочитать их из каталога, даже если их нет в списке загрузки.
 pub(crate) fn stage_dir_partially(
     handle: &mut AgentHandle,
     exchange: &Exchange,
@@ -553,22 +574,34 @@ pub(crate) fn stage_dir_partially(
     let Exchange::Sftp = exchange else {
         return stage_dir(handle, exchange, relative, local);
     };
+    use crate::change_detection::partial_load::{
+        relative_paths, root_dependencies, CONFIGURATION_XML,
+    };
+
+    let configuration = local.join(CONFIGURATION_XML);
+    let mut selected = files.to_vec();
+    if files.contains(&configuration) {
+        selected.extend(
+            root_dependencies(local)
+                .map_err(|error| AppError::SourceLoadNotStarted(error.to_string()))?,
+        );
+    }
+    selected.extend(
+        [
+            configuration,
+            local.join(crate::use_cases::ignored_files::VERSION_FILE_NAME),
+        ]
+        .into_iter()
+        .filter(|path| path.is_file()),
+    );
+    selected.sort_unstable();
+    selected.dedup();
+    let paths = relative_paths(&selected, local)
+        .map_err(|error| AppError::SourceLoadNotStarted(error.to_string()))?;
     let session = handle.session();
     session.sftp_mkdir_all(relative).map_err(AppError::from)?;
-    let mut selected: Vec<PathBuf> = ["Configuration.xml", "ConfigDumpInfo.xml"]
-        .iter()
-        .map(|name| local.join(name))
-        .filter(|path| path.is_file())
-        .collect();
-    selected.extend(files.iter().cloned());
-    for file in selected {
-        let inside = file.strip_prefix(local).map_err(|_| {
-            AppError::Runtime(format!(
-                "partial load file '{}' lies outside its source root '{}'",
-                file.display(),
-                local.display()
-            ))
-        })?;
+    for inside in paths {
+        let file = local.join(&inside);
         let remote = format!(
             "{relative}/{}",
             inside.display().to_string().replace('\\', "/")

@@ -4,6 +4,7 @@ check:
   - src/platform/dump_forecast.rs::the_changes_list_is_read_by_its_measured_keys
   - src/platform/dump_forecast.rs::the_export_status_is_read_by_its_measured_keys
   - src/use_cases/dump_config.rs::a_designer_full_forecast_is_reported_as_full_by_the_platform
+  - src/use_cases/dump_config.rs::a_forecast_hands_the_designer_a_closed_changes_file
   - src/use_cases/dump_config.rs::an_unrecognized_forecast_reports_the_mode_as_unknown
   - src/use_cases/dump_config.rs::a_changes_forecast_keeps_the_incremental_mode
   - src/use_cases/dump_config.rs::a_failed_forecast_reports_the_mode_as_unknown

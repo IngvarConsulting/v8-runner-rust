@@ -13,6 +13,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use crate::domain::extensions::InstalledExtension;
+use crate::platform::secrets::mask_text;
 
 /// Properties found in the configuration descriptor exported from a saved DB CFE.
 #[derive(Debug, PartialEq, Eq)]
@@ -225,7 +226,7 @@ pub fn is_windows_device_name(value: &str) -> bool {
 /// при чтении журнала, пустой вывод — расширений нет (замер #187). Строка, которая не
 /// является идентификатором, — неверный вывод, а не имя: текст сообщения платформы именем
 /// расширения не становится.
-pub fn parse_extension_name_list(output: &str) -> Result<Vec<String>, String> {
+pub fn parse_extension_name_list(output: &str, secrets: &[&str]) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     for line in output.lines() {
         let name = line.trim();
@@ -233,8 +234,10 @@ pub fn parse_extension_name_list(output: &str) -> Result<Vec<String>, String> {
             continue;
         }
         if !is_extension_identifier(name) {
+            let diagnostic = mask_text(line, secrets);
+            let diagnostic = diagnostic.trim();
             return Err(format!(
-                "extension list line is not an extension name: {name:?}"
+                "extension list line is not an extension name: {diagnostic:?}"
             ));
         }
         names.push(name.to_owned());
@@ -358,13 +361,18 @@ mod tests {
     #[test]
     fn the_designer_name_list_is_read_line_by_line_and_fail_closed() {
         assert_eq!(
-            parse_extension_name_list("Расширение1\r\nРасширение2\r\n\r\n"),
+            parse_extension_name_list("Расширение1\r\nРасширение2\r\n\r\n", &[]),
             Ok(vec!["Расширение1".to_owned(), "Расширение2".to_owned()])
         );
-        assert_eq!(parse_extension_name_list(""), Ok(Vec::new()));
-        assert_eq!(parse_extension_name_list("\n  \n"), Ok(Vec::new()));
-        assert!(parse_extension_name_list("Ext\nОшибка в параметрах.\n").is_err());
-        assert!(parse_extension_name_list("1Ext\n").is_err());
+        assert_eq!(parse_extension_name_list("", &[]), Ok(Vec::new()));
+        assert_eq!(parse_extension_name_list("\n  \n", &[]), Ok(Vec::new()));
+        assert!(parse_extension_name_list("Ext\nОшибка в параметрах.\n", &[]).is_err());
+        assert!(parse_extension_name_list("1Ext\n", &[]).is_err());
+        for password in [r#"secret\with"quotes"#, "secret with trailing space "] {
+            let output = format!("unexpected diagnostic: {password}");
+            let error = parse_extension_name_list(&output, &[password]).expect_err("invalid name");
+            assert!(error.contains(r#""unexpected diagnostic: ***""#), "{error}");
+        }
     }
 
     fn parse_descriptor(xml: &str) -> Result<super::AppliedExtensionDescriptor, String> {

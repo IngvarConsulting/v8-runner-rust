@@ -9,6 +9,9 @@ use crate::platform::process::{
 };
 use crate::platform::result::PlatformCommandResult;
 
+// Parallel config export can fail on valid packages (#476).
+const CONFIG_EXPORT_THREADS_ARG: &str = "--threads=1";
+
 #[derive(Debug, Error)]
 pub enum IbcmdError {
     #[error(transparent)]
@@ -16,6 +19,11 @@ pub enum IbcmdError {
 
     #[error("failed to execute ibcmd process: {0}")]
     Spawn(ProcessError),
+
+    #[error(
+        "cannot start partial ibcmd import of {file_count} files: operating-system command-line or executable path limit exceeded; use push <SET> --full, or choose designer or agent via providers.push when available"
+    )]
+    PartialImportCommandLineTooLong { file_count: usize },
 
     /// `config export --sync --force` that falls back to a full export clears the whole
     /// directory, `.git` included (measured on 8.3.27, #425); the runner never sends it.
@@ -302,7 +310,7 @@ impl<'a> IbcmdDsl<'a> {
     pub fn ensure_infobase_create(&self) -> Result<IbcmdInfobaseCreateOutcome, IbcmdError> {
         let args = self.create_infobase_args();
         let result = self.run(&args)?;
-        if result.process.exit_code == 0 {
+        if result.process.outcome().is_ok() {
             return Ok(IbcmdInfobaseCreateOutcome {
                 status: IbcmdInfobaseCreateStatus::Created,
                 result,
@@ -310,7 +318,9 @@ impl<'a> IbcmdDsl<'a> {
         }
         let question = self.authenticated_infobase_args(&["config", "generation-id"]);
         let status = match self.run_with(&question, &self.execution_policy.for_reading()) {
-            Ok(probe) if probe.process.exit_code == 0 => IbcmdInfobaseCreateStatus::AlreadyExists,
+            Ok(probe) if probe.process.outcome().is_ok() => {
+                IbcmdInfobaseCreateStatus::AlreadyExists
+            }
             Ok(_) => IbcmdInfobaseCreateStatus::Failed,
             Err(IbcmdError::Spawn(error)) => IbcmdInfobaseCreateStatus::Unconfirmed(error),
             Err(error) => return Err(error),
@@ -435,7 +445,16 @@ impl<'a> IbcmdDsl<'a> {
         args.push("--partial".to_owned());
         push_option_value(&mut args, "--base-dir", base_dir.display().to_string());
         args.extend(files.iter().map(|path| path.display().to_string()));
-        self.run(&args)
+        match self.run(&args) {
+            Err(IbcmdError::Spawn(ProcessError::SpawnFailed { source, .. }))
+                if invocation_too_long(&source) =>
+            {
+                Err(IbcmdError::PartialImportCommandLineTooLong {
+                    file_count: files.len(),
+                })
+            }
+            result => result,
+        }
     }
 
     /// Applies imported configuration changes to the infobase.
@@ -475,6 +494,7 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -497,7 +517,12 @@ impl<'a> IbcmdDsl<'a> {
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
-        args.push(target_file.display().to_string());
+        // Цель может быть канонической, а `ibcmd` не находит путь с приставкой `\\?\`.
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(target_file)
+                .display()
+                .to_string(),
+        );
         self.run(&args)
     }
 
@@ -516,6 +541,7 @@ impl<'a> IbcmdDsl<'a> {
         args.push("export".to_owned());
         args.extend(self.connection.auth_args());
         args.extend(self.connection.dbms_auth_args());
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         args.push(format!("--file={}", source_file.display()));
         args.push(target_dir.display().to_string());
         self.run(&args)
@@ -536,6 +562,18 @@ impl<'a> IbcmdDsl<'a> {
         self.run_with(&args, &self.execution_policy.for_reading())
     }
 
+    /// The same answer as a file: unlike stdout, it is UTF-8 with a BOM in any console code page.
+    pub fn config_export_status_to_file(
+        &self,
+        version_file: &Path,
+        out_file: &Path,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "export", "status"]);
+        args.push(format!("--base={}", version_file.display()));
+        args.push(format!("--out={}", out_file.display()));
+        self.run_with(&args, &self.execution_policy.for_reading())
+    }
+
     /// Exports changes in sync mode (`--sync`) relative to the version file of an existing
     /// target directory.
     pub fn config_export_incremental(
@@ -544,6 +582,7 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
+        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -626,6 +665,19 @@ impl<'a> IbcmdDsl<'a> {
 fn push_option_value(args: &mut Vec<String>, key: &str, value: impl ToString) {
     args.push(key.to_owned());
     args.push(value.to_string());
+}
+
+fn invocation_too_long(error: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        // CreateProcessW reports the same error for an overlong executable path.
+        error.raw_os_error()
+            == Some(windows_sys::Win32::Foundation::ERROR_FILENAME_EXCED_RANGE as i32)
+    }
+    #[cfg(not(windows))]
+    {
+        error.kind() == std::io::ErrorKind::ArgumentListTooLong
+    }
 }
 
 /// `config export` with both `--sync` and `--force`: when the platform falls back to a full
@@ -923,10 +975,126 @@ mod tests {
                 "--db-path",
                 "/ib",
                 "export",
+                "--threads=1",
                 format!("--file={}", source.display()).as_str(),
                 target.to_str().expect("utf8 target"),
             ]
         );
+    }
+
+    #[derive(Default)]
+    struct CapturingRunner {
+        requests: std::cell::RefCell<Vec<crate::platform::process::ProcessRequest>>,
+        spawn_error: Option<i32>,
+    }
+
+    impl ProcessRunner for CapturingRunner {
+        fn run_with_policy(
+            &self,
+            request: &crate::platform::process::ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
+        {
+            self.requests.borrow_mut().push(request.clone());
+            if let Some(code) = self.spawn_error {
+                return Err(crate::platform::process::ProcessError::SpawnFailed {
+                    cmd: request.args.join(" "),
+                    source: std::io::Error::from_raw_os_error(code),
+                });
+            }
+            Ok(crate::platform::process::ProcessResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: None,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &crate::platform::process::ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
+        {
+            panic!("ibcmd must run synchronously")
+        }
+    }
+
+    #[test]
+    fn config_import_partial_reports_oversized_argv_without_retries() {
+        #[cfg(windows)]
+        let code = windows_sys::Win32::Foundation::ERROR_FILENAME_EXCED_RANGE as i32;
+        #[cfg(unix)]
+        let code = libc::E2BIG;
+        let runner = CapturingRunner {
+            spawn_error: Some(code),
+            ..Default::default()
+        };
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+        let files: Vec<_> = (0..1000)
+            .map(|index| {
+                PathBuf::from(format!("CommonModules/LongConfigurationPath{index:04}.xml"))
+            })
+            .collect();
+
+        let error = dsl
+            .config_import_partial(Path::new("sources"), &files, None)
+            .expect_err("oversized list must be refused")
+            .to_string();
+
+        let requests = runner.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].args.contains(&"--partial".to_owned()));
+        assert!(
+            error.contains("1000 files"),
+            "{}",
+            error.chars().take(300).collect::<String>()
+        );
+        assert!(error.contains("command-line or executable path limit"));
+        assert!(!error.contains("LongConfigurationPath"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn config_save_passes_windows_paths_without_verbatim_prefix() {
+        for (target, expected) in [
+            (
+                r"\\?\C:\Каталог с пробелами\конфигурация.cf",
+                r"C:\Каталог с пробелами\конфигурация.cf",
+            ),
+            (
+                r"\\?\UNC\server\share\Каталог с пробелами\конфигурация.cf",
+                r"\\server\share\Каталог с пробелами\конфигурация.cf",
+            ),
+            (
+                r"C:\Каталог с пробелами\конфигурация.cf",
+                r"C:\Каталог с пробелами\конфигурация.cf",
+            ),
+        ] {
+            let runner = CapturingRunner::default();
+            let dsl = IbcmdDsl::new(
+                "ibcmd.exe".into(),
+                file_connection("File=C:/ib"),
+                &runner,
+                ProcessExecutionPolicy::default(),
+            );
+
+            dsl.config_save(Path::new(target), false, None)
+                .expect("save configuration");
+
+            let requests = runner.requests.borrow();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0].args.last().map(String::as_str),
+                Some(expected),
+                "{target}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1061,6 +1229,7 @@ mod tests {
                 "/ib".to_owned(),
                 "config".to_owned(),
                 "export".to_owned(),
+                "--threads=1".to_owned(),
                 "--force".to_owned(),
                 dir.path().display().to_string(),
             ]
@@ -1162,8 +1331,7 @@ mod tests {
             .expect("export");
 
         let args = fs::read_to_string(args_log).expect("args");
-        assert!(args.contains("export"));
-        assert!(args.contains("--sync"));
+        assert!(args.contains("export\n--threads=1\n--sync\n"), "{args}");
         assert!(!args.contains("--force"), "{args}");
     }
 

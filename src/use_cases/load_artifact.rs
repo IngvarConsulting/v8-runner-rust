@@ -30,6 +30,7 @@ use crate::use_cases::interruption::{
     cancelled_outcome, deferred_process_interruption, SafePoint, SafePointCancel,
 };
 use crate::use_cases::progress::log_live_stage;
+use crate::use_cases::provider_selection::stamp_session;
 use crate::use_cases::request::LoadRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
@@ -54,7 +55,10 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing load use case"
     );
-    stamp_dispatch(run_load(context, config, args), context.work())
+    stamp_dispatch(
+        stamp_session(run_load(context, config, args), context),
+        context.work(),
+    )
 }
 
 type LoadExecutionFailure = UseCaseFailure<LoadResult>;
@@ -639,7 +643,7 @@ enum ExtensionPresence {
 }
 
 /// Asks the infobase whether the extension is installed, by its own keyed list: `ibcmd` at a
-/// file base, the `extensions` executor of the target (the agent) elsewhere (#431).
+/// file base, the `extensions list` executor of the target elsewhere (#431).
 ///
 /// `NotEstablished` is kept for one case only: the platform was asked and did not answer.
 /// Everything that stops the question before it is asked keeps its own kind as `Err` — a
@@ -661,12 +665,12 @@ fn installed_extension_state(
     };
     // У кластера и автономного сервера `ibcmd` в строке `extensions` нет
     // (`INV.USE-CASES.A-CLUSTER-ROW-DOES-NOT-NAME-IBCMD`): список спрашивает исполнитель
-    // `extensions` этой цели — агент (#431).
+    // `extensions list` этой цели (#431, #428).
     if config.target_kind() != crate::domain::capability::TargetKind::File {
         let (_, read) = crate::use_cases::extension_inventory::read_installed(context, config);
         return match read {
             Ok(extensions) => Ok(
-                if extensions.iter().any(|extension| extension.name == name) {
+                if extensions.iter().any(|extension| extension.name() == name) {
                     ExtensionPresence::Present
                 } else {
                     ExtensionPresence::Absent

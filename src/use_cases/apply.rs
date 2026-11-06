@@ -5,6 +5,7 @@
 
 pub(crate) mod act;
 
+use crate::use_cases::provider_selection::stamp_session;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -25,6 +26,7 @@ use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::extension_identity::extension_name_key;
 use crate::use_cases::generation_reader::{designer_log_file, read_by_record_tool, LocatedTool};
 use crate::use_cases::generation_record::{self, RecordStep};
+use crate::use_cases::installed_extensions::{self, InventorySource};
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 use crate::use_cases::request::ApplyRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
@@ -62,7 +64,7 @@ pub fn execute(
     request: &ApplyRequest,
 ) -> UseCaseResult<ApplyResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(run(context, config, request), context),
+        stamp_session(run(context, config, request), context),
         context.work(),
     )
 }
@@ -225,7 +227,7 @@ fn targets<'a>(
     config: &'a AppConfig,
     request: &ApplyRequest,
     inventory: &'a SourceSetInventory<'a>,
-    executor: &Executor,
+    executor: &mut Executor,
 ) -> Result<Vec<Target<'a>>, AppError> {
     let sets: Vec<&SourceSetConfig> = match request.source_set.as_deref().map(str::trim) {
         Some("") => {
@@ -248,13 +250,20 @@ fn targets<'a>(
                 .iter()
                 .any(|set| set.purpose == SourceSetPurpose::Extension));
     let (not_installed, installed): (Vec<&str>, Vec<String>) = if reads_installed {
-        let installed = crate::use_cases::installed_extensions::read_installed_extensions(
+        let source = if executor.provider() == Provider::Agent {
+            let (handle, wait) = executor.session(context, config)?;
+            InventorySource::OpenAgent { handle, wait }
+        } else {
+            InventorySource::Selected {
+                tool: executor.tool(),
+                utilities: &executor.utilities,
+            }
+        };
+        let installed = installed_extensions::read_installed_extensions(
             context,
             config,
             Operation::Apply,
-            executor.provider(),
-            executor.binary(),
-            &executor.utilities,
+            source,
         )?;
         let packages = inventory.installed_packages(&installed)?;
         (
@@ -468,10 +477,6 @@ impl Executor {
         self.provider
     }
 
-    fn binary(&self) -> Option<&std::path::Path> {
-        self.binary.as_deref()
-    }
-
     /// Исполнитель и его утилита — в том виде, что знает общий читатель поколения.
     fn tool(&self) -> LocatedTool<'_> {
         LocatedTool {
@@ -480,11 +485,12 @@ impl Executor {
         }
     }
 
+    /// Открывает сессию при первом обращении и даёт её взаймы до следующего шага команды.
     fn session(
         &mut self,
         context: &ExecutionContext,
         config: &AppConfig,
-    ) -> Result<(&mut AgentHandle, WaitPolicy), AppError> {
+    ) -> Result<(&mut AgentHandle, &WaitPolicy), AppError> {
         if self.session.is_none() {
             let wait = agent_session::wait_policy(context);
             let transcript = agent_session::transcript_log(config, "apply")?;
@@ -502,7 +508,7 @@ impl Executor {
             .session
             .as_mut()
             .expect("agent session was just opened");
-        Ok((handle, wait.clone()))
+        Ok((handle, wait))
     }
 
     fn apply(
@@ -550,10 +556,7 @@ impl Executor {
                 act::apply(
                     context,
                     config,
-                    Applier::Agent {
-                        handle,
-                        wait: &wait,
-                    },
+                    Applier::Agent { handle, wait },
                     subject,
                     deferrals,
                 )
@@ -585,7 +588,7 @@ impl Executor {
                 return Ok(None);
             }
             let (handle, wait) = self.session(context, config)?;
-            return agent_session::generation_id(handle.session(), target.extension, &wait)
+            return agent_session::generation_id(handle.session(), target.extension, wait)
                 .map(Some);
         }
         read_by_record_tool(

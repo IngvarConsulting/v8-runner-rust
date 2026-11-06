@@ -3,6 +3,7 @@ id: INV.USE-CASES.A-FAILED-LOAD-MARKS-THE-GENERATION-RECORD
 check:
   - tests/cli_push_generation.rs::after_a_failed_load_the_next_push_names_it_and_is_not_let_through
   - src/use_cases/build_project.rs::a_push_load_that_fails_after_a_deferred_cancellation_names_it
+  - src/use_cases/exchange_guard.rs::a_load_refused_before_dispatch_keeps_the_previous_unapplied_generation
 ---
 
 # Неудачная загрузка помечает запись поколения
@@ -15,3 +16,7 @@ check:
 отказывает `non_fast_forward` и говорит, что базу изменила неудачная загрузка или другая
 копия, и первым выходом называет повтор загрузки `push --force`, а не «база ушла вперёд с
 прошлого обмена».
+
+Если ОС отказалась запустить частичный импорт `ibcmd` из-за длины команды или раннер
+не смог подготовить безопасный список передачи агенту по SFTP, загрузка не началась.
+Прежняя запись поколения, в том числе отметка неприменённой загрузки, сохраняется.

@@ -45,8 +45,12 @@ pub enum HoldReply {
     Normal,
     /// Сообщение об ошибке агента.
     Error,
+    /// Несколько JSON-массивов одного ответа: диагностические сообщения и итог.
+    JsonMessages(&'static str),
     /// Канал закрыт без итогового сообщения.
     Close,
+    /// Неразобранный stderr перед закрытием канала без ответа.
+    StderrThenClose(&'static str),
     /// Команда исполнена как обычно, но ответ о ней — проза вместо массива сообщений; с
     /// `close` двойник после неё закрывает канал.
     Prose { text: &'static str, close: bool },
@@ -107,12 +111,16 @@ pub struct FakeAgent {
     pub any_credentials: bool,
     /// Выгрузка в файлы отвечает ошибкой агента, пока флаг поднят.
     pub fail_dump: Arc<AtomicBool>,
+    /// Диагностика служебной команды подключения перед командой запроса.
+    pub connect_log: Option<&'static str>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
     sftp_channels: Arc<Mutex<Vec<ChannelId>>>,
     /// Состав расширений базы: `properties get/set`, `create`, `delete`.
     pub extensions: Arc<Mutex<Vec<FakeExtension>>>,
+    /// Коды языков конфигурации: синониму с другим кодом двойник отвечает `LanguageNotFound`.
+    pub languages: Vec<&'static str>,
     /// Что было собрано из каких xml: обратная выгрузка возвращает тот же описатель.
     external_sources: Arc<Mutex<HashMap<PathBuf, String>>>,
     buffers: Arc<Mutex<HashMap<ChannelId, Vec<u8>>>>,
@@ -166,10 +174,12 @@ impl FakeAgent {
             sftp_hold: None,
             any_credentials: false,
             fail_dump: Arc::new(AtomicBool::new(false)),
+            connect_log: None,
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
             extension_generations: Arc::new(Mutex::new(HashMap::new())),
+            languages: vec!["ru", "en"],
             extensions: Arc::new(Mutex::new(vec![FakeExtension {
                 name: "Зонд".to_owned(),
                 active: true,
@@ -311,6 +321,16 @@ impl FakeAgent {
             || line == "common connect-ib"
             || line == "common disconnect-ib"
         {
+            if let Some(message) = self.connect_log.filter(|_| line == "common connect-ib") {
+                return (
+                    format!(
+                        "{}\n{}",
+                        serde_json::json!([{"type":"log", "message":message}]),
+                        success()
+                    ),
+                    false,
+                );
+            }
             return (success(), false);
         }
         if line.starts_with("config generation-id") {
@@ -562,6 +582,20 @@ impl FakeAgent {
                     false,
                 );
             }
+            // Как настоящий агент: код языка вне конфигурации — отказ, ничего не создано.
+            let synonym = option("synonym").unwrap_or_default();
+            let unknown = synonym
+                .split(';')
+                .filter_map(|part| part.split_once('=').map(|(code, _)| code.trim()))
+                .find(|code| !self.languages.contains(code));
+            if let Some(code) = unknown {
+                return (
+                    format!(
+                        "[{{\"type\":\"error\",\"error-type\":\"LanguageNotFound\",\"message\":\"Язык с кодом '{code}' не найден\",\"body\":[]}}]"
+                    ),
+                    false,
+                );
+            }
             let name = option("extension").unwrap_or_default();
             self.extensions
                 .lock()
@@ -791,6 +825,18 @@ impl server::Handler for FakeAgent {
                         let failure = r#"[{"type":"error","error-type":"UnknownError","message":"held command failed"}]"#;
                         session.data(channel, format!("{failure}\n").into_bytes())?;
                         continue;
+                    }
+                    HoldReply::JsonMessages(messages) => {
+                        self.log(&line);
+                        session.data(channel, messages.as_bytes().to_vec())?;
+                        continue;
+                    }
+                    HoldReply::StderrThenClose(text) => {
+                        self.log(&line);
+                        session.extended_data(channel, 1, text.as_bytes().to_vec())?;
+                        session.eof(channel)?;
+                        session.close(channel)?;
+                        break;
                     }
                     HoldReply::Close => {
                         self.log(&line);

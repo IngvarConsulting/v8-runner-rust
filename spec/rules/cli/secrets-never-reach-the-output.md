@@ -7,9 +7,13 @@ check:
   - src/platform/secrets.rs::a_connection_string_shown_as_a_value_hides_the_password_and_the_user
   - src/platform/secrets.rs::a_space_inside_a_value_does_not_split_its_masking
   - src/platform/secrets.rs::masks_the_password_of_a_connection_string_quoted_as_a_whole
+  - tests/cli_external_full_pull.rs::designer_failure_hides_the_infobase_password_for_a_cluster
+  - tests/cli_external_full_pull.rs::designer_failure_hides_the_infobase_password_for_a_direct_gateway
+  - tests/cli_external_full_pull.rs::designer_syntax_masks_diagnostics_after_parsing_the_issue
   - tests/cli_launch.rs::launch_failure_never_echoes_the_password_inside_the_connection_string
   - tests/cli_launch.rs::launch_dry_run_text_masks_credentials_and_says_nothing_was_dispatched
   - tests/cli_extensions.rs::extension_preview_never_echoes_the_infobase_password
+  - tests/cli_extensions.rs::cluster_designer_invalid_list_output_does_not_echo_credentials
   - tests/cli_init.rs::server_infobase_create_never_echoes_the_connection_string_credentials
   - tests/cli_init.rs::a_failed_cluster_create_never_echoes_the_passwords
   - src/platform/secrets.rs::masks_the_dbms_and_cluster_passwords_of_a_creation_string

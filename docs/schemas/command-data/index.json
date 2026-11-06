@@ -13,6 +13,9 @@
     "convert": [
       "convert"
     ],
+    "diff": [
+      "diff"
+    ],
     "download": [
       "download",
       "download-all"

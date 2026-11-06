@@ -516,7 +516,8 @@ mod tests {
             .to_string();
         assert!(measured.contains("format 2.21"), "{measured}");
         let unmeasured = crate::platform::locator::PlatformVersion {
-            patch: 26,
+            minor: 5,
+            patch: 2,
             ..platform.clone()
         };
         assert_eq!(

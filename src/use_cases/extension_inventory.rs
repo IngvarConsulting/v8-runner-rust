@@ -1,18 +1,21 @@
 //! Reads and changes the extension composition of the configured infobase.
 //!
-//! Provider selection chooses the standalone agent or IBCMD. Designer has no
-//! batch key for installed extensions, so it cannot serve this family.
+//! Batch Designer can list extension names on a cluster. The agent and IBCMD
+//! also read properties and change extensions.
 
+use crate::use_cases::provider_selection::stamp_session;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::model::AppConfig;
-use crate::domain::capability::Provider;
+use crate::domain::capability::{
+    Operation, Provider, ProviderPlan, ProviderReceipt, SkippedProvider,
+};
 use crate::domain::extensions::{
-    ExtensionInventoryResult, ExtensionsResult, ExtensionsStep, InstalledExtension,
-    RequestedInventory,
+    ExtensionInventoryEntry, ExtensionInventoryResult, ExtensionsResult, ExtensionsStep,
+    InstalledExtension, RequestedInventory,
 };
 use crate::platform::extension_inventory::{
     is_extension_identifier, parse_extension_inventory, read_applied_extension_descriptor,
@@ -25,7 +28,10 @@ use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::extension_agent::ExtensionAgent;
+use crate::use_cases::generation_reader::LocatedTool;
+use crate::use_cases::installed_extensions::{read_installed_extensions, InventorySource};
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals};
+use crate::use_cases::provider_selection::{self, SelectedProvider};
 use crate::use_cases::request::{ExtensionInventoryRequest, ExtensionInventoryScope};
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use tracing::debug;
@@ -37,10 +43,7 @@ pub fn execute(
     request: &ExtensionInventoryRequest,
 ) -> UseCaseResult<ExtensionInventoryResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_read(context, config, request),
-            context,
-        ),
+        stamp_session(run_read(context, config, request), context),
         context.work(),
     )
 }
@@ -66,12 +69,12 @@ fn run_read(
         }
     }
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected = crate::use_cases::provider_selection::select(
-        config,
-        &mut utilities,
-        crate::domain::capability::Operation::Extensions,
-    )
-    .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
+    let action = match request.scope {
+        ExtensionInventoryScope::All => ExtensionAction::List,
+        ExtensionInventoryScope::Named { .. } => ExtensionAction::RequiresAgentOrIbcmd("info"),
+    };
+    let selected = select_executor(config, &mut utilities, action)
+        .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
     let receipt = selected.receipt;
     let executor = Executor::of(selected.provider, selected.location, config)
         .map_err(UseCaseFailure::without_payload)?;
@@ -131,22 +134,19 @@ fn run_read(
     }
 }
 
-/// Имена и активность расширений базы — для `status --deep`: тот же выбор исполнителя и то
+/// Состав расширений базы — для `status --deep` и `upload .cfe`; у имён от Конфигуратора нет
+/// активности: тот же выбор исполнителя и то
 /// же чтение, что у `extensions list`, без снимков ради префиксов. Квитанция — `None`, если
 /// выбор не начинался.
 pub(crate) fn read_installed(
     context: &ExecutionContext,
     config: &AppConfig,
 ) -> (
-    Option<crate::domain::capability::ProviderReceipt>,
-    Result<Vec<InstalledExtension>, AppError>,
+    Option<ProviderReceipt>,
+    Result<Vec<ExtensionInventoryEntry>, AppError>,
 ) {
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected = match crate::use_cases::provider_selection::select(
-        config,
-        &mut utilities,
-        crate::domain::capability::Operation::Extensions,
-    ) {
+    let selected = match select_executor(config, &mut utilities, ExtensionAction::List) {
         Ok(selected) => selected,
         Err((error, receipt)) => return (Some(receipt), Err(error)),
     };
@@ -183,8 +183,26 @@ fn read_extensions(
     executor: Executor,
     utilities: &PlatformUtilities,
     prefixes: Prefixes,
-) -> Result<Vec<InstalledExtension>, AppError> {
+) -> Result<Vec<ExtensionInventoryEntry>, AppError> {
     let extensions = match executor {
+        Executor::Designer { binary } => {
+            let names = read_installed_extensions(
+                context,
+                config,
+                Operation::Extensions,
+                InventorySource::Selected {
+                    tool: LocatedTool {
+                        provider: Provider::Designer,
+                        binary: Some(&binary),
+                    },
+                    utilities,
+                },
+            )?;
+            return Ok(names
+                .into_iter()
+                .map(|name| ExtensionInventoryEntry::NameOnly { name })
+                .collect());
+        }
         Executor::Agent { v8 } => {
             let mut agent = ExtensionAgent::open(context, config, v8.as_deref())?;
             let inventory = agent.inventory(match &request.scope {
@@ -222,7 +240,10 @@ fn read_extensions(
             extensions
         }
     };
-    Ok(extensions)
+    Ok(extensions
+        .into_iter()
+        .map(ExtensionInventoryEntry::Full)
+        .collect())
 }
 
 /// The list/info command omits NamePrefix. Save the *applied database* CFE for
@@ -437,16 +458,70 @@ fn ensure_requested_record(
     Ok(())
 }
 
-/// Исполнитель семейства `extensions`: `ibcmd` — утилитой над своим подключением, агент —
-/// сессией (утилита нужна только управляемому агенту, чтобы его запустить).
+pub(crate) enum ExtensionAction<'a> {
+    List,
+    RequiresAgentOrIbcmd(&'a str),
+}
+
+pub(crate) fn select_executor(
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    action: ExtensionAction<'_>,
+) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
+    let mut plan = config.provider_plan(Operation::Extensions);
+    let ExtensionAction::RequiresAgentOrIbcmd(action) = action else {
+        return provider_selection::select_from(config, utilities, Operation::Extensions, plan);
+    };
+    let skip_designer = || SkippedProvider {
+        provider: Provider::Designer,
+        reason: designer_refusal(action).to_string(),
+    };
+    let skipped_designer = match &mut plan {
+        ProviderPlan::Override {
+            provider: Provider::Designer,
+            ..
+        } => {
+            return Err((
+                designer_refusal(action),
+                plan.receipt_for_nobody(vec![skip_designer()]),
+            ));
+        }
+        ProviderPlan::Override { .. } => false,
+        ProviderPlan::Default { chain } => {
+            let contains_designer = chain.contains(&Provider::Designer);
+            chain.retain(|provider| *provider != Provider::Designer);
+            contains_designer
+        }
+    };
+    let mut selected =
+        provider_selection::select_from(config, utilities, Operation::Extensions, plan);
+    if let (true, Err((_, receipt))) = (skipped_designer, &mut selected) {
+        receipt.skipped.push(skip_designer());
+    }
+    selected
+}
+
+pub(crate) fn designer_refusal(action: &str) -> AppError {
+    AppError::capability(format!(
+        "batch Designer only supports extensions list on a cluster; use the designer agent for extensions {action}"
+    ))
+}
+
+/// Исполнитель семейства `extensions`: пакетный Конфигуратор — список имён,
+/// `ibcmd` — утилита со своим подключением, агент — сессия.
 pub(crate) enum Executor {
+    Designer {
+        binary: PathBuf,
+    },
     Ibcmd {
         binary: PathBuf,
         connection: IbcmdConnection,
     },
     /// `v8` — утилита, которой раннер запускает своего агента; у подключённого агента и
     /// шлюза её нет.
-    Agent { v8: Option<PathBuf> },
+    Agent {
+        v8: Option<PathBuf>,
+    },
 }
 
 impl Executor {
@@ -459,6 +534,9 @@ impl Executor {
         config: &AppConfig,
     ) -> Result<Self, AppError> {
         match (provider, location) {
+            (Provider::Designer, Some(location)) => Ok(Self::Designer {
+                binary: location.path,
+            }),
             (Provider::Agent, location) => Ok(Self::Agent {
                 v8: location.map(|l| l.path),
             }),
@@ -487,7 +565,7 @@ impl Executor {
 
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::Ibcmd { binary, .. } => binary.display().to_string(),
+            Self::Designer { binary } | Self::Ibcmd { binary, .. } => binary.display().to_string(),
             Self::Agent { .. } => "the designer agent".to_owned(),
         }
     }
@@ -497,6 +575,7 @@ impl Executor {
     /// автономного сервера.
     pub(crate) fn target_label(&self, config: &AppConfig) -> String {
         match self {
+            Self::Designer { .. } => config.v8_connection().describe_target(),
             Self::Ibcmd { connection, .. } => connection.describe_target(),
             // Агента автономному серверу назначают только при объявленном SSH-шлюзе
             // (`AppConfig::missing_way`), так что шлюз есть всегда, когда есть секция.
@@ -562,10 +641,7 @@ pub fn change(
     dry_run: bool,
 ) -> UseCaseResult<ExtensionsResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_change(context, config, request, dry_run),
-            context,
-        ),
+        stamp_session(run_change(context, config, request, dry_run), context),
         context.work(),
     )
 }
@@ -583,10 +659,10 @@ fn run_change(
     );
     let started = Instant::now();
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected = crate::use_cases::provider_selection::select(
+    let selected = select_executor(
         config,
         &mut utilities,
-        crate::domain::capability::Operation::Extensions,
+        ExtensionAction::RequiresAgentOrIbcmd(request.action()),
     )
     .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
     let receipt = selected.receipt;
@@ -618,6 +694,7 @@ fn run_change(
     // которую запись отложила и пережила.
     let action = format!("extension {}", request.action());
     let outcome = collecting_deferrals(|deferrals| match executor {
+        Executor::Designer { .. } => Err(designer_refusal(request.action())),
         Executor::Agent { v8 } => {
             let mut agent = ExtensionAgent::open(context, config, v8.as_deref())?;
             let outcome = match request {

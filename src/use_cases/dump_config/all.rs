@@ -8,6 +8,7 @@
 //! памятью базы; объявление нового набора дописывается в `v8project.yaml` после его удачной
 //! выгрузки, так что отказ посреди обхода не оставляет в проекте набора без содержимого.
 
+use crate::use_cases::provider_selection::stamp_session;
 use std::collections::HashSet;
 
 use super::*;
@@ -18,6 +19,8 @@ use crate::domain::dump::{NotDeclaredExtension, PullAllResult};
 use crate::platform::extension_inventory::is_windows_device_name;
 use crate::use_cases::config_init::{declare_source_sets, with_declared_source_sets};
 use crate::use_cases::extension_identity::extension_name_key;
+use crate::use_cases::generation_reader::LocatedTool;
+use crate::use_cases::installed_extensions::{self, InventorySource};
 use crate::use_cases::provider_selection::SelectedProvider;
 use crate::use_cases::request::PullAllRequest;
 use crate::use_cases::result::UseCaseError;
@@ -40,10 +43,7 @@ pub fn execute_all(
         "executing pull --all"
     );
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_all(context, config, request),
-            context,
-        ),
+        stamp_session(run_all(context, config, request), context),
         context.work(),
     )
 }
@@ -92,13 +92,17 @@ fn run_all(
     }
 
     let binary = selected.location.as_ref().map(|found| found.path.as_path());
-    let installed = match crate::use_cases::installed_extensions::read_installed_extensions(
+    let installed = match installed_extensions::read_installed_extensions(
         context,
         config,
         Operation::Dump,
-        selected.provider,
-        binary,
-        &utilities,
+        InventorySource::Selected {
+            tool: LocatedTool {
+                provider: selected.provider,
+                binary,
+            },
+            utilities: &utilities,
+        },
     ) {
         Ok(installed) => installed,
         Err(error) => {

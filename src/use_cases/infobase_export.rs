@@ -1,3 +1,4 @@
+use crate::use_cases::provider_selection::stamp_session;
 use std::io::ErrorKind;
 mod agent;
 mod all;
@@ -77,7 +78,7 @@ pub fn execute_configuration_export(
     request: &ExportConfigurationPackageRequest,
     prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportConfigurationPackageResult> {
-    crate::use_cases::provider_selection::stamp_session(
+    stamp_session(
         run_configuration_export(context, config, request, prepared),
         context,
     )
@@ -188,7 +189,7 @@ fn run_configuration_export(
             ))
         }
     };
-    if let Err(error) = validate_platform_success(&platform_result) {
+    if let Err(error) = validate_platform_success(&platform_result, None) {
         return Err(configuration_failure(
             context,
             publication.cleanup_failure(error),
@@ -290,7 +291,7 @@ pub fn execute_infobase_snapshot(
     request: &ExportInfobaseSnapshotRequest,
     prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportInfobaseSnapshotResult> {
-    crate::use_cases::provider_selection::stamp_session(
+    stamp_session(
         run_infobase_snapshot(context, config, request, prepared),
         context,
     )
@@ -387,7 +388,9 @@ fn run_infobase_snapshot(
             ))
         }
     };
-    if let Err(error) = validate_platform_success(&platform_result) {
+    if let Err(error) =
+        validate_platform_success(&platform_result, config.infobase.password.as_deref())
+    {
         return Err(snapshot_failure(
             context,
             publication.cleanup_failure(error),
@@ -594,7 +597,7 @@ pub fn execute_infobase_restore(
     request: &RestoreInfobaseSnapshotRequest,
     prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
-    crate::use_cases::provider_selection::stamp_session(
+    stamp_session(
         run_infobase_restore(context, config, request, prepared),
         context,
     )
@@ -669,7 +672,9 @@ fn run_infobase_restore(
             ));
         }
     };
-    if let Err(error) = validate_platform_success(&platform_result) {
+    if let Err(error) =
+        validate_platform_success(&platform_result, config.infobase.password.as_deref())
+    {
         // The provider may have replaced part of the data before failing, and nothing
         // here can tell how much, so the target state is reported as uncertain.
         result.target_state = InfobaseTargetState::Uncertain;
@@ -1160,13 +1165,20 @@ fn readiness(
         IbcmdConnection::from_infobase(&config.infobase)
             .map_err(|error| format!("connection is not ready for IBCMD: {error}"))?;
     }
-    match utility {
-        Some(utility) => utilities
-            .locate(utility)
-            .map(|location| Some(location.path))
-            .map_err(|error| format!("environment is not ready: {error}")),
-        None => Ok(None),
+    let Some(utility) = utility else {
+        return Ok(None);
+    };
+    let location = utilities
+        .locate(utility)
+        .map_err(|error| format!("environment is not ready: {error}"))?;
+    if provider == Provider::Agent
+        && matches!(intent, InfobaseTransferIntent::SnapshotRestore { .. })
+    {
+        if let Some(reason) = agent::restore_blocked_by_a_question(&location) {
+            return Err(reason);
+        }
     }
+    Ok(Some(location.path))
 }
 
 fn validate_file_infobase_readiness(config: &AppConfig) -> Result<(), String> {
@@ -1634,13 +1646,26 @@ fn provider_log_path(config: &AppConfig, stem: &str) -> Result<PathBuf, AppError
         .map_err(|error| AppError::Runtime(format!("failed to create platform logs dir: {error}")))
 }
 
-fn validate_platform_success(result: &PlatformCommandResult) -> Result<(), AppError> {
+/// Форматирует отказ, скрывая известный пароль в сырых уликах переноса базы.
+fn validate_platform_success(
+    result: &PlatformCommandResult,
+    password: Option<&str>,
+) -> Result<(), AppError> {
     if let Err(code) = result.process.outcome() {
         let mut details = vec![format!("platform export failed with exit code {code}")];
-        append_platform_diagnostic(&mut details, "stdout", &result.process.stdout);
-        append_platform_diagnostic(&mut details, "stderr", &result.process.stderr);
+        let password = password.filter(|password| !password.is_empty());
+        let mut append = |label, value: &str| match password {
+            Some(password) => append_platform_diagnostic(
+                &mut details,
+                label,
+                &crate::platform::secrets::mask_text(value, &[password]),
+            ),
+            None => append_platform_diagnostic(&mut details, label, value),
+        };
+        append("stdout", &result.process.stdout);
+        append("stderr", &result.process.stderr);
         if let Some(log) = result.platform_log.as_deref() {
-            append_platform_diagnostic(&mut details, "platform log", log);
+            append("platform log", log);
         }
         if let Some(error) = result.platform_log_read_error.as_deref() {
             append_platform_diagnostic(&mut details, "platform log read error", error);

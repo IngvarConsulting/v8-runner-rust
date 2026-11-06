@@ -395,9 +395,9 @@ fn forecast_through(
     let local = crate::support::temp::dump_forecast_file(&config.work_path).map_err(|error| {
         AppError::Runtime(format!("failed to create the dump forecast file: {error}"))
     })?;
-    let read = collect_file(handle, exchange, &list_relative, local.path())
+    let read = collect_file(handle, exchange, &list_relative, &local)
         .ok()
-        .and_then(|()| std::fs::read(local.path()).ok());
+        .and_then(|()| std::fs::read(&local).ok());
     tidy(handle, exchange, &list_relative);
     Ok(read.map_or(DumpForecast::Unknown, |bytes| {
         crate::platform::dump_forecast::read_changes_list(&bytes)

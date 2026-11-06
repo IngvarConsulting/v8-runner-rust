@@ -1,3 +1,4 @@
+use std::num::NonZeroI32;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -8,6 +9,7 @@ use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::secrets::mask_text;
 
 #[derive(Debug, Error)]
 pub enum DesignerError {
@@ -26,14 +28,26 @@ pub enum DesignerError {
     },
 }
 
+const SYNTAX_ISSUES_EXIT_CODE: NonZeroI32 = NonZeroI32::new(101).unwrap();
+
 /// Вердикт проверки Конфигуратора — `/CheckConfig` и `/CheckModules` — по коду выхода: ноль —
 /// чисто, 101 — замечания найдены, любой другой — сбой инструмента. Других входов у вердикта
 /// нет: текст журнала его не меняет.
 pub fn syntax_check_status(exit_code: i32) -> SyntaxCheckStatus {
     match exit_code {
         0 => SyntaxCheckStatus::Clean,
-        101 => SyntaxCheckStatus::IssuesFound,
+        code if code == SYNTAX_ISSUES_EXIT_CODE.get() => SyntaxCheckStatus::IssuesFound,
         _ => SyntaxCheckStatus::ToolFailed,
+    }
+}
+
+/// Исходы с однозначным кодом проверки Конфигуратора. У сбоя единого кода нет,
+/// а при превью команда не выполнялась.
+pub(crate) fn syntax_check_outcome(status: SyntaxCheckStatus) -> Option<Result<(), NonZeroI32>> {
+    match status {
+        SyntaxCheckStatus::Clean => Some(Ok(())),
+        SyntaxCheckStatus::IssuesFound => Some(Err(SYNTAX_ISSUES_EXIT_CODE)),
+        SyntaxCheckStatus::ToolFailed | SyntaxCheckStatus::Planned => None,
     }
 }
 
@@ -202,6 +216,59 @@ impl<'a> DesignerDsl<'a> {
         second_name: Option<&str>,
         report_file: &Path,
     ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.compare_args(
+            first_configuration_type,
+            first_name,
+            second_configuration_type,
+            second_name,
+        );
+        args.extend(["-ReportType".to_owned(), "Brief".to_owned()]);
+        self.run_compare(args, report_file)
+    }
+
+    /// Full text report comparing the main configuration with the named target.
+    pub(crate) fn compare_full_report(
+        &self,
+        against: &crate::domain::diff::DiffAgainst,
+        report_file: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        use crate::domain::diff::DiffAgainst;
+
+        let (configuration_type, name) = match against {
+            DiffAgainst::Database => ("DBConfiguration", None),
+            DiffAgainst::Vendor(name) => ("VendorConfiguration", Some(name.as_str())),
+            DiffAgainst::File(_) => ("File", None),
+        };
+        let mut args = self.compare_args("MainConfiguration", None, configuration_type, name);
+        if let DiffAgainst::File(file) = against {
+            args.push("-SecondFile".to_owned());
+            args.push(
+                crate::support::path::normalize_windows_verbatim_path(file)
+                    .display()
+                    .to_string(),
+            );
+        }
+        args.extend(
+            [
+                "-ReportType",
+                "Full",
+                "-IncludeChangedObjects",
+                "-IncludeAddedObjects",
+                "-IncludeDeletedObjects",
+            ]
+            .map(str::to_owned),
+        );
+        let report_file = crate::support::path::normalize_windows_verbatim_path(report_file);
+        self.run_compare(args, &report_file)
+    }
+
+    fn compare_args(
+        &self,
+        first_configuration_type: &str,
+        first_name: Option<&str>,
+        second_configuration_type: &str,
+        second_name: Option<&str>,
+    ) -> Vec<String> {
         let mut args = self.base_args();
         args.push("/CompareCfg".to_owned());
         args.push("-FirstConfigurationType".to_owned());
@@ -216,8 +283,14 @@ impl<'a> DesignerDsl<'a> {
             args.push("-SecondName".to_owned());
             args.push(second_name.to_owned());
         }
-        args.push("-ReportType".to_owned());
-        args.push("Brief".to_owned());
+        args
+    }
+
+    fn run_compare(
+        &self,
+        mut args: Vec<String>,
+        report_file: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
         args.push("-ReportFormat".to_owned());
         args.push("txt".to_owned());
         args.push("-ReportFile".to_owned());
@@ -235,7 +308,7 @@ impl<'a> DesignerDsl<'a> {
                     "a file-based connection File=…",
                 ))?;
         args.push(connection);
-        self.run(&args)
+        self.run_raw(&args)
     }
 
     /// `CREATEINFOBASE <клиент-серверная строка> /DisableStartupDialogs`: регистрация базы в
@@ -253,7 +326,8 @@ impl<'a> DesignerDsl<'a> {
             .ok_or(DesignerError::ConnectionForm(
                 "a cluster connection Srvr=…;Ref=…",
             ))?;
-        self.run(&[
+        // The caller masks creation diagnostics with the DBMS and cluster credentials.
+        self.run_raw(&[
             "CREATEINFOBASE".to_owned(),
             connection,
             "/DisableStartupDialogs".to_owned(),
@@ -271,10 +345,18 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpConfigToFiles".to_owned());
-        args.push(target_dir.display().to_string());
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(target_dir)
+                .display()
+                .to_string(),
+        );
         args.push("-update".to_owned());
         args.push("-getChanges".to_owned());
-        args.push(list_file.display().to_string());
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(list_file)
+                .display()
+                .to_string(),
+        );
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -421,7 +503,8 @@ impl<'a> DesignerDsl<'a> {
                 .display()
                 .to_string(),
         );
-        self.run(&args)
+        // The caller formats the failure with the credentials of the transfer or copy.
+        self.run_raw(&args)
     }
 
     /// `/RestoreIB <file>`
@@ -436,7 +519,7 @@ impl<'a> DesignerDsl<'a> {
         let mut args = self.base_args();
         args.push("/RestoreIB".to_owned());
         args.push(source_file.display().to_string());
-        self.run(&args)
+        self.run_raw(&args)
     }
 
     /// `/DumpExternalDataProcessorOrReportToFiles <root-xml> <binary>`
@@ -490,7 +573,8 @@ impl<'a> DesignerDsl<'a> {
         let mut args = self.base_args();
         args.push("/CheckConfig".to_owned());
         args.extend(flags.iter().map(|flag| (*flag).to_owned()));
-        self.run(&args)
+        // The validation parser needs the original report, including on a nonzero exit.
+        self.run_raw(&args)
     }
 
     fn base_args(&self) -> Vec<String> {
@@ -508,7 +592,26 @@ impl<'a> DesignerDsl<'a> {
         args
     }
 
+    /// Preserve machine replies and mask failed runs before their diagnostics leave the adapter.
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, DesignerError> {
+        let mut result = self.run_raw(args)?;
+        if let Some(password) = self
+            .connection
+            .password
+            .as_deref()
+            .filter(|password| !password.is_empty() && result.process.outcome().is_err())
+        {
+            let secrets = &[password];
+            result.process.stdout = mask_text(&result.process.stdout, secrets);
+            result.process.stderr = mask_text(&result.process.stderr, secrets);
+            if let Some(log) = &mut result.platform_log {
+                *log = mask_text(log, secrets);
+            }
+        }
+        Ok(result)
+    }
+
+    fn run_raw(&self, args: &[String]) -> Result<PlatformCommandResult, DesignerError> {
         if let Some(log_file) = &self.log_file {
             match std::fs::remove_file(log_file) {
                 Ok(()) => {}
@@ -565,7 +668,7 @@ impl<'a> DesignerDsl<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{syntax_check_status, DesignerDsl};
+    use super::{syntax_check_outcome, syntax_check_status, DesignerDsl};
     use crate::domain::syntax::SyntaxCheckStatus;
     use crate::platform::connection::V8Connection;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
@@ -573,11 +676,9 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
 
-    #[cfg(windows)]
     #[derive(Default)]
     struct CapturingRunner(std::cell::RefCell<Vec<crate::platform::process::ProcessRequest>>);
 
-    #[cfg(windows)]
     impl ProcessRunner for CapturingRunner {
         fn run_with_policy(
             &self,
@@ -610,6 +711,75 @@ mod tests {
         assert_cf_export_target(
             r"\\?\C:\Каталог с пробелами\конфигурация.cf",
             r"C:\Каталог с пробелами\конфигурация.cf",
+        );
+    }
+
+    #[test]
+    fn full_comparison_passes_windows_paths_without_verbatim_prefix() {
+        let runner = CapturingRunner::default();
+        let dsl = DesignerDsl::new(
+            "1cv8.exe".into(),
+            V8Connection::from_connection_string("File=C:/ib"),
+            &runner,
+            None,
+            ProcessExecutionPolicy::default(),
+        );
+        let package =
+            crate::domain::diff::DiffAgainst::File(r"\\?\C:\Каталог с пробелами\пакет.cf".into());
+        dsl.compare_full_report(
+            &package,
+            Path::new(r"\\?\UNC\server\share\Каталог с пробелами\отчёт.txt"),
+        )
+        .expect("compare package");
+        dsl.compare_cfg(
+            "ExtensionConfiguration",
+            Some("SalesAddon"),
+            "ExtensionDBConfiguration",
+            Some("SalesAddon"),
+            Path::new("probe.txt"),
+        )
+        .expect("upload probe");
+        let requests = runner.0.borrow();
+        assert_eq!(
+            &requests[0].args[5..],
+            [
+                "/CompareCfg",
+                "-FirstConfigurationType",
+                "MainConfiguration",
+                "-SecondConfigurationType",
+                "File",
+                "-SecondFile",
+                r"C:\Каталог с пробелами\пакет.cf",
+                "-ReportType",
+                "Full",
+                "-IncludeChangedObjects",
+                "-IncludeAddedObjects",
+                "-IncludeDeletedObjects",
+                "-ReportFormat",
+                "txt",
+                "-ReportFile",
+                r"\\server\share\Каталог с пробелами\отчёт.txt",
+            ]
+        );
+        assert_eq!(
+            &requests[1].args[5..],
+            [
+                "/CompareCfg",
+                "-FirstConfigurationType",
+                "ExtensionConfiguration",
+                "-FirstName",
+                "SalesAddon",
+                "-SecondConfigurationType",
+                "ExtensionDBConfiguration",
+                "-SecondName",
+                "SalesAddon",
+                "-ReportType",
+                "Brief",
+                "-ReportFormat",
+                "txt",
+                "-ReportFile",
+                "probe.txt",
+            ]
         );
     }
 
@@ -736,6 +906,13 @@ mod tests {
         assert_eq!(syntax_check_status(0), SyntaxCheckStatus::Clean);
         assert_eq!(syntax_check_status(101), SyntaxCheckStatus::IssuesFound);
         assert_eq!(syntax_check_status(1), SyntaxCheckStatus::ToolFailed);
+        assert_eq!(syntax_check_outcome(syntax_check_status(0)), Some(Ok(())));
+        assert_eq!(
+            syntax_check_outcome(syntax_check_status(101)),
+            std::num::NonZeroI32::new(101).map(Err)
+        );
+        assert_eq!(syntax_check_outcome(SyntaxCheckStatus::ToolFailed), None);
+        assert_eq!(syntax_check_outcome(SyntaxCheckStatus::Planned), None);
     }
 
     #[cfg(unix)]

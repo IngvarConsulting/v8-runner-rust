@@ -88,6 +88,8 @@ pub enum Operation {
     /// `reset`. Обратный ход `apply`; у агента команды отката нет.
     #[serde(rename = "reset")]
     Reset,
+    #[serde(rename = "diff")]
+    Diff,
     #[serde(rename = "upload", alias = "load")]
     Load,
     #[serde(rename = "pull", alias = "dump")]
@@ -111,11 +113,12 @@ pub enum Operation {
 }
 
 impl Operation {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Init,
         Self::Build,
         Self::Apply,
         Self::Reset,
+        Self::Diff,
         Self::Load,
         Self::Dump,
         Self::Extensions,
@@ -135,6 +138,7 @@ impl Operation {
             Self::Build => "push",
             Self::Apply => "apply",
             Self::Reset => "reset",
+            Self::Diff => "diff",
             Self::Load => "upload",
             Self::Dump => "pull",
             Self::Extensions => "extensions",
@@ -313,6 +317,11 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Ibcmd, ArgvTested),
     ];
     const ROLLBACK_SERVER: &[Capability] = &[implemented(Designer, ArgvTested)];
+    const DIFF_FILE: &[Capability] = &[
+        implemented(Ibcmd, ArgvTested),
+        implemented(Designer, ArgvTested),
+    ];
+    const DIFF_SERVER: &[Capability] = &[implemented(Designer, ArgvTested)];
     // `make` собирает пакет из исходников во временной базе раннера, а не выгружает базу
     // проекта, поэтому строка от вида цели не зависит. `ibcmd`: `infobase create`, затем
     // `config import --out` (замер #182, 06.10.2026, 8.3.27.2074); Конфигуратор:
@@ -331,14 +340,16 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     const CONVERT: &[Capability] = &[implemented(Ibcmd, ArgvTested)];
     // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
     // прогнаны раннером на 8.3.27 15.09.2026. У файловой базы состав и свойства первым
-    // читает `ibcmd`; у кластера — только агент: `ibcmd` к базе под кластером в
-    // умолчаниях нет, а адаптера Конфигуратора у семейства `extensions` нет:
-    // имена он перечисляет (`/DumpDBCfgList`), свойств не отдаёт.
+    // читает `ibcmd`; у кластера за агентом идёт пакетный Конфигуратор. На 8.3.27
+    // подтверждён только список имён (`/DumpDBCfgList -AllExtensions`, #428).
     const EXTENSIONS_FILE: &[Capability] = &[
         implemented(Ibcmd, LiveVerified),
         implemented(Agent, LiveVerified),
     ];
-    const EXTENSIONS_CLUSTER: &[Capability] = &[implemented(Agent, LiveVerified)];
+    const EXTENSIONS_CLUSTER: &[Capability] = &[
+        implemented(Agent, LiveVerified),
+        implemented(Designer, LiveVerified),
+    ];
     // Агент: `config dump-cfg` для рабочей конфигурации прогнан раннером 15.09.2026.
     const EXPORT_FILE: &[Capability] = &[
         implemented(Agent, LiveVerified),
@@ -374,6 +385,8 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         }
         (Operation::Reset, TargetKind::File) => ROLLBACK_FILE,
         (Operation::Reset, TargetKind::Cluster) => ROLLBACK_SERVER,
+        (Operation::Diff, TargetKind::File) => DIFF_FILE,
+        (Operation::Diff, TargetKind::Cluster | TargetKind::Standalone) => DIFF_SERVER,
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
             DESIGNER_ONLY
         }
@@ -443,6 +456,7 @@ pub const fn serves_project(operation: Operation, provider: Provider, shape: Pro
             // проекта EDT, и расширение-инструмент — исходников он не читает.
             Operation::Apply
             | Operation::Reset
+            | Operation::Diff
             | Operation::Init
             | Operation::Load
             | Operation::Extensions
@@ -800,7 +814,10 @@ mod tests {
             missing_executors(Operation::Extensions, TargetKind::File),
             [Provider::Designer]
         );
-        assert!(missing_executors(Operation::Extensions, TargetKind::Cluster).is_empty());
+        assert_eq!(
+            missing_executors(Operation::Extensions, TargetKind::Cluster),
+            [Provider::Ibcmd]
+        );
     }
 
     #[test]

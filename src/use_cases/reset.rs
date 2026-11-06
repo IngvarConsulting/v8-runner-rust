@@ -10,6 +10,7 @@
 
 pub(crate) mod act;
 
+use crate::use_cases::provider_selection::stamp_session;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -27,6 +28,7 @@ use crate::use_cases::generation_reader::{
     designer_log_file, read_by_record_tool, read_unapplied, GenerationProcess, LocatedTool,
 };
 use crate::use_cases::generation_record::{self, RecordStep};
+use crate::use_cases::installed_extensions::{self, InventorySource};
 use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 use crate::use_cases::request::ResetRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
@@ -41,7 +43,7 @@ pub fn execute(
     request: &ResetRequest,
 ) -> UseCaseResult<ResetResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(run(context, config, request), context),
+        stamp_session(run(context, config, request), context),
         context.work(),
     )
 }
@@ -350,13 +352,17 @@ impl Executor {
         inventory: &SourceSetInventory<'_>,
         set: &SourceSetConfig,
     ) -> Result<(), AppError> {
-        let installed = crate::use_cases::installed_extensions::read_installed_extensions(
+        let installed = installed_extensions::read_installed_extensions(
             context,
             config,
             Operation::Reset,
-            self.provider,
-            self.binary.as_deref(),
-            &self.utilities,
+            InventorySource::Selected {
+                tool: LocatedTool {
+                    provider: self.provider,
+                    binary: self.binary.as_deref(),
+                },
+                utilities: &self.utilities,
+            },
         )?;
         let packages = inventory.installed_packages(&installed)?;
         if packages
