@@ -17,12 +17,20 @@ pub struct ServiceRequest {
     pub args: Vec<String>,
     pub workdir: Option<PathBuf>,
     /// Куда идут stdout и stderr службы.
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "читает только запуск на Windows")
+    )]
     pub log_path: PathBuf,
 }
 
 /// Служба не переживёт выход раннера.
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceSpawnError {
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "читает только запуск на Windows")
+    )]
     #[error("the runner runs in a Job that kills its processes on close and forbids leaving it: the service would not outlive the command")]
     WouldNotSurvive,
     #[cfg(not(windows))]
@@ -53,6 +61,10 @@ pub struct ProcessFacts {
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
 /// Имя файла образа в виде, в котором его сравнивает запись.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "читает только запуск на Windows")
+)]
 pub fn image_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_lowercase())

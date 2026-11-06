@@ -852,11 +852,9 @@ mod tests {
                 "pg_ctl" if request.args[0] == "--version" => {
                     stdout = "pg_ctl (PostgreSQL) 17.11\n".to_owned();
                 }
-                "pg_ctl" if request.args[0] == "stop" => {
-                    if self.stop_works.get() {
-                        self.host.processes.borrow_mut().remove(&PID);
-                        self.host.listeners.borrow_mut().clear();
-                    }
+                "pg_ctl" if request.args[0] == "stop" && self.stop_works.get() => {
+                    self.host.processes.borrow_mut().remove(&PID);
+                    self.host.listeners.borrow_mut().clear();
                 }
                 "initdb" => {
                     if self.initdb_fails.get() {
