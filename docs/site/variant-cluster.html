@@ -415,7 +415,7 @@ v8-runner cluster stop       # сервер 1С и PostgreSQL</code></pre>
       name: demo_data                                    # физическое имя БД, не Ref
       user: dbadmin                                      # пользователь СУБД
       password: &quot;db-password&quot;                            # пароль пользователя СУБД</code></pre>
-<p>Адрес db:5432 должен быть доступен с машины раннера. Адрес srv:1541 относится к серверу 1С и используется при обычной работе через кластер.</p>
+<p>Адрес db port=5432 должен быть доступен с машины раннера. Адрес srv:1541 относится к серверу 1С и используется при обычной работе через кластер.</p>
 
 <h2 id="cluster-administration">Администрирование через RAS</h2>
 <p>RAS — сервер администрирования кластера. Утилита <code>rac</code> подключается к нему отдельно от соединения с информационной базой. Этот канал нужен для управления сеансами: <a href="cli-sessions-list.html">просмотра</a>, <a href="cli-sessions-terminate.html">завершения</a>, <a href="cli-sessions-deny.html">запрета</a> и <a href="cli-sessions-allow.html">разрешения входа</a>, в том числе перед монопольной операцией <span class="ref">(<a href="platform.html#t56">56</a>, <a href="platform.html#t57">57</a>)</span>.</p>
