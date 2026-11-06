@@ -160,7 +160,9 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
             .ok_or_else(|| {
                 io::Error::new(
                     ErrorKind::InvalidInput,
-                    format!("cannot stage unrecognized Designer metadata type '{kind}'"),
+                    format!(
+                        "cannot stage unrecognized Designer metadata type '{kind}'; use push --full"
+                    ),
                 )
             })?;
         if !is_safe_path_segment(&name) || name.ends_with(['.', ' ']) {

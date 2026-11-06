@@ -21,7 +21,7 @@ pub enum IbcmdError {
     Spawn(ProcessError),
 
     #[error(
-        "cannot start partial ibcmd import of {file_count} files: operating-system command-line or executable path limit exceeded; choose designer or agent via providers.push when available"
+        "cannot start partial ibcmd import of {file_count} files: operating-system command-line or executable path limit exceeded; use push --full, or choose designer or agent via providers.push when available"
     )]
     PartialImportCommandLineTooLong { file_count: usize },
 
