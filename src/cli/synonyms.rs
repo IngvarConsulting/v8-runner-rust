@@ -106,6 +106,7 @@ pub const SYNONYMS: &[Synonym] = &[
     key(&["pull"], "mode", "without the key"),
     key(&["test"], "no-build", "--no-push"),
     key(&["upload"], "path", "<FILE>"),
+    key(&["upload"], "extension", "--ref"),
     value(&["upload"], "mode", "merge", "combine"),
     value(&["download"], "state", "working", "without the key"),
     value(&["download"], "state", "database", "db"),

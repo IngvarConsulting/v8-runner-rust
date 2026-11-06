@@ -226,7 +226,10 @@ runtime snapshot commit только указанным source-set.
 
 Это materialization сценарии поверх готовых артефактов или publish targets.
 
-- `upload` работает с готовыми `.cf` / `.cfe`.
+- `upload` работает с готовыми `.cf` и `.cfe`; для расширения укажите
+  `--ref <NAME>`. Режим `update` принимает файл поставки `.cf` или обновление `.cfu`
+  и требует XML настроек. Раннер сравнивает версии рабочей конфигурации до и после
+  `/UpdateCfg` и только при подтверждённой смене запускает `/UpdateDBCfg`.
 - `make` / `artifacts` собирают final `.cf`, `.cfe`, `.epf`, `.erf` из исходников и
   публикуют их. База проекта не участвует: пакет собирается во временной базе раннера
   (`use_cases::throwaway_infobase::ThrowawayInfobase`) под `workPath/temp/throwaway-infobases/`

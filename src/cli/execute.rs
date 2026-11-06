@@ -45,6 +45,7 @@ use crate::domain::issue::{Issue, IssueSeverity};
 use crate::domain::launch::{LaunchMode, LaunchResult, LaunchVia};
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
+    UploadArtifactType,
 };
 use crate::domain::runner::{
     launch_key_alias_matches, ExecutionPolicy, ExternalEpfWaitOptions, LaunchClientModeRequest,
@@ -4183,7 +4184,7 @@ pub(crate) struct LoadJsonData<'a> {
     pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: &'a Path,
-    pub artifact_type: ArtifactBuildMode,
+    pub artifact_type: UploadArtifactType,
     pub target_kind: LoadTargetKind,
     pub compatibility_state: CompatibilityState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4242,6 +4243,11 @@ fn load_message(result: &LoadResult, requested: Requested) -> Option<String> {
     let mut message = if requested == Requested::Preview {
         format!(
             "{mode} {} previewed; nothing applied",
+            result.artifact_path.display()
+        )
+    } else if result.mode == LoadMode::Update {
+        format!(
+            "{mode} {} applied successfully",
             result.artifact_path.display()
         )
     } else {
@@ -4801,10 +4807,7 @@ fn render_load_text(
         );
     let mut details = vec![
         format!("target: {target}"),
-        format!(
-            "action: {mode} {}",
-            render_artifact_mode(result.artifact_type)
-        ),
+        format!("action: {mode} {}", result.artifact_type.file_extension()),
         format!("artifact: {}", result.artifact_path.display()),
     ];
     if show_signals {
@@ -4822,6 +4825,9 @@ fn render_load_text(
                 .as_deref()
                 .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
         );
+    }
+    if result.mode == LoadMode::Update && succeeded && !show_signals {
+        append_diagnostics(&mut details, &result.execution.diagnostics);
     }
     details.extend(provider_receipt_details(result.provider.as_ref()));
     single_timeline_outcome(
@@ -5465,6 +5471,7 @@ mod tests {
     };
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
+        UploadArtifactType,
     };
     use crate::domain::runner::{LaunchOptions, RunnerKind};
     use crate::output::presenter::{ColorMode, Presenter};
@@ -6490,7 +6497,7 @@ mod tests {
             provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("main.cf"),
-            artifact_type: ArtifactBuildMode::ConfigurationCf,
+            artifact_type: UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf),
             extension: None,
             duration_ms: 17,
             execution: ExecutionOutcome::new(ExecutionStatus::Succeeded)

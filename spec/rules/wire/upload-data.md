@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.UPLOAD-DATA
-version: 6
+version: 7
 artifact: docs/schemas/command-data/upload.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -8,6 +8,7 @@ check:
   - src/use_cases/load_artifact.rs::execute_reports_cancelled_status_at_update_db_cfg_safe_point
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_load.rs::upload_update_failure_preserves_the_completed_load_receipt
+  - tests/cli_load.rs::vendor_update_requires_a_version_change_before_updating_the_database
   - src/use_cases/load_artifact.rs::a_configuration_probe_cancelled_after_its_start_reports_the_work
   - src/use_cases/load_artifact.rs::an_extension_probe_cancelled_after_its_start_reports_the_work
   - src/use_cases/load_artifact.rs::a_failed_load_after_a_deferred_cancellation_still_names_it
@@ -48,6 +49,13 @@ check:
 общий у всех команд. Саму загрузку исполняет Конфигуратор, но наличие расширения у
 серверной базы проверяет агент; если эта проверка открыла сессию, квитанция называет её
 `endpoint`, в том числе при последующем отказе загрузки. Без открытой сессии поля нет.
+
+**Что изменила версия 7.** Для файла обновления поставщика `.cfu` поле
+`artifact_type` принимает значение `vendor_update_cfu`. Файл поставки `.cf`
+по-прежнему имеет тип `configuration_cf`. Режим `update` оставляет
+`compatibility_state: not_probed`: версию читают для подтверждения результата.
+Нулевой код `/UpdateCfg` сам по себе оставляет `applied: false`. Если версию после
+запуска не удалось прочитать или она прежняя, `/UpdateDBCfg` пропускается.
 
 ## Пример
 

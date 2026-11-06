@@ -1,3 +1,5 @@
+mod vendor_update;
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -13,6 +15,7 @@ use crate::domain::execution::{
 };
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
+    UploadArtifactType,
 };
 use crate::platform::designer::DesignerDsl;
 use crate::platform::extension_inventory::parse_extension_inventory;
@@ -38,9 +41,9 @@ const SUPPORTED_LOAD_ERROR: &str =
     "load currently supports only the Designer provider and format=DESIGNER";
 const UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR: &str =
     "load currently supports only .cf and .cfe artifacts";
-const CFE_REQUIRES_EXTENSION_ERROR: &str = ".cfe artifacts require --extension <name>";
-const UNSUPPORTED_UPDATE_MODE_ERROR: &str =
-    "load --mode update is not supported; use --mode load or --mode merge";
+const CFE_REQUIRES_EXTENSION_ERROR: &str = ".cfe artifacts require --ref <name>";
+const UPDATE_REQUIRES_MAIN: &str =
+    "upload --mode update requires a main-configuration distribution .cf or update .cfu; use --mode combine --ref <name> for extensions";
 
 pub fn execute(
     context: &ExecutionContext,
@@ -67,12 +70,18 @@ type LoadExecutionFailure = UseCaseFailure<LoadResult>;
 struct ResolvedLoadRequest {
     mode: LoadMode,
     artifact_path: PathBuf,
-    artifact_type: ArtifactBuildMode,
+    artifact_type: UploadArtifactType,
     target_kind: LoadTargetKind,
-    settings_path: Option<PathBuf>,
+    settings: Option<ResolvedSettings>,
     extension: Option<String>,
     /// Name of the vendor configuration, when the caller stated it.
     vendor_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedSettings {
+    Merge(PathBuf),
+    Update { source: PathBuf, bytes: Vec<u8> },
 }
 
 impl ResolvedLoadRequest {
@@ -82,6 +91,9 @@ impl ResolvedLoadRequest {
     /// platform refuses the comparison without that name (measured on 8.3.27.2074). No name,
     /// no probe — and no guess either.
     fn comparison_name(&self) -> Option<&str> {
+        if self.mode == LoadMode::Update {
+            return None;
+        }
         match self.target_kind {
             LoadTargetKind::Configuration => self.vendor_name.as_deref(),
             LoadTargetKind::Extension => self.extension.as_deref(),
@@ -224,6 +236,28 @@ fn run_load_selected(
         // The next step is the compatibility probe, and the probe is a Designer run against
         // the infobase. A preview must not dispatch it, so the compatibility state stays
         // `not_probed` — a named case, not a guess — and nothing is reported as applied.
+        let diagnostic = if let Some(ResolvedSettings::Update { source, .. }) = &resolved.settings {
+            let designer = DesignerDsl::new(
+                location.path.clone(),
+                config.v8_connection(),
+                utilities.runner_for(UtilityType::V8),
+                None,
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+            );
+            format!(
+                "would run {} using a private copy of the settings, then /UpdateDBCfg only after a confirmed version change",
+                designer.preview_update_cfg(
+                    &resolved.artifact_path,
+                    source,
+                )
+            )
+        } else {
+            format!(
+                "would load {} via {}; compatibility not probed and nothing applied",
+                target_label(&resolved),
+                location.path.display()
+            )
+        };
         let execution = ExecutionOutcome::new(ExecutionStatus::Succeeded)
             .with_payload(LoadExecutionMetadata {
                 applied: false,
@@ -231,11 +265,7 @@ fn run_load_selected(
                 compatibility_state: CompatibilityState::NotProbed,
                 update_db_cfg_ran: false,
             })
-            .with_diagnostics(vec![format!(
-                "would load {} via {}; compatibility not probed and nothing applied",
-                target_label(&resolved),
-                location.path.display()
-            )]);
+            .with_diagnostics(vec![diagnostic]);
         return Ok(LoadResult {
             provider: None,
             provider_dispatched: false,
@@ -248,10 +278,12 @@ fn run_load_selected(
         });
     }
 
-    log_live_stage(
-        "load: compatibility probe",
-        "[Конфигуратор] comparing infobase compatibility",
-    );
+    if resolved.mode != LoadMode::Update {
+        log_live_stage(
+            "load: compatibility probe",
+            "[Конфигуратор] comparing infobase compatibility",
+        );
+    }
     let probe_result = match probe_compatibility(
         context,
         config,
@@ -301,16 +333,49 @@ fn run_load_selected(
         ));
     }
 
+    let read_version = |stage| {
+        let dsl = build_designer_dsl(
+            context,
+            config,
+            &location.path,
+            utilities.runner_for(UtilityType::V8),
+            stage,
+            InterruptionSafetyClass::GracefulThenKill,
+        )
+        .map_err(|(error, _)| error)?;
+        vendor_update::read_working_version(&config.work_path, &dsl)
+    };
+    let version_before = if resolved.mode == LoadMode::Update {
+        Some(read_version("update-version-before").map_err(|error| {
+            let error = error.with_context(
+                "cannot establish the working configuration version before /UpdateCfg",
+            );
+            let result = failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::ProviderCommand,
+                None,
+                false,
+            );
+            LoadExecutionFailure::with_payload(error, result)
+        })?)
+    } else {
+        None
+    };
+
+    let (apply_action, apply_stage) = match resolved.mode {
+        LoadMode::Load => ("load", "load: apply"),
+        LoadMode::Merge => ("merge", "load: merge"),
+        LoadMode::Update => ("update", "load: update"),
+    };
     let apply_dsl = match build_designer_dsl(
         context,
         config,
         location.path.as_path(),
         utilities.runner_for(UtilityType::V8),
-        match resolved.mode {
-            LoadMode::Load => "load",
-            LoadMode::Merge => "merge",
-            LoadMode::Update => unreachable!("update mode is rejected during validation"),
-        },
+        apply_action,
         InterruptionSafetyClass::CriticalNonAbortable,
     ) {
         Ok(dsl) => dsl,
@@ -328,27 +393,29 @@ fn run_load_selected(
         }
     };
 
-    let apply_stage = match resolved.mode {
-        LoadMode::Load => "load: apply",
-        LoadMode::Merge => "load: merge",
-        LoadMode::Update => unreachable!("update mode is rejected during validation"),
-    };
     log_live_stage(apply_stage, "[Конфигуратор] applying artifact");
-    let apply_result = match resolved.mode {
-        LoadMode::Load => apply_dsl
+    let apply_result = match (resolved.mode, &resolved.settings) {
+        (LoadMode::Load, None) => apply_dsl
             .load_cfg(&resolved.artifact_path, resolved.extension.as_deref())
             .map_err(|error| (AppError::from(error), None)),
-        LoadMode::Merge => apply_dsl
+        (LoadMode::Merge, Some(ResolvedSettings::Merge(settings))) => apply_dsl
             .merge_cfg(
                 &resolved.artifact_path,
-                resolved
-                    .settings_path
-                    .as_deref()
-                    .expect("merge settings were validated"),
+                settings,
                 resolved.extension.as_deref(),
             )
             .map_err(|error| (AppError::from(error), None)),
-        LoadMode::Update => unreachable!("update mode is rejected during validation"),
+        (LoadMode::Update, Some(ResolvedSettings::Update { bytes, .. })) => vendor_update::apply(
+            &config.work_path,
+            &apply_dsl,
+            &resolved.artifact_path,
+            bytes,
+        )
+        .map_err(|error| (error, None)),
+        _ => Err((
+            AppError::Runtime("upload settings do not match its validated mode".into()),
+            None,
+        )),
     };
 
     let apply_result = match apply_result {
@@ -365,12 +432,6 @@ fn run_load_selected(
             );
             return Err(LoadExecutionFailure::with_payload(error, result));
         }
-    };
-
-    let apply_action = match resolved.mode {
-        LoadMode::Load => "load",
-        LoadMode::Merge => "merge",
-        LoadMode::Update => unreachable!("update mode is rejected during validation"),
     };
 
     if let Err(error) = ensure_platform_success(apply_action, &resolved, &apply_result) {
@@ -399,6 +460,43 @@ fn run_load_selected(
         "apply completed successfully",
         apply_result.process.interruption,
     );
+    let version_confirmation = if let Some(before) = version_before {
+        let confirmation = crate::use_cases::interruption::pending_interruption_error(
+            context,
+            "the configuration version after /UpdateCfg",
+        )
+        .map_or_else(|| read_version("update-version-after"), Err)
+        .and_then(|after| {
+            if before == after {
+                Err(AppError::Platform(format!(
+                    "the working configuration version stayed at '{before}'"
+                )))
+            } else {
+                Ok(format!(
+                    "working configuration version changed from '{before}' to '{after}'"
+                ))
+            }
+        });
+        Some(confirmation.map_err(|error| {
+            let error = error.with_context(
+                "/UpdateCfg returned success but the change is unconfirmed; the working configuration may have changed; /UpdateDBCfg was not run",
+            );
+            let mut result = failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::ProviderCommand,
+                apply_result.platform_log_path.clone(),
+                false,
+            );
+            name_deferral(&mut result, apply_deferral.clone());
+            LoadExecutionFailure::with_payload(error, result)
+        })?)
+    } else {
+        None
+    };
+
     if let Some(cancel) = SafePointCancel::noticed(context, SafePoint::Before("update_db_cfg")) {
         let mut result = with_loaded_artifact(interrupted_result_from_resolved(
             &resolved,
@@ -498,7 +596,7 @@ fn run_load_selected(
         "update_db_cfg completed successfully",
         update_result.process.interruption,
     );
-    let (deferred_warnings, deferred_interruptions): (Vec<_>, Vec<_>) =
+    let (mut diagnostics, deferred_interruptions): (Vec<_>, Vec<_>) =
         [apply_deferral, update_deferral]
             .into_iter()
             .flatten()
@@ -510,8 +608,9 @@ fn run_load_selected(
             compatibility_state,
             update_db_cfg_ran: true,
         });
-    if !deferred_warnings.is_empty() {
-        execution = execution.with_diagnostics(deferred_warnings);
+    diagnostics.extend(version_confirmation);
+    if !diagnostics.is_empty() {
+        execution = execution.with_diagnostics(diagnostics);
     }
     if !deferred_interruptions.is_empty() {
         execution = execution.with_interruptions(deferred_interruptions);
@@ -756,9 +855,10 @@ fn validate_probe_mode_compatibility(
     let unproven = || Some(AppError::Validation(unproven_message()));
 
     match (resolved.target_kind, resolved.mode, state) {
-        (_, Update, _) => Some(AppError::Validation(
-            UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
-        )),
+        (Configuration, Update, NotProbed) => None,
+        (Configuration, Update, Supported | Absent) => unproven(),
+        (Configuration, Update, NotEstablished) => Some(AppError::Platform(unproven_message())),
+        (Extension | Unknown, Update, _) => Some(AppError::Validation(UPDATE_REQUIRES_MAIN.into())),
         // Asked and not proven permits no change, in either mode and for either target
         // (DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED). The request was
         // right and the platform did not answer — the infobase did not open or the extension
@@ -817,16 +917,18 @@ fn validate_supported_matrix(config: &AppConfig) -> Option<AppError> {
 }
 
 fn request_snapshot_for_failure_payload(args: &LoadRequest) -> ResolvedLoadRequest {
-    let artifact_type =
-        infer_artifact_type(&args.artifact_path).unwrap_or(ArtifactBuildMode::Unknown);
+    let artifact_type = infer_artifact_type(&args.artifact_path)
+        .unwrap_or(UploadArtifactType::Package(ArtifactBuildMode::Unknown));
     let extension = trim_optional(args.extension.clone());
     let target_kind = match artifact_type {
-        ArtifactBuildMode::ExtensionCfe => LoadTargetKind::Extension,
-        ArtifactBuildMode::ConfigurationCf => LoadTargetKind::Configuration,
-        ArtifactBuildMode::ExternalDataProcessorEpf | ArtifactBuildMode::ExternalReportErf => {
+        UploadArtifactType::Package(ArtifactBuildMode::ExtensionCfe) => LoadTargetKind::Extension,
+        UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf)
+        | UploadArtifactType::VENDOR_UPDATE_CFU => LoadTargetKind::Configuration,
+        UploadArtifactType::Package(ArtifactBuildMode::ExternalDataProcessorEpf)
+        | UploadArtifactType::Package(ArtifactBuildMode::ExternalReportErf) => {
             LoadTargetKind::Unknown
         }
-        ArtifactBuildMode::Unknown => LoadTargetKind::Unknown,
+        UploadArtifactType::Package(ArtifactBuildMode::Unknown) => LoadTargetKind::Unknown,
     };
 
     ResolvedLoadRequest {
@@ -835,7 +937,7 @@ fn request_snapshot_for_failure_payload(args: &LoadRequest) -> ResolvedLoadReque
         artifact_path: PathBuf::from(&args.artifact_path),
         artifact_type,
         target_kind,
-        settings_path: None,
+        settings: None,
         extension,
     }
 }
@@ -844,62 +946,88 @@ fn resolve_request(
     config: &AppConfig,
     args: &LoadRequest,
 ) -> Result<ResolvedLoadRequest, AppError> {
-    if args.mode == LoadMode::Update {
-        return Err(AppError::Validation(
-            UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
-        ));
-    }
-
     let artifact_path = resolve_existing_file(config, &args.artifact_path, "--path")?;
     let artifact_type = infer_artifact_type(&args.artifact_path)
         .ok_or_else(|| AppError::Validation(UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR.to_owned()))?;
     if matches!(
         artifact_type,
-        ArtifactBuildMode::ExternalDataProcessorEpf | ArtifactBuildMode::ExternalReportErf
+        UploadArtifactType::Package(ArtifactBuildMode::ExternalDataProcessorEpf)
+            | UploadArtifactType::Package(ArtifactBuildMode::ExternalReportErf)
     ) {
         return Err(AppError::Validation(
             UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR.to_owned(),
         ));
     }
 
+    if args.mode == LoadMode::Update
+        && !matches!(
+            artifact_type,
+            UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf)
+                | UploadArtifactType::VENDOR_UPDATE_CFU
+        )
+    {
+        return Err(AppError::Validation(UPDATE_REQUIRES_MAIN.into()));
+    }
+    if args.mode != LoadMode::Update && artifact_type == UploadArtifactType::VENDOR_UPDATE_CFU {
+        return Err(AppError::Validation(
+            ".cfu files require --mode update".into(),
+        ));
+    }
+
     let extension = trim_optional(args.extension.clone());
-    let settings_path = match args.mode {
-        LoadMode::Merge => Some(resolve_existing_file(
+    let settings = match args.mode {
+        LoadMode::Merge => Some(ResolvedSettings::Merge(resolve_existing_file(
             config,
             args.settings_path.as_deref().ok_or_else(|| {
                 AppError::Validation("load --mode merge requires --settings <file>".to_owned())
             })?,
             "--settings",
-        )?),
+        )?)),
         LoadMode::Load => {
             if args.settings_path.is_some() {
                 return Err(AppError::Validation(
-                    "--settings is supported only with --mode merge".to_owned(),
+                    "--settings is supported only with --mode combine or --mode update".to_owned(),
                 ));
             }
             None
         }
-        LoadMode::Update => None,
+        LoadMode::Update => {
+            let settings = resolve_existing_file(
+                config,
+                args.settings_path.as_deref().ok_or_else(|| {
+                    AppError::Validation("upload --mode update requires --settings <file>".into())
+                })?,
+                "--settings",
+            )?;
+            Some(ResolvedSettings::Update {
+                bytes: vendor_update::read_settings(&settings)?,
+                source: settings,
+            })
+        }
     };
 
     let (target_kind, extension) = match artifact_type {
-        ArtifactBuildMode::ConfigurationCf => {
+        UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf)
+        | UploadArtifactType::VENDOR_UPDATE_CFU => {
             if extension.is_some() {
                 return Err(AppError::Validation(
-                    ".cf artifacts do not support --extension".to_owned(),
+                    "main-configuration packages do not support --ref".to_owned(),
                 ));
             }
             (LoadTargetKind::Configuration, None)
         }
-        ArtifactBuildMode::ExtensionCfe => {
+        UploadArtifactType::Package(ArtifactBuildMode::ExtensionCfe) => {
             let extension = extension
                 .ok_or_else(|| AppError::Validation(CFE_REQUIRES_EXTENSION_ERROR.to_owned()))?;
             (LoadTargetKind::Extension, Some(extension))
         }
-        ArtifactBuildMode::ExternalDataProcessorEpf | ArtifactBuildMode::ExternalReportErf => {
+        UploadArtifactType::Package(ArtifactBuildMode::ExternalDataProcessorEpf)
+        | UploadArtifactType::Package(ArtifactBuildMode::ExternalReportErf) => {
             unreachable!("external artifacts are rejected above")
         }
-        ArtifactBuildMode::Unknown => unreachable!("unknown artifacts are rejected above"),
+        UploadArtifactType::Package(ArtifactBuildMode::Unknown) => {
+            unreachable!("unknown artifacts are rejected above")
+        }
     };
 
     Ok(ResolvedLoadRequest {
@@ -907,7 +1035,7 @@ fn resolve_request(
         artifact_path,
         artifact_type,
         target_kind,
-        settings_path,
+        settings,
         extension,
         vendor_name: args.vendor_name.clone(),
     })
@@ -963,16 +1091,23 @@ fn refuse_a_transfer_file(raw_path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn infer_artifact_type(raw_path: &str) -> Option<ArtifactBuildMode> {
+fn infer_artifact_type(raw_path: &str) -> Option<UploadArtifactType> {
     let extension = Path::new(raw_path)
         .extension()
         .and_then(|value| value.to_str())?
         .to_ascii_lowercase();
     match extension.as_str() {
-        "cf" => Some(ArtifactBuildMode::ConfigurationCf),
-        "cfe" => Some(ArtifactBuildMode::ExtensionCfe),
-        "epf" => Some(ArtifactBuildMode::ExternalDataProcessorEpf),
-        "erf" => Some(ArtifactBuildMode::ExternalReportErf),
+        "cf" => Some(UploadArtifactType::Package(
+            ArtifactBuildMode::ConfigurationCf,
+        )),
+        "cfu" => Some(UploadArtifactType::VENDOR_UPDATE_CFU),
+        "cfe" => Some(UploadArtifactType::Package(ArtifactBuildMode::ExtensionCfe)),
+        "epf" => Some(UploadArtifactType::Package(
+            ArtifactBuildMode::ExternalDataProcessorEpf,
+        )),
+        "erf" => Some(UploadArtifactType::Package(
+            ArtifactBuildMode::ExternalReportErf,
+        )),
         _ => None,
     }
 }
@@ -1166,7 +1301,7 @@ fn empty_result_from_resolved(
 fn empty_result(
     mode: LoadMode,
     artifact_path: PathBuf,
-    artifact_type: ArtifactBuildMode,
+    artifact_type: UploadArtifactType,
     target_kind: LoadTargetKind,
     compatibility_state: CompatibilityState,
     extension: Option<String>,
@@ -1230,6 +1365,7 @@ mod tests {
     };
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
+        UploadArtifactType,
     };
     #[cfg(unix)]
     use crate::platform::process::HeldCommand;
@@ -1328,9 +1464,11 @@ mod tests {
                     let resolved = ResolvedLoadRequest {
                         mode,
                         artifact_path: PathBuf::from("dist/main.cf"),
-                        artifact_type: ArtifactBuildMode::ConfigurationCf,
+                        artifact_type: UploadArtifactType::Package(
+                            ArtifactBuildMode::ConfigurationCf,
+                        ),
                         target_kind: kind,
-                        settings_path: None,
+                        settings: None,
                         extension: None,
                         vendor_name: None,
                     };
@@ -1342,10 +1480,11 @@ mod tests {
                             "{kind:?}/{mode:?}/{state:?} must refuse: an unproven state permits no change"
                         );
                     }
-                    if matches!(mode, Update) {
-                        assert!(
-                            verdict.is_some(),
-                            "{kind:?}/{mode:?}/{state:?} must refuse: update mode is not supported"
+                    if mode == Update {
+                        assert_eq!(
+                            verdict.is_none(),
+                            kind == Configuration && state == NotProbed,
+                            "{kind:?}/{mode:?}/{state:?}"
                         );
                     }
                 }
@@ -1358,9 +1497,9 @@ mod tests {
         let configuration = ResolvedLoadRequest {
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("dist/main.cf"),
-            artifact_type: ArtifactBuildMode::ConfigurationCf,
+            artifact_type: UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf),
             target_kind: LoadTargetKind::Configuration,
-            settings_path: None,
+            settings: None,
             extension: None,
             vendor_name: None,
         };
@@ -1448,9 +1587,9 @@ mod tests {
         let configuration = ResolvedLoadRequest {
             mode: LoadMode::Merge,
             artifact_path: PathBuf::from("dist/main.cf"),
-            artifact_type: ArtifactBuildMode::ConfigurationCf,
+            artifact_type: UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf),
             target_kind: LoadTargetKind::Configuration,
-            settings_path: None,
+            settings: None,
             extension: None,
             vendor_name: None,
         };
@@ -1673,9 +1812,9 @@ mod tests {
                 let resolved = ResolvedLoadRequest {
                     mode,
                     artifact_path: PathBuf::from("dist/main.cf"),
-                    artifact_type: ArtifactBuildMode::ConfigurationCf,
+                    artifact_type: UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf),
                     target_kind,
-                    settings_path: None,
+                    settings: None,
                     extension: None,
                     vendor_name: None,
                 };
@@ -1821,6 +1960,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn update_requires_readable_settings_with_the_platform_xml_structure() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("release.cfu"), "package").expect("write");
+        let config = sample_config(root, &root.join("1cv8"));
+        let mut request = LoadRequest {
+            vendor_name: None,
+            dry_run: true,
+            mode: LoadMode::Update,
+            artifact_path: "release.cfu".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+        assert!(resolve_request(&config, &request)
+            .expect_err("missing settings")
+            .to_string()
+            .contains("requires --settings"));
+        request.settings_path = Some("settings.xml".to_owned());
+        let settings = root.join("settings.xml");
+        for bad in [
+            "<Settings/>",
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"/>"#,
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects/></Settings><extra/>"#,
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects><Configuration></Objects></Settings>"#,
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects><Configuration><MergeRule>bogus</MergeRule></Configuration></Objects></Settings>"#,
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects>unexpected text</Objects></Settings>"#,
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects><Configuration><MergeRule>DoNotMerge</MergeRule><MergeRule>GetFromSecondConfiguration</MergeRule></Configuration></Objects></Settings>"#,
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects><Object><Properties/></Object></Objects></Settings>"#,
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects><Configuration><Subsystem configuration="Main" includeObjectsFromSubordinateSubsystems="false"/></Configuration></Objects></Settings>"#,
+            r#"<?xml version="1.0"?><?xml version="1.0"?><Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects/></Settings>"#,
+        ] {
+            fs::write(&settings, bad).expect("write");
+            let error = resolve_request(&config, &request).expect_err("invalid settings");
+            assert!(error.to_string().contains("--settings"), "{error}");
+        }
+        fs::write(
+            &settings,
+            r#"<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.2"><Objects><Configuration><MergeRule>GetFromSecondConfiguration</MergeRule></Configuration></Objects></Settings>"#,
+        )
+        .expect("write");
+        let resolved = resolve_request(&config, &request).expect("valid update request");
+        assert_eq!(resolved.mode, LoadMode::Update);
+        assert_eq!(resolved.target_kind, LoadTargetKind::Configuration);
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolve_request_rejects_unsupported_artifacts_and_missing_flags() {
@@ -1856,9 +2041,7 @@ mod tests {
             },
         )
         .expect_err("cfe without extension should fail");
-        assert!(missing_extension
-            .to_string()
-            .contains("require --extension"));
+        assert!(missing_extension.to_string().contains("require --ref"));
     }
 
     /// `std::fs::canonicalize` returns a `\\?\`-prefixed extended-length path on Windows.
@@ -1919,7 +2102,10 @@ mod tests {
             .expect("load result");
 
         assert!(result.execution.is_ok());
-        assert_eq!(result.artifact_type, ArtifactBuildMode::ConfigurationCf);
+        assert_eq!(
+            result.artifact_type,
+            UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf)
+        );
         assert_eq!(
             load_payload(&result).compatibility_state,
             CompatibilityState::NotProbed
@@ -1965,7 +2151,10 @@ mod tests {
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
         let payload = failure.payload.expect("payload");
         assert!(!payload.execution.is_ok());
-        assert_eq!(payload.artifact_type, ArtifactBuildMode::ExtensionCfe);
+        assert_eq!(
+            payload.artifact_type,
+            UploadArtifactType::Package(ArtifactBuildMode::ExtensionCfe)
+        );
         assert_eq!(
             load_payload(&payload).target_kind,
             LoadTargetKind::Extension
@@ -2597,7 +2786,10 @@ mod tests {
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
         let payload = failure.payload.expect("payload");
-        assert_eq!(payload.artifact_type, ArtifactBuildMode::ConfigurationCf);
+        assert_eq!(
+            payload.artifact_type,
+            UploadArtifactType::Package(ArtifactBuildMode::ConfigurationCf)
+        );
         assert_eq!(
             load_payload(&payload).target_kind,
             LoadTargetKind::Configuration
@@ -2628,7 +2820,10 @@ mod tests {
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
         let payload = failure.payload.expect("payload");
-        assert_eq!(payload.artifact_type, ArtifactBuildMode::ExtensionCfe);
+        assert_eq!(
+            payload.artifact_type,
+            UploadArtifactType::Package(ArtifactBuildMode::ExtensionCfe)
+        );
         assert_eq!(
             load_payload(&payload).target_kind,
             LoadTargetKind::Extension
@@ -2658,7 +2853,10 @@ mod tests {
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
         let payload = failure.payload.expect("payload");
-        assert_eq!(payload.artifact_type, ArtifactBuildMode::Unknown);
+        assert_eq!(
+            payload.artifact_type,
+            UploadArtifactType::Package(ArtifactBuildMode::Unknown)
+        );
         assert_eq!(load_payload(&payload).target_kind, LoadTargetKind::Unknown);
         assert_eq!(payload.extension.as_deref(), None);
         assert!(load_message(&payload).contains("only .cf and .cfe"));
@@ -2688,7 +2886,7 @@ mod tests {
         let payload = failure.payload.expect("payload");
         assert_eq!(
             payload.artifact_type,
-            ArtifactBuildMode::ExternalDataProcessorEpf
+            UploadArtifactType::Package(ArtifactBuildMode::ExternalDataProcessorEpf)
         );
         assert_eq!(load_payload(&payload).target_kind, LoadTargetKind::Unknown);
         assert_eq!(payload.extension.as_deref(), None);

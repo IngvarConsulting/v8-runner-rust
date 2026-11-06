@@ -704,6 +704,21 @@ v1_dist.cf -EnableSupport`) и локальной процедурой в `Об�
 нельзя. После `/UpdateCfg` конфигурация БД не обновлена: нужен `/UpdateDBCfg`, его можно
 дописать в тот же запуск Конфигуратора.
 
+**Подтверждение версии на Windows (06.11.2026, 8.3.27.2074, #196).** На отдельной
+файловой копии с тестовой конфигурацией на поддержке и локальной правкой
+`/DumpConfigToFiles <новый каталог> -partial -listFile <список>` со строкой
+`Configuration` выгрузил корневой `Configuration.xml`. Версия рабочей конфигурации
+лежит в `MetaDataObject/Configuration/Properties/Version`. Атрибут `version` корня
+относится к формату выгрузки.
+
+- `/UpdateCfg v2.cfu -Settings do-not-merge.xml` вернул 0. Выборочная выгрузка до и
+  после показала `1.0.0.1`. Раннер вернул 4 и пропустил `/UpdateDBCfg`.
+- С `MergePrioritizingMainConfiguration` и `v2.cfu` или `v2-dist.cf` версия стала
+  `1.0.0.2`. После вызова `/UpdateDBCfg` раннером для `.cfu` хеши `/DumpCfg` и
+  `/DumpDBCfg` совпали.
+- Обычный `.cf` от `/DumpCfg` вернул 1 на исходной базе на поддержке, версия осталась
+  `1.0.0.1`.
+
 ## Прямой шлюз автономного сервера
 
 Замер 06.10.2026. Задача: [#178](https://github.com/IngvarConsulting/v8-runner-rust/issues/178). Платформа 8.3.27.2074, macOS.

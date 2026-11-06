@@ -156,7 +156,23 @@ pub fn extract_configuration_logical_name(
         return Ok(None);
     }
 
-    extract_configuration_name(content)
+    extract_configuration_property(content, is_configuration_name_path)
+}
+
+/// Version of the main configuration, as exported by Designer.
+pub fn extract_designer_configuration_version(
+    content: &str,
+) -> Result<Option<String>, SourceDescriptorParseError> {
+    extract_configuration_property(content, |path| {
+        matches!(
+            path,
+            [root, configuration, properties, version]
+                if root == "MetaDataObject"
+                    && configuration == "Configuration"
+                    && properties == "Properties"
+                    && version == "Version"
+        )
+    })
 }
 
 pub fn scan_designer_external_root(
@@ -376,12 +392,15 @@ fn extract_logical_name(content: &str) -> Result<Option<String>, ExternalDescrip
     Ok(logical_name)
 }
 
-fn extract_configuration_name(content: &str) -> Result<Option<String>, SourceDescriptorParseError> {
+fn extract_configuration_property(
+    content: &str,
+    is_property: impl Fn(&[String]) -> bool,
+) -> Result<Option<String>, SourceDescriptorParseError> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut stack = Vec::<String>::new();
-    let mut logical_name = None;
+    let mut value = None;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -392,10 +411,8 @@ fn extract_configuration_name(content: &str) -> Result<Option<String>, SourceDes
                 stack.push(xml_local_name(event.name().as_ref()));
                 stack.pop();
             }
-            Ok(Event::Text(text))
-                if logical_name.is_none() && is_configuration_name_path(&stack) =>
-            {
-                logical_name = Some(
+            Ok(Event::Text(text)) if value.is_none() && is_property(&stack) => {
+                value = Some(
                     text.unescape()
                         .map_err(|error| SourceDescriptorParseError::Xml(error.to_string()))?
                         .into_owned(),
@@ -417,7 +434,7 @@ fn extract_configuration_name(content: &str) -> Result<Option<String>, SourceDes
         return Err(SourceDescriptorParseError::UnexpectedEof);
     }
 
-    Ok(logical_name)
+    Ok(value)
 }
 
 fn is_configuration_name_path(stack: &[String]) -> bool {
