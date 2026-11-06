@@ -577,7 +577,7 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("failed to create the throwaway infobase"),
+            message.contains("failed to create the runner infobase"),
             "{message}"
         );
     }

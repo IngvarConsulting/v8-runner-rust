@@ -294,7 +294,8 @@ impl PreparedBuild {
 impl BuildSession {
     pub(super) fn request_full(&mut self) {
         self.force_pending = !self.started;
-        self.full_translation = !self.started;
+        // The walk asks for every set of the run; the request outlives its first set.
+        self.full_translation |= !self.started;
     }
 
     /// `--full` translates every EDT set of the run again, each of them once.
@@ -735,8 +736,12 @@ mod tests {
     fn a_full_build_translates_every_set_of_the_run_once() {
         let mut session = BuildSession::default();
         session.request_full();
-
         assert!(session.takes_full_translation("main"));
+        session.started = true;
+
+        // Обход без набора просит полную сборку у каждого набора прогона.
+        session.request_full();
+        assert!(!session.force_pending, "the base is rebuilt only once");
         assert!(session.takes_full_translation("ext"));
         assert!(!session.takes_full_translation("main"));
     }
