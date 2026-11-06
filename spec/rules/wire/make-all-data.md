@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.MAKE-ALL-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/make-all.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -67,3 +67,5 @@ check:
   "duration_ms": 6500
 }
 ```
+
+Каждая выполненная сборка в `sets` называет режим и причину в `execution.payload.build`.

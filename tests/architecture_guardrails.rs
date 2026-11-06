@@ -431,7 +431,7 @@ fn an_ibcmd_process_is_built_only_by_those_who_give_it_a_data_directory() {
         ),
         [
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
-            "crate::use_cases::throwaway_infobase::ThrowawayInfobase::ibcmd",
+            "crate::use_cases::throwaway_infobase::FileInfobase::ibcmd",
         ]
         .map(str::to_owned)
         .into_iter()

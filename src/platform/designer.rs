@@ -128,13 +128,35 @@ impl<'a> DesignerDsl<'a> {
         list_file: &Path,
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, DesignerError> {
+        self.load_config_from_files_partial_with_policy(source_dir, list_file, extension, true)
+    }
+
+    /// Partial load for package builds, leaving the source tree untouched.
+    pub fn load_config_from_files_partial_untouched(
+        &self,
+        source_dir: &Path,
+        list_file: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        self.load_config_from_files_partial_with_policy(source_dir, list_file, extension, false)
+    }
+
+    fn load_config_from_files_partial_with_policy(
+        &self,
+        source_dir: &Path,
+        list_file: &Path,
+        extension: Option<&str>,
+        update_dump_info: bool,
+    ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/LoadConfigFromFiles".to_owned());
         args.push(source_dir.display().to_string());
         args.push("-partial".to_owned());
         args.push("-listFile".to_owned());
         args.push(list_file.display().to_string());
-        args.push("-updateConfigDumpInfo".to_owned());
+        if update_dump_info {
+            args.push("-updateConfigDumpInfo".to_owned());
+        }
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());

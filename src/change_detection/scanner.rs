@@ -65,6 +65,53 @@ pub struct HashedFile {
 pub struct ScanSnapshot {
     pub scan_started_at: u64,
     pub files: Vec<HashedFile>,
+    pub has_untracked_links: bool,
+}
+
+/// A single-set make may publish inside its source set. Keep its lock, staged
+/// packages and publication metadata out of the snapshot of platform inputs.
+fn is_build_artifact(entry: &walkdir::DirEntry, name: &str) -> bool {
+    if entry
+        .path()
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            ["cf", "cfe", "epf", "erf"]
+                .iter()
+                .any(|package| extension.eq_ignore_ascii_case(package))
+        })
+    {
+        return true;
+    }
+    if name
+        .strip_prefix(".artifacts-")
+        .and_then(|value| value.split_once(".lock"))
+        .is_some_and(|(hash, _)| {
+            hash.len() == 32 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return true;
+    }
+    let package_backup = name.starts_with('.')
+        && [
+            ".cf.backup-",
+            ".cfe.backup-",
+            ".epf.backup-",
+            ".erf.backup-",
+        ]
+        .iter()
+        .any(|suffix| name.contains(suffix));
+    package_backup
+        || name.ends_with(".meta.json")
+            && (name.starts_with(".artifacts-stage-")
+                || name.starts_with(".artifacts-backup-")
+                || name.starts_with(".convert-stage-"))
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ScanScope {
+    Push,
+    Build,
 }
 
 /// Hash every selected regular file, including equal-size edits with exactly the old
@@ -72,7 +119,7 @@ pub struct ScanSnapshot {
 /// successful post-publication bookkeeping supplies an always-false predicate.
 #[cfg(test)]
 pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSnapshot, ScanError> {
-    scan_excluding(root, None, interrupted)
+    scan_in_scope(root, None, interrupted, ScanScope::Push)
 }
 
 /// `workPath` under a source-set root, named as the walk of that root names it. A set in the
@@ -84,11 +131,12 @@ pub fn work_path_inside(root: &Path, work_path: &Path) -> Option<PathBuf> {
     (!relative.as_os_str().is_empty()).then(|| root.join(relative))
 }
 
-/// [`scan`] that does not enter `excluded`.
-pub fn scan_excluding(
+/// Hash the files selected by the scan scope, excluding the supplied directory.
+pub(super) fn scan_in_scope(
     root: &Path,
-    excluded: Option<PathBuf>,
+    excluded: Option<&Path>,
     interrupted: &mut dyn FnMut() -> bool,
+    scope: ScanScope,
 ) -> Result<ScanSnapshot, ScanError> {
     check_interruption(interrupted)?;
     let scan_started_at =
@@ -97,14 +145,21 @@ pub fn scan_excluding(
             source,
         })?;
     let mut files = Vec::new();
+    let mut has_untracked_links = false;
 
-    for entry in source_entries_excluding(root, excluded) {
+    for entry in source_entries(root, excluded, scope) {
         check_interruption(interrupted)?;
         let entry = entry.map_err(|e| ScanError::Walk {
             path: root.to_path_buf(),
             source: e,
         })?;
-        if !is_source_file(&entry) {
+        if matches!(scope, ScanScope::Build) && entry.file_type().is_symlink() {
+            // The platform may consume a link's contents. An untracked link prevents reuse
+            // but still permits the same fresh full load that the platform handled before.
+            has_untracked_links = true;
+        }
+
+        if !is_source_file(&entry, root, scope) {
             continue;
         }
         let path = entry.path();
@@ -135,6 +190,7 @@ pub fn scan_excluding(
     Ok(ScanSnapshot {
         scan_started_at,
         files,
+        has_untracked_links,
     })
 }
 
@@ -195,12 +251,6 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
-pub(super) fn source_entries(
-    root: &Path,
-) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
-    source_entries_excluding(root, None)
-}
-
 /// A set copied for the agent keeps a form named `build`: below the top level such a name is
 /// metadata. Generated directories live at the top, the others are named by their paths.
 pub(crate) fn top_level_source_entries(
@@ -212,42 +262,53 @@ pub(crate) fn top_level_source_entries(
         .into_iter()
         .filter_entry(move |entry| {
             entry.depth() == 0
-                || !((entry.depth() == 1 && is_ignored_dir(entry))
+                || !((entry.depth() == 1 && is_ignored_dir(entry, ScanScope::Push))
                     || excluded.iter().any(|path| path == entry.path()))
         })
 }
 
 /// The entries of a source tree, without the generated directories and `excluded`.
-pub(crate) fn source_entries_excluding(
+pub(super) fn source_entries<'a>(
     root: &Path,
-    excluded: Option<PathBuf>,
-) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    excluded: Option<&'a Path>,
+    scope: ScanScope,
+) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> + 'a {
     WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_entry(move |entry| {
-            entry.depth() == 0
-                || !(is_ignored_dir(entry) || excluded.as_deref() == Some(entry.path()))
+            entry.depth() == 0 || !(is_ignored_dir(entry, scope) || excluded == Some(entry.path()))
         })
 }
 
-pub(super) fn is_source_file(entry: &walkdir::DirEntry) -> bool {
-    entry.file_type().is_file() && !entry.file_name().to_str().is_some_and(is_ignored_file)
+pub(super) fn is_source_file(entry: &walkdir::DirEntry, root: &Path, scope: ScanScope) -> bool {
+    entry.file_type().is_file()
+        && !entry.file_name().to_str().is_some_and(|name| match scope {
+            ScanScope::Push => is_ignored_file(name),
+            ScanScope::Build => {
+                entry.path().parent() == Some(root) && is_ignored_file(name)
+                    || is_build_artifact(entry, name)
+            }
+        })
 }
 
-fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
+fn is_ignored_dir(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
     if !entry.file_type().is_dir() {
         return false;
     }
     let Some(name) = entry.file_name().to_str() else {
         return false;
     };
-    IGNORED_DIRS.contains(&name)
+    match scope {
+        ScanScope::Push => IGNORED_DIRS.contains(&name),
+        // A metadata object can itself be named build, target, temp, or tmp.
+        ScanScope::Build => matches!(name, ".git" | ".gradle" | ".build" | ".yaxunit"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{scan, scan_excluding, work_path_inside, ScanSnapshot};
+    use super::{scan, scan_in_scope, work_path_inside, ScanScope, ScanSnapshot};
     use crate::change_detection::file_state::mtime_nanos;
     use std::fs::{self, File};
     use std::path::Path;
@@ -288,7 +349,8 @@ mod tests {
 
         let excluded = work_path_inside(&root, &work);
         assert_eq!(excluded.as_deref(), Some(work.as_path()));
-        let snapshot = scan_excluding(&root, excluded, &mut || false).expect("scan");
+        let snapshot = scan_in_scope(&root, excluded.as_deref(), &mut || false, ScanScope::Push)
+            .expect("scan");
 
         assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
         assert_eq!(work_path_inside(&root, dir.path()), None);

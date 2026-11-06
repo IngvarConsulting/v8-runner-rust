@@ -20,6 +20,11 @@ use support::command_data::assert_data_matches_one_of;
 use support::{temp_workspace, v8_runner_command, write_shell_script};
 
 const DESIGNER: &str = r#"root="$(dirname "$0")/.."
+if [ "$1" = CREATEINFOBASE ]; then
+  db=$(printf '%s' "${2#File=}" | tr -d "'")
+  mkdir -p "$db"
+  printf 'database' > "$db/1Cv8.1CD"
+fi
 out=''
 target=''
 extension=''
@@ -36,6 +41,7 @@ for argument in "$@"; do
   case "$previous" in
     /Out) out="$argument" ;;
     /DumpCfg) target="$argument" ;;
+    -listFile) cp "$argument" "$root/partial-list" ;;
     -Extension) extension="$argument" ;;
   esac
   if [ "$argument" = /DumpDBCfgList ]; then list=1; fi
@@ -172,11 +178,10 @@ fn make_without_a_set_builds_every_set_into_the_directory() {
     );
 }
 
-/// Обход `make` собирает все наборы в одной временной базе раннера под `workPath`: она
-/// создаётся один раз, основная конфигурация загружается в неё один раз, расширения — поверх,
-/// база проекта не открывается, а после обхода база убирается.
+/// Обход `make` собирает все наборы в одной базе сборки. Она сохраняется между прогонами;
+/// основная конфигурация загружается один раз, расширения ложатся поверх.
 #[test]
-fn make_without_a_set_builds_every_package_in_one_throwaway_base() {
+fn make_without_a_set_builds_every_package_in_one_build_infobase() {
     let project = Project::new(&[]);
     let output = project.run(&["make", "--output", "out"]);
     let envelope = envelope(&output);
@@ -205,26 +210,203 @@ fn make_without_a_set_builds_every_package_in_one_throwaway_base() {
             "{calls}"
         );
     }
-    let throwaway = project.root.join("work/temp/throwaway-infobases");
+    let build_base = project.root.join("work/temp/build-infobase");
     assert!(
         lines
             .iter()
             .filter(|line| !line.starts_with("CREATEINFOBASE"))
-            .all(|line| line.contains(&throwaway.display().to_string())),
-        "every call goes to the throwaway base: {calls}"
+            .all(|line| line.contains(&build_base.display().to_string())),
+        "every call goes to the build infobase: {calls}"
     );
     assert!(
         !calls.contains("File=ib"),
         "the project base is untouched: {calls}"
     );
     assert!(!calls.contains("-updateConfigDumpInfo"), "{calls}");
-    assert_eq!(
-        fs::read_dir(&throwaway)
-            .map(|entries| entries.count())
-            .unwrap_or(0),
-        0,
-        "the throwaway base is removed after the walk"
+    assert!(build_base.join("ib/1Cv8.1CD").is_file());
+    assert!(!project.root.join("work/temp/throwaway-infobases").exists());
+}
+
+#[test]
+fn make_reuses_an_edt_build_infobase_until_forced() {
+    let project = Project::new(&[]);
+    let source = project.root.join("src/cf");
+    let module = source.join("src/Configuration/Module.bsl");
+    fs::create_dir_all(module.parent().expect("module parent")).expect("source");
+    fs::write(&module, "// initial").expect("module");
+    fs::write(
+        source.join(".project"),
+        "<projectDescription><name>Main</name><natures><nature>com._1c.g5.v8.dt.core.V8ConfigurationNature</nature></natures></projectDescription>",
+    )
+    .expect("EDT project descriptor");
+    fs::create_dir(source.join("DT-INF")).expect("manifest directory");
+    fs::write(
+        source.join("DT-INF/PROJECT.PMF"),
+        "Manifest-Version: 1.0\nRuntime-Version: 8.3.27\n",
+    )
+    .expect("EDT project manifest");
+    fs::write(
+        source.join("src/Configuration/Configuration.mdo"),
+        "<Configuration/>",
+    )
+    .expect("EDT metadata marker");
+    fs::write(
+        project.root.join("v8project.yaml"),
+        "workPath: work\nformat: EDT\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src/cf\ntools:\n  platform:\n    path: platform\n  edt_cli:\n    path: platform/bin/1cedtcli\n",
+    )
+    .expect("project config");
+    write_shell_script(
+        &project.root.join("platform/bin/1cedtcli"),
+        r#"root="$(dirname "$0")/.."
+target=''
+source=''
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = --configuration-files ]; then target="$argument"; fi
+  if [ "$previous" = --project ]; then source="$argument"; fi
+  previous="$argument"
+done
+test -n "$target" && test -n "$source" || exit 13
+printf '%s\n' "$*" >> "$root/edt-calls"
+mkdir -p "$target/CommonModules/Demo/Ext"
+printf '<Configuration/>' > "$target/Configuration.xml"
+printf '<CommonModule/>' > "$target/CommonModules/Demo.xml"
+cp "$source/src/Configuration/Module.bsl" "$target/CommonModules/Demo/Ext/Module.bsl"
+"#,
     );
+    let build_base = project.root.join("work/temp/build-infobase");
+    let edt_log = project.root.join("platform/edt-calls");
+    let run = |options: &[&str]| {
+        let mut args = vec!["make", "main", "--output", "out/main.cf"];
+        args.extend_from_slice(options);
+        let output = project.run(&args);
+        let answer = envelope(&output);
+        assert!(output.status.success(), "{answer}");
+        answer
+    };
+
+    let preview = run(&["--dry-run", "--full"]);
+    assert_eq!(preview["data"]["provider_dispatched"], false, "{preview}");
+    assert!(
+        preview["data"]["execution"]["payload"]["build"].is_null(),
+        "{preview}"
+    );
+    assert!(!build_base.exists());
+    assert!(!edt_log.exists());
+    assert!(project.calls().is_empty());
+
+    let first = run(&[]);
+    assert_eq!(
+        first["data"]["execution"]["payload"]["build"]["mode"], "full",
+        "{first}"
+    );
+    let original_calls = project.calls();
+    assert_eq!(original_calls.lines().count(), 3, "{original_calls}");
+    let original_edt = fs::read_to_string(&edt_log).expect("first EDT export");
+    let actual_source = original_edt
+        .split_whitespace()
+        .skip_while(|arg| *arg != "--project")
+        .nth(1)
+        .expect("EDT --project argument");
+    assert_eq!(
+        fs::canonicalize(actual_source).expect("actual source"),
+        fs::canonicalize(&source).expect("expected source"),
+        "{original_edt}"
+    );
+
+    let second = run(&["--clean-before-execution"]);
+    assert_eq!(
+        second["data"]["execution"]["payload"]["build"]["mode"], "unchanged",
+        "{second}"
+    );
+    assert_eq!(fs::read_to_string(&edt_log).expect("EDT log"), original_edt);
+    assert!(build_base.join("ib/1Cv8.1CD").is_file());
+    let second_calls = project.calls();
+    let second_run = second_calls
+        .strip_prefix(&original_calls)
+        .expect("second run");
+    assert_eq!(second_run.lines().count(), 1, "{second_run}");
+    assert!(second_run.contains("/DumpCfg"), "{second_run}");
+
+    fs::write(&module, "// changed").expect("modified module");
+    let partial = run(&[]);
+    assert_eq!(
+        partial["data"]["execution"]["payload"]["build"]["mode"], "partial",
+        "{partial}"
+    );
+    assert_eq!(
+        fs::read_to_string(&edt_log)
+            .expect("EDT log")
+            .lines()
+            .count(),
+        2
+    );
+    let modified_calls = project.calls();
+    let modified_run = modified_calls
+        .strip_prefix(&second_calls)
+        .expect("modified run");
+    assert_eq!(modified_run.lines().count(), 2, "{modified_run}");
+    assert!(
+        modified_run.contains("-partial -listFile"),
+        "{modified_run}"
+    );
+    assert!(modified_run.contains("/DumpCfg"), "{modified_run}");
+    assert!(
+        !modified_run.contains("-updateConfigDumpInfo"),
+        "{modified_run}"
+    );
+    assert!(!modified_run.contains("/UpdateDBCfg"), "{modified_run}");
+    let list =
+        fs::read_to_string(project.root.join("platform/partial-list")).expect("partial list");
+    assert!(list.contains("CommonModules/Demo/Ext/Module.bsl"), "{list}");
+    assert!(list.contains("CommonModules/Demo.xml"), "{list}");
+
+    let sentinel = build_base.join("ib/old-build");
+    fs::write(&sentinel, "old build").expect("sentinel");
+    let full = run(&["--full"]);
+    assert_eq!(
+        full["data"]["execution"]["payload"]["build"]["mode"], "full",
+        "{full}"
+    );
+    assert!(
+        full["data"]["execution"]["payload"]["build"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{full}"
+    );
+    assert!(!sentinel.exists(), "the old infobase was replaced");
+    assert!(build_base.join("ib/1Cv8.1CD").is_file());
+    let full_calls = project.calls();
+    let forced_run = full_calls
+        .strip_prefix(&modified_calls)
+        .expect("forced run");
+    assert!(forced_run.starts_with("CREATEINFOBASE"), "{forced_run}");
+    assert!(forced_run.contains("/LoadConfigFromFiles"), "{forced_run}");
+    assert!(!forced_run.contains("-partial"), "{forced_run}");
+}
+
+#[test]
+fn make_reuses_the_build_infobase_when_the_package_is_inside_the_source_set() {
+    let project = Project::new(&[]);
+    let source = project.root.join("src/cf");
+    fs::write(source.join("Configuration.xml"), "<Configuration/>").expect("descriptor");
+    let args = ["make", "main", "--output", "src/cf/release.cf"];
+    let output = project.run(&args);
+    assert!(output.status.success(), "{}", envelope(&output));
+    assert!(source.join("release.cf").is_file());
+    let first = project.calls();
+
+    let output = project.run(&args);
+    let answer = envelope(&output);
+    assert!(output.status.success(), "{answer}");
+    assert_eq!(
+        answer["data"]["execution"]["payload"]["build"]["mode"], "unchanged",
+        "{answer}"
+    );
+    let second = project.calls();
+    let commands = second.strip_prefix(&first).expect("second run");
+    assert_eq!(commands.lines().count(), 1, "{commands}");
+    assert!(commands.contains("/DumpCfg"), "{commands}");
 }
 
 /// `make` базу проекта не выбирает: без местного слоя и без `origin` он собирает пакет, а

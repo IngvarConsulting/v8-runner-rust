@@ -216,12 +216,11 @@ window.RUNNER_DATA = (function () {
     },
     {
       id: 'make', verb: 'make', title: 'Собрать пакет из исходников',
-      what: 'Собирает .cf, .cfe, .epf, .erf из исходников; база не нужна.',
+      what: 'Собирает .cf, .cfe, .epf, .erf из исходников; база проекта не нужна.',
       cmd: function (ctx) { return (ctx.type === 'EXTERNAL' ? 'v8-runner make --output .build/epf' : ctx.type === 'EXTENSION' ? 'v8-runner make my-ext --output .build/ext.cfe' : 'v8-runner make --output .build/main.cf'); },
       applies: function (ctx) { return null; },
       target: function (ctx) {
-        // Пакет собирается из исходников без базы: ibcmd config import --out. Конфигуратор — запасной путь через временную базу.
-        return { chain: [P.ibcmd, P.rs, P.designer], config: ['source-set[]'], note: 'база не нужна: ibcmd собирает пакет из XML, ibcmd-rs — без платформы; Конфигуратор — через временную базу' };
+        return { chain: [P.designer, P.ibcmd], config: ['source-set[]'], note: 'своя постоянная база сборки; --full пересоздаёт её' };
       }
     },
     {
