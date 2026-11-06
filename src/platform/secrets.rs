@@ -63,12 +63,18 @@ enum Hidden {
     SecretsAndIdentities,
 }
 
+#[derive(Clone, Copy)]
+enum Input {
+    Argument,
+    Prose,
+}
+
 /// Маскирует секреты в аргументах превью, оставляя имя пользователя читаемым.
 ///
 /// `secrets` несёт значения, о которых известно, что они конфиденциальны: они
 /// маскируются везде, где встретятся, даже приклеенными к незнакомому ключу.
 pub fn mask_preview_args(args: &[String], secrets: &[&str]) -> Vec<String> {
-    mask(args, Hidden::Secrets, secrets)
+    mask(args, Hidden::Secrets, secrets, Input::Argument)
 }
 
 /// Маскирует секреты в чужой прозе — выводе инструмента, а не в argv раннера.
@@ -82,10 +88,16 @@ pub fn mask_text(text: &str, secrets: &[&str]) -> String {
         std::slice::from_ref(&text.to_owned()),
         Hidden::SecretsAndIdentities,
         secrets,
+        Input::Prose,
     )
     .into_iter()
     .next()
     .unwrap_or_default()
+}
+
+/// Скрывает известные значения в диагностике, сохраняя остальной текст дословно.
+pub fn mask_known_secrets(text: &str, secrets: &[&str]) -> String {
+    render_masked(text, Vec::new(), secrets)
 }
 
 /// Составляет показ команды для отказа и журнала.
@@ -97,11 +109,16 @@ pub fn mask_text(text: &str, secrets: &[&str]) -> String {
 pub fn render_masked_command(program: &Path, args: &[String]) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
     parts.push(program.display().to_string());
-    parts.extend(mask(args, Hidden::SecretsAndIdentities, &[]));
+    parts.extend(mask(
+        args,
+        Hidden::SecretsAndIdentities,
+        &[],
+        Input::Argument,
+    ));
     parts.join(" ")
 }
 
-fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
+fn mask(args: &[String], hidden: Hidden, secrets: &[&str], input: Input) -> Vec<String> {
     let mut masked = Vec::with_capacity(args.len());
     let mut detached = false;
     let mut address = false;
@@ -127,7 +144,7 @@ fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
         }
         // Connection values are opaque before flag tokenization: spaces or /P
         // inside a password must not change the detached-argument state.
-        let mut ranges = connection_ranges(arg, hidden);
+        let mut ranges = connection_ranges(arg, hidden, input);
         let probe = opaque_probe(arg, &ranges);
         let mut offset = 0;
         for (word, spacing) in words(&probe) {
@@ -138,11 +155,12 @@ fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
                 match flag_value_start(word, hidden) {
                     Some(start) if start == word.len() => detached = true,
                     Some(start) => ranges.push(offset + start..offset + word.len()),
-                    None => ranges.extend(
+                    None if matches!(input, Input::Argument) => ranges.extend(
                         userinfo_ranges(word, true, hidden)
                             .into_iter()
                             .map(|range| offset + range.start..offset + range.end),
                     ),
+                    None => {}
                 }
             }
             offset += word.len() + spacing.len();
@@ -313,13 +331,21 @@ pub fn mask_connection_string(value: &str) -> String {
 /// которые разбор по сегментам не увидел (строка, целиком взятая в кавычки), затем
 /// userinfo адреса со схемой.
 fn mask_connection_value(value: &str, hidden: Hidden) -> String {
-    render_masked(value, connection_ranges(value, hidden), &[])
+    render_masked(
+        value,
+        connection_ranges(value, hidden, Input::Argument),
+        &[],
+    )
 }
 
-fn connection_ranges(value: &str, hidden: Hidden) -> Vec<Range<usize>> {
+fn connection_ranges(value: &str, hidden: Hidden, input: Input) -> Vec<Range<usize>> {
     let mut ranges = segment_ranges(value, hidden);
     ranges.extend(hidden_key_ranges(&opaque_probe(value, &ranges), hidden));
-    ranges.extend(userinfo_ranges(&opaque_probe(value, &ranges), true, hidden));
+    let probe = opaque_probe(value, &ranges);
+    ranges.extend(match input {
+        Input::Argument => userinfo_ranges(&probe, true, hidden),
+        Input::Prose => prose_userinfo_ranges(&probe, hidden),
+    });
     ranges
 }
 
@@ -473,16 +499,16 @@ fn is_client_address_key(arg: &str) -> bool {
 
 /// Прячет пароль из userinfo адреса: `http://alice:pass@host/base` → `http://alice:***@host/base`.
 ///
-/// Маскируется только то, что после `:`. Голое имя пользователя секретом не является, а
-/// спрятать его целиком значит сделать адрес неузнаваемым.
+/// При `Hidden::Secrets` маскируется только то, что после `:`. Имя пользователя
+/// остаётся видимым, чтобы адрес можно было узнать.
 ///
 /// `require_scheme` разделяет два случая. У значения `/WS` схемы может не быть вовсе —
 /// поле `infobase.web.url` не валидируется, — поэтому там адресом считается и голый
 /// authority. В любом другом аргументе без схемы на адрес похож и путь вида
 /// `C:\dir@host`, и маскировать его значило бы портить читаемое.
 ///
-/// Имя остаётся при `Hidden::Secrets`; `Hidden::SecretsAndIdentities` прячет и его, как
-/// прячет `Usr=` и `/N`: `***:***@` или `***@`.
+/// `Hidden::SecretsAndIdentities` прячет и имя пользователя, как прячет `Usr=` и `/N`:
+/// `***:***@` или `***@`.
 fn mask_userinfo(value: &str, require_scheme: bool, hidden: Hidden) -> String {
     render_masked(value, userinfo_ranges(value, require_scheme, hidden), &[])
 }
@@ -494,10 +520,61 @@ fn userinfo_ranges(value: &str, require_scheme: bool, hidden: Hidden) -> Vec<Ran
         None if value.starts_with("//") => "//".len(),
         None => 0,
     };
-    let end = value[start..]
-        .find(['/', '?', '#'])
-        .map_or(value.len(), |at| start + at);
-    let authority = &value[start..end];
+    authority_userinfo_ranges(authority_prefix(&value[start..]), start, hidden)
+}
+
+fn authority_prefix(value: &str) -> &str {
+    value.split(['/', '?', '#']).next().unwrap_or(value)
+}
+
+/// В прозе пробел закрывает адрес. Явное значение в кавычках, за `ws=` или `/WS`
+/// может содержать пробел, поэтому у него своя граница.
+fn prose_userinfo_ranges(value: &str, hidden: Hidden) -> Vec<Range<usize>> {
+    value
+        .match_indices("://")
+        .flat_map(|(scheme_end, delimiter)| {
+            let start = scheme_end + delimiter.len();
+            let authority = authority_prefix(&value[start..]);
+            let prefix = value[..scheme_end].trim_end_matches(|ch: char| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')
+            });
+            let key_prefix = prefix.trim_end_matches([' ', '\t']);
+            let connection_key = key_prefix
+                .strip_suffix('=')
+                .and_then(|prefix| {
+                    trailing_web_key(prefix.trim_end_matches([' ', '\t']), "ws".len())
+                })
+                .filter(|(_, key)| key.eq_ignore_ascii_case("ws"));
+            let quote =
+                connection_key.map_or_else(|| prefix.chars().next_back(), |(before, _)| before);
+            let end = match quote {
+                Some('"') => closing_quote_start(authority, "\""),
+                Some('\'') => closing_quote_start(authority, "'"),
+                _ if connection_key.is_some() => authority.find([';', '\r', '\n']),
+                _ if key_prefix.len() < prefix.len()
+                    && trailing_web_key(key_prefix, "/WS".len())
+                        .is_some_and(|(_, key)| is_client_address_key(key)) =>
+                {
+                    authority.find(['\r', '\n'])
+                }
+                _ => authority.find(char::is_whitespace),
+            };
+            authority_userinfo_ranges(&authority[..end.unwrap_or(authority.len())], start, hidden)
+        })
+        .collect()
+}
+
+/// Ищет ключ заданной длины по ближайшей границе слева.
+fn trailing_web_key(prefix: &str, key_len: usize) -> Option<(Option<char>, &str)> {
+    let start = prefix.len().checked_sub(key_len)?;
+    let (before, key) = prefix.split_at_checked(start)?;
+    let boundary = before.chars().next_back();
+    boundary
+        .is_none_or(|ch| ch.is_whitespace() || matches!(ch, ';' | '"' | '\''))
+        .then_some((boundary, key))
+}
+
+fn authority_userinfo_ranges(authority: &str, start: usize, hidden: Hidden) -> Vec<Range<usize>> {
     let Some(at) = authority.rfind('@') else {
         return Vec::new();
     };
@@ -549,16 +626,22 @@ fn hidden_value_len(rest: &str) -> usize {
 /// Длина значения, открытого кавычкой `quote`, вместе с закрывающей: `quote`, за которой
 /// идёт ещё одна `quote`, — экранированная кавычка внутри значения.
 fn quoted_value_len(rest: &str, quote: &str) -> usize {
-    let mut cursor = quote.len();
+    closing_quote_start(&rest[quote.len()..], quote).map_or(rest.len(), |end| end + 2 * quote.len())
+}
+
+/// Закрывающая кавычка в тексте после открывающей. Удвоенная входит в значение.
+fn closing_quote_start(rest: &str, quote: &str) -> Option<usize> {
+    let mut cursor = 0;
     while let Some(found) = rest[cursor..].find(quote) {
-        let after = cursor + found + quote.len();
+        let at = cursor + found;
+        let after = at + quote.len();
         if rest[after..].starts_with(quote) {
             cursor = after + quote.len();
         } else {
-            return after;
+            return Some(at);
         }
     }
-    rest.len()
+    None
 }
 
 /// Ближайший скрываемый ключ строки соединения после `from`: смещение ключа и смещение
@@ -676,6 +759,70 @@ mod tests {
             ("unchanged", vec![""], "unchanged"),
         ] {
             assert_eq!(super::render_masked(text, Vec::new(), &secrets), expected);
+        }
+    }
+
+    #[test]
+    fn prose_keeps_the_words_after_a_url() {
+        for text in [
+            "see http://x.org and mail me@host now",
+            "see http://x.org:8080\tthen mail me@host",
+            r#"see "http://x.org"then-me@host"#,
+            r#"see "ws=http://x.org" then me@host"#,
+        ] {
+            assert_eq!(super::mask_text(text, &[]), text);
+        }
+        assert_eq!(
+            super::mask_text("see http://alice@host and mail me@host now", &[]),
+            "see http://***@host and mail me@host now"
+        );
+        assert_eq!(
+            super::mask_text("see http://alice:pa%20ss@host and mail me@host", &[]),
+            "see http://***:***@host and mail me@host"
+        );
+    }
+
+    #[test]
+    fn prose_masks_spaces_in_explicit_url_values() {
+        for (text, userinfo) in [
+            (
+                r#"see "http://alice:pa ss@host" then mail me@host"#,
+                "alice:pa ss",
+            ),
+            (
+                "connection ws=http://alice:pa'ss word@host;Ref=demo",
+                "alice:pa'ss word",
+            ),
+            (
+                r#"connection ws=http://alice:pa"ss word@host;Ref=demo"#,
+                r#"alice:pa"ss word"#,
+            ),
+            (
+                "connection ws= http://alice:pa ss@host;Ref=demo",
+                "alice:pa ss",
+            ),
+            (
+                "connection ws = http://alice:pa ss@host;Ref=demo",
+                "alice:pa ss",
+            ),
+            (
+                r#"command /WS "http://alice:pa ss@host" /Out log.txt"#,
+                "alice:pa ss",
+            ),
+            (
+                "command /WS http://alice:pa ss@host /Out log.txt",
+                "alice:pa ss",
+            ),
+            (
+                r#"ws="http://alice:pa""ss word@host";Ref=demo"#,
+                r#"alice:pa""ss word"#,
+            ),
+        ] {
+            assert_eq!(
+                super::mask_text(text, &[]),
+                text.replace(userinfo, "***:***"),
+                "{text}"
+            );
         }
     }
 

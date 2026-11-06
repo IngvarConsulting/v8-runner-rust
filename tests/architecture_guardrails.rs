@@ -90,6 +90,56 @@ fn raw_process_spawn_apis_stay_inside_platform_layer() {
     }
 }
 
+/// Приставку `\\?\` снимает один проход на выходе: новый писатель в stdout обошёл бы его.
+/// Журнал действий ответом не считается.
+#[test]
+fn a_response_reaches_stdout_only_through_its_owners() {
+    const OWNERS: &[&str] = &[
+        "src/output/text.rs",
+        "src/cli/external_pull.rs",
+        "src/support/logging.rs",
+    ];
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let terminal_probe = Regex::new(r"stdout\s*\(\s*\)\s*\.\s*is_terminal").expect("regex");
+    let writer =
+        Regex::new(r"\b(?:println|print)\s*!|(?:^|[^.\s])\s*\bstdout\s*\(\s*\)").expect("regex");
+    // Токены разделены пробелами. `eprintln` и чужой `child.stdout()` не пишут в stdout раннера.
+    for (sample, writes) in [
+        ("println ! (\"x\")", true),
+        ("print ! (\"x\")", true),
+        ("std :: io :: stdout ()", true),
+        ("let out = stdout ()", true),
+        ("eprintln ! (\"x\")", false),
+        ("child . stdout ()", false),
+    ] {
+        assert_eq!(writer.is_match(sample), writes, "{sample}");
+    }
+    for file in collect_rust_files(&repo_path("src")) {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if OWNERS.contains(&relative.as_str()) {
+            continue;
+        }
+        let source = production_source(&file);
+        let without_terminal_probe = terminal_probe.replace_all(&source, "");
+        assert!(
+            !writer.is_match(&without_terminal_probe),
+            "{relative} writes to stdout past the response gate in src/support/path.rs"
+        );
+    }
+    for (owner, gate) in [
+        ("src/output/text.rs", "response_text ("),
+        ("src/output/text.rs", "response_json ("),
+        ("src/cli/external_pull.rs", "response_json ("),
+        ("src/mcp/server.rs", "response_value ("),
+    ] {
+        assert!(
+            production_source(&repo_path(owner)).contains(gate),
+            "{owner} must pass its response through {gate}"
+        );
+    }
+}
+
 #[test]
 fn mcp_surface_snapshot_stays_explicit_and_documented() {
     let source = read("src/mcp/server.rs");

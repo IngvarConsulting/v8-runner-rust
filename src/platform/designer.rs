@@ -9,6 +9,7 @@ use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::secrets::mask_text;
 
 #[derive(Debug, Error)]
 pub enum DesignerError {
@@ -248,7 +249,7 @@ impl<'a> DesignerDsl<'a> {
                     "a file-based connection File=…",
                 ))?;
         args.push(connection);
-        self.run(&args)
+        self.run_raw(&args)
     }
 
     /// `CREATEINFOBASE <клиент-серверная строка> /DisableStartupDialogs`: регистрация базы в
@@ -266,7 +267,8 @@ impl<'a> DesignerDsl<'a> {
             .ok_or(DesignerError::ConnectionForm(
                 "a cluster connection Srvr=…;Ref=…",
             ))?;
-        self.run(&[
+        // The caller masks creation diagnostics with the DBMS and cluster credentials.
+        self.run_raw(&[
             "CREATEINFOBASE".to_owned(),
             connection,
             "/DisableStartupDialogs".to_owned(),
@@ -434,7 +436,8 @@ impl<'a> DesignerDsl<'a> {
                 .display()
                 .to_string(),
         );
-        self.run(&args)
+        // The caller formats the failure with the credentials of the transfer or copy.
+        self.run_raw(&args)
     }
 
     /// `/RestoreIB <file>`
@@ -449,7 +452,7 @@ impl<'a> DesignerDsl<'a> {
         let mut args = self.base_args();
         args.push("/RestoreIB".to_owned());
         args.push(source_file.display().to_string());
-        self.run(&args)
+        self.run_raw(&args)
     }
 
     /// `/DumpExternalDataProcessorOrReportToFiles <root-xml> <binary>`
@@ -503,7 +506,8 @@ impl<'a> DesignerDsl<'a> {
         let mut args = self.base_args();
         args.push("/CheckConfig".to_owned());
         args.extend(flags.iter().map(|flag| (*flag).to_owned()));
-        self.run(&args)
+        // The validation parser needs the original report, including on a nonzero exit.
+        self.run_raw(&args)
     }
 
     fn base_args(&self) -> Vec<String> {
@@ -521,7 +525,26 @@ impl<'a> DesignerDsl<'a> {
         args
     }
 
+    /// Preserve machine replies and mask failed runs before their diagnostics leave the adapter.
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, DesignerError> {
+        let mut result = self.run_raw(args)?;
+        if let Some(password) = self
+            .connection
+            .password
+            .as_deref()
+            .filter(|password| !password.is_empty() && result.process.outcome().is_err())
+        {
+            let secrets = &[password];
+            result.process.stdout = mask_text(&result.process.stdout, secrets);
+            result.process.stderr = mask_text(&result.process.stderr, secrets);
+            if let Some(log) = &mut result.platform_log {
+                *log = mask_text(log, secrets);
+            }
+        }
+        Ok(result)
+    }
+
+    fn run_raw(&self, args: &[String]) -> Result<PlatformCommandResult, DesignerError> {
         if let Some(log_file) = &self.log_file {
             match std::fs::remove_file(log_file) {
                 Ok(()) => {}

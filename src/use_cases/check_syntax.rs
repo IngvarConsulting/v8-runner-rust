@@ -188,8 +188,40 @@ fn run_syntax_branch(
     };
 
     let mut result = build_result(CheckName::DesignerConfig, platform_result, started);
+    if let Some(password) = config
+        .infobase
+        .password
+        .as_deref()
+        .filter(|p| !p.is_empty())
+    {
+        mask_designer_diagnostics(&mut result, password);
+    }
     result.provider = Some(receipt);
     conclude(result)
+}
+
+/// Маскирует поля после разбора отчёта, чтобы пароль не менял его структуру.
+fn mask_designer_diagnostics(result: &mut SyntaxCheckResult, password: &str) {
+    use crate::platform::secrets::mask_known_secrets;
+
+    if let Some(stderr) = &mut result.stderr {
+        *stderr = mask_known_secrets(stderr, &[password]);
+    }
+    // The parser splits the report into lines and trims the fields it keeps.
+    let mut parsed_secrets = vec![password];
+    parsed_secrets.extend(password.lines().map(str::trim));
+    let redact_parsed = |text: &mut String| {
+        *text = mask_known_secrets(text, &parsed_secrets);
+    };
+    for issue in &mut result.issues {
+        let (subject, message) = match issue {
+            Issue::Module(issue) => (&mut issue.path, &mut issue.message),
+            Issue::Object(issue) => (&mut issue.object, &mut issue.message),
+            Issue::Edt(_) => continue,
+        };
+        redact_parsed(subject);
+        redact_parsed(message);
+    }
 }
 
 /// Исполнитель, выбранный для проверки конфигурации: та же квитанция и тот же путь, что

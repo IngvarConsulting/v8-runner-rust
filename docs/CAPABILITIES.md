@@ -389,6 +389,10 @@ overrides. Сам local overlay нельзя передавать как `--conf
 - `--json-message` остаётся machine-readable contract для автоматизации.
 - MCP `structured_content` использует тот же envelope core: `ok`, `command`, `duration_ms`,
   `data`, `warnings`, `steps`, optional `error`.
+- На Windows ответ называет путь обычным написанием, без приставки `\\?\`: и в JSON, и в тексте,
+  и в MCP. Показанный путь длиннее 260 знаков или с именем, которое без приставки значит другое
+  (`con.cf`, `out.`), внешняя программа может не открыть. Исключение — `target_path` и
+  `stage_path` кадра `ready` внешней публикации: это операнды, и они могут нести приставку.
 
 ## Настройка проекта
 

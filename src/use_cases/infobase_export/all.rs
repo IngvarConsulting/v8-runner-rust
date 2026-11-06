@@ -17,6 +17,8 @@ use crate::domain::infobase_export::{
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{CommandName, ExecutionContext};
+use crate::use_cases::generation_reader::LocatedTool;
+use crate::use_cases::installed_extensions::{self, InventorySource};
 use crate::use_cases::request::DownloadAllRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseResult};
 use crate::use_cases::set_walk;
@@ -106,13 +108,17 @@ fn run_all(
         return walker.preview(&packages, result, started);
     }
 
-    let installed = match crate::use_cases::installed_extensions::read_installed_extensions(
+    let installed = match installed_extensions::read_installed_extensions(
         context,
         config,
         Operation::ConfigurationExport,
-        prepared.provider,
-        prepared.executable.as_deref(),
-        &PlatformUtilities::from_config(config),
+        InventorySource::Selected {
+            tool: LocatedTool {
+                provider: prepared.provider,
+                binary: prepared.executable.as_deref(),
+            },
+            utilities: &PlatformUtilities::from_config(config),
+        },
     ) {
         Ok(installed) => installed,
         Err(error) => {

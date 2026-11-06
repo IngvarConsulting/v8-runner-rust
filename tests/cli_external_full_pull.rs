@@ -225,6 +225,8 @@ impl Project {
         ));
         assert_reported_path(&selected["executor"]["executable"], &expected_executable);
         assert!(selected["executor"]["endpoint"].is_null());
+        #[cfg(windows)]
+        assert!(!selected.to_string().contains(r"\\\\?\\"), "{selected}");
         assert!(self.calls().is_empty(), "provider ran before authorization");
         selected
     }
@@ -255,6 +257,127 @@ impl Project {
         .expect("caller retains old sources");
         fs::rename(&self.stage, &self.sources).expect("caller publishes prepared sources");
     }
+}
+
+#[test]
+fn designer_failure_hides_the_infobase_password_for_a_cluster() {
+    // The known password overlaps the keys of other credentials in the same report.
+    assert_designer_failure_hides_the_infobase_password(None, "Pwd");
+}
+
+#[test]
+fn designer_failure_hides_the_infobase_password_for_a_direct_gateway() {
+    assert_designer_failure_hides_the_infobase_password(
+        Some(json!({})),
+        "fake infobase ёжик secret",
+    );
+}
+
+fn assert_designer_failure_hides_the_infobase_password(standalone: Option<Value>, password: &str) {
+    let project = Project::new("designer", false);
+    let mut origin = json!({
+        "connection": "Srvr=srv:1541;Ref=demo",
+        "user": "Admin",
+        "password": password,
+    });
+    if let Some(standalone) = standalone {
+        origin["standalone"] = standalone;
+    }
+    fs::write(
+        project.config.with_file_name("v8project.local.yaml"),
+        serde_yaml::to_string(&json!({"infobases": {"origin": origin}}))
+            .expect("server infobase YAML"),
+    )
+    .expect("server infobase overlay");
+
+    let output = project
+        .command()
+        .env("V8_RUNNER_FAKE_PLATFORM_FAIL_WITH_PASSWORD", "1")
+        .args(["--json-message", "pull", "main", "--force"])
+        .output()
+        .expect("run pull");
+    assert!(!output.status.success());
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
+    let refusal = envelope.to_string();
+    let journal =
+        fs::read_to_string(project.work.join("logs/mcp/actions.log")).expect("MCP action journal");
+    for surface in [&refusal, &journal] {
+        for diagnostic in [
+            "Designer /Out authentication rejected",
+            "Designer stdout rejected",
+            "Designer stderr rejected",
+        ] {
+            assert!(surface.contains(diagnostic), "{surface}");
+        }
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let leaks = [
+        ("refusal", refusal.as_str()),
+        ("actions.log", journal.as_str()),
+        ("CLI stderr", stderr.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, text)| {
+        [password, "fake-database-secret", "fake-cluster-secret"]
+            .into_iter()
+            .any(|secret| text.contains(secret))
+            .then_some(name)
+    })
+    .collect::<Vec<_>>();
+    assert!(leaks.is_empty(), "known password exposed in {leaks:?}");
+}
+
+#[test]
+fn designer_syntax_masks_diagnostics_after_parsing_the_issue() {
+    assert_designer_syntax_masks_diagnostics("{", "***");
+    assert_designer_syntax_masks_diagnostics("private phrase  ", "");
+    assert_designer_syntax_masks_diagnostics("private-first\nprivate-last", "***");
+}
+
+fn assert_designer_syntax_masks_diagnostics(password: &str, masked_suffix: &str) {
+    let project = Project::new("designer", false);
+    let overlay = project.config.with_file_name("v8project.local.yaml");
+    let mut local: Value =
+        serde_yaml::from_slice(&fs::read(&overlay).expect("overlay")).expect("local YAML");
+    local["infobases"]["origin"]["password"] = json!(password);
+    fs::write(
+        &overlay,
+        serde_yaml::to_string(&local).expect("overlay YAML"),
+    )
+    .expect("write password");
+
+    let output = project
+        .command()
+        .env("V8_RUNNER_FAKE_PLATFORM_FAIL_WITH_PASSWORD", "1")
+        .args(["--json-message", "check", "--server"])
+        .output()
+        .expect("run check");
+    assert!(!output.status.success());
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
+    let data = &envelope["data"];
+    assert_eq!(data["status"], "issues_found");
+    assert_eq!(data["exit_code"], 101);
+    assert_eq!(
+        data["issues"][0],
+        json!({
+            "kind": "module",
+            "path": format!("CommonModules.TestModule{masked_suffix}"),
+            "line": 4,
+            "column": 2,
+            "message": "compile error: ***",
+            "severity": "ERROR",
+        })
+    );
+    assert_eq!(
+        data["issues"][1],
+        json!({
+            "kind": "object",
+            "object": format!("Catalogs.Demo{masked_suffix}"),
+            "message": "object error: ***",
+            "severity": "ERROR",
+        })
+    );
+    assert_eq!(data["stderr"], "Designer stderr rejected [***]\n");
 }
 
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -1023,6 +1146,14 @@ fn accepted_external_full_pull_remembers_the_original_source_for_the_next_push()
             assert_eq!(terminal["memory"], "saved");
             assert_eq!(terminal["result"]["ok"], true);
             assert_reported_path(&terminal["result"]["data"]["target_path"], &project.sources);
+            // `ready` отдаёт вызывающему операнд публикации как есть, а конверт в `result` —
+            // обычный ответ команды: путь в нём без приставки.
+            #[cfg(windows)]
+            {
+                let stage = ready["stage_path"].as_str().expect("stage path");
+                assert!(stage.starts_with(r"\\?\"), "{ready}");
+                assert!(!terminal.to_string().contains(r"\\\\?\\"), "{terminal}");
+            }
             // Замену делает вызывающий, но ответ называет уничтоженное, как и своя замена.
             let losses = &terminal["result"]["data"]["losses"];
             assert!(losses["count"].as_u64() >= Some(1), "{terminal}");
