@@ -589,6 +589,8 @@ v8-runner infobase create [--from <INFOBASE>] [--dry-run]
   набора есть своя память (отправка одного набора его оставляет, и следующая снова полная); до него ни один отказ не предлагает
   `pull` — выход только `push --force`.
 
+Команды `dbms`, `cluster` и `standalone` и секции `managed` ещё не реализованы: [#536](https://github.com/IngvarConsulting/v8-runner-rust/issues/536), #537, #538, #495. Первый круг — только Windows.
+
 ### `tools download`
 
 ```bash

@@ -609,6 +609,8 @@ infobases:
 отвергается; `infobase.dbms` и `infobase.cluster` — тоже: `ibsrv` — один процесс вместо
 кластера, и `ras` им не управляет.
 
+> **В разработке.** Управляемый стенд, где раннер сам поднимает PostgreSQL, кластер и `ibsrv` (`dbms.managed`, `cluster.managed`, `standalone.managed`, команды `dbms`, `cluster`, `standalone`), ещё не реализован: [#536](https://github.com/IngvarConsulting/v8-runner-rust/issues/536), [#537](https://github.com/IngvarConsulting/v8-runner-rust/issues/537), [#538](https://github.com/IngvarConsulting/v8-runner-rust/issues/538), [#495](https://github.com/IngvarConsulting/v8-runner-rust/issues/495). Первый круг — только Windows.
+
 Исполнители автономного сервера:
 
 | Команда | Исполнители по порядку |

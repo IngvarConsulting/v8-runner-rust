@@ -62,6 +62,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -171,7 +172,7 @@ infobases:
 <p><code>server</code>, <code>wsdir</code> и <code>dir</code> нужны команде <a href="cli-web-publish.html"><code>web publish</code></a>; <code>url</code> — команде <a href="cli-launch.html"><code>launch</code></a>. Для <code>apache2</code> и <code>apache22</code> также нужен <code>conf</code> — путь к файлу конфигурации Apache. На платформе 8.5.4 и новее <code>apache22</code> нет, см. <a href="#platform-versions">версии платформы</a>. Для IIS можно задать <code>os-auth: true</code> — аутентификацию средствами ОС.</p>
 <pre><code>v8-runner web publish</code></pre>
 <h2 id="tools">Инструменты</h2>
-<p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С.</p>
+<p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С. <code>tools.postgres.path</code> называет каталог сборки PostgreSQL для 1С, которую поднимает <a href="cli-dbms.html"><code>dbms</code></a> <span class="plan-badge">План</span>.</p>
 <h3 id="platform-selection">Выбор платформы <span class="plan-badge">План</span></h3>
 <p>Выберите один способ: <code>version</code> — поиск подходящей установленной платформы, <code>path</code> — использование платформы по указанному пути.</p>
 <pre data-config-example="main"><code># Фрагмент v8project.yaml

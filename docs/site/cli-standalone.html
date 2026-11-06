@@ -62,6 +62,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start" aria-current="page">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -75,19 +76,19 @@
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-standalone-start">standalone start <span class="plan-badge">План</span></h2>
 <pre data-output-command><code>v8-runner standalone start</code></pre>
-<p>Поднимает <code>ibsrv</code> той же платформы, что выбирают остальные команды (<code>tools.platform</code>), над файловой базой из <code>standalone.managed.db-path</code>. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами, пока его не остановит <a href="#op-standalone-stop"><code>standalone stop</code></a>. Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под <code>workPath</code>.</p>
+<p>Поднимает <code>ibsrv</code> той же платформы, что выбирают остальные команды (<code>tools.platform</code>), над файловой базой из <code>standalone.managed.db-path</code> или над базой из секции <code>dbms</code>. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Пароль СУБД <code>ibsrv</code> получает ключом <code>-W</code> через stdin, в командной строке его нет. На Linux и macOS команда отказывает. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами, пока его не остановит <a href="#op-standalone-stop"><code>standalone stop</code></a>. Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под <code>workPath</code>.</p>
 <p>Если сервер этой базы уже поднят раннером этой копии, команда ничего не запускает и называет его. Если базу держит чужой процесс <code>ibsrv</code>, команда отказывает и называет его: второй сервер над той же базой не поднимается.</p>
 <pre data-output-command><code>v8-runner standalone start --dry-run</code></pre>
-<p>Показывает исполняемый файл, каталог данных, базу и выбранные порты. Ничего не запускает.</p>
+<p>Показывает исполняемый файл, каталог данных, базу и выбранные порты. Ничего не запускает. Такое же превью есть у <code>standalone stop</code> и <code>standalone restart</code>. Команды <code>standalone</code> принимают только объявленную базу: строка соединения в <code>--infobase</code> — отказ.</p>
 <h2 class="command-variant" id="op-standalone-status">standalone status <span class="plan-badge">План</span></h2>
 <pre data-output-command><code>v8-runner standalone status</code></pre>
-<p>Отвечает, поднят ли сервер этой базы и кем: не поднят, поднят раннером этой копии или поднят не раннером. Для своего сервера называет PID, версию платформы, адреса прямого шлюза, SSH-шлюза и HTTP и прошла ли проба готовности. Чужой сервер только называет: чей он, раннер не знает. Платформу команда не запускает.</p>
+<p>Отвечает, поднят ли сервер этой базы и кем: не поднят, поднят раннером этой копии или поднят не раннером. Для своего сервера называет PID, версию платформы, адреса прямого шлюза, SSH-шлюза и HTTP и прошла ли проба готовности. Чужой сервер только называет: чей он, раннер не знает. Платформу команда не запускает, замок рабочей копии ей не нужен, ключа <code>--dry-run</code> у неё нет.</p>
 <h2 class="command-variant" id="op-standalone-stop">standalone stop <span class="plan-badge">План</span></h2>
 <pre data-output-command><code>v8-runner standalone stop</code></pre>
-<p>Останавливает сервер, который поднял раннер этой копии, и ждёт завершения его процесса. Сервер, поднятый не раннером, не останавливает: ответ называет его и говорит, что он не наш. Если сервер не поднят, останавливать нечего, и команда успешна.</p>
+<p>Останавливает сервер, который поднял раннер этой копии, и ждёт завершения его процесса. PostgreSQL, поднятый шагом <code>standalone start</code>, гасит следом, а поднятый <code>dbms start</code> не трогает (<a href="cli-dbms.html#dbms-ownership">таблица владения</a>). Сервер, поднятый не раннером, не останавливает: ответ называет его и говорит, что он не наш. Если сервера нет и гасить нечего, команда успешна.</p>
 <h2 class="command-variant" id="op-standalone-restart">standalone restart <span class="plan-badge">План</span></h2>
 <pre data-output-command><code>v8-runner standalone restart</code></pre>
-<p>То же, что <code>standalone stop</code> и затем <code>standalone start</code>, для своего сервера. Чужой сервер не перезапускает.</p>
+<p>То же, что <code>standalone stop</code> и затем <code>standalone start</code>, для своего сервера. Чужой сервер не перезапускает, PostgreSQL не трогает.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
@@ -103,18 +104,18 @@
 <h3>Варианты ответа</h3>
 <h4 id="standalone-started">Сервер поднят</h4>
 <pre data-output-example="standalone-started" data-output-schema="planned"><code>✓ standalone: start - ibsrv 8.3.27.2074, pid 48213
-│   direct gate  localhost:51541  Srvr=localhost:51541;Ref=demo
-│   ssh gate     127.0.0.1:51543
-│   http         http://localhost:51830/demo
+│   direct gate  127.0.0.1:24641  Srvr=127.0.0.1:24641;Ref=demo
+│   ssh gate     127.0.0.1:24643
+│   http         http://127.0.0.1:24830/demo
 │   ready in 14.2 s</code></pre>
 <h4 id="standalone-already">Уже поднят этой копией</h4>
 <pre data-output-example="standalone-already" data-output-schema="planned"><code>○ standalone: start - already running for origin, pid 48213 (started by this working copy)</code></pre>
 <h4 id="standalone-status-own">Состояние своего сервера</h4>
 <pre data-output-example="standalone-status-own" data-output-schema="planned"><code>origin: standalone server, started by this working copy
   pid 48213 · ibsrv 8.3.27.2074 · ready
-  direct gate  Srvr=localhost:51541;Ref=demo
-  ssh gate     127.0.0.1:51543
-  http         http://localhost:51830/demo</code></pre>
+  direct gate  Srvr=127.0.0.1:24641;Ref=demo
+  ssh gate     127.0.0.1:24643
+  http         http://127.0.0.1:24830/demo</code></pre>
 <h4 id="standalone-stopped">Сервер остановлен</h4>
 <pre data-output-example="standalone-stopped" data-output-schema="planned"><code>✓ standalone: stop - ibsrv pid 48213 stopped</code></pre>
 <h4 id="standalone-foreign">Чужой сервер не тронут</h4>
@@ -135,10 +136,10 @@ ERROR: platform error: the standalone server did not become ready</code></pre>
       "state": "started_by_this_copy",
       "pid": 48213,
       "platform_version": "8.3.27.2074",
-      "direct_gate": "localhost:51541",
-      "connection": "Srvr=localhost:51541;Ref=demo",
-      "ssh_gate": "127.0.0.1:51543",
-      "http_url": "http://localhost:51830/demo",
+      "direct_gate": "127.0.0.1:24641",
+      "connection": "Srvr=127.0.0.1:24641;Ref=demo",
+      "ssh_gate": "127.0.0.1:24643",
+      "http_url": "http://127.0.0.1:24830/demo",
       "ready": true
     },
     "warnings": [],
@@ -166,9 +167,9 @@ ERROR: platform error: the standalone server did not become ready</code></pre>
       "state": "started_by_this_copy",
       "pid": 48213,
       "platform_version": "8.3.27.2074",
-      "connection": "Srvr=localhost:51541;Ref=demo",
-      "ssh_gate": "127.0.0.1:51543",
-      "http_url": "http://localhost:51830/demo",
+      "connection": "Srvr=127.0.0.1:24641;Ref=demo",
+      "ssh_gate": "127.0.0.1:24643",
+      "http_url": "http://127.0.0.1:24830/demo",
       "ready": true
     },
     "warnings": [],
