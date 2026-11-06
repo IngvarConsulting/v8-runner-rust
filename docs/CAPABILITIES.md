@@ -1757,6 +1757,7 @@ v8-runner mcp serve http
 - `check` через `ibcmd`.
 - `make` через `ibcmd-rs`: сборка пакета из XML без базы только по ключу `providers.make: ibcmd-rs` ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
 - `extensions` через `designer` на файловой базе.
+- `extensions` через `ibcmd` на кластерной базе.
 - `convert` через `designer`.
 - `convert` через `ibcmd-rs`: пакет ↔ XML без платформы ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
 - `convert` файла пакета в `edt` и внешних наборов в пакет.

@@ -636,7 +636,11 @@ mod tests {
             .iter()
             .map(|entry| entry.provider)
             .collect::<Vec<_>>();
-        assert_eq!(skipped, [crate::domain::capability::Provider::Agent]);
+        use crate::domain::capability::Provider::{Agent, Designer};
+        assert_eq!(skipped, [Agent, Designer]);
+        assert!(receipt.skipped[1]
+            .reason
+            .contains("only supports extensions list"));
         assert!(
             !calls.exists(),
             "ibcmd must not run against a cluster infobase"

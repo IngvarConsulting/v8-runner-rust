@@ -814,7 +814,10 @@ mod tests {
             missing_executors(Operation::Extensions, TargetKind::File),
             [Provider::Designer]
         );
-        assert!(missing_executors(Operation::Extensions, TargetKind::Cluster).is_empty());
+        assert_eq!(
+            missing_executors(Operation::Extensions, TargetKind::Cluster),
+            [Provider::Ibcmd]
+        );
     }
 
     #[test]
