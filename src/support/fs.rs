@@ -900,16 +900,24 @@ pub fn move_dir(source: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 pub fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.is_dir() {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() {
+        remove_link(path)
+    } else if metadata.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
         std::fs::remove_file(path)
     }
+}
+
+/// A link to a directory is removed as a file or as a directory, depending on how Windows made
+/// it. A junction also counts as a link here. The directory it points to stays untouched.
+pub fn remove_link(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(link).or_else(|_| std::fs::remove_dir(link))
 }
 
 pub fn replace_dir_atomically(
