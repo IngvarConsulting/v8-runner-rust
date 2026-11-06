@@ -1,6 +1,6 @@
 ---
 id: CTR.CONFIG.V8PROJECT-SCHEMA
-version: 14
+version: 15
 artifact: docs/schemas/v8project.schema.json
 check:
   - src/config/schema.rs::generated_schema_artifacts_are_current
@@ -17,6 +17,9 @@ check:
 порождаются из типизированной модели и обязаны совпадать с ней: расхождение
 валит проверку, а не обнаруживается в редакторе пользователя. Артефакт обновляется
 командой `UPDATE_CONFIG_SCHEMAS=1 cargo test generated_schema_artifacts_are_current`.
+
+**Что изменила версия 15.** Схемы проектного файла и местного слоя больше не содержат
+ключи `providers.syntax` и `providers.publish`. Загрузчик отклоняет их как неизвестные поля.
 
 **Что изменила версия 14.** Ключ `providers.reset` назначает исполнителя команды `reset`:
 Конфигуратор или `ibcmd` ([правило](../cli/reset-discards-the-unapplied.md)).
