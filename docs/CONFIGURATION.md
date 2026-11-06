@@ -390,7 +390,7 @@ providers:
   `webinst`; назначенный исполнитель обязан реализовывать операцию на этой базе — иначе
   команда отказывает при загрузке настроек с `invalid_argument` до запуска платформы и
   перечисляет допустимых исполнителей;
-- какие ключи проверяет команда: `download`, `infobase configuration export`,
+- какие назначения исполнителей проверяет команда: `download`, `infobase configuration export`,
   `infobase dump`, `infobase restore`, `make` и `convert` — только ключ своей операции
   (`download`, `infobase.dump`, `infobase.restore`, `make` или `convert`), ключ другой
   операции им не мешает; `test --no-push` и `launch` —
@@ -404,10 +404,8 @@ providers:
 - ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
   квитанции ответа видно, из какого файла он пришёл.
 
-Опубликованная схема пока перечисляет `providers.syntax` и `providers.publish`, хотя
-назначать исполнителя этих операций нельзя. Ключа `providers.diff` в схеме пока нет.
-Приведение списка к словарю команд отслеживается в
-[#201](https://github.com/IngvarConsulting/v8-runner-rust/issues/201).
+Загрузчик отклоняет `providers.syntax`, `providers.publish`, `providers.check` и
+`providers.sessions` как неизвестные поля в обоих конфигурационных файлах.
 
 Умолчания по операциям зависят от вида базы. `push`, `pull`, `download` — агент, затем
 Конфигуратор, у файловой базы затем `ibcmd`; у кластера `ibcmd` в цепочке нет; у
