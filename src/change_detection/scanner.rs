@@ -38,7 +38,7 @@ pub enum ScanError {
 
 /// Directory/file names that are always excluded from scanning.
 const IGNORED_DIRS: &[&str] = &[
-    ".git", ".gradle", "build", "target", "temp", "tmp", ".yaxunit",
+    ".git", ".gradle", ".build", "build", "target", "temp", "tmp", ".yaxunit",
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 
@@ -71,6 +71,24 @@ pub struct ScanSnapshot {
 /// remembered mtime (#447). The predicate is the caller's existing interruption policy;
 /// successful post-publication bookkeeping supplies an always-false predicate.
 pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSnapshot, ScanError> {
+    scan_excluding(root, None, interrupted)
+}
+
+/// `workPath` under a source-set root, named as the walk of that root names it. A set in the
+/// workspace root holds it, and it can have any name.
+pub fn work_path_inside(root: &Path, work_path: &Path) -> Option<PathBuf> {
+    let root_real = root.canonicalize().ok()?;
+    let work_real = work_path.canonicalize().ok()?;
+    let relative = work_real.strip_prefix(&root_real).ok()?;
+    (!relative.as_os_str().is_empty()).then(|| root.join(relative))
+}
+
+/// [`scan`] that does not enter `excluded`.
+pub fn scan_excluding(
+    root: &Path,
+    excluded: Option<PathBuf>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<ScanSnapshot, ScanError> {
     check_interruption(interrupted)?;
     let scan_started_at =
         mtime_nanos(std::time::SystemTime::now(), root).map_err(|source| ScanError::Mtime {
@@ -79,7 +97,7 @@ pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSn
         })?;
     let mut files = Vec::new();
 
-    for entry in source_entries(root) {
+    for entry in source_entries_excluding(root, excluded) {
         check_interruption(interrupted)?;
         let entry = entry.map_err(|e| ScanError::Walk {
             path: root.to_path_buf(),
@@ -179,10 +197,21 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
 pub(super) fn source_entries(
     root: &Path,
 ) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    source_entries_excluding(root, None)
+}
+
+/// The entries of a source tree, without the generated directories and `excluded`.
+pub(crate) fn source_entries_excluding(
+    root: &Path,
+    excluded: Option<PathBuf>,
+) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
     WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| entry.depth() == 0 || !is_ignored_dir(entry))
+        .filter_entry(move |entry| {
+            entry.depth() == 0
+                || !(is_ignored_dir(entry) || excluded.as_deref() == Some(entry.path()))
+        })
 }
 
 pub(super) fn is_source_file(entry: &walkdir::DirEntry) -> bool {
@@ -201,12 +230,53 @@ fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{scan, ScanSnapshot};
+    use super::{scan, scan_excluding, work_path_inside, ScanSnapshot};
     use crate::change_detection::file_state::mtime_nanos;
     use std::fs::{self, File};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
     use tempfile::tempdir;
+
+    fn scanned_names(snapshot: &ScanSnapshot) -> Vec<&str> {
+        snapshot
+            .files
+            .iter()
+            .map(|file| file.rel_path.as_str())
+            .collect()
+    }
+
+    /// `.build` — служебный каталог на любой глубине; выбранный корень с таким именем обходится.
+    #[test]
+    fn the_build_directory_is_not_a_source_below_the_root() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join(".build");
+        fs::create_dir_all(root.join(".build/unica")).expect("service dir");
+        fs::write(root.join(".build/unica/lock"), "lock").expect("service file");
+        fs::write(root.join("Configuration.xml"), "<x/>").expect("source");
+
+        let snapshot = scan(&root, &mut || false).expect("scan");
+
+        assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
+    }
+
+    /// `workPath` внутри набора не исходник, как бы он ни назывался.
+    #[test]
+    fn a_work_path_inside_the_root_is_not_a_source_whatever_its_name() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let work = root.join("service-area");
+        fs::create_dir_all(&work).expect("work");
+        fs::write(work.join("log.txt"), "log").expect("service file");
+        fs::write(root.join("Configuration.xml"), "<x/>").expect("source");
+
+        let excluded = work_path_inside(&root, &work);
+        assert_eq!(excluded.as_deref(), Some(work.as_path()));
+        let snapshot = scan_excluding(&root, excluded, &mut || false).expect("scan");
+
+        assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
+        assert_eq!(work_path_inside(&root, dir.path()), None);
+        assert_eq!(work_path_inside(&root, &root), None);
+    }
 
     fn write_touched(path: &Path, contents: &str, modified: SystemTime) {
         fs::write(path, contents).expect("write");

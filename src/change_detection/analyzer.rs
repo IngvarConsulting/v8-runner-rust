@@ -115,7 +115,8 @@ pub fn analyze_context(
                     Err(error) => return Err(error),
                 },
             };
-            let scan = match scanner::scan(context.path(), interrupted) {
+            let excluded = scanner::work_path_inside(context.path(), work_path);
+            let scan = match scanner::scan_excluding(context.path(), excluded, interrupted) {
                 Ok(scan) => scan,
                 Err(ScanError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
                 Err(error) => {
@@ -278,7 +279,8 @@ pub fn rescan_and_commit_full(
     if !context.persists_snapshot() {
         return Ok(());
     }
-    let prepared = prepare_full_snapshot(context, context.path())?;
+    let excluded = scanner::work_path_inside(context.path(), work_path);
+    let prepared = prepare_snapshot(context, context.path(), excluded)?;
     commit_full_snapshot(context, work_path, &prepared)
 }
 
@@ -287,9 +289,17 @@ pub fn prepare_full_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
+    prepare_snapshot(context, source_path, None)
+}
+
+fn prepare_snapshot(
+    context: &SourceSetContext,
+    source_path: &Path,
+    excluded: Option<std::path::PathBuf>,
+) -> Result<FullSnapshot, ChangeDetectionError> {
     // The caller records an already successful load/publication: cancellation must not
     // leave its memory describing the preceding database/tree.
-    let scan = scanner::scan(source_path, &mut || false)
+    let scan = scanner::scan_excluding(source_path, excluded, &mut || false)
         .map_err(|error| map_scan_error(context, error))?;
     Ok(FullSnapshot {
         snapshot: scan
@@ -471,6 +481,26 @@ mod tests {
         assert!(matches!(
             decision,
             crate::change_detection::partial_load::LoadDecision::Partial(_)
+        ));
+    }
+
+    /// Файлы `workPath` внутри набора не попадают в память и не становятся правкой.
+    #[test]
+    fn a_service_file_in_a_work_path_inside_the_set_is_not_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let work_path = root.join("service-area");
+        std::fs::create_dir_all(&work_path).expect("work");
+        std::fs::write(root.join("Configuration.xml"), "<xml />").expect("config");
+        std::fs::write(work_path.join("state.txt"), "before").expect("state");
+        let context = SourceSetContext::new("main", root, "designer-main");
+        rescan_and_commit_full(&context, &work_path).expect("snapshot");
+
+        std::fs::write(work_path.join("state.txt"), "after").expect("state");
+
+        assert!(matches!(
+            analyze_context(&context, &work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
         ));
     }
 

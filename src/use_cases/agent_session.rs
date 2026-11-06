@@ -358,7 +358,7 @@ pub(crate) fn expose_dir(
     })?;
     let _ = crate::support::fs::remove_path_if_exists(&link);
     if symlink_dir(&target, &link).is_err() {
-        copy_dir_recursively(&target, &link).map_err(|error| {
+        copy_for_the_agent(&target, user_dir, &link).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to expose '{}' to the agent at '{}': {error}",
                 target.display(),
@@ -367,6 +367,30 @@ pub(crate) fn expose_dir(
         })?;
     }
     Ok(relative.to_owned())
+}
+
+/// Набор в корне рабочей области держит каталог агента внутри себя: копия не должна входить
+/// в собственное назначение, а служебным каталогам в ней не место.
+fn copy_for_the_agent(target: &Path, user_dir: &Path, link: &Path) -> std::io::Result<()> {
+    let agent_dir = user_dir.canonicalize()?;
+    if !agent_dir.starts_with(target) {
+        return copy_dir_recursively(target, link);
+    }
+    std::fs::create_dir_all(link)?;
+    for entry in crate::change_detection::scanner::source_entries_excluding(target, Some(agent_dir))
+    {
+        let entry = entry?;
+        let Ok(relative) = entry.path().strip_prefix(target) else {
+            continue;
+        };
+        let destination = link.join(relative);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&destination)?;
+        } else if entry.file_type().is_file() {
+            std::fs::copy(entry.path(), &destination)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1127,6 +1151,28 @@ mod tests {
             let endpoint = session_endpoint(SessionMode::Gate, &AgentEndpoint { host, port });
             assert_eq!(endpoint.address, address);
         }
+    }
+
+    /// Копия корня в каталог агента внутри него же заканчивается и не содержит сама себя.
+    #[test]
+    fn a_root_copied_for_the_agent_leaves_the_agent_directory_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        let root = root.canonicalize().expect("canonical root");
+        let user_dir = root.join("service-area").join("agent").join("0");
+        std::fs::create_dir_all(&user_dir).expect("agent dir");
+        std::fs::create_dir_all(root.join("Catalogs")).expect("objects");
+        std::fs::write(root.join("Configuration.xml"), "<x/>").expect("marker");
+        std::fs::write(root.join("Catalogs").join("Item.xml"), "<x/>").expect("object");
+        let link = user_dir.join("run").join("main");
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("parent");
+
+        copy_for_the_agent(&root, &user_dir, &link).expect("copy");
+
+        assert!(link.join("Configuration.xml").is_file());
+        assert!(link.join("Catalogs").join("Item.xml").is_file());
+        assert!(!link.join("service-area").join("agent").join("0").exists());
     }
 
     #[test]
