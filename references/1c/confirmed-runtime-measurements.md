@@ -2299,6 +2299,68 @@ cmp <U>/a.cf <W>/b.cf
 его не выключили `--show-prompt=no`. Что агент печатает при разрыве сессии, клиент увидеть не
 может; п. 3 этим не закрыт.
 
+### Повторный замер на 8.5.4
+
+Замер 06.11.2026, Windows 11 (сборка 26100), 1С 8.5.4.1683. Пакетный Конфигуратор
+и агент по очереди работали с одной файловой копией DemoTrd, без загрузки и применения
+конфигурации между запусками. `<W>` — каталог замера с ASCII-путём. Агент слушал только
+`127.0.0.1` на отдельном свободном порту. SSH-клиент Paramiko сверял одноразовый ED25519-ключ
+и открывал shell без PTY. Пользователь ИБ — `Администратор`, пароль пустой.
+
+```text
+1cv8.exe DESIGNER /DisableStartupDialogs /DisableStartupMessages /IBConnectionString File=<W>\ib /N Администратор /Out <W>\designer-cf.log -NoTruncate /DumpCfg <W>\designer.cf
+1cv8.exe DESIGNER /DisableStartupDialogs /DisableStartupMessages /IBConnectionString File=<W>\ib /N Администратор /Out <W>\designer-files.log -NoTruncate /DumpConfigToFiles <W>\bdump
+1cv8.exe DESIGNER /IBConnectionString File=<W>\ib /Out <W>\agent.log /AgentMode /AgentListenAddress 127.0.0.1 /AgentPort <свободный> /AgentSSHHostKey <W>\host-ed25519 /AgentBaseDir <W>\agent
+  options set --show-prompt=no --output-format=json
+  common connect-ib
+  config dump-config-to-files --dir=adump
+  config dump-cfg --file=a.cf
+```
+
+Команды агента выполнялись в отдельных SSH-сессиях с теми же настройками. Файлы
+агента записаны под `<W>\agent\0`. Обе пакетные команды завершились с кодом 0, обе
+команды выгрузки агента вернули `success`.
+
+- `.cf` — 922 720 016 байт каждый, прямое побайтовое сравнение без расхождений.
+  SHA-256 обоих пакетов — `e0134bd54588c2e8678a03377f3d6b5461b3c8f08302e00147f9ebd7e9ba3c03`.
+- Деревья `adump` и `bdump` — по 51 537 файлов, списки относительных путей равны.
+  Сравнение SHA-256 содержимого обнаружило девять расхождений. `ConfigDumpInfo.xml` совпал.
+
+В следующих файлах различаются только значения элементов цвета диаграммы. Агент во всех
+этих элементах записал `auto`. Обозначения значений Конфигуратора в таблице:
+
+- **Белый** — `chColor` = `#FFFFFF`.
+- **Текст** — `labelsColor`, `ttlTxtColor`, `legTxtColor`, `chTxtColor` = `style:FormTextColor`.
+- **Фон** — `bkgColor`, `ttlColor`, `legColor` = `style:FormBackColor`.
+
+| Файл | Что записал Конфигуратор |
+| --- | --- |
+| `Catalogs/ВариантыАнализаЦелевыхПоказателей/Forms/НастройкаДемоДанных/Ext/Form.xml` | Белый (1 набор) |
+| `DataProcessors/ПроверкаКонтрагента/Forms/Форма/Ext/Form.xml` | Текст (3 набора) |
+| `DataProcessors/ПроверкаКонтрагента/Templates/ФинансовыйАнализ/Ext/Template.xml` | Белый, текст, фон (6 наборов) |
+| `InformationRegisters/СезонныеКоэффициенты/Forms/СезонныеКоэффициенты/Ext/Form.xml` | Белый (1 набор) |
+| `Reports/АнализЖурналаРегистрации/Templates/ПродолжительностьРаботыРегламентныхЗаданий/Ext/Template.xml` | Белый, текст, фон (1 набор) |
+| `Reports/ДлительностьОтложенногоОбновления/Templates/ДиаграммаГанта/Ext/Template.xml` | Белый, текст, фон (1 набор) |
+| `Reports/ДосьеКонтрагента/Templates/ФинансовыйАнализ/Ext/Template.xml` | Белый, текст, фон (6 наборов) |
+| `Reports/СверкаРасчетовСКонтрагентами/Forms/ФормаОтчета/Ext/Form.xml` | Текст (1 набор) |
+| `Reports/СравнительныйАнализПоказателейРаботыМенеджеров/Templates/СравнительныйАнализМенеджеров/Ext/Template.xml` | Белый, текст, фон (1 набор) |
+
+**Вывод SSH вне массивов.** До настройки JSON пришли баннер и `designer> `. После настройки
+сохраняли исходные байты обычного и расширенного потоков SSH, разбирая последовательные
+массивы целиком. Расширенный поток во всех пробах ниже пуст.
+
+| Проба | Что получил клиент |
+| --- | --- |
+| `config dump-cfg` без `--file` | Один массив со справкой и `error` / `CommandFormatError`. |
+| `config dump-config-to-files --dir=adump` | До первых байтов прошло 15,6 с. Два смежных массива, 12 сообщений `log` с предупреждением об именах длиннее 80 символов и отдельный `success`. |
+| `config dump-cfg --file=a.cf` | Первые байты на 63,9 с, один массив с `success`. |
+| `config dump-config-to-files --dir=eofdump`, клиент отправил SSH EOF на 0,25 с и продолжил читать | Первые байты на 8,2 с. К 117,3 с агент отправил те же два массива (2 903 байта, равны контрольному выводу), затем SSH EOF и закрытие канала. Следующий shell открылся. |
+| `common disconnect-ib`, затем `common shutdown` | Один массив с `success` на отключение от ИБ. На `shutdown` канал получил SSH EOF и закрылся без данных за 3,2 с, процесс агента завершился с кодом 0. |
+
+Текста вне массивов после включения JSON в этих сценариях не обнаружено. При полном
+обрыве транспорта клиент видит только данные до закрытия соединения. Изменение реакции
+раннера на текстовый ответ вынесено в [#544](https://github.com/IngvarConsulting/v8-runner-rust/issues/544).
+
 ## Управляемый агент: одноразовый ключ раннера и свободный порт
 
 Замер 08.10.2026. Задача: [#429](https://github.com/IngvarConsulting/v8-runner-rust/issues/429). Платформы
