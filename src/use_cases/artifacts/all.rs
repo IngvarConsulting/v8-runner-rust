@@ -113,7 +113,9 @@ mod tests {
             std::fs::create_dir_all(base.join(set)).expect("set dir");
         }
         // Конфигуратор не запускается: отмена приходит раньше.
-        let platform = dir.path().join("1cv8");
+        let platform = dir
+            .path()
+            .join(format!("1cv8{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&platform, "#!/bin/sh\nexit 1\n").expect("platform");
         #[cfg(unix)]
         {

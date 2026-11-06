@@ -140,10 +140,21 @@ impl SourceSetLoader for AgentLoader {
             // Недоставленные исходники (канал отверг запись) не оставляют на стороне точки
             // входа и половины каталога.
             let staged = match partial_paths {
-                Some(paths) => {
-                    stage_dir_partially(handle, &exchange, &relative, source_context.path(), paths)
-                }
-                None => stage_dir(handle, &exchange, &relative, source_context.path()),
+                Some(paths) => stage_dir_partially(
+                    handle,
+                    &exchange,
+                    &relative,
+                    source_context.path(),
+                    paths,
+                    &config.work_path,
+                ),
+                None => stage_dir(
+                    handle,
+                    &exchange,
+                    &relative,
+                    source_context.path(),
+                    &config.work_path,
+                ),
             };
             let exposed = match staged {
                 Ok(exposed) => exposed,

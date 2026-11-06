@@ -2606,8 +2606,12 @@ fi"#;
     #[test]
     fn ibcmd_build_expands_objects_with_the_build_scan_scope() {
         let dir = tempdir().expect("tempdir");
-        let (config, _) = project(dir.path());
+        let (mut config, _) = project(dir.path());
         let xml = config.base_path.join("configuration");
+        config.work_path = xml.join("Catalogs/Items/Ext/service-area");
+        fs::create_dir_all(&config.work_path).expect("nested workPath");
+        let service_file = config.work_path.join("service.xml");
+        fs::write(&service_file, "<service/>").expect("service file");
         let payload = "Catalogs/Items/Ext/build/payload.xml";
         let path = xml.join(payload);
         fs::create_dir_all(path.parent().expect("payload parent")).expect("payload directory");
@@ -2630,7 +2634,16 @@ fi"#;
             )
             .expect("built");
         };
-        build(&Recorder::new());
+        let initial = Recorder::new();
+        build(&initial);
+        assert_eq!(initial.calls().len(), 3);
+
+        fs::write(&service_file, "<changed/>").expect("change service file");
+        let unchanged = Recorder::new();
+        build(&unchanged);
+        assert_eq!(position(&unchanged.calls(), "save"), [0]);
+        assert_eq!(unchanged.calls().len(), 1);
+
         fs::write(xml.join("Catalogs/Items.xml"), "<Catalog/>").expect("descriptor");
         let partial = Recorder::new();
         build(&partial);
@@ -2642,6 +2655,10 @@ fi"#;
             "{args:?}"
         );
         assert!(!args.iter().any(|arg| arg.ends_with("old.cf")), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.ends_with("service.xml")),
+            "{args:?}"
+        );
     }
 
     #[test]

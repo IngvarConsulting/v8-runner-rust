@@ -44,20 +44,25 @@ pub(super) fn root(work_path: &Path) -> PathBuf {
 pub(super) fn reject_overlap(work_path: &Path, candidate: &Path) -> Result<(), AppError> {
     let base = canonical(&root(work_path))?;
     let candidate = canonical(candidate)?;
-    let contains = |parent: &Path, child: &Path| {
-        let identity = stable_path_identity(parent);
-        child
-            .ancestors()
-            .any(|ancestor| stable_path_identity(ancestor) == identity)
-    };
-    if contains(&base, &candidate) || contains(&candidate, &base) {
-        return Err(AppError::Validation(format!(
-            "path '{}' overlaps the reserved build infobase '{}'",
-            candidate.display(),
-            base.display()
-        )));
+    if path_contains(&base, &candidate) || path_contains(&candidate, &base) {
+        return Err(overlap_error(&base, &candidate));
     }
     Ok(())
+}
+
+fn path_contains(parent: &Path, child: &Path) -> bool {
+    let identity = stable_path_identity(parent);
+    child
+        .ancestors()
+        .any(|ancestor| stable_path_identity(ancestor) == identity)
+}
+
+fn overlap_error(base: &Path, candidate: &Path) -> AppError {
+    AppError::Validation(format!(
+        "path '{}' overlaps the reserved build infobase '{}'",
+        candidate.display(),
+        base.display()
+    ))
 }
 
 fn canonical(path: &Path) -> Result<PathBuf, AppError> {
@@ -320,10 +325,14 @@ impl BuildSession {
             let slot = slot_key(extension);
             let sources = snapshot(set, xml, &slot, &memory, &identity)?;
             let load = if reset.is_none() && slots.contains(&slot) {
-                match analyze(env.context, &root, &sources)? {
+                match analyze(env.context, &env.config.work_path, &sources)? {
                     AnalysisOutcome::NoChanges => Load::Skip,
                     AnalysisOutcome::Changes { changes, prepared } => {
-                        match partial_load::decide_build(&changes, sources.path()) {
+                        match partial_load::decide_build(
+                            &changes,
+                            sources.path(),
+                            &env.config.work_path,
+                        ) {
                             LoadDecision::Partial(paths) => Load::Partial(paths, prepared),
                             LoadDecision::Full => Load::Full,
                         }
@@ -378,9 +387,11 @@ impl BuildSession {
         let snapshots = loads
             .iter()
             .map(|item| match item.load {
-                Load::Full => analyzer::prepare_full_snapshot(&item.context, item.context.path())
-                    .map(Some)
-                    .map_err(memory_error),
+                Load::Full => {
+                    analyzer::prepare_source_snapshot(&item.context, &env.config.work_path)
+                        .map(Some)
+                        .map_err(memory_error)
+                }
                 _ => Ok(None),
             })
             .collect::<Result<Vec<Option<FullSnapshot>>, AppError>>()?;
@@ -512,8 +523,16 @@ impl BuildSession {
 
 pub(super) fn validate_project(config: &AppConfig) -> Result<(), AppError> {
     let inventory = SourceSetInventory::new(config);
+    let work_path = canonical(&config.work_path)?;
+    let base = canonical(&root(&config.work_path))?;
     for set in &config.source_sets {
-        reject_overlap(&config.work_path, &inventory.source_path(set))?;
+        let source = canonical(&inventory.source_path(set))?;
+        let contains_work = work_path
+            .parent()
+            .is_some_and(|parent| path_contains(&source, parent));
+        if path_contains(&base, &source) || path_contains(&source, &base) && !contains_work {
+            return Err(overlap_error(&base, &source));
+        }
     }
     Ok(())
 }
@@ -589,17 +608,18 @@ fn sources_in_xml(
     if !force_export
         && target.join("Configuration.xml").is_file()
         && matches!(
-            analyze(env.context, root, &edt)?,
+            analyze(env.context, &env.config.work_path, &edt)?,
             AnalysisOutcome::NoChanges
         )
         && matches!(
-            analyze(env.context, root, &xml)?,
+            analyze(env.context, &env.config.work_path, &xml)?,
             AnalysisOutcome::NoChanges
         )
     {
         return Ok((target, identity, Vec::new()));
     }
-    let prepared = analyzer::prepare_full_snapshot(&edt, edt.path()).map_err(memory_error)?;
+    let prepared =
+        analyzer::prepare_source_snapshot(&edt, &env.config.work_path).map_err(memory_error)?;
     let edt_memory = edt
         .storage_path(root)
         .ok_or_else(|| AppError::Runtime("build cache has no EDT snapshot path".to_owned()))?;

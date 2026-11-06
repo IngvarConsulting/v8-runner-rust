@@ -38,7 +38,7 @@ pub enum ScanError {
 
 /// Directory/file names that are always excluded from scanning.
 const IGNORED_DIRS: &[&str] = &[
-    ".git", ".gradle", "build", "target", "temp", "tmp", ".yaxunit",
+    ".git", ".gradle", ".build", "build", "target", "temp", "tmp", ".yaxunit",
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 
@@ -117,12 +117,24 @@ pub(super) enum ScanScope {
 /// Hash every selected regular file, including equal-size edits with exactly the old
 /// remembered mtime (#447). The predicate is the caller's existing interruption policy;
 /// successful post-publication bookkeeping supplies an always-false predicate.
+#[cfg(test)]
 pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSnapshot, ScanError> {
-    scan_in_scope(root, interrupted, ScanScope::Push)
+    scan_in_scope(root, None, interrupted, ScanScope::Push)
 }
 
+/// `workPath` under a source-set root, named as the walk of that root names it. A set in the
+/// workspace root holds it, and it can have any name.
+pub fn work_path_inside(root: &Path, work_path: &Path) -> Option<PathBuf> {
+    let root_real = root.canonicalize().ok()?;
+    let work_real = work_path.canonicalize().ok()?;
+    let relative = work_real.strip_prefix(&root_real).ok()?;
+    (!relative.as_os_str().is_empty()).then(|| root.join(relative))
+}
+
+/// Hash the files selected by the scan scope, excluding the supplied directory.
 pub(super) fn scan_in_scope(
     root: &Path,
+    excluded: Option<&Path>,
     interrupted: &mut dyn FnMut() -> bool,
     scope: ScanScope,
 ) -> Result<ScanSnapshot, ScanError> {
@@ -135,7 +147,7 @@ pub(super) fn scan_in_scope(
     let mut files = Vec::new();
     let mut has_untracked_links = false;
 
-    for entry in source_entries(root, scope) {
+    for entry in source_entries(root, excluded, scope) {
         check_interruption(interrupted)?;
         let entry = entry.map_err(|e| ScanError::Walk {
             path: root.to_path_buf(),
@@ -239,14 +251,34 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
-pub(super) fn source_entries(
+/// A set copied for the agent keeps a form named `build`: below the top level such a name is
+/// metadata. Generated directories live at the top, the others are named by their paths.
+pub(crate) fn top_level_source_entries(
     root: &Path,
-    scope: ScanScope,
+    excluded: Vec<PathBuf>,
 ) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
     WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(move |entry| entry.depth() == 0 || !is_ignored_dir(entry, scope))
+        .filter_entry(move |entry| {
+            entry.depth() == 0
+                || !((entry.depth() == 1 && is_ignored_dir(entry, ScanScope::Push))
+                    || excluded.iter().any(|path| path == entry.path()))
+        })
+}
+
+/// The entries of a source tree, without the generated directories and `excluded`.
+pub(super) fn source_entries<'a>(
+    root: &Path,
+    excluded: Option<&'a Path>,
+    scope: ScanScope,
+) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> + 'a {
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(move |entry| {
+            entry.depth() == 0 || !(is_ignored_dir(entry, scope) || excluded == Some(entry.path()))
+        })
 }
 
 pub(super) fn is_source_file(entry: &walkdir::DirEntry, root: &Path, scope: ScanScope) -> bool {
@@ -270,18 +302,60 @@ fn is_ignored_dir(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
     match scope {
         ScanScope::Push => IGNORED_DIRS.contains(&name),
         // A metadata object can itself be named build, target, temp, or tmp.
-        ScanScope::Build => matches!(name, ".git" | ".gradle" | ".yaxunit"),
+        ScanScope::Build => matches!(name, ".git" | ".gradle" | ".build" | ".yaxunit"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{scan, ScanSnapshot};
+    use super::{scan, scan_in_scope, work_path_inside, ScanScope, ScanSnapshot};
     use crate::change_detection::file_state::mtime_nanos;
     use std::fs::{self, File};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
     use tempfile::tempdir;
+
+    fn scanned_names(snapshot: &ScanSnapshot) -> Vec<&str> {
+        snapshot
+            .files
+            .iter()
+            .map(|file| file.rel_path.as_str())
+            .collect()
+    }
+
+    /// `.build` — служебный каталог на любой глубине; выбранный корень с таким именем обходится.
+    #[test]
+    fn the_build_directory_is_not_a_source_below_the_root() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join(".build");
+        fs::create_dir_all(root.join(".build/unica")).expect("service dir");
+        fs::write(root.join(".build/unica/lock"), "lock").expect("service file");
+        fs::write(root.join("Configuration.xml"), "<x/>").expect("source");
+
+        let snapshot = scan(&root, &mut || false).expect("scan");
+
+        assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
+    }
+
+    /// `workPath` внутри набора не исходник, как бы он ни назывался.
+    #[test]
+    fn a_work_path_inside_the_root_is_not_a_source_whatever_its_name() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let work = root.join("service-area");
+        fs::create_dir_all(&work).expect("work");
+        fs::write(work.join("log.txt"), "log").expect("service file");
+        fs::write(root.join("Configuration.xml"), "<x/>").expect("source");
+
+        let excluded = work_path_inside(&root, &work);
+        assert_eq!(excluded.as_deref(), Some(work.as_path()));
+        let snapshot = scan_in_scope(&root, excluded.as_deref(), &mut || false, ScanScope::Push)
+            .expect("scan");
+
+        assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
+        assert_eq!(work_path_inside(&root, dir.path()), None);
+        assert_eq!(work_path_inside(&root, &root), None);
+    }
 
     fn write_touched(path: &Path, contents: &str, modified: SystemTime) {
         fs::write(path, contents).expect("write");

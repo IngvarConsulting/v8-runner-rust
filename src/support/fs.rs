@@ -81,6 +81,10 @@ pub struct TempDirMetadata {
     pub target_path: PathBuf,
     pub target_identity: String,
     pub created_at: DateTime<Utc>,
+    /// The replacement finished, so this backup holds an older state than the target had.
+    /// A backup without the mark may be the only copy of the target.
+    #[serde(default)]
+    pub superseded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -836,10 +840,21 @@ pub fn write_temp_dir_metadata(
         target_path: target_path.to_path_buf(),
         target_identity: target_identity.to_owned(),
         created_at: Utc::now(),
+        superseded: false,
     };
 
     std::fs::write(
         metadata_sidecar_path(dir),
+        serde_json::to_vec_pretty(&metadata)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    )
+}
+
+fn mark_backup_superseded(backup: &Path) -> std::io::Result<()> {
+    let mut metadata = read_temp_dir_metadata(backup)?;
+    metadata.superseded = true;
+    std::fs::write(
+        metadata_sidecar_path(backup),
         serde_json::to_vec_pretty(&metadata)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
     )
@@ -975,6 +990,13 @@ pub fn replace_dir_atomically(
     let _ = remove_path_if_exists(&stage_metadata_path);
 
     let mut warnings = Vec::new();
+    // Removing a large tree can stop halfway. What it leaves must not pass for the only copy.
+    if let Err(error) = mark_backup_superseded(&backup_dir) {
+        warnings.push(format!(
+            "failed to mark backup dir '{}' as superseded: {error}",
+            backup_dir.display()
+        ));
+    }
     if let Err(error) = remove_path_if_exists(&backup_dir) {
         warnings.push(format!(
             "failed to remove backup dir '{}': {error}",

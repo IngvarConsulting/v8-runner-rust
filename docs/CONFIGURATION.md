@@ -308,6 +308,9 @@ tests:
 command-specific validation, а не ослабление `push`, source `pull`, `convert`, `make` или
 остальных project workflows.
 
+Каталог `workPath` внутри набора исходников, например при наборе в корне проекта, исходником
+не считается: определение изменений его не читает.
+
 Корень runtime state:
 
 - `workPath/infobases/<база>/` — память о базе: `<база>` — имя объявленной базы или, у базы,
