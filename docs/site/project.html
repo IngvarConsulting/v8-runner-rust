@@ -229,11 +229,7 @@ providers:        # явно выбранные исполнители опер�
 </table></div>
 <h2 id="operations">Настройки операций</h2>
 <h3 id="push-settings">Отправка исходников</h3>
-<p><code>push.partialLoadThreshold</code> задаёт максимальное число изменённых файлов для частичной загрузки через Конфигуратор. По умолчанию — 20; при превышении порога используется полная загрузка.</p>
-<pre data-config-example="main"><code># Фрагмент v8project.yaml
-workPath: .build
-push:                       # настройки отправки исходников
-  partialLoadThreshold: 20  # до 20 файлов — частичная загрузка</code></pre>
+<p>При наличии снимка исходников <code>push</code> загружает изменения частично. Порога числа файлов нет. Для загрузки набора целиком есть <code>push --full</code>. Ключ <code>push.partialLoadThreshold</code> отклоняется при чтении обоих файлов проекта.</p>
 <h3 id="test-settings">Тесты</h3>
 <p><code>tests</code> хранит настройки YAxUnit и Vanessa Automation. Общий таймаут выполнения задаётся в секундах; параметры конкретных инструментов лежат в <code>tests.yaxunit</code> и <code>tests.va</code>.</p>
 <pre data-config-example="main"><code># Фрагмент v8project.yaml
@@ -244,12 +240,8 @@ tests:                            # настройки тестовых инст
 <p>Общие настройки хранятся в <code>v8project.yaml</code>, настройки этой машины — в <code>v8project.local.yaml</code> рядом с ним. Раннер сначала читает основной файл, затем локальный.</p>
 <p>Вложенные карты объединяются по ключам: локальное значение заменяет одноимённое основное, остальные значения сохраняются. Значения других типов, включая списки, заменяются целиком.</p>
 <p>Локальный файл может переопределять <code>workPath</code>, <code>providers</code>, <code>tools</code> и <code>tests</code>, а также объявлять <code>infobases</code>. Он не может менять <code>format</code> и <code>source-set</code>: это общие свойства проекта.</p>
-<h3 id="local-push">Пример: другой порог загрузки <span class="plan-badge">План</span></h3>
-<p>Секцию <a href="#push-settings"><code>push</code></a> можно задать в обоих файлах. В основном примере порог равен 20. Добавьте в локальный файл:</p>
-<pre data-config-example="local-push"><code># Фрагмент v8project.local.yaml
-push:
-  partialLoadThreshold: 40  # порог для этой машины</code></pre>
-<p>На этой машине итоговый порог будет 40. Остальные общие настройки сохранятся.</p>
+<h3 id="local-push">Отправка исходников</h3>
+<p>Режим полной загрузки задаёт аргумент <a href="cli-push.html"><code>push --full</code></a>. В локальном файле можно выбрать исполнителя через <code>providers.push</code>.</p>
 </main>
 <script src="site.js?v=26" defer></script>
 </body>

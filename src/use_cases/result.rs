@@ -68,7 +68,7 @@ impl UseCaseErrorKind {
             | AppError::ValidationIbcmdContext { .. }
             | AppError::Config(_)
             | AppError::ConfigContext { .. } => Self::Validation,
-            AppError::Runtime(_) => Self::Runtime,
+            AppError::Runtime(_) | AppError::SourceLoadNotStarted(_) => Self::Runtime,
             AppError::Platform(_)
             | AppError::PlatformDesigner(_)
             | AppError::PlatformDesignerContext { .. }
@@ -275,6 +275,7 @@ impl UseCaseError {
             | AppError::InvalidOutput(message)
             | AppError::Validation(message)
             | AppError::Runtime(message)
+            | AppError::SourceLoadNotStarted(message)
             | AppError::Platform(message) => message,
             AppError::ValidationIbcmd(error) => error.to_string(),
             AppError::PlatformDesigner(error) => error.to_string(),

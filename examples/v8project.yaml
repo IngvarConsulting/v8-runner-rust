@@ -8,6 +8,8 @@ workPath: build
 format: DESIGNER
 
 # Executor overrides are optional: providers.<operation>: designer | ibcmd
+# push uses partial loads when it can compare against a file snapshot.
+# For a full load, use v8-runner push --full.
 
 # Infobases are declared in v8project.local.yaml (map `infobases`, default `origin`):
 # which infobase a checkout is attached to is known to the machine, not to the project.

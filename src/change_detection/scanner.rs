@@ -79,34 +79,16 @@ pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSn
         })?;
     let mut files = Vec::new();
 
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !is_ignored_dir(e))
-    {
+    for entry in source_entries(root) {
         check_interruption(interrupted)?;
         let entry = entry.map_err(|e| ScanError::Walk {
             path: root.to_path_buf(),
             source: e,
         })?;
-
+        if !is_source_file(&entry) {
+            continue;
+        }
         let path = entry.path();
-
-        if entry.file_type().is_dir() {
-            continue;
-        }
-
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
-        // Skip ignored file names.
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if is_ignored_file(name) {
-                continue;
-            }
-        }
-
         let meta = std::fs::metadata(path).map_err(|e| ScanError::Meta {
             path: path.to_path_buf(),
             source: e,
@@ -192,6 +174,19 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
             path: path.to_path_buf(),
         })?;
     Ok(rel.to_string_lossy().replace('\\', "/"))
+}
+
+pub(super) fn source_entries(
+    root: &Path,
+) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| entry.depth() == 0 || !is_ignored_dir(entry))
+}
+
+pub(super) fn is_source_file(entry: &walkdir::DirEntry) -> bool {
+    entry.file_type().is_file() && !entry.file_name().to_str().is_some_and(is_ignored_file)
 }
 
 fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {

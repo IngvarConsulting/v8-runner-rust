@@ -353,6 +353,60 @@ fn a_partial_build_through_sftp_ships_only_the_changed_files() {
     assert_eq!(actual, expected, "{writes:?}");
 }
 
+#[test]
+fn a_partial_root_load_through_sftp_stages_dependencies_outside_the_load_list() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let sources = harness.dir.path().join("project/configuration");
+    let root = sources.join("Configuration.xml");
+    let module = sources.join("Catalogs/Items/Ext/ObjectModule.bsl");
+    fs::create_dir_all(module.parent().expect("module directory")).expect("module directory");
+    fs::write(module, "Procedure Test() Export\nEndProcedure").expect("unchanged payload");
+    fs::write(sources.join("unrelated.txt"), "not for the partial upload").expect("unrelated");
+    fs::write(
+        &root,
+        "<MetaDataObject><Configuration><ChildObjects/></Configuration></MetaDataObject>",
+    )
+    .expect("configuration without the object");
+    let (code, payload) = run(&harness, &["push", "main", "--force"]);
+    assert_eq!(code, 0, "{payload}");
+    let seen_before = commands(&harness).len();
+    fs::write(
+        root,
+        "<MetaDataObject><Configuration><ChildObjects><Catalog>Items</Catalog></ChildObjects></Configuration></MetaDataObject>",
+    )
+    .expect("restore the declaration without editing object files");
+
+    let (code, payload) = run(&harness, &["push", "main"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["steps"][0]["mode"]["partial"]["file_count"], 1,
+        "{payload}"
+    );
+    let commands: Vec<_> = commands(&harness).into_iter().skip(seen_before).collect();
+    let mut uploaded: Vec<_> = commands
+        .iter()
+        .filter(|line| line.starts_with("sftp write "))
+        .filter_map(|line| line.rsplit('/').next())
+        .collect();
+    uploaded.sort_unstable();
+    assert_eq!(
+        uploaded,
+        [
+            "00-main.list.txt",
+            "Configuration.xml",
+            "Items.xml",
+            "ObjectModule.bsl"
+        ],
+        "{commands:?}"
+    );
+    let lists: Vec<_> = commands
+        .iter()
+        .filter(|line| line.starts_with("list: "))
+        .collect();
+    assert_eq!(lists, ["list: Configuration.xml"], "{commands:?}");
+}
+
 /// Инкрементальная выгрузка по SFTP не возит цель целиком: на сервер уходит только
 /// опись выгрузки, обратно приходят изменённые файлы поверх локальной цели.
 #[test]

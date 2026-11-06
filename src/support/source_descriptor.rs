@@ -471,6 +471,68 @@ fn xml_local_name(name: &[u8]) -> String {
     raw.rsplit(':').next().unwrap_or(raw.as_ref()).to_owned()
 }
 
+/// Types and names directly declared by a Designer configuration's ChildObjects.
+pub(crate) fn designer_child_objects(content: &str) -> Option<Vec<(String, String)>> {
+    let mut reader = Reader::from_str(content.trim_start_matches('\u{feff}'));
+    reader.config_mut().trim_text(true);
+    let mut stack = Vec::new();
+    let mut names = None;
+    let mut name = String::new();
+    let mut seen_root = false;
+    let mut seen_configuration = false;
+
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(event) => {
+                let tag = xml_local_name(event.name().as_ref());
+                match stack.len() {
+                    0 if !seen_root && tag == "MetaDataObject" => seen_root = true,
+                    1 if !seen_configuration && tag == "Configuration" => seen_configuration = true,
+                    0 | 1 => return None,
+                    2 if tag == "ChildObjects" => {
+                        if names.replace(Vec::new()).is_some() {
+                            return None;
+                        }
+                    }
+                    3 if stack[2] == "ChildObjects" => name.clear(),
+                    4.. if stack[2] == "ChildObjects" => return None,
+                    _ => {}
+                }
+                stack.push(tag);
+            }
+            Event::Empty(event)
+                if stack.len() == 2 && event.local_name().as_ref() == b"ChildObjects" =>
+            {
+                if names.replace(Vec::new()).is_some() {
+                    return None;
+                }
+            }
+            Event::Text(text) if stack.len() == 4 && stack[2] == "ChildObjects" => {
+                name.push_str(&text.unescape().ok()?);
+            }
+            Event::End(_) => {
+                if stack.len() == 4 && stack[2] == "ChildObjects" {
+                    if name.is_empty() {
+                        return None;
+                    }
+                    names
+                        .as_mut()?
+                        .push((stack[3].clone(), std::mem::take(&mut name)));
+                }
+                stack.pop()?;
+            }
+            Event::Eof if stack.is_empty() => return names,
+            Event::Eof => return None,
+            Event::Empty(_) | Event::CData(_) | Event::Text(_)
+                if stack.len() >= 3 && stack[2] == "ChildObjects" =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
