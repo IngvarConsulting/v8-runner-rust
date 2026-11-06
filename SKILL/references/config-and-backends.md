@@ -36,8 +36,8 @@ matrix, and `providers.<operation>` names one explicitly.
 - The key is accepted only where the matrix gives this target more than one executor. On a file
   or cluster infobase that means `infobase.create`, `push`, `pull`, `extensions`,
   `download`, `infobase.dump`, `infobase.restore`, and `make`. Naming an
-  executor for a single-executor operation is a config error, so `providers.upload` and
-  `providers.syntax` are refused — both are Designer-only.
+  executor for a single-executor operation is a config error. The loader rejects
+  `providers.syntax`, `providers.check`, `providers.publish`, and `providers.sessions` as unknown keys.
 - Defaults: `infobase.create`, `push`, `pull`, `download` try Designer then `ibcmd`;
   `infobase.dump` and `infobase.restore` use Designer (experimental IBCMD DT only when named);
   `upload` and `syntax` are Designer-only; `extensions` defaults to `ibcmd`. `agent` is
@@ -67,7 +67,7 @@ matrix, and `providers.<operation>` names one explicitly.
 - `extensions` supports Designer and EDT projects: `--name` selects an extension `source-set`,
   `--installed-name` selects an installed platform name without a matching source-set.
 - `check` picks its branch by `format`: `/CheckConfig` under DESIGNER, EDT validation under EDT.
-- IBCMD dump uses project-local standalone-server data under `workPath/ibcmd-data`.
+- Every IBCMD command on the project infobase uses project-local standalone-server data under `workPath/ibcmd-data`.
 - `pull --object` (partial) with IBCMD degrades to incremental and must be called out in user-facing summaries.
 - `convert` is CLI-only, repo-aware, uses configured `source-set`, takes no `providers` key, and does not require an infobase.
 - `upload` supports `.cf` and `.cfe` only for `format=DESIGNER`.

@@ -259,6 +259,19 @@ fn a_full_dump_travels_through_sftp() {
         fs::read_to_string(target.join("Configuration.xml")).expect("published dump"),
         "<Configuration/>\n"
     );
+    let lines = commands(&harness);
+    let dumps = lines
+        .iter()
+        .filter(|line| line.starts_with("config dump-config-to-files"))
+        .collect::<Vec<_>>();
+    assert_eq!(dumps.len(), 1, "{lines:?}");
+    let directory = dumps[0]
+        .strip_prefix("config dump-config-to-files --dir=dump/")
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(
+        !directory.is_empty() && !directory.contains(char::is_whitespace),
+        "one directory argument and no extra options: {lines:?}"
+    );
     let sftp = sftp_lines(&harness);
     assert!(
         sftp.iter().any(|line| line.starts_with("sftp mkdir dump/")),
@@ -631,7 +644,9 @@ fn a_download_through_the_gate_exports_the_main_configuration() {
         .strip_prefix("config dump-cfg --file=")
         .unwrap_or_else(|| panic!("{lines:?}"));
     assert!(
-        file.starts_with("export/") && file.ends_with("/main.cf") && !file.contains(' '),
+        file.starts_with("export/")
+            && file.ends_with("/main.cf")
+            && !file.contains(char::is_whitespace),
         "a target-side path of the main configuration package: {lines:?}"
     );
 }

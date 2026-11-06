@@ -354,6 +354,34 @@ fn status_deep_predicts_the_push_generation_check() {
     assert_eq!(refused["error"]["code"], "non_fast_forward", "{refused}");
 }
 
+/// `status --deep`, которому `push` назначил `ibcmd`, спрашивает базу с каталогом данных
+/// проекта: умолчательный один на пользователя, и чтение отказало бы команде другого проекта.
+#[test]
+fn an_ibcmd_status_deep_holds_the_data_directory_of_the_project() {
+    let project = Project::new();
+    project.base_generation(FIRST);
+    let config = fs::read_to_string(&project.config).expect("config");
+    assert!(config.contains(support::DESIGNER_LEADS), "{config}");
+    fs::write(
+        &project.config,
+        config.replace(support::DESIGNER_LEADS, "providers:\n  push: ibcmd\n"),
+    )
+    .expect("config");
+
+    succeeded(&project.run(&["status", "--deep"]));
+
+    let calls = project.calls();
+    assert!(calls.contains("config generation-id"), "{calls}");
+    assert!(calls.contains(" save "), "{calls}");
+    for call in calls.lines().filter(|call| call.starts_with("ibcmd ")) {
+        let data = call
+            .split_once("--data ")
+            .and_then(|(_, rest)| rest.split(' ').next())
+            .unwrap_or_else(|| panic!("no --data in: {call}"));
+        assert!(data.ends_with("/work/ibcmd-data"), "{call}");
+    }
+}
+
 /// `status --deep` называет непринятое: основная конфигурация, сохранённая в файл, не равна
 /// конфигурации базы данных (#412). Равны — непринятого нет.
 #[test]

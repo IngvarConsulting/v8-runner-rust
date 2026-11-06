@@ -603,7 +603,11 @@ fn upload_with_ibcmd_push_receives_config_relative_paths_resolved_from_the_confi
     let infobase = project.join("ib");
     let calls = fs::read_to_string(&calls_log).expect("calls");
     assert!(
-        calls.contains(&format!("ibcmd infobase --db-path {} ", infobase.display())),
+        calls.contains(&format!(
+            "ibcmd infobase --data {} --db-path {} ",
+            project.join("work").join("ibcmd-data").display(),
+            infobase.display()
+        )),
         "{calls}"
     );
     assert!(

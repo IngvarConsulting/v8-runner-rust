@@ -727,6 +727,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn main_configuration_exports_use_the_measured_designer_commands() {
+        let runner = CapturingRunner::default();
+        let temp = tempdir().expect("temporary log directory");
+        let log = temp.path().join("designer.log");
+        let log_argument = log.display().to_string();
+        let mut connection = V8Connection::from_connection_string("File=C:/ib");
+        connection.user = Some("Администратор".to_owned());
+        connection.password = Some(String::new());
+        let dsl = DesignerDsl::new(
+            "1cv8.exe".into(),
+            connection,
+            &runner,
+            Some(log),
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.dump_config_to_files(Path::new("bdump"), None)
+            .expect("dump configuration files");
+        dsl.dump_cfg(Path::new("b.cf"), None)
+            .expect("dump configuration package");
+
+        let requests = runner.0.borrow();
+        assert_eq!(requests.len(), 2);
+        for (request, operation, output) in [
+            (&requests[0], "/DumpConfigToFiles", "bdump"),
+            (&requests[1], "/DumpCfg", "b.cf"),
+        ] {
+            assert_eq!(
+                request.args,
+                [
+                    "DESIGNER",
+                    "/DisableStartupDialogs",
+                    "/DisableStartupMessages",
+                    "/IBConnectionString",
+                    "File=C:/ib",
+                    "/N",
+                    "Администратор",
+                    "/Out",
+                    log_argument.as_str(),
+                    "-NoTruncate",
+                    operation,
+                    output,
+                ]
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn cf_exports_pass_windows_drive_paths_without_verbatim_prefix() {

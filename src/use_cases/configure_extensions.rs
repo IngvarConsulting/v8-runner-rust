@@ -8,6 +8,7 @@ use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::extension_identity::platform_extension_name;
 use crate::use_cases::extension_inventory::{
@@ -116,12 +117,16 @@ fn run_configure(
             Ok(agent) => SafetySetter::Agent(Box::new(agent)),
             Err(error) => return Err(UseCaseFailure::without_payload(error)),
         },
-        Executor::Ibcmd { binary, connection } => SafetySetter::Ibcmd(Box::new(IbcmdDsl::new(
-            binary,
-            connection,
+        Executor::Ibcmd { binary, .. } => match build_ibcmd_dsl(
+            context,
+            config,
+            &binary,
             utilities.runner_for(UtilityType::Ibcmd),
-            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-        ))),
+            InterruptionSafetyClass::CriticalNonAbortable,
+        ) {
+            Ok(dsl) => SafetySetter::Ibcmd(Box::new(dsl)),
+            Err(error) => return Err(UseCaseFailure::without_payload(error)),
+        },
     };
 
     let outcome = disable_safety_for(context, &mut setter, targets, started);
