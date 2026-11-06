@@ -1161,13 +1161,20 @@ fn readiness(
         IbcmdConnection::from_infobase(&config.infobase)
             .map_err(|error| format!("connection is not ready for IBCMD: {error}"))?;
     }
-    match utility {
-        Some(utility) => utilities
-            .locate(utility)
-            .map(|location| Some(location.path))
-            .map_err(|error| format!("environment is not ready: {error}")),
-        None => Ok(None),
+    let Some(utility) = utility else {
+        return Ok(None);
+    };
+    let location = utilities
+        .locate(utility)
+        .map_err(|error| format!("environment is not ready: {error}"))?;
+    if provider == Provider::Agent
+        && matches!(intent, InfobaseTransferIntent::SnapshotRestore { .. })
+    {
+        if let Some(reason) = agent::restore_blocked_by_a_question(&location) {
+            return Err(reason);
+        }
     }
+    Ok(Some(location.path))
 }
 
 fn validate_file_infobase_readiness(config: &AppConfig) -> Result<(), String> {

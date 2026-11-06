@@ -3282,7 +3282,8 @@ exit 0"#,
             );
         }
         let unmeasured = crate::platform::locator::PlatformVersion {
-            patch: 26,
+            minor: 5,
+            patch: 2,
             ..platform.clone()
         };
         assert_eq!(
