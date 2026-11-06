@@ -44,7 +44,7 @@ fn harness_for(connection: Option<&str>, providers: &str) -> Harness {
 
 /// Стенд, двойник которого держит команду `hold`, пока тест её не отпустит.
 fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>) -> Harness {
-    harness_speaking(connection, providers, hold, &["ru", "en"])
+    harness_speaking(connection, providers, hold, &["ru", "en"], "8.3.27.2074")
 }
 
 /// Стенд, в конфигурации которого только эти языки.
@@ -53,6 +53,7 @@ fn harness_speaking(
     providers: &str,
     hold: Option<Hold>,
     languages: &[&'static str],
+    platform: &str,
 ) -> Harness {
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
@@ -84,7 +85,7 @@ fn harness_speaking(
     fs::create_dir_all(&work_path).expect("work dir");
     fs::create_dir_all(root.join("ib")).expect("ib");
     fs::write(root.join("ib").join("1Cv8.1CD"), "db").expect("ib file");
-    let bin = root.join("platform").join("8.3.27.2074").join("bin");
+    let bin = root.join("platform").join(platform).join("bin");
     fs::create_dir_all(&bin).expect("platform dir");
 
     let commands_log = root.join("agent-commands.log");
@@ -122,10 +123,11 @@ fn harness_speaking(
     fs::write(
         &config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
+            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '{version}'\n  designer_agent:\n    port: {port}\n",
             work = work_path.display(),
             password = AGENT_PASSWORD,
             platform = root.join("platform").display(),
+            version = platform,
         ),
     )
     .expect("write config");
@@ -605,7 +607,13 @@ fn create_commands(harness: &Harness) -> Vec<String> {
 }
 
 fn create_with_languages(languages: &[&'static str], synonym: &[&str]) -> (Harness, i32, Value) {
-    let harness = harness_speaking(None, "  extensions: agent\n", None, languages);
+    let harness = harness_speaking(
+        None,
+        "  extensions: agent\n",
+        None,
+        languages,
+        "8.3.27.2074",
+    );
     let mut arguments = vec![
         "extensions",
         "create",
@@ -965,7 +973,13 @@ fn a_cancellation_during_a_language_refusal_stops_the_synonym_forms() {
     let marks = temp_workspace();
     let held = hold(&marks, "config extensions create", HoldReply::Normal);
     let (started, release) = (held.started.clone(), held.release.clone());
-    let harness = harness_speaking(None, EVERY_AGENT_PROVIDER, Some(held), &["ru"]);
+    let harness = harness_speaking(
+        None,
+        EVERY_AGENT_PROVIDER,
+        Some(held),
+        &["ru"],
+        "8.3.27.2074",
+    );
 
     let (code, payload) = interrupt_at_hold(
         runner(
@@ -987,6 +1001,33 @@ fn a_cancellation_during_a_language_refusal_stops_the_synonym_forms() {
 
     assert_ne!(code, 0, "{payload}");
     assert_eq!(create_commands(&harness).len(), 1, "{payload}");
+}
+
+/// Агент 8.3.24 не выполняет `common shutdown`: не отвечает и не выходит. Команду ему отдают, но
+/// полные сроки закрытия, 45 с, не ждут, и исход команды от этого не меняется.
+#[test]
+fn an_agent_of_a_platform_ignoring_shutdown_is_not_awaited() {
+    let marks = temp_workspace();
+    let held = hold(&marks, "common shutdown", HoldReply::Normal);
+    let started = held.started.clone();
+    let harness = harness_speaking(
+        None,
+        EVERY_AGENT_PROVIDER,
+        Some(held),
+        &["ru", "en"],
+        "8.3.24.1819",
+    );
+
+    let began = std::time::Instant::now();
+    let (code, payload) = run(&harness, &["extensions", "list"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(started.exists(), "common shutdown was not sent: {payload}");
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        began.elapsed()
+    );
 }
 
 /// Строки журнала, которых ждут тесты, — те же, что пишет раннер: переименование падает
