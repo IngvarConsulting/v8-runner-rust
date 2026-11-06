@@ -2011,12 +2011,10 @@ fn convert_an_edt_set_to_a_package_goes_through_xml_in_the_build_infobase() {
         .find(|call| call.contains(" config import "))
         .expect("import call");
     let xml = fs::canonicalize(work_path.join("temp/build-infobase/xml")).expect("XML cache");
-    let imported_path = import.split_whitespace().last().expect("imported XML");
-    assert!(Path::new(imported_path).starts_with(&xml), "{import}");
-    assert!(
-        Path::new(imported_path).join("Configuration.xml").is_file(),
-        "{import}"
-    );
+    let imported = import.split_whitespace().last().expect("imported XML");
+    let imported = fs::canonicalize(imported).expect("imported XML directory");
+    assert!(imported.starts_with(&xml), "{import}");
+    assert!(imported.join("Configuration.xml").is_file(), "{import}");
 }
 
 impl PackageProject {
