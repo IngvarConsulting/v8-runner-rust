@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use crate::config::model::AppConfig;
+use crate::platform::locator::{PlatformVersion, UtilityLocation, UtilityVersion};
 use crate::platform::result::PlatformCommandResult;
 use crate::use_cases::agent_session::{
     argument, collect_file, make_output_dir, run_command, run_id, stage_file, tidy, tidy_run_path,
@@ -16,6 +17,33 @@ use crate::use_cases::agent_session::{
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::CommandFailure;
 use crate::use_cases::progress::log_live_stage;
+
+/// Первая платформа, агент которой выполняет `restore-ib` без вопроса. На 8.3.24 и 8.3.26 он
+/// просит разрешение на перезапуск, раннер на вопросы не отвечает, команда падает, а состояние
+/// базы остаётся неизвестным (замер «Раннер на 8.3.24–8.3.26»).
+const RESTORE_WITHOUT_A_QUESTION: PlatformVersion = PlatformVersion {
+    major: 8,
+    minor: 3,
+    patch: 27,
+    build: 0,
+};
+
+/// Причина не выбирать агента для `infobase restore` на этой платформе
+/// (`INV.USE-CASES.A-RESTORE-BELOW-8-3-27-SKIPS-THE-AGENT`); `None`, если версия платформы не
+/// ниже границы или её не видно.
+pub(super) fn restore_blocked_by_a_question(location: &UtilityLocation) -> Option<String> {
+    match &location.version {
+        Some(UtilityVersion::Platform(version)) if *version < RESTORE_WITHOUT_A_QUESTION => {
+            Some(format!(
+                "the agent of platform {version} asks to confirm a restart during restore-ib, which the runner does not answer; platform {}.{}.{} and newer restores without asking, assign the Designer, which restores on any",
+                RESTORE_WITHOUT_A_QUESTION.major,
+                RESTORE_WITHOUT_A_QUESTION.minor,
+                RESTORE_WITHOUT_A_QUESTION.patch,
+            ))
+        }
+        Some(UtilityVersion::Platform(_) | UtilityVersion::Edt(_)) | None => None,
+    }
+}
 
 /// `config dump-cfg --file=… [--extension=…]` — только рабочая конфигурация: команды для
 /// конфигурации базы данных у агента нет, и `--state db` до него не доходит — выбор
