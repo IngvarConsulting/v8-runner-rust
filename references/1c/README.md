@@ -11,6 +11,8 @@ truth for `v8-runner` behavior, contracts, or supported scenarios.
 - `designer-batch/`: batch command notes.
 - `designer-spec.md`: raw designer command reference excerpt.
 - `ibcmd-commands-full.md`: raw `ibcmd` command reference.
+- `platform-versions.md`: which platform and EDT versions each command the runner uses needs,
+  the thresholds, and a draft of the minimum supported version.
 - `confirmed-runtime-measurements.md`: facts obtained by running the real tools — exit codes,
   exact messages, readiness windows. They cannot be re-derived without a 1C installation.
 
