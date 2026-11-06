@@ -340,6 +340,7 @@ pub(crate) fn expose_dir(
     user_dir: &Path,
     relative: &str,
     target: &Path,
+    work_path: &Path,
 ) -> Result<String, AppError> {
     let link = user_dir.join(relative);
     if let Some(parent) = link.parent() {
@@ -358,7 +359,7 @@ pub(crate) fn expose_dir(
     })?;
     let _ = crate::support::fs::remove_path_if_exists(&link);
     if symlink_dir(&target, &link).is_err() {
-        copy_dir_recursively(&target, &link).map_err(|error| {
+        copy_for_the_agent(&target, user_dir, work_path, &link).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to expose '{}' to the agent at '{}': {error}",
                 target.display(),
@@ -367,6 +368,45 @@ pub(crate) fn expose_dir(
         })?;
     }
     Ok(relative.to_owned())
+}
+
+/// Набор в корне рабочей области держит каталог агента и `workPath` внутри себя: копия не
+/// должна входить в собственное назначение и нести служебные каталоги, а метаданным с именем
+/// вроде `build` глубже верхнего уровня в ней место.
+fn copy_for_the_agent(
+    target: &Path,
+    user_dir: &Path,
+    work_path: &Path,
+    link: &Path,
+) -> std::io::Result<()> {
+    let agent_dir = user_dir.canonicalize()?;
+    if agent_dir == target {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the agent directory is the directory to copy",
+        ));
+    }
+    if !agent_dir.starts_with(target) {
+        return copy_dir_recursively(target, link);
+    }
+    let mut excluded = vec![agent_dir];
+    excluded.extend(crate::change_detection::scanner::work_path_inside(
+        target, work_path,
+    ));
+    std::fs::create_dir_all(link)?;
+    for entry in crate::change_detection::scanner::top_level_source_entries(target, excluded) {
+        let entry = entry?;
+        let Ok(relative) = entry.path().strip_prefix(target) else {
+            continue;
+        };
+        let destination = link.join(relative);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&destination)?;
+        } else if entry.file_type().is_file() {
+            std::fs::copy(entry.path(), &destination)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -550,9 +590,10 @@ pub(crate) fn stage_dir(
     exchange: &Exchange,
     relative: &str,
     local: &Path,
+    work_path: &Path,
 ) -> Result<String, AppError> {
     match exchange {
-        Exchange::Dir(user_dir) => expose_dir(user_dir, relative, local),
+        Exchange::Dir(user_dir) => expose_dir(user_dir, relative, local, work_path),
         Exchange::Sftp => handle
             .session()
             .sftp_put_dir(local, relative)
@@ -570,9 +611,10 @@ pub(crate) fn stage_dir_partially(
     relative: &str,
     local: &Path,
     files: &[PathBuf],
+    work_path: &Path,
 ) -> Result<String, AppError> {
     let Exchange::Sftp = exchange else {
-        return stage_dir(handle, exchange, relative, local);
+        return stage_dir(handle, exchange, relative, local, work_path);
     };
     use crate::change_detection::partial_load::{
         relative_paths, root_dependencies, CONFIGURATION_XML,
@@ -1129,6 +1171,39 @@ mod tests {
         }
     }
 
+    /// Копия корня в каталог агента внутри него же заканчивается, не несёт `workPath` и
+    /// служебных каталогов, а форму с именем служебного каталога сохраняет.
+    #[test]
+    fn a_root_copied_for_the_agent_leaves_the_agent_directory_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        let root = root.canonicalize().expect("canonical root");
+        let work = root.join("service-area");
+        let user_dir = work.join("agent").join("0");
+        std::fs::create_dir_all(&user_dir).expect("agent dir");
+        std::fs::write(work.join("state.txt"), "state").expect("state");
+        std::fs::create_dir_all(root.join(".build")).expect("service dir");
+        std::fs::write(root.join(".build").join("lock"), "lock").expect("lock");
+        let form = root
+            .join("Catalogs")
+            .join("Item")
+            .join("Forms")
+            .join("build");
+        std::fs::create_dir_all(&form).expect("form");
+        std::fs::write(form.join("Form.xml"), "<x/>").expect("form file");
+        std::fs::write(root.join("Configuration.xml"), "<x/>").expect("marker");
+        let link = user_dir.join("run").join("main");
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("parent");
+
+        copy_for_the_agent(&root, &user_dir, &work, &link).expect("copy");
+
+        assert!(link.join("Configuration.xml").is_file());
+        assert!(link.join("Catalogs/Item/Forms/build/Form.xml").is_file());
+        assert!(!link.join("service-area").exists());
+        assert!(!link.join(".build").exists());
+    }
+
     #[test]
     fn a_symlinked_dir_is_exposed_under_the_user_dir_and_withdrawn_as_a_link() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1137,7 +1212,8 @@ mod tests {
         std::fs::create_dir_all(&sources).expect("sources");
         std::fs::write(sources.join("Configuration.xml"), "<x/>").expect("marker");
 
-        let relative = expose_dir(&user_dir, "build/run/main", &sources).expect("expose");
+        let relative =
+            expose_dir(&user_dir, "build/run/main", &sources, root.path()).expect("expose");
         assert_eq!(relative, "build/run/main");
         assert!(user_dir.join("build/run/main/Configuration.xml").is_file());
 

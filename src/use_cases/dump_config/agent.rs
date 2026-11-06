@@ -163,8 +163,12 @@ fn dump_through(
                 // Каталог точки входа виден раннеру: цель выставляется ссылкой и
                 // обновляется на месте, как у пакетного Конфигуратора.
                 Exchange::Dir(user_dir) => {
-                    let target =
-                        expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
+                    let target = expose_dir(
+                        user_dir,
+                        &target_relative,
+                        &resolved.platform_target_path,
+                        &config.work_path,
+                    )?;
                     let forecast = forecast_for(how, || {
                         forecast_through(
                             context,
@@ -273,8 +277,12 @@ fn dump_through(
             let target_relative = format!("target/{run}");
             let outcome = match &exchange {
                 Exchange::Dir(user_dir) => {
-                    let target =
-                        expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
+                    let target = expose_dir(
+                        user_dir,
+                        &target_relative,
+                        &resolved.platform_target_path,
+                        &config.work_path,
+                    )?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={} --list-file={}",
