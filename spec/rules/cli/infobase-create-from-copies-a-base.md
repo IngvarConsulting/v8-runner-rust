@@ -49,8 +49,8 @@ DT Конфигуратором (`/DumpIB`) в `workPath/copies/<база>.dt` �
 источника и секцию базы, куда объявить их учётные данные.
 
 Файловая база из образа через `ibcmd` ждёт его исполнителя
-(`INV.CLI.A-FILE-COPY-IS-CREATED-BY-IBCMD`), база в кластере по шаблону .dt — замера
-(`INV.CLI.A-CLUSTER-COPY-IS-CREATED-FROM-THE-DT-TEMPLATE`).
+(`INV.CLI.A-FILE-COPY-IS-CREATED-BY-IBCMD`). База в кластере создаётся в два шага
+(`INV.CLI.A-CLUSTER-COPY-IS-CREATED-IN-TWO-STEPS`).
 
 Источник: [`sources.html#copies`](../../../docs/site/sources.html#copies),
 [`cli.html#map`](../../../docs/site/cli.html#map), замер «Загрузка информационной базы из

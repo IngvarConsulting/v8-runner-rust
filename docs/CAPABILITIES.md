@@ -557,8 +557,9 @@ v8-runner infobase create [--from <INFOBASE>] [--dry-run]
   `.dt` ([#226](https://github.com/IngvarConsulting/v8-runner-rust/issues/226)). На стенде
   8.3.27.2074 с PostgreSQL при занятом `Ref` `CREATEINFOBASE` отказал до создания БД.
   При усечённом `.dt` на свежей цели после отказа `/RestoreIB` остались зарегистрированная
-  ИБ и её БД без таблиц справочников и документов. Шаблон `/UseTemplate` тоже оставил
-  ИБ и БД, поэтому условие перехода на него не выполнено.
+  ИБ и её БД без таблиц справочников и документов. Шаблон `/UseTemplate` раннер
+  не использует: причину сбоя загрузки образа при нём сообщает только `/Out`, а этот файл
+  повторяет пароли.
   [Замер #434](../references/1c/confirmed-runtime-measurements.md#createinfobase-с-dt-шаблоном-в-кластере).
   При неудаче `/RestoreIB` раннер называет `infobase restore --input <образ> --replace`.
   Ответ называет источник и снимок в `data.source.infobase` и `data.source.snapshot`.
