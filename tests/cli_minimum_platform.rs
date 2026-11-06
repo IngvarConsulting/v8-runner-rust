@@ -191,8 +191,11 @@ fn a_dump_below_8_3_27_stays_with_the_agent() {
     let dir = temp_workspace();
     let config = project(dir.path(), "8.3.26.1656", "");
 
-    let answer = envelope(&dump_preview(&config, dir.path()));
+    let output = dump_preview(&config, dir.path());
 
+    assert!(output.status.success(), "{output:?}");
+    let answer = envelope(&output);
+    assert_eq!(answer["ok"], true, "{answer}");
     assert_eq!(answer["data"]["provider"]["selected"], "agent", "{answer}");
 }
 
