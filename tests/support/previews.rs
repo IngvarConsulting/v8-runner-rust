@@ -78,6 +78,19 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
         ),
     )
     .expect("write config");
+    // База со службами раннера, для команд `dbms`: рядом с обычной она никому не мешает.
+    fs::write(
+        dir.join("v8project.local.yaml"),
+        "infobases:
+  stand:
+    cluster:
+      managed:
+        name: demo
+    dbms:
+      managed: {}
+",
+    )
+    .expect("write local config");
     config_path
 }
 
@@ -160,6 +173,24 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             "clone",
             "clone",
             cloned,
+        ),
+        row(
+            &["--infobase", "stand", "dbms", "start"],
+            "dbms start",
+            "dbms start",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "dbms", "stop"],
+            "dbms stop",
+            "dbms stop",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "dbms", "restart"],
+            "dbms restart",
+            "dbms restart",
+            work.clone(),
         ),
         row(&["extensions"], "extensions", "extensions", work.clone()),
         row(

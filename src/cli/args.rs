@@ -72,6 +72,8 @@ pub enum Command {
     /// Creating the infobase; parsed as `infobase create` and normalised here.
     #[command(skip)]
     Init(InfobaseCreateArgs),
+    /// Start and stop the PostgreSQL of an infobase declared with dbms.managed
+    Dbms(DbmsArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -177,6 +179,24 @@ pub struct BootstrapArgs {
     /// Overwrite generated config/local config/source targets
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DbmsArgs {
+    #[command(subcommand)]
+    pub command: DbmsCommandArgs,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum DbmsCommandArgs {
+    /// Start the PostgreSQL of this infobase and wait until it accepts connections
+    Start,
+    /// Say whether it runs, by whom it was started, its address and password file
+    Status,
+    /// Stop the PostgreSQL this working copy started; the data stays
+    Stop,
+    /// Stop and start it again
+    Restart,
 }
 
 #[derive(Args, Debug)]

@@ -272,6 +272,7 @@ pub fn run() -> i32 {
         | Command::Build(_)
         | Command::Apply(_)
         | Command::Reset(_)
+        | Command::Dbms(_)
         | Command::Diff(_)
         | Command::Load(_)
         | Command::Test(_)
@@ -373,6 +374,8 @@ pub(crate) fn load_cli_config(
         load_config_for_preview(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Dbms(_)) {
+        crate::config::loader::load_config_for_managed_dbms(config_path, workdir, &selector)
     } else if cli.dry_run {
         // Превью не создаёт рабочего каталога: проверки те же, готовит `workPath` только
         // применение. Прежде так загружалось одно лишь `extensions --dry-run`.

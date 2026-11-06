@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-MANAGED-TARGET-MEMORY-FOLLOWS-ITS-NAME
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
 ---
 
 # Память управляемой цели привязана к её имени

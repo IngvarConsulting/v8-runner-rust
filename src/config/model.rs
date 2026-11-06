@@ -181,6 +181,10 @@ pub struct InfobaseClusterConfig {
     /// The central server agent and its administrator.
     #[serde(default)]
     pub agent: Option<InfobaseClusterAgentConfig>,
+
+    /// The runner starts this cluster itself; `connection` is not declared next to it.
+    #[serde(default)]
+    pub managed: Option<ManagedServerConfig>,
 }
 
 /// The central server agent (`ragent`) of the cluster and its administrator.
@@ -200,6 +204,19 @@ pub struct InfobaseClusterAgentConfig {
     pub password: Option<String>,
 }
 
+/// `cluster.managed` and `standalone.managed`: a server the runner starts itself.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ManagedServerConfig {
+    /// Name of the infobase on the server, `Ref=`.
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// File infobase of a standalone server, relative to the file that declares it.
+    #[serde(default)]
+    pub db_path: Option<PathBuf>,
+}
+
 /// A standalone server as the target. The Designer goes to its direct gate, declared by
 /// `InfobaseConfig::connection`, and keeps its files on the runner's side; the agent
 /// attaches to its SSH gate and exchanges files through a declared channel, never through
@@ -207,6 +224,10 @@ pub struct InfobaseClusterAgentConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct StandaloneConfig {
+    /// The runner starts this server itself; gates and addresses are its own.
+    #[serde(default)]
+    pub managed: Option<ManagedServerConfig>,
+
     /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
     /// port is required — `ibsrv` listens on 1543 unless told otherwise. Absent: the agent
     /// has no way to the server, and only the Designer serves it.
@@ -576,6 +597,27 @@ pub struct InfobaseDbmsConfig {
     /// National settings of a new infobase in a cluster: `Locale=` of `CREATEINFOBASE`.
     #[serde(default)]
     pub locale: Option<String>,
+
+    /// The runner starts this PostgreSQL itself; the address and the password are its own.
+    /// An empty key means the same as an empty map.
+    #[serde(default, deserialize_with = "deserialize_present_section")]
+    pub managed: Option<ManagedDbmsConfig>,
+}
+
+/// `dbms.managed`: an empty map, its presence is the declaration.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedDbmsConfig {}
+
+/// A key that means something by being there: `managed:` and `managed: {}` are the same.
+fn deserialize_present_section<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Some(
+        Option::<T>::deserialize(deserializer)?.unwrap_or_default(),
+    ))
 }
 
 /// Обязательное поле секции `infobase.dbms`, которого нет: раннер идёт в СУБД сам и берёт
@@ -686,6 +728,7 @@ impl InfobaseDbmsConfig {
         name: impl Into<String>,
     ) -> Self {
         Self {
+            managed: None,
             kind: Some(kind.into()),
             server: Some(server.into()),
             name: Some(name.into()),
@@ -938,6 +981,17 @@ pub struct ToolsConfig {
 
     #[serde(default)]
     pub va: VanessaToolConfig,
+
+    #[serde(default)]
+    pub postgres: PostgresToolConfig,
+}
+
+/// The PostgreSQL build for 1C that `dbms start` runs.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, rename_all = "snake_case")]
+pub struct PostgresToolConfig {
+    /// Directory of the build, or its `bin`.
+    pub path: Option<PathBuf>,
 }
 
 /// MCP transport-neutral runtime configuration.

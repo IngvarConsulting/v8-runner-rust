@@ -1,7 +1,7 @@
 ---
 id: INV.CLI.SERVICE-PREVIEWS-CHANGE-NOTHING
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - src/use_cases/managed_stand/mod.rs::a_preview_changes_nothing
 ---
 
 # Превью служб ничего не меняет

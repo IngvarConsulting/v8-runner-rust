@@ -13,6 +13,18 @@
     "convert": [
       "convert"
     ],
+    "dbms restart": [
+      "dbms-restart"
+    ],
+    "dbms start": [
+      "dbms-start"
+    ],
+    "dbms status": [
+      "dbms-status"
+    ],
+    "dbms stop": [
+      "dbms-stop"
+    ],
     "diff": [
       "diff"
     ],
