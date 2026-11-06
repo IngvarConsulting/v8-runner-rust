@@ -255,7 +255,8 @@ fn cluster_designer_invalid_list_output_does_not_echo_credentials() {
     let stdout = String::from_utf8(output.stdout).expect("JSON text");
     let payload: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
     assert_eq!(payload["data"]["provider_dispatched"], true);
-    assert!(stdout.contains("extension list line 1 is not an extension name"));
+    assert!(stdout.contains("extension list line is not an extension name"));
+    assert!(stdout.contains("connection failed /P ***"));
     assert!(!stdout.contains("TestPassword428"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("TestPassword428"));
 }
