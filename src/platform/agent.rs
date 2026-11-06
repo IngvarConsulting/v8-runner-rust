@@ -55,6 +55,8 @@ const WAIT_SLICE: Duration = Duration::from_millis(200);
 /// Строка журнала: отмена бросила ответ команды, которую не обязаны дожидаться.
 pub(crate) const AGENT_COMMAND_ABANDONED: &str =
     "agent command abandoned: the command was cancelled";
+const EXTERNAL_AGENT_WAITING_FOR_TERMINAL: &str =
+    "interruption requested after sending a command to an external agent; waiting for terminal reply";
 
 /// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -760,6 +762,12 @@ impl client::Handler for ClientEvents {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentOwnership {
+    Managed,
+    External,
+}
+
 /// Открытая сессия: соединение, канал shell и накопленный, ещё не разобранный ответ.
 pub struct AgentSession {
     runtime: tokio::runtime::Runtime,
@@ -770,6 +778,7 @@ pub struct AgentSession {
     pending: Vec<u8>,
     stderr: Vec<u8>,
     endpoint: AgentEndpoint,
+    ownership: AgentOwnership,
     transcript: Option<std::fs::File>,
     known_secrets: Vec<String>,
     ended: bool,
@@ -787,7 +796,7 @@ impl AgentSession {
     /// Открывает сессию и переводит её в машинный режим. Успех означает, что
     /// аутентификация прошла и агент ответил JSON, — этим и доказывается готовность.
     pub fn open(request: &AgentSessionRequest, policy: &WaitPolicy) -> Result<Self, AgentError> {
-        Self::open_within(request, policy, None)
+        Self::open_within(request, policy, AgentOwnership::External, None)
     }
 
     /// То же, но рукопожатие транспорта ограничено `handshake`: слушатель, который принял
@@ -796,6 +805,7 @@ impl AgentSession {
     fn open_within(
         request: &AgentSessionRequest,
         policy: &WaitPolicy,
+        ownership: AgentOwnership,
         handshake: Option<Duration>,
     ) -> Result<Self, AgentError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -914,6 +924,7 @@ impl AgentSession {
             pending: Vec::new(),
             stderr: Vec::new(),
             endpoint,
+            ownership,
             transcript,
             known_secrets: [&request.user, &request.password]
                 .into_iter()
@@ -1001,9 +1012,10 @@ impl AgentSession {
         if let Some(work) = &policy.work {
             work.mark_work_given();
         }
+        let mut pending_interruption = None;
         let mut messages = Vec::new();
         loop {
-            let raw = self.read_reply(command, policy)?;
+            let raw = self.read_reply(command, policy, &mut pending_interruption)?;
             let mut batch = parse_batch(&raw)?;
             let secrets: Vec<&str> = self.known_secrets.iter().map(String::as_str).collect();
             if let Some(log) = self.transcript.as_mut() {
@@ -1026,6 +1038,24 @@ impl AgentSession {
         let reply = AgentReply { messages };
         let secrets: Vec<&str> = self.known_secrets.iter().map(String::as_str).collect();
         log_reply(command, &secrets, &reply, started.elapsed());
+        if let Some((reason, observed)) = pending_interruption {
+            // Вопрос останавливает чтение, но не подтверждает конец команды. Отказ
+            // агента сохраняет свою причину; явная отмена агентом подтверждает конец.
+            match reply.outcome() {
+                Ok(_) | Err(AgentError::Canceled { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            return Err(match reason {
+                ProcessInterruptionReason::Cancelled => AgentError::Cancelled {
+                    command: self.display_command(command),
+                    delivered: true,
+                },
+                ProcessInterruptionReason::TimedOut => AgentError::TimedOut {
+                    command: self.display_command(command),
+                    timeout_ms: observed.saturating_duration_since(started).as_millis() as u64,
+                },
+            });
+        }
         Ok(reply)
     }
 
@@ -1405,7 +1435,12 @@ impl AgentSession {
 
     /// Читает канал до первого полного JSON-массива. Всё до открывающей скобки — не
     /// ответ (баннер или приглашение до JSON-режима); в журнал идёт только его размер.
-    fn read_reply(&mut self, command: &str, policy: &WaitPolicy) -> Result<Vec<u8>, AgentError> {
+    fn read_reply(
+        &mut self,
+        command: &str,
+        policy: &WaitPolicy,
+        pending_interruption: &mut Option<(ProcessInterruptionReason, Instant)>,
+    ) -> Result<Vec<u8>, AgentError> {
         let started = Instant::now();
         // Критическая фаза меняет базу, и бросать её на полпути дороже, чем ждать
         // (`DEC.2026-04-20.A-MUTATING-CRITICAL-PHASE-IS-NOT-HARD-KILLED`): отмена и
@@ -1416,47 +1451,58 @@ impl AgentSession {
             policy.safety,
             ProcessInterruptionSafety::CriticalNonAbortable
         );
+        // Чужой процесс раннер не может снять и дождаться. Только доставленная
+        // команда запроса ждёт своего итога; служебная очистка сохраняет свой предел.
+        let wait_for_external_end =
+            self.ownership == AgentOwnership::External && policy.work.is_some() && !critical;
         loop {
-            if let Some(reply) = self.take_complete_array()? {
+            let reply = self.take_complete_array()?;
+            let now = Instant::now();
+            let remaining = policy
+                .deadline
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let reason = if policy.cancellation.is_cancelled() {
+                Some(ProcessInterruptionReason::Cancelled)
+            } else if remaining == Some(Duration::ZERO) {
+                Some(ProcessInterruptionReason::TimedOut)
+            } else {
+                None
+            };
+            if let (true, None, Some(reason)) =
+                (wait_for_external_end, *pending_interruption, reason)
+            {
+                info!(command = %self.display_command(command), ?reason, "{}", EXTERNAL_AGENT_WAITING_FOR_TERMINAL);
+                *pending_interruption = Some((reason, now));
+            }
+            if let Some(reply) = reply {
                 return Ok(reply);
             }
             if self.ended {
                 return Err(self.ended_without_reply());
             }
-            if policy.cancellation.is_cancelled() {
-                if !critical {
-                    // Служебные команды уборки тоже бросаются по отмене, но строка журнала —
-                    // о брошенной работе команды.
-                    if policy.work.is_some() {
-                        info!(command = %self.display_command(command), "{}", AGENT_COMMAND_ABANDONED);
+            if let Some(reason) = reason.filter(|_| !wait_for_external_end) {
+                match reason {
+                    reason if critical => self.defer(command, reason),
+                    ProcessInterruptionReason::Cancelled => {
+                        if policy.work.is_some() {
+                            info!(command = %self.display_command(command), "{}", AGENT_COMMAND_ABANDONED);
+                        }
+                        return Err(AgentError::Cancelled {
+                            command: self.display_command(command),
+                            delivered: policy.work.is_some(),
+                        });
                     }
-                    // Ответ читается после отправки: команда запроса уже работа команды.
-                    return Err(AgentError::Cancelled {
-                        command: self.display_command(command),
-                        delivered: policy.work.is_some(),
-                    });
+                    ProcessInterruptionReason::TimedOut => {
+                        return Err(AgentError::TimedOut {
+                            command: self.display_command(command),
+                            timeout_ms: started.elapsed().as_millis() as u64,
+                        });
+                    }
                 }
-                self.defer(command, ProcessInterruptionReason::Cancelled);
             }
-            let wait = match policy.deadline {
-                Some(deadline) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    match (remaining.is_zero(), critical) {
-                        (true, false) => {
-                            return Err(AgentError::TimedOut {
-                                command: self.display_command(command),
-                                timeout_ms: started.elapsed().as_millis() as u64,
-                            })
-                        }
-                        (true, true) => {
-                            self.defer(command, ProcessInterruptionReason::TimedOut);
-                            WAIT_SLICE
-                        }
-                        (false, _) => remaining.min(WAIT_SLICE),
-                    }
-                }
-                None => WAIT_SLICE,
-            };
+            let wait = remaining
+                .filter(|remaining| !remaining.is_zero())
+                .map_or(WAIT_SLICE, |remaining| remaining.min(WAIT_SLICE));
             let channel = &mut self.channel;
             let event = self
                 .runtime
@@ -1797,7 +1843,12 @@ impl ManagedAgent {
 
         let started = Instant::now();
         let opened = loop {
-            let last = match AgentSession::open_within(&session, policy, Some(HANDSHAKE_PROBE)) {
+            let last = match AgentSession::open_within(
+                &session,
+                policy,
+                AgentOwnership::Managed,
+                Some(HANDSHAKE_PROBE),
+            ) {
                 Ok(opened) => break opened,
                 Err(error @ AgentError::Unreachable { .. }) => error.to_string(),
                 Err(AgentError::HostKeyRejected {
