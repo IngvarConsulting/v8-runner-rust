@@ -738,17 +738,6 @@
           ],
           "description": "Executor for `make`."
         },
-        "publish": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProviderSchema"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Executor for `publish`. Accepted by the schema so validation can say the operation has no choice."
-        },
         "pull": {
           "anyOf": [
             {
@@ -781,17 +770,6 @@
             }
           ],
           "description": "Executor for `reset`: the Designer `/RollbackCfg` or `ibcmd config reset`."
-        },
-        "syntax": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProviderSchema"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Executor for `syntax`."
         },
         "upload": {
           "anyOf": [

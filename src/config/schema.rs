@@ -588,9 +588,6 @@ struct ProvidersSchema {
         skip_serializing_if = "Option::is_none"
     )]
     infobase_restore: Option<ProviderSchema>,
-    /// Executor for `syntax`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    syntax: Option<ProviderSchema>,
     /// Executor for `make`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     make: Option<ProviderSchema>,
@@ -598,9 +595,6 @@ struct ProvidersSchema {
     /// can say the operation has no choice while `ibcmd` is its only executor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     convert: Option<ProviderSchema>,
-    /// Executor for `publish`. Accepted by the schema so validation can say the operation has no choice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    publish: Option<ProviderSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1399,7 +1393,7 @@ struct ExecutionTimeoutsSchema {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::loader::load_config;
+    use crate::config::loader::{load_config, ConfigLoadError};
     use crate::config::model::InfobaseSelector;
 
     use super::{
@@ -1425,6 +1419,64 @@ mod tests {
 
         assert_schema_file(MAIN_CONFIG_SCHEMA_PATH, &main_config_schema_json());
         assert_schema_file(LOCAL_CONFIG_SCHEMA_PATH, &local_config_schema_json());
+    }
+
+    #[test]
+    fn provider_keys_match_the_command_vocabulary() {
+        use std::collections::BTreeSet;
+
+        let expected = BTreeSet::from([
+            "apply",
+            "convert",
+            "diff",
+            "download",
+            "extensions",
+            "infobase.create",
+            "infobase.dump",
+            "infobase.restore",
+            "make",
+            "pull",
+            "push",
+            "reset",
+            "upload",
+        ]);
+        let synonyms = BTreeSet::from([
+            "build",
+            "dump",
+            "infobase.configuration.export",
+            "init",
+            "load",
+        ]);
+
+        for schema in [main_config_schema_json(), local_config_schema_json()] {
+            let properties = schema["$defs"]["ProvidersSchema"]["properties"]
+                .as_object()
+                .expect("provider key properties");
+            let (deprecated, active): (BTreeSet<_>, BTreeSet<_>) = properties
+                .keys()
+                .map(String::as_str)
+                .partition(|&name| properties[name]["deprecated"].as_bool() == Some(true));
+
+            assert_eq!(active, expected);
+            assert_eq!(deprecated, synonyms);
+        }
+    }
+
+    #[test]
+    fn provider_keys_without_a_config_entry_are_refused_at_load() {
+        for key in ["syntax", "publish", "check", "sessions"] {
+            let overlay = format!("providers:\n  {key}: designer\n");
+            let config = format!("{}{overlay}", minimal_project_config_without_base_path());
+
+            let expected = format!("unknown field `{key}`");
+
+            assert_config_loader_error(&config, &expected);
+            let error = assert_overlay_loader_error(&overlay);
+            assert!(
+                matches!(&error, ConfigLoadError::LocalOverlayUnsupportedShape(message) if message.contains(&expected)),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -2144,7 +2196,7 @@ source-set:
         serde_json::to_value(value).expect("json")
     }
 
-    fn assert_overlay_loader_error(overlay: &str) {
+    fn assert_overlay_loader_error(overlay: &str) -> ConfigLoadError {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
         let config_path = dir.path().join("v8project.yaml");
@@ -2153,7 +2205,7 @@ source-set:
 
         load_config(config_path.to_str(), None, &InfobaseSelector::Default)
             .map(|loaded| loaded.config)
-            .expect_err("overlay must be rejected");
+            .expect_err("overlay must be rejected")
     }
 
     fn assert_overlay_loader_ok(overlay: &str) {

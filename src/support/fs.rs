@@ -81,6 +81,10 @@ pub struct TempDirMetadata {
     pub target_path: PathBuf,
     pub target_identity: String,
     pub created_at: DateTime<Utc>,
+    /// The replacement finished, so this backup holds an older state than the target had.
+    /// A backup without the mark may be the only copy of the target.
+    #[serde(default)]
+    pub superseded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -836,10 +840,21 @@ pub fn write_temp_dir_metadata(
         target_path: target_path.to_path_buf(),
         target_identity: target_identity.to_owned(),
         created_at: Utc::now(),
+        superseded: false,
     };
 
     std::fs::write(
         metadata_sidecar_path(dir),
+        serde_json::to_vec_pretty(&metadata)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    )
+}
+
+fn mark_backup_superseded(backup: &Path) -> std::io::Result<()> {
+    let mut metadata = read_temp_dir_metadata(backup)?;
+    metadata.superseded = true;
+    std::fs::write(
+        metadata_sidecar_path(backup),
         serde_json::to_vec_pretty(&metadata)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
     )
@@ -885,16 +900,24 @@ pub fn move_dir(source: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 pub fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.is_dir() {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() {
+        remove_link(path)
+    } else if metadata.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
         std::fs::remove_file(path)
     }
+}
+
+/// A link to a directory is removed as a file or as a directory, depending on how Windows made
+/// it. A junction also counts as a link here. The directory it points to stays untouched.
+pub fn remove_link(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(link).or_else(|_| std::fs::remove_dir(link))
 }
 
 pub fn replace_dir_atomically(
@@ -975,6 +998,13 @@ pub fn replace_dir_atomically(
     let _ = remove_path_if_exists(&stage_metadata_path);
 
     let mut warnings = Vec::new();
+    // Removing a large tree can stop halfway. What it leaves must not pass for the only copy.
+    if let Err(error) = mark_backup_superseded(&backup_dir) {
+        warnings.push(format!(
+            "failed to mark backup dir '{}' as superseded: {error}",
+            backup_dir.display()
+        ));
+    }
     if let Err(error) = remove_path_if_exists(&backup_dir) {
         warnings.push(format!(
             "failed to remove backup dir '{}': {error}",

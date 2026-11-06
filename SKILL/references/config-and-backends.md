@@ -36,8 +36,8 @@ matrix, and `providers.<operation>` names one explicitly.
 - The key is accepted only where the matrix gives this target more than one executor. On a file
   or cluster infobase that means `infobase.create`, `push`, `pull`, `extensions`,
   `download`, `infobase.dump`, `infobase.restore`, and `make`. Naming an
-  executor for a single-executor operation is a config error, so `providers.upload` and
-  `providers.syntax` are refused — both are Designer-only.
+  executor for a single-executor operation is a config error. The loader rejects
+  `providers.syntax`, `providers.check`, `providers.publish`, and `providers.sessions` as unknown keys.
 - Defaults: `infobase.create`, `push`, `pull`, `download` try Designer then `ibcmd`;
   `infobase.dump` and `infobase.restore` use Designer (experimental IBCMD DT only when named);
   `upload` and `syntax` are Designer-only; `extensions` defaults to `ibcmd`. `agent` is
