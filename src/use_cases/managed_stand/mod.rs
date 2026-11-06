@@ -32,6 +32,7 @@ use record::{
 /// Сколько ждать готовности и конца процесса.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(70);
+const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(200);
 /// Порты вне динамического диапазона Windows (49152 и выше) и вне первых тысяч.
 const PORT_BASE: u32 = 20_000;
@@ -59,6 +60,9 @@ pub(crate) trait ServiceHost {
     }
     fn stop_timeout(&self) -> Duration {
         STOP_TIMEOUT
+    }
+    fn identify_timeout(&self) -> Duration {
+        IDENTIFY_TIMEOUT
     }
 }
 
@@ -204,12 +208,10 @@ impl<'a> Stand<'a> {
         if starter_alive {
             return Observed::Starting(record);
         }
-        let identified = postgres::postmaster_pid(&self.paths.data()).and_then(|pid| {
-            let facts = self.host.facts(pid)?;
-            (facts.image.starts_with("postgres")
-                && self.host.listening_pid(record.port) == Some(pid))
-            .then_some((pid, facts))
-        });
+        if record.machine != self.host.machine() {
+            return Observed::Stale;
+        }
+        let identified = self.identified_postgres(record.port);
         match identified {
             Some((pid, facts)) => {
                 record.state = RecordState::Running;
@@ -220,6 +222,15 @@ impl<'a> Stand<'a> {
             }
             None => Observed::Stale,
         }
+    }
+
+    /// Живой `postgres` из `postmaster.pid`. Файл переживает перезагрузку, поэтому pid из него свой,
+    /// только если этот процесс — `postgres` и слушает порт записи.
+    fn identified_postgres(&self, port: u16) -> Option<(u32, ProcessFacts)> {
+        let pid = postgres::postmaster_pid(&self.paths.data())?;
+        let facts = self.host.facts(pid)?;
+        (facts.image.starts_with("postgres") && self.host.listening_pid(port) == Some(pid))
+            .then_some((pid, facts))
     }
 
     fn pinned_port(&self) -> Option<u16> {
@@ -382,7 +393,7 @@ impl<'a> Stand<'a> {
         let pid = postgres::postmaster_pid(&self.paths.data());
         let facts = pid.and_then(|pid| self.host.facts(pid));
         let Some(facts) = facts else {
-            self.stop_started(&build);
+            self.stop_started(&build, port);
             return Err(self.not_ready("the PostgreSQL process could not be identified"));
         };
         record.state = RecordState::Running;
@@ -391,7 +402,7 @@ impl<'a> Stand<'a> {
         record.image = Some(facts.image);
         record.starter = None;
         if let Err(error) = self.write_record(&record) {
-            self.stop_started(&build);
+            self.stop_started(&build, port);
             return Err(error);
         }
         let mut result = self.result(DbmsState::StartedByThisCopy, DbmsAction::Started);
@@ -477,7 +488,7 @@ impl<'a> Stand<'a> {
             if let Some(error) =
                 interruption_before_safe_point(self.context, "waiting for PostgreSQL")
             {
-                self.stop_started(build);
+                self.stop_started(build, port);
                 return Err(error.into());
             }
             let answer = self
@@ -487,7 +498,7 @@ impl<'a> Stand<'a> {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                self.stop_started(build);
+                self.stop_started(build, port);
                 return Err(self.not_ready("PostgreSQL did not accept connections in time"));
             }
             self.host.sleep(POLL);
@@ -501,23 +512,22 @@ impl<'a> Stand<'a> {
         )
     }
 
-    /// Гасит только то, что подняла эта команда. `postmaster.pid` появляется не сразу, поэтому его
-    /// ждут; не удалось подтвердить конец процесса — запись остаётся, и следующий `stop` продолжит.
-    fn stop_started(&self, build: &PostgresBuild) {
-        let deadline = Instant::now() + self.host.ready_timeout();
-        let mut pid = postgres::postmaster_pid(&self.paths.data());
-        while pid.is_none() && Instant::now() < deadline {
+    /// Гасит только то, что подняла эта команда. Процесс появляется не сразу, а `postmaster.pid`
+    /// может остаться от прошлого запуска, поэтому ждут опознанный `postgres`. Не дождались или не
+    /// подтвердили его конец — запись остаётся: когда этого раннера не станет, её разберёт следующая
+    /// команда (`observe_starting`).
+    fn stop_started(&self, build: &PostgresBuild, port: u16) {
+        let deadline = Instant::now() + self.host.identify_timeout();
+        let mut identified = self.identified_postgres(port);
+        while identified.is_none() && Instant::now() < deadline {
             self.host.sleep(POLL);
-            pid = postgres::postmaster_pid(&self.paths.data());
+            identified = self.identified_postgres(port);
         }
-        let Some(pid) = pid else {
-            // Процесса так и нет: возможно, `pg_ctl` не успел. Запись `starting` разберёт следующая
-            // команда, когда раннера уже не будет.
+        let Some((pid, facts)) = identified else {
             return;
         };
-        let started = self.host.facts(pid).map(|facts| facts.started);
         self.stop_tool(build);
-        if self.await_gone(pid, started, self.host.stop_timeout()) {
+        if self.await_gone(pid, Some(facts.started), self.host.stop_timeout()) {
             self.forget_record();
         }
     }
@@ -889,6 +899,7 @@ mod tests {
         spawned: Cell<u32>,
         hard_stops: RefCell<HashSet<u32>>,
         start_args: RefCell<Vec<String>>,
+        spawn_is_slow: Cell<bool>,
     }
 
     use tokio_util::sync::CancellationToken;
@@ -907,8 +918,18 @@ mod tests {
             }
             self.spawned.set(self.spawned.get() + 1);
             let data = PathBuf::from(&request.args[3]);
+            if self.spawn_is_slow.get() {
+                return Ok(7);
+            }
             std::fs::write(data.join("postmaster.pid"), format!("{PID}\n")).unwrap();
             self.start_args.replace(request.args.clone());
+            let port = request
+                .args
+                .last()
+                .and_then(|options| options.split_whitespace().nth(1))
+                .and_then(|port| port.parse().ok())
+                .expect("the port of the service");
+            self.listeners.borrow_mut().insert(port, PID);
             self.processes.borrow_mut().insert(
                 PID,
                 ProcessFacts {
@@ -938,6 +959,9 @@ mod tests {
             Duration::ZERO
         }
         fn stop_timeout(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn identify_timeout(&self) -> Duration {
             Duration::ZERO
         }
         fn sleep(&self, _duration: Duration) {}
@@ -1187,6 +1211,7 @@ mod tests {
             .unwrap();
         // Перезагрузка: процесса из записи больше нет, данные и порт на месте.
         host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
@@ -1465,7 +1490,7 @@ mod tests {
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
-        assert_eq!(status.state, DbmsState::NotRunning);
+        assert_eq!(status.state, DbmsState::Foreign);
         assert!(status.stale_record);
     }
 
@@ -1635,5 +1660,56 @@ mod tests {
             .unwrap();
         assert_eq!(restarted.action, DbmsAction::Started);
         assert_eq!(restarted.stopped_pid, Some(PID));
+    }
+
+    #[test]
+    fn a_cancellation_before_postgres_appears_keeps_the_record_despite_an_old_pid_file() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(DbmsCommand::Start, false, &runner, &host)
+            .unwrap();
+        setup.run(DbmsCommand::Stop, false, &runner, &host).unwrap();
+        // После перезагрузки файл остался, процесса нет, новый ещё не поднялся.
+        std::fs::write(
+            setup.paths().data().join("postmaster.pid"),
+            format!("{PID}\n"),
+        )
+        .unwrap();
+        host.spawn_is_slow.set(true);
+        let token = CancellationToken::new();
+        token.cancel();
+        let context = ExecutionContext::cli(CommandName::DbmsStart).with_cancellation(token);
+        setup
+            .run_in(&context, DbmsCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert!(
+            setup.paths().record().exists(),
+            "the next command sorts it out"
+        );
+    }
+
+    #[test]
+    fn a_record_of_another_machine_is_not_taken_over() {
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        starting_record(&setup, Some((900, 5)));
+        let mut record = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
+        record.machine = Some("other".to_owned());
+        write_json(&setup.paths().record(), &record).unwrap();
+        std::fs::write(
+            setup.paths().data().join("postmaster.pid"),
+            format!("{PID}\n"),
+        )
+        .unwrap();
+        own_process(&host);
+        host.listeners.borrow_mut().insert(24432, PID);
+        let status = setup
+            .run(DbmsCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, DbmsState::NotRunning);
+        assert!(status.stale_record);
     }
 }
