@@ -25,13 +25,13 @@ use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::{DynamicUpdateMode, IbcmdConnection, IbcmdDsl};
+use crate::platform::ibcmd::DynamicUpdateMode;
 use crate::platform::process::ProcessRunner;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{argument, run_critical, AgentHandle};
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::dump_config::helpers::ibcmd_data_path;
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::ibcmd_diagnostics::ensure_succeeded;
 use crate::use_cases::interruption::{self, Deferrals};
 
@@ -137,7 +137,6 @@ pub(crate) fn apply(
         &detail,
         TimelineStageStatus::Running,
     );
-    let policy = context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
     match applier {
         Applier::Designer {
             binary,
@@ -149,7 +148,7 @@ pub(crate) fn apply(
                 config.v8_connection(),
                 runner,
                 Some(log_file),
-                policy,
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             )
             .update_db_cfg(subject.extension)
             .map_err(AppError::from)?;
@@ -162,12 +161,15 @@ pub(crate) fn apply(
             )
         }
         Applier::Ibcmd { binary, runner } => {
-            let connection =
-                IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-            let result = IbcmdDsl::new(binary.to_path_buf(), connection, runner, policy)
-                .with_data_path(ibcmd_data_path(config)?)
-                .config_apply(subject.extension, DynamicUpdateMode::Auto)
-                .map_err(AppError::from)?;
+            let result = build_ibcmd_dsl(
+                context,
+                config,
+                binary,
+                runner,
+                InterruptionSafetyClass::CriticalNonAbortable,
+            )?
+            .config_apply(subject.extension, DynamicUpdateMode::Auto)
+            .map_err(AppError::from)?;
             deferrals.note_result("apply", &result);
             ensure_succeeded("apply", subject.kind.as_str(), subject.name, &result)
         }

@@ -286,11 +286,15 @@ pub(crate) fn build_designer_dsl<'a>(
     ))
 }
 
+/// `ibcmd` к базе проекта: единственное место, где он строится
+/// (`INV.USE-CASES.AN-IBCMD-RUN-HOLDS-THE-DATA-DIRECTORY-OF-THE-PROJECT`). Класс прерывания задаёт
+/// шаг: запись в базу — критическая фаза, чтение снимается.
 pub(crate) fn build_ibcmd_dsl<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
     binary: &Path,
     runner: &'a dyn ProcessRunner,
+    safety: InterruptionSafetyClass,
 ) -> Result<IbcmdDsl<'a>, AppError> {
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(map_ibcmd_error)?;
     let data_path = ibcmd_data_path(config)?;
@@ -299,16 +303,16 @@ pub(crate) fn build_ibcmd_dsl<'a>(
         binary.to_path_buf(),
         connection,
         runner,
-        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+        context.process_policy(safety, None),
     )
     .with_data_path(data_path))
 }
 
 /// Каталог данных автономного сервера `ibcmd` в `workPath` проекта. Блокируется он, а не база,
 /// и умолчательный — один на пользователя: без своего каталога запуски в разных проектах
-/// отказывают друг другу (`rc=254`). Запись в базу берёт отсюда только каталог: класс прерывания
-/// у неё критический, а [`build_ibcmd_dsl`] строит снимаемый процесс.
-pub(crate) fn ibcmd_data_path(config: &AppConfig) -> Result<PathBuf, AppError> {
+/// отказывают друг другу (`rc=254`). Команды к базе проекта идут под блокировкой `workPath`,
+/// поэтому внутри проекта каталог никто не оспаривает.
+fn ibcmd_data_path(config: &AppConfig) -> Result<PathBuf, AppError> {
     let data_path = config.work_path.join("ibcmd-data");
     std::fs::create_dir_all(&data_path).map_err(|error| {
         AppError::Runtime(format!(
@@ -521,11 +525,7 @@ pub(super) fn read_dump_generation(
             runner,
             log_file,
         }),
-        Provider::Ibcmd => ibcmd_data_path(config).map(|data_path| GenerationProcess::Ibcmd {
-            binary,
-            runner,
-            data_path: Some(data_path),
-        }),
+        Provider::Ibcmd => Ok(GenerationProcess::Ibcmd { binary, runner }),
         Provider::Agent | Provider::IbcmdRs | Provider::Webinst => Err(AppError::capability(
             format!("{provider} reads no generation by a platform process"),
         )),

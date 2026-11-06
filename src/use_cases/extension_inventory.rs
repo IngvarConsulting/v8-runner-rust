@@ -27,6 +27,7 @@ use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::generation_reader::LocatedTool;
 use crate::use_cases::installed_extensions::{read_installed_extensions, InventorySource};
@@ -214,13 +215,14 @@ fn read_extensions(
             ensure_requested_record(&extensions, request)?;
             extensions
         }
-        Executor::Ibcmd { binary, connection } => {
-            let dsl = IbcmdDsl::new(
-                binary,
-                connection,
+        Executor::Ibcmd { binary, .. } => {
+            let dsl = build_ibcmd_dsl(
+                context,
+                config,
+                &binary,
                 utilities.runner_for(UtilityType::Ibcmd),
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-            );
+                InterruptionSafetyClass::GracefulThenKill,
+            )?;
             let subject = inventory_subject(&request.scope);
 
             let platform_result = match &request.scope {
@@ -719,13 +721,14 @@ fn run_change(
             agent.close();
             outcome
         }
-        Executor::Ibcmd { binary, connection } => {
-            let dsl = IbcmdDsl::new(
-                binary,
-                connection,
+        Executor::Ibcmd { binary, .. } => {
+            let dsl = build_ibcmd_dsl(
+                context,
+                config,
+                &binary,
                 utilities.runner_for(UtilityType::Ibcmd),
-                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-            );
+                InterruptionSafetyClass::CriticalNonAbortable,
+            )?;
             let platform_result = match request {
                 ExtensionChangeRequest::Create {
                     name,

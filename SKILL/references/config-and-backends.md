@@ -67,7 +67,7 @@ matrix, and `providers.<operation>` names one explicitly.
 - `extensions` supports Designer and EDT projects: `--name` selects an extension `source-set`,
   `--installed-name` selects an installed platform name without a matching source-set.
 - `check` picks its branch by `format`: `/CheckConfig` under DESIGNER, EDT validation under EDT.
-- IBCMD dump, `diff`, `reset`, `apply` and the apply step of `push` use project-local standalone-server data under `workPath/ibcmd-data`.
+- Every IBCMD command on the project infobase uses project-local standalone-server data under `workPath/ibcmd-data`.
 - `pull --object` (partial) with IBCMD degrades to incremental and must be called out in user-facing summaries.
 - `convert` is CLI-only, repo-aware, uses configured `source-set`, takes no `providers` key, and does not require an infobase.
 - `upload` supports `.cf` and `.cfe` only for `format=DESIGNER`.

@@ -1634,7 +1634,8 @@ fn build_ibcmd_passes_credentials_to_import_and_apply() {
     assert!(output.status.success());
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains(&format!(
-        "infobase --db-path {tmp}/ib config import --user Admin --password secret"
+        "infobase --data {} --db-path {tmp}/ib config import --user Admin --password secret",
+        work_path.join("ibcmd-data").display()
     )));
     assert!(calls.contains(&format!(
         "infobase --data {} --db-path {tmp}/ib config apply --user Admin --password secret",
@@ -1824,7 +1825,8 @@ fn ibcmd_push_receives_config_relative_paths_resolved_from_the_config_directory(
     let calls = fs::read_to_string(&calls_log).expect("calls");
     assert!(
         calls.contains(&format!(
-            "infobase --db-path {} config import {}\n",
+            "infobase --data {} --db-path {} config import {}\n",
+            project.join("work").join("ibcmd-data").display(),
             project.join("ib").display(),
             source.display()
         )),

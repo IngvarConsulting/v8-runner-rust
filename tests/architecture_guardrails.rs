@@ -397,44 +397,12 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "исполнитель `extensions`: ветка `ibcmd` после выбора",
         ),
         (
-            "crate::use_cases::load_artifact::installed_extension_state",
-            "проба расширения перед `upload`",
-        ),
-        (
             "crate::use_cases::infobase_export::readiness",
             "готовность кандидата `ibcmd` в его же переборе",
         ),
         (
-            "crate::use_cases::infobase_export::run_configuration_provider",
-            "ветка `ibcmd` после выбора",
-        ),
-        (
-            "crate::use_cases::init_project::create_file_infobase",
-            "создание файловой базы, когда выбран `ibcmd`",
-        ),
-        (
-            "crate::use_cases::build_project::helpers::build_ibcmd_dsl",
-            "шаг `ibcmd` сборки",
-        ),
-        (
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
-            "шаг `ibcmd` выгрузки и состав базы, когда `pull --all` или `download` без набора выбрали `ibcmd`",
-        ),
-        (
-            "crate::use_cases::tool_extension::build_ibcmd_dsl",
-            "расширение-инструмент, когда сборку ведёт `ibcmd`",
-        ),
-        (
-            "crate::use_cases::generation_reader::ibcmd_dsl",
-            "поколение, когда его спрашивают у `ibcmd`, выбранного для обмена",
-        ),
-        (
-            "crate::use_cases::apply::act::apply",
-            "применение, когда его ведёт `ibcmd`, выбранный для `push` или `apply`",
-        ),
-        (
-            "crate::use_cases::reset::act::roll_back",
-            "откат непринятого, когда `reset` ведёт `ibcmd`",
+            "единственный построитель `ibcmd` к базе проекта: его зовёт шаг, выбравший `ibcmd`",
         ),
     ];
     let expected = BUILT_FOR_IBCMD
@@ -446,6 +414,29 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
         ibcmd_connection_sites(&SourceIndex::of_src()),
         expected,
         "the places that build an ibcmd connection changed; each must run after ibcmd was selected or be its probe"
+    );
+}
+
+/// Reintroduction guard каталога данных. Корень: каждый сценарий строил `ibcmd` сам и мог
+/// забыть `--data`, а умолчательный каталог один на пользователя, поэтому запуски в разных
+/// проектах отказывали друг другу (`rc=254`). Владелец теперь один —
+/// `dump_config::helpers::build_ibcmd_dsl`; свой каталог есть только у временной базы. Новый
+/// `IbcmdDsl::new` под любым местным именем роняет проверку.
+#[test]
+fn an_ibcmd_process_is_built_only_by_those_who_give_it_a_data_directory() {
+    assert_eq!(
+        path_sites(
+            &SourceIndex::of_src(),
+            "crate::platform::ibcmd::IbcmdDsl::new"
+        ),
+        [
+            "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
+            "crate::use_cases::throwaway_infobase::ThrowawayInfobase::ibcmd",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect(),
+        "build ibcmd to the project base through dump_config::helpers::build_ibcmd_dsl"
     );
 }
 
@@ -2576,11 +2567,11 @@ fn a_critical_phase_names_its_deferral_through_the_owner() {
             "crate::use_cases::infobase_export::run_infobase_restore",
         ),
         (
-            "crate::use_cases::tool_extension::build_designer_dsl",
+            "crate::use_cases::tool_extension::prepare_designer_source_extension",
             "crate::use_cases::tool_extension::ensure_written",
         ),
         (
-            "crate::use_cases::tool_extension::build_ibcmd_dsl",
+            "crate::use_cases::tool_extension::build_designer_dsl",
             "crate::use_cases::tool_extension::ensure_written",
         ),
     ];

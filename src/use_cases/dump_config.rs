@@ -733,7 +733,13 @@ fn run_dump_over_directory_ibcmd(
     ensure_dir(&resolved.platform_target_path)
         .map_err(|error| AppError::Runtime(format!("failed to create target dir: {error}")))?;
 
-    let dsl = build_ibcmd_dsl(context, config, binary, runner)?;
+    let dsl = build_ibcmd_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        InterruptionSafetyClass::GracefulThenKill,
+    )?;
     let forecast = match how {
         OverDirectory::Whole(_) => {
             return run_whole_dump_through_stage_ibcmd(context, resolved, &dsl)
@@ -818,9 +824,15 @@ fn run_full_dump_ibcmd(
     debug!(path = %staging_dir.display(), "created dump staging directory");
 
     log_live_stage("dump: full", "[ibcmd] exporting configuration files");
-    let dump_result = match build_ibcmd_dsl(context, config, binary, runner)?
-        .config_export_full(&staging_dir, resolved.extension.as_deref())
-        .map_err(map_ibcmd_error)
+    let dump_result = match build_ibcmd_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .config_export_full(&staging_dir, resolved.extension.as_deref())
+    .map_err(map_ibcmd_error)
     {
         Ok(result) => result,
         Err(error) => return Err(publication.cleanup_failure(error)),

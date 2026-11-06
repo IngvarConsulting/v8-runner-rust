@@ -14,13 +14,13 @@ use crate::platform::connection::ClusterInfobaseCreation;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::mask_text;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::{AppError, CapabilityReason};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::exchange_guard::{remember_created_base, AssembledMemory, EdtSourceMemory};
 use crate::use_cases::ibcmd_diagnostics::format_failure_evidence;
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
@@ -604,21 +604,19 @@ fn create_file_infobase(
     marker: &Path,
     deferrals: &mut Deferrals,
 ) -> Result<PlatformCommandResult, AppError> {
-    let policy = context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
     match provider {
         Provider::Ibcmd => {
             let binary = utilities
                 .locate(UtilityType::Ibcmd)
                 .map_err(AppError::from)?
                 .path;
-            let connection =
-                IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-            let created = IbcmdDsl::new(
-                binary,
-                connection,
+            let created = build_ibcmd_dsl(
+                context,
+                config,
+                &binary,
                 utilities.runner_for(UtilityType::Ibcmd),
-                policy,
-            )
+                InterruptionSafetyClass::CriticalNonAbortable,
+            )?
             .infobase_create(import)
             .map_err(AppError::from)?;
             deferrals.note_result(INFOBASE_CREATE, &created);
@@ -631,6 +629,8 @@ fn create_file_infobase(
                 .map_err(AppError::from)?
                 .path;
             let runner = utilities.runner_for(UtilityType::V8);
+            let policy =
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
             let created = DesignerDsl::new(
                 binary.clone(),
                 config.v8_connection(),

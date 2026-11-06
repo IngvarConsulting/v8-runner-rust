@@ -9,7 +9,7 @@ use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
 use crate::domain::build::{BuildMode, BuildResult, BuildStep};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
+use crate::platform::ibcmd::IbcmdError;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::support::error::AppError;
@@ -585,23 +585,6 @@ pub(super) fn designer_log_file(
     )
 }
 
-pub(super) fn build_ibcmd_dsl<'a>(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    binary: &Path,
-    runner: &'a dyn ProcessRunner,
-    safety: InterruptionSafetyClass,
-) -> Result<IbcmdDsl<'a>, AppError> {
-    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(map_ibcmd_error)?;
-
-    Ok(IbcmdDsl::new(
-        binary.to_path_buf(),
-        connection,
-        runner,
-        context.process_policy(safety, None),
-    ))
-}
-
 pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {
     AppError::from(error)
 }
@@ -748,13 +731,7 @@ pub(super) fn read_ibcmd_generation(
     read_generation(
         context,
         config,
-        || {
-            Ok(GenerationProcess::Ibcmd {
-                binary,
-                runner,
-                data_path: None,
-            })
-        },
+        || Ok(GenerationProcess::Ibcmd { binary, runner }),
         extension_name(source_set),
     )
 }

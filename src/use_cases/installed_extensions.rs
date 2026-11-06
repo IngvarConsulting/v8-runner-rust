@@ -15,7 +15,7 @@ use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::AgentHandle;
-use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::dump_config::helpers::{
     build_designer_dsl, build_ibcmd_dsl, ensure_success_of, map_ibcmd_error,
 };
@@ -115,6 +115,7 @@ fn read_with_selected_tool(
                 config,
                 binary,
                 utilities.runner_for(UtilityType::Ibcmd),
+                InterruptionSafetyClass::GracefulThenKill,
             )?;
             let listed = dsl.infobase_extension_list().map_err(map_ibcmd_error)?;
             ensure_listed(&listed)?;

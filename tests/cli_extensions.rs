@@ -519,6 +519,8 @@ fn extensions_list_reports_the_installed_composition() {
     let calls = calls.lines().collect::<Vec<_>>();
     assert_eq!(calls.len(), 4, "{calls:?}");
     assert!(calls[0].contains("extension list"), "{calls:?}");
+    let data = format!("--data {}", dir.path().join("work/ibcmd-data").display());
+    assert!(calls.iter().all(|call| call.contains(&data)), "{calls:?}");
     assert!(
         calls[1].contains(" save --db --extension Проба"),
         "{calls:?}"
@@ -1074,6 +1076,7 @@ fn installed_extension_can_be_configured_without_an_extension_source_set() {
     assert_eq!(calls.lines().count(), 1, "{calls}");
     assert!(calls.contains("extension update"), "{calls}");
     assert!(calls.contains("--name YaXUnit"), "{calls}");
+    assert!(calls.contains("/work/ibcmd-data "), "{calls}");
     assert!(calls.contains("--safe-mode no"), "{calls}");
     assert!(calls.contains("--unsafe-action-protection no"), "{calls}");
 }

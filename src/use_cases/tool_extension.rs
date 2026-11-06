@@ -13,7 +13,6 @@ use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
@@ -24,6 +23,7 @@ use crate::support::temp::{platform_logs_dir, tool_extension_export_dir};
 use crate::use_cases::apply::act::Applier;
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
 use crate::use_cases::request::ApplyPolicy;
 
@@ -523,6 +523,7 @@ fn prepare_designer_source_extension(
                 config,
                 &binary,
                 utilities.runner_for(UtilityType::Ibcmd),
+                InterruptionSafetyClass::CriticalNonAbortable,
             )?;
             log_tool_extension_stage(
                 extension,
@@ -704,22 +705,6 @@ fn designer_log_file(
         config,
         &format!("build-tool-{}-{action}", extension.name),
     )
-}
-
-fn build_ibcmd_dsl<'a>(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    binary: &Path,
-    runner: &'a dyn ProcessRunner,
-) -> Result<IbcmdDsl<'a>, AppError> {
-    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-
-    Ok(IbcmdDsl::new(
-        binary.to_path_buf(),
-        connection,
-        runner,
-        context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-    ))
 }
 
 fn build_edt_dsl<'a>(
