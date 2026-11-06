@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Fail closed when a release ref does not match the package contract."""
+"""Check the release source, package metadata, and GitHub tag signature."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
 from pathlib import Path
+from typing import NoReturn
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
+RELEASE_REPOSITORY = "IngvarConsulting/v8-runner-rust"
 MIN_CONSOLIDATED_MANIFEST_VERSION = (0, 7, 0)
 PRERELEASE_IDENTIFIER = (
     r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -21,7 +25,7 @@ SEMVER_PATTERN = re.compile(
 )
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     raise SystemExit(f"release contract violation: {message}")
 
 
@@ -33,6 +37,51 @@ def git_revision(name: str) -> str:
         text=True,
         stdout=subprocess.PIPE,
     ).stdout.strip()
+
+
+def github_object(endpoint: str) -> dict:
+    try:
+        result = subprocess.run(
+            ["gh", "api", "--hostname", "github.com", f"repos/{RELEASE_REPOSITORY}/{endpoint}"],
+            cwd=ROOT, check=True, stdout=subprocess.PIPE, encoding="utf-8", timeout=30,
+        )
+        data = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        fail(f"could not read GitHub API response for {endpoint}")
+    if not isinstance(data, dict):
+        fail(f"expected a GitHub API object for {endpoint}")
+    return data
+
+
+def require_verified_release_tag(tag: str, commit: str) -> None:
+    ref = f"refs/tags/{tag}"
+    reference = github_object(f"git/ref/tags/{quote(tag, safe='')}")
+    target = reference.get("object")
+    if reference.get("ref") != ref or not isinstance(target, dict) or target.get("type") != "tag":
+        fail(f"{tag} must be an annotated tag on GitHub")
+
+    try:
+        tag_sha = git_revision(f"{ref}^{{tag}}")
+    except subprocess.CalledProcessError:
+        fail(f"{tag} must be an annotated tag in the checkout")
+    if target.get("sha") != tag_sha:
+        fail(f"{tag} points to a different tag object on GitHub than in the checkout")
+
+    annotated = github_object(f"git/tags/{tag_sha}")
+    if annotated.get("sha") != tag_sha or annotated.get("tag") != tag:
+        fail(f"GitHub returned a different tag object for {tag}")
+    destination = annotated.get("object")
+    if (
+        not isinstance(destination, dict)
+        or destination.get("type") != "commit"
+        or destination.get("sha") != commit
+    ):
+        fail(f"annotated tag {tag} must point directly to the approved source commit {commit}")
+
+    verification = annotated.get("verification")
+    if not isinstance(verification, dict) or verification.get("verified") is not True:
+        reason = verification.get("reason") if isinstance(verification, dict) else None
+        fail(f"{tag} requires GitHub verification.verified=true (reason: {reason!r})")
 
 
 def require_consolidated_manifest_version(version: str) -> None:
@@ -67,8 +116,10 @@ def main() -> None:
     require_consolidated_manifest_version(package["version"] or "")
     if package.get("license") != "AGPL-3.0-only":
         fail("Cargo package must declare AGPL-3.0-only")
-    if package.get("repository") != "https://github.com/IngvarConsulting/v8-runner-rust":
+    if package.get("repository") != f"https://github.com/{RELEASE_REPOSITORY}":
         fail("Cargo package must name the maintained fork repository")
+    if os.environ.get("GITHUB_REPOSITORY", "").lower() != RELEASE_REPOSITORY.lower():
+        fail(f"release workflow must run in {RELEASE_REPOSITORY}")
 
     for required in (
         "Cargo.lock",
@@ -99,6 +150,7 @@ def main() -> None:
             f"and GITHUB_SHA: HEAD={head}, tag={tag_commit}, master={master}, workflow={workflow_commit}"
         )
 
+    require_verified_release_tag(args.tag, head)
     print(f"release contract verified for {args.tag}")
 
 
