@@ -589,7 +589,28 @@ v8-runner infobase create [--from <INFOBASE>] [--dry-run]
   набора есть своя память (отправка одного набора его оставляет, и следующая снова полная); до него ни один отказ не предлагает
   `pull` — выход только `push --force`.
 
-Команды `dbms`, `cluster` и `standalone` и секции `managed` ещё не реализованы: [#536](https://github.com/IngvarConsulting/v8-runner-rust/issues/536), #537, #538, #495. Первый круг — только Windows.
+### `dbms`
+
+```text
+v8-runner dbms start [--dry-run]
+v8-runner dbms status
+v8-runner dbms stop [--dry-run]
+v8-runner dbms restart [--dry-run]
+```
+
+- Запускают и останавливают PostgreSQL базы, объявленной `dbms.managed`, без службы и прав
+  администратора. Только Windows: на Linux и macOS `start` и `restart` отвечают
+  `environment_unavailable`.
+- `tools.postgres.path` называет каталог сборки PostgreSQL для 1С. Данные, журнал, пароль и запись
+  лежат под `workPath/infobases/<база>/managed/postgres/`; удаление `workPath` уничтожает базу.
+- PostgreSQL слушает только `127.0.0.1`, порт закрепляется при первом запуске, занятый чужим
+  процессом порт — `workspace_busy`. Значение пароля в ответ не попадает: `status` называет файл.
+- `status` работает без замка `workPath`. `stop` при работающем своём сервере отказывает.
+
+Команды `cluster` и `standalone` и работа остальных команд с такой базой ещё не реализованы:
+#537, #538, #495. До них команды, которым нужна база с `cluster.managed` или `standalone.managed`,
+отказывают и называют этот ключ.
+
 
 ### `tools download`
 

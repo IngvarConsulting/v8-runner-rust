@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.MANAGED-SERVICES-RUN-ON-WINDOWS
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - src/use_cases/managed_stand/mod.rs::other_systems_refuse_start_and_restart_without_starting_anything
+  - tests/cli_dbms.rs::other_systems_refuse_start_as_the_environment
 ---
 
 # Службы стенда раннер запускает только на Windows

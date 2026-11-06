@@ -634,6 +634,9 @@ struct InfobaseSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct InfobaseStandaloneSchema {
+    /// The runner starts this server itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<ManagedServerSchema>,
     /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
     /// port is required — `ibsrv` listens on 1543 unless told otherwise. Optional when
     /// `connection` declares the direct gate: the agent then is not offered.
@@ -719,6 +722,9 @@ struct InfobaseWebSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseClusterSchema {
+    /// The runner starts this cluster itself; `connection` is not declared next to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<ManagedServerSchema>,
     /// Administration server (`ras`) address as `host[:port]`, the host a name or an IPv4
     /// address: `rac` and `ras` accept nothing else, so an IPv6 address is refused. It goes
     /// to `rac` as is, so the port default (1545) stays with the platform. Left empty, the
@@ -755,9 +761,30 @@ struct InfobaseClusterAgentSchema {
     password: Option<String>,
 }
 
+/// A server the runner starts itself.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct ManagedServerSchema {
+    /// Name of the infobase on the server, `Ref=`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// File infobase of a standalone server; not for `cluster.managed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_path: Option<String>,
+}
+
+/// `dbms.managed`: an empty map; the runner starts this PostgreSQL itself.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ManagedDbmsSchema {}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseDbmsSchema {
+    /// The runner starts this PostgreSQL itself; `kind`, `server`, `user` and `password` are
+    /// refused next to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<ManagedDbmsSchema>,
     /// DBMS kind passed to `ibcmd --dbms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
@@ -858,6 +885,14 @@ struct ToolsSchema {
     )]
     #[schemars(with = "VanessaToolSchema")]
     va: Option<VanessaToolSchema>,
+    /// PostgreSQL build for 1C.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PostgresToolSchema")]
+    postgres: Option<PostgresToolSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -913,6 +948,14 @@ struct PartialToolsSchema {
     )]
     #[schemars(with = "VanessaToolSchema")]
     va: Option<VanessaToolSchema>,
+    /// PostgreSQL build for 1C.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PostgresToolSchema")]
+    postgres: Option<PostgresToolSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1141,6 +1184,14 @@ struct PartialToolExtensionSourceSchema {
 struct ToolExtensionArtifactSchema {
     /// Path to a `.cfe` extension artifact.
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct PostgresToolSchema {
+    /// Directory of the build, or its `bin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

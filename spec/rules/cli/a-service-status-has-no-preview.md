@@ -1,7 +1,7 @@
 ---
 id: INV.CLI.A-SERVICE-STATUS-HAS-NO-PREVIEW
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - tests/cli_dbms.rs::status_has_no_preview
 ---
 
 # У `status` служб нет превью

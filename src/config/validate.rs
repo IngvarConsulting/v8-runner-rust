@@ -72,6 +72,24 @@ pub enum ConfigValidationError {
     #[error("infobase.dbms is not allowed for a standalone server: the server opens its database itself")]
     DbmsNotAllowedForStandalone,
 
+    #[error("infobase.dbms.{field} is not allowed next to infobase.dbms.managed: the runner chooses it itself")]
+    ManagedDbmsWithAccessField { field: &'static str },
+
+    #[error("infobase.dbms.managed stands only next to infobase.cluster.managed or infobase.standalone.managed: the runner cannot answer for the order of a server it did not start")]
+    ManagedDbmsNeedsManagedServer,
+
+    #[error("infobase.connection is not declared next to infobase.cluster.managed: the runner knows the address of its own cluster")]
+    ManagedClusterWithConnection,
+
+    #[error("infobase.standalone.managed names one storage: either db-path or the section infobase.dbms")]
+    ManagedStandaloneStorage,
+
+    #[error("infobase.{key}: the runner does not start this server yet; only the dbms commands work with this infobase")]
+    ManagedServerNotAvailable { key: &'static str },
+
+    #[error("infobase.dbms.managed is not declared for this infobase: the dbms commands start only a PostgreSQL the runner owns")]
+    DbmsNotManaged,
+
     #[error("infobase.standalone.gate: {0}")]
     StandaloneGateInvalid(String),
 
@@ -414,6 +432,79 @@ impl ConfigValidationError {
             _ => None,
         }
     }
+}
+
+/// Ключ сервера, который поднимает раннер, если он объявлен.
+fn managed_server_key(infobase: &crate::config::model::InfobaseConfig) -> Option<&'static str> {
+    if infobase
+        .cluster
+        .as_ref()
+        .is_some_and(|cluster| cluster.managed.is_some())
+    {
+        Some("cluster.managed")
+    } else if infobase
+        .standalone
+        .as_ref()
+        .is_some_and(|standalone| standalone.managed.is_some())
+    {
+        Some("standalone.managed")
+    } else {
+        None
+    }
+}
+
+/// Объявления управляемого стенда, общие для всех команд. Проверка реквизитов идёт раньше проверки
+/// соседа: отказ называет ключ, который надо убрать.
+fn validate_managed_declarations(
+    infobase: &crate::config::model::InfobaseConfig,
+) -> Result<(), ConfigValidationError> {
+    if let Some(dbms) = infobase.dbms.as_ref().filter(|dbms| dbms.managed.is_some()) {
+        let declared = [
+            ("kind", dbms.kind.is_some()),
+            ("server", dbms.server.is_some()),
+            ("user", dbms.user.is_some()),
+            ("password", dbms.password.is_some()),
+        ];
+        if let Some((field, _)) = declared.into_iter().find(|(_, present)| *present) {
+            return Err(ConfigValidationError::ManagedDbmsWithAccessField { field });
+        }
+        if managed_server_key(infobase).is_none() {
+            return Err(ConfigValidationError::ManagedDbmsNeedsManagedServer);
+        }
+    }
+    let cluster_managed = infobase
+        .cluster
+        .as_ref()
+        .is_some_and(|cluster| cluster.managed.is_some());
+    if cluster_managed && !infobase.connection.trim().is_empty() {
+        return Err(ConfigValidationError::ManagedClusterWithConnection);
+    }
+    if let Some(managed) = infobase
+        .standalone
+        .as_ref()
+        .and_then(|standalone| standalone.managed.as_ref())
+    {
+        if managed.db_path.is_some() == infobase.dbms.is_some() {
+            return Err(ConfigValidationError::ManagedStandaloneStorage);
+        }
+    }
+    Ok(())
+}
+
+/// Проверка для команд `dbms`: база объявляет `dbms.managed`. Проект и наборы им не нужны.
+pub fn validate_managed_dbms(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_managed_declarations(&config.infobase)?;
+    if config
+        .infobase
+        .dbms
+        .as_ref()
+        .is_none_or(|dbms| dbms.managed.is_none())
+    {
+        return Err(ConfigValidationError::DbmsNotManaged);
+    }
+    Ok(())
 }
 
 /// Validate high-level application configuration consistency and filesystem references.
@@ -984,6 +1075,9 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
         })?;
     }
     validate_infobase_form(&config.infobase)?;
+    if let Some(key) = managed_server_key(&config.infobase) {
+        return Err(ConfigValidationError::ManagedServerNotAvailable { key });
+    }
     validate_selected_infobase_environment(config)
 }
 
@@ -994,6 +1088,11 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
 fn validate_infobase_form(
     infobase: &crate::config::model::InfobaseConfig,
 ) -> Result<(), ConfigValidationError> {
+    validate_managed_declarations(infobase)?;
+    // Строки у такой цели нет: её адрес знает раннер. Рядом с обычной базой она никому не мешает.
+    if managed_server_key(infobase).is_some() {
+        return Ok(());
+    }
     let connection = infobase.connection.trim();
     // Вид цели объявляется, а не угадывается: за `ws=` может стоять файловая база,
     // кластер или автономный сервер, и чем базу администрировать, из адреса не следует.
@@ -3507,6 +3606,121 @@ mod tests {
                 "{connection}"
             );
         }
+    }
+
+    fn managed_infobase(
+        yaml_dbms: crate::config::model::InfobaseDbmsConfig,
+    ) -> crate::config::model::InfobaseConfig {
+        let mut infobase = crate::config::model::InfobaseConfig::file(String::new());
+        infobase.cluster = Some(crate::config::model::InfobaseClusterConfig {
+            managed: Some(crate::config::model::ManagedServerConfig::default()),
+            ..Default::default()
+        });
+        infobase.dbms = Some(yaml_dbms);
+        infobase
+    }
+
+    fn managed_dbms() -> crate::config::model::InfobaseDbmsConfig {
+        crate::config::model::InfobaseDbmsConfig {
+            managed: Some(crate::config::model::ManagedDbmsConfig::default()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_managed_dbms_refuses_every_access_field_by_its_name() {
+        for (field, dbms) in [
+            (
+                "kind",
+                crate::config::model::InfobaseDbmsConfig {
+                    kind: Some("PostgreSQL".into()),
+                    ..managed_dbms()
+                },
+            ),
+            (
+                "server",
+                crate::config::model::InfobaseDbmsConfig {
+                    server: Some("h".into()),
+                    ..managed_dbms()
+                },
+            ),
+            (
+                "user",
+                crate::config::model::InfobaseDbmsConfig {
+                    user: Some("u".into()),
+                    ..managed_dbms()
+                },
+            ),
+            (
+                "password",
+                crate::config::model::InfobaseDbmsConfig {
+                    password: Some("p".into()),
+                    ..managed_dbms()
+                },
+            ),
+        ] {
+            let error = super::validate_managed_declarations(&managed_infobase(dbms)).unwrap_err();
+            assert!(
+                matches!(error, ConfigValidationError::ManagedDbmsWithAccessField { field: f } if f == field),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_managed_dbms_needs_a_managed_server_beside_it() {
+        let mut infobase = crate::config::model::InfobaseConfig::file(String::new());
+        infobase.connection = "Srvr=srv;Ref=demo".to_owned();
+        infobase.dbms = Some(managed_dbms());
+        assert!(matches!(
+            super::validate_managed_declarations(&infobase),
+            Err(ConfigValidationError::ManagedDbmsNeedsManagedServer)
+        ));
+        assert!(super::validate_managed_declarations(&managed_infobase(managed_dbms())).is_ok());
+    }
+
+    #[test]
+    fn a_managed_cluster_declares_no_connection() {
+        let mut infobase = managed_infobase(managed_dbms());
+        infobase.connection = "Srvr=srv;Ref=demo".to_owned();
+        assert!(matches!(
+            super::validate_managed_declarations(&infobase),
+            Err(ConfigValidationError::ManagedClusterWithConnection)
+        ));
+    }
+
+    #[test]
+    fn a_managed_standalone_names_exactly_one_storage() {
+        let standalone = |db_path: Option<&str>, dbms| {
+            let mut infobase = crate::config::model::InfobaseConfig::file(String::new());
+            infobase.standalone = Some(crate::config::model::StandaloneConfig {
+                managed: Some(crate::config::model::ManagedServerConfig {
+                    name: Some("demo".to_owned()),
+                    db_path: db_path.map(std::path::PathBuf::from),
+                }),
+                gate: None,
+                host_fingerprint: None,
+                exchange: None,
+            });
+            infobase.dbms = dbms;
+            super::validate_managed_declarations(&infobase)
+        };
+        assert!(standalone(Some("ib"), None).is_ok());
+        assert!(standalone(None, Some(managed_dbms())).is_ok());
+        for refused in [
+            standalone(None, None),
+            standalone(Some("ib"), Some(managed_dbms())),
+        ] {
+            assert!(matches!(
+                refused,
+                Err(ConfigValidationError::ManagedStandaloneStorage)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_managed_server_is_a_valid_neighbour_of_the_selected_base() {
+        assert!(super::validate_infobase_form(&managed_infobase(managed_dbms())).is_ok());
     }
 
     #[test]

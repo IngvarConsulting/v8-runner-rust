@@ -1,7 +1,7 @@
 ---
 id: INV.CONFIG.MANAGED-DBMS-STANDS-BESIDE-A-MANAGED-SERVER
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - src/config/validate.rs::a_managed_dbms_needs_a_managed_server_beside_it
 ---
 
 # Управляемая СУБД объявляется только рядом с управляемым сервером

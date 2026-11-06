@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - tests/cli_dbms.rs::status_answers_while_another_command_holds_the_work_path
 ---
 
 # Состояние службы читается без замка
