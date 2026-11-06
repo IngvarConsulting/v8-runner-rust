@@ -168,7 +168,7 @@ window.RUNNER_DATA = (function () {
       cmd: function (ctx) { return 'v8-runner diff'; },
       applies: function (ctx) { return notExternal(ctx, 'diff') || needEdt(ctx); },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.designer], config: ['connection'], note: '/CompareCfg и /DumpConfigToFiles -getChanges по прямому шлюзу' };
+        if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['connection'], note: '/CompareCfg и /DumpConfigToFiles -getChanges по прямому шлюзу; agent — только по файлу версий, отчёта сравнения у SSH-шлюза нет' };
         if (ctx.target === 'cluster') return { chain: [P.designer], config: ['connection'], note: '/DumpConfigToFiles -getChanges по файлу версий; отчёты сравнения — /CompareCfg' };
         return { chain: [P.ibcmd, P.designer], config: ['connection'], note: 'ibcmd export status по файлу версий; отчёты сравнения — /CompareCfg' };
       }

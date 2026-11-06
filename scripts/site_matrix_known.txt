@@ -17,6 +17,7 @@ extensions cluster | сайт: agent designer | матрица: agent | #428
 
 # Целевые цепочки справки; реализация отслеживается общим планом #233.
 extensions standalone | сайт: agent designer | матрица: agent | #233
+diff standalone | сайт: designer agent | матрица: designer | #233
 make file | сайт: ibcmd ibcmd-rs designer | матрица: ibcmd designer | #233
 make cluster | сайт: ibcmd ibcmd-rs designer | матрица: ibcmd designer | #233
 make standalone | сайт: ibcmd ibcmd-rs designer | матрица: ibcmd designer | #233

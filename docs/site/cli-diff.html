@@ -89,7 +89,7 @@
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h3>Варианты ответа</h3>
 <h4 id="diff-success">Объекты изменились</h4>
-<p>Версия объекта изменилась относительно файла версий.</p>
+<p>Версия объекта изменилась относительно файла версий. Список описывает версии, а не содержимое. После <code>push</code> версии всех загруженных объектов новые, поэтому список называет все объекты, пока выгрузка не обновит файл версий.</p>
 <pre data-output-example="diff-success" data-output-schema="diff"><code>✓ Metadata version changes
   provider: ibcmd (default)
   Modified: Catalog.Products</code></pre>
