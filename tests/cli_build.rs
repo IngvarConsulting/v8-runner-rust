@@ -1637,7 +1637,8 @@ fn build_ibcmd_passes_credentials_to_import_and_apply() {
         "infobase --db-path {tmp}/ib config import --user Admin --password secret"
     )));
     assert!(calls.contains(&format!(
-        "infobase --db-path {tmp}/ib config apply --user Admin --password secret"
+        "infobase --data {} --db-path {tmp}/ib config apply --user Admin --password secret",
+        work_path.join("ibcmd-data").display()
     )));
     assert!(calls.contains("--user Admin"));
     assert!(calls.contains("--password secret"));

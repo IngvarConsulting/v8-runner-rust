@@ -727,6 +727,37 @@ fn providers_reset_assigns_the_executor_of_the_reset() {
     );
 }
 
+/// `reset` основной конфигурации держит каталог данных проекта в каждом вызове `ibcmd`:
+/// блокируется он, а не база, и умолчательный — один на пользователя, так что два проекта
+/// конфликтуют (`rc=254`). Это и откат, и сохранения для признака и чтения поколения вокруг него.
+#[test]
+fn an_ibcmd_reset_of_the_main_configuration_holds_the_data_directory_of_the_project() {
+    let project = Project::with_sets(
+        &[("main", "CONFIGURATION", "sources")],
+        "  push: ibcmd\n  reset: ibcmd\n",
+    );
+    let config = fs::read_to_string(&project.config).expect("config");
+    fs::write(&project.config, config.replace("  push: designer\n", "")).expect("config");
+    succeeded(&project.run(&["push", "--force"]));
+    project.edit();
+    succeeded(&project.run(&["push", "--no-apply"]));
+    project.forget_calls();
+
+    succeeded(&project.run(&["reset"]));
+
+    let calls = project.calls();
+    for step in ["config save", "config generation-id", "config reset"] {
+        assert!(calls.contains(step), "{step}: {calls}");
+    }
+    for call in calls.lines() {
+        let data = call
+            .split_once("--data ")
+            .and_then(|(_, rest)| rest.split(' ').next())
+            .unwrap_or_else(|| panic!("no --data in: {call}"));
+        assert!(data.ends_with("/work/ibcmd-data"), "{call}");
+    }
+}
+
 /// Учётные данные базы уходят откату обоих исполнителей, а ответ их не называет.
 #[test]
 fn reset_passes_the_credentials_and_prints_no_secret() {

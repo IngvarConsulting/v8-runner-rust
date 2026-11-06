@@ -24,6 +24,7 @@ use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::dump_config::helpers::ibcmd_data_path;
 use crate::use_cases::generation_reader::{
     designer_log_file, read_by_record_tool, read_unapplied, GenerationProcess, LocatedTool,
 };
@@ -406,7 +407,7 @@ impl Executor {
                     Ok(GenerationProcess::Ibcmd {
                         binary,
                         runner: self.utilities.runner_for(UtilityType::Ibcmd),
-                        data_path: None,
+                        data_path: Some(ibcmd_data_path(config)?),
                     })
                 },
                 extension,

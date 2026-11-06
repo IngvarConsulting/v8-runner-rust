@@ -2809,7 +2809,10 @@ mod tests {
         assert!(ibcmd_calls_text.contains("infobase --db-path /tmp/ib config import"));
         assert!(!ibcmd_calls_text.contains("config import files"));
         assert!(!ibcmd_calls_text.contains("--partial"));
-        assert!(ibcmd_calls_text.contains("infobase --db-path /tmp/ib config apply"));
+        assert!(ibcmd_calls_text.contains(&format!(
+            "infobase --data {} --db-path /tmp/ib config apply",
+            config.work_path.join("ibcmd-data").display()
+        )));
         assert!(ibcmd_calls_text.contains(
             designer_snapshot(&config, "main")
                 .display()
