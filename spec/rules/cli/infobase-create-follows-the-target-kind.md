@@ -47,3 +47,5 @@ check:
 Источник: [`cli.html#map`](../../../docs/site/cli.html#map),
 [`sources.html#copies`](../../../docs/site/sources.html#copies), замер
 [#181](../../../references/1c/confirmed-runtime-measurements.md).
+
+Отказ автономного сервера с рецептом относится к серверу, который поднимаете вы. `standalone.managed` создаёт базу сам: [#537](https://github.com/IngvarConsulting/v8-runner-rust/issues/537), [#495](https://github.com/IngvarConsulting/v8-runner-rust/issues/495).
