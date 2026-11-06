@@ -632,13 +632,13 @@ fn forecast_designer(
     let result = dsl
         .dump_changes_list(
             &resolved.platform_target_path,
-            list.path(),
+            &list,
             resolved.extension.as_deref(),
         )
         .map_err(AppError::from)?;
     ensure_interruption_clear(context, "after the dump forecast")?;
     Ok(match result.process.outcome() {
-        Ok(()) => std::fs::read(list.path()).map_or(DumpForecast::Unknown, |bytes| {
+        Ok(()) => std::fs::read(&list).map_or(DumpForecast::Unknown, |bytes| {
             crate::platform::dump_forecast::read_changes_list(&bytes)
         }),
         Err(_) => DumpForecast::Unknown,
@@ -874,7 +874,7 @@ fn run_partial_dump_designer(
     )?
     .dump_config_to_files_partial(
         &resolved.platform_target_path,
-        list_file.path(),
+        &list_file,
         resolved.extension.as_deref(),
     )
     .map_err(AppError::from)?;
@@ -3477,6 +3477,109 @@ exit 0"#,
         assert!(partial_list_paths(&work).is_empty());
     }
 
+    /// Значение ключа в запросе к Конфигуратору.
+    #[cfg(windows)]
+    fn designer_option(request: &ProcessRequest, key: &str) -> Option<PathBuf> {
+        let position = request.args.iter().position(|arg| arg == key)?;
+        request.args.get(position + 1).map(PathBuf::from)
+    }
+
+    /// Открывает файл так, как замеренный Конфигуратор: чужой дескриптор на чтение ему не
+    /// мешает, дескриптор на запись даёт отказ
+    /// (`references/1c/confirmed-runtime-measurements.md`, «Открытый файл у `-listFile` и
+    /// `-getChanges`»).
+    #[cfg(windows)]
+    fn open_as_the_designer(path: &Path, write: bool) -> std::io::Result<fs::File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(write)
+            .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+            .open(path)
+    }
+
+    #[cfg(windows)]
+    fn designer_dump_fixture(
+        objects: &[&str],
+    ) -> (tempfile::TempDir, AppConfig, super::ResolvedDumpTarget) {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        create_source_tree(&base);
+        let config = build_config(&base, &dir.path().join("work"), &dir.path().join("1cv8"));
+        let resolved = resolve_target(
+            &config,
+            &DumpArgs {
+                dry_run: false,
+                discard_uncommitted: false,
+                force_way_out: ForceWayOut::PullForce,
+                mode: DumpModeRequest::Partial,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: objects.iter().map(|&object| object.to_owned()).collect(),
+            },
+        )
+        .expect("target");
+        (dir, config, resolved)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_partial_dump_hands_the_designer_a_closed_object_list() {
+        let (dir, config, resolved) = designer_dump_fixture(&["Catalog.Items"]);
+        let read = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&read);
+        let runner = TestProcessRunner::with_on_run(move |request| {
+            use std::io::Read;
+            let list = designer_option(request, "-listFile").expect("-listFile");
+            let mut text = String::new();
+            open_as_the_designer(&list, false)
+                .expect("the list holds no writer handle")
+                .read_to_string(&mut text)
+                .expect("read list");
+            *seen.lock().expect("seen") = Some(text);
+        });
+
+        super::run_partial_dump_designer(
+            &ExecutionContext::cli(crate::use_cases::context::CommandName::Dump),
+            &config,
+            &resolved,
+            &dir.path().join("1cv8"),
+            &runner,
+            &[PartialDumpSelector::parse("Catalog.Items").expect("selector")],
+        )
+        .expect("partial dump");
+
+        assert_eq!(
+            read.lock().expect("read").as_deref(),
+            Some("Catalog.Items\n")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_forecast_hands_the_designer_a_closed_changes_file() {
+        let (dir, config, resolved) = designer_dump_fixture(&["Catalog.Items"]);
+        let runner = TestProcessRunner::with_on_run(move |request| {
+            use std::io::Write;
+            let changes = designer_option(request, "-getChanges").expect("-getChanges");
+            open_as_the_designer(&changes, true)
+                .expect("the changes file holds no writer handle")
+                .write_all(b"FullDump\r\n")
+                .expect("write forecast");
+        });
+
+        let forecast = super::forecast_designer(
+            &ExecutionContext::cli(crate::use_cases::context::CommandName::Dump),
+            &config,
+            &resolved,
+            &dir.path().join("1cv8"),
+            &runner,
+        )
+        .expect("forecast");
+
+        assert_eq!(forecast, super::DumpForecast::Full);
+    }
+
     #[test]
     fn dump_partial_designer_extension_uses_extension_flag() {
         let dir = tempdir().expect("tempdir");
@@ -3582,7 +3685,7 @@ exit 0"#,
             .expect("warning")
             .contains("IBCMD does not support object-scoped partial dump"));
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("--sync"));
+        assert!(calls.contains(" export --threads=1 --sync "), "{calls}");
     }
 
     #[test]
@@ -3672,8 +3775,10 @@ exit 0"#,
         assert_eq!(result.requested_mode, DumpMode::Partial);
         assert_eq!(result.mode, ReportedDumpMode::Incremental);
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("--sync"));
-        assert!(calls.contains("--extension ext"));
+        assert!(
+            calls.contains(" export --threads=1 --extension ext --sync "),
+            "{calls}"
+        );
         assert!(result
             .message
             .as_deref()
@@ -4177,7 +4282,11 @@ exit 0"#,
         assert_eq!(result.mode, ReportedDumpMode::Full);
         assert_eq!(result.mode_reason, Some(DumpModeReason::PlatformForecast));
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("export status"), "{calls}");
+        let forecast = calls
+            .lines()
+            .find(|call| call.contains(" export status "))
+            .expect("forecast call");
+        assert!(!forecast.contains("--threads"), "{forecast}");
         assert!(!calls.contains("--sync"), "{calls}");
         assert!(calls.contains(".dump-stage-"), "{calls}");
         assert_eq!(

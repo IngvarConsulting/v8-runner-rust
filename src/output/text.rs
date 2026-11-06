@@ -12,6 +12,7 @@
 //!    произошло, потом что получилось, и только в конце — что не так.
 
 use crate::command_envelope::Envelope;
+use crate::support::path::{response_json, response_text};
 use serde::Serialize;
 #[cfg(test)]
 use serde_json::{json, Value};
@@ -256,6 +257,7 @@ pub struct TextPresenter {
 
 impl TextPresenter {
     pub fn print_error(&self, msg: &str) {
+        let msg = response_text(msg);
         if self.no_color {
             eprintln!("ERROR: {msg}");
         } else {
@@ -272,11 +274,14 @@ impl TextPresenter {
                 TimelineLabel::Fixed(label) => label.clone(),
                 TimelineLabel::Subject(subject) => format!("{subject} {}", mark.word()),
             };
-            println!("{} {}", self.timeline_node(mark), label);
+            println!("{} {}", self.timeline_node(mark), response_text(&label));
 
             let prefix = self.timeline_pipe();
             for line in &details {
-                println!("{prefix}{DETAIL_INDENT}{}", self.timeline_detail(line));
+                println!(
+                    "{prefix}{DETAIL_INDENT}{}",
+                    self.timeline_detail(&response_text(line))
+                );
             }
 
             if !last {
@@ -288,7 +293,7 @@ impl TextPresenter {
     /// Ответ без ленты. Так отвечает только `version`: заворачивать одну строку в
     /// узел значит мешать тому, кто её читает подстановкой в другую команду.
     pub fn print_bare(&self, line: &str) {
-        println!("{line}");
+        println!("{}", response_text(line));
     }
 
     /// Узел, предваряющий ленту команды: печатается со связкой после себя, чтобы лента
@@ -422,7 +427,7 @@ pub struct JsonPresenter;
 impl JsonPresenter {
     pub fn print<T: Serialize>(&self, envelope: &Envelope<T>) {
         match serde_json::to_string_pretty(envelope) {
-            Ok(s) => println!("{s}"),
+            Ok(s) => println!("{}", response_json(&s)),
             Err(e) => eprintln!("JSON serialization error: {e}"),
         }
     }
