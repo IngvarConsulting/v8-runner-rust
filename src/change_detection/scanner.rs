@@ -65,12 +65,67 @@ pub struct HashedFile {
 pub struct ScanSnapshot {
     pub scan_started_at: u64,
     pub files: Vec<HashedFile>,
+    pub has_untracked_links: bool,
+}
+
+/// A single-set make may publish inside its source set. Keep its lock, staged
+/// packages and publication metadata out of the snapshot of platform inputs.
+fn is_build_artifact(entry: &walkdir::DirEntry, name: &str) -> bool {
+    if entry
+        .path()
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            ["cf", "cfe", "epf", "erf"]
+                .iter()
+                .any(|package| extension.eq_ignore_ascii_case(package))
+        })
+    {
+        return true;
+    }
+    if name
+        .strip_prefix(".artifacts-")
+        .and_then(|value| value.split_once(".lock"))
+        .is_some_and(|(hash, _)| {
+            hash.len() == 32 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return true;
+    }
+    let package_backup = name.starts_with('.')
+        && [
+            ".cf.backup-",
+            ".cfe.backup-",
+            ".epf.backup-",
+            ".erf.backup-",
+        ]
+        .iter()
+        .any(|suffix| name.contains(suffix));
+    package_backup
+        || name.ends_with(".meta.json")
+            && (name.starts_with(".artifacts-stage-")
+                || name.starts_with(".artifacts-backup-")
+                || name.starts_with(".convert-stage-"))
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ScanScope {
+    Push,
+    Build,
 }
 
 /// Hash every selected regular file, including equal-size edits with exactly the old
 /// remembered mtime (#447). The predicate is the caller's existing interruption policy;
 /// successful post-publication bookkeeping supplies an always-false predicate.
 pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSnapshot, ScanError> {
+    scan_in_scope(root, interrupted, ScanScope::Push)
+}
+
+pub(super) fn scan_in_scope(
+    root: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
+    scope: ScanScope,
+) -> Result<ScanSnapshot, ScanError> {
     check_interruption(interrupted)?;
     let scan_started_at =
         mtime_nanos(std::time::SystemTime::now(), root).map_err(|source| ScanError::Mtime {
@@ -78,14 +133,21 @@ pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSn
             source,
         })?;
     let mut files = Vec::new();
+    let mut has_untracked_links = false;
 
-    for entry in source_entries(root) {
+    for entry in source_entries_in_scope(root, scope) {
         check_interruption(interrupted)?;
         let entry = entry.map_err(|e| ScanError::Walk {
             path: root.to_path_buf(),
             source: e,
         })?;
-        if !is_source_file(&entry) {
+        if matches!(scope, ScanScope::Build) && entry.file_type().is_symlink() {
+            // The platform may consume a link's contents. An untracked link prevents reuse
+            // but still permits the same fresh full load that the platform handled before.
+            has_untracked_links = true;
+        }
+
+        if !is_source_file_in_scope(&entry, scope) {
             continue;
         }
         let path = entry.path();
@@ -116,6 +178,7 @@ pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSn
     Ok(ScanSnapshot {
         scan_started_at,
         files,
+        has_untracked_links,
     })
 }
 
@@ -179,24 +242,45 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
 pub(super) fn source_entries(
     root: &Path,
 ) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    source_entries_in_scope(root, ScanScope::Push)
+}
+
+fn source_entries_in_scope(
+    root: &Path,
+    scope: ScanScope,
+) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
     WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| entry.depth() == 0 || !is_ignored_dir(entry))
+        .filter_entry(move |entry| entry.depth() == 0 || !is_ignored_dir(entry, scope))
 }
 
 pub(super) fn is_source_file(entry: &walkdir::DirEntry) -> bool {
-    entry.file_type().is_file() && !entry.file_name().to_str().is_some_and(is_ignored_file)
+    is_source_file_in_scope(entry, ScanScope::Push)
 }
 
-fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
+fn is_source_file_in_scope(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
+    entry.file_type().is_file()
+        && !entry.file_name().to_str().is_some_and(|name| match scope {
+            ScanScope::Push => is_ignored_file(name),
+            ScanScope::Build => {
+                entry.depth() == 1 && is_ignored_file(name) || is_build_artifact(entry, name)
+            }
+        })
+}
+
+fn is_ignored_dir(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
     if !entry.file_type().is_dir() {
         return false;
     }
     let Some(name) = entry.file_name().to_str() else {
         return false;
     };
-    IGNORED_DIRS.contains(&name)
+    match scope {
+        ScanScope::Push => IGNORED_DIRS.contains(&name),
+        // A metadata object can itself be named build, target, temp, or tmp.
+        ScanScope::Build => matches!(name, ".git" | ".gradle" | ".yaxunit"),
+    }
 }
 
 #[cfg(test)]

@@ -6,6 +6,16 @@
         "artifact_type": {
           "$ref": "#/$defs/ArtifactBuildMode"
         },
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "file_names": {
           "items": {
             "type": "string"
@@ -183,6 +193,31 @@
         "output_path",
         "duration_ms",
         "execution"
+      ],
+      "type": "object"
+    },
+    "BuildMode": {
+      "description": "How the working configuration was synchronized before exporting the artifact.",
+      "enum": [
+        "full",
+        "partial",
+        "unchanged"
+      ],
+      "type": "string"
+    },
+    "BuildReport": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/BuildMode"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "reason"
       ],
       "type": "object"
     },

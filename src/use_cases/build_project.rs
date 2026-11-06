@@ -449,12 +449,23 @@ fn analyze_contexts_by_name(
 /// Шаг EDT: проект набора переводится `1cedtcli` в файлы Конфигуратора в `export_target`.
 /// Один на `push` и `make`: `push` кладёт снимок под память выбранной базы (контекст
 /// `designer-`), `make` — в свою временную базу. `log_label` начинает имя журнала шага.
-pub(crate) fn execute_edt_export_step(
+pub(crate) enum EdtExportSource<'a> {
+    Registered(&'a SourceSetContext),
+    ProjectPath(&'a SourceSetContext),
+}
+
+impl<'a> From<&'a SourceSetContext> for EdtExportSource<'a> {
+    fn from(context: &'a SourceSetContext) -> Self {
+        Self::Registered(context)
+    }
+}
+
+pub(crate) fn execute_edt_export_step<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
     dsl: &EdtDsl<'_>,
     source_set: &SourceSetConfig,
-    edt_context: &SourceSetContext,
+    source: impl Into<EdtExportSource<'a>>,
     export_target: &Path,
     log_label: &str,
 ) -> Result<Vec<String>, AppError> {
@@ -465,16 +476,26 @@ pub(crate) fn execute_edt_export_step(
         ) {
             return Err(error);
         }
-        let project_name = resolve_edt_project_name(source_set, edt_context)?;
+        let source = source.into();
+        let project_name = match source {
+            EdtExportSource::Registered(edt_context) => {
+                resolve_edt_project_name(source_set, edt_context)?
+            }
+            EdtExportSource::ProjectPath(edt_context) => edt_context.path().display().to_string(),
+        };
         recreate_directory(export_target).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to prepare EDT export directory '{}': {error}",
                 export_target.display()
             ))
         })?;
-        let export_result = dsl
-            .export_project(&project_name, export_target)
-            .map_err(AppError::from)?;
+        let export_result = match source {
+            EdtExportSource::Registered(_) => dsl.export_project(&project_name, export_target),
+            EdtExportSource::ProjectPath(edt_context) => {
+                dsl.export_project_path(edt_context.path(), export_target)
+            }
+        }
+        .map_err(AppError::from)?;
         deferrals.note_result("edt_export", &export_result);
         let export_log_path = write_edt_export_log(
             config,

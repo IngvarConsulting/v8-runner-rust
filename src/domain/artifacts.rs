@@ -32,6 +32,40 @@ impl ArtifactBuildMode {
     }
 }
 
+/// How the working configuration was synchronized before exporting the artifact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildMode {
+    Full,
+    Partial,
+    Unchanged,
+}
+
+impl BuildMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Partial => "partial",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct BuildReport {
+    pub mode: BuildMode,
+    pub reason: String,
+}
+
+impl BuildReport {
+    pub(crate) fn new(mode: BuildMode, reason: &str) -> Self {
+        Self {
+            mode,
+            reason: reason.to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArtifactBuildMetadata {
     pub artifact_type: ArtifactBuildMode,
@@ -39,6 +73,8 @@ pub struct ArtifactBuildMetadata {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_names: Vec<String>,
     pub published: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -108,6 +144,7 @@ mod tests {
                     output_path: PathBuf::from("/tmp/out.cf"),
                     file_names: vec!["out.cf".to_owned()],
                     published: true,
+                    build: None,
                 },
             ),
         };

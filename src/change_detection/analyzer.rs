@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::change_detection::hash_storage::{
     HashStorage, StorageError, StorageSnapshot, StoredFileState,
 };
-use crate::change_detection::scanner::{self, ScanError};
+use crate::change_detection::scanner::{self, ScanError, ScanScope};
 use crate::domain::source_set::SourceSetContext;
 
 /// A single detected file change.
@@ -115,7 +115,7 @@ pub fn analyze_context(
                     Err(error) => return Err(error),
                 },
             };
-            let scan = match scanner::scan(context.path(), interrupted) {
+            let scan = match scan_sources(context, context.path(), interrupted) {
                 Ok(scan) => scan,
                 Err(ScanError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
                 Err(error) => {
@@ -123,6 +123,9 @@ pub fn analyze_context(
                     return Ok(AnalysisOutcome::Fallback);
                 }
             };
+            if scan.has_untracked_links {
+                return Ok(AnalysisOutcome::Fallback);
+            }
             let mut changes = detect_changes(&scan.files, &snapshot.entries);
             let seen_rel: HashSet<&str> = scan
                 .files
@@ -289,7 +292,7 @@ pub fn prepare_full_snapshot(
 ) -> Result<FullSnapshot, ChangeDetectionError> {
     // The caller records an already successful load/publication: cancellation must not
     // leave its memory describing the preceding database/tree.
-    let scan = scanner::scan(source_path, &mut || false)
+    let scan = scan_sources(context, source_path, &mut || false)
         .map_err(|error| map_scan_error(context, error))?;
     Ok(FullSnapshot {
         snapshot: scan
@@ -340,6 +343,18 @@ pub fn commit_full_snapshot(
             context.storage_identity(),
         )
         .map_err(|error| map_commit_error(context, storage.path(), error))
+}
+
+fn scan_sources(
+    context: &SourceSetContext,
+    path: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<scanner::ScanSnapshot, ScanError> {
+    if context.is_build_memory() {
+        scanner::scan_in_scope(path, interrupted, ScanScope::Build)
+    } else {
+        scanner::scan(path, interrupted)
+    }
 }
 
 fn detect_changes(

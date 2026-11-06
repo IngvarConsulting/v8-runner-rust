@@ -796,6 +796,10 @@ pub struct ArtifactsArgs {
     /// Extension name in the infobase for cfe export
     #[arg(long)]
     pub extension: Option<String>,
+
+    /// Recreate the build infobase and load the full sources
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1578,6 +1582,7 @@ mod tests {
                 output,
                 source_set,
                 extension,
+                full: _,
             }) => {
                 assert_eq!(output, "dist/main.cf");
                 assert!(source_set.name().is_none());
@@ -1671,6 +1676,7 @@ mod tests {
                 output,
                 source_set,
                 extension,
+                full: _,
             }) => {
                 assert_eq!(output, "dist/ext.cfe");
                 assert_eq!(source_set.name(), Some("ext-sales"));

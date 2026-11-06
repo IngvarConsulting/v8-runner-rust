@@ -341,7 +341,7 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md),
 [`pull --all` объявляет набор каждому расширению базы](../rules/cli/pull-all-declares-a-set-for-each-installed-extension.md),
 [`make` и `download` без набора пишут в каталог](../rules/cli/make-and-download-without-a-set-write-into-a-directory.md),
-[`make` собирает пакет из исходников во временной базе](../rules/use-cases/make-builds-packages-from-sources-in-a-throwaway-base.md),
+[`make` собирает пакет из исходников в базе сборки](../rules/use-cases/make-builds-packages-from-sources-in-the-build-infobase.md),
 [временная база служит одному прогону](../rules/use-cases/a-throwaway-base-serves-one-run-and-is-removed.md),
 [направление `convert` задаёт `--to`](../rules/cli/convert-direction-is-set-by-to.md),
 [направление с пакетом исполняет цепочка](../rules/cli/a-package-direction-of-convert-has-an-executor-chain.md).

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use support::{temp_workspace, v8_runner_command, write_shell_script as write_script};
 
 fn write_designer_script(path: &Path, fail: bool) {
-    // Отказ — на выгрузке пакета: временная база создаётся и исходники в неё загружаются.
+    // Отказ на выгрузке проверяется после создания базы сборки и загрузки исходников.
     let failure_branch = if fail {
         "case \" $* \" in *' /DumpCfg '*) exit 17 ;; esac\nexit 0"
     } else {
@@ -17,7 +17,7 @@ fn write_designer_script(path: &Path, fail: bool) {
     write_script(
         path,
         &format!(
-            "out=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '/DumpCfg' ]; then printf 'cf' > \"$arg\"; fi\n  if [ \"$prev\" = '/Out' ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log' > \"$out\"; fi\n{failure_branch}"
+            "if [ \"$1\" = CREATEINFOBASE ]; then\n  db=$(printf '%s' \"${{2#File=}}\" | tr -d \"'\")\n  mkdir -p \"$db\"\n  printf 'database' > \"$db/1Cv8.1CD\"\nfi\nout=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '/DumpCfg' ]; then printf 'cf' > \"$arg\"; fi\n  if [ \"$prev\" = '/Out' ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log' > \"$out\"; fi\n{failure_branch}"
         ),
     );
 }
@@ -110,6 +110,7 @@ fn artifacts_text_success_keeps_output_artifact_visible() {
     assert!(stdout.contains("● Artifacts export completed successfully"));
     assert!(stdout.contains("│   source-set: main"));
     assert!(stdout.contains("│   mode: cf"));
+    assert!(stdout.contains("│   build: full ("));
     assert!(stdout.contains(output_path.display().to_string().as_str()));
     assert!(stdout.contains("[artifact] package_file ->"));
     assert!(!stdout.contains("platform log"));

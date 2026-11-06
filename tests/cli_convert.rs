@@ -1468,9 +1468,8 @@ fn a_convert_refusal_does_not_offer_a_truncated_command() {
 
 // --- Направления с пакетом (#236) -----------------------------------------------------
 //
-// Поддельный `ibcmd` записывает каждый вызов, создаёт базу по `infobase create`, пишет пакет
-// по ключу `--out=` и раскладывает XML по `config export --file=`. Файл `fail` рядом с ним
-// роняет импорт и разбор кодом 17, файл `cancel` присылает раннеру SIGTERM во время импорта.
+// Поддельный `ibcmd` создаёт базу, пишет пакет командой `config save` и раскладывает XML
+// командой `config export --file=`. Файлы `fail` и `cancel` имитируют отказ и отмену.
 // Проект базы не объявляет: ни `infobase:` в проектном файле, ни местного слоя.
 
 const IBCMD: &str = r#"root="$(dirname "$0")/.."
@@ -1485,15 +1484,13 @@ db=''
 previous=''
 last=''
 for argument in "$@"; do
-  case "$argument" in
-    --out=*) printf 'package' > "${argument#--out=}" ;;
-  esac
   if [ "$previous" = --db-path ]; then db="$argument"; fi
   previous="$argument"
   last="$argument"
 done
 case " $* " in
-  *" create "*) mkdir -p "$db"; : > "$db/1Cv8.1CD" ;;
+  *" create "*) mkdir -p "$db"; printf 'database' > "$db/1Cv8.1CD" ;;
+  *" save "*) printf 'package' > "$last" ;;
   *" export "*) mkdir -p "$last"; printf '<Configuration />' > "$last/Configuration.xml" ;;
 esac
 exit 0"#;
@@ -1554,6 +1551,10 @@ impl PackageProject {
             .collect()
     }
 
+    fn build_base(&self) -> PathBuf {
+        self.root.join("work/temp/build-infobase")
+    }
+
     fn throwaway_root(&self) -> PathBuf {
         self.root.join("work/temp/throwaway-infobases")
     }
@@ -1565,11 +1566,10 @@ impl PackageProject {
     }
 }
 
-/// Набор в пакет: `ibcmd` создаёт временную базу под `workPath` со своим `--data` и собирает
-/// пакет `config import --out` — база проекта не нужна и не объявлена; база убирается, а
-/// квитанция называет исполнителя.
+/// `ibcmd` загружает набор в базу сборки со своим каталогом `--data` и выгружает пакет
+/// командой `config save` без `--db`. База проекта не нужна.
 #[test]
-fn convert_a_set_to_a_package_builds_it_with_ibcmd_in_a_throwaway_base() {
+fn convert_a_set_to_a_package_builds_it_with_ibcmd_in_the_build_infobase() {
     let project = PackageProject::new();
 
     let (output, envelope) = project.run(&["convert", "Sales", "--to", "package"]);
@@ -1588,26 +1588,30 @@ fn convert_a_set_to_a_package_builds_it_with_ibcmd_in_a_throwaway_base() {
     );
 
     let calls = project.calls();
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    let throwaway = project.throwaway_root().display().to_string();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    let base = project.build_base();
     for call in &calls {
         assert!(
-            call.starts_with(&format!("infobase --data {throwaway}")),
-            "every call carries its own data directory under the throwaway root: {call}"
+            call.starts_with(&format!("infobase --data {}", base.display())),
+            "every call carries the data directory under the build infobase: {call}"
         );
         assert!(!call.contains("ibcmd-data"), "{call}");
+        assert!(!call.contains("--out"), "{call}");
     }
     assert!(calls[0].ends_with(" create"), "{calls:?}");
-    assert!(calls[1].contains(" config import --out="), "{calls:?}");
+    assert!(calls[1].contains(" config import "), "{calls:?}");
     assert!(
         calls[1].ends_with(&project.root.join("src/sales").display().to_string()),
         "{calls:?}"
     );
-    assert_eq!(project.bases_left(), 0, "the throwaway base is removed");
+    assert!(calls[2].contains(" config save "), "{calls:?}");
+    assert!(!calls[2].contains("--db "), "{calls:?}");
+    assert!(base.join("ib/1Cv8.1CD").is_file());
+    assert!(!project.throwaway_root().exists());
 }
 
 /// Без набора `--to package` берёт пакеты конфигурации проекта — основную конфигурацию и
-/// расширения — в одной временной базе; набор внешних обработок в обход не входит.
+/// расширения — в одной базе сборки. Внешние обработки в обход не входят.
 #[test]
 fn convert_without_a_set_to_a_package_takes_the_configuration_packages() {
     let project = PackageProject::new();
@@ -1633,9 +1637,149 @@ fn convert_without_a_set_to_a_package_takes_the_configuration_packages() {
             .filter(|call| call.ends_with(" create"))
             .count(),
         1,
-        "one throwaway base serves the run: {calls:?}"
+        "one build infobase serves the run: {calls:?}"
     );
+    assert!(project.build_base().join("ib/1Cv8.1CD").is_file());
+    assert!(!project.throwaway_root().exists());
+}
+
+#[test]
+fn make_and_convert_share_the_build_infobase() {
+    let project = PackageProject::new();
+    let path = project.root.join("v8project.yaml");
+    let config = fs::read_to_string(&path).expect("config");
+    fs::write(
+        &path,
+        config.replace("path: platform\n", "path: platform/8.3.27.2074\n"),
+    )
+    .expect("versioned platform config");
+    let platform = project.root.join("platform/8.3.27.2074");
+    let bin = platform.join("bin");
+    write_script(&bin.join("ibcmd"), IBCMD);
+    write_script(
+        &bin.join("1cv8"),
+        r#"root="$(dirname "$0")/.."
+printf '%s\n' "$*" >> "$root/designer-calls"
+if [ "$1" = CREATEINFOBASE ]; then
+  db=$(printf '%s' "${2#File=}" | tr -d "'")
+  mkdir -p "$db"
+  printf 'database' > "$db/1Cv8.1CD"
+fi
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = /DumpCfg ]; then printf 'package' > "$argument"; fi
+  previous="$argument"
+done
+exit 0"#,
+    );
+
+    let (output, answer) = project.run(&["make", "main", "--output", "out/main.cf"]);
+    assert!(output.status.success(), "{answer}");
+    assert_eq!(
+        answer["data"]["provider"]["selected"], "designer",
+        "{answer}"
+    );
+    let designer_calls =
+        fs::read_to_string(platform.join("designer-calls")).expect("Designer calls");
+    assert_eq!(designer_calls.lines().count(), 3, "{designer_calls}");
+    assert!(!platform.join("ibcmd-calls").exists());
+
+    let (output, answer) = project.run(&["convert", "main", "--to", "package"]);
+    assert!(output.status.success(), "{answer}");
+    assert_eq!(answer["data"]["provider"]["selected"], "ibcmd", "{answer}");
+    let ibcmd_calls = fs::read_to_string(platform.join("ibcmd-calls")).expect("ibcmd calls");
+    assert_eq!(ibcmd_calls.lines().count(), 1, "{ibcmd_calls}");
+    assert!(ibcmd_calls.contains(" config save "), "{ibcmd_calls}");
+    assert!(project.build_base().join("ib/1Cv8.1CD").is_file());
+}
+
+#[test]
+fn convert_loads_a_changed_module_with_ibcmd_files_partial() {
+    let project = PackageProject::new();
+    let source = project.root.join("src/cf");
+    let module = source.join("CommonModules/Demo/Ext/Module.bsl");
+    fs::create_dir_all(module.parent().expect("module parent")).expect("module dir");
+    fs::write(source.join("CommonModules/Demo.xml"), "<CommonModule/>").expect("descriptor");
+    fs::write(&module, "// initial").expect("module");
+    let args = ["convert", "main", "--to", "package"];
+    let (status, answer) = project.run(&args);
+    assert!(status.status.success(), "{answer}");
+    let before = project.calls();
+
+    fs::write(&module, "// changed").expect("modified module");
+    let (status, answer) = project.run(&args);
+    assert!(status.status.success(), "{answer}");
+    let after = project.calls();
+    let commands = after.strip_prefix(before.as_slice()).expect("second run");
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    assert!(
+        commands[0].contains(" config import files --partial --base-dir "),
+        "{commands:?}"
+    );
+    assert!(
+        commands[0].contains(" CommonModules/Demo/Ext/Module.bsl"),
+        "{commands:?}"
+    );
+    assert!(commands[1].contains(" config save "), "{commands:?}");
+    assert!(
+        commands
+            .iter()
+            .all(|call| !call.contains("--out") && !call.contains("--db ")),
+        "{commands:?}"
+    );
+}
+
+#[test]
+fn convert_cleans_stale_throwaway_bases_and_keeps_the_build_infobase() {
+    let project = PackageProject::new();
+    let args = ["convert", "main", "--to", "package"];
+    let (status, answer) = project.run(&args);
+    assert!(status.status.success(), "{answer}");
+    let db = project.build_base().join("ib/1Cv8.1CD");
+    assert!(db.is_file());
+
+    let throwaway = project.throwaway_root();
+    let orphan = throwaway.join("base-old-run");
+    fs::create_dir_all(&orphan).expect("orphan");
+    fs::write(
+        throwaway.join("base-old-run.meta.json"),
+        serde_json::json!({
+            "tool": "v8-runner",
+            "kind": "throwaway_infobase",
+            "run_id": "old-run",
+            "target_path": orphan,
+            "target_identity": "v8-runner throwaway infobase",
+            "created_at": "2000-01-01T00:00:00Z",
+        })
+        .to_string(),
+    )
+    .expect("orphan metadata");
+
+    let package = project.base.join("external.cf");
+    fs::write(&package, "package").expect("input package");
+    let target = project.base.join("xml");
+    let (status, answer) = project.run(&[
+        "convert",
+        &package.display().to_string(),
+        "--to",
+        "xml",
+        "--output",
+        &target.display().to_string(),
+    ]);
+    assert!(status.status.success(), "{answer}");
+    assert!(target.join("Configuration.xml").is_file());
     assert_eq!(project.bases_left(), 0);
+    assert!(db.is_file());
+
+    let before = project.calls();
+    let (status, answer) = project.run(&args);
+    assert!(status.status.success(), "{answer}");
+    let after = project.calls();
+    let commands = after
+        .strip_prefix(before.as_slice())
+        .expect("after cleanup");
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(commands[0].contains(" config save "), "{commands:?}");
 }
 
 /// Набор внешних файлов пакета конфигурации не называет: отказ до замка и до платформы.
@@ -1812,10 +1956,10 @@ fn convert_needs_no_infobase_and_refuses_the_infobase_key() {
     assert!(project.calls().is_empty());
 }
 
-/// Исходники формата EDT в пакет: сперва `1cedtcli` переводит набор в XML в каталог
-/// временной базы, затем `ibcmd` собирает пакет из этого XML `config import --out`.
+/// `1cedtcli` переводит набор EDT в XML внутри базы сборки. Затем `ibcmd` загружает этот XML
+/// и выгружает пакет.
 #[test]
-fn convert_an_edt_set_to_a_package_goes_through_xml_in_the_throwaway_base() {
+fn convert_an_edt_set_to_a_package_goes_through_xml_in_the_build_infobase() {
     let (_dir, config_path, base_path, work_path, edt_cli_path, calls_log) = setup_project();
     write_edt_source(
         &base_path.join("main"),
@@ -1864,12 +2008,14 @@ fn convert_an_edt_set_to_a_package_goes_through_xml_in_the_throwaway_base() {
     let ibcmd_calls = fs::read_to_string(base_path.join("platform/ibcmd-calls")).expect("calls");
     let import = ibcmd_calls
         .lines()
-        .find(|call| call.contains(" config import --out="))
+        .find(|call| call.contains(" config import "))
         .expect("import call");
-    let throwaway = work_path.join("temp/throwaway-infobases");
+    let xml = fs::canonicalize(work_path.join("temp/build-infobase/xml")).expect("XML cache");
+    let imported_path = import.split_whitespace().last().expect("imported XML");
+    assert!(Path::new(imported_path).starts_with(&xml), "{import}");
     assert!(
-        import.contains(&throwaway.display().to_string()) && import.ends_with("/xml/main"),
-        "the package is built from the XML the EDT CLI wrote into the throwaway base: {import}"
+        Path::new(imported_path).join("Configuration.xml").is_file(),
+        "{import}"
     );
 }
 
@@ -1886,7 +2032,17 @@ fn convert_a_failed_ibcmd_step_removes_the_base_and_keeps_the_receipt() {
     let project = PackageProject::new();
     project.marker("fail");
 
-    let (output, envelope) = project.run(&["convert", "main", "--to", "package"]);
+    let package = project.base.join("main.cf");
+    fs::write(&package, "package").expect("input package");
+    let target = project.base.join("xml");
+    let (output, envelope) = project.run(&[
+        "convert",
+        &package.display().to_string(),
+        "--to",
+        "xml",
+        "--output",
+        &target.display().to_string(),
+    ]);
 
     assert!(!output.status.success(), "{envelope}");
     assert_eq!(envelope["error"]["kind"], "platform", "{envelope}");
@@ -1904,10 +2060,7 @@ fn convert_a_failed_ibcmd_step_removes_the_base_and_keeps_the_receipt() {
         project.calls()
     );
     assert_eq!(project.bases_left(), 0, "the throwaway base is removed");
-    assert!(!project
-        .root
-        .join("work/convert/out/packages/main.cf")
-        .exists());
+    assert!(!target.exists());
 }
 
 /// Отмена во время работы `ibcmd` останавливает прогон, и временная база убирается.
@@ -1916,7 +2069,17 @@ fn convert_a_cancelled_run_removes_the_throwaway_base() {
     let project = PackageProject::new();
     project.marker("cancel");
 
-    let (output, envelope) = project.run(&["convert", "main", "--to", "package"]);
+    let package = project.base.join("main.cf");
+    fs::write(&package, "package").expect("input package");
+    let target = project.base.join("xml");
+    let (output, envelope) = project.run(&[
+        "convert",
+        &package.display().to_string(),
+        "--to",
+        "xml",
+        "--output",
+        &target.display().to_string(),
+    ]);
 
     assert!(!output.status.success(), "{envelope}");
     assert_eq!(envelope["error"]["code"], "cancelled", "{envelope}");
@@ -1929,10 +2092,7 @@ fn convert_a_cancelled_run_removes_the_throwaway_base() {
         project.calls()
     );
     assert_eq!(project.bases_left(), 0, "the throwaway base is removed");
-    assert!(!project
-        .root
-        .join("work/convert/out/packages/main.cf")
-        .exists());
+    assert!(!target.exists());
 }
 
 /// `--output` файла пакета, лежащий в каталоге набора, под `basePath` или под `workPath`, —
