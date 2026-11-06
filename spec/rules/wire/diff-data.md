@@ -7,6 +7,7 @@ check:
   - tests/cli_diff.rs::diff_lists_metadata_versions_without_dumping
   - tests/cli_diff.rs::designer_lists_named_objects_and_refuses_unrecognized_entries
   - tests/cli_diff.rs::full_dump_and_empty_list_are_distinct_for_both_providers
+  - src/platform/dump_forecast.rs::only_the_utf8_signature_is_a_valid_empty_designer_diff
   - tests/cli_diff.rs::against_keeps_opaque_report_and_uses_typed_designer_arguments
   - tests/cli_diff.rs::designer_output_must_exist_and_partial_reports_are_discarded
   - tests/cli_diff.rs::platform_failure_includes_stdout_without_the_infobase_password
@@ -28,6 +29,8 @@ check:
 `full_dump: true` и пустой `changes` означают, что платформа требует полную выгрузку и не
 перечислила объекты. `full_dump: false` и пустой `changes` у успешного обычного `diff` означают,
 что платформа не нашла изменений версий. Неизвестный ответ платформы даёт `invalid_output`.
+Designer обозначает пустой список одной сигнатурой UTF-8 BOM.
+[Замер на платформе 8.3.27.2074](../../../references/1c/confirmed-runtime-measurements.md).
 
 `diff --against db|vendor:<имя>|<файл>` при успехе возвращает абсолютный путь `report` к
 полному TXT-отчёту Конфигуратора. Раннер сохраняет байты отчёта. В этой форме `changes`

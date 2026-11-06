@@ -44,7 +44,21 @@ fn forecast(list: Option<ChangeList<'_>>) -> DumpForecast {
     }
 }
 
-pub(crate) fn parse_changes_list(text: &str) -> Option<ChangeList<'_>> {
+/// An empty list produced by Designer consists solely of the UTF-8 signature.
+/// Keep this stricter check out of the `pull` forecast, which also accepts an empty response.
+pub(crate) fn parse_designer_diff(text: &str) -> Option<ChangeList<'_>> {
+    let list = parse_changes_list(text)?;
+    match &list {
+        ChangeList::Objects(objects)
+            if objects.is_empty() && text.as_bytes() != b"\xEF\xBB\xBF" =>
+        {
+            None
+        }
+        _ => Some(list),
+    }
+}
+
+fn parse_changes_list(text: &str) -> Option<ChangeList<'_>> {
     parse(text, "FullDump", |line| match line.split_once(' ')? {
         ("New:", object) if !object.is_empty() => Some((ChangeKind::Added, object)),
         ("Modified:", object) if !object.is_empty() => Some((ChangeKind::Modified, object)),
@@ -89,7 +103,19 @@ fn parse<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{read_changes_list, read_export_status, DumpForecast};
+    use super::{
+        parse_designer_diff, read_changes_list, read_export_status, ChangeList, DumpForecast,
+    };
+
+    #[test]
+    fn only_the_utf8_signature_is_a_valid_empty_designer_diff() {
+        assert!(
+            matches!(parse_designer_diff("\u{feff}"), Some(ChangeList::Objects(objects)) if objects.is_empty())
+        );
+        for unexpected in ["", "\r\n", "\u{feff}\r\n"] {
+            assert!(parse_designer_diff(unexpected).is_none(), "{unexpected:?}");
+        }
+    }
 
     /// Замеренные ответы Конфигуратора и агента (UTF-8 с BOM, CRLF).
     #[test]

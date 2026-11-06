@@ -10,7 +10,7 @@ use crate::domain::capability::{
 };
 use crate::domain::diff::{DiffAgainst, DiffResult, MetadataChange};
 use crate::platform::designer::DesignerDsl;
-use crate::platform::dump_forecast::{parse_changes_list, parse_export_status, ChangeList};
+use crate::platform::dump_forecast::{parse_designer_diff, parse_export_status, ChangeList};
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::process::ProcessExecutor;
 use crate::platform::result::PlatformCommandResult;
@@ -225,12 +225,7 @@ fn designer_changes(
             "cannot read the Designer change list as UTF-8: {error}"
         ))
     })?;
-    if text != "\u{feff}" && text.trim_matches(['\u{feff}', '\r', '\n']).is_empty() {
-        return Err(AppError::InvalidOutput(
-            "empty Designer change list must contain only a UTF-8 BOM".to_owned(),
-        ));
-    }
-    metadata_changes(parse_changes_list(&text))
+    metadata_changes(parse_designer_diff(&text))
 }
 
 fn metadata_changes(list: Option<ChangeList<'_>>) -> Result<DiffOutput, AppError> {
