@@ -1568,13 +1568,126 @@ rac cluster list '[::1]:1545'
 сеансы (`infobase create|info|update|drop`, `session list|terminate`) требует администратора кластера, если его
 список не пуст, и только его — пароль центрального сервера этим операциям не нужен и `rac` их даже не примет
 (`cluster list --agent-user` — ошибка разбора). Администратор центрального сервера нужен только для `agent …`.
-Учётных данных пользователя ИБ `rac` 8.5.4 не принимает вовсе (на 8.3.27 не проверено). Отказ аутентификации различим только по тексту
+Учётных данных пользователя ИБ `rac` 8.5.4 не принимает вовсе. Отказ аутентификации различим только по тексту
 (`…не аутентифицирован`, `Аутентификация по паролю доступна только с локальной машины`), код всегда 255; учитывать
 `password-auth-from-localhost-only=yes` по умолчанию: рабочая учётная запись для удалённого RAS должна быть
 зарегистрирована с `=no`. Запасной путь создания (#204): `rac infobase create … --create-database --locale=…`
 печатает `infobase : <uuid>` — это и есть признак «создана»; «уже была» — rc=255 с текстом «уже зарегистрирована»;
 `--create-database` не защищает от регистрации второй ИБ на чужой непустой БД. Удаление с `--drop-database` сносит
 БД, даже если на неё зарегистрирована ещё одна ИБ. Адрес RAS для `rac` — только IPv4 или имя, разрешаемое в IPv4.
+
+### Дополнительный замер на 8.3.27.2074 (Windows)
+
+Замер 06.11.2026 для [#180](https://github.com/IngvarConsulting/v8-runner-rust/issues/180).
+Отдельный кластер с собственным каталогом реестра, `ragent` на порту 45800,
+менеджер на 45801, рабочие порты 45820–45829, RAS на 45805 и его монитор на 45806.
+Для замера выделили отдельные регистрации ИБ, базы и логины в локальном SQL Server.
+DemoTrd восстановлена из `/DumpIB` файловой копии `1Cv8.1CD`. Регламентные задания
+запрещены при регистрации. Выгрузка и восстановление завершились успешно.
+У файловой и серверной копий совпал непустой результат `/GetConfigGenerationID`
+при входе как `Администратор` с пустым паролем.
+
+**Справка** (`rac help session`, `rac help infobase`, `rac help cluster`,
+`rac help agent` — код 0).
+
+- `session list [--infobase=<uuid>] [--licenses]` и
+  `session terminate --session=<uuid> [--error-message=<string>]` используют
+  общие `--cluster=<uuid>`, `--cluster-user`, `--cluster-pwd`.
+- `infobase info|update|drop` принимает `--infobase=<uuid>` или `--name=<name>`
+  и `--infobase-user` / `--infobase-pwd`. В справке `session` и
+  `infobase create` ключей пользователя ИБ нет.
+- `infobase update` принимает `--sessions-deny=on|off`, `--denied-from`,
+  `--denied-to`, `--denied-message`, `--denied-parameter`, `--permission-code`
+  и отдельно `--scheduled-jobs-deny=on|off`. В справке `update` нет
+  `--data-version`.
+- Для `infobase create` справка требует `--cluster`, `--name`,
+  `--dbms=MSSQLServer|PostgreSQL|IBMDB2|OracleDatabase`, `--db-server`,
+  `--db-name`, `--locale`. Дополнительные ключи из справки
+  `--create-database`, `--db-user`, `--db-pwd`, `--descr`, `--date-offset`,
+  `--security-level`, `--scheduled-jobs-deny`, `--license-distribution`.
+  `--sessions-deny` указан у `update`.
+
+**Администраторы.** Сеансы проверены на восстановленной DemoTrd, создание —
+на отдельных пустых БД. «Кластер» означает `--cluster-user/--cluster-pwd`,
+«центральный сервер» — `--agent-user/--agent-pwd`.
+«0 без реквизитов» означает, что у вызова есть идентификаторы, указанные ниже,
+и отсутствуют ключи аутентификации администратора 1С.
+
+| Списки администраторов | `session list`, `session terminate`, `infobase create` | `agent admin list` |
+| --- | --- | --- |
+| Оба пусты | 0 без реквизитов | 0 без реквизитов |
+| Только центральный сервер | 0 без реквизитов | 0 с реквизитами центрального сервера |
+| Только кластер | 0 с реквизитами кластера | 0 без реквизитов |
+| Оба заполнены | 0 с реквизитами кластера | 0 с реквизитами центрального сервера |
+
+В заполненном списке отсутствие реквизитов и неверный пароль дали одинаковый
+код Windows `4294967295` (`0xFFFFFFFF`, знаковое `-1`). Для трёх операций
+кластера вывод был «Администратор кластера не аутентифицирован».
+У `agent admin list` пропуск реквизитов дал «Администратор центрального сервера
+не аутентифицирован», а неверный пароль — «Администратор кластера не аутентифицирован».
+Уровень учётных данных следует определять по операции.
+`cluster list` вернул 0 без реквизитов во всех четырёх состояниях. В каждом
+состоянии завершили сеанс Конфигуратора пользователя `Администратор` и проверили,
+что его UUID исчез из повторного `session list`. `infobase create` вывел
+`infobase : <uuid>`, регистрация подтвердилась по этому UUID. Для каждой
+регистрации использовали отдельную заранее созданную пустую БД SQL Server.
+
+**Запрет и разрешение начала сеансов.** На той же сборке с восстановленной
+DemoTrd это проверено в [#521](https://github.com/IngvarConsulting/v8-runner-rust/pull/521),
+см. [замер блокировки](#блокировка-начала-сеансов-в-кластере-и-на-автономном-сервере).
+При заполненном списке администраторов кластера и пользователях ИБ
+`infobase update` требует оба уровня. Без реквизитов кластера или с неверным
+паролем кластера — `0xFFFFFFFF`, «Администратор кластера не аутентифицирован».
+С верными реквизитами кластера и без реквизитов ИБ либо с неверными реквизитами ИБ —
+`0xFFFFFFFF`, «Недостаточно прав пользователя на информационную базу …».
+Успешные запрет и разрешение вернули 0, изменение флага подтверждено через
+`infobase info`. Ключи центрального сервера этой команде не передаются.
+
+```text
+ragent.exe /agent /port 45800 /regport 45801 /range 45820:45829 /d <registry>
+ras.exe cluster --port=45805 --monitor-port=45806 127.0.0.1:45800
+rac cluster list <ras>
+rac cluster admin register --cluster=<cl> --name=i180cluster --pwd=<cluster-pwd> --auth=pwd <ras>
+rac agent admin register --name=i180agent --pwd=<agent-pwd> --auth=pwd <ras>
+rac agent admin list <agent-auth> <ras>
+rac agent admin remove --name=i180agent <agent-auth> <ras>
+rac session list --cluster=<cl> --infobase=<ib> <cluster-auth> <ras>
+rac session terminate --cluster=<cl> --session=<session> --error-message="i180 terminate" <cluster-auth> <ras>
+rac infobase create --cluster=<cl> --create-database --name=<db> --dbms=MSSQLServer --db-server=localhost --db-name=<db> --db-user=<db> --db-pwd=<db-pwd> --locale=ru --scheduled-jobs-deny=on <cluster-auth> <ras>
+rac infobase summary info --cluster=<cl> --infobase=<new-ib> <cluster-auth> <ras>
+rac infobase update --cluster=<cl> --infobase=<ib> <cluster-auth> <ib-auth> --sessions-deny=on --scheduled-jobs-deny=on "--denied-message=I469 maintenance" --permission-code=i469pass <ras>
+rac infobase update --cluster=<cl> --infobase=<ib> <cluster-auth> <ib-auth> --sessions-deny=off --scheduled-jobs-deny=on --denied-message= --permission-code= <ras>
+rac infobase info --cluster=<cl> --infobase=<ib> <cluster-auth> <ib-auth> <ras>
+```
+
+`<ras>` — `127.0.0.1:45805`, `<cl>` и `<ib>` — UUID кластера и ИБ,
+`<session>` — UUID из `session list`, `<new-ib>` — UUID из `infobase create`.
+`<cluster-auth>` и `<agent-auth>`
+обозначают соответствующие пары ключей администратора. `<ib-auth>` —
+`--infobase-user=Администратор --infobase-pwd=` для этой копии DemoTrd.
+
+Матрицу начали с пустых списков, затем зарегистрировали центрального
+администратора, удалили его, зарегистрировали администратора кластера
+и повторно зарегистрировали центрального администратора. В 8.3.27.2074
+`agent admin register` с `--password-auth-from-localhost-only=no` вернул
+`0xFFFFFFFF` и «Ошибка разбора параметра: --password-auth-from-localhost-only=no».
+Регистрация с `--auth=pwd` без этого ключа прошла с кодом 0.
+
+**IPv6.** `rac cluster list '[::1]:45807'` вернул `0xFFFFFFFF` и
+«Ошибка соединения с сервером» / `[:0` / «Этот хост неизвестен».
+Тестовый слушатель `[::1]:45807` получил пять байт от контрольного клиента
+и ни одного соединения от `rac`. Контрольный слушатель IPv4 на
+`127.0.0.1:45808` получил восемь байт от `rac`, а запрос к настоящему RAS
+по `127.0.0.1:45805` вернул 0. Скобочный адрес эта сборка `rac` не разбирает.
+
+**Для #212 и #204.** Для чтения и завершения сеансов нужен администратор
+кластера при заполненном списке. Для изменения допуска к сеансам на базе
+с пользователями нужны также реквизиты ИБ. Центральный администратор
+не нужен для этих вызовов и для создания базы. Запасной вызов
+`infobase create --create-database` подтверждает успешную регистрацию
+строкой `infobase : <uuid>`. Создание физической БД с нуля проверено
+на PostgreSQL в замере 8.5.4 выше. Результат на Windows относится к
+регистрации с заранее подготовленной пустой БД SQL Server.
 
 ## CREATEINFOBASE для кластера
 
@@ -2195,6 +2308,68 @@ cmp <U>/a.cf <W>/b.cf
 `1C:Enterprise 8.3 1C Designer Shell …` и приглашение `designer> ` после каждого массива, пока
 его не выключили `--show-prompt=no`. Что агент печатает при разрыве сессии, клиент увидеть не
 может; п. 3 этим не закрыт.
+
+### Повторный замер на 8.5.4
+
+Замер 06.11.2026, Windows 11 (сборка 26100), 1С 8.5.4.1683. Пакетный Конфигуратор
+и агент по очереди работали с одной файловой копией DemoTrd, без загрузки и применения
+конфигурации между запусками. `<W>` — каталог замера с ASCII-путём. Агент слушал только
+`127.0.0.1` на отдельном свободном порту. SSH-клиент Paramiko сверял одноразовый ED25519-ключ
+и открывал shell без PTY. Пользователь ИБ — `Администратор`, пароль пустой.
+
+```text
+1cv8.exe DESIGNER /DisableStartupDialogs /DisableStartupMessages /IBConnectionString File=<W>\ib /N Администратор /Out <W>\designer-cf.log -NoTruncate /DumpCfg <W>\designer.cf
+1cv8.exe DESIGNER /DisableStartupDialogs /DisableStartupMessages /IBConnectionString File=<W>\ib /N Администратор /Out <W>\designer-files.log -NoTruncate /DumpConfigToFiles <W>\bdump
+1cv8.exe DESIGNER /IBConnectionString File=<W>\ib /Out <W>\agent.log /AgentMode /AgentListenAddress 127.0.0.1 /AgentPort <свободный> /AgentSSHHostKey <W>\host-ed25519 /AgentBaseDir <W>\agent
+  options set --show-prompt=no --output-format=json
+  common connect-ib
+  config dump-config-to-files --dir=adump
+  config dump-cfg --file=a.cf
+```
+
+Команды агента выполнялись в отдельных SSH-сессиях с теми же настройками. Файлы
+агента записаны под `<W>\agent\0`. Обе пакетные команды завершились с кодом 0, обе
+команды выгрузки агента вернули `success`.
+
+- `.cf` — 922 720 016 байт каждый, прямое побайтовое сравнение без расхождений.
+  SHA-256 обоих пакетов — `e0134bd54588c2e8678a03377f3d6b5461b3c8f08302e00147f9ebd7e9ba3c03`.
+- Деревья `adump` и `bdump` — по 51 537 файлов, списки относительных путей равны.
+  Сравнение SHA-256 содержимого обнаружило девять расхождений. `ConfigDumpInfo.xml` совпал.
+
+В следующих файлах различаются только значения элементов цвета диаграммы. Агент во всех
+этих элементах записал `auto`. Обозначения значений Конфигуратора в таблице:
+
+- **Белый** — `chColor` = `#FFFFFF`.
+- **Текст** — `labelsColor`, `ttlTxtColor`, `legTxtColor`, `chTxtColor` = `style:FormTextColor`.
+- **Фон** — `bkgColor`, `ttlColor`, `legColor` = `style:FormBackColor`.
+
+| Файл | Что записал Конфигуратор |
+| --- | --- |
+| `Catalogs/ВариантыАнализаЦелевыхПоказателей/Forms/НастройкаДемоДанных/Ext/Form.xml` | Белый (1 набор) |
+| `DataProcessors/ПроверкаКонтрагента/Forms/Форма/Ext/Form.xml` | Текст (3 набора) |
+| `DataProcessors/ПроверкаКонтрагента/Templates/ФинансовыйАнализ/Ext/Template.xml` | Белый, текст, фон (6 наборов) |
+| `InformationRegisters/СезонныеКоэффициенты/Forms/СезонныеКоэффициенты/Ext/Form.xml` | Белый (1 набор) |
+| `Reports/АнализЖурналаРегистрации/Templates/ПродолжительностьРаботыРегламентныхЗаданий/Ext/Template.xml` | Белый, текст, фон (1 набор) |
+| `Reports/ДлительностьОтложенногоОбновления/Templates/ДиаграммаГанта/Ext/Template.xml` | Белый, текст, фон (1 набор) |
+| `Reports/ДосьеКонтрагента/Templates/ФинансовыйАнализ/Ext/Template.xml` | Белый, текст, фон (6 наборов) |
+| `Reports/СверкаРасчетовСКонтрагентами/Forms/ФормаОтчета/Ext/Form.xml` | Текст (1 набор) |
+| `Reports/СравнительныйАнализПоказателейРаботыМенеджеров/Templates/СравнительныйАнализМенеджеров/Ext/Template.xml` | Белый, текст, фон (1 набор) |
+
+**Вывод SSH вне массивов.** До настройки JSON пришли баннер и `designer> `. После настройки
+сохраняли исходные байты обычного и расширенного потоков SSH, разбирая последовательные
+массивы целиком. Расширенный поток во всех пробах ниже пуст.
+
+| Проба | Что получил клиент |
+| --- | --- |
+| `config dump-cfg` без `--file` | Один массив со справкой и `error` / `CommandFormatError`. |
+| `config dump-config-to-files --dir=adump` | До первых байтов прошло 15,6 с. Два смежных массива, 12 сообщений `log` с предупреждением об именах длиннее 80 символов и отдельный `success`. |
+| `config dump-cfg --file=a.cf` | Первые байты на 63,9 с, один массив с `success`. |
+| `config dump-config-to-files --dir=eofdump`, клиент отправил SSH EOF на 0,25 с и продолжил читать | Первые байты на 8,2 с. К 117,3 с агент отправил те же два массива (2 903 байта, равны контрольному выводу), затем SSH EOF и закрытие канала. Следующий shell открылся. |
+| `common disconnect-ib`, затем `common shutdown` | Один массив с `success` на отключение от ИБ. На `shutdown` канал получил SSH EOF и закрылся без данных за 3,2 с, процесс агента завершился с кодом 0. |
+
+Текста вне массивов после включения JSON в этих сценариях не обнаружено. При полном
+обрыве транспорта клиент видит только данные до закрытия соединения. Изменение реакции
+раннера на текстовый ответ вынесено в [#544](https://github.com/IngvarConsulting/v8-runner-rust/issues/544).
 
 ## Управляемый агент: одноразовый ключ раннера и свободный порт
 
@@ -3536,3 +3711,17 @@ agent asked a question the runner does not answer: Для завершения �
 | 8.3.24.1819, 8.3.26.1656, 8.3.27.2342 | `ru` | 1 | `ru` |
 | 8.3.27.2342 | `en` | 2 | `en` |
 | 8.3.27.2342 | `ru`, `en` | 0 | `ru`, `en` |
+
+## Агент и точка соединения Windows
+
+Замер 06.11.2026 для приёмки исправления выгрузки через агента. Windows 11 без права на символические ссылки (создание ссылки даёт ошибку 1314), файловая база, 8.3.24.1819 и 8.3.27.2342, управляемый агент раннера. Каталог набора выставлен точкой соединения в `workPath/agent/base/<пользователь>/`.
+
+```text
+v8-runner --json-message pull main --force
+v8-runner --json-message pull main
+v8-runner --json-message pull main --object Catalog:<имя>
+v8-runner --json-message push main --force
+v8-runner --json-message push main
+```
+
+На обеих версиях агент читал и писал через точку соединения. После правки базы Конфигуратором `pull main` и `pull main --object` принесли её в файлы проекта, режимы `INCREMENTAL` и `PARTIAL`. При наборе в корне, когда каталог агента лежит внутри выставленного каталога, полная и частичная загрузка прошли, правка оказалась в базе, исходники целы. Снятие точки соединения цель не затрагивает. Кластер, автономный сервер и сетевые каталоги не проверялись.
