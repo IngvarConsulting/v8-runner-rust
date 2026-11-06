@@ -1,3 +1,4 @@
+use std::num::NonZeroI32;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -27,14 +28,26 @@ pub enum DesignerError {
     },
 }
 
+const SYNTAX_ISSUES_EXIT_CODE: NonZeroI32 = NonZeroI32::new(101).unwrap();
+
 /// Вердикт проверки Конфигуратора — `/CheckConfig` и `/CheckModules` — по коду выхода: ноль —
 /// чисто, 101 — замечания найдены, любой другой — сбой инструмента. Других входов у вердикта
 /// нет: текст журнала его не меняет.
 pub fn syntax_check_status(exit_code: i32) -> SyntaxCheckStatus {
     match exit_code {
         0 => SyntaxCheckStatus::Clean,
-        101 => SyntaxCheckStatus::IssuesFound,
+        code if code == SYNTAX_ISSUES_EXIT_CODE.get() => SyntaxCheckStatus::IssuesFound,
         _ => SyntaxCheckStatus::ToolFailed,
+    }
+}
+
+/// Исходы с однозначным кодом проверки Конфигуратора. У сбоя единого кода нет,
+/// а при превью команда не выполнялась.
+pub(crate) fn syntax_check_outcome(status: SyntaxCheckStatus) -> Option<Result<(), NonZeroI32>> {
+    match status {
+        SyntaxCheckStatus::Clean => Some(Ok(())),
+        SyntaxCheckStatus::IssuesFound => Some(Err(SYNTAX_ISSUES_EXIT_CODE)),
+        SyntaxCheckStatus::ToolFailed | SyntaxCheckStatus::Planned => None,
     }
 }
 
@@ -588,7 +601,7 @@ impl<'a> DesignerDsl<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{syntax_check_status, DesignerDsl};
+    use super::{syntax_check_outcome, syntax_check_status, DesignerDsl};
     use crate::domain::syntax::SyntaxCheckStatus;
     use crate::platform::connection::V8Connection;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
@@ -759,6 +772,13 @@ mod tests {
         assert_eq!(syntax_check_status(0), SyntaxCheckStatus::Clean);
         assert_eq!(syntax_check_status(101), SyntaxCheckStatus::IssuesFound);
         assert_eq!(syntax_check_status(1), SyntaxCheckStatus::ToolFailed);
+        assert_eq!(syntax_check_outcome(syntax_check_status(0)), Some(Ok(())));
+        assert_eq!(
+            syntax_check_outcome(syntax_check_status(101)),
+            std::num::NonZeroI32::new(101).map(Err)
+        );
+        assert_eq!(syntax_check_outcome(SyntaxCheckStatus::ToolFailed), None);
+        assert_eq!(syntax_check_outcome(SyntaxCheckStatus::Planned), None);
     }
 
     #[cfg(unix)]
