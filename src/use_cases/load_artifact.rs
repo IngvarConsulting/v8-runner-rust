@@ -643,7 +643,7 @@ enum ExtensionPresence {
 }
 
 /// Asks the infobase whether the extension is installed, by its own keyed list: `ibcmd` at a
-/// file base, the `extensions` executor of the target (the agent) elsewhere (#431).
+/// file base, the `extensions list` executor of the target elsewhere (#431).
 ///
 /// `NotEstablished` is kept for one case only: the platform was asked and did not answer.
 /// Everything that stops the question before it is asked keeps its own kind as `Err` — a

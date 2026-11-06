@@ -238,12 +238,15 @@ fn cluster_designer_invalid_list_output_does_not_echo_credentials() {
     let config = fs::read_to_string(&config_path).expect("config");
     fs::write(
         &config_path,
-        config.replace("Ref=demo", "Ref=demo;Usr=admin;Pwd=TestPassword428"),
+        config.replace(
+            "  connection: 'Srvr=server;Ref=demo'\n",
+            "  connection: 'Srvr=server;Ref=demo'\n  user: admin\n  password: TestPassword428\n",
+        ),
     )
     .expect("configured credentials");
     write_script(
         &platform,
-        "while [ \"$1\" != /Out ]; do shift; done\nprintf '%s\\n' 'connection failed /P TestPassword428' > \"$2\"",
+        "while [ \"$1\" != /Out ]; do shift; done\nprintf '%s\\n' 'connection failed for TestPassword428' > \"$2\"",
     );
     let output = v8_runner_command()
         .arg("--config")
@@ -256,7 +259,7 @@ fn cluster_designer_invalid_list_output_does_not_echo_credentials() {
     let payload: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
     assert_eq!(payload["data"]["provider_dispatched"], true);
     assert!(stdout.contains("extension list line is not an extension name"));
-    assert!(stdout.contains("connection failed /P ***"));
+    assert!(stdout.contains("connection failed for ***"));
     assert!(!stdout.contains("TestPassword428"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("TestPassword428"));
 }
