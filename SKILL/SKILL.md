@@ -38,7 +38,7 @@ Useful global flags:
 
 - `--version` to print the application version and exit.
 - `--config <CONFIG>` when the active config is not `./v8project.yaml`.
-- `--json-message` for machine-readable CLI envelopes.
+- `--json-message` for machine-readable CLI envelopes. On Windows, responses name paths without `\\?\`; a shown path over 260 characters or with a name like `con.cf` may not open in an external program. Only `ready.target_path` and `ready.stage_path` of `--publication-stdio` may keep the prefix, so do not byte-compare them with `result`.
 - `--workdir <WORKDIR>` to override `workPath`; it wins over `v8project.local.yaml`.
 - `--infobase <NAME|CONNECTION>` to work with another declared infobase or an ad hoc connection string; defaults to `origin`. An ad hoc string carries nothing the output masks: `Usr=`, `Pwd=`, `Wsn=`, `Wsp=`, `Wsppwd=`, `Password=`, `WspUser=`, `/N`, `/P`, `/WSN`, `/WSP`, `/UC`, `/AccessToken`, a user or password in a `ws=`/`/WS` address — anywhere in it, glued forms included (so `/Proxy` is refused as `/P`) — is refused with `invalid_argument`; declare the base with `user`/`password` under `infobases.<name>` in `v8project.local.yaml` and pass its name.
 - `--clean-before-execution` to clear logs before execution.

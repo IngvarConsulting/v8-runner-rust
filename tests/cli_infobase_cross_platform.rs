@@ -67,6 +67,146 @@ fn run_json(config: &Path, arguments: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("JSON envelope")
 }
 
+/// Проект с набором `main`, который выгружается фальшивым Конфигуратором.
+#[cfg(windows)]
+fn with_main_set(config: &Path) {
+    let text = fs::read_to_string(config).expect("config");
+    let sources = config.parent().expect("config dir").join("project/sources");
+    fs::create_dir_all(&sources).expect("sources");
+    fs::write(sources.join("Configuration.xml"), "<Configuration/>\n").expect("source");
+    fs::write(
+        config,
+        text.replace(
+            "source-set: []",
+            "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/sources",
+        ),
+    )
+    .expect("config with a set");
+}
+
+#[cfg(windows)]
+fn ordinary_canonical(path: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(path).expect("canonical path");
+    let text = canonical.to_str().expect("utf-8 path");
+    assert!(text.starts_with(r"\\?\"), "canonical spelling: {text}");
+    PathBuf::from(&text[r"\\?\".len()..])
+}
+
+/// `download` называет цель обычным путём во всех видах ответа, а файл публикует на месте.
+#[cfg(windows)]
+#[test]
+fn a_download_answers_with_an_ordinary_path() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    with_main_set(&config);
+    let expected = ordinary_canonical(root.path()).join(r"out\main.cf");
+
+    let json = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "--json-message",
+            "download",
+            "main",
+            "--output",
+            "out/main.cf",
+        ])
+        .output()
+        .expect("run v8-runner");
+    let stdout = String::from_utf8_lossy(&json.stdout);
+    assert!(json.status.success(), "{stdout}");
+    assert!(!stdout.contains(r"\\\\?\\"), "{stdout}");
+    let envelope: Value = serde_json::from_str(&stdout).expect("JSON envelope");
+    assert_eq!(
+        envelope["data"]["output"],
+        expected.to_str().expect("utf-8")
+    );
+    assert_eq!(envelope["data"]["published"], true);
+    assert_eq!(fs::read(&expected).expect("published CF"), b"payload");
+    let key = |name: &str| stdout.find(&format!("\"{name}\":")).expect(name);
+    assert!(
+        key("ok") < key("command") && key("command") < key("data"),
+        "the envelope keeps its key order: {stdout}"
+    );
+
+    let text = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+        .arg("--config")
+        .arg(&config)
+        .args(["--no-color", "download", "main", "--output", "out/main.cf"])
+        .output()
+        .expect("run v8-runner");
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(text.status.success(), "{stdout}");
+    assert!(!stdout.contains(r"\\?\"), "{stdout}");
+    assert!(
+        stdout.contains(expected.to_str().expect("utf-8")),
+        "{stdout}"
+    );
+}
+
+/// Предупреждение о владельце базы называет обе копии обычными путями, хотя метка на диске
+/// хранит канонический: она сверяется с другими копиями и не переписывается ради показа.
+#[cfg(windows)]
+#[test]
+fn an_owner_warning_names_the_copies_with_ordinary_paths() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    with_main_set(&config);
+    let base = root.path().join("declared");
+    fs::create_dir_all(&base).expect("declared base");
+    fs::write(base.join("1Cv8.1CD"), "database").expect("infobase file");
+    fs::write(
+        root.path().join("v8project.local.yaml"),
+        format!(
+            "infobases:\n  origin:\n    connection: 'File={}'\n",
+            base.display()
+        ),
+    )
+    .expect("local layer");
+    let other = root.path().join("other");
+    fs::create_dir_all(&other).expect("other copy");
+    let owner = fs::canonicalize(&other).expect("canonical other copy");
+    let marker = serde_json::json!({
+        "version": 2,
+        "owners": [{
+            "machine": "0".repeat(64),
+            "host": "elsewhere",
+            "project": owner,
+            "since": "2026-01-01T00:00:00Z",
+        }],
+    });
+    let marker_path = root.path().join(".declared.v8-runner.owners.json");
+    let written = serde_json::to_string_pretty(&marker).expect("marker");
+    fs::write(&marker_path, &written).expect("marker");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
+        .arg("--config")
+        .arg(&config)
+        .args(["--json-message", "push", "--dry-run"])
+        .output()
+        .expect("run v8-runner");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: Value = serde_json::from_str(&stdout).expect("JSON envelope");
+    let warnings = envelope["warnings"].as_array().expect("warnings");
+    let warning = warnings
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|warning| warning.contains("elsewhere"))
+        .unwrap_or_else(|| panic!("names the owner: {stdout}"));
+    assert!(
+        warning.contains(ordinary_canonical(&other).to_str().expect("utf-8")),
+        "{warning}"
+    );
+    assert!(!stdout.contains(r"\\\\?\\"), "{stdout}");
+    assert_eq!(
+        fs::read_to_string(&marker_path).expect("marker"),
+        written,
+        "the marker is not rewritten"
+    );
+}
+
 fn wait_for_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !path.is_file() {

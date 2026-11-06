@@ -501,7 +501,12 @@ impl<'a> IbcmdDsl<'a> {
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
-        args.push(target_file.display().to_string());
+        // Цель может быть канонической, а `ibcmd` не находит путь с приставкой `\\?\`.
+        args.push(
+            crate::support::path::normalize_windows_verbatim_path(target_file)
+                .display()
+                .to_string(),
+        );
         self.run(&args)
     }
 
@@ -934,6 +939,75 @@ mod tests {
                 target.to_str().expect("utf8 target"),
             ]
         );
+    }
+
+    #[cfg(windows)]
+    #[derive(Default)]
+    struct CapturingRunner(std::cell::RefCell<Vec<crate::platform::process::ProcessRequest>>);
+
+    #[cfg(windows)]
+    impl ProcessRunner for CapturingRunner {
+        fn run_with_policy(
+            &self,
+            request: &crate::platform::process::ProcessRequest,
+            _policy: &ProcessExecutionPolicy,
+        ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
+        {
+            self.0.borrow_mut().push(request.clone());
+            Ok(crate::platform::process::ProcessResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: None,
+            })
+        }
+
+        fn spawn(
+            &self,
+            _request: &crate::platform::process::ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
+        {
+            panic!("config save must run synchronously")
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn config_save_passes_windows_paths_without_verbatim_prefix() {
+        for (target, expected) in [
+            (
+                r"\\?\C:\Каталог с пробелами\конфигурация.cf",
+                r"C:\Каталог с пробелами\конфигурация.cf",
+            ),
+            (
+                r"\\?\UNC\server\share\Каталог с пробелами\конфигурация.cf",
+                r"\\server\share\Каталог с пробелами\конфигурация.cf",
+            ),
+            (
+                r"C:\Каталог с пробелами\конфигурация.cf",
+                r"C:\Каталог с пробелами\конфигурация.cf",
+            ),
+        ] {
+            let runner = CapturingRunner::default();
+            let dsl = IbcmdDsl::new(
+                "ibcmd.exe".into(),
+                file_connection("File=C:/ib"),
+                &runner,
+                ProcessExecutionPolicy::default(),
+            );
+
+            dsl.config_save(Path::new(target), false, None)
+                .expect("save configuration");
+
+            let requests = runner.0.borrow();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0].args.last().map(String::as_str),
+                Some(expected),
+                "{target}"
+            );
+        }
     }
 
     #[cfg(unix)]
