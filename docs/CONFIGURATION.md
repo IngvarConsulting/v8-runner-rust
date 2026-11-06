@@ -324,6 +324,7 @@ command-specific validation, а не ослабление `push`, source `pull`,
     владельца; до первой удачной отправки отказы обмена выгрузку не предлагают
 - `workPath/hash-storages` — общий кеш EDT и внешних артефактов
 - `workPath/logs`
+- `workPath/reports/diff` — отчёты `diff --against`; раннер их не удаляет, каталог можно очистить
 - `workPath/temp`
 - `workPath/edt-workspace`
 - `workPath/designer` — выгрузки внешних обработок и отчётов формата EDT
@@ -395,7 +396,7 @@ providers:
   операции с одним исполнителем это ошибка конфигурации, а не подтверждение очевидного;
 - переопределение строгое: если названный исполнитель не готов, команда отказывает с
   причиной и на умолчание не откатывается;
-- ключи операций: `infobase.create`, `push`, `apply`, `reset`, `upload`, `pull`, `extensions`,
+- ключи операций: `infobase.create`, `push`, `apply`, `reset`, `diff`, `upload`, `pull`, `extensions`,
   `download`, `infobase.dump`, `infobase.restore`, `make`, `convert`;
 - ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
   квитанции ответа видно, из какого файла он пришёл.
@@ -413,6 +414,9 @@ providers:
 проекта её не сужает: агент применяет и проект EDT, и расширение-инструмент; отдельно от
 `push` его назначает `providers.apply`. `reset` у файловой базы — Конфигуратор, затем
 `ibcmd`, у кластера и автономного сервера — только Конфигуратор: у агента команды отката нет.
+`diff` у файловой базы — `ibcmd`, затем Конфигуратор, у кластера и автономного сервера по
+прямому шлюзу — Конфигуратор. Ключ `providers.diff` разрешён у файловой базы. Для
+`diff --against` подходит `designer`.
 `infobase dump` и `infobase restore` —
 агент, затем Конфигуратор (`ibcmd` для DT файловой базы остаётся экспериментальным и
 назначается только явно; у кластера его нет). `infobase.create` у файловой базы — `ibcmd`, затем
@@ -603,7 +607,7 @@ infobases:
 | --- | --- |
 | `push`, `apply`, `pull`, `download` | `designer` по прямому шлюзу → `agent` по SSH-шлюзу |
 | `download --state db` | `designer` по прямому шлюзу: у агента команды для конфигурации базы данных нет |
-| `upload`, `check`, `reset`, `infobase dump`, `infobase restore` | `designer` по прямому шлюзу |
+| `upload`, `check`, `reset`, `diff`, `infobase dump`, `infobase restore` | `designer` по прямому шлюзу |
 | `extensions` | `agent` по SSH-шлюзу |
 
 Исполнитель, путь которого не объявлен, в цепочку не входит; ключ `providers.*`, назначивший

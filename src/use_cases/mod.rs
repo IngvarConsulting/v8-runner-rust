@@ -28,6 +28,8 @@ pub mod context;
 pub mod convert_sources;
 /// Refuses a directory replacement that would destroy unrecoverable work.
 mod destruction_guard;
+/// Список изменений и отчёт сравнения конфигураций.
+pub mod diff;
 /// Dump orchestration use case.
 pub mod dump_config;
 /// Проверки перед обменом с базой: память о ней и её поколение.

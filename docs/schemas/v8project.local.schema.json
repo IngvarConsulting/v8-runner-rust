@@ -753,6 +753,17 @@
           ],
           "description": "Executor for the package directions of `convert`. Accepted by the schema so validation\ncan say the operation has no choice while `ibcmd` is its only executor."
         },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `diff` on a file infobase. Comparison reports require Designer."
+        },
         "download": {
           "anyOf": [
             {

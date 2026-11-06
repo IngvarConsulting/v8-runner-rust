@@ -548,6 +548,18 @@ impl<'a> IbcmdDsl<'a> {
         self.run_with(&args, &self.execution_policy.for_reading())
     }
 
+    /// The same answer as a file: unlike stdout, it is UTF-8 with a BOM in any console code page.
+    pub fn config_export_status_to_file(
+        &self,
+        version_file: &Path,
+        out_file: &Path,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "export", "status"]);
+        args.push(format!("--base={}", version_file.display()));
+        args.push(format!("--out={}", out_file.display()));
+        self.run_with(&args, &self.execution_policy.for_reading())
+    }
+
     /// Exports changes in sync mode (`--sync`) relative to the version file of an existing
     /// target directory.
     pub fn config_export_incremental(

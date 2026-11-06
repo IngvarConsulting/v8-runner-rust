@@ -14,6 +14,8 @@ pub mod capability;
 pub mod config_init;
 /// Source-format conversion domain models.
 pub mod convert;
+/// Ответ и предмет сравнения команды `diff`.
+pub mod diff;
 /// Dump domain models.
 pub mod dump;
 /// Shared execution result models.
