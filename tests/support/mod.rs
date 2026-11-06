@@ -316,11 +316,22 @@ pub const OPERATOR_INTERRUPT_RECEIVED: &str =
 /// выхода и конверт.
 #[cfg(unix)]
 pub fn interrupt_at_hold(
-    mut command: Command,
+    command: Command,
     action_log: &Path,
     started: &Path,
     release: &Path,
     logged: &str,
+) -> (i32, serde_json::Value) {
+    interrupt_at_hold_waiting_for_any(command, action_log, started, release, &[logged])
+}
+
+#[cfg(unix)]
+pub fn interrupt_at_hold_waiting_for_any(
+    mut command: Command,
+    action_log: &Path,
+    started: &Path,
+    release: &Path,
+    logged: &[&str],
 ) -> (i32, serde_json::Value) {
     use std::io::Read;
 
@@ -355,12 +366,12 @@ pub fn interrupt_at_hold(
     );
     send_sigterm(&runner.0);
     let seen = wait_until(timeout, Duration::from_millis(20), || {
-        fs::read_to_string(action_log).is_ok_and(|log| log.contains(logged))
+        fs::read_to_string(action_log).is_ok_and(|log| logged.iter().any(|line| log.contains(line)))
     });
     fs::write(release, "").expect("release the held work");
     assert!(
         seen,
-        "the runner never logged `{logged}`: {}",
+        "the runner never logged any of {logged:?}: {}",
         fs::read_to_string(action_log).unwrap_or_default()
     );
     // Оборванная сессия оставляет раннеру ждать своего агента до конца грации закрытия.

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use support::fake_agent::{
     fingerprint_of, fingerprint_with, random_host_key, read_or_empty,
-    start_fake_agent_with_host_key, FakeAgent, SftpHold, AGENT_PASSWORD,
+    start_fake_agent_with_host_key, FakeAgent, Hold, SftpHold, AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command};
 
@@ -103,15 +103,16 @@ fn harness_with(
     host_key: russh::keys::PrivateKey,
     declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
 ) -> Harness {
-    harness_holding_sftp(channel, host_key, declared, None)
+    harness_holding(channel, host_key, declared, None, None)
 }
 
-/// Стенд, шлюз которого держит первую запись по SFTP, пока тест её не отпустит.
-fn harness_holding_sftp(
+/// Стенд, который может удержать shell-команду или первую запись по SFTP.
+fn harness_holding(
     channel: Channel,
     host_key: russh::keys::PrivateKey,
     declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
     sftp_hold: Option<SftpHold>,
+    hold: Option<Hold>,
 ) -> Harness {
     let declared_fingerprint = declared(&host_key);
     let dir = temp_workspace();
@@ -147,6 +148,7 @@ fn harness_holding_sftp(
     gate.sftp_hold = sftp_hold;
     let dump_info = Arc::clone(&gate.dump_info);
     let generation = Arc::clone(&gate.generation);
+    gate.hold = hold;
     let port = start_fake_agent_with_host_key(gate, host_key);
     let harness = Harness {
         config_path: root.join("v8project.yaml"),
@@ -1481,7 +1483,7 @@ fn via_connection_without_the_direct_gate_names_the_connection_string() {
 fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
     let marks = temp_workspace();
     let (started, release) = (marks.path().join("started"), marks.path().join("release"));
-    let harness = harness_holding_sftp(
+    let harness = harness_holding(
         Channel::Sftp,
         random_host_key(),
         |_| None,
@@ -1489,6 +1491,7 @@ fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
             started: started.clone(),
             release: release.clone(),
         }),
+        None,
     );
     let mut runner = v8_runner_command();
     runner.args([
@@ -1517,4 +1520,113 @@ fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
             .any(|line| line.starts_with("config load-config-from-files")),
         "the load must not reach the agent after the interrupt: {lines:?}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_of_an_external_agent_waits_for_a_terminal_reply() {
+    use support::fake_agent::HoldReply;
+
+    const WAITING: &str =
+        "interruption requested after sending a command to an external agent; waiting for terminal reply";
+    const REPLIES: &str = concat!(
+        "[{\"type\":\"progress\",\"message\":\"dump still running\"}]\n",
+        "[{\"type\":\"success\",\"message\":\"held dump finished\"}]\n",
+    );
+    for attached in [false, true] {
+        for (reply, expected, evidence) in [
+            (
+                HoldReply::JsonMessages(REPLIES),
+                "cancelled",
+                "held dump finished",
+            ),
+            (
+                HoldReply::JsonMessages(
+                    r#"[{"type":"canceled","message":"held dump stopped by platform"}]"#,
+                ),
+                "cancelled",
+                "held dump stopped by platform",
+            ),
+            (HoldReply::Close, "platform_failure", "ended before a reply"),
+            (HoldReply::Error, "platform_failure", "held command failed"),
+            (
+                HoldReply::JsonMessages(
+                    r#"[{"type":"question","message":"waiting for held dump input"}]"#,
+                ),
+                "platform_failure",
+                "waiting for held dump input",
+            ),
+        ] {
+            let marks = temp_workspace();
+            let started = marks.path().join("started");
+            let release = marks.path().join("release");
+            let harness = harness_holding(
+                Channel::Dir,
+                random_host_key(),
+                |_| None,
+                None,
+                Some(Hold {
+                    command: "config dump-config-to-files".into(),
+                    started: started.clone(),
+                    release: release.clone(),
+                    reply,
+                }),
+            );
+            let root = harness.dir.path();
+            if attached {
+                let base = harness.user_dir.parent().expect("agent base directory");
+                fs::write(
+                    base.join("agentbasedir.json"),
+                    r#"{"usersInfo":[{"name":"agent","dir":"agent"}]}"#,
+                )
+                .expect("write attached user map");
+                write_config(
+                    &harness,
+                    &format!(
+                        "  connection: 'File={}'\n  user: {GATE_USER}\n  password: '{AGENT_PASSWORD}'\n",
+                        root.join("ib").display(),
+                    ),
+                    &format!(
+                        "providers:\n  pull: agent\ntools:\n  designer_agent:\n    attach: 127.0.0.1:{}\n    base-dir: '{}'\n",
+                        harness.port,
+                        base.display(),
+                    ),
+                );
+            }
+            let mut runner = v8_runner_command();
+            runner.args([
+                "--config",
+                harness.config_path.to_str().expect("config path"),
+                "--json-message",
+                "pull",
+                "main",
+                "--force",
+            ]);
+            let (code, payload) = support::interrupt_at_hold_waiting_for_any(
+                runner,
+                &marks.path().join("actions.log"),
+                &started,
+                &release,
+                &[WAITING, support::AGENT_COMMAND_ABANDONED],
+            );
+            if expected == "cancelled" {
+                let transcript =
+                    fs::read_to_string(root.join("work/logs/platform/dump-main-agent.log"))
+                        .expect("agent transcript");
+                assert!(
+                    transcript.contains(evidence),
+                    "external agent cancellation returned without reading the terminal reply (attached={attached}): {transcript}"
+                );
+                assert_eq!(code, 4, "{payload}");
+            } else {
+                assert!(error_message(&payload).contains(evidence), "{payload}");
+            }
+            assert_eq!(payload["error"]["code"], expected, "{payload}");
+            assert_eq!(
+                fs::read_to_string(root.join("project/configuration/Configuration.xml")).unwrap(),
+                "<Configuration/>",
+                "an interrupted dump must not be published"
+            );
+        }
+    }
 }
