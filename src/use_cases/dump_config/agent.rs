@@ -181,7 +181,8 @@ fn dump_through(
                             },
                             wait,
                         )
-                    })?;
+                    })
+                    .inspect_err(|_| withdraw_dir(user_dir, &target))?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={}{update}",
