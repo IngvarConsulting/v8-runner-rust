@@ -421,9 +421,6 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "шаг `ibcmd` выгрузки и состав базы, когда `pull --all` или `download` без набора выбрали `ibcmd`",
         ),
         (
-            "запрос списка изменений, когда `diff` выбрал `ibcmd`",
-        ),
-        (
             "crate::use_cases::tool_extension::build_ibcmd_dsl",
             "расширение-инструмент, когда сборку ведёт `ibcmd`",
         ),
