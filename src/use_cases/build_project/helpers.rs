@@ -9,7 +9,7 @@ use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
 use crate::domain::build::{BuildMode, BuildResult, BuildStep};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
+use crate::platform::ibcmd::IbcmdError;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::support::error::AppError;
@@ -365,13 +365,15 @@ fn plan_partial_or_full_load(
     prepared: PreparedStateUpdate,
     source: LoadPlanSource,
 ) -> StepPlan {
-    let decision = if source.forces_full_for_extension()
-        && source_set.purpose == SourceSetPurpose::Extension
-    {
-        debug!(
-            source_set = source_set.name.as_str(),
-            "generated designer change analysis decision: forcing full load for EDT extension source-set"
-        );
+    let edt_extension =
+        source.forces_full_for_extension() && source_set.purpose == SourceSetPurpose::Extension;
+    // When the prior snapshot has no entries, every current file is new.
+    // A warm snapshot with one added file can still be loaded partially.
+    let nothing_to_compare = changes.len() == prepared.snapshot.len()
+        && changes
+            .iter()
+            .all(|change| change.kind == analyzer::ChangeKind::Added);
+    let decision = if edt_extension || nothing_to_compare {
         LoadDecision::Full
     } else {
         partial_load::decide(&changes, context_path)
@@ -382,7 +384,6 @@ fn plan_partial_or_full_load(
             debug!(
                 source_set = source_set.name.as_str(),
                 partial_file_count = paths.len(),
-                threshold = partial_load::PARTIAL_LOAD_THRESHOLD,
                 "{}",
                 source.partial_log_message()
             );
@@ -398,19 +399,17 @@ fn plan_partial_or_full_load(
         LoadDecision::Full => {
             debug!(
                 source_set = source_set.name.as_str(),
-                threshold = partial_load::PARTIAL_LOAD_THRESHOLD,
                 "{}",
                 source.full_log_message()
             );
             StepPlan::Execute {
                 mode: BuildMode::Full,
-                message: if source.forces_full_for_extension()
-                    && source_set.purpose == SourceSetPurpose::Extension
-                {
-                    "full load required for EDT extension source-set".to_owned()
+                message: if edt_extension {
+                    "full load required for EDT extension source-set"
                 } else {
-                    "full load selected by partial-load rules".to_owned()
-                },
+                    "full load selected by partial-load rules"
+                }
+                .to_owned(),
                 partial_paths: None,
                 commit: StepCommit::Prepared(prepared),
             }
@@ -586,23 +585,6 @@ pub(super) fn designer_log_file(
     )
 }
 
-pub(super) fn build_ibcmd_dsl<'a>(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    binary: &Path,
-    runner: &'a dyn ProcessRunner,
-    safety: InterruptionSafetyClass,
-) -> Result<IbcmdDsl<'a>, AppError> {
-    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(map_ibcmd_error)?;
-
-    Ok(IbcmdDsl::new(
-        binary.to_path_buf(),
-        connection,
-        runner,
-        context.process_policy(safety, None),
-    ))
-}
-
 pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {
     AppError::from(error)
 }
@@ -749,13 +731,7 @@ pub(super) fn read_ibcmd_generation(
     read_generation(
         context,
         config,
-        || {
-            Ok(GenerationProcess::Ibcmd {
-                binary,
-                runner,
-                data_path: None,
-            })
-        },
+        || Ok(GenerationProcess::Ibcmd { binary, runner }),
         extension_name(source_set),
     )
 }

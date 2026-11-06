@@ -770,7 +770,16 @@ impl<'a> GenerationGate<'a> {
     /// отправка откажет `non_fast_forward` и скажет, что базу изменила либо эта загрузка,
     /// либо другая копия, а не выдаст своё за чужое; совпадёт — загрузка базу не тронула.
     /// Строку для шага неудачной загрузки отдаёт [`Self::failed_load_note`].
-    pub(crate) fn after_failed_load(&self, set: &SourceSetContext, tool: Provider) {
+    pub(crate) fn after_failed_load(
+        &self,
+        set: &SourceSetContext,
+        tool: Provider,
+        error: &AppError,
+    ) {
+        // A refused invocation has no partial load to reconcile.
+        if matches!(error, AppError::SourceLoadNotStarted(_)) {
+            return;
+        }
         let name = set.name();
         let not_recorded = format!(
             "the configuration generation of source-set '{name}' is not recorded after the failed load"
@@ -983,7 +992,7 @@ impl EdtSourceMemory {
         source_set: &crate::config::model::SourceSetConfig,
     ) -> Result<Self, AppError> {
         let contexts = SourceSetsService::new(config).edt_contexts();
-        snapshot_of(&contexts, &source_set.name).map(Self)
+        snapshot_of(&contexts, &source_set.name, &config.work_path).map(Self)
     }
 }
 
@@ -997,7 +1006,7 @@ impl AssembledMemory {
         let contexts = SourceSetsService::new(config).designer_contexts();
         Ok(Self {
             source_set: source_set.name.clone(),
-            designer: snapshot_of(&contexts, &source_set.name)?,
+            designer: snapshot_of(&contexts, &source_set.name, &config.work_path)?,
             edt: None,
         })
     }
@@ -1012,6 +1021,7 @@ impl AssembledMemory {
 fn snapshot_of(
     contexts: &[SourceSetContext],
     source_set: &str,
+    work_path: &Path,
 ) -> Result<analyzer::FullSnapshot, AppError> {
     let context = contexts
         .iter()
@@ -1021,7 +1031,7 @@ fn snapshot_of(
                 "missing change-detection context for source-set '{source_set}'"
             ))
         })?;
-    analyzer::prepare_full_snapshot(context, context.path())
+    analyzer::prepare_source_snapshot(context, work_path)
         .map_err(|error| AppError::Runtime(error.to_string()))
 }
 
@@ -1171,6 +1181,48 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_load_refused_before_dispatch_keeps_the_previous_unapplied_generation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let contexts = SourceSetsService::new(&config).designer_contexts();
+        let main = &contexts[0];
+        let ledger = GenerationLedger::of(main, &config.work_path).expect("ledger");
+        let token = "1".repeat(40);
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = GenerationGate::new(&context, &config, PushMode::Changes);
+        let errors = [
+            (
+                Provider::Ibcmd,
+                AppError::from(
+                    crate::platform::ibcmd::IbcmdError::PartialImportCommandLineTooLong {
+                        file_count: 1000,
+                    },
+                ),
+            ),
+            (
+                Provider::Agent,
+                AppError::SourceLoadNotStarted("missing staged dependency".to_owned()),
+            ),
+        ];
+
+        for (tool, error) in errors {
+            ledger
+                .record_as(tool, &token, GenerationAfter::Build, ApplyMark::Unapplied)
+                .expect("record prior successful load");
+
+            gate.after_failed_load(main, tool, &error);
+
+            let Recorded::Ours(record) = ledger.read() else {
+                panic!("the previous load must stay recorded");
+            };
+            assert_eq!(record.after, GenerationAfter::Build);
+            assert_eq!(record.token, token);
+            assert_eq!(record.mark(), ApplyMark::Unapplied);
+            assert!(gate.failed_load_note().is_empty());
+        }
+    }
+
     /// Базу, созданную раннером, он помнит: первая отправка в неё без отказа первого
     /// знакомства, а признак нового владельца снят.
     #[test]
@@ -1222,6 +1274,33 @@ mod tests {
         let analysis = analyze_context(&contexts[0], &config.work_path, &mut || false);
         assert!(
             matches!(analysis.outcome, Ok(AnalysisOutcome::Changes { .. })),
+            "{:?}",
+            analysis.outcome
+        );
+    }
+
+    /// `workPath` внутри набора не попадает в память созданной базы: первая отправка не видит
+    /// служебных файлов правкой.
+    #[test]
+    fn a_created_base_does_not_remember_a_work_path_inside_its_set() {
+        use crate::change_detection::analyzer::{analyze_context, AnalysisOutcome};
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut config = project(root.path());
+        let main = config.source_sets[0].clone();
+        let set_root = main.root_in(&config.base_path);
+        std::fs::write(set_root.join("Configuration.xml"), "<Configuration/>").expect("source");
+        config.work_path = set_root.join("service-area");
+        std::fs::create_dir_all(&config.work_path).expect("work");
+        std::fs::write(config.work_path.join("state.txt"), "before").expect("state");
+        let memory = AssembledMemory::prepare(&config, &main).expect("assembled memory");
+        assert_eq!(remember_created_base(&config, Some(&memory)), None);
+
+        std::fs::write(config.work_path.join("state.txt"), "after").expect("state");
+
+        let contexts = SourceSetsService::new(&config).designer_contexts();
+        let analysis = analyze_context(&contexts[0], &config.work_path, &mut || false);
+        assert!(
+            matches!(analysis.outcome, Ok(AnalysisOutcome::NoChanges)),
             "{:?}",
             analysis.outcome
         );

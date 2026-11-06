@@ -24,7 +24,7 @@ use crate::domain::infobase_export::{
     RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
+use crate::platform::ibcmd::IbcmdConnection;
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessError;
 use crate::platform::result::PlatformCommandResult;
@@ -1568,22 +1568,13 @@ fn run_configuration_provider(
         }
         Provider::Ibcmd => {
             let executable = executable_of(executable)?;
-            let connection =
-                IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-            let data_path = config.work_path.join("ibcmd-data");
-            std::fs::create_dir_all(&data_path).map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to create IBCMD data directory '{}': {error}",
-                    data_path.display()
-                ))
-            })?;
-            IbcmdDsl::new(
-                executable.to_path_buf(),
-                connection,
+            crate::use_cases::dump_config::helpers::build_ibcmd_dsl(
+                context,
+                config,
+                executable,
                 &runner,
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-            )
-            .with_data_path(data_path)
+                InterruptionSafetyClass::GracefulThenKill,
+            )?
             .config_save(
                 staging_path,
                 state == ConfigurationState::Database,

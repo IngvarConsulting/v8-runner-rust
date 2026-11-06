@@ -16,6 +16,7 @@ use crate::support::edt_project;
 use crate::support::error::AppError;
 use crate::support::fs::{
     is_known_tool_name, metadata_sidecar_path, read_temp_dir_metadata, remove_path_if_exists,
+    TempDirKind,
 };
 use crate::support::path::{is_filesystem_root, nearest_existing_canonical_path};
 use crate::support::temp::{dump_object_list_file, platform_logs_dir};
@@ -101,6 +102,72 @@ pub(super) fn cleanup_platform_orphan_dirs(resolved: &ResolvedDumpTarget) -> Res
     )
 }
 
+/// A process that died between the two renames of a replacement leaves a backup and no
+/// target. The backup is then the only copy of the directory, and it goes back before anything
+/// creates an empty target: an existing target would make it look like a leftover.
+/// The caller holds the target lock, so no replacement is in progress.
+fn return_backup_to_a_missing_target(
+    target_path: &Path,
+    target_parent: &Path,
+    target_identity: &str,
+) -> Result<(), AppError> {
+    let read_failure =
+        |error: std::io::Error| AppError::Runtime(format!("failed to read target parent: {error}"));
+    match std::fs::symlink_metadata(target_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            return Err(AppError::Runtime(format!(
+                "failed to inspect dump target '{}': {error}",
+                target_path.display()
+            )))
+        }
+    }
+    let mut newest = None;
+    for entry in std::fs::read_dir(target_parent).map_err(read_failure)? {
+        let path = entry.map_err(read_failure)?.path();
+        let is_backup = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".dump-backup-"));
+        if !is_backup || !path.is_dir() {
+            continue;
+        }
+        let Ok(metadata) = read_temp_dir_metadata(&path) else {
+            continue;
+        };
+        if matches!(metadata.kind, TempDirKind::Backup)
+            && !metadata.superseded
+            && is_known_tool_name(&metadata.tool)
+            && metadata.target_identity == target_identity
+            && newest
+                .as_ref()
+                .is_none_or(|(created_at, _)| metadata.created_at > *created_at)
+        {
+            newest = Some((metadata.created_at, path));
+        }
+    }
+    let Some((_, backup)) = newest else {
+        return Ok(());
+    };
+    std::fs::rename(&backup, target_path).map_err(|error| {
+        AppError::Runtime(format!(
+            "the target '{}' is missing and its backup '{}' could not be returned: {error}",
+            target_path.display(),
+            backup.display()
+        ))
+    })?;
+    tracing::warn!(
+        target = %target_path.display(),
+        backup = %backup.display(),
+        "returned the backup of an interrupted replacement to its missing target"
+    );
+    if let Err(error) = remove_path_if_exists(&metadata_sidecar_path(&backup)) {
+        tracing::warn!(%error, "could not remove the metadata of a returned backup");
+    }
+    Ok(())
+}
+
 fn cleanup_orphan_dirs_for(target_path: &Path, target_identity: &str) -> Result<(), AppError> {
     let target_parent = target_path.parent().ok_or_else(|| {
         AppError::Runtime(format!(
@@ -111,6 +178,7 @@ fn cleanup_orphan_dirs_for(target_path: &Path, target_identity: &str) -> Result<
     if !target_parent.exists() {
         return Ok(());
     }
+    return_backup_to_a_missing_target(target_path, target_parent, target_identity)?;
 
     for entry in std::fs::read_dir(target_parent)
         .map_err(|error| AppError::Runtime(format!("failed to read target parent: {error}")))?
@@ -218,11 +286,15 @@ pub(crate) fn build_designer_dsl<'a>(
     ))
 }
 
+/// `ibcmd` к базе проекта: единственное место, где он строится
+/// (`INV.USE-CASES.AN-IBCMD-RUN-HOLDS-THE-DATA-DIRECTORY-OF-THE-PROJECT`). Класс прерывания задаёт
+/// шаг: запись в базу — критическая фаза, чтение снимается.
 pub(crate) fn build_ibcmd_dsl<'a>(
     context: &ExecutionContext,
     config: &AppConfig,
     binary: &Path,
     runner: &'a dyn ProcessRunner,
+    safety: InterruptionSafetyClass,
 ) -> Result<IbcmdDsl<'a>, AppError> {
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(map_ibcmd_error)?;
     let data_path = ibcmd_data_path(config)?;
@@ -231,12 +303,15 @@ pub(crate) fn build_ibcmd_dsl<'a>(
         binary.to_path_buf(),
         connection,
         runner,
-        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+        context.process_policy(safety, None),
     )
     .with_data_path(data_path))
 }
 
-/// Каталог данных автономного сервера `ibcmd` у выгрузки — один на все её вызовы.
+/// Каталог данных автономного сервера `ibcmd` в `workPath` проекта. Блокируется он, а не база,
+/// и умолчательный — один на пользователя: без своего каталога запуски в разных проектах
+/// отказывают друг другу (`rc=254`). Команды к базе проекта идут под блокировкой `workPath`,
+/// поэтому внутри проекта каталог никто не оспаривает.
 fn ibcmd_data_path(config: &AppConfig) -> Result<PathBuf, AppError> {
     let data_path = config.work_path.join("ibcmd-data");
     std::fs::create_dir_all(&data_path).map_err(|error| {
@@ -450,11 +525,7 @@ pub(super) fn read_dump_generation(
             runner,
             log_file,
         }),
-        Provider::Ibcmd => ibcmd_data_path(config).map(|data_path| GenerationProcess::Ibcmd {
-            binary,
-            runner,
-            data_path: Some(data_path),
-        }),
+        Provider::Ibcmd => Ok(GenerationProcess::Ibcmd { binary, runner }),
         Provider::Agent | Provider::IbcmdRs | Provider::Webinst => Err(AppError::capability(
             format!("{provider} reads no generation by a platform process"),
         )),

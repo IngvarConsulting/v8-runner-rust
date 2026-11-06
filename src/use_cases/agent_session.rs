@@ -335,11 +335,13 @@ pub(crate) fn run_id() -> String {
 /// Выставляет чужой каталог внутрь каталога пользователя агента под относительным
 /// именем и возвращает это имя для команды. Агент ходит по символическим ссылкам
 /// (замер 15.09.2026: выгрузка и загрузка через ссылку); там, где ссылку создать
-/// нельзя, каталог копируется — медленно, но той же формы.
+/// нельзя, каталог копируется — медленно, но той же формы. Так можно отдать только то, что
+/// агент читает; каталог, в который он пишет, выставляет [`expose_output_dir`].
 pub(crate) fn expose_dir(
     user_dir: &Path,
     relative: &str,
     target: &Path,
+    work_path: &Path,
 ) -> Result<String, AppError> {
     let link = user_dir.join(relative);
     if let Some(parent) = link.parent() {
@@ -357,8 +359,8 @@ pub(crate) fn expose_dir(
         ))
     })?;
     let _ = crate::support::fs::remove_path_if_exists(&link);
-    if symlink_dir(&target, &link).is_err() {
-        copy_dir_recursively(&target, &link).map_err(|error| {
+    if link_dir(&target, &link).is_err() {
+        copy_for_the_agent(&target, user_dir, work_path, &link).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to expose '{}' to the agent at '{}': {error}",
                 target.display(),
@@ -367,6 +369,128 @@ pub(crate) fn expose_dir(
         })?;
     }
     Ok(relative.to_owned())
+}
+
+/// Выставляет агенту каталог, в который он пишет. Копия здесь не годится: агент обновил бы её,
+/// а цель осталась бы прежней при успешном ответе. Поэтому без ссылки это отказ, а не копия.
+pub(crate) fn expose_output_dir(
+    user_dir: &Path,
+    relative: &str,
+    target: &Path,
+) -> Result<String, AppError> {
+    expose_output_with(user_dir, relative, target, link_dir)
+}
+
+fn expose_output_with(
+    user_dir: &Path,
+    relative: &str,
+    target: &Path,
+    link_to: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<String, AppError> {
+    let link = user_dir.join(relative);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to prepare the agent exchange dir '{}': {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let target = target.canonicalize().map_err(|error| {
+        AppError::Runtime(format!(
+            "target dir '{}' is not reachable: {error}",
+            target.display()
+        ))
+    })?;
+    let _ = crate::support::fs::remove_link(&link);
+    link_to(&target, &link).map_err(|error| {
+        AppError::EnvironmentUnavailable(format!(
+            "the agent cannot write into '{}': no link can be created at '{}' ({error}); name another executor in providers.pull or, at a gate, use exchange: sftp",
+            target.display(),
+            link.display()
+        ))
+    })?;
+    Ok(relative.to_owned())
+}
+
+/// Символическая ссылка, а на Windows без права на неё — точка соединения: она права не требует.
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    symlink_dir(target, link).or_else(|symlink_error| {
+        junction_dir(target, link).map_err(|junction_error| {
+            std::io::Error::other(format!("{symlink_error}; {junction_error}"))
+        })
+    })
+}
+
+/// Точка соединения хранит локальный путь: на сетевом диске запись примет NTFS, но открыть такую
+/// ссылку будет нельзя, а в каталоге обмена на чужом сервере она вела бы к его путям.
+#[cfg(windows)]
+fn is_on_a_local_disk(path: &Path) -> std::io::Result<bool> {
+    use std::path::{Component, Prefix};
+    Ok(matches!(
+        path.canonicalize()?.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    ))
+}
+
+#[cfg(windows)]
+fn junction_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    let directory = link.parent().unwrap_or(link);
+    if !is_on_a_local_disk(target)? || !is_on_a_local_disk(directory)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "a junction links directories on local disks only",
+        ));
+    }
+    junction::create(target, link).inspect_err(|_| {
+        // Крейт сперва создаёт каталог и при отказе его оставляет.
+        let _ = std::fs::remove_dir(link);
+    })
+}
+
+#[cfg(not(windows))]
+fn junction_dir(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
+/// Набор в корне рабочей области держит каталог агента и `workPath` внутри себя: копия не
+/// должна входить в собственное назначение и нести служебные каталоги, а метаданным с именем
+/// вроде `build` глубже верхнего уровня в ней место.
+fn copy_for_the_agent(
+    target: &Path,
+    user_dir: &Path,
+    work_path: &Path,
+    link: &Path,
+) -> std::io::Result<()> {
+    let agent_dir = user_dir.canonicalize()?;
+    if agent_dir == target {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the agent directory is the directory to copy",
+        ));
+    }
+    if !agent_dir.starts_with(target) {
+        return copy_dir_recursively(target, link);
+    }
+    let mut excluded = vec![agent_dir];
+    excluded.extend(crate::change_detection::scanner::work_path_inside(
+        target, work_path,
+    ));
+    std::fs::create_dir_all(link)?;
+    for entry in crate::change_detection::scanner::top_level_source_entries(target, excluded) {
+        let entry = entry?;
+        let Ok(relative) = entry.path().strip_prefix(target) else {
+            continue;
+        };
+        let destination = link.join(relative);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&destination)?;
+        } else if entry.file_type().is_file() {
+            std::fs::copy(entry.path(), &destination)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -410,7 +534,8 @@ pub(crate) fn expose_file(
     Ok(relative.to_owned())
 }
 
-/// Каталог для файлов, которые агент должен *написать*: настоящий подкаталог
+/// Каталог для новых файлов, которые агент должен *написать* и раннер затем заберёт (каталог
+/// набора, куда агент пишет сам, выставляет [`expose_output_dir`]): настоящий подкаталог
 /// каталога пользователя — через символическую ссылку агент файлы не пишет.
 pub(crate) fn output_dir(user_dir: &Path, relative: &str) -> Result<PathBuf, AppError> {
     let dir = user_dir.join(relative);
@@ -550,9 +675,10 @@ pub(crate) fn stage_dir(
     exchange: &Exchange,
     relative: &str,
     local: &Path,
+    work_path: &Path,
 ) -> Result<String, AppError> {
     match exchange {
-        Exchange::Dir(user_dir) => expose_dir(user_dir, relative, local),
+        Exchange::Dir(user_dir) => expose_dir(user_dir, relative, local, work_path),
         Exchange::Sftp => handle
             .session()
             .sftp_put_dir(local, relative)
@@ -561,37 +687,48 @@ pub(crate) fn stage_dir(
     }
 }
 
-/// Часть каталога раннера — на сторону точки входа: корневые описатели и названные
-/// файлы, каждый под своим относительным путём. По сети частичной загрузке хватает
-/// `Configuration.xml`, `ConfigDumpInfo.xml` и самих изменённых файлов (замер
-/// 16.09.2026 на агенте Конфигуратора 8.3.27); в каталог точки входа, видимый
-/// раннеру, каталог по-прежнему выставляется целиком ссылкой.
+/// По SFTP передаём файлы списка и корневые описатели. Когда сам корень в
+/// списке, дополнительно передаём файлы объявленных объектов: платформа
+/// может прочитать их из каталога, даже если их нет в списке загрузки.
 pub(crate) fn stage_dir_partially(
     handle: &mut AgentHandle,
     exchange: &Exchange,
     relative: &str,
     local: &Path,
     files: &[PathBuf],
+    work_path: &Path,
 ) -> Result<String, AppError> {
     let Exchange::Sftp = exchange else {
-        return stage_dir(handle, exchange, relative, local);
+        return stage_dir(handle, exchange, relative, local, work_path);
     };
+    use crate::change_detection::partial_load::{
+        relative_paths, root_dependencies, CONFIGURATION_XML,
+    };
+
+    let configuration = local.join(CONFIGURATION_XML);
+    let mut selected = files.to_vec();
+    if files.contains(&configuration) {
+        selected.extend(
+            root_dependencies(local)
+                .map_err(|error| AppError::SourceLoadNotStarted(error.to_string()))?,
+        );
+    }
+    selected.extend(
+        [
+            configuration,
+            local.join(crate::use_cases::ignored_files::VERSION_FILE_NAME),
+        ]
+        .into_iter()
+        .filter(|path| path.is_file()),
+    );
+    selected.sort_unstable();
+    selected.dedup();
+    let paths = relative_paths(&selected, local)
+        .map_err(|error| AppError::SourceLoadNotStarted(error.to_string()))?;
     let session = handle.session();
     session.sftp_mkdir_all(relative).map_err(AppError::from)?;
-    let mut selected: Vec<PathBuf> = ["Configuration.xml", "ConfigDumpInfo.xml"]
-        .iter()
-        .map(|name| local.join(name))
-        .filter(|path| path.is_file())
-        .collect();
-    selected.extend(files.iter().cloned());
-    for file in selected {
-        let inside = file.strip_prefix(local).map_err(|_| {
-            AppError::Runtime(format!(
-                "partial load file '{}' lies outside its source root '{}'",
-                file.display(),
-                local.display()
-            ))
-        })?;
+    for inside in paths {
+        let file = local.join(&inside);
         let remote = format!(
             "{relative}/{}",
             inside.display().to_string().replace('\\', "/")
@@ -825,7 +962,7 @@ pub(crate) fn withdraw_dir(user_dir: &Path, relative: &str) {
     let link = user_dir.join(relative);
     match std::fs::symlink_metadata(&link) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(&link);
+            let _ = crate::support::fs::remove_link(&link);
         }
         Ok(metadata) if metadata.is_dir() => {
             let _ = std::fs::remove_dir_all(&link);
@@ -1119,6 +1256,107 @@ mod tests {
         }
     }
 
+    /// Цель выгрузки без ссылки — отказ: копию агент обновил бы при успешном ответе, а цель
+    /// осталась бы прежней.
+    #[test]
+    fn an_output_directory_without_a_link_is_refused_and_not_copied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_dir = dir.path().join("0");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::write(target.join("Configuration.xml"), "<x/>").expect("marker");
+
+        let error = expose_output_with(&user_dir, "target/run", &target, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("no link, no output directory");
+
+        assert!(matches!(error, AppError::EnvironmentUnavailable(_)));
+        assert!(!user_dir.join("target/run").exists());
+    }
+
+    /// То, что агент пишет в выставленный каталог, оказывается в цели, а снятие ссылки цель
+    /// не трогает.
+    #[test]
+    fn a_write_through_the_exposed_output_directory_lands_in_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_dir = dir.path().join("0");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).expect("target");
+
+        let relative = expose_output_dir(&user_dir, "target/run", &target).expect("expose");
+        std::fs::write(user_dir.join(&relative).join("Module.bsl"), "new").expect("write");
+        withdraw_dir(&user_dir, &relative);
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("Module.bsl")).expect("in the target"),
+            "new"
+        );
+        assert!(!user_dir.join(&relative).exists());
+    }
+
+    /// Точка соединения не требует права на символические ссылки: это путь по умолчанию на
+    /// Windows обычного пользователя.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_carries_writes_and_its_removal_keeps_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).expect("target");
+        let target = target.canonicalize().expect("canonical");
+        let link = dir.path().join("link");
+
+        junction_dir(&target, &link).expect("junction");
+        std::fs::write(link.join("Module.bsl"), "new").expect("write");
+        crate::support::fs::remove_path_if_exists(&link).expect("remove");
+
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(target.join("Module.bsl").is_file());
+    }
+
+    /// На сетевом пути точка соединения создалась бы, но не открывалась: это отказ, и для чтения
+    /// остаётся копия.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_is_refused_for_a_target_off_the_local_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(is_on_a_local_disk(dir.path()).expect("local"));
+        assert!(!is_on_a_local_disk(std::path::Path::new(r"\\localhost\C$")).unwrap_or(false));
+    }
+
+    /// Копия корня в каталог агента внутри него же заканчивается, не несёт `workPath` и
+    /// служебных каталогов, а форму с именем служебного каталога сохраняет.
+    #[test]
+    fn a_root_copied_for_the_agent_leaves_the_agent_directory_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        let root = root.canonicalize().expect("canonical root");
+        let work = root.join("service-area");
+        let user_dir = work.join("agent").join("0");
+        std::fs::create_dir_all(&user_dir).expect("agent dir");
+        std::fs::write(work.join("state.txt"), "state").expect("state");
+        std::fs::create_dir_all(root.join(".build")).expect("service dir");
+        std::fs::write(root.join(".build").join("lock"), "lock").expect("lock");
+        let form = root
+            .join("Catalogs")
+            .join("Item")
+            .join("Forms")
+            .join("build");
+        std::fs::create_dir_all(&form).expect("form");
+        std::fs::write(form.join("Form.xml"), "<x/>").expect("form file");
+        std::fs::write(root.join("Configuration.xml"), "<x/>").expect("marker");
+        let link = user_dir.join("run").join("main");
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("parent");
+
+        copy_for_the_agent(&root, &user_dir, &work, &link).expect("copy");
+
+        assert!(link.join("Configuration.xml").is_file());
+        assert!(link.join("Catalogs/Item/Forms/build/Form.xml").is_file());
+        assert!(!link.join("service-area").exists());
+        assert!(!link.join(".build").exists());
+    }
+
     #[test]
     fn a_symlinked_dir_is_exposed_under_the_user_dir_and_withdrawn_as_a_link() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1127,7 +1365,8 @@ mod tests {
         std::fs::create_dir_all(&sources).expect("sources");
         std::fs::write(sources.join("Configuration.xml"), "<x/>").expect("marker");
 
-        let relative = expose_dir(&user_dir, "build/run/main", &sources).expect("expose");
+        let relative =
+            expose_dir(&user_dir, "build/run/main", &sources, root.path()).expect("expose");
         assert_eq!(relative, "build/run/main");
         assert!(user_dir.join("build/run/main/Configuration.xml").is_file());
 

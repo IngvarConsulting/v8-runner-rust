@@ -115,6 +115,10 @@ pub enum AppError {
         source: IbcmdError,
     },
 
+    /// The loader rejected the source load before dispatching it to the platform.
+    #[error("runtime error: {0}")]
+    SourceLoadNotStarted(String),
+
     #[error("runtime error: {0}")]
     Runtime(String),
 
@@ -217,9 +221,9 @@ impl AppError {
             Self::ValidationIbcmd(source) | Self::ValidationIbcmdContext { source, .. } => {
                 match source {
                     IbcmdError::Spawn(error) => process_cancellation(error),
-                    IbcmdError::MissingServerDbmsField(_) | IbcmdError::DirectoryWipingExport => {
-                        None
-                    }
+                    IbcmdError::MissingServerDbmsField(_)
+                    | IbcmdError::DirectoryWipingExport
+                    | IbcmdError::PartialImportCommandLineTooLong { .. } => None,
                 }
             }
             Self::PlatformEdt(source) | Self::PlatformEdtContext { source, .. } => match source {
@@ -240,6 +244,7 @@ impl AppError {
             | Self::InvalidOutput(_)
             | Self::Validation(_)
             | Self::Runtime(_)
+            | Self::SourceLoadNotStarted(_)
             | Self::Platform(_)
             | Self::PlatformLocator(_)
             | Self::PlatformLocatorContext { .. }
@@ -280,6 +285,9 @@ impl AppError {
                 source,
             },
             Self::Runtime(message) => Self::Runtime(format!("{context}; {message}")),
+            Self::SourceLoadNotStarted(message) => {
+                Self::SourceLoadNotStarted(format!("{context}; {message}"))
+            }
             Self::Platform(message) => Self::Platform(format!("{context}; {message}")),
             Self::PlatformDesigner(source) => Self::PlatformDesignerContext { context, source },
             Self::PlatformDesignerContext {
@@ -389,6 +397,9 @@ impl From<IbcmdError> for AppError {
             IbcmdError::MissingServerDbmsField(_) => Self::ValidationIbcmd(error),
             IbcmdError::Spawn(error) => Self::PlatformProcess(error),
             IbcmdError::DirectoryWipingExport => Self::Runtime(error.to_string()),
+            IbcmdError::PartialImportCommandLineTooLong { .. } => {
+                Self::SourceLoadNotStarted(error.to_string())
+            }
         }
     }
 }

@@ -1,11 +1,12 @@
 ---
 id: CTR.WIRE.EXTENSIONS-INVENTORY-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/extensions-inventory.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_extensions.rs::extensions_info_that_fails_after_the_platform_ran_answers_in_its_form
+  - tests/cli_extensions.rs::cluster_designer_lists_only_names_with_batch_argv
 ---
 
 # `data` чтения состава расширений
@@ -23,6 +24,9 @@ check:
 это свойство. `ibcmd` читает его из сохранённого состояния БД и сверяет запись
 с инвентаризацией; агент пока сообщает `null`. Подмена рабочей конфигурацией
 после `upload` до `apply` недопустима.
+
+**Что изменила версия 6.** При чтении через пакетный Конфигуратор на кластере элемент
+`extensions` содержит только `name`. Полные записи агента и `ibcmd` сохраняют прежние поля.
 
 **Что изменила версия 5.** Квитанция `provider` получила необязательное поле
 `endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`

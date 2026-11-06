@@ -294,15 +294,18 @@ pub fn snapshot_path_identity(path: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// A comparison key for caseless names with canonically equivalent spellings.
+pub(crate) fn canonical_caseless(value: &str) -> String {
+    use unicode_casefold::UnicodeCaseFold;
+    use unicode_normalization::UnicodeNormalization;
+    value.nfd().case_fold().nfd().collect()
+}
+
 pub fn stable_path_identity(path: &Path) -> String {
     let mut hasher = Sha256::new();
     let path = path.to_string_lossy();
     #[cfg(any(windows, target_os = "macos"))]
-    let path = {
-        use unicode_casefold::UnicodeCaseFold;
-        use unicode_normalization::UnicodeNormalization;
-        path.nfd().case_fold().nfd().collect::<String>()
-    };
+    let path = canonical_caseless(&path);
     hasher.update(path.as_bytes());
     let digest = hasher.finalize();
     digest[..16]

@@ -19,7 +19,6 @@ use crate::domain::load::{
 };
 use crate::platform::designer::DesignerDsl;
 use crate::platform::extension_inventory::parse_extension_inventory;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
@@ -28,6 +27,7 @@ use crate::support::error::{AppError, CancelledAt};
 use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::dump_config::helpers::build_ibcmd_dsl;
 use crate::use_cases::extension_identity::resolve_upload_extension_ref;
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
@@ -743,7 +743,7 @@ enum ExtensionPresence {
 }
 
 /// Asks the infobase whether the extension is installed, by its own keyed list: `ibcmd` at a
-/// file base, the `extensions` executor of the target (the agent) elsewhere (#431).
+/// file base, the `extensions list` executor of the target elsewhere (#431).
 ///
 /// `NotEstablished` is kept for one case only: the platform was asked and did not answer.
 /// Everything that stops the question before it is asked keeps its own kind as `Err` — a
@@ -765,12 +765,12 @@ fn installed_extension_state(
     };
     // У кластера и автономного сервера `ibcmd` в строке `extensions` нет
     // (`INV.USE-CASES.A-CLUSTER-ROW-DOES-NOT-NAME-IBCMD`): список спрашивает исполнитель
-    // `extensions` этой цели — агент (#431).
+    // `extensions list` этой цели (#431, #428).
     if config.target_kind() != crate::domain::capability::TargetKind::File {
         let (_, read) = crate::use_cases::extension_inventory::read_installed(context, config);
         return match read {
             Ok(extensions) => Ok(
-                if extensions.iter().any(|extension| extension.name == name) {
+                if extensions.iter().any(|extension| extension.name() == name) {
                     ExtensionPresence::Present
                 } else {
                     ExtensionPresence::Absent
@@ -784,14 +784,14 @@ fn installed_extension_state(
             Err(error) => Err(error),
         };
     }
-    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
     let binary = utilities.locate(UtilityType::Ibcmd)?.path;
-    let dsl = IbcmdDsl::new(
-        binary,
-        connection,
+    let dsl = build_ibcmd_dsl(
+        context,
+        config,
+        &binary,
         utilities.runner_for(UtilityType::Ibcmd),
-        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-    );
+        InterruptionSafetyClass::GracefulThenKill,
+    )?;
     let result = match dsl.infobase_extension_list() {
         Ok(result) => result,
         // Refused before the start or stopped after it: the runner has already marked the

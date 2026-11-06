@@ -14,9 +14,9 @@ use crate::platform::locator::UtilityLocation;
 use crate::platform::process::ProcessResult;
 use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
-    argument, collect_dir, collect_file, collect_into_dir, connect, expose_dir, generation_id,
-    make_output_dir, run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir,
-    write_text, AgentHandle, Exchange, GenerationLedger, Recorded,
+    argument, collect_dir, collect_file, collect_into_dir, connect, expose_output_dir,
+    generation_id, make_output_dir, run_id, stage_file, tidy, transcript_log, wait_policy,
+    withdraw_dir, write_text, AgentHandle, Exchange, GenerationLedger, Recorded,
 };
 
 /// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
@@ -163,8 +163,11 @@ fn dump_through(
                 // Каталог точки входа виден раннеру: цель выставляется ссылкой и
                 // обновляется на месте, как у пакетного Конфигуратора.
                 Exchange::Dir(user_dir) => {
-                    let target =
-                        expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
+                    let target = expose_output_dir(
+                        user_dir,
+                        &target_relative,
+                        &resolved.platform_target_path,
+                    )?;
                     let forecast = forecast_for(how, || {
                         forecast_through(
                             context,
@@ -178,7 +181,8 @@ fn dump_through(
                             },
                             wait,
                         )
-                    })?;
+                    })
+                    .inspect_err(|_| withdraw_dir(user_dir, &target))?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={}{update}",
@@ -273,8 +277,11 @@ fn dump_through(
             let target_relative = format!("target/{run}");
             let outcome = match &exchange {
                 Exchange::Dir(user_dir) => {
-                    let target =
-                        expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
+                    let target = expose_output_dir(
+                        user_dir,
+                        &target_relative,
+                        &resolved.platform_target_path,
+                    )?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={} --list-file={}",

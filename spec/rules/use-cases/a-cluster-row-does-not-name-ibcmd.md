@@ -19,5 +19,5 @@ check:
 цепочку кластера его не вводят.
 
 Правило говорит о строках матрицы — исполнителях операций. Список расширений перед
-`upload .cfe` у кластера спрашивает агент, а не `ibcmd`:
+`upload .cfe` у кластера спрашивает исполнитель `extensions list`:
 `INV.USE-CASES.AN-EXTENSION-UPLOAD-ON-A-CLUSTER-ASKS-NO-IBCMD`.

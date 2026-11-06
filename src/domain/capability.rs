@@ -340,14 +340,16 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     const CONVERT: &[Capability] = &[implemented(Ibcmd, ArgvTested)];
     // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
     // прогнаны раннером на 8.3.27 15.09.2026. У файловой базы состав и свойства первым
-    // читает `ibcmd`; у кластера — только агент: `ibcmd` к базе под кластером в
-    // умолчаниях нет, а адаптера Конфигуратора у семейства `extensions` нет:
-    // имена он перечисляет (`/DumpDBCfgList`), свойств не отдаёт.
+    // читает `ibcmd`; у кластера за агентом идёт пакетный Конфигуратор. На 8.3.27
+    // подтверждён только список имён (`/DumpDBCfgList -AllExtensions`, #428).
     const EXTENSIONS_FILE: &[Capability] = &[
         implemented(Ibcmd, LiveVerified),
         implemented(Agent, LiveVerified),
     ];
-    const EXTENSIONS_CLUSTER: &[Capability] = &[implemented(Agent, LiveVerified)];
+    const EXTENSIONS_CLUSTER: &[Capability] = &[
+        implemented(Agent, LiveVerified),
+        implemented(Designer, LiveVerified),
+    ];
     // Агент: `config dump-cfg` для рабочей конфигурации прогнан раннером 15.09.2026.
     const EXPORT_FILE: &[Capability] = &[
         implemented(Agent, LiveVerified),
@@ -812,7 +814,10 @@ mod tests {
             missing_executors(Operation::Extensions, TargetKind::File),
             [Provider::Designer]
         );
-        assert!(missing_executors(Operation::Extensions, TargetKind::Cluster).is_empty());
+        assert_eq!(
+            missing_executors(Operation::Extensions, TargetKind::Cluster),
+            [Provider::Ibcmd]
+        );
     }
 
     #[test]

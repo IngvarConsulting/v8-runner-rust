@@ -53,7 +53,7 @@ Useful `workPath` locations:
 - `workPath/edt-workspace/`: shared EDT workspace for `infobase create`.
 - `workPath/convert/edt-workspace/`: separate EDT workspace for `convert`.
 - `workPath/designer/<sourceSetName>/`: generated Designer representation of EDT external processors/reports (and of EDT sets when the base address is not recognized).
-- `workPath/ibcmd-data/`: project-local standalone-server data for IBCMD dump; safe to remove only when no project command is running.
+- `workPath/ibcmd-data/`: project-local standalone-server data for every IBCMD command on the project infobase; safe to remove only when no project command is running.
 - `workPath/logs/platform/`: platform logs.
 - `workPath/temp/partial-lists/`: Designer partial load/dump list files; failed partial-load builds preserve the relevant list file for diagnostics.
 - `workPath/temp/`: temporary run artifacts and diagnostics.

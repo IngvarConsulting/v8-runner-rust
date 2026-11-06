@@ -733,7 +733,13 @@ fn run_dump_over_directory_ibcmd(
     ensure_dir(&resolved.platform_target_path)
         .map_err(|error| AppError::Runtime(format!("failed to create target dir: {error}")))?;
 
-    let dsl = build_ibcmd_dsl(context, config, binary, runner)?;
+    let dsl = build_ibcmd_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        InterruptionSafetyClass::GracefulThenKill,
+    )?;
     let forecast = match how {
         OverDirectory::Whole(_) => {
             return run_whole_dump_through_stage_ibcmd(context, resolved, &dsl)
@@ -818,9 +824,15 @@ fn run_full_dump_ibcmd(
     debug!(path = %staging_dir.display(), "created dump staging directory");
 
     log_live_stage("dump: full", "[ibcmd] exporting configuration files");
-    let dump_result = match build_ibcmd_dsl(context, config, binary, runner)?
-        .config_export_full(&staging_dir, resolved.extension.as_deref())
-        .map_err(map_ibcmd_error)
+    let dump_result = match build_ibcmd_dsl(
+        context,
+        config,
+        binary,
+        runner,
+        InterruptionSafetyClass::GracefulThenKill,
+    )?
+    .config_export_full(&staging_dir, resolved.extension.as_deref())
+    .map_err(map_ibcmd_error)
     {
         Ok(result) => result,
         Err(error) => return Err(publication.cleanup_failure(error)),
@@ -3100,6 +3112,113 @@ exit 0"#,
         cleanup_orphan_dirs(&resolved).expect("cleanup");
         assert!(!stage_dir.exists());
         assert!(!meta_path.exists());
+    }
+
+    /// Смерть процесса между двумя переименованиями оставляет резерв без цели: это
+    /// единственная копия каталога, и она возвращается раньше, чем что-то создаст цель.
+    #[test]
+    fn cleanup_orphan_dirs_returns_the_backup_when_the_target_is_gone() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let backup_dir = temp_dir_of(&resolved, TempDirKind::Backup);
+        fs::write(backup_dir.join("kept.txt"), "kept").expect("content");
+        let stage_dir = stale_temp_dir(&resolved, TempDirKind::Stage, |_| {});
+        let _ = fs::remove_dir_all(&resolved.target_path);
+        assert!(!resolved.target_path.exists());
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(resolved.target_path.join("kept.txt").exists());
+        assert!(!backup_dir.exists());
+        assert!(!metadata_sidecar_path(&backup_dir).exists());
+        assert!(!stage_dir.exists(), "only the backup is returned");
+
+        // Следующая уборка с уже существующей целью ничего не теряет.
+        cleanup_orphan_dirs(&resolved).expect("second cleanup");
+        assert!(resolved.target_path.join("kept.txt").exists());
+    }
+
+    /// Резерв, оставшийся от завершённой замены, старше удалённой цели: вернуть его значило
+    /// бы выдать устаревшее дерево за каталог набора.
+    #[test]
+    fn cleanup_orphan_dirs_does_not_return_a_superseded_backup() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let backup_dir = stale_temp_dir(&resolved, TempDirKind::Backup, |metadata| {
+            metadata.superseded = true;
+        });
+        let _ = fs::remove_dir_all(&resolved.target_path);
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(!resolved.target_path.exists());
+        assert!(
+            !backup_dir.exists(),
+            "a superseded stale backup is a leftover"
+        );
+    }
+
+    /// Каталог возвращён раньше, чем выгрузка создаст цель: отказ платформы его не трогает.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_dump_after_a_killed_replacement_leaves_the_returned_directory() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_staging_ibcmd_script(&script, &calls, true);
+        let config = build_config_with_builder(
+            &base,
+            &dir.path().join("work"),
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+        let target = base.join("main");
+        fs::write(target.join("Configuration.xml"), "old").expect("old");
+        commit_sources(&base);
+        let identity =
+            crate::support::path::stable_path_identity(&target.canonicalize().expect("target"));
+        let backup = base.join(".dump-backup-killed");
+        fs::rename(&target, &backup).expect("the first rename of a replacement");
+        write_temp_dir_metadata(&backup, TempDirKind::Backup, "killed", &target, &identity)
+            .expect("metadata");
+
+        let failed = run_dump(&config, &incremental_main());
+
+        assert!(failed.is_err(), "the platform refused");
+        assert_eq!(
+            fs::read_to_string(target.join("Configuration.xml")).expect("returned"),
+            "old"
+        );
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn cleanup_orphan_dirs_does_not_return_a_foreign_backup() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let backup_dir = stale_temp_dir(&resolved, TempDirKind::Backup, |metadata| {
+            metadata.target_identity = "another target".to_owned();
+        });
+        let _ = fs::remove_dir_all(&resolved.target_path);
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(backup_dir.exists());
+        assert!(!resolved.target_path.exists());
+    }
+
+    #[test]
+    fn cleanup_orphan_dirs_removes_a_stale_backup_beside_its_target() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let backup_dir = stale_temp_dir(&resolved, TempDirKind::Backup, |_| {});
+        fs::create_dir_all(&resolved.target_path).expect("target");
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(!backup_dir.exists());
     }
 
     #[test]

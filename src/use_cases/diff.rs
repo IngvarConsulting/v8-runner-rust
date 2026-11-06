@@ -182,8 +182,14 @@ fn run_provider(
         (Provider::Ibcmd, DiffInput::VersionFile(version_file)) => {
             let stage = list_stage(config)?;
             let list = stage.path().join("changes.txt");
-            let result = build_ibcmd_dsl(context, config, &binary, &runner)?
-                .config_export_status_to_file(version_file, &list)?;
+            let result = build_ibcmd_dsl(
+                context,
+                config,
+                &binary,
+                &runner,
+                InterruptionSafetyClass::GracefulThenKill,
+            )?
+            .config_export_status_to_file(version_file, &list)?;
             check_result(context, config, &result)?;
             metadata_changes(parse_export_status(&read_list(&list)?))
         }

@@ -279,7 +279,11 @@
       "description": "Расширение, установленное в базе.",
       "properties": {
         "active": {
-          "type": "boolean"
+          "description": "`null` — пакетный Конфигуратор сообщает только имя.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "name": {
           "description": "Имя расширения в базе.",

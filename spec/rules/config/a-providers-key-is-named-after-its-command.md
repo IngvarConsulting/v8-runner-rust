@@ -1,7 +1,9 @@
 ---
 id: INV.CONFIG.A-PROVIDERS-KEY-IS-NAMED-AFTER-ITS-COMMAND
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/201
+check:
+  - src/config/schema.rs::generated_schema_artifacts_are_current
+  - src/config/schema.rs::provider_keys_match_the_command_vocabulary
+  - src/config/schema.rs::provider_keys_without_a_config_entry_are_refused_at_load
 ---
 
 # Ключ выбора исполнителя назван именем команды

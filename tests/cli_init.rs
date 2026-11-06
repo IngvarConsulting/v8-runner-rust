@@ -476,6 +476,37 @@ fn a_failed_ibcmd_create_of_a_file_base_is_fatal_and_asks_nothing_more() {
     assert!(!calls.contains("generation-id"), "{calls}");
 }
 
+/// Создание файловой базы держит каталог данных проекта: умолчательный один на пользователя,
+/// и `infobase create` в другом проекте отказал бы этому (`rc=254`).
+#[test]
+fn an_ibcmd_create_of_a_file_base_holds_the_data_directory_of_the_project() {
+    let (dir, config_path, work_path, _base_path, platform_path, _edt_calls_log) =
+        setup_edt_init_project("DESIGNER", "IBCMD", "__AUTO_FILE__");
+    let calls_log = dir.path().join("ibcmd.calls.log");
+    write_script(
+        &platform_path,
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\nmkdir -p '{}' && : > '{}'\nexit 0",
+            calls_log.display(),
+            dir.path().join("ib").display(),
+            dir.path().join("ib").join("1Cv8.1CD").display(),
+        ),
+    );
+
+    let output = run_infobase_create(&config_path, &[]);
+
+    assert!(output.status.success(), "{}", json_of(&output));
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    assert!(
+        calls.starts_with(&format!(
+            "infobase --data {} ",
+            work_path.join("ibcmd-data").display()
+        )),
+        "{calls}"
+    );
+    assert!(calls.contains(" create"), "{calls}");
+}
+
 /// Файловую базу `ibcmd` создаёт сразу с основной конфигурацией из исходников, и память
 /// знает собранный набор: первая отправка его не грузит, а расширение досылает целиком.
 #[test]

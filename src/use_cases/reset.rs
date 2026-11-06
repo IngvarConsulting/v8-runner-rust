@@ -406,7 +406,6 @@ impl Executor {
                     Ok(GenerationProcess::Ibcmd {
                         binary,
                         runner: self.utilities.runner_for(UtilityType::Ibcmd),
-                        data_path: None,
                     })
                 },
                 extension,

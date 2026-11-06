@@ -505,7 +505,11 @@ fn render_status_text(result: &crate::domain::status::StatusResult, presenter: &
                                 } else {
                                     "installed in the infobase, not in the project"
                                 },
-                                if extension.active { "" } else { " (inactive)" }
+                                match extension.active {
+                                    Some(true) => "",
+                                    Some(false) => " (inactive)",
+                                    None => " (activity unavailable)",
+                                }
                             ));
                         }
                         for set in missing {
@@ -1118,8 +1122,11 @@ fn render_extension_inventory_text(
     let details = result
         .extensions
         .iter()
-        .map(|extension| {
-            format!(
+        .map(|entry| match entry {
+            crate::domain::extensions::ExtensionInventoryEntry::NameOnly { name } => {
+                format!("{name}: properties unavailable")
+            }
+            crate::domain::extensions::ExtensionInventoryEntry::Full(extension) => format!(
                 "{}: purpose={}, active={}, safe mode={}, unsafe action protection={}, scope={}, version={}, prefix={}, hash={}",
                 extension.name,
                 extension.purpose,
@@ -1130,7 +1137,7 @@ fn render_extension_inventory_text(
                 extension.version.as_deref().unwrap_or("none"),
                 extension.name_prefix.as_deref().unwrap_or("unavailable"),
                 extension.hash_sum,
-            )
+            ),
         })
         .collect::<Vec<_>>();
     let mut details = details;
