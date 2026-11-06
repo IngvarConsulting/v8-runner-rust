@@ -348,14 +348,15 @@ v8-runner mcp serve stdio
 | Direct launch (прямой запуск) | `launch <designer\|thin\|thick\|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
 | MCP automation (автоматизация через MCP) | `mcp serve stdio`, `mcp serve http` | Открывает 8 MCP tools для агентных workflow |
 
-Команды названы словарём гита. Прежние имена приняты ещё один цикл выпуска и в справке не
-печатаются: `bootstrap` → `clone`, `config init` → `init`, `build` → `push`, `load` → `upload`,
-`dump` → `pull`, `syntax` → `check`; прежний путь `infobase configuration export` тоже
-принимается. То же с ключами: `--full-rebuild` → `--full`, `--discard-uncommitted` → `--force`,
+Прежние имена команд принимаются в течение одного цикла выпуска и скрыты в `--help` на
+всех уровнях. Например: `bootstrap` → `clone`, `config init` → `init`, `build` → `push`, `load` → `upload`,
+`dump` → `pull`, `syntax` → `check`, `infobase configuration export` → `download`.
+Примеры прежних ключей: `--full-rebuild` → `--full`, `--discard-uncommitted` → `--force`,
 `--no-build` → `--no-push`, `--mode merge` → `--mode combine`, `--source-set <NAME>` →
 позиционный набор, `--state working` → без ключа, `--state database` → `--state db`,
 `pull --mode incremental|partial` → без ключа. `pull --mode full` не отображается, а
-отказывает и называет `pull [SET] --force` для того же набора. Ответ приходит под новым именем.
+отказывает и называет `pull [SET] --force` для того же набора.
+Для команды, вызванной прежним именем, поле `command` JSON-ответа содержит новое имя.
 Создание базы синонима не имеет: имя `init` занято подготовкой проекта, база создаётся командой
 `infobase create`.
 

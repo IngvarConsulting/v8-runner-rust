@@ -1037,10 +1037,18 @@ fn a_cluster_with_administrators_refuses_naming_the_cluster_administrator_level(
 /// соединения: пароли СУБД и администратора кластера в ответ не попадают.
 #[test]
 fn a_failed_cluster_create_never_echoes_the_passwords() {
+    // The first masking pass must know the whole DBMS password, including its key-like text.
+    let dbms = FULL_DBMS.replace("pg-s3cret", "db-prefix Pwd=pg-private; db-tail");
+    let local = CLUSTER_ADMIN.replace("    cluster:", "    password: ib-s3cret\n    cluster:");
     let (_dir, config_path, _work_path, _calls_log) = setup_cluster_init_project(
-        "printf 'Создание информационной базы (\"%s\") не выполнено\\n' \"$2\"\nprintf '%s\\n' \"$2\" >&2\nexit 1",
-        FULL_DBMS,
-        CLUSTER_ADMIN,
+        concat!(
+            "printf 'authentication rejected [%s]\\n' 'db-prefix Pwd=pg-private; db-tail'\n",
+            "printf 'Создание информационной базы (\"%s\") не выполнено\\n' \"$2\"\n",
+            "printf '%s\\n' \"$2\" >&2\n",
+            "exit 1",
+        ),
+        &dbms,
+        &local,
     );
 
     let output = run_infobase_create(&config_path, &[]);
@@ -1052,7 +1060,11 @@ fn a_failed_cluster_create_never_echoes_the_passwords() {
     let message = payload["error"]["message"].as_str().expect("message");
     assert!(message.contains("exit code 1"), "{message}");
     assert!(message.contains("DBPwd=***"), "{message}");
-    for secret in ["pg-s3cret", "c-s3cret"] {
+    assert!(
+        message.contains("authentication rejected [***]"),
+        "{message}"
+    );
+    for secret in ["db-prefix", "pg-private", "db-tail", "c-s3cret"] {
         assert!(!stdout.contains(secret), "{secret} in {stdout}");
         assert!(!stderr.contains(secret), "{secret} in {stderr}");
     }

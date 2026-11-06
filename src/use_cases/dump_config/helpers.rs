@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 
 use crate::config::model::{AppConfig, SourceSetPurpose};
 use crate::domain::capability::{Operation, Provider};
@@ -306,15 +306,17 @@ fn normalize_partial_objects(objects: &[String]) -> Result<Vec<PartialDumpSelect
 pub(super) fn create_dump_object_list_file(
     work_path: &Path,
     objects: &[PartialDumpSelector],
-) -> Result<NamedTempFile, AppError> {
+) -> Result<TempPath, AppError> {
     create_dump_object_list_file_with(work_path, objects, write_partial_object_list)
 }
 
+/// Отдаёт путь без дескриптора: на Windows Конфигуратор не читает список, пока файл открыт
+/// на запись, и отвечает «Ошибка чтения файла-списка выгружаемых объектов метаданных».
 pub(super) fn create_dump_object_list_file_with<F>(
     work_path: &Path,
     objects: &[PartialDumpSelector],
     write_list: F,
-) -> Result<NamedTempFile, AppError>
+) -> Result<TempPath, AppError>
 where
     F: FnOnce(&mut NamedTempFile, &[PartialDumpSelector]) -> std::io::Result<()>,
 {
@@ -324,7 +326,7 @@ where
     write_list(&mut list_file, objects).map_err(|error| {
         AppError::Runtime(format!("failed to write partial dump list: {error}"))
     })?;
-    Ok(list_file)
+    Ok(list_file.into_temp_path())
 }
 
 fn write_partial_object_list(

@@ -168,7 +168,7 @@ infobases:
       wsdir: demo                    # имя виртуального каталога
       dir: /var/www/demo             # существующий каталог публикации
       url: https://srv.example/demo  # адрес для открытия базы</code></pre>
-<p><code>server</code>, <code>wsdir</code> и <code>dir</code> нужны команде <a href="cli-web-publish.html"><code>web publish</code></a>; <code>url</code> — команде <a href="cli-launch.html"><code>launch</code></a>. Для <code>apache2</code> и <code>apache22</code> также нужен <code>conf</code> — путь к файлу конфигурации Apache. Для IIS можно задать <code>os-auth: true</code> — аутентификацию средствами ОС.</p>
+<p><code>server</code>, <code>wsdir</code> и <code>dir</code> нужны команде <a href="cli-web-publish.html"><code>web publish</code></a>; <code>url</code> — команде <a href="cli-launch.html"><code>launch</code></a>. Для <code>apache2</code> и <code>apache22</code> также нужен <code>conf</code> — путь к файлу конфигурации Apache. На платформе 8.5.4 и новее <code>apache22</code> нет, см. <a href="#platform-versions">версии платформы</a>. Для IIS можно задать <code>os-auth: true</code> — аутентификацию средствами ОС.</p>
 <pre><code>v8-runner web publish</code></pre>
 <h2 id="tools">Инструменты</h2>
 <p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С.</p>
@@ -186,6 +186,22 @@ tools:
   platform:
     path: /opt/1cv8/x86_64/8.3.27.2074  # каталог установленной платформы</code></pre>
 <p>Если оба поля отсутствуют, раннер ищет установленную платформу автоматически. Если после объединения основного и локального файлов заданы и <code>path</code>, и <code>version</code>, это ошибка конфигурации. Локальный <code>path</code> не отменяет <code>version</code> из основного файла.</p>
+<h3 id="platform-versions">Поддерживаемые версии платформы <span class="plan-badge">План</span></h3>
+<p>Минимальная версия платформы — <strong>8.3.24</strong>. Платформу ниже раннер не запускает: команда, и её превью тоже, отказывает с кодом <code>environment_unavailable</code> и называет путь, найденную версию и минимум. Проверка идёт до запуска, потому что старая платформа может не отвергнуть незнакомую команду, а открыть окно и не завершиться, а срока у команды нет. Команды, которые платформу не запускают, например <a href="cli-init.html"><code>init</code></a> и <a href="cli-status.html"><code>status</code></a> без <code>--deep</code>, от версии не зависят.</p>
+<p>Два ответа устроены иначе. <a href="cli-status.html"><code>status --deep</code></a> — диагностика: он отвечает успехом, платформу не запускает, а причину называет в ответе о базе. <a href="cli-push.html"><code>push</code></a> без памяти о базе отказывает кодом <code>no_memory</code>, а причина стоит в <code>skipped</code>; <code>push --force</code> отказывает с <code>environment_unavailable</code>.</p>
+<p>Версию раннер видит в пути установки, например <code>/opt/1cv8/x86_64/8.3.27.2074/bin/1cv8</code>, и запускать платформу ради ответа о версии не станет. Если версии в пути нет, отказа не будет, и платформа ниже минимума может зависнуть, поэтому указывайте каталог версии. Подключённый агент (<code>attached</code>) и SSH-шлюз автономного сервера не используют утилиты на машине раннера: их версию раннер не видит, и минимум к ним не применяется.</p>
+<p>Выше минимума команды и исполнители те же. Различия по версиям:</p>
+<div class="tablewrap"><table><thead><tr><th>Версия</th><th>Что меняется</th><th>Что делает раннер</th></tr></thead><tbody>
+<tr><td>ниже 8.3.24</td><td>Ни у одного исполнителя нет ключа частичной загрузки</td><td>Платформа не запускается, ответы описаны выше</td></tr>
+<tr><td>8.3.24–8.3.26 <span class="pill measured">замер</span></td><td>Агент при восстановлении из <code>.dt</code> просит подтвердить свой перезапуск</td><td><a href="cli-infobase-restore.html"><code>infobase restore</code></a> выполняет Конфигуратор, агент попадает в <code>skipped</code> с причиной. Если агент назначен ключом <code>providers.infobase.restore</code>, команда отказывает и другого исполнителя не берёт</td></tr>
+<tr><td>8.3.24–8.3.26 <span class="pill measured">замер</span></td><td>Управляемый агент запускается около 46 с, на 8.3.27 — около 5 с (Windows, файловая база)</td><td>Результат тот же, команда идёт дольше на время запуска каждой сессии</td></tr>
+<tr><td>8.5.4 и новее</td><td><code>webinst</code> больше не знает <code>-apache22</code></td><td><a href="cli-web-publish.html"><code>web publish</code></a> с <code>apache22</code> отказывает и называет <code>apache24</code></td></tr>
+</tbody></table></div>
+<p>Версия формата выгрузки зависит от версии платформы <span class="pill measured">замер</span>:</p>
+<div class="tablewrap"><table><thead><tr><th>Платформа</th><th>8.3.24</th><th>8.3.25</th><th>8.3.26</th><th>8.3.27</th><th>8.5.1</th><th>8.5.4</th></tr></thead><tbody>
+<tr><td>Формат</td><td>2.17</td><td>2.18</td><td>2.19</td><td>2.20</td><td>2.21</td><td>2.22</td></tr>
+</tbody></table></div>
+<p>Платформа загружает формат не новее своего, поэтому исходники с более новой платформы на более старую не переносятся: <a href="problems.html#p5">отказ называет обе версии</a>.</p>
 <h2 id="keys">Исполнители операций</h2>
 <p><code>providers</code> выбирает, какой инструмент исполнит операцию. Ключ называется именем команды: например, <code>providers.push</code> — исполнитель отправки исходников.</p>
 <pre data-config-example="main"><code># Фрагмент v8project.yaml

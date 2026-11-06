@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde_json::Value;
+use support::fake_agent::{
+    serve_managed_launches_on_a_reserved_port, write_fake_designer, FakeAgent, AGENT_PASSWORD,
+};
 use support::{temp_workspace, v8_runner_command, write_shell_script};
 
 const FIRST: &str = "1111111111111111111111111111111111111111";
@@ -180,6 +183,91 @@ fn succeeded(output: &Output) -> Value {
     let payload = envelope(output);
     assert!(output.status.success(), "{payload}");
     payload
+}
+
+/// Применение использует ответ списка: обновляет установленное расширение и пропускает
+/// отсутствующее, не запуская второй управляемый агент.
+#[test]
+fn an_apply_without_a_set_uses_one_managed_agent_session() {
+    let project = Project::new().with_extension();
+    let root = project.root();
+    let commands_log = root.join("agent-commands.log");
+    let base_dir_file = root.join("base-dir.txt");
+    let designer_pid_file = root.join("designer.pid");
+    let designer_args_log = root.join("designer-args.log");
+    let agent = FakeAgent::new(
+        true,
+        commands_log.clone(),
+        None,
+        base_dir_file.clone(),
+        designer_pid_file.clone(),
+    );
+    agent.extensions.lock().expect("fake inventory")[0].name = "ext".to_owned();
+    let port = serve_managed_launches_on_a_reserved_port(agent, None);
+    write_fake_designer(
+        &root.join("1cv8"),
+        &designer_args_log,
+        &designer_pid_file,
+        &base_dir_file,
+    );
+    fs::create_dir(root.join("absent")).expect("absent extension directory");
+    fs::copy(
+        root.join("ext/Configuration.xml"),
+        root.join("absent/Configuration.xml"),
+    )
+    .expect("absent extension sources");
+    let config = fs::read_to_string(&project.config)
+        .expect("config")
+        .replace("  apply: designer\n", "  apply: agent\n")
+        .replace(
+            "    path: ext\n",
+            "    path: ext\n  - name: absent\n    type: EXTENSION\n    path: absent\n",
+        );
+    fs::write(
+        &project.config,
+        format!("{config}  designer_agent:\n    port: {port}\n"),
+    )
+    .expect("agent config");
+    fs::write(
+        root.join("v8project.local.yaml"),
+        format!(
+            "infobases:\n  origin:\n    connection: 'File=ib'\n    password: '{AGENT_PASSWORD}'\n"
+        ),
+    )
+    .expect("local layer");
+
+    let applied = succeeded(&project.run(&["apply"]));
+    assert_eq!(
+        applied["data"]["provider"]["selected"], "agent",
+        "{applied}"
+    );
+    let absent = &applied["data"]["steps"][2];
+    assert_eq!(absent["source_set"], "absent", "{applied}");
+    assert_eq!(absent["outcome"], "skipped", "{applied}");
+    let commands = fs::read_to_string(commands_log).expect("agent commands");
+    let apply_commands: Vec<_> = commands
+        .lines()
+        .filter(|line| {
+            line.contains("--all-extensions") || line.starts_with("config update-db-cfg")
+        })
+        .collect();
+    assert_eq!(
+        apply_commands,
+        [
+            "config extensions properties get --all-extensions",
+            "config update-db-cfg",
+            "config update-db-cfg --extension=ext",
+        ],
+    );
+    let launches = fs::read_to_string(designer_args_log).expect("Designer invocations");
+    assert_eq!(
+        launches
+            .split_whitespace()
+            .filter(|arg| *arg == "/AgentMode")
+            .count(),
+        1,
+        "apply must list and apply through one managed agent"
+    );
 }
 
 /// `push --no-apply` грузит в основную конфигурацию и не применяет; запись поколения помнит

@@ -332,7 +332,10 @@ fn extensions_list_reports_the_installed_composition() {
         calls[1].contains(" save --db --extension Проба"),
         "{calls:?}"
     );
-    assert!(calls[2].contains(" export --file="), "{calls:?}");
+    assert!(
+        calls[2].contains(" export --threads=1 --file="),
+        "{calls:?}"
+    );
     assert!(calls[3].contains("extension list"), "{calls:?}");
     let saved = calls[1].split_whitespace().last().expect("saved path");
     assert!(calls[2].contains(&format!("--file={saved}")), "{calls:?}");

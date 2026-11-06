@@ -148,13 +148,15 @@ artifact без привязки к release tag.
 - canonical key для агента Конфигуратора: `tools.designer_agent`; child keys —
   `attach`, `base-dir`, `port`, `host-key` и `startup_timeout_ms`.
 
-Ключи названы именами команд. Прежние написания приняты ещё один цикл выпуска и помечены
-`deprecated` в опубликованной схеме: `providers.init` → `providers.infobase.create`,
-`providers.build` → `providers.push`, `providers.load` → `providers.upload`,
-`providers.dump` → `providers.pull`, `providers.infobase.configuration.export` →
-`providers.download`, секция `build:` → `push:`. Прежнее имя секции загрузчик сворачивает в
-новое с предупреждением; оба ключа в одном файле — отказ, потому что в карте они схлопнулись
-бы молча. Квитанция ответа называет ключ новым именем, как бы его ни написали в файле.
+Прежние ключи принимаются в течение одного цикла выпуска. Опубликованные схемы
+проектного и локального файлов помечают их как `deprecated: true`: `providers.init` →
+`providers.infobase.create`, `providers.build` → `providers.push`, `providers.load` →
+`providers.upload`, `providers.dump` → `providers.pull`,
+`providers.infobase.configuration.export` → `providers.download`. Квитанция выбора
+исполнителя указывает файл, из которого пришло переопределение.
+
+В проектном файле секция `build:` тоже помечена как `deprecated: true`: загрузчик
+читает её как `push:` с предупреждением. Если в файле есть обе секции, загрузчик отказывает.
 
 Ниже фиксируются только поддержанные canonical keys.
 
@@ -393,10 +395,15 @@ providers:
   операции с одним исполнителем это ошибка конфигурации, а не подтверждение очевидного;
 - переопределение строгое: если названный исполнитель не готов, команда отказывает с
   причиной и на умолчание не откатывается;
-- допустимые ключи: `infobase.create`, `push`, `apply`, `reset`, `diff`, `upload`, `pull`, `extensions`,
-  `download`, `infobase.dump`, `infobase.restore`, `syntax`, `make`, `convert`;
+- ключи операций: `infobase.create`, `push`, `apply`, `reset`, `diff`, `upload`, `pull`, `extensions`,
+  `download`, `infobase.dump`, `infobase.restore`, `make`, `convert`;
 - ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
   квитанции ответа видно, из какого файла он пришёл.
+
+Опубликованная схема пока перечисляет `providers.syntax` и `providers.publish`, хотя
+назначать исполнителя этих операций нельзя. Ключа `providers.diff` в схеме пока нет.
+Приведение списка к словарю команд отслеживается в
+[#201](https://github.com/IngvarConsulting/v8-runner-rust/issues/201).
 
 Умолчания по операциям зависят от вида базы. `push`, `pull`, `download` — агент, затем
 Конфигуратор, у файловой базы затем `ibcmd`; у кластера `ibcmd` в цепочке нет; у
@@ -454,8 +461,8 @@ providers:
 действует и на `mcp serve`. Исключение — `make`: он собирает пакет во временной базе раннера,
 базу проекта не выбирает, работает без `origin` и `--infobase` отвергает.
 
-Имя базы — идентификатор `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`: оно же становится каталогом под
-`workPath`, поэтому другого имени схема не принимает.
+Имя базы — идентификатор `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. Для объявленной базы раннер
+использует это имя в пути к её памяти: `workPath/infobases/<имя>/` (см. [`workPath`](#workpath)).
 
 ```yaml
 # v8project.local.yaml
@@ -480,9 +487,10 @@ infobases:
 прочитать, держит базу за копией. Подробно — в [`CAPABILITIES.md`](CAPABILITIES.md).
 
 **Синоним на один цикл выпуска.** Прежний ключ `infobase:` читается как `infobases.origin`
-— в проектном файле и в местном слое, в каждом с предупреждением (в тексте — узел
-`▲ config:` перед лентой команды, в JSON — `warnings` конверта); схема помечает его как
-`deprecated`. Карта `infobases` в проектном файле не принимается. Оба ключа в одном файле
+— в проектном файле и в местном слое. При загрузке настроек для команд, использующих базу
+проекта, загрузчик предупреждает о прежнем ключе (в тексте — узел `▲ config:` перед лентой команды, в JSON —
+`warnings` конверта). Обе опубликованные схемы помечают `infobase` как `deprecated: true`.
+Карта `infobases` в проектном файле не принимается. Оба ключа в одном файле
 — отказ. Проектный `infobase:` и местный `infobases.origin` — одна база, слитая по полям:
 так `connection` из проектного файла и `user`/`password` из местного продолжают работать
 вместе до переезда секции. В следующем цикле выпуска синоним снимается.

@@ -242,7 +242,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'снимок базы'); },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer], config: ['connection'], note: '/DumpIB и /RestoreIB по прямому шлюзу; через SSH-шлюз намеренно нет: dump-ib роняет ibsrv 8.3.27 (замер)' };
-        return { chain: [P.agent, P.designer], config: ['connection'], note: '' };
+        return { chain: [P.agent, P.designer], config: ['connection'], note: 'restore на платформе ниже 8.3.27 выполняет Конфигуратор: агент там просит подтвердить свой перезапуск (замер)' };
       }
     },
     {

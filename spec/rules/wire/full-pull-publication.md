@@ -28,7 +28,9 @@ check:
 `mode_reason`, `extension`, `provider_dispatched`, `source_set`, итоговый
 `target_path`, `stage_path`, готовность снимка `snapshot` (`prepared`,
 `unavailable`) и `snapshot_warning`. Поля результата соответствуют выбранной
-операции и фактически выполненной работе до публикации.
+операции и фактически выполненной работе до публикации. На Windows `target_path` и
+`stage_path` могут нести приставку `\\?\`: это операнды публикации, а не показ
+([правило](a-response-names-a-path-without-the-verbatim-prefix.md)).
 `published` подтверждает уже выполненную вызывающим публикацию; `rejected`
 подтверждает отказ от неё. Превью заканчивается после согласования исполнителя.
 
