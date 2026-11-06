@@ -736,7 +736,7 @@ infobases:
 Поддержанные поля:
 
 - `kind` — вид СУБД (`PostgreSQL`, `MSSQLServer`, …): `DBMS=` строки создания, `--dbms` у `ibcmd`;
-- `server` — сервер СУБД: `DBSrvr=`, `--database-server`;
+- `server` — сервер СУБД: `DBSrvr=`, `--database-server`. Для PostgreSQL на нестандартном порту задайте `server: "host port=N"`;
 - `name` — имя базы данных: `DB=`, `--database-name`;
 - `user`, `password` — учётная запись СУБД: `DBUID=`/`DBPwd=`, `--database-user`/`--database-password`;
   без `user` строка создания идёт без `DBUID`, и сервер 1С подставляет пользователя ОС своего
