@@ -335,7 +335,8 @@ pub(crate) fn run_id() -> String {
 /// Выставляет чужой каталог внутрь каталога пользователя агента под относительным
 /// именем и возвращает это имя для команды. Агент ходит по символическим ссылкам
 /// (замер 15.09.2026: выгрузка и загрузка через ссылку); там, где ссылку создать
-/// нельзя, каталог копируется — медленно, но той же формы.
+/// нельзя, каталог копируется — медленно, но той же формы. Так можно отдать только то, что
+/// агент читает; каталог, в который он пишет, выставляет [`expose_output_dir`].
 pub(crate) fn expose_dir(
     user_dir: &Path,
     relative: &str,
@@ -358,7 +359,7 @@ pub(crate) fn expose_dir(
         ))
     })?;
     let _ = crate::support::fs::remove_path_if_exists(&link);
-    if symlink_dir(&target, &link).is_err() {
+    if link_dir(&target, &link).is_err() {
         copy_for_the_agent(&target, user_dir, work_path, &link).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to expose '{}' to the agent at '{}': {error}",
@@ -368,6 +369,72 @@ pub(crate) fn expose_dir(
         })?;
     }
     Ok(relative.to_owned())
+}
+
+/// Выставляет агенту каталог, в который он пишет. Копия здесь не годится: агент обновил бы её,
+/// а цель осталась бы прежней при успешном ответе. Поэтому без ссылки это отказ, а не копия.
+pub(crate) fn expose_output_dir(
+    user_dir: &Path,
+    relative: &str,
+    target: &Path,
+) -> Result<String, AppError> {
+    expose_output_with(user_dir, relative, target, link_dir)
+}
+
+fn expose_output_with(
+    user_dir: &Path,
+    relative: &str,
+    target: &Path,
+    link_to: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<String, AppError> {
+    let link = user_dir.join(relative);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to prepare the agent exchange dir '{}': {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let target = target.canonicalize().map_err(|error| {
+        AppError::Runtime(format!(
+            "target dir '{}' is not reachable: {error}",
+            target.display()
+        ))
+    })?;
+    let _ = remove_link(&link);
+    link_to(&target, &link).map_err(|error| {
+        AppError::EnvironmentUnavailable(format!(
+            "the agent cannot write into '{}': no link can be created at '{}' ({error}); name another executor in providers.pull",
+            target.display(),
+            link.display()
+        ))
+    })?;
+    Ok(relative.to_owned())
+}
+
+/// Символическая ссылка, а на Windows без права на неё — точка соединения: она права не требует.
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    symlink_dir(target, link).or_else(|error| junction_dir(target, link).map_err(|_| error))
+}
+
+#[cfg(windows)]
+fn junction_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    junction::create(
+        crate::support::path::normalize_windows_verbatim_path(target),
+        link,
+    )
+}
+
+#[cfg(not(windows))]
+fn junction_dir(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
+/// Ссылка на каталог на Windows снимается как файл или как каталог, смотря как создана.
+/// Содержимое цели не затрагивается.
+fn remove_link(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(link).or_else(|_| std::fs::remove_dir(link))
 }
 
 /// Набор в корне рабочей области держит каталог агента и `workPath` внутри себя: копия не
@@ -877,7 +944,7 @@ pub(crate) fn withdraw_dir(user_dir: &Path, relative: &str) {
     let link = user_dir.join(relative);
     match std::fs::symlink_metadata(&link) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(&link);
+            let _ = remove_link(&link);
         }
         Ok(metadata) if metadata.is_dir() => {
             let _ = std::fs::remove_dir_all(&link);
@@ -1169,6 +1236,64 @@ mod tests {
             let endpoint = session_endpoint(SessionMode::Gate, &AgentEndpoint { host, port });
             assert_eq!(endpoint.address, address);
         }
+    }
+
+    /// Цель выгрузки без ссылки — отказ: копию агент обновил бы при успешном ответе, а цель
+    /// осталась бы прежней.
+    #[test]
+    fn an_output_directory_without_a_link_is_refused_and_not_copied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_dir = dir.path().join("0");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::write(target.join("Configuration.xml"), "<x/>").expect("marker");
+
+        let error = expose_output_with(&user_dir, "target/run", &target, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("no link, no output directory");
+
+        assert!(matches!(error, AppError::EnvironmentUnavailable(_)));
+        assert!(!user_dir.join("target/run").exists());
+    }
+
+    /// То, что агент пишет в выставленный каталог, оказывается в цели, а снятие ссылки цель
+    /// не трогает.
+    #[test]
+    fn a_write_through_the_exposed_output_directory_lands_in_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_dir = dir.path().join("0");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).expect("target");
+
+        let relative = expose_output_dir(&user_dir, "target/run", &target).expect("expose");
+        std::fs::write(user_dir.join(&relative).join("Module.bsl"), "new").expect("write");
+        withdraw_dir(&user_dir, &relative);
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("Module.bsl")).expect("in the target"),
+            "new"
+        );
+        assert!(!user_dir.join(&relative).exists());
+    }
+
+    /// Точка соединения не требует права на символические ссылки: это путь по умолчанию на
+    /// Windows обычного пользователя.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_carries_writes_and_its_removal_keeps_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).expect("target");
+        let target = target.canonicalize().expect("canonical");
+        let link = dir.path().join("link");
+
+        junction_dir(&target, &link).expect("junction");
+        std::fs::write(link.join("Module.bsl"), "new").expect("write");
+        remove_link(&link).expect("remove");
+
+        assert!(!link.exists());
+        assert!(target.join("Module.bsl").is_file());
     }
 
     /// Копия корня в каталог агента внутри него же заканчивается, не несёт `workPath` и
