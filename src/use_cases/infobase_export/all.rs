@@ -6,6 +6,7 @@
 //! что `download <SET>`, в [`package_in_directory`]; набор расширения, которого в базе нет,
 //! не выгружается и называется в `not_installed`. Отказ набора останавливает обход.
 
+use crate::use_cases::provider_selection::stamp_session;
 use std::time::Instant;
 
 use crate::config::model::{AppConfig, SourceSetConfig};
@@ -34,10 +35,7 @@ pub fn execute_configuration_export_all(
     request: &DownloadAllRequest,
 ) -> UseCaseResult<DownloadAllResult> {
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_all(context, config, request),
-            context,
-        ),
+        stamp_session(run_all(context, config, request), context),
         context.work(),
     )
 }

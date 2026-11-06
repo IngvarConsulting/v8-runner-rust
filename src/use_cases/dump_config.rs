@@ -1,3 +1,4 @@
+use crate::use_cases::provider_selection::stamp_session;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -92,10 +93,7 @@ pub fn execute(
     } else {
         coordinator::run_dump_with_context(context, config, args)
     };
-    stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(outcome, context),
-        context.work(),
-    )
+    stamp_dispatch(stamp_session(outcome, context), context.work())
 }
 
 type DumpExecutionFailure = UseCaseFailure<DumpResult>;

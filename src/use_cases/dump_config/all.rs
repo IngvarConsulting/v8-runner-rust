@@ -8,6 +8,7 @@
 //! памятью базы; объявление нового набора дописывается в `v8project.yaml` после его удачной
 //! выгрузки, так что отказ посреди обхода не оставляет в проекте набора без содержимого.
 
+use crate::use_cases::provider_selection::stamp_session;
 use std::collections::HashSet;
 
 use super::*;
@@ -42,10 +43,7 @@ pub fn execute_all(
         "executing pull --all"
     );
     stamp_dispatch(
-        crate::use_cases::provider_selection::stamp_session(
-            run_all(context, config, request),
-            context,
-        ),
+        stamp_session(run_all(context, config, request), context),
         context.work(),
     )
 }

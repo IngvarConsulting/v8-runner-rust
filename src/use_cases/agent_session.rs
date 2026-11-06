@@ -461,7 +461,8 @@ pub(crate) fn run_critical(
     wait: &WaitPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<agent::AgentReply, AppError> {
-    let outcome = run_command(handle, command, &wait.critical());
+    let outcome = run_command(handle, command, &wait.critical())
+        .map_err(|error| error.with_context(format!("agent {action}")));
     let deferral = handle
         .session()
         .last_command_deferral()
