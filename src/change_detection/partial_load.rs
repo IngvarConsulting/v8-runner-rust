@@ -161,7 +161,7 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
                 io::Error::new(
                     ErrorKind::InvalidInput,
                     format!(
-                        "cannot stage unrecognized Designer metadata type '{kind}'; use push --full"
+                        "cannot stage unrecognized Designer metadata type '{kind}'; use push <SET> --full"
                     ),
                 )
             })?;
