@@ -770,7 +770,16 @@ impl<'a> GenerationGate<'a> {
     /// отправка откажет `non_fast_forward` и скажет, что базу изменила либо эта загрузка,
     /// либо другая копия, а не выдаст своё за чужое; совпадёт — загрузка базу не тронула.
     /// Строку для шага неудачной загрузки отдаёт [`Self::failed_load_note`].
-    pub(crate) fn after_failed_load(&self, set: &SourceSetContext, tool: Provider) {
+    pub(crate) fn after_failed_load(
+        &self,
+        set: &SourceSetContext,
+        tool: Provider,
+        error: &AppError,
+    ) {
+        // A refused invocation has no partial load to reconcile.
+        if matches!(error, AppError::SourceLoadNotStarted(_)) {
+            return;
+        }
         let name = set.name();
         let not_recorded = format!(
             "the configuration generation of source-set '{name}' is not recorded after the failed load"
@@ -1169,6 +1178,48 @@ mod tests {
             &SourceSetsService::new(config).designer_contexts(),
             None,
         )
+    }
+
+    #[test]
+    fn a_load_refused_before_dispatch_keeps_the_previous_unapplied_generation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = project(root.path());
+        let contexts = SourceSetsService::new(&config).designer_contexts();
+        let main = &contexts[0];
+        let ledger = GenerationLedger::of(main, &config.work_path).expect("ledger");
+        let token = "1".repeat(40);
+        let context = ExecutionContext::cli(CommandName::Build);
+        let gate = GenerationGate::new(&context, &config, PushMode::Changes);
+        let errors = [
+            (
+                Provider::Ibcmd,
+                AppError::from(
+                    crate::platform::ibcmd::IbcmdError::PartialImportCommandLineTooLong {
+                        file_count: 1000,
+                    },
+                ),
+            ),
+            (
+                Provider::Agent,
+                AppError::SourceLoadNotStarted("missing staged dependency".to_owned()),
+            ),
+        ];
+
+        for (tool, error) in errors {
+            ledger
+                .record_as(tool, &token, GenerationAfter::Build, ApplyMark::Unapplied)
+                .expect("record prior successful load");
+
+            gate.after_failed_load(main, tool, &error);
+
+            let Recorded::Ours(record) = ledger.read() else {
+                panic!("the previous load must stay recorded");
+            };
+            assert_eq!(record.after, GenerationAfter::Build);
+            assert_eq!(record.token, token);
+            assert_eq!(record.mark(), ApplyMark::Unapplied);
+            assert!(gate.failed_load_note().is_empty());
+        }
     }
 
     /// Базу, созданную раннером, он помнит: первая отправка в неё без отказа первого

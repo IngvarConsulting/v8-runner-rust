@@ -954,9 +954,30 @@ fn build_text_failure_does_not_print_success_footer() {
     assert!(!stdout.contains("Build completed successfully"));
 }
 
+fn seed_and_edit_main(config: &Path, workspace: &Path) {
+    let initial = v8_runner_command()
+        .arg("--config")
+        .arg(config)
+        .args(["push", "main", "--full"])
+        .output()
+        .expect("seed the main source snapshot");
+    assert!(
+        initial.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initial.stdout),
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    fs::write(
+        workspace.join("project/main/Catalogs.Items/ObjectModule.bsl"),
+        "procedure Test() // changed\nendprocedure",
+    )
+    .expect("edit the remembered module");
+}
+
 #[test]
 fn build_text_stdout_includes_action_logs() {
-    let (_dir, config_path, _binary_path, _work_path) = setup_project();
+    let (dir, config_path, _binary_path, _work_path) = setup_project();
+    seed_and_edit_main(&config_path, dir.path());
 
     let output = v8_runner_command()
         .args([
@@ -982,7 +1003,8 @@ fn build_text_stdout_includes_action_logs() {
 
 #[test]
 fn build_text_highlights_timeline_detail_prefixes() {
-    let (_dir, config_path, _binary_path, _work_path) = setup_project();
+    let (dir, config_path, _binary_path, _work_path) = setup_project();
+    seed_and_edit_main(&config_path, dir.path());
 
     // Вывод теста перенаправлен, а цвет включается только там, где его увидят.
     // `FORCE_COLOR` — тот же способ, которым его включает CI.
@@ -1294,7 +1316,8 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
 
 #[test]
 fn build_json_writes_action_log_file_without_polluting_stdout() {
-    let (_dir, config_path, _binary_path, work_path) = setup_project();
+    let (dir, config_path, _binary_path, work_path) = setup_project();
+    seed_and_edit_main(&config_path, dir.path());
 
     let output = v8_runner_command()
         .args([

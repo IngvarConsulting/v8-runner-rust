@@ -469,7 +469,9 @@ fn run_build_with(
                                 args.apply,
                             )
                             .map(|loaded| (before, loaded))
-                            .inspect_err(|_| gate.after_failed_load(&source_context, tool))
+                            .inspect_err(|error| {
+                                gate.after_failed_load(&source_context, tool, error)
+                            })
                     })
                     .and_then(|(before, Loaded { warnings, apply })| {
                         let read = loader.read_generation(context, config, source_set, index);
@@ -1726,7 +1728,8 @@ fn guarded_load(
     commit: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<Loaded, AppError> {
     gate.before_load(set, tool, &read)?;
-    let Loaded { warnings, apply } = load().inspect_err(|_| gate.after_failed_load(set, tool))?;
+    let Loaded { warnings, apply } =
+        load().inspect_err(|error| gate.after_failed_load(set, tool, error))?;
     let (mut warnings, token) = generation_after_load(gate, set, tool, warnings, read())?;
     let recorded = gate.after_load(set, tool, token.as_deref(), apply.mark());
     warnings.extend(remember_unapplied(&apply, recorded, commit)?);
