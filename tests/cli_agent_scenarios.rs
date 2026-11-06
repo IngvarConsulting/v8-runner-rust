@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 use support::command_data::assert_data_matches_one_of;
 use support::fake_agent::{
-    read_or_empty, serve_managed_launches_on_a_reserved_port, write_fake_designer, FakeAgent, Hold,
-    HoldReply, AGENT_PASSWORD,
+    process_is_alive, read_or_empty, serve_managed_launches_on_a_reserved_port,
+    write_fake_designer, FakeAgent, Hold, HoldReply, AGENT_PASSWORD,
 };
 use support::{
     interrupt_at_hold, temp_workspace, v8_runner_command, AGENT_COMMAND_ABANDONED,
@@ -672,12 +672,16 @@ fn extensions_create_does_not_rewrite_a_synonym_with_named_languages() {
     let (harness, code, payload) = create_with_languages(&["ru"], &["--synonym", "de='Проба'"]);
 
     assert_ne!(code, 0, "{payload}");
-    assert_eq!(create_commands(&harness).len(), 1);
+    let commands = create_commands(&harness);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(commands[0].contains("--synonym=de='Проба'"), "{commands:?}");
 
     let (harness, code, payload) = create_with_languages(&["uk"], &["--synonym", "uk='Проба'"]);
 
     assert_eq!(code, 0, "{payload}");
-    assert_eq!(create_commands(&harness).len(), 1);
+    let commands = create_commands(&harness);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(commands[0].contains("--synonym=uk='Проба'"), "{commands:?}");
 }
 
 /// Создание, выключение и удаление: синоним уходит в форме NStr(), как требует агент.
@@ -1028,6 +1032,15 @@ fn an_agent_of_a_platform_ignoring_shutdown_is_not_awaited() {
         "{:?}",
         began.elapsed()
     );
+    let pid = read_or_empty(&harness.dir.path().join("designer.pid"));
+    let pid = pid.trim();
+    let alive = process_is_alive(pid.parse().expect("designer pid"));
+    if alive {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status();
+    }
+    assert!(!alive, "the agent process was left running");
 }
 
 /// Строки журнала, которых ждут тесты, — те же, что пишет раннер: переименование падает

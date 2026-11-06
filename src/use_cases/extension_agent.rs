@@ -203,7 +203,7 @@ const NO_SHIPPED_LANGUAGE: &str = "the configuration has neither the ru nor the 
 /// передаётся как есть и без запасных; простая заворачивается в обе поставляемые локали, а
 /// конфигурации, где какой-то из них нет, достаётся форма с одной.
 fn synonym_forms(value: &str) -> (String, Vec<String>) {
-    if value.contains("='") {
+    if names_a_language(value) {
         return (value.to_owned(), Vec::new());
     }
     let escaped = value.replace('\'', "''");
@@ -211,6 +211,17 @@ fn synonym_forms(value: &str) -> (String, Vec<String>) {
         format!("ru='{escaped}'; en='{escaped}'"),
         vec![format!("ru='{escaped}'"), format!("en='{escaped}'")],
     )
+}
+
+/// Начинается ли строка с кода языка в форме `NStr()`. Сочетание `='` в середине простого текста
+/// языка не называет.
+fn names_a_language(value: &str) -> bool {
+    value
+        .trim_start()
+        .split_once("='")
+        .is_some_and(|(code, _)| {
+            !code.is_empty() && code.chars().all(|c| c.is_alphanumeric() || c == '_')
+        })
 }
 
 fn create_command(name: &str, name_prefix: &str, synonym: &str, purpose: Option<&str>) -> String {
@@ -312,6 +323,16 @@ mod tests {
         assert_eq!(
             synonym_forms("uk='Проба'"),
             ("uk='Проба'".to_owned(), Vec::new())
+        );
+        assert_eq!(
+            synonym_forms("look =' odd"),
+            (
+                "ru='look ='' odd'; en='look ='' odd'".to_owned(),
+                vec![
+                    "ru='look ='' odd'".to_owned(),
+                    "en='look ='' odd'".to_owned(),
+                ],
+            )
         );
     }
 
