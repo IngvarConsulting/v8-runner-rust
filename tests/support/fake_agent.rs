@@ -119,6 +119,8 @@ pub struct FakeAgent {
     sftp_channels: Arc<Mutex<Vec<ChannelId>>>,
     /// Состав расширений базы: `properties get/set`, `create`, `delete`.
     pub extensions: Arc<Mutex<Vec<FakeExtension>>>,
+    /// Коды языков конфигурации: синониму с другим кодом двойник отвечает `LanguageNotFound`.
+    pub languages: Vec<&'static str>,
     /// Что было собрано из каких xml: обратная выгрузка возвращает тот же описатель.
     external_sources: Arc<Mutex<HashMap<PathBuf, String>>>,
     buffers: Arc<Mutex<HashMap<ChannelId, Vec<u8>>>>,
@@ -177,6 +179,7 @@ impl FakeAgent {
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
             extension_generations: Arc::new(Mutex::new(HashMap::new())),
+            languages: vec!["ru", "en"],
             extensions: Arc::new(Mutex::new(vec![FakeExtension {
                 name: "Зонд".to_owned(),
                 active: true,
@@ -576,6 +579,20 @@ impl FakeAgent {
             if !option("synonym").is_some_and(|synonym| synonym.contains("='")) {
                 return (
                     "[{\"type\":\"error\",\"error-type\":\"CommandFormatError\",\"message\":\"Неверный формат команды:Ошибка разбора параметра: synonym\"}]\n".to_owned(),
+                    false,
+                );
+            }
+            // Как настоящий агент: код языка вне конфигурации — отказ, ничего не создано.
+            let synonym = option("synonym").unwrap_or_default();
+            let unknown = synonym
+                .split(';')
+                .filter_map(|part| part.split_once('=').map(|(code, _)| code.trim()))
+                .find(|code| !self.languages.contains(code));
+            if let Some(code) = unknown {
+                return (
+                    format!(
+                        "[{{\"type\":\"error\",\"error-type\":\"LanguageNotFound\",\"message\":\"Язык с кодом '{code}' не найден\",\"body\":[]}}]"
+                    ),
                     false,
                 );
             }

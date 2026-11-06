@@ -4,7 +4,7 @@
 //!
 //! Двойник агента (`support::fake_agent`) отказывает файловым параметрам через
 //! символическую ссылку, как настоящий агент (замер 15.09.2026), и требует синоним в
-//! форме `NStr()` — так проверяется, что раннер пишет файлы прямо в каталог агента,
+//! форме `NStr()` с языками конфигурации — так проверяется, что раннер пишет файлы прямо в каталог агента,
 //! копирует исходники внешних обработок и заворачивает синоним.
 #![cfg(unix)]
 
@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 use support::command_data::assert_data_matches_one_of;
 use support::fake_agent::{
-    read_or_empty, serve_managed_launches_on_a_reserved_port, write_fake_designer, FakeAgent, Hold,
-    HoldReply, AGENT_PASSWORD,
+    process_is_alive, read_or_empty, serve_managed_launches_on_a_reserved_port,
+    write_fake_designer, FakeAgent, Hold, HoldReply, AGENT_PASSWORD,
 };
 use support::{
     interrupt_at_hold, temp_workspace, v8_runner_command, AGENT_COMMAND_ABANDONED,
@@ -44,6 +44,17 @@ fn harness_for(connection: Option<&str>, providers: &str) -> Harness {
 
 /// Стенд, двойник которого держит команду `hold`, пока тест её не отпустит.
 fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>) -> Harness {
+    harness_speaking(connection, providers, hold, &["ru", "en"], "8.3.27.2074")
+}
+
+/// Стенд, в конфигурации которого только эти языки.
+fn harness_speaking(
+    connection: Option<&str>,
+    providers: &str,
+    hold: Option<Hold>,
+    languages: &[&'static str],
+    platform: &str,
+) -> Harness {
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let project = root.join("project");
@@ -74,7 +85,7 @@ fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>
     fs::create_dir_all(&work_path).expect("work dir");
     fs::create_dir_all(root.join("ib")).expect("ib");
     fs::write(root.join("ib").join("1Cv8.1CD"), "db").expect("ib file");
-    let bin = root.join("platform").join("8.3.27.2074").join("bin");
+    let bin = root.join("platform").join(platform).join("bin");
     fs::create_dir_all(&bin).expect("platform dir");
 
     let commands_log = root.join("agent-commands.log");
@@ -89,6 +100,7 @@ fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>
         designer_pid_file.clone(),
     );
     agent.hold = hold;
+    agent.languages = languages.to_vec();
     // Двойник держит объявленный порт занятым весь прогон и отвечает ключом, который
     // раннер передал агенту.
     let port = serve_managed_launches_on_a_reserved_port(agent, None);
@@ -111,10 +123,11 @@ fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>
     fs::write(
         &config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
+            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '{version}'\n  designer_agent:\n    port: {port}\n",
             work = work_path.display(),
             password = AGENT_PASSWORD,
             platform = root.join("platform").display(),
+            version = platform,
         ),
     )
     .expect("write config");
@@ -586,6 +599,91 @@ fn extensions_safety_is_disabled_through_the_agent_in_one_session() {
     );
 }
 
+fn create_commands(harness: &Harness) -> Vec<String> {
+    commands(harness)
+        .into_iter()
+        .filter(|line| line.starts_with("config extensions create"))
+        .collect()
+}
+
+fn create_with_languages(languages: &[&'static str], synonym: &[&str]) -> (Harness, i32, Value) {
+    let harness = harness_speaking(
+        None,
+        "  extensions: agent\n",
+        None,
+        languages,
+        "8.3.27.2074",
+    );
+    let mut arguments = vec![
+        "extensions",
+        "create",
+        "--name",
+        "Проба",
+        "--name-prefix",
+        "Пр_",
+    ];
+    arguments.extend_from_slice(synonym);
+    let (code, payload) = run(&harness, &arguments);
+    (harness, code, payload)
+}
+
+/// В конфигурации нет `en`, как на чистой базе: синоним без языка переживает отказ по языку,
+/// и расширение создаётся формой с тем языком, что есть.
+#[test]
+fn extensions_create_without_a_synonym_fits_a_configuration_without_en() {
+    let (harness, code, payload) = create_with_languages(&["ru"], &[]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        create_commands(&harness),
+        [
+            "config extensions create --extension=Проба --name-prefix=Пр_ --synonym=\"ru='Проба'; en='Проба'\"",
+            "config extensions create --extension=Проба --name-prefix=Пр_ --synonym=ru='Проба'",
+        ]
+    );
+}
+
+#[test]
+fn extensions_create_without_a_synonym_fits_a_configuration_without_ru() {
+    let (harness, code, payload) = create_with_languages(&["en"], &[]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        create_commands(&harness).last().map(String::as_str),
+        Some("config extensions create --extension=Проба --name-prefix=Пр_ --synonym=en='Проба'")
+    );
+}
+
+/// Ни `ru`, ни `en`: отказ называет, что делать.
+#[test]
+fn extensions_create_without_a_shipped_language_names_the_way_out() {
+    let (harness, code, payload) = create_with_languages(&["uk"], &[]);
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(create_commands(&harness).len(), 3);
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("--synonym"), "{payload}");
+    assert!(message.contains("LanguageNotFound"), "{payload}");
+}
+
+/// Многоязычная строка пользователя уходит один раз: её языки он назвал сам.
+#[test]
+fn extensions_create_does_not_rewrite_a_synonym_with_named_languages() {
+    let (harness, code, payload) = create_with_languages(&["ru"], &["--synonym", "de='Проба'"]);
+
+    assert_ne!(code, 0, "{payload}");
+    let commands = create_commands(&harness);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(commands[0].contains("--synonym=de='Проба'"), "{commands:?}");
+
+    let (harness, code, payload) = create_with_languages(&["uk"], &["--synonym", "uk='Проба'"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let commands = create_commands(&harness);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(commands[0].contains("--synonym=uk='Проба'"), "{commands:?}");
+}
+
 /// Создание, выключение и удаление: синоним уходит в форме NStr(), как требует агент.
 #[test]
 fn extensions_create_activate_and_delete_reach_the_agent_verbs() {
@@ -868,7 +966,81 @@ fn an_extension_created_through_the_agent_names_the_deferral_of_its_failure() {
             .unwrap_or_else(|| panic!("{payload}"));
         let failure = message.find(failure).unwrap_or_else(|| panic!("{payload}"));
         assert!(deferral < failure, "{payload}");
+        // Отказ не по языку перебор форм синонима не продолжает.
+        assert_eq!(create_commands(&harness).len(), 1, "{payload}");
     }
+}
+
+/// Отмена, пришедшая, пока агент отказывал по языку, останавливает перебор форм синонима.
+#[test]
+fn a_cancellation_during_a_language_refusal_stops_the_synonym_forms() {
+    let marks = temp_workspace();
+    let held = hold(&marks, "config extensions create", HoldReply::Normal);
+    let (started, release) = (held.started.clone(), held.release.clone());
+    let harness = harness_speaking(
+        None,
+        EVERY_AGENT_PROVIDER,
+        Some(held),
+        &["ru"],
+        "8.3.27.2074",
+    );
+
+    let (code, payload) = interrupt_at_hold(
+        runner(
+            &harness,
+            &[
+                "extensions",
+                "create",
+                "--name",
+                "Проба",
+                "--name-prefix",
+                "Пр_",
+            ],
+        ),
+        &marks.path().join("actions.log"),
+        &started,
+        &release,
+        CRITICAL_INTERRUPTION_DEFERRED,
+    );
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(create_commands(&harness).len(), 1, "{payload}");
+}
+
+/// Агент 8.3.24 не выполняет `common shutdown`: не отвечает и не выходит. Команду ему отдают, но
+/// полные сроки закрытия, 45 с, не ждут, и исход команды от этого не меняется.
+#[test]
+fn an_agent_of_a_platform_ignoring_shutdown_is_not_awaited() {
+    let marks = temp_workspace();
+    let held = hold(&marks, "common shutdown", HoldReply::Normal);
+    let started = held.started.clone();
+    let harness = harness_speaking(
+        None,
+        EVERY_AGENT_PROVIDER,
+        Some(held),
+        &["ru", "en"],
+        "8.3.24.1819",
+    );
+
+    let began = std::time::Instant::now();
+    let (code, payload) = run(&harness, &["extensions", "list"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(started.exists(), "common shutdown was not sent: {payload}");
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        began.elapsed()
+    );
+    let pid = read_or_empty(&harness.dir.path().join("designer.pid"));
+    let pid = pid.trim();
+    let alive = process_is_alive(pid.parse().expect("designer pid"));
+    if alive {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status();
+    }
+    assert!(!alive, "the agent process was left running");
 }
 
 /// Строки журнала, которых ждут тесты, — те же, что пишет раннер: переименование падает

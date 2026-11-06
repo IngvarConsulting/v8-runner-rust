@@ -655,6 +655,10 @@ v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
   базы цепочка `ibcmd` → `agent`, у кластера и автономного сервера — только `agent`
   (Конфигуратор вторым у кластера — [#428](https://github.com/IngvarConsulting/v8-runner-rust/issues/428)).
   Не готов никто из строки — операция отказывает, а не уходит на Designer.
+- `create`: `--synonym` — строка в форме `NStr()` (`ru='Проба'`) или простой текст. Через агента
+  простой текст и синоним по умолчанию (имя расширения) уходят с языками `ru` и `en`, а если какого-то
+  из них в конфигурации нет — с тем, что есть. Нет ни одного — отказ: задайте `--synonym` с языком
+  конфигурации. Строку с названными языками раннер отправляет как есть.
 - `list` и `info` отдают по расширению: `name`, `version`, `active`, `purpose`,
   `safe_mode`, `security_profile_name`, `unsafe_action_protection`,
   `used_in_distributed_infobase`, `scope`, `hash_sum`. Пустое поле платформы —
