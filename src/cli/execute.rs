@@ -3017,6 +3017,7 @@ fn execute_make_all(
         .packages_directory(command, &args.output, None)
         .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
     let request = MakeAllRequest {
+        full: args.full,
         output_directory,
         dry_run,
     };
@@ -3812,6 +3813,7 @@ fn map_artifacts_request_with_config(
     };
 
     Ok(ArtifactsRequest {
+        full: args.full,
         dry_run,
         execution: ArtifactsRequest::default_execution(mode),
         mode,
@@ -5111,6 +5113,14 @@ fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succee
     if let Some(extension) = result.extension.as_deref() {
         details.push(format!("extension: {extension}"));
     }
+    if let Some(build) = result
+        .execution
+        .payload
+        .as_ref()
+        .and_then(|metadata| metadata.build.as_ref())
+    {
+        details.push(format!("build: {} ({})", build.mode.as_str(), build.reason));
+    }
     let package_artifacts = result
         .execution
         .artifacts
@@ -5910,6 +5920,7 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
+                full: false,
                 output: "dist/ext.cfe".to_owned(),
                 source_set: SourceSetArg::named("ext-sales"),
                 extension: Some("SalesAddon".to_owned()),
@@ -5927,6 +5938,7 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
+                full: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: SourceSetArg::named("main"),
                 extension: Some("   ".to_owned()),
@@ -6192,6 +6204,7 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Artifacts(ArtifactsArgs {
+                full: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: SourceSetArg::default(),
                 extension: None,
