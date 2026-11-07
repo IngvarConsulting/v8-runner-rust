@@ -3786,3 +3786,105 @@ v8-runner --json-message push main
 ```
 
 На обеих версиях агент читал и писал через точку соединения. После правки базы Конфигуратором `pull main` и `pull main --object` принесли её в файлы проекта, режимы `INCREMENTAL` и `PARTIAL`. При наборе в корне, когда каталог агента лежит внутри выставленного каталога, полная и частичная загрузка прошли, правка оказалась в базе, исходники целы. Снятие точки соединения цель не затрагивает. Кластер, автономный сервер и сетевые каталоги не проверялись.
+
+## Управляемый агент: ключ, порт и Windows ACL на Linux и Windows (#429)
+
+Замер 07.11.2026, продолжение [#429](https://github.com/IngvarConsulting/v8-runner-rust/issues/429)
+после macOS-замера 08.10.2026 и реализации раннего отказа в
+[#458](https://github.com/IngvarConsulting/v8-runner-rust/pull/458).
+Раннер `0.16.0` собран из `26c755dbbff36170dcfadd452aad1954bb615a41`, без изменения Rust-кода.
+Стенды: Ubuntu 24.04.4 LTS, x86_64, kernel 6.8.0-137-generic; Windows Enterprise LTSC 2024,
+build 26100, x86_64. На Linux **весь раннер и все прямые вызовы платформы работают под
+`sudo`, UID/GID 0 (`root`), с `xvfb-run -a`**. Это не замер непривилегированного пользователя:
+его лицензирование не подтверждается. Windows — повышенный процесс пользователя `victor\Виктор`.
+Для каждой версии выделена отдельная копия файловой DemoTrd; оригинал не открывался.
+
+**Команды.** `<W>` — отдельный каталог прогона версии, `<ib>` — его копия базы.
+`providers.download: agent`, `format: DESIGNER`, набор `main` типа `CONFIGURATION`,
+`infobase.connection: File=<ib>`, пользователь `Администратор`, пустой пароль;
+`tools.platform.path` указывает точно на каталог измеряемой сборки (на Windows — `bin`).
+При свободном порте секции `tools.designer_agent` нет:
+
+```text
+v8-runner --config <W>/free.yaml --json-message --log-level debug download main --output <W>/free.cf
+sudo xvfb-run -a <runner> --config <W>/free.yaml --json-message --log-level debug download main --output <W>/free.cf
+```
+
+Первая строка — Windows, вторая — Linux. Фактическая форма аргументов дочернего процесса,
+сверенная по `Win32_Process.CommandLine` / `/proc/<pid>/cmdline`:
+
+```text
+<platform>/1cv8[.exe] DESIGNER /IBConnectionString File=<ib> /AgentMode /AgentPort <p> /AgentListenAddress 127.0.0.1 /AgentSSHHostKey <W>/free/agent/host-keys/host-key-<pid>-<uuid> /AgentBaseDir <W>/free/agent/base /Out <W>/free/logs/platform/infobase-export-agent.out.log
+```
+
+**Ключ и свободный порт.** Файл имеет заголовок `-----BEGIN OPENSSH PRIVATE KEY-----`,
+ED25519 и комментарий `v8-runner managed agent`. Во время выгрузки открытая часть из
+OpenSSH-файла сравнена побайтно с `ssh-keyscan -T 2 -t ed25519 -p <p> 127.0.0.1`;
+SHA256 вычислен по public-key blob (также сверялся `ssh-keygen -lf <key>`).
+Это именно ключ раннера, а не ключ из `ssh-keygen` для отдельного прямого запуска ниже.
+
+| ОС / платформа | Свободный порт | Совпавший отпечаток файла и SSH | `download`, с |
+| --- | --- | --- | --- |
+| Linux, root / 8.3.27.2342 | 35479 | `SHA256:29Pc2n86vPHqt4dBpGDSnRV+oCDt//nHHaEYMyTATo0` | 125,758 |
+| Linux, root / 8.5.1.1343 | 32989 | `SHA256:czgI503f0WNivMgtf4BNCBj0ITz0NNqnkq10z7xjTgA` | 143,518 |
+| Windows / 8.3.27.2342 | 7019 | `SHA256:08cQTqXKFMLsj/G+mZBmn4nMc7km3C3EPFMOudPgwJg` | 66,306 |
+| Windows / 8.5.1.1529 | 13956 | `SHA256:RAzkUZzQo+n5sjWVRRdRfRmj0jxQJMhqwAzMpxjHmzk` | 74,887 |
+
+На Linux оба файла ключа принадлежат `root:root`, UID/GID 0, mode `0600`; порты входят в
+`/proc/sys/net/ipv4/ip_local_port_range` стенда: 32768–60999.
+На Windows оба порта входят в фактический динамический диапазон стенда
+(`netsh int ipv4 show dynamicport tcp`: начало 1024, 13977 портов).
+Все четыре выгрузки завершились `rc=0`, `ok: true`, `provider.selected: agent`,
+`endpoint.mode: managed`, `published: true`; размер каждого CF — 922720016 байт.
+Одноразовые ключи после успеха удалены.
+
+**Занятый порт.** Python `socket.bind(('127.0.0.1', 0)); listen(10)` держал порт до конца
+обоих запусков; слушатель не SSH. В конфиг раннера добавлены только
+`tools.designer_agent.port: <p>` и `startup_timeout_ms: 60000`; команда `download` та же.
+Отдельный прямой запуск воспроизводил порядок аргументов раннера выше, но с
+`/AgentSSHHostKey <W>/direct-key`, `/AgentBaseDir <W>/direct-agent`, `/Out <W>/direct.out`.
+Для него `ssh-keygen -q -t ed25519 -N "" -C "v8-runner managed agent" -f <W>/direct-key`
+создал OpenSSH-ключ, на Linux с правами `0600`.
+
+| ОС / платформа | Занятый порт | Прямая платформа: rc / время, с | Раннер: rc / время, с |
+| --- | --- | --- | --- |
+| Linux, root / 8.3.27.2342 | 48173 | 0 / 9,528 | 2 / 11,785 |
+| Linux, root / 8.5.1.1343 | 35547 | 0 / 9,973 | 2 / 18,192 |
+| Windows / 8.3.27.2342 | 7824 | 0 / 10,313 | 2 / 14,983 |
+| Windows / 8.5.1.1529 | 6951 | 0 / 3,832 | 2 / 5,956 |
+
+stdout/stderr прямого агента пусты на обеих ОС. Linux `/Out` обеих версий:
+`Фатальная ошибка SSH-сервера: Binding to 127.0.0.1:<p>: Адрес уже используется`;
+структурная ошибка bind — `98` (`Address already in use`). Windows `/Out` — UTF-8 BOM, начало:
+`Фатальная ошибка SSH-сервера: Binding to 127.0.0.1:<p>:`; русская системная часть
+**уже в исходном файле платформы** содержит U+FFFD (8.3: 76 символов), это не ошибка
+декодирования раннером. ОС также даёт раннеру структурную ошибку bind `10048` с читаемым
+сообщением. JSON раннера: `ok: false`, `error.code: environment_unavailable`,
+`port <p> of the managed agent is taken by another process`, текст `/Out`,
+`published: false`. Срок 60000 мс не выжидался. Классификация `PortTaken` опирается
+на завершившийся до первой сессии процесс и занятость порта после выхода, а не на прозу
+или `rc=0` отдельно. Контрольный слушатель оставался привязан, ключи раннера удалены.
+
+**ACL Windows.** `Get-Acl -LiteralPath <key|host-keys|workPath>` снят с живых ключей
+обеих версий (дополнительные запуски `download` на занятом порту, до выхода агента).
+Владелец файла и каталогов — `BUILTIN\Администраторы`, `AreAccessRulesProtected: false`.
+Все ACE файла унаследованы: Administrators и SYSTEM — FullControl, Users —
+ReadAndExecute/Synchronize, Authenticated Users — Modify/Synchronize. DACL файла:
+
+```text
+D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)
+```
+
+Непосредственный `host-keys` и `workPath` имеют одинаковую наследуемую DACL:
+
+```text
+D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;0x1200a9;;;BU)(A;ID;0x1301bf;;;AU)(A;OICIIOID;SDGXGWGR;;;AU)
+```
+
+Обе платформы принимают такой ключ; Windows OpenSSH `ssh-keygen -lf` при этом предупреждает
+`UNPROTECTED PRIVATE KEY FILE`. Это **не эквивалент `0600`**: доступ зависит от ACL
+`workPath`, раннер здесь их не сужает. Проверка не доказывает безопасность общего каталога;
+для закрытого ключа нужен каталог с подходящими правами.
+
+Нечитаемый ключ на новых ОС, кластер, автономный сервер, другой SSH-сервер как держатель
+порта и запуск Linux без root в этом замере не проверялись.
