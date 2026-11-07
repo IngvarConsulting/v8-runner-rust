@@ -74,19 +74,19 @@
 <h1>dbms</h1>
 <p class="lede">Команды <code>dbms</code> запускают и останавливают PostgreSQL для базы, объявленной <code>dbms.managed</code>, на машине раннера Windows, без службы и без прав администратора. Вашу СУБД раннер только использует и не трогает её процессы.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
-<h2 class="command-variant" id="op-dbms-start">dbms start <span class="plan-badge">План</span></h2>
+<h2 class="command-variant" id="op-dbms-start">dbms start</h2>
 <pre data-output-command><code>v8-runner dbms start</code></pre>
 <p>Запускает PostgreSQL из каталога <code>tools.postgres.path</code> и отдаёт ответ после того, как он принял соединение. При первом запуске создаёт каталог данных и пароль. Слушает только <code>127.0.0.1</code>, вход — <code>scram-sha-256</code>. Порт выбирается вне динамического диапазона и закрепляется, потому что на него ссылается зарегистрированная база. Занят чужим процессом — команда отказывает и называет его, а переносить PostgreSQL на другой порт не умеет. PostgreSQL живёт между командами. Вид СУБД, адрес и пароль не объявляются. На Linux и macOS команда отказывает.</p>
 <p>Если PostgreSQL уже запущен, команда ничего не запускает, но считает его явным: <code>stop</code> сервера его больше не трогает.</p>
 <pre data-output-command><code>v8-runner dbms start --dry-run</code></pre>
 <p>Показывает исполняемый файл, каталог данных и порт. Ничего не запускает.</p>
-<h2 class="command-variant" id="op-dbms-status">dbms status <span class="plan-badge">План</span></h2>
+<h2 class="command-variant" id="op-dbms-status">dbms status</h2>
 <pre data-output-command><code>v8-runner dbms status</code></pre>
 <p>Отвечает, работает ли PostgreSQL базы из <code>--infobase</code> или <code>origin</code>; строка соединения в <code>--infobase</code> — отказ: не запущен, запускается, запущен раннером или порт занят не раннером. Для своей СУБД называет PID, адрес, имя пользователя, путь к файлу пароля и кто её поднял. Значение пароля не показывает. Замок рабочей копии команде не нужен. Ключа <code>--dry-run</code> у неё нет.</p>
-<h2 class="command-variant" id="op-dbms-stop">dbms stop <span class="plan-badge">План</span></h2>
+<h2 class="command-variant" id="op-dbms-stop">dbms stop</h2>
 <pre data-output-command><code>v8-runner dbms stop</code></pre>
 <p>Останавливает свой PostgreSQL и ждёт завершения его процессов. Данные остаются. С <code>--dry-run</code> показывает план и ничего не останавливает. Пока работает свой сервер этой базы, команда отказывает и называет его. Если PostgreSQL не запущен, останавливать нечего, и команда успешна; чужой процесс на этом порту она называет и не трогает.</p>
-<h2 class="command-variant" id="op-dbms-restart">dbms restart <span class="plan-badge">План</span></h2>
+<h2 class="command-variant" id="op-dbms-restart">dbms restart</h2>
 <pre data-output-command><code>v8-runner dbms restart</code></pre>
 <p>То же, что <code>dbms stop</code> и затем <code>dbms start</code>. Пока работает свой сервер этой базы, команда отказывает и называет его.</p>
 <h3 id="dbms-ownership">Кто что останавливает</h3>
@@ -110,31 +110,31 @@
 <h3 id="response-classes">Классы ответов</h3>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
-<tbody><tr data-response-class="planned"><td>PostgreSQL запущен</td><td><code>dbms start</code> запустил PostgreSQL, он принял соединение. <a href="#dbms-started">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Состояние</td><td><code>dbms status</code> называет свой PostgreSQL или говорит, что он не запущен. <a href="#dbms-status-own">Пример</a></td></tr>
-<tr data-response-class="planned"><td>PostgreSQL остановлен</td><td><code>dbms stop</code> завершил свои процессы. <a href="#dbms-stopped">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Сервер ещё работает</td><td><code>dbms stop</code> при работающем своём сервере отказывает и называет его: <code>invalid_argument</code>, выход CLI 2. <a href="#dbms-server-running">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Нет сборки или другая ОС</td><td><code>tools.postgres.path</code> не объявлен, в нём нет сборки или это Linux либо macOS: <code>environment_unavailable</code>, выход CLI 2. <a href="#dbms-no-build">Пример</a></td></tr>
+<tbody><tr data-response-class="outcome"><td>PostgreSQL запущен</td><td><code>dbms start</code> запустил PostgreSQL, он принял соединение. <a href="#dbms-started">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Состояние</td><td><code>dbms status</code> называет свой PostgreSQL или говорит, что он не запущен. <a href="#dbms-status-own">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>PostgreSQL остановлен</td><td><code>dbms stop</code> завершил свои процессы. <a href="#dbms-stopped">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Сервер ещё работает</td><td><code>dbms stop</code> при работающем своём сервере отказывает и называет его: <code>invalid_argument</code>, выход CLI 2. <a href="#dbms-server-running">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Нет сборки или другая ОС</td><td><code>tools.postgres.path</code> не объявлен, в нём нет сборки или это Linux либо macOS: <code>environment_unavailable</code>, выход CLI 2. <a href="#dbms-no-build">Пример</a></td></tr>
 </tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h3>Варианты ответа</h3>
 <h4 id="dbms-started">PostgreSQL запущен</h4>
-<pre data-output-example="dbms-started" data-output-schema="planned"><code>✓ dbms: start - postgres 17.11, pid 40112
+<pre data-output-example="dbms-started" data-output-schema="dbms-start"><code>✓ dbms: start - postgres 17.11, pid 40112
 │   address   127.0.0.1 port=24432
 │   ready in 1.2 s</code></pre>
 <h4 id="dbms-status-own">Состояние своего PostgreSQL</h4>
-<pre data-output-example="dbms-status-own" data-output-schema="planned"><code>origin: PostgreSQL, started by this working copy
+<pre data-output-example="dbms-status-own" data-output-schema="dbms-status"><code>origin: PostgreSQL, started by this working copy
   pid 40112 · postgres 17.11 · ready · explicit
   address   127.0.0.1 port=24432
   user      postgres
   password  build/infobases/origin/managed/postgres/password</code></pre>
 <h4 id="dbms-stopped">PostgreSQL остановлен</h4>
-<pre data-output-example="dbms-stopped" data-output-schema="planned"><code>✓ dbms: stop - postgres pid 40112 stopped</code></pre>
+<pre data-output-example="dbms-stopped" data-output-schema="dbms-stop"><code>✓ dbms: stop - postgres pid 40112 stopped</code></pre>
 <h4 id="dbms-server-running">Сервер ещё работает</h4>
-<pre data-output-example="dbms-server-running" data-output-schema="planned"><code>ERROR: validation error: the cluster of origin is still running on this PostgreSQL; run cluster stop first</code></pre>
+<pre data-output-example="dbms-server-running" data-output-schema="dbms-stop"><code>ERROR: validation error: the cluster of origin is still running on this PostgreSQL; run cluster stop first</code></pre>
 <h4 id="dbms-no-build">Нет сборки</h4>
-<pre data-output-example="dbms-no-build" data-output-schema="planned"><code>ERROR: environment unavailable: the PostgreSQL build was not found: declare tools.postgres.path</code></pre>
+<pre data-output-example="dbms-no-build" data-output-schema="dbms-start"><code>ERROR: environment unavailable: the PostgreSQL build was not found: declare tools.postgres.path</code></pre>
 </main>
 <script type="application/json" id="output-examples">{
   "dbms-started": {
@@ -142,13 +142,18 @@
     "command": "dbms start",
     "duration_ms": 1240,
     "data": {
+      "ok": true,
       "infobase": "origin",
       "state": "started_by_this_copy",
       "pid": 40112,
       "version": "17.11",
       "address": "127.0.0.1 port=24432",
+      "user": "postgres",
+      "password_file": "build/infobases/origin/managed/postgres/password",
       "explicit": true,
-      "ready": true
+      "ready": true,
+      "action": "started",
+      "duration_ms": 1240
     },
     "warnings": [],
     "steps": []
@@ -158,6 +163,7 @@
     "command": "dbms status",
     "duration_ms": 18,
     "data": {
+      "ok": true,
       "infobase": "origin",
       "state": "started_by_this_copy",
       "pid": 40112,
@@ -166,7 +172,9 @@
       "user": "postgres",
       "password_file": "build/infobases/origin/managed/postgres/password",
       "explicit": true,
-      "ready": true
+      "ready": true,
+      "action": "reported",
+      "duration_ms": 18
     },
     "warnings": [],
     "steps": []
@@ -176,9 +184,13 @@
     "command": "dbms stop",
     "duration_ms": 610,
     "data": {
+      "ok": true,
       "infobase": "origin",
       "state": "not_running",
-      "stopped_pid": 40112
+      "action": "stopped",
+      "ready": false,
+      "stopped_pid": 40112,
+      "duration_ms": 610
     },
     "warnings": [],
     "steps": []
@@ -188,15 +200,25 @@
     "command": "dbms stop",
     "duration_ms": 9,
     "data": {
+      "ok": false,
       "infobase": "origin",
-      "state": "started_by_this_copy"
+      "state": "started_by_this_copy",
+      "pid": 40112,
+      "version": "17.11",
+      "address": "127.0.0.1 port=24432",
+      "user": "postgres",
+      "password_file": "build/infobases/origin/managed/postgres/password",
+      "explicit": true,
+      "ready": true,
+      "action": "reported",
+      "duration_ms": 9
     },
     "warnings": [],
     "steps": [],
     "error": {
       "kind": "validation",
       "code": "invalid_argument",
-      "message": "the cluster of origin is still running on this PostgreSQL; run cluster stop first"
+      "message": "the standalone of 'origin' is still running on this PostgreSQL; run standalone stop first"
     }
   },
   "dbms-no-build": {
@@ -204,8 +226,12 @@
     "command": "dbms start",
     "duration_ms": 6,
     "data": {
+      "ok": false,
       "infobase": "origin",
-      "state": "not_running"
+      "state": "not_running",
+      "action": "reported",
+      "ready": false,
+      "duration_ms": 6
     },
     "warnings": [],
     "steps": [],

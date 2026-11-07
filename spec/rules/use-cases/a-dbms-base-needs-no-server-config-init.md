@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-DBMS-BASE-NEEDS-NO-SERVER-CONFIG-INIT
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - src/use_cases/managed_stand/standalone.rs::a_dbms_server_starts_over_its_database_with_the_password_on_stdin
 ---
 
 # Для базы в СУБД `server config init` не вызывается

@@ -15,7 +15,6 @@ use std::time::Duration;
     not(windows),
     allow(dead_code, reason = "читает только запуск на Windows")
 )]
-#[derive(Debug, Clone)]
 pub struct ServiceRequest {
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -26,6 +25,8 @@ pub struct ServiceRequest {
         allow(dead_code, reason = "читает только запуск на Windows")
     )]
     pub log_path: PathBuf,
+    /// Что служба прочитает из stdin: пароль СУБД `ibsrv -W`, чтобы его не было в командной строке.
+    pub stdin: Option<String>,
 }
 
 /// Служба не переживёт выход раннера.
@@ -136,8 +137,9 @@ mod listing_tests {
 mod imp {
     use std::ffi::{OsStr, OsString};
     use std::fs::{File, OpenOptions};
+    use std::io::Write as _;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::{
@@ -152,6 +154,7 @@ mod imp {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetProcessTimes,
         InitializeProcThreadAttributeList, OpenProcess, QueryFullProcessImageNameW,
@@ -332,6 +335,25 @@ mod imp {
         }
     }
 
+    /// Чтение из канала, в котором уже лежит этот текст; запись закрыта, поэтому читатель увидит конец.
+    fn input_with(text: &str) -> std::io::Result<File> {
+        let (mut read, mut write): (HANDLE, HANDLE) = (null_mut(), null_mut());
+        // SAFETY: указатели смотрят на живые переменные, атрибуты по умолчанию.
+        if unsafe { CreatePipe(&mut read, &mut write, null(), 0) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: оба дескриптора только что созданы и переходят во владение `File`.
+        let (read, mut write) = unsafe {
+            (
+                File::from_raw_handle(read.cast()),
+                File::from_raw_handle(write.cast()),
+            )
+        };
+        write.write_all(text.as_bytes())?;
+        write.write_all(b"\n")?;
+        Ok(read)
+    }
+
     /// Запускает службу со скрытой консолью, без унаследованных дескрипторов, вывод в журнал.
     pub fn spawn_hidden(request: &ServiceRequest) -> Result<u32, ServiceSpawnError> {
         create_hidden(request, breakaway_flag()?)
@@ -345,9 +367,12 @@ mod imp {
             .create(true)
             .append(true)
             .open(&request.log_path)?;
-        let null_input = OpenOptions::new().read(true).open("NUL")?;
+        let input = match &request.stdin {
+            Some(text) => input_with(text)?,
+            None => OpenOptions::new().read(true).open("NUL")?,
+        };
         let stdout = inheritable(&log)?;
-        let stdin = inheritable(&null_input)?;
+        let stdin = inheritable(&input)?;
         let mut list = HandleList::new([stdout, stdin])?;
 
         // SAFETY: нулевая структура — допустимое значение этого C-типа.
@@ -529,6 +554,7 @@ mod imp {
                     args: vec!["/C".to_owned(), "echo hello".to_owned()],
                     workdir: Some(dir.path().to_path_buf()),
                     log_path: log.clone(),
+                    stdin: None,
                 },
                 0,
             )
@@ -541,6 +567,31 @@ mod imp {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             panic!("the service did not write to its log");
+        }
+
+        #[test]
+        fn a_service_reads_what_was_given_to_its_stdin_and_the_argument_stays_clean() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("service.log");
+            let system = std::env::var_os("ComSpec").expect("ComSpec");
+            create_hidden(
+                &ServiceRequest {
+                    program: system.into(),
+                    args: vec!["/C".to_owned(), "findstr .".to_owned()],
+                    workdir: Some(dir.path().to_path_buf()),
+                    log_path: log.clone(),
+                    stdin: Some("secret-value".to_owned()),
+                },
+                0,
+            )
+            .unwrap();
+            for _ in 0..100 {
+                if std::fs::read_to_string(&log).is_ok_and(|text| text.contains("secret-value")) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            panic!("the service did not read its stdin");
         }
 
         #[test]

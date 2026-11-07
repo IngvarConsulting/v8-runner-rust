@@ -1525,9 +1525,17 @@ fn project_managed_standalone(
         if running.is_some() {
             return Err(ConfigValidationError::ManagedServerIsRunning.into());
         }
-        if let Some(db_path) = managed.db_path {
-            config.infobase.connection = format!("File={}", db_path.display());
-            config.infobase.standalone = None;
+        match managed.db_path {
+            Some(db_path) => {
+                config.infobase.connection = format!("File={}", db_path.display());
+                config.infobase.standalone = None;
+            }
+            // База в СУБД: цель остаётся автономной, её создаёт сценарий стенда. Адрес — заглушка
+            // для проверок формы: сервера ещё нет.
+            None => {
+                let name = managed.name.as_deref().unwrap_or(infobase_name.as_str());
+                config.infobase.connection = format!("Srvr=127.0.0.1;Ref={name}");
+            }
         }
         return Ok(());
     }
@@ -2865,6 +2873,43 @@ mod tests {
         let standalone = config.infobase.standalone.as_ref().unwrap();
         assert_eq!(standalone.gate.as_deref(), Some("127.0.0.1:24001"));
         assert!(standalone.exchange.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn infobase_create_is_refused_under_the_running_server() {
+        use crate::platform::ibsrv::ServerPorts;
+        use crate::platform::service_record::{
+            machine_fingerprint, write_json, RecordState, ServicePaths, ServiceRecord,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = managed_standalone_config(dir.path());
+        let paths = ServicePaths::new(&config.work_path, "origin", "standalone");
+        let pid = std::process::id();
+        let facts = crate::platform::service::process_facts(pid).unwrap();
+        write_json(&paths.pins(), &ServerPorts::from_first(24000)).unwrap();
+        write_json(
+            &paths.record(),
+            &ServiceRecord {
+                state: RecordState::Running,
+                pid: Some(pid),
+                started: Some(facts.started),
+                image: Some(facts.image),
+                machine: machine_fingerprint(),
+                starter: None,
+                port: 24000,
+                explicit: true,
+                bin: std::path::PathBuf::from("ibsrv"),
+                version: None,
+            },
+        )
+        .unwrap();
+        let refused = super::project_managed_standalone(
+            &mut config,
+            &super::ConfigValidationMode::InfobaseCreate { preview: false },
+        )
+        .unwrap_err();
+        assert!(refused.to_string().contains("standalone stop"), "{refused}");
     }
 
     fn managed_standalone_config(dir: &Path) -> crate::config::model::AppConfig {

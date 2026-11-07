@@ -1,7 +1,7 @@
 ---
 id: INV.PLATFORM.A-MANAGED-SERVER-KEEPS-ITS-OWN-DATA-DIRECTORY
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - src/use_cases/managed_stand/standalone.rs::a_dbms_server_starts_over_its_database_with_the_password_on_stdin
 ---
 
 # У поднятого раннером `ibsrv` свой каталог `--data`
