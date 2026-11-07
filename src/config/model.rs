@@ -468,18 +468,18 @@ pub struct InfobaseWebConfig {
     pub url: Option<String>,
 }
 
-/// Сервер этой базы поднимает раннер.
-pub fn declares_a_managed_server(&self) -> bool {
-    self.standalone
-        .as_ref()
-        .is_some_and(|standalone| standalone.managed.is_some())
-        || self
-            .cluster
-            .as_ref()
-            .is_some_and(|cluster| cluster.managed.is_some())
-}
-
 impl InfobaseConfig {
+    /// Сервер этой базы поднимает раннер.
+    pub fn declares_a_managed_server(&self) -> bool {
+        self.standalone
+            .as_ref()
+            .is_some_and(|standalone| standalone.managed.is_some())
+            || self
+                .cluster
+                .as_ref()
+                .is_some_and(|cluster| cluster.managed.is_some())
+    }
+
     /// Адрес, к которому привязана память о базе, — без учётных данных и выбора исполнителя.
     /// У цели, которую приняла проверка конфигурации, он есть всегда
     /// (`INV.CONFIG.AN-ACCEPTED-TARGET-HAS-A-MEMORY-ADDRESS`); `None` — только у формы, которую
