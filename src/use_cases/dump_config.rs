@@ -3804,7 +3804,7 @@ exit 0"#,
             .expect("warning")
             .contains("IBCMD does not support object-scoped partial dump"));
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains(" export --threads=1 --sync "), "{calls}");
+        assert!(calls.contains(" export --sync "), "{calls}");
     }
 
     #[test]
@@ -3894,10 +3894,7 @@ exit 0"#,
         assert_eq!(result.requested_mode, DumpMode::Partial);
         assert_eq!(result.mode, ReportedDumpMode::Incremental);
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(
-            calls.contains(" export --threads=1 --extension ext --sync "),
-            "{calls}"
-        );
+        assert!(calls.contains(" export --extension ext --sync "), "{calls}");
         assert!(result
             .message
             .as_deref()
