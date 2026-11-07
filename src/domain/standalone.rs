@@ -35,5 +35,8 @@ pub struct StandaloneResult {
     pub occupant_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_pid: Option<u32>,
+    /// PostgreSQL, погашенный вместе с сервером, потому что поднят его шагом.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_dbms_pid: Option<u32>,
     pub duration_ms: u64,
 }

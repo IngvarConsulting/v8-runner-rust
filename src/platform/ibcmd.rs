@@ -215,6 +215,7 @@ pub struct IbcmdDsl<'a> {
     runner: &'a dyn ProcessRunner,
     execution_policy: ProcessExecutionPolicy,
     data_path: Option<PathBuf>,
+    locale: Option<String>,
 }
 
 impl<'a> IbcmdDsl<'a> {
@@ -233,7 +234,14 @@ impl<'a> IbcmdDsl<'a> {
             runner,
             execution_policy,
             data_path: None,
+            locale: None,
         }
+    }
+
+    /// Национальные настройки новой базы в СУБД: `--locale` у `infobase create`.
+    pub fn with_locale(mut self, locale: Option<String>) -> Self {
+        self.locale = locale;
+        self
     }
 
     /// Uses an isolated standalone-server data directory for every IBCMD call.
@@ -613,6 +621,9 @@ impl<'a> IbcmdDsl<'a> {
         let mut args = self.infobase_args(&["create"]);
         if matches!(self.connection, IbcmdConnection::Server { .. }) {
             args.push("--create-database".to_owned());
+            if let Some(locale) = &self.locale {
+                args.push(format!("--locale={locale}"));
+            }
         }
         args.extend(self.connection.auth_args());
         args.extend(self.connection.dbms_auth_args());

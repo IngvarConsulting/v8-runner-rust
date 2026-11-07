@@ -83,7 +83,17 @@ fn run_init(
                 config
                     .default_provider(Operation::Init)
                     .unwrap_or(crate::domain::capability::Provider::Designer),
-                receipt,
+                // Базу такого сервера создаёт `ibcmd`, и квитанция называет его.
+                if is_managed_standalone(config) {
+                    crate::domain::capability::ProviderReceipt {
+                        selected: Some(Provider::Ibcmd),
+                        origin: crate::domain::capability::ProviderOrigin::Default,
+                        skipped: Vec::new(),
+                        endpoint: None,
+                    }
+                } else {
+                    receipt
+                },
             ),
         };
     let mut steps = Vec::new();
@@ -363,7 +373,11 @@ fn ensure_infobase(
         // Базу автономного сервера создают до его запуска, на его машине: раннер к серверу
         // только подключается (`INV.CLI.INFOBASE-CREATE-FOLLOWS-THE-TARGET-KIND`).
         TargetKind::Standalone => {
-            StepOutcome::failed("infobase", "create", started, standalone_refusal())
+            if is_managed_standalone(config) {
+                ensure_managed_standalone_base(context, config, utilities, dry_run)
+            } else {
+                StepOutcome::failed("infobase", "create", started, standalone_refusal())
+            }
         }
         TargetKind::Cluster => ensure_cluster_infobase(context, config, utilities, dry_run),
         TargetKind::File => match config.v8_connection().file_path().map(PathBuf::from) {
@@ -383,6 +397,39 @@ fn ensure_infobase(
                 AppError::Runtime("a file target names no infobase path".to_owned()),
             ),
         },
+    }
+}
+
+/// Цель — автономный сервер, которым управляет раннер.
+fn is_managed_standalone(config: &AppConfig) -> bool {
+    config.target_kind() == TargetKind::Standalone
+        && config
+            .infobase
+            .standalone
+            .as_ref()
+            .is_some_and(|standalone| standalone.managed.is_some())
+}
+
+/// База сервера `standalone.managed` в СУБД: её создаёт сценарий стенда.
+fn ensure_managed_standalone_base(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    dry_run: bool,
+) -> StepOutcome {
+    let started = Instant::now();
+    let binary = match utilities.locate(crate::platform::locator::UtilityType::Ibcmd) {
+        Ok(location) => location.path,
+        Err(error) => {
+            return StepOutcome::failed("infobase", "create", started, AppError::from(error))
+        }
+    };
+    match crate::use_cases::managed_stand::create_standalone_base(context, config, binary, dry_run)
+    {
+        Ok(message) if dry_run => StepOutcome::planned("infobase", "create", started, message),
+        Ok(message) => StepOutcome::ok("infobase", "create", started, message)
+            .with_warnings(remember_created_base(config, None).as_slice()),
+        Err(error) => StepOutcome::failed("infobase", "create", started, error),
     }
 }
 

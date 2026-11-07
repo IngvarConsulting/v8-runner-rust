@@ -6,13 +6,16 @@ use std::time::{Duration, Instant};
 
 use super::{
     await_gone, being_started, environment, forget_record, io_failure, occupant_of, port_offsets,
-    validation, write_record, ServiceCommand, ServiceHost,
+    validation, write_record, ServiceCommand, ServiceHost, Stand,
 };
 use crate::config::model::AppConfig;
+use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
 use crate::domain::dbms::{ServiceAction, ServiceState};
 use crate::domain::standalone::StandaloneResult;
 use crate::platform::agent::write_service_host_key;
-use crate::platform::ibsrv::{self, ServerPorts};
+use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
+use crate::platform::ibsrv::{self, DbmsTarget, ServerPorts, ServerStorage};
+use crate::platform::postgres;
 use crate::platform::process::ProcessRunner;
 use crate::platform::service::ServiceSpawnError;
 use crate::platform::service_record::{
@@ -20,6 +23,7 @@ use crate::platform::service_record::{
     ServicePaths, ServiceRecord,
 };
 use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::context::InterruptionSafetyClass;
 use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
@@ -27,11 +31,28 @@ const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const SOFT_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(200);
 
+/// Где лежит база сервера.
+enum Storage {
+    File(PathBuf),
+    /// PostgreSQL поднимает раннер.
+    ManagedDbms {
+        name: String,
+    },
+    /// СУБД ваша.
+    OwnDbms {
+        kind: String,
+        server: String,
+        name: String,
+        user: Option<String>,
+        password: Option<String>,
+    },
+}
+
 /// То, что сценарий узнаёт о цели из настроек.
 struct Declared {
     infobase: String,
     name: String,
-    db_path: PathBuf,
+    storage: Storage,
 }
 
 fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
@@ -50,18 +71,45 @@ fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
         .name
         .clone()
         .ok_or_else(|| validation("infobase.standalone.managed.name is not declared"))?;
-    let db_path = managed
-        .db_path
-        .clone()
-        .ok_or_else(|| validation("infobase.standalone.managed.db-path is not declared"))?;
+    let storage = match (&managed.db_path, &config.infobase.dbms) {
+        (Some(db_path), None) => Storage::File(db_path.clone()),
+        (None, Some(dbms)) => {
+            let database = dbms
+                .name
+                .clone()
+                .ok_or_else(|| validation("infobase.dbms.name is not declared"))?;
+            if dbms.managed.is_some() {
+                Storage::ManagedDbms { name: database }
+            } else {
+                let required = |value: &Option<String>, key: &str| {
+                    value
+                        .clone()
+                        .ok_or_else(|| validation(format!("infobase.dbms.{key} is not declared")))
+                };
+                Storage::OwnDbms {
+                    kind: required(&dbms.kind, "kind")?,
+                    server: required(&dbms.server, "server")?,
+                    name: database,
+                    user: dbms.user.clone(),
+                    password: dbms.password.clone(),
+                }
+            }
+        }
+        _ => {
+            return Err(validation(
+                "infobase.standalone.managed names one storage: either db-path or the section infobase.dbms",
+            ))
+        }
+    };
     Ok(Declared {
         infobase,
         name,
-        db_path,
+        storage,
     })
 }
 
 struct Server<'a> {
+    config: &'a AppConfig,
     context: &'a ExecutionContext,
     runner: &'a dyn ProcessRunner,
     host: &'a dyn ServiceHost,
@@ -81,6 +129,35 @@ impl Server<'_> {
             &|pid| host.facts(pid),
             &|record| adopt_recorded_pid(record, &|pid| host.facts(pid), machine.as_deref()),
         )
+    }
+
+    /// Файловая база сервера, если он над файловой базой.
+    fn db_path(&self) -> Option<&std::path::Path> {
+        match &self.declared.storage {
+            Storage::File(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Чужой `ibsrv` над этой же базой: ключи запуска, которые её называют.
+    fn foreign_server(&self) -> Option<u32> {
+        let keys = match &self.declared.storage {
+            Storage::File(path) => ibsrv::file_base_keys(path),
+            Storage::ManagedDbms { name } => {
+                let port = self.stand()?.pinned_port()?;
+                ibsrv::database_keys(&postgres::server_address(port), name)
+            }
+            Storage::OwnDbms { server, name, .. } => ibsrv::database_keys(server, name),
+        };
+        self.host.server_with(&keys)
+    }
+
+    /// СУБД, которую поднимает раннер, как шаг этого сервера.
+    fn stand(&self) -> Option<Stand<'_>> {
+        matches!(self.declared.storage, Storage::ManagedDbms { .. })
+            .then(|| Stand::new(self.config, self.context, self.runner, self.host).ok())
+            .flatten()
+            .map(Stand::server_step)
     }
 
     fn pins(&self) -> Option<ServerPorts> {
@@ -103,6 +180,7 @@ impl Server<'_> {
             stale_record: false,
             occupant_pid: None,
             stopped_pid: None,
+            stopped_dbms_pid: None,
             duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
         }
     }
@@ -170,21 +248,49 @@ impl Server<'_> {
             Observed::Stale => true,
             Observed::Nothing => false,
         };
-        if let Some(pid) = self.host.server_over(&self.declared.db_path) {
+        if let Some(pid) = self.foreign_server() {
             return Err(UseCaseError::new(
                 UseCaseErrorKind::WorkspaceBusy,
                 format!(
-                    "the infobase '{}' is served by ibsrv pid {pid}, which this runner did not start; it is left running",
-                    self.declared.db_path.display()
+                    "the infobase of '{}' is served by ibsrv pid {pid}, which this runner did not start; it is left running",
+                    self.declared.infobase
                 ),
             ));
         }
-        if !self.declared.db_path.join("1Cv8.1CD").is_file() {
-            return Err(validation(format!(
-                "there is no infobase in '{}': create it with `infobase create` before the server starts",
-                self.declared.db_path.display()
-            )));
+        if let Some(db_path) = self.db_path() {
+            if !db_path.join("1Cv8.1CD").is_file() {
+                return Err(validation(format!(
+                    "there is no infobase in '{}': create it with `infobase create` before the server starts",
+                    db_path.display()
+                )));
+            }
         }
+        // Шаг сервера: поднятая здесь СУБД гаснет при любой неудаче дальше.
+        let stand = self.stand();
+        let raised = match &stand {
+            Some(stand) => stand.start(false)?.action == ServiceAction::Started,
+            None => false,
+        };
+        match self.start_process(stale, machine, stand.as_ref()) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                if raised {
+                    if let Some(stand) = &stand {
+                        let _ = stand.stop_if_step();
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn start_process(
+        &self,
+        stale: bool,
+        machine: String,
+        stand: Option<&Stand<'_>>,
+    ) -> Result<StandaloneResult, UseCaseError> {
+        let storage = self.server_storage(stand)?;
         let ibsrv = (self.locate)()?;
         self.paths
             .prepare()
@@ -230,10 +336,10 @@ impl Server<'_> {
             version: None,
         };
         self.write_record(&record)?;
-        let request = ibsrv::start_over_file_base(
+        let request = ibsrv::start_server(
             &ibsrv,
             &self.paths.data(),
-            &self.declared.db_path,
+            &storage.view(),
             &self.declared.name,
             ports,
             &key,
@@ -275,6 +381,47 @@ impl Server<'_> {
         result.ready = true;
         result.stale_record = stale;
         Ok(self.describe(result, record.pid))
+    }
+
+    /// Значения для ключей `ibsrv`. У управляемой СУБД они из её записи, и БД должна уже быть.
+    fn server_storage(&self, stand: Option<&Stand<'_>>) -> Result<OwnedStorage, UseCaseError> {
+        match (&self.declared.storage, stand) {
+            (Storage::File(path), _) => Ok(OwnedStorage::File(path.clone())),
+            (Storage::ManagedDbms { name }, Some(stand)) => {
+                let (port, bin) = stand.running_record()?;
+                if !stand.database_exists(port, &bin, name)? {
+                    return Err(validation(format!(
+                        "there is no database '{name}' in the PostgreSQL of this infobase: create it with `infobase create` before the server starts"
+                    )));
+                }
+                Ok(OwnedStorage::Dbms {
+                    kind: "PostgreSQL".to_owned(),
+                    server: postgres::server_address(port),
+                    name: name.clone(),
+                    user: Some(postgres::SUPERUSER.to_owned()),
+                    password: Some(stand.password()?),
+                })
+            }
+            (
+                Storage::OwnDbms {
+                    kind,
+                    server,
+                    name,
+                    user,
+                    password,
+                },
+                _,
+            ) => Ok(OwnedStorage::Dbms {
+                kind: kind.clone(),
+                server: server.clone(),
+                name: name.clone(),
+                user: user.clone(),
+                password: password.clone(),
+            }),
+            (Storage::ManagedDbms { .. }, None) => Err(validation(
+                "the PostgreSQL of this infobase could not be reached",
+            )),
+        }
     }
 
     fn await_ready(&self, record: &ServiceRecord, ports: ServerPorts) -> Result<(), UseCaseError> {
@@ -353,6 +500,18 @@ impl Server<'_> {
     }
 
     fn stop(&self, dry_run: bool) -> Result<StandaloneResult, UseCaseError> {
+        let mut result = self.stop_server(dry_run)?;
+        if !dry_run {
+            // Сервер гаснет первым: СУБД нужна ему до конца. Шаг сервера гаснет вместе с ним, в том
+            // числе если сам сервер уже упал.
+            if let Some(stand) = self.stand() {
+                result.stopped_dbms_pid = stand.stop_if_step()?;
+            }
+        }
+        Ok(result)
+    }
+
+    fn stop_server(&self, dry_run: bool) -> Result<StandaloneResult, UseCaseError> {
         if dry_run {
             return Ok(self.plan());
         }
@@ -390,7 +549,7 @@ impl Server<'_> {
 
     fn name_occupant(&self, result: &mut StandaloneResult) {
         let by_port = self.pins().and_then(|ports| self.occupant(ports));
-        if let Some(pid) = by_port.or_else(|| self.host.server_over(&self.declared.db_path)) {
+        if let Some(pid) = by_port.or_else(|| self.foreign_server()) {
             result.state = ServiceState::Foreign;
             result.occupant_pid = Some(pid);
         }
@@ -421,7 +580,8 @@ impl Server<'_> {
         if dry_run {
             return Ok(self.plan());
         }
-        let stopped = self.stop(false)?;
+        // СУБД не трогает: перезапускается только сервер.
+        let stopped = self.stop_server(false)?;
         if let Some(error) = interruption_before_safe_point(self.context, "starting ibsrv again") {
             return Err(error.into());
         }
@@ -450,6 +610,7 @@ pub(super) fn run_standalone(
     let declared = declared(config).map_err(UseCaseFailure::without_payload)?;
     let paths = ServicePaths::new(&config.work_path, &declared.infobase, "standalone");
     let server = Server {
+        config,
         context,
         runner,
         host,
@@ -465,6 +626,145 @@ pub(super) fn run_standalone(
         ServiceCommand::Restart => server.restart(dry_run),
     };
     outcome.map_err(|error| UseCaseFailure::with_payload(error, server.failed()))
+}
+
+/// Значения для ключей `ibsrv`, владеющие своими строками.
+enum OwnedStorage {
+    File(PathBuf),
+    Dbms {
+        kind: String,
+        server: String,
+        name: String,
+        user: Option<String>,
+        password: Option<String>,
+    },
+}
+
+impl OwnedStorage {
+    fn view(&self) -> ServerStorage<'_> {
+        match self {
+            Self::File(path) => ServerStorage::File(path),
+            Self::Dbms {
+                kind,
+                server,
+                name,
+                user,
+                password,
+            } => ServerStorage::Dbms(DbmsTarget {
+                kind,
+                server,
+                name,
+                user: user.as_deref(),
+                password: password.as_deref(),
+            }),
+        }
+    }
+}
+
+/// `infobase create` базы сервера в СУБД: через `ibcmd`, до запуска сервера. У PostgreSQL раннера
+/// существующая БД — отказ до платформы; у вашей СУБД отвечает сам `ibcmd`.
+pub(super) fn create_base(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: PathBuf,
+    dry_run: bool,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Result<String, UseCaseError> {
+    let declared = declared(config)?;
+    let paths = ServicePaths::new(&config.work_path, &declared.infobase, "standalone");
+    let (kind, server, name, user, password) = match &declared.storage {
+        Storage::File(_) => {
+            return Err(validation("a file infobase is created by its own path"));
+        }
+        Storage::ManagedDbms { name } => {
+            let stand = Stand::new(config, context, runner, host)?;
+            let Some((port, bin)) = stand.running_record().ok() else {
+                return Err(UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "the PostgreSQL of this infobase is not running: run `dbms start`".to_owned(),
+                ));
+            };
+            if dry_run {
+                return Ok(format!(
+                    "would create the database '{name}' on {}",
+                    postgres::server_address(port)
+                ));
+            }
+            if stand.database_exists(port, &bin, name)? {
+                return Err(validation(format!(
+                    "the database '{name}' already exists in the PostgreSQL of this infobase: name another with infobase.dbms.name, or drop it with PostgreSQL tools using the password file `dbms status` names"
+                )));
+            }
+            (
+                "PostgreSQL".to_owned(),
+                postgres::server_address(port),
+                name.clone(),
+                Some(postgres::SUPERUSER.to_owned()),
+                Some(stand.password()?),
+            )
+        }
+        Storage::OwnDbms {
+            kind,
+            server,
+            name,
+            user,
+            password,
+        } => (
+            kind.clone(),
+            server.clone(),
+            name.clone(),
+            user.clone(),
+            password.clone(),
+        ),
+    };
+    if dry_run {
+        return Ok(format!("would create the database '{name}' on {server}"));
+    }
+    let dbms = InfobaseDbmsConfig {
+        kind: Some(kind),
+        server: Some(server.clone()),
+        name: Some(name.clone()),
+        user,
+        password,
+        locale: None,
+        managed: None,
+    };
+    let target = InfobaseConfig::server(format!("Srvr=127.0.0.1;Ref={}", declared.name), dbms);
+    let connection = IbcmdConnection::from_infobase(&target)
+        .map_err(|error| UseCaseError::new(UseCaseErrorKind::Runtime, error.to_string()))?;
+    std::fs::create_dir_all(paths.data())
+        .map_err(|error| io_failure("cannot prepare", &paths.data(), &error))?;
+    let locale = config
+        .infobase
+        .dbms
+        .as_ref()
+        .and_then(|dbms| dbms.locale.clone());
+    let outcome = IbcmdDsl::new(
+        binary,
+        connection,
+        runner,
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    )
+    .with_data_path(paths.data())
+    .with_locale(locale)
+    .ensure_infobase_create()
+    .map_err(|error| UseCaseError::new(UseCaseErrorKind::Platform, error.to_string()))?;
+    match outcome.status {
+        IbcmdInfobaseCreateStatus::Created => Ok(format!(
+            "the database '{name}' created on {server}; the first push loads every source-set in full"
+        )),
+        IbcmdInfobaseCreateStatus::AlreadyExists => Err(validation(format!(
+            "the database '{name}' on {server} already holds an infobase: infobase create leaves it untouched"
+        ))),
+        _ => Err(UseCaseError::new(
+            UseCaseErrorKind::Platform,
+            format!(
+                "ibcmd infobase create failed for the database '{name}': {}",
+                outcome.result.process.stderr.trim()
+            ),
+        )),
+    }
 }
 
 /// Имя образа сервера, как его сравнивает запись.
@@ -485,21 +785,56 @@ mod tests {
     };
     use crate::platform::service::{ProcessFacts, ServiceRequest};
     use crate::use_cases::context::CommandName;
-    use std::path::Path;
 
     const PID: u32 = 7001;
+    const PG_PID: u32 = 7002;
     const STARTED: u64 = 11;
     const MACHINE: &str = "machine";
 
-    struct NoRunner;
+    /// Утилиты PostgreSQL: те же подделки, что у сценария `dbms`.
+    struct Runner<'a> {
+        host: &'a Host,
+    }
 
-    impl ProcessRunner for NoRunner {
+    impl ProcessRunner for Runner<'_> {
         fn run_with_policy(
             &self,
-            _request: &ProcessRequest,
+            request: &ProcessRequest,
             _policy: &ProcessExecutionPolicy,
         ) -> Result<ProcessResult, ProcessError> {
-            unreachable!("the server stops through the host")
+            self.host.calls.borrow_mut().push(request.args.clone());
+            let tool = request
+                .program
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let mut stdout = String::new();
+            match tool.as_str() {
+                "initdb" => {
+                    let data = PathBuf::from(&request.args[1]);
+                    std::fs::create_dir_all(&data).unwrap();
+                    std::fs::write(data.join("PG_VERSION"), "17").unwrap();
+                }
+                "pg_ctl" if request.args[0] == "stop" => {
+                    self.host.processes.borrow_mut().remove(&PG_PID);
+                    self.host
+                        .listeners
+                        .borrow_mut()
+                        .retain(|_, pid| *pid != PG_PID);
+                    self.host.pg_stops.set(self.host.pg_stops.get() + 1);
+                }
+                "psql" if self.host.database_exists.get() => {
+                    stdout = "1".to_owned();
+                }
+                _ => {}
+            }
+            Ok(ProcessResult {
+                exit_code: 0,
+                stdout,
+                stderr: String::new(),
+                interruption: None,
+            })
         }
         fn spawn(
             &self,
@@ -523,6 +858,11 @@ mod tests {
         hard_stops: RefCell<HashSet<u32>>,
         last_args: RefCell<Vec<String>>,
         foreign_server: Cell<Option<u32>>,
+        foreign_keys: RefCell<Vec<String>>,
+        database_exists: Cell<bool>,
+        calls: RefCell<Vec<Vec<String>>>,
+        pg_stops: Cell<u32>,
+        last_stdin: RefCell<Option<String>>,
     }
 
     impl ServiceHost for Host {
@@ -534,8 +874,31 @@ mod tests {
             request: &ServiceRequest,
             _work: &WorkGiven,
         ) -> Result<u32, ServiceSpawnError> {
+            if request.program.to_string_lossy().contains("pg_ctl") {
+                let data = PathBuf::from(&request.args[3]);
+                std::fs::write(data.join("postmaster.pid"), format!("{PG_PID}")).unwrap();
+                self.processes.borrow_mut().insert(
+                    PG_PID,
+                    ProcessFacts {
+                        started: STARTED,
+                        image: "postgres.exe".to_owned(),
+                    },
+                );
+                let port = request
+                    .args
+                    .last()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                self.listeners
+                    .borrow_mut()
+                    .insert(port.parse().unwrap(), PG_PID);
+                return Ok(7);
+            }
             self.spawned.set(self.spawned.get() + 1);
             self.last_args.replace(request.args.clone());
+            self.last_stdin.replace(request.stdin.clone());
             if !self.exits_at_once.get() {
                 self.processes.borrow_mut().insert(
                     PID,
@@ -572,19 +935,20 @@ mod tests {
             self.soft_stops.borrow_mut().insert(pid);
             if !self.ignores_soft_stop.get() {
                 self.processes.borrow_mut().remove(&pid);
-                self.listeners.borrow_mut().clear();
+                self.listeners.borrow_mut().retain(|_, held| *held != pid);
             }
         }
         fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
             self.hard_stops.borrow_mut().insert(pid);
             self.processes.borrow_mut().remove(&pid);
-            self.listeners.borrow_mut().clear();
+            self.listeners.borrow_mut().retain(|_, held| *held != pid);
         }
         fn sleep(&self, _duration: Duration) {}
         fn patience(&self, _default: Duration) -> Duration {
             Duration::ZERO
         }
-        fn server_over(&self, _db_path: &Path) -> Option<u32> {
+        fn server_with(&self, keys: &[String]) -> Option<u32> {
+            self.foreign_keys.borrow_mut().extend_from_slice(keys);
             self.foreign_server.get()
         }
     }
@@ -660,7 +1024,7 @@ mod tests {
                 &self.config,
                 command,
                 dry_run,
-                &NoRunner,
+                &Runner { host },
                 host,
                 &locate,
             )
@@ -912,5 +1276,290 @@ mod tests {
         assert_eq!(again.stopped_pid, Some(PID));
         assert_eq!(first.connection, again.connection);
         assert_eq!(host.spawned.get(), 2);
+    }
+
+    /// Сервер над базой в PostgreSQL, которого поднимает раннер.
+    fn over_postgres() -> Setup {
+        let mut setup = setup();
+        let build = setup._root.path().join("pg");
+        std::fs::create_dir_all(build.join("bin")).unwrap();
+        std::fs::write(
+            build
+                .join("bin")
+                .join(format!("pg_ctl{}", std::env::consts::EXE_SUFFIX)),
+            "",
+        )
+        .unwrap();
+        setup.config.tools.postgres.path = Some(build);
+        setup.config.infobase.dbms = Some(crate::config::model::InfobaseDbmsConfig {
+            managed: Some(crate::config::model::ManagedDbmsConfig::default()),
+            name: Some("demo_data".to_owned()),
+            ..Default::default()
+        });
+        let standalone = setup.config.infobase.standalone.as_mut().unwrap();
+        standalone.managed.as_mut().unwrap().db_path = None;
+        setup
+    }
+
+    fn dbms_record(setup: &Setup) -> ServiceRecord {
+        let paths = ServicePaths::new(&setup.config.work_path, "origin", "postgres");
+        read_json(&paths.record()).expect("the record of the PostgreSQL")
+    }
+
+    fn run_dbms(
+        setup: &Setup,
+        host: &Host,
+        command: ServiceCommand,
+    ) -> crate::domain::dbms::DbmsResult {
+        super::super::run_dbms(
+            &ExecutionContext::cli(CommandName::DbmsStart),
+            &setup.config,
+            command,
+            false,
+            &Runner { host },
+            host,
+        )
+        .map_err(|failure| failure.error)
+        .unwrap()
+    }
+
+    #[test]
+    fn a_dbms_server_starts_over_its_database_with_the_password_on_stdin() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let args = host.last_args.borrow();
+        assert!(
+            args.iter().any(|arg| arg == "--dbms=PostgreSQL"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "--db-name=demo_data"),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "-W"), "{args:?}");
+        assert!(
+            args.iter()
+                .any(|arg| arg.starts_with("--data=") && arg.contains("standalone")),
+            "{args:?}"
+        );
+        let stdin = host.last_stdin.borrow().clone().expect("the password");
+        assert!(!args.iter().any(|arg| arg.contains(&stdin)), "{args:?}");
+    }
+
+    #[test]
+    fn a_foreign_server_over_the_same_database_is_found_by_its_keys() {
+        let setup = over_postgres();
+        let host = Host::default();
+        super::super::run_dbms(
+            &ExecutionContext::cli(CommandName::DbmsStart),
+            &setup.config,
+            ServiceCommand::Start,
+            false,
+            &Runner { host: &host },
+            &host,
+        )
+        .map_err(|failure| failure.error)
+        .unwrap();
+        host.foreign_server.set(Some(30117));
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+        assert_eq!(host.spawned.get(), 0, "no second server");
+        let keys = host.foreign_keys.borrow();
+        assert!(
+            keys.iter().any(|key| key == "--db-name=demo_data"),
+            "{keys:?}"
+        );
+        assert!(
+            keys.iter()
+                .any(|key| key.starts_with("--db-server=127.0.0.1 port=")),
+            "{keys:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_over_a_missing_database_names_infobase_create() {
+        let setup = over_postgres();
+        let host = Host::default();
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::Validation);
+        assert!(refused.to_string().contains("infobase create"), "{refused}");
+        assert_eq!(host.spawned.get(), 0);
+        assert!(
+            !setup.paths().record().exists(),
+            "a refusal leaves no record"
+        );
+        assert!(
+            host.processes.borrow().is_empty(),
+            "the step PostgreSQL is stopped"
+        );
+    }
+
+    #[test]
+    fn creating_over_an_existing_database_is_refused() {
+        let setup = over_postgres();
+        let host = Host::default();
+        run_dbms(&setup, &host, ServiceCommand::Start);
+        host.database_exists.set(true);
+        let refused = create_base(
+            &ExecutionContext::cli(CommandName::Init),
+            &setup.config,
+            PathBuf::from("ibcmd.exe"),
+            false,
+            &Runner { host: &host },
+            &host,
+        )
+        .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::Validation);
+        assert!(refused.to_string().contains("already exists"), "{refused}");
+        assert!(
+            refused.to_string().contains("dbms status"),
+            "the way out: {refused}"
+        );
+    }
+
+    #[test]
+    fn creating_without_the_postgres_names_dbms_start() {
+        let setup = over_postgres();
+        let host = Host::default();
+        let refused = create_base(
+            &ExecutionContext::cli(CommandName::Init),
+            &setup.config,
+            PathBuf::from("ibcmd.exe"),
+            false,
+            &Runner { host: &host },
+            &host,
+        )
+        .unwrap_err();
+        assert!(refused.to_string().contains("dbms start"), "{refused}");
+    }
+
+    #[test]
+    fn a_server_step_postgres_stops_with_its_server() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        assert!(!dbms_record(&setup).explicit);
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.stopped_pid, Some(PID));
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+        assert!(host.processes.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_explicit_postgres_outlives_its_server() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        run_dbms(&setup, &host, ServiceCommand::Start);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, None);
+        assert!(host.processes.borrow().contains_key(&PG_PID));
+    }
+
+    #[test]
+    fn a_later_dbms_start_makes_a_step_postgres_explicit() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        run_dbms(&setup, &host, ServiceCommand::Start);
+        assert!(dbms_record(&setup).explicit);
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert!(host.processes.borrow().contains_key(&PG_PID));
+    }
+
+    #[test]
+    fn restart_leaves_the_postgres_alone() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Restart, false, &host).unwrap();
+        assert_eq!(host.pg_stops.get(), 0);
+    }
+
+    #[test]
+    fn a_failed_server_stops_only_what_this_command_raised() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        host.exits_at_once.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert!(
+            host.processes.borrow().is_empty(),
+            "the step PostgreSQL is stopped"
+        );
+
+        let host = Host::default();
+        host.database_exists.set(true);
+        host.exits_at_once.set(true);
+        run_dbms(&setup, &host, ServiceCommand::Start);
+        setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert!(
+            host.processes.borrow().contains_key(&PG_PID),
+            "the explicit one stays"
+        );
+    }
+
+    #[test]
+    fn a_crashed_server_still_takes_its_step_postgres_down() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        host.processes.borrow_mut().remove(&PID);
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.action, ServiceAction::NothingToStop);
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+    }
+
+    #[test]
+    fn a_database_is_created_by_ibcmd_without_a_server_config() {
+        let setup = over_postgres();
+        let host = Host::default();
+        super::super::run_dbms(
+            &ExecutionContext::cli(CommandName::DbmsStart),
+            &setup.config,
+            ServiceCommand::Start,
+            false,
+            &Runner { host: &host },
+            &host,
+        )
+        .map_err(|failure| failure.error)
+        .unwrap();
+        host.calls.borrow_mut().clear();
+        let mut config = setup.config.clone();
+        config.infobase.dbms.as_mut().unwrap().locale = Some("ru".to_owned());
+        let message = create_base(
+            &ExecutionContext::cli(CommandName::Init),
+            &config,
+            PathBuf::from("ibcmd.exe"),
+            false,
+            &Runner { host: &host },
+            &host,
+        )
+        .unwrap();
+        assert!(message.contains("demo_data"), "{message}");
+        let calls = host.calls.borrow();
+        let create = calls
+            .iter()
+            .find(|args| args.iter().any(|arg| arg == "--create-database"))
+            .expect("infobase create");
+        assert!(create.iter().any(|arg| arg == "--locale=ru"), "{create:?}");
+        assert!(
+            !calls.iter().flatten().any(|arg| arg == "init"),
+            "{calls:?}"
+        );
+        assert!(!setup.paths().root().join("passfile").exists());
+        assert!(
+            !ServicePaths::new(&setup.config.work_path, "origin", "postgres")
+                .passfile()
+                .exists(),
+            "the second copy of the password is gone"
+        );
     }
 }

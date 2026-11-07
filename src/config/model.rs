@@ -577,7 +577,6 @@ impl InfobaseConfig {
     }
 
     /// Build a server-based infobase config.
-    #[cfg(test)]
     pub fn server(connection: impl Into<String>, dbms: InfobaseDbmsConfig) -> Self {
         Self {
             connection: connection.into(),

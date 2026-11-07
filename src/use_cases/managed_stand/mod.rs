@@ -57,8 +57,8 @@ pub(crate) trait ServiceHost {
     fn patience(&self, default: Duration) -> Duration {
         default
     }
-    /// Чужой сервер над этой файловой базой.
-    fn server_over(&self, _db_path: &Path) -> Option<u32> {
+    /// Чужой сервер с этими ключами запуска.
+    fn server_with(&self, _keys: &[String]) -> Option<u32> {
         None
     }
 }
@@ -92,8 +92,8 @@ impl ServiceHost for RealHost {
         let request = taskkill(&["/PID", &pid.to_string(), "/T", "/F"]);
         let _ = runner.run_with_policy(&request, &context.cleanup_policy());
     }
-    fn server_over(&self, db_path: &Path) -> Option<u32> {
-        service::ibsrv_over(db_path)
+    fn server_with(&self, keys: &[String]) -> Option<u32> {
+        service::ibsrv_with(keys)
     }
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
@@ -205,6 +205,8 @@ struct Stand<'a> {
     infobase: String,
     paths: ServicePaths,
     started_at: Instant,
+    /// `dbms start` делает СУБД явной; шаг сервера — нет (`INV.USE-CASES.MANAGED-DBMS-OWNERSHIP`).
+    explicit: bool,
 }
 
 impl<'a> Stand<'a> {
@@ -224,7 +226,71 @@ impl<'a> Stand<'a> {
             infobase,
             paths,
             started_at: Instant::now(),
+            explicit: true,
         })
+    }
+
+    /// Та же СУБД как шаг сервера: поднятая так, она гаснет вместе с ним.
+    fn server_step(mut self) -> Self {
+        self.explicit = false;
+        self
+    }
+
+    /// Порт и каталог утилит работающей своей СУБД.
+    fn running_record(&self) -> Result<(u16, PathBuf), UseCaseError> {
+        match self.observe() {
+            Observed::Own(record) => Ok((record.port, record.bin)),
+            _ => Err(validation(
+                "the PostgreSQL of this infobase is not running: run `dbms start`",
+            )),
+        }
+    }
+
+    fn password(&self) -> Result<String, UseCaseError> {
+        std::fs::read_to_string(self.paths.password())
+            .map(|text| text.trim().to_owned())
+            .map_err(|error| io_failure("cannot read", &self.paths.password(), &error))
+    }
+
+    /// Есть ли БД с этим именем у своего PostgreSQL.
+    fn database_exists(&self, port: u16, bin: &Path, name: &str) -> Result<bool, UseCaseError> {
+        let passfile = self.paths.passfile();
+        let password = self.password()?;
+        crate::support::fs::write_file_atomically(&passfile, |file| {
+            file.write_all(postgres::passfile_line(port, &password).as_bytes())
+        })
+        .map_err(|error| io_failure("cannot write", &passfile, &error))?;
+        let build = PostgresBuild::at(bin.to_path_buf());
+        let asked = self.runner.run_with_policy(
+            &build.database_exists(port, &passfile, name),
+            &policy(self.context),
+        );
+        // Вторая копия пароля на диске нужна только на время вопроса.
+        let _ = std::fs::remove_file(&passfile);
+        let answer = asked.map_err(|error| {
+            UseCaseError::new(
+                UseCaseErrorKind::Platform,
+                format!("psql did not run: {error}"),
+            )
+        })?;
+        if answer.outcome().is_err() {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Platform,
+                format!(
+                    "psql could not read the list of databases: {}",
+                    answer.stderr.trim()
+                ),
+            ));
+        }
+        Ok(answer.stdout.trim() == "1")
+    }
+
+    /// Гасит СУБД, если она поднята шагом сервера, а явную не трогает.
+    fn stop_if_step(&self) -> Result<Option<u32>, UseCaseError> {
+        match self.observe() {
+            Observed::Own(record) if !record.explicit => Ok(self.stop(false)?.stopped_pid),
+            _ => Ok(None),
+        }
     }
 
     fn observe(&self) -> Observed {
@@ -346,7 +412,7 @@ impl<'a> Stand<'a> {
         };
         let stale = match self.observe() {
             Observed::Own(mut record) => {
-                record.explicit = true;
+                record.explicit |= self.explicit;
                 self.write_record(&record)?;
                 let mut result = self.result(
                     ServiceState::StartedByThisCopy,
@@ -384,7 +450,7 @@ impl<'a> Stand<'a> {
             machine: Some(machine),
             starter: self.starter(),
             port,
-            explicit: true,
+            explicit: self.explicit,
             bin: build.bin().to_path_buf(),
             version,
         };
@@ -704,6 +770,22 @@ fn write_password(path: &Path) -> std::io::Result<()> {
 }
 
 /// `standalone start|stop|restart`: команда записи, под замком `workPath`.
+pub(crate) fn create_standalone_base(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: PathBuf,
+    dry_run: bool,
+) -> Result<String, UseCaseError> {
+    standalone::create_base(
+        context,
+        config,
+        binary,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost,
+    )
+}
+
 pub fn execute_standalone(
     context: &ExecutionContext,
     config: &AppConfig,

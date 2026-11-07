@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-MANAGED-CREATION-REFUSES-AN-EXISTING-DATABASE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - src/use_cases/managed_stand/standalone.rs::creating_over_an_existing_database_is_refused
 ---
 
 # Создание управляемой базы не берёт существующую БД

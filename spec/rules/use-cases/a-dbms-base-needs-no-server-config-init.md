@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-DBMS-BASE-NEEDS-NO-SERVER-CONFIG-INIT
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - src/use_cases/managed_stand/standalone.rs::a_database_is_created_by_ibcmd_without_a_server_config
 ---
 
 # Для базы в СУБД `server config init` не вызывается

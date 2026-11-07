@@ -617,8 +617,8 @@ infobases:
 сборки PostgreSQL для 1С или его `bin`.
 
 `standalone.managed: { name, db-path }` поручает `ibsrv` раннеру (команды `standalone`, только Windows): `db-path` — файловая
-база сервера, от каталога конфигурации. Шлюзы и адреса не объявляются. База в СУБД вместо `db-path` —
-[#537](https://github.com/IngvarConsulting/v8-runner-rust/issues/537). `cluster.managed: { name }` не допускает `connection`
+база сервера, от каталога конфигурации. Шлюзы и адреса не объявляются. Вместо `db-path` можно объявить секцию `dbms`: управляемую
+или вашу. Рядом с автономным сервером, который поднимаете вы, `dbms` остаётся отказом. `cluster.managed: { name }` не допускает `connection`
 рядом, а поднимать кластер раннер пока не умеет, поэтому команды с такой базой отказывают:
 [#538](https://github.com/IngvarConsulting/v8-runner-rust/issues/538).
 

@@ -1,7 +1,17 @@
 ---
 id: INV.USE-CASES.MANAGED-DBMS-OWNERSHIP
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - src/use_cases/managed_stand/standalone.rs::a_server_step_postgres_stops_with_its_server
+  - src/use_cases/managed_stand/standalone.rs::an_explicit_postgres_outlives_its_server
+  - src/use_cases/managed_stand/standalone.rs::a_later_dbms_start_makes_a_step_postgres_explicit
+  - src/use_cases/managed_stand/standalone.rs::restart_leaves_the_postgres_alone
+  - src/use_cases/managed_stand/standalone.rs::a_failed_server_stops_only_what_this_command_raised
+  - src/use_cases/managed_stand/standalone.rs::a_crashed_server_still_takes_its_step_postgres_down
+  - src/use_cases/managed_stand/mod.rs::stop_refuses_under_a_running_own_server_and_names_it
+  - src/use_cases/managed_stand/mod.rs::a_stale_record_is_replaced_and_named_and_the_data_stays
+  - src/use_cases/managed_stand/mod.rs::stop_that_failed_keeps_the_record_and_a_repeat_goes_on
+  - src/use_cases/managed_stand/mod.rs::a_foreign_process_on_the_pinned_port_is_named_and_left_alone
+  - src/use_cases/managed_stand/mod.rs::status_and_stop_work_from_the_record_when_the_tool_key_is_gone
 ---
 
 # Кто поднял СУБД, тот её и гасит
