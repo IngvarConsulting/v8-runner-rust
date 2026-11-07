@@ -1,7 +1,9 @@
 //! Управляемый стенд: единственный владелец записи о службе, различия своего и чужого, порядка
 //! подъёма и отмены. Команды `dbms` здесь; `cluster` и `standalone` лягут на тот же механизм.
 
-mod record;
+mod standalone;
+
+pub use standalone::StandaloneCommand;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -10,22 +12,22 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use crate::config::model::AppConfig;
-use crate::domain::dbms::{DbmsAction, DbmsResult, DbmsState};
+use crate::domain::dbms::{DbmsResult, ServiceAction, ServiceState};
 use crate::domain::execution::ExecutionInterruptionPhase;
 use crate::platform::postgres::{self, PostgresBuild};
 use crate::platform::process::{
     ProcessExecutionPolicy, ProcessExecutor, ProcessRequest, ProcessRunner, WorkGiven,
 };
 use crate::platform::service::{self, ProcessFacts, ServiceRequest, ServiceSpawnError};
+use crate::platform::service_record::{
+    machine_fingerprint, read_json, write_json, PinnedPorts, RecordState, ServicePaths,
+    ServiceRecord,
+};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::{
     deferred_process_interruption, interruption_before_safe_point,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
-use record::{
-    machine_fingerprint, read_json, write_json, PinnedPorts, RecordState, ServicePaths,
-    ServiceRecord,
-};
 
 /// Сколько ждать готовности и конца процесса.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -51,6 +53,7 @@ pub(crate) trait ServiceHost {
     fn machine(&self) -> Option<String>;
     fn listening_pid(&self, port: u16) -> Option<u32>;
     fn port_answers(&self, port: u16) -> bool;
+    fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext);
     fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext);
     fn sleep(&self, duration: Duration);
     fn ready_timeout(&self) -> Duration {
@@ -61,6 +64,12 @@ pub(crate) trait ServiceHost {
     }
     fn identify_timeout(&self) -> Duration {
         IDENTIFY_TIMEOUT
+    }
+    fn ready_timeout_of(&self, default: Duration) -> Duration {
+        default
+    }
+    fn stop_timeout_of(&self, default: Duration) -> Duration {
+        default
     }
 }
 
@@ -85,6 +94,9 @@ impl ServiceHost for RealHost {
     fn port_answers(&self, port: u16) -> bool {
         service::port_answers(port)
     }
+    fn soft_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
+        let _ = runner.run_with_policy(&taskkill(&["/PID", &pid.to_string()]), &policy(context));
+    }
     fn hard_stop(&self, runner: &dyn ProcessRunner, pid: u32, context: &ExecutionContext) {
         let request = ProcessRequest {
             program: PathBuf::from("taskkill"),
@@ -104,6 +116,18 @@ impl ServiceHost for RealHost {
     }
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+}
+
+fn taskkill(args: &[&str]) -> ProcessRequest {
+    ProcessRequest {
+        program: PathBuf::from("taskkill"),
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        workdir: None,
+        stdout_log_path: None,
+        stderr_log_path: None,
+        startup_probe: None,
+        windows_verbatim_args: Vec::new(),
     }
 }
 
@@ -235,7 +259,7 @@ impl<'a> Stand<'a> {
         read_json::<PinnedPorts>(&self.paths.pins()).map(|pins| pins.port)
     }
 
-    fn result(&self, state: DbmsState, action: DbmsAction) -> DbmsResult {
+    fn result(&self, state: ServiceState, action: ServiceAction) -> DbmsResult {
         DbmsResult {
             ok: true,
             infobase: self.infobase.clone(),
@@ -333,8 +357,10 @@ impl<'a> Stand<'a> {
             Observed::Own(mut record) => {
                 record.explicit = true;
                 self.write_record(&record)?;
-                let mut result =
-                    self.result(DbmsState::StartedByThisCopy, DbmsAction::AlreadyRunning);
+                let mut result = self.result(
+                    ServiceState::StartedByThisCopy,
+                    ServiceAction::AlreadyRunning,
+                );
                 result.ready = self.host.port_answers(record.port);
                 return Ok(self.describe(result, &record));
             }
@@ -402,24 +428,24 @@ impl<'a> Stand<'a> {
             self.stop_started(&build, port);
             return Err(error);
         }
-        let mut result = self.result(DbmsState::StartedByThisCopy, DbmsAction::Started);
+        let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
         result.ready = true;
         result.stale_record = stale;
         Ok(self.describe(result, &record))
     }
 
     fn plan_start(&self) -> Result<DbmsResult, UseCaseError> {
-        let mut result = self.result(DbmsState::NotRunning, DbmsAction::Planned);
+        let mut result = self.result(ServiceState::NotRunning, ServiceAction::Planned);
         result.data_dir = Some(self.paths.data());
         result.log_path = Some(self.paths.log());
         result.password_file = Some(self.paths.password());
         result.address = self.pinned_port().map(postgres::server_address);
         match self.observe() {
             Observed::Own(record) => {
-                result.state = DbmsState::StartedByThisCopy;
+                result.state = ServiceState::StartedByThisCopy;
                 result.pid = record.pid;
             }
-            Observed::Starting(_) => result.state = DbmsState::Starting,
+            Observed::Starting(_) => result.state = ServiceState::Starting,
             Observed::Stale => result.stale_record = true,
             Observed::Nothing => {}
         }
@@ -581,9 +607,9 @@ impl<'a> Stand<'a> {
         self.refuse_under_a_server()?;
         if dry_run {
             let observed = self.observe();
-            let mut result = self.result(DbmsState::NotRunning, DbmsAction::Planned);
+            let mut result = self.result(ServiceState::NotRunning, ServiceAction::Planned);
             if let Observed::Own(record) = observed {
-                result.state = DbmsState::StartedByThisCopy;
+                result.state = ServiceState::StartedByThisCopy;
                 result = self.describe(result, &record);
             }
             return Ok(result);
@@ -610,7 +636,7 @@ impl<'a> Stand<'a> {
             }
         }
         self.forget_record();
-        let mut result = self.result(DbmsState::NotRunning, DbmsAction::Stopped);
+        let mut result = self.result(ServiceState::NotRunning, ServiceAction::Stopped);
         result.stopped_pid = Some(pid);
         result.warnings.extend(deferred);
         Ok(result)
@@ -651,11 +677,11 @@ impl<'a> Stand<'a> {
     }
 
     fn nothing_to_stop(&self, stale: bool) -> DbmsResult {
-        let mut result = self.result(DbmsState::NotRunning, DbmsAction::NothingToStop);
+        let mut result = self.result(ServiceState::NotRunning, ServiceAction::NothingToStop);
         result.stale_record = stale;
         if let Some(port) = self.pinned_port() {
             if let Some(pid) = self.occupant(port) {
-                result.state = DbmsState::Foreign;
+                result.state = ServiceState::Foreign;
                 result.occupant_pid = (pid != 0).then_some(pid);
             }
         }
@@ -665,22 +691,23 @@ impl<'a> Stand<'a> {
     fn status(&self) -> DbmsResult {
         match self.observe() {
             Observed::Own(record) => {
-                let mut result = self.result(DbmsState::StartedByThisCopy, DbmsAction::Reported);
+                let mut result =
+                    self.result(ServiceState::StartedByThisCopy, ServiceAction::Reported);
                 result.ready = self.host.port_answers(record.port);
                 self.describe(result, &record)
             }
             Observed::Starting(record) => {
-                let result = self.result(DbmsState::Starting, DbmsAction::Reported);
+                let result = self.result(ServiceState::Starting, ServiceAction::Reported);
                 self.describe(result, &record)
             }
             observed => {
                 let stale = matches!(observed, Observed::Stale);
-                let mut result = self.result(DbmsState::NotRunning, DbmsAction::Reported);
+                let mut result = self.result(ServiceState::NotRunning, ServiceAction::Reported);
                 result.stale_record = stale;
                 if let Some(port) = self.pinned_port() {
                     result.address = Some(postgres::server_address(port));
                     if let Some(pid) = self.occupant(port) {
-                        result.state = DbmsState::Foreign;
+                        result.state = ServiceState::Foreign;
                         result.occupant_pid = (pid != 0).then_some(pid);
                     }
                 }
@@ -720,6 +747,47 @@ fn write_password(path: &Path) -> std::io::Result<()> {
         .map(|byte| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]))
         .collect();
     crate::support::fs::write_file_atomically(path, |file| file.write_all(text.as_bytes()))
+}
+
+/// `standalone start|stop|restart`: команда записи, под замком `workPath`.
+pub fn execute_standalone(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    command: StandaloneCommand,
+    dry_run: bool,
+) -> UseCaseResult<crate::domain::standalone::StandaloneResult> {
+    standalone::run_standalone(
+        context,
+        config,
+        command,
+        dry_run,
+        &ProcessExecutor,
+        &RealHost,
+        &|| locate_ibsrv(config),
+    )
+}
+
+/// `standalone status`: читает запись без замка, чтобы отвечать и пока идёт другая команда.
+pub fn standalone_status(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> UseCaseResult<crate::domain::standalone::StandaloneResult> {
+    standalone::run_standalone(
+        context,
+        config,
+        StandaloneCommand::Status,
+        false,
+        &ProcessExecutor,
+        &RealHost,
+        &|| locate_ibsrv(config),
+    )
+}
+
+fn locate_ibsrv(config: &AppConfig) -> Result<PathBuf, UseCaseError> {
+    crate::platform::utilities::PlatformUtilities::from_config(config)
+        .locate(crate::platform::locator::UtilityType::Ibsrv)
+        .map(|location| location.path)
+        .map_err(|error| environment(error.to_string()))
 }
 
 /// Какая из команд `dbms`.
@@ -940,6 +1008,7 @@ mod tests {
         fn port_answers(&self, port: u16) -> bool {
             self.listeners.borrow().contains_key(&port)
         }
+        fn soft_stop(&self, _runner: &dyn ProcessRunner, _pid: u32, _context: &ExecutionContext) {}
         fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
             self.hard_stops.borrow_mut().insert(pid);
             self.processes.borrow_mut().remove(&pid);
@@ -1057,7 +1126,7 @@ mod tests {
         let started = setup
             .run(DbmsCommand::Start, false, &runner, &host)
             .unwrap();
-        assert_eq!(started.action, DbmsAction::Started);
+        assert_eq!(started.action, ServiceAction::Started);
         assert_eq!(started.pid, Some(PID));
         assert_eq!(started.version.as_deref(), Some("17.11"));
         assert!(started.ready);
@@ -1076,7 +1145,7 @@ mod tests {
         let again = setup
             .run(DbmsCommand::Start, false, &runner, &host)
             .unwrap();
-        assert_eq!(again.action, DbmsAction::Started);
+        assert_eq!(again.action, ServiceAction::Started);
         assert_eq!(runner.called("initdb"), 1, "the data directory is reused");
         assert_eq!(again.address, started.address, "the port stays pinned");
     }
@@ -1092,7 +1161,7 @@ mod tests {
         let second = setup
             .run(DbmsCommand::Start, false, &runner, &host)
             .unwrap();
-        assert_eq!(second.action, DbmsAction::AlreadyRunning);
+        assert_eq!(second.action, ServiceAction::AlreadyRunning);
         assert_eq!(second.pid, Some(PID));
         assert_eq!(host.spawned.get(), 1);
     }
@@ -1121,11 +1190,11 @@ mod tests {
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
-        assert_eq!(status.state, DbmsState::Foreign);
+        assert_eq!(status.state, ServiceState::Foreign);
         assert_eq!(status.occupant_pid, Some(555));
 
         let stop = setup.run(DbmsCommand::Stop, false, &runner, &host).unwrap();
-        assert_eq!(stop.action, DbmsAction::NothingToStop);
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
         assert_eq!(stop.occupant_pid, Some(555));
         assert!(host.hard_stops.borrow().is_empty());
     }
@@ -1204,13 +1273,13 @@ mod tests {
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
-        assert_eq!(status.state, DbmsState::NotRunning);
+        assert_eq!(status.state, ServiceState::NotRunning);
         assert!(status.stale_record);
 
         let again = setup
             .run(DbmsCommand::Start, false, &runner, &host)
             .unwrap();
-        assert_eq!(again.action, DbmsAction::Started);
+        assert_eq!(again.action, ServiceAction::Started);
         assert!(again.stale_record);
         assert_eq!(runner.called("initdb"), 1);
     }
@@ -1231,7 +1300,7 @@ mod tests {
             },
         );
         let stop = setup.run(DbmsCommand::Stop, false, &runner, &host).unwrap();
-        assert_eq!(stop.action, DbmsAction::NothingToStop);
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
         assert!(stop.stale_record);
         assert_eq!(runner.called("pg_ctl stop"), 0);
         assert!(
@@ -1282,7 +1351,7 @@ mod tests {
                 .run(DbmsCommand::Stop, false, &runner, &host)
                 .unwrap()
                 .action,
-            DbmsAction::Stopped
+            ServiceAction::Stopped
         );
     }
 
@@ -1326,14 +1395,14 @@ mod tests {
                 .run(DbmsCommand::Status, false, &runner, &host)
                 .unwrap()
                 .state,
-            DbmsState::StartedByThisCopy
+            ServiceState::StartedByThisCopy
         );
         assert_eq!(
             setup
                 .run(DbmsCommand::Stop, false, &runner, &host)
                 .unwrap()
                 .action,
-            DbmsAction::Stopped
+            ServiceAction::Stopped
         );
     }
 
@@ -1411,7 +1480,7 @@ mod tests {
         let runner = FakeRunner::new(&host);
         for command in [DbmsCommand::Start, DbmsCommand::Stop, DbmsCommand::Restart] {
             let plan = setup.run(command, true, &runner, &host).unwrap();
-            assert_eq!(plan.action, DbmsAction::Planned);
+            assert_eq!(plan.action, ServiceAction::Planned);
         }
         assert!(runner.calls.borrow().is_empty());
         assert!(!setup.config.work_path.exists());
@@ -1478,7 +1547,7 @@ mod tests {
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
-        assert_eq!(status.state, DbmsState::Foreign);
+        assert_eq!(status.state, ServiceState::Foreign);
         assert!(status.stale_record);
     }
 
@@ -1532,7 +1601,7 @@ mod tests {
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
-        assert_eq!(status.state, DbmsState::Starting);
+        assert_eq!(status.state, ServiceState::Starting);
         for command in [DbmsCommand::Start, DbmsCommand::Stop] {
             let refused = setup.run(command, false, &runner, &host).unwrap_err();
             assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
@@ -1557,7 +1626,7 @@ mod tests {
                 .run(DbmsCommand::Status, false, &runner, &host)
                 .unwrap()
                 .state,
-            DbmsState::StartedByThisCopy
+            ServiceState::StartedByThisCopy
         );
         let stopped = setup.run(DbmsCommand::Stop, false, &runner, &host).unwrap();
         assert_eq!(stopped.stopped_pid, Some(PID));
@@ -1580,10 +1649,10 @@ mod tests {
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
-        assert_eq!(status.state, DbmsState::NotRunning);
+        assert_eq!(status.state, ServiceState::NotRunning);
         assert!(status.stale_record);
         let stop = setup.run(DbmsCommand::Stop, false, &runner, &host).unwrap();
-        assert_eq!(stop.action, DbmsAction::NothingToStop);
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
         assert!(host.processes.borrow().contains_key(&777));
         assert!(host.hard_stops.borrow().is_empty());
     }
@@ -1631,7 +1700,7 @@ mod tests {
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
-        assert_eq!(status.state, DbmsState::StartedByThisCopy);
+        assert_eq!(status.state, ServiceState::StartedByThisCopy);
         assert!(runner.calls.borrow().is_empty());
     }
 
@@ -1646,7 +1715,7 @@ mod tests {
         let restarted = setup
             .run(DbmsCommand::Restart, false, &runner, &host)
             .unwrap();
-        assert_eq!(restarted.action, DbmsAction::Started);
+        assert_eq!(restarted.action, ServiceAction::Started);
         assert_eq!(restarted.stopped_pid, Some(PID));
     }
 
@@ -1697,7 +1766,7 @@ mod tests {
         let status = setup
             .run(DbmsCommand::Status, false, &runner, &host)
             .unwrap();
-        assert_eq!(status.state, DbmsState::NotRunning);
+        assert_eq!(status.state, ServiceState::NotRunning);
         assert!(status.stale_record);
     }
 }

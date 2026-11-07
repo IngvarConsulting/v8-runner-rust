@@ -74,6 +74,8 @@ pub enum Command {
     Init(InfobaseCreateArgs),
     /// Start and stop the PostgreSQL of an infobase declared with dbms.managed
     Dbms(DbmsArgs),
+    /// Start and stop the ibsrv of an infobase declared with standalone.managed
+    Standalone(StandaloneArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -197,6 +199,12 @@ pub enum DbmsCommandArgs {
     Stop,
     /// Stop and start it again
     Restart,
+}
+
+#[derive(Args, Debug)]
+pub struct StandaloneArgs {
+    #[command(subcommand)]
+    pub command: DbmsCommandArgs,
 }
 
 #[derive(Args, Debug)]

@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.A-WORKING-COMMAND-DOES-NOT-START-A-SERVICE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - tests/cli_standalone_managed.rs::a_working_command_without_the_server_is_refused_and_names_the_next_command
+  - tests/cli_standalone_managed.rs::start_without_an_infobase_names_infobase_create
 ---
 
 # Рабочая команда службу не поднимает

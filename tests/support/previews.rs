@@ -88,6 +88,11 @@ pub fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
         name: demo
     dbms:
       managed: {}
+  server:
+    standalone:
+      managed:
+        name: demo
+        db-path: server-ib
 ",
     )
     .expect("write local config");
@@ -190,6 +195,24 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             &["--infobase", "stand", "dbms", "restart"],
             "dbms restart",
             "dbms restart",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "server", "standalone", "start"],
+            "standalone start",
+            "standalone start",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "server", "standalone", "stop"],
+            "standalone stop",
+            "standalone stop",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "server", "standalone", "restart"],
+            "standalone restart",
+            "standalone restart",
             work.clone(),
         ),
         row(&["extensions"], "extensions", "extensions", work.clone()),

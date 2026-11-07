@@ -160,6 +160,26 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "standalone start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone restart",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "diff",
         preview: Preview::Absent("it reads the selected infobase to obtain the answer"),
         base: Base::Resolves,

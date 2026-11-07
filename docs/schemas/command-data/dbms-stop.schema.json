@@ -1,6 +1,6 @@
 {
   "$defs": {
-    "DbmsAction": {
+    "ServiceAction": {
       "description": "Что сделала команда.",
       "enum": [
         "started",
@@ -12,7 +12,7 @@
       ],
       "type": "string"
     },
-    "DbmsState": {
+    "ServiceState": {
       "description": "В каком состоянии служба сейчас.",
       "oneOf": [
         {
@@ -36,7 +36,7 @@
   "additionalProperties": false,
   "properties": {
     "action": {
-      "$ref": "#/$defs/DbmsAction"
+      "$ref": "#/$defs/ServiceAction"
     },
     "address": {
       "description": "Значение для `--db-server`: `127.0.0.1 port=<порт>`.",
@@ -107,7 +107,7 @@
       "type": "boolean"
     },
     "state": {
-      "$ref": "#/$defs/DbmsState"
+      "$ref": "#/$defs/ServiceState"
     },
     "stopped_pid": {
       "format": "uint32",

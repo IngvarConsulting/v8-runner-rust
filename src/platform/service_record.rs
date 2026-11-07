@@ -4,57 +4,67 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::platform::service::ProcessFacts;
+use crate::platform::agent::host_key_fingerprint;
+use crate::platform::ibsrv::ServerPorts;
+use crate::platform::service::{process_facts, ProcessFacts};
 use crate::support::fs::write_file_atomically;
-use crate::support::machine::machine_id;
+use crate::support::machine::{machine_hash, machine_id};
 
 /// Где живёт служба объявленной базы.
 #[derive(Debug, Clone)]
-pub(crate) struct ServicePaths {
+pub struct ServicePaths {
     managed: PathBuf,
     root: PathBuf,
+    service: String,
 }
 
 impl ServicePaths {
-    pub(crate) fn new(work_path: &Path, infobase: &str, service: &str) -> Self {
+    pub fn new(work_path: &Path, infobase: &str, service: &str) -> Self {
         let managed = work_path.join("infobases").join(infobase).join("managed");
         let root = managed.join(service);
-        Self { managed, root }
+        Self {
+            managed,
+            root,
+            service: service.to_owned(),
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn managed(&self) -> &Path {
+    pub fn managed(&self) -> &Path {
         &self.managed
     }
-    pub(crate) fn data(&self) -> PathBuf {
+    pub fn data(&self) -> PathBuf {
         self.root.join("data")
     }
-    pub(crate) fn staged_data(&self) -> PathBuf {
+    pub fn host_key(&self) -> PathBuf {
+        self.root.join("host-key")
+    }
+    pub fn staged_data(&self) -> PathBuf {
         self.root.join("data.staged")
     }
-    pub(crate) fn password(&self) -> PathBuf {
+    pub fn password(&self) -> PathBuf {
         self.root.join("password")
     }
-    pub(crate) fn log(&self) -> PathBuf {
-        self.root.join("postgres.log")
+    pub fn log(&self) -> PathBuf {
+        self.root.join(format!("{}.log", self.service))
     }
-    pub(crate) fn record(&self) -> PathBuf {
+    pub fn record(&self) -> PathBuf {
         self.root.join("record.json")
     }
-    pub(crate) fn pins(&self) -> PathBuf {
+    pub fn pins(&self) -> PathBuf {
         self.root.join("ports.json")
     }
-    pub(crate) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// Запись соседней службы той же базы: сервера над этой СУБД.
-    pub(crate) fn sibling_record(&self, service: &str) -> PathBuf {
+    pub fn sibling_record(&self, service: &str) -> PathBuf {
         self.managed.join(service).join("record.json")
     }
 
     /// Каталог `managed/` со своим `.gitignore`: его содержимому в репозитории не место.
-    pub(crate) fn prepare(&self) -> std::io::Result<()> {
+    pub fn prepare(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)?;
         let ignore = self.managed.join(".gitignore");
         if !ignore.exists() {
@@ -66,47 +76,70 @@ impl ServicePaths {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RecordState {
+pub enum RecordState {
     Starting,
     Running,
 }
 
 /// Запись о запущенной службе. Читатель видит её целиком: замена атомарна.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ServiceRecord {
-    pub(crate) state: RecordState,
-    pub(crate) pid: Option<u32>,
-    pub(crate) started: Option<u64>,
-    pub(crate) image: Option<String>,
-    pub(crate) machine: Option<String>,
+pub struct ServiceRecord {
+    pub state: RecordState,
+    pub pid: Option<u32>,
+    pub started: Option<u64>,
+    pub image: Option<String>,
+    pub machine: Option<String>,
     /// Раннер, записавший `starting`: pid и время старта. Он умер — запись больше не верна.
     #[serde(default)]
-    pub(crate) starter: Option<(u32, u64)>,
-    pub(crate) port: u16,
-    pub(crate) explicit: bool,
+    pub starter: Option<(u32, u64)>,
+    pub port: u16,
+    pub explicit: bool,
     /// Каталог утилит: `status` и `stop` работают, даже если `tools.postgres.path` уже не объявлен.
-    pub(crate) bin: PathBuf,
-    pub(crate) version: Option<String>,
+    pub bin: PathBuf,
+    pub version: Option<String>,
 }
 
 /// Закреплённые порты живут отдельно от записи о запущенной службе: её снятие и замена их не
 /// отменяют (`INV.PLATFORM.MANAGED-PORTS-ARE-PINNED`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct PinnedPorts {
-    pub(crate) port: u16,
+pub struct PinnedPorts {
+    pub port: u16,
 }
 
 /// Хеш `machine_id`; `None`, если система идентификатора не дала.
-pub(crate) fn machine_fingerprint() -> Option<String> {
-    Some(crate::use_cases::infobase_owner::machine_hash(
-        &machine_id()?
-    ))
+pub fn machine_fingerprint() -> Option<String> {
+    Some(machine_hash(&machine_id()?))
+}
+
+/// Сервер, который поднял раннер этой копии, как его видят остальные команды.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningServer {
+    pub ports: ServerPorts,
+    pub host_fingerprint: Option<String>,
+}
+
+/// Работающий свой сервер объявленной базы. Читает запись и спрашивает систему о процессе: адрес
+/// такой цели не объявлен, его знает только запись.
+pub fn running_standalone(work_path: &Path, infobase: &str) -> Option<RunningServer> {
+    let paths = ServicePaths::new(work_path, infobase, "standalone");
+    let record = read_json::<ServiceRecord>(&paths.record())?;
+    if record.state != RecordState::Running {
+        return None;
+    }
+    let facts = record.pid.and_then(process_facts);
+    if !record.is_own(facts.as_ref(), machine_fingerprint().as_deref()) {
+        return None;
+    }
+    Some(RunningServer {
+        ports: read_json(&paths.pins())?,
+        host_fingerprint: host_key_fingerprint(&paths.host_key()),
+    })
 }
 
 impl ServiceRecord {
     /// Свой ли процесс: совпали pid, время старта, образ и машина. Нет `machine_id` — чужой
     /// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
-    pub(crate) fn is_own(&self, facts: Option<&ProcessFacts>, machine: Option<&str>) -> bool {
+    pub fn is_own(&self, facts: Option<&ProcessFacts>, machine: Option<&str>) -> bool {
         let (Some(facts), Some(machine)) = (facts, machine) else {
             return false;
         };
@@ -116,12 +149,12 @@ impl ServiceRecord {
     }
 }
 
-pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 /// Заменяет файл атомарно: `INV.USE-CASES.A-SERVICE-RECORD-IS-REPLACED-ATOMICALLY`.
-pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+pub fn write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

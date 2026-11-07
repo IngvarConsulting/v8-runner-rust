@@ -107,6 +107,10 @@ command_data_forms! {
     "dbms status", "dbms-status" => crate::domain::dbms::DbmsResult;
     "dbms stop", "dbms-stop" => crate::domain::dbms::DbmsResult;
     "dbms restart", "dbms-restart" => crate::domain::dbms::DbmsResult;
+    "standalone start", "standalone-start" => crate::domain::standalone::StandaloneResult;
+    "standalone status", "standalone-status" => crate::domain::standalone::StandaloneResult;
+    "standalone stop", "standalone-stop" => crate::domain::standalone::StandaloneResult;
+    "standalone restart", "standalone-restart" => crate::domain::standalone::StandaloneResult;
     "status", "status" => crate::domain::status::StatusResult;
     "*", "refusal" => crate::cli::output::RefusalData;
     "*", "mcp-refusal" => crate::mcp::service::McpRefusalData;

@@ -159,6 +159,11 @@ pub struct InfobaseConfig {
     /// `ras` — #213, `infobase create` in a cluster — #204).
     #[serde(default)]
     pub cluster: Option<InfobaseClusterConfig>,
+
+    /// Адрес памяти цели, которую поднимает раннер: её порты могут меняться, база — нет
+    /// (`INV.USE-CASES.A-MANAGED-TARGET-MEMORY-FOLLOWS-ITS-NAME`). Ставит загрузчик.
+    #[serde(skip)]
+    pub managed_memory: Option<String>,
 }
 
 /// The cluster section of a server infobase. Every key is optional: each operation asks
@@ -469,6 +474,9 @@ impl InfobaseConfig {
     /// (`INV.CONFIG.AN-ACCEPTED-TARGET-HAS-A-MEMORY-ADDRESS`); `None` — только у формы, которую
     /// проверка отвергает: такая цель память ни с кем не делит.
     pub fn memory_address(&self, base_path: &Path) -> Option<String> {
+        if let Some(address) = &self.managed_memory {
+            return Some(address.clone());
+        }
         // Автономный сервер помнится по SSH-шлюзу, если он объявлен: так память,
         // записанная до прямого шлюза, переживает появление строки рядом с секцией. Без
         // шлюза сервер помнится по строке прямого шлюза.
@@ -495,6 +503,7 @@ impl InfobaseConfig {
             web: None,
             standalone: None,
             cluster: None,
+            managed_memory: None,
         }
     }
 
@@ -567,6 +576,7 @@ impl InfobaseConfig {
             standalone: None,
             dbms: Some(dbms),
             cluster: None,
+            managed_memory: None,
         }
     }
 }

@@ -33,6 +33,10 @@ pub enum CommandName {
     DbmsStatus,
     DbmsStop,
     DbmsRestart,
+    StandaloneStart,
+    StandaloneStatus,
+    StandaloneStop,
+    StandaloneRestart,
     Status,
 }
 
@@ -64,6 +68,10 @@ impl CommandName {
             Self::DbmsStatus => "dbms status",
             Self::DbmsStop => "dbms stop",
             Self::DbmsRestart => "dbms restart",
+            Self::StandaloneStart => "standalone start",
+            Self::StandaloneStatus => "standalone status",
+            Self::StandaloneStop => "standalone stop",
+            Self::StandaloneRestart => "standalone restart",
             Self::Status => "status",
         }
     }

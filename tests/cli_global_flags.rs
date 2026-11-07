@@ -60,6 +60,7 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["platforms"], "platforms"),
     (&["status"], "status"),
     (&["dbms", "status"], "dbms status"),
+    (&["standalone", "status"], "standalone status"),
     (&["diff"], "diff"),
     (&["mcp", "serve", "stdio"], "mcp serve stdio"),
     (&["mcp", "serve", "http"], "mcp serve http"),
