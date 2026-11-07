@@ -57,8 +57,8 @@ pub(crate) trait ServiceHost {
     fn patience(&self, default: Duration) -> Duration {
         default
     }
-    /// Чужой сервер над этой файловой базой.
-    fn server_over(&self, _db_path: &Path) -> Option<u32> {
+    /// Чужой сервер с этими ключами запуска.
+    fn server_with(&self, _keys: &[String]) -> Option<u32> {
         None
     }
 }
@@ -92,8 +92,8 @@ impl ServiceHost for RealHost {
         let request = taskkill(&["/PID", &pid.to_string(), "/T", "/F"]);
         let _ = runner.run_with_policy(&request, &context.cleanup_policy());
     }
-    fn server_over(&self, db_path: &Path) -> Option<u32> {
-        service::ibsrv_over(db_path)
+    fn server_with(&self, keys: &[String]) -> Option<u32> {
+        service::ibsrv_with(keys)
     }
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
@@ -261,18 +261,18 @@ impl<'a> Stand<'a> {
         })
         .map_err(|error| io_failure("cannot write", &passfile, &error))?;
         let build = PostgresBuild::at(bin.to_path_buf());
-        let answer = self
-            .runner
-            .run_with_policy(
-                &build.database_exists(port, &passfile, name),
-                &policy(self.context),
+        let asked = self.runner.run_with_policy(
+            &build.database_exists(port, &passfile, name),
+            &policy(self.context),
+        );
+        // Вторая копия пароля на диске нужна только на время вопроса.
+        let _ = std::fs::remove_file(&passfile);
+        let answer = asked.map_err(|error| {
+            UseCaseError::new(
+                UseCaseErrorKind::Platform,
+                format!("psql did not run: {error}"),
             )
-            .map_err(|error| {
-                UseCaseError::new(
-                    UseCaseErrorKind::Platform,
-                    format!("psql did not run: {error}"),
-                )
-            })?;
+        })?;
         if answer.outcome().is_err() {
             return Err(UseCaseError::new(
                 UseCaseErrorKind::Platform,

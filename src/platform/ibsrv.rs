@@ -67,6 +67,16 @@ pub struct DbmsTarget<'a> {
     pub password: Option<&'a str>,
 }
 
+/// Ключи запуска, которые называют файловую базу. По ним же узнают чужой сервер над ней.
+pub fn file_base_keys(db_path: &Path) -> Vec<String> {
+    vec![format!("--db-path={}", db_path.display())]
+}
+
+/// Ключи запуска, которые называют базу в СУБД. По ним же узнают чужой сервер над ней.
+pub fn database_keys(server: &str, name: &str) -> Vec<String> {
+    vec![format!("--db-server={server}"), format!("--db-name={name}")]
+}
+
 /// Запуск сервера. Без `--enable-extended-designer-features`: с ним сервер не сообщает о готовности,
 /// и `ibcmd --pid` не подключается (замер #82). Пароль СУБД уходит через stdin ключом `-W`: в командной
 /// строке долгоживущего процесса его видели бы все пользователи машины.
@@ -82,11 +92,10 @@ pub fn start_server(
     let mut args = vec![format!("--data={}", data.display())];
     let mut stdin = None;
     match storage {
-        ServerStorage::File(db_path) => args.push(format!("--db-path={}", db_path.display())),
+        ServerStorage::File(db_path) => args.extend(file_base_keys(db_path)),
         ServerStorage::Dbms(target) => {
             args.push(format!("--dbms={}", target.kind));
-            args.push(format!("--db-server={}", target.server));
-            args.push(format!("--db-name={}", target.name));
+            args.extend(database_keys(target.server, target.name));
             if let Some(user) = target.user {
                 args.push(format!("--db-user={user}"));
             }

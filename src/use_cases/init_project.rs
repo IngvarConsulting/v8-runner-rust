@@ -83,7 +83,17 @@ fn run_init(
                 config
                     .default_provider(Operation::Init)
                     .unwrap_or(crate::domain::capability::Provider::Designer),
-                receipt,
+                // Базу такого сервера создаёт `ibcmd`, и квитанция называет его.
+                if is_managed_standalone(config) {
+                    crate::domain::capability::ProviderReceipt {
+                        selected: Some(Provider::Ibcmd),
+                        origin: crate::domain::capability::ProviderOrigin::Default,
+                        skipped: Vec::new(),
+                        endpoint: None,
+                    }
+                } else {
+                    receipt
+                },
             ),
         };
     let mut steps = Vec::new();
@@ -363,12 +373,7 @@ fn ensure_infobase(
         // Базу автономного сервера создают до его запуска, на его машине: раннер к серверу
         // только подключается (`INV.CLI.INFOBASE-CREATE-FOLLOWS-THE-TARGET-KIND`).
         TargetKind::Standalone => {
-            let managed = config
-                .infobase
-                .standalone
-                .as_ref()
-                .is_some_and(|standalone| standalone.managed.is_some());
-            if managed {
+            if is_managed_standalone(config) {
                 ensure_managed_standalone_base(context, config, utilities, dry_run)
             } else {
                 StepOutcome::failed("infobase", "create", started, standalone_refusal())
@@ -393,6 +398,16 @@ fn ensure_infobase(
             ),
         },
     }
+}
+
+/// Цель — автономный сервер, которым управляет раннер.
+fn is_managed_standalone(config: &AppConfig) -> bool {
+    config.target_kind() == TargetKind::Standalone
+        && config
+            .infobase
+            .standalone
+            .as_ref()
+            .is_some_and(|standalone| standalone.managed.is_some())
 }
 
 /// База сервера `standalone.managed` в СУБД: её создаёт сценарий стенда.

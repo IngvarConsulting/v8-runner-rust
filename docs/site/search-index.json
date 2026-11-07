@@ -69,7 +69,7 @@
     "url": "glossary.html#tool-services",
     "page": "Словарь",
     "section": "Серверы и внешние сервисы",
-    "text": "Серверы и внешние сервисы Компонент Что это Как используется Кластер 1С: ragent , rmngr , rphost Агент сервера, менеджер кластера и рабочие процессы, обслуживающие информационные базы. К базе через кластер подключаются Конфигуратор, агент и клиенты 1С. Кластер запускаете вы — службой или из консоли, и тогда раннер его процессы не трогает, — или раннер на своей машине Windows командой cluster start План . PostgreSQL для 1С Сборка PostgreSQL для платформы: initdb , pg_ctl , postgres , pg_isready . СУБД вы поднимаете сами, и тогда раннер только идёт в неё по адресу из dbms . При dbms.managed раннер запускает её на своей машине Windows командой dbms start из каталога tools.postgres.path . ibsrv Автономный сервер 1С: обслуживает базу, предоставляет прямой шлюз, агентский SSH-шлюз и HTTP-доступ. Раннер использует SSH-шлюз; Конфигуратор и тонкий клиент могут подключаться по прямому шлюзу, клиенты — по HTTP. Сервер поднимаете вы, и тогда раннер его процесс не трогает, или раннер на своей машине командой standalone start . См. варианты подключения . Apache с модулем wsap Веб-сервер и модуль расширения 1С, обслуживающие веб-публикации. Публикацию настраивает webinst ; браузер и тонкий клиент открывают её по HTTP/HTTPS. Веб-сервер соединяется с базой через модуль 1С. Раннер не запускает и не останавливает Apache. IIS с модулем wsisapi Веб-сервер Windows и модуль расширения 1С для веб-публикаций. Для публикации используется webinst , для открытия — веб-адрес. Запуском и остановкой IIS раннер не управляет. Готовую публикацию можно открыть без права менять её: достаточно web.url . СУБД Сервер базы данных, в котором хранится информационная база серверного варианта. С СУБД работает кластер, ibsrv или ibcmd при прямом доступе. Раннер передаёт настройки dbms утилите; собственного SQL-драйвера для этих операций нет. Запуском и остановкой СУБД раннер не управляет. GitHub Releases Сервис публикации выпусков и файлов внешних инструментов. tools download запрашивает выпуск и скачивает готовый артефакт или архив исходников. Запросы выполняет встроенный HTTP-клиент раннера."
+    "text": "Серверы и внешние сервисы Компонент Что это Как используется Кластер 1С: ragent , rmngr , rphost Агент сервера, менеджер кластера и рабочие процессы, обслуживающие информационные базы. К базе через кластер подключаются Конфигуратор, агент и клиенты 1С. Кластер запускаете вы — службой или из консоли, и тогда раннер его процессы не трогает, — или раннер на своей машине Windows командой cluster start План . PostgreSQL для 1С Сборка PostgreSQL для платформы: initdb , pg_ctl , postgres , pg_isready , psql . СУБД вы поднимаете сами, и тогда раннер только идёт в неё по адресу из dbms . При dbms.managed раннер запускает её на своей машине Windows командой dbms start из каталога tools.postgres.path . ibsrv Автономный сервер 1С: обслуживает базу, предоставляет прямой шлюз, агентский SSH-шлюз и HTTP-доступ. Раннер использует SSH-шлюз; Конфигуратор и тонкий клиент могут подключаться по прямому шлюзу, клиенты — по HTTP. Сервер поднимаете вы, и тогда раннер его процесс не трогает, или раннер на своей машине командой standalone start . См. варианты подключения . Apache с модулем wsap Веб-сервер и модуль расширения 1С, обслуживающие веб-публикации. Публикацию настраивает webinst ; браузер и тонкий клиент открывают её по HTTP/HTTPS. Веб-сервер соединяется с базой через модуль 1С. Раннер не запускает и не останавливает Apache. IIS с модулем wsisapi Веб-сервер Windows и модуль расширения 1С для веб-публикаций. Для публикации используется webinst , для открытия — веб-адрес. Запуском и остановкой IIS раннер не управляет. Готовую публикацию можно открыть без права менять её: достаточно web.url . СУБД Сервер базы данных, в котором хранится информационная база серверного варианта. С СУБД работает кластер, ibsrv или ibcmd при прямом доступе. Раннер передаёт настройки dbms утилите; собственного SQL-драйвера для этих операций нет. Запуском и остановкой СУБД раннер не управляет. GitHub Releases Сервис публикации выпусков и файлов внешних инструментов. tools download запрашивает выпуск и скачивает готовый артефакт или архив исходников. Запросы выполняет встроенный HTTP-клиент раннера."
   },
   {
     "url": "glossary.html#tool-client-components",
@@ -1311,7 +1311,7 @@
     "url": "cli-infobase-create.html#create-standalone-managed",
     "page": "infobase create",
     "section": "Автономный сервер под управлением раннера",
-    "text": "Автономный сервер под управлением раннера Для базы, объявленной standalone.managed , команда создаёт файловую базу в db-path так, как этого требует платформа, — до запуска сервера ( 75 ) : ibcmd infobase create с конфигурацией из исходников, теми же исполнителями, что у файловой базы. Если сервер уже поднят раннером, команда отказывает: базу под работающим сервером не создают. Следующий шаг после создания — standalone start . Если база лежит в СУБД, команда создаёт её через ibcmd infobase create --create-database , а ibcmd server config init не нужен. СУБД должна работать: при dbms.managed команда иначе отказывает и называет dbms start . Существующая БД с именем dbms.name — отказ с её именем. --from , создание копии другой базы, для такой базы отказывает: копию из образа кладут infobase restore через работающий сервер. План Созданную базу команда записывает в память, поэтому первый push после неё идёт как обычный."
+    "text": "Автономный сервер под управлением раннера Для базы, объявленной standalone.managed , команда создаёт файловую базу в db-path так, как этого требует платформа, — до запуска сервера ( 75 ) : ibcmd infobase create с конфигурацией из исходников, теми же исполнителями, что у файловой базы. Если сервер уже поднят раннером, команда отказывает: базу под работающим сервером не создают. Следующий шаг после создания — standalone start . Если база лежит в СУБД, команда создаёт её через ibcmd infobase create --create-database , а ibcmd server config init не нужен. СУБД должна работать: при dbms.managed команда иначе отказывает и называет dbms start . У PostgreSQL раннера существующая БД с именем dbms.name — отказ с её именем; у вашей СУБД так отвечает сам ibcmd , если в БД уже есть база. --from , создание копии другой базы, для такой базы отказывает: копию из образа кладут infobase restore через работающий сервер. Созданную базу команда записывает в память, поэтому первый push после неё идёт как обычный."
   },
   {
     "url": "cli-infobase-create.html#response-classes",
@@ -2637,13 +2637,13 @@
     "url": "cli-standalone.html#op-standalone-start",
     "page": "standalone",
     "section": "standalone start",
-    "text": "standalone start v8-runner standalone start Поднимает ibsrv той же платформы, что выбирают остальные команды ( tools.platform ), над файловой базой из standalone.managed.db-path или над базой из секции dbms ; база должна быть создана заранее. При dbms.managed команда первым шагом поднимает PostgreSQL, если он не работает. Пароль СУБД ibsrv получает ключом -W через stdin, в командной строке его нет. На Linux и macOS команда отказывает. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой ( 61 , 65 ) . Сервер живёт между командами, пока его не остановит standalone stop . Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под workPath . Если сервер этой базы уже поднят раннером этой копии, команда ничего не запускает и называет его. Если базу держит чужой процесс ibsrv , команда отказывает и называет его: второй сервер над той же базой не поднимается. v8-runner standalone start --dry-run Показывает исполняемый файл, каталог данных, базу и выбранные порты. Ничего не запускает. Такое же превью есть у standalone stop и standalone restart . Команды standalone принимают только объявленную базу: строка соединения в --infobase — отказ."
+    "text": "standalone start v8-runner standalone start Поднимает ibsrv той же платформы, что выбирают остальные команды ( tools.platform ), над файловой базой из standalone.managed.db-path или над базой из секции dbms ; база должна быть создана заранее. При dbms.managed команда первым шагом поднимает PostgreSQL, если он не работает. Пароль СУБД ibsrv получает ключом -W через stdin, в командной строке его нет. На Linux и macOS команда отказывает. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой ( 61 , 65 ) . Сервер живёт между командами, пока его не остановит standalone stop . Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под workPath . Если сервер этой базы уже поднят раннером этой копии, команда ничего не запускает и называет его. Если базу держит чужой процесс ibsrv , команда отказывает и называет его: второй сервер над той же базой не поднимается. v8-runner standalone start --dry-run Показывает каталог данных, журнал и закреплённые адреса, если сервер уже запускался. Ничего не запускает. Такое же превью есть у standalone stop и standalone restart . Команды standalone принимают только объявленную базу: строка соединения в --infobase — отказ."
   },
   {
     "url": "cli-standalone.html#op-standalone-status",
     "page": "standalone",
     "section": "standalone status",
-    "text": "standalone status v8-runner standalone status Отвечает, поднят ли сервер этой базы и кем: не поднят, поднят раннером этой копии или поднят не раннером. Для своего сервера называет PID, версию платформы, адреса прямого шлюза, SSH-шлюза и HTTP и прошла ли проба готовности. Чужой сервер только называет: чей он, раннер не знает. Платформу команда не запускает, замок рабочей копии ей не нужен, ключа --dry-run у неё нет."
+    "text": "standalone status v8-runner standalone status Отвечает, поднят ли сервер этой базы и кем: не поднят, поднят раннером этой копии или поднят не раннером. Для своего сервера называет PID, адреса прямого шлюза, SSH-шлюза и HTTP и отвечает ли прямой шлюз. Чужой сервер только называет: чей он, раннер не знает. Платформу команда не запускает, замок рабочей копии ей не нужен, ключа --dry-run у неё нет."
   },
   {
     "url": "cli-standalone.html#op-standalone-stop",
@@ -2673,37 +2673,37 @@
     "url": "cli-standalone.html#standalone-started",
     "page": "standalone",
     "section": "Сервер поднят",
-    "text": "Сервер поднят ✓ standalone: start - ibsrv 8.3.27.2074, pid 48213 │ direct gate Srvr=127.0.0.1:24641;Ref=demo │ ssh gate 127.0.0.1:24642 │ http http://127.0.0.1:24830/demo │ ready in 14.2 s"
+    "text": "Сервер поднят standalone start: started ibsrv, pid 48213 direct gate Srvr=127.0.0.1:24641;Ref=demo ssh gate 127.0.0.1:24642 http http://127.0.0.1:24643/demo data build/infobases/origin/managed/standalone/data log build/infobases/origin/managed/standalone/standalone.log"
   },
   {
     "url": "cli-standalone.html#standalone-already",
     "page": "standalone",
     "section": "Уже поднят этой копией",
-    "text": "Уже поднят этой копией ○ standalone: start - already running for origin, pid 48213 (started by this working copy)"
+    "text": "Уже поднят этой копией standalone start: already running for origin, pid 48213 direct gate Srvr=127.0.0.1:24641;Ref=demo ssh gate 127.0.0.1:24642 http http://127.0.0.1:24643/demo data build/infobases/origin/managed/standalone/data log build/infobases/origin/managed/standalone/standalone.log"
   },
   {
     "url": "cli-standalone.html#standalone-status-own",
     "page": "standalone",
     "section": "Состояние своего сервера",
-    "text": "Состояние своего сервера origin: standalone server, started by this working copy pid 48213 · ibsrv 8.3.27.2074 · ready direct gate Srvr=127.0.0.1:24641;Ref=demo ssh gate 127.0.0.1:24642 http http://127.0.0.1:24830/demo"
+    "text": "Состояние своего сервера standalone status: origin: standalone server, started by this working copy, pid 48213 direct gate Srvr=127.0.0.1:24641;Ref=demo ssh gate 127.0.0.1:24642 http http://127.0.0.1:24643/demo data build/infobases/origin/managed/standalone/data log build/infobases/origin/managed/standalone/standalone.log"
   },
   {
     "url": "cli-standalone.html#standalone-stopped",
     "page": "standalone",
     "section": "Сервер остановлен",
-    "text": "Сервер остановлен ✓ standalone: stop - ibsrv pid 48213 stopped"
+    "text": "Сервер остановлен standalone stop: ibsrv pid 48213 stopped"
   },
   {
     "url": "cli-standalone.html#standalone-foreign",
     "page": "standalone",
     "section": "Чужой сервер не тронут",
-    "text": "Чужой сервер не тронут ERROR: workspace busy: the infobase build/ib is served by ibsrv pid 30117, which this runner did not start; it is left running"
+    "text": "Чужой сервер не тронут ERROR: workspace busy: the infobase of 'origin' is served by ibsrv pid 30117, which this runner did not start; it is left running"
   },
   {
     "url": "cli-standalone.html#standalone-not-ready",
     "page": "standalone",
     "section": "Сервер не стал готов",
-    "text": "Сервер не стал готов ✗ standalone: start - ibsrv exited before its direct gate accepted a connection │ log .build/logs/ibsrv/origin.log ERROR: platform error: the standalone server did not become ready"
+    "text": "Сервер не стал готов ERROR: platform error: ibsrv exited before its direct gate accepted a connection; log: build/infobases/origin/managed/standalone/standalone.log"
   },
   {
     "url": "cli-cluster.html",
@@ -2781,7 +2781,7 @@
     "url": "cli-dbms.html#op-dbms-start",
     "page": "dbms",
     "section": "dbms start",
-    "text": "dbms start v8-runner dbms start Запускает PostgreSQL из каталога tools.postgres.path и отдаёт ответ после того, как он принял соединение. При первом запуске создаёт каталог данных и пароль. Слушает только 127.0.0.1 , вход — scram-sha-256 . Порт выбирается вне динамического диапазона и закрепляется, потому что на него ссылается зарегистрированная база. Занят чужим процессом — команда отказывает и называет его, а переносить PostgreSQL на другой порт не умеет. PostgreSQL живёт между командами. Вид СУБД, адрес и пароль не объявляются. На Linux и macOS команда отказывает. Если PostgreSQL уже запущен, команда ничего не запускает, но считает его явным: stop сервера его больше не трогает. v8-runner dbms start --dry-run Показывает исполняемый файл, каталог данных и порт. Ничего не запускает."
+    "text": "dbms start v8-runner dbms start Запускает PostgreSQL из каталога tools.postgres.path и отдаёт ответ после того, как он принял соединение. При первом запуске создаёт каталог данных и пароль. Слушает только 127.0.0.1 , вход — scram-sha-256 . Порт выбирается вне динамического диапазона и закрепляется, потому что на него ссылается зарегистрированная база. Занят чужим процессом — команда отказывает и называет его, а переносить PostgreSQL на другой порт не умеет. PostgreSQL живёт между командами. Вид СУБД, адрес и пароль не объявляются. На Linux и macOS команда отказывает. Если PostgreSQL уже запущен, команда ничего не запускает, но считает его явным: stop сервера его больше не трогает. v8-runner dbms start --dry-run Показывает каталог данных, журнал и закреплённый порт, если PostgreSQL уже запускался. Ничего не запускает."
   },
   {
     "url": "cli-dbms.html#op-dbms-status",
@@ -2823,25 +2823,25 @@
     "url": "cli-dbms.html#dbms-started",
     "page": "dbms",
     "section": "PostgreSQL запущен",
-    "text": "PostgreSQL запущен ✓ dbms: start - postgres 17.11, pid 40112 │ address 127.0.0.1 port=24432 │ ready in 1.2 s"
+    "text": "PostgreSQL запущен dbms start: started PostgreSQL, pid 40112 address 127.0.0.1 port=24432 user postgres password build/infobases/origin/managed/postgres/password data build/infobases/origin/managed/postgres/data log build/infobases/origin/managed/postgres/postgres.log"
   },
   {
     "url": "cli-dbms.html#dbms-status-own",
     "page": "dbms",
     "section": "Состояние своего PostgreSQL",
-    "text": "Состояние своего PostgreSQL origin: PostgreSQL, started by this working copy pid 40112 · postgres 17.11 · ready · explicit address 127.0.0.1 port=24432 user postgres password build/infobases/origin/managed/postgres/password"
+    "text": "Состояние своего PostgreSQL dbms status: origin: PostgreSQL, started by this working copy, pid 40112 address 127.0.0.1 port=24432 user postgres password build/infobases/origin/managed/postgres/password data build/infobases/origin/managed/postgres/data log build/infobases/origin/managed/postgres/postgres.log"
   },
   {
     "url": "cli-dbms.html#dbms-stopped",
     "page": "dbms",
     "section": "PostgreSQL остановлен",
-    "text": "PostgreSQL остановлен ✓ dbms: stop - postgres pid 40112 stopped"
+    "text": "PostgreSQL остановлен dbms stop: PostgreSQL pid 40112 stopped"
   },
   {
     "url": "cli-dbms.html#dbms-server-running",
     "page": "dbms",
     "section": "Сервер ещё работает",
-    "text": "Сервер ещё работает ERROR: validation error: the cluster of origin is still running on this PostgreSQL; run cluster stop first"
+    "text": "Сервер ещё работает ERROR: validation error: the standalone of 'origin' is still running on this PostgreSQL; run standalone stop first"
   },
   {
     "url": "cli-dbms.html#dbms-no-build",

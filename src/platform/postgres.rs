@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::platform::process::ProcessRequest;
 use crate::platform::service::ServiceRequest;
 
+const BACKSLASH: char = '\\';
+const QUOTE: char = '\'';
+const ESCAPED_QUOTE: &str = "\\'";
+
 /// Пользователь СУБД, которого создаёт `initdb`.
 pub const SUPERUSER: &str = "postgres";
 
@@ -119,8 +123,8 @@ impl PostgresBuild {
             vec![
                 "-w".to_owned(),
                 format!(
-                    "host=127.0.0.1 port={port} user={SUPERUSER} dbname=postgres passfile={}",
-                    passfile.display().to_string().replace('\\', "/")
+                    "host=127.0.0.1 port={port} user={SUPERUSER} dbname=postgres passfile='{}'",
+                    conninfo_value(passfile)
                 ),
                 "-Atc".to_owned(),
                 format!(
@@ -147,6 +151,15 @@ impl PostgresBuild {
 
 fn executable(tool: &str) -> String {
     format!("{tool}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// Путь как значение строки подключения: в кавычках он выдерживает пробел, а обратная косая черта там —
+/// экранирование, поэтому разделители прямые.
+fn conninfo_value(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace(BACKSLASH, "/")
+        .replace(QUOTE, ESCAPED_QUOTE)
 }
 
 /// Строка файла `passfile` для этого порта.
@@ -216,8 +229,22 @@ mod tests {
         assert!(request
             .args
             .iter()
-            .any(|arg| arg.contains("passfile=E:/w/passfile")));
+            .any(|arg| arg.contains("passfile='E:/w/passfile'")));
         assert!(request.args.iter().any(|arg| arg.contains("'o''brien'")));
+    }
+
+    #[test]
+    fn a_passfile_path_with_a_space_stays_one_value() {
+        let request = PostgresBuild::at(PathBuf::from("bin")).database_exists(
+            24432,
+            Path::new("E:/work dir/o'neil/passfile"),
+            "demo",
+        );
+        let conninfo = &request.args[1];
+        assert!(
+            conninfo.ends_with("passfile='E:/work dir/o\\'neil/passfile'"),
+            "{conninfo}"
+        );
     }
 
     #[test]

@@ -1645,7 +1645,10 @@ fn render_standalone_text(
                 )
             }
             ServiceState::Foreign => {
-                format!("{}: a port is taken by another process", result.infobase)
+                format!(
+                    "{}: another process holds a port or the infobase of this server",
+                    result.infobase
+                )
             }
         },
     };

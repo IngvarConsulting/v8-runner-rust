@@ -79,7 +79,7 @@
 <p>Запускает PostgreSQL из каталога <code>tools.postgres.path</code> и отдаёт ответ после того, как он принял соединение. При первом запуске создаёт каталог данных и пароль. Слушает только <code>127.0.0.1</code>, вход — <code>scram-sha-256</code>. Порт выбирается вне динамического диапазона и закрепляется, потому что на него ссылается зарегистрированная база. Занят чужим процессом — команда отказывает и называет его, а переносить PostgreSQL на другой порт не умеет. PostgreSQL живёт между командами. Вид СУБД, адрес и пароль не объявляются. На Linux и macOS команда отказывает.</p>
 <p>Если PostgreSQL уже запущен, команда ничего не запускает, но считает его явным: <code>stop</code> сервера его больше не трогает.</p>
 <pre data-output-command><code>v8-runner dbms start --dry-run</code></pre>
-<p>Показывает исполняемый файл, каталог данных и порт. Ничего не запускает.</p>
+<p>Показывает каталог данных, журнал и закреплённый порт, если PostgreSQL уже запускался. Ничего не запускает.</p>
 <h2 class="command-variant" id="op-dbms-status">dbms status</h2>
 <pre data-output-command><code>v8-runner dbms status</code></pre>
 <p>Отвечает, работает ли PostgreSQL базы из <code>--infobase</code> или <code>origin</code>; строка соединения в <code>--infobase</code> — отказ: не запущен, запускается, запущен раннером или порт занят не раннером. Для своей СУБД называет PID, адрес, имя пользователя, путь к файлу пароля и кто её поднял. Значение пароля не показывает. Замок рабочей копии команде не нужен. Ключа <code>--dry-run</code> у неё нет.</p>
@@ -120,19 +120,23 @@
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h3>Варианты ответа</h3>
 <h4 id="dbms-started">PostgreSQL запущен</h4>
-<pre data-output-example="dbms-started" data-output-schema="dbms-start"><code>✓ dbms: start - postgres 17.11, pid 40112
-│   address   127.0.0.1 port=24432
-│   ready in 1.2 s</code></pre>
+<pre data-output-example="dbms-started" data-output-schema="dbms-start"><code>dbms start: started PostgreSQL, pid 40112
+  address  127.0.0.1 port=24432
+  user  postgres
+  password  build/infobases/origin/managed/postgres/password
+  data  build/infobases/origin/managed/postgres/data
+  log  build/infobases/origin/managed/postgres/postgres.log</code></pre>
 <h4 id="dbms-status-own">Состояние своего PostgreSQL</h4>
-<pre data-output-example="dbms-status-own" data-output-schema="dbms-status"><code>origin: PostgreSQL, started by this working copy
-  pid 40112 · postgres 17.11 · ready · explicit
-  address   127.0.0.1 port=24432
-  user      postgres
-  password  build/infobases/origin/managed/postgres/password</code></pre>
+<pre data-output-example="dbms-status-own" data-output-schema="dbms-status"><code>dbms status: origin: PostgreSQL, started by this working copy, pid 40112
+  address  127.0.0.1 port=24432
+  user  postgres
+  password  build/infobases/origin/managed/postgres/password
+  data  build/infobases/origin/managed/postgres/data
+  log  build/infobases/origin/managed/postgres/postgres.log</code></pre>
 <h4 id="dbms-stopped">PostgreSQL остановлен</h4>
-<pre data-output-example="dbms-stopped" data-output-schema="dbms-stop"><code>✓ dbms: stop - postgres pid 40112 stopped</code></pre>
+<pre data-output-example="dbms-stopped" data-output-schema="dbms-stop"><code>dbms stop: PostgreSQL pid 40112 stopped</code></pre>
 <h4 id="dbms-server-running">Сервер ещё работает</h4>
-<pre data-output-example="dbms-server-running" data-output-schema="dbms-stop"><code>ERROR: validation error: the cluster of origin is still running on this PostgreSQL; run cluster stop first</code></pre>
+<pre data-output-example="dbms-server-running" data-output-schema="dbms-stop"><code>ERROR: validation error: the standalone of 'origin' is still running on this PostgreSQL; run standalone stop first</code></pre>
 <h4 id="dbms-no-build">Нет сборки</h4>
 <pre data-output-example="dbms-no-build" data-output-schema="dbms-start"><code>ERROR: environment unavailable: the PostgreSQL build was not found: declare tools.postgres.path</code></pre>
 </main>
@@ -150,6 +154,8 @@
       "address": "127.0.0.1 port=24432",
       "user": "postgres",
       "password_file": "build/infobases/origin/managed/postgres/password",
+      "data_dir": "build/infobases/origin/managed/postgres/data",
+      "log_path": "build/infobases/origin/managed/postgres/postgres.log",
       "explicit": true,
       "ready": true,
       "action": "started",
@@ -171,6 +177,8 @@
       "address": "127.0.0.1 port=24432",
       "user": "postgres",
       "password_file": "build/infobases/origin/managed/postgres/password",
+      "data_dir": "build/infobases/origin/managed/postgres/data",
+      "log_path": "build/infobases/origin/managed/postgres/postgres.log",
       "explicit": true,
       "ready": true,
       "action": "reported",
@@ -208,6 +216,8 @@
       "address": "127.0.0.1 port=24432",
       "user": "postgres",
       "password_file": "build/infobases/origin/managed/postgres/password",
+      "data_dir": "build/infobases/origin/managed/postgres/data",
+      "log_path": "build/infobases/origin/managed/postgres/postgres.log",
       "explicit": true,
       "ready": true,
       "action": "reported",

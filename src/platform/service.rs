@@ -65,9 +65,9 @@ pub struct ProcessFacts {
 
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
-/// Чужой `ibsrv` над этой файловой базой: порты о нём не говорят, у него свои. Смотрит командные
-/// строки процессов, потому что других следов у сервера нет.
-pub fn ibsrv_over(db_path: &Path) -> Option<u32> {
+/// Чужой `ibsrv` над этой базой: порты о нём не говорят, у него свои. Смотрит командные строки
+/// процессов, потому что других следов у сервера нет. `keys` — все ключи, которые его выдают.
+pub fn ibsrv_with(keys: &[String]) -> Option<u32> {
     if !cfg!(windows) {
         return None;
     }
@@ -90,23 +90,78 @@ pub fn ibsrv_over(db_path: &Path) -> Option<u32> {
         std::thread::sleep(Duration::from_millis(50));
     }
     let output = child.wait_with_output().ok()?;
-    server_over(&String::from_utf8_lossy(&output.stdout), db_path)
+    server_with(&String::from_utf8_lossy(&output.stdout), keys)
 }
 
-/// Разбор ответа: первый pid, в чьей командной строке этот `--db-path`.
-fn server_over(listing: &str, db_path: &Path) -> Option<u32> {
-    let needle = format!("--db-path={}", db_path.display())
-        .to_lowercase()
-        .replace('"', "");
+/// Разбор ответа: первый pid, в чьей командной строке есть все эти ключи.
+fn server_with(listing: &str, keys: &[String]) -> Option<u32> {
+    let keys: Vec<String> = keys.iter().map(|key| key.to_lowercase()).collect();
     listing.lines().find_map(|line| {
         let (pid, command) = line.trim().split_once(' ')?;
-        let command = command.to_lowercase().replace('"', "");
-        command
-            .split(" --")
-            .any(|part| format!("--{}", part.trim_start_matches("--")).trim_end() == needle)
+        let tokens = spelled_keys(command_tokens(&command.to_lowercase()));
+        keys.iter()
+            .all(|key| tokens.contains(key))
             .then(|| pid.parse().ok())?
     })
 }
+
+/// Ключи одного вида независимо от написания: `--database-x` то же, что `--db-x`, а значение
+/// отдельным словом то же, что через `=`.
+fn spelled_keys(tokens: Vec<String>) -> Vec<String> {
+    let tokens: Vec<String> = tokens
+        .into_iter()
+        .map(|token| token.replacen("--database-", "--db-", 1))
+        .collect();
+    let joined = tokens
+        .windows(2)
+        .filter(|pair| {
+            pair[0].starts_with("--") && !pair[0].contains('=') && !pair[1].starts_with('-')
+        })
+        .map(|pair| format!("{}={}", pair[0], pair[1]));
+    joined.chain(tokens.iter().cloned()).collect()
+}
+
+/// Слова командной строки по правилам Windows: пробел внутри кавычек их не делит, а косые черты
+/// перед кавычкой экранируют её и друг друга.
+fn command_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quoted = false;
+    let mut slashes = 0usize;
+    for symbol in command.chars() {
+        if symbol == BACKSLASH {
+            slashes += 1;
+            continue;
+        }
+        if symbol == QUOTE_MARK {
+            token.extend(std::iter::repeat_n(BACKSLASH, slashes / 2));
+            if slashes % 2 == 1 {
+                token.push(QUOTE_MARK);
+            } else {
+                quoted = !quoted;
+            }
+            slashes = 0;
+            continue;
+        }
+        token.extend(std::iter::repeat_n(BACKSLASH, slashes));
+        slashes = 0;
+        if symbol.is_whitespace() && !quoted {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(symbol);
+        }
+    }
+    token.extend(std::iter::repeat_n(BACKSLASH, slashes));
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
+const QUOTE_MARK: char = '"';
+const BACKSLASH: char = '\\';
 
 /// Имя файла образа в виде, в котором его сравнивает запись.
 #[cfg_attr(
@@ -124,12 +179,60 @@ mod listing_tests {
     use super::*;
 
     #[test]
-    fn a_server_is_found_by_its_own_db_path_only() {
+    fn a_trailing_backslash_before_the_quote_is_one_backslash() {
+        let listing = r#"10 ibsrv.exe "--db-path=E:\my base\\" --name=x"#;
+        assert_eq!(
+            server_with(listing, &[r"--db-path=E:\my base\".to_owned()]),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn a_server_is_found_by_any_spelling_of_its_keys() {
+        let keys = [
+            "--db-server=127.0.0.1 port=24432".to_owned(),
+            "--db-name=demo".to_owned(),
+        ];
+        let long = r#"10 ibsrv.exe --dbms=PostgreSQL "--database-server=127.0.0.1 port=24432" --database-name=demo"#;
+        assert_eq!(server_with(long, &keys), Some(10));
+        let separate = r#"20 ibsrv.exe --db-server "127.0.0.1 port=24432" --db-name demo -W"#;
+        assert_eq!(server_with(separate, &keys), Some(20));
+    }
+
+    #[test]
+    fn a_server_is_found_by_all_of_its_keys_only() {
         let listing = r#"10 "C:\1cv8\ibsrv.exe" "--data=E:\a\data" "--db-path=E:\a\ib" --name=x
-20 C:\1cv8\ibsrv.exe --data=E:\b --db-path=E:\b\ib2 --name=y"#;
-        assert_eq!(server_over(listing, Path::new(r"E:\A\IB")), Some(10));
-        assert_eq!(server_over(listing, Path::new(r"E:\b\ib2")), Some(20));
-        assert_eq!(server_over(listing, Path::new(r"E:\a\i")), None);
+20 C:\1cv8\ibsrv.exe --data=E:\b --db-path=E:\b\ib2 --name=y
+30 C:\1cv8\ibsrv.exe --data=E:\c --dbms=PostgreSQL "--db-server=127.0.0.1 port=24432" --db-name=demo -W"#;
+        let keys = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            server_with(listing, &keys(&[r"--db-path=E:\A\IB"])),
+            Some(10)
+        );
+        assert_eq!(
+            server_with(listing, &keys(&[r"--db-path=E:\b\ib2"])),
+            Some(20)
+        );
+        assert_eq!(server_with(listing, &keys(&[r"--db-path=E:\a\i"])), None);
+        assert_eq!(
+            server_with(
+                listing,
+                &keys(&["--db-server=127.0.0.1 port=24432", "--db-name=demo"])
+            ),
+            Some(30)
+        );
+        assert_eq!(
+            server_with(
+                listing,
+                &keys(&["--db-server=127.0.0.1 port=24432", "--db-name=other"])
+            ),
+            None
+        );
     }
 }
 
@@ -338,8 +441,11 @@ mod imp {
     /// Чтение из канала, в котором уже лежит этот текст; запись закрыта, поэтому читатель увидит конец.
     fn input_with(text: &str) -> std::io::Result<File> {
         let (mut read, mut write): (HANDLE, HANDLE) = (null_mut(), null_mut());
+        // Читателя ещё нет: запись не должна ждать, поэтому буфер вмещает весь текст.
+        let size = u32::try_from(text.len() + 1)
+            .map_err(|_| std::io::Error::other("the text for stdin is too long"))?;
         // SAFETY: указатели смотрят на живые переменные, атрибуты по умолчанию.
-        if unsafe { CreatePipe(&mut read, &mut write, null(), 0) } == 0 {
+        if unsafe { CreatePipe(&mut read, &mut write, null(), size) } == 0 {
             return Err(std::io::Error::last_os_error());
         }
         // SAFETY: оба дескриптора только что созданы и переходят во владение `File`.
