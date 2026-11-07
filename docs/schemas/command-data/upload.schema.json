@@ -551,6 +551,23 @@
         "reason"
       ],
       "type": "object"
+    },
+    "UploadArtifactType": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactBuildMode"
+        },
+        {
+          "$ref": "#/$defs/VendorUpdateType"
+        }
+      ],
+      "description": "Upload adds the vendor update type to the existing artifact wire values."
+    },
+    "VendorUpdateType": {
+      "enum": [
+        "vendor_update_cfu"
+      ],
+      "type": "string"
     }
   },
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/upload.schema.json",
@@ -561,7 +578,7 @@
       "type": "string"
     },
     "artifact_type": {
-      "$ref": "#/$defs/ArtifactBuildMode"
+      "$ref": "#/$defs/UploadArtifactType"
     },
     "compatibility_state": {
       "$ref": "#/$defs/CompatibilityState"

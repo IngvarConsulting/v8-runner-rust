@@ -87,7 +87,7 @@ pub enum Command {
     Reset(ResetArgs),
     /// List metadata changes since the version file, or write a comparison report
     Diff(DiffArgs),
-    /// Upload a built package (.cf/.cfe) into the infobase
+    /// Upload a configuration package into the infobase
     #[command(name = "upload", alias = "load")]
     Load(LoadArgs),
     /// Run YaXUnit or Vanessa Automation tests, building first by default
@@ -381,12 +381,12 @@ pub struct LoadArgs {
     )]
     pub mode: String,
 
-    /// Settings file used by --mode combine
+    /// Settings file required by --mode combine and --mode update
     #[arg(long)]
     pub settings: Option<String>,
 
-    /// Extension name required for .cfe artifacts
-    #[arg(long)]
+    /// Extension source-set or platform name required for .cfe artifacts
+    #[arg(long = "ref", alias = "extension", value_name = "NAME")]
     pub extension: Option<String>,
 
     /// Vendor configuration name, required to ask whether a configuration is on support

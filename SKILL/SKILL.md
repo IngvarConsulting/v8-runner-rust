@@ -263,7 +263,10 @@ v8-runner infobase create
   itself a Designer run, and `infobase create` against a cluster infobase cannot tell "created" from
   "already existed" without creating it (a failed creation may leave its database in the DBMS — check before a retry).
 - Source files need conversion between Designer and EDT, a set into a `.cf`/`.cfe` (`convert <SET> --to package`) or a package into XML (`convert main.cf --to xml`): use `v8-runner convert`; this is CLI-only, never selects the project infobase (`--infobase` is refused) and uses `ibcmd` for package directions. Source-to-package shares the `make` build infobase. Package-to-XML uses a throwaway infobase.
-- Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner upload ...`.
+- Apply packages with `v8-runner upload <FILE>`. For an extension, `--ref <NAME>`
+  resolves an extension source-set via its `Configuration.xml`. With no matching extension
+  source-set, it uses `NAME` as the platform extension name.
+  Vendor distribution `.cf` and update `.cfu` use `--mode update --settings <FILE>`.
 - Release artifacts need to be built or external artifacts published: use `v8-runner make ...` or the `artifacts` alias. `make` builds from the sources in the persistent build infobase (Designer, then `ibcmd`) and never opens the project base: no `origin` needed, `--infobase` and `providers.make: agent` are refused. Use `make --full` to recreate it. Unexported Designer edits do not reach the package: `pull` first, or take the base's package with `download`.
 - Need to know which extensions are installed in an infobase, or to change that composition:
   use `v8-runner extensions list|info|create|delete|activate`. These subcommands address the

@@ -1136,7 +1136,7 @@ fn extension_source_set_name(
         }
         ConfigFormatRequest::Edt => edt_project::ordinary_root_marker_path(source_path),
     };
-    let raw_name = read_configuration_logical_name(&marker_path)?
+    let raw_name = read_configuration_logical_name(&marker_path, None)?
         .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty())
         .ok_or_else(|| {
@@ -1158,24 +1158,29 @@ fn extension_source_set_name(
 }
 
 /// `Name` описания конфигурации по пути `path`: `None`, когда описание не конфигурации или
-/// имени в нём нет.
-pub(crate) fn read_configuration_logical_name(path: &Path) -> Result<Option<String>, AppError> {
+/// имени в нём нет или оно не относится к запрошенному виду конфигурации.
+pub(crate) fn read_configuration_logical_name(
+    path: &Path,
+    required_purpose: Option<SourceDescriptorPurpose>,
+) -> Result<Option<String>, AppError> {
     let content = std::fs::read_to_string(path).map_err(|error| {
         AppError::Runtime(format!(
             "failed to read configuration marker '{}': {error}",
             path.display()
         ))
     })?;
-    source_descriptor::extract_configuration_logical_name(&content).map_err(|error| match error {
-        SourceDescriptorParseError::Xml(error) => AppError::Validation(format!(
-            "failed to parse configuration marker '{}': {error}",
-            path.display()
-        )),
-        SourceDescriptorParseError::UnexpectedEof => AppError::Validation(format!(
-            "failed to parse configuration marker '{}': unexpected EOF",
-            path.display()
-        )),
-    })
+    source_descriptor::extract_configuration_logical_name(&content, required_purpose).map_err(
+        |error| match error {
+            SourceDescriptorParseError::Xml(error) => AppError::Validation(format!(
+                "failed to parse configuration marker '{}': {error}",
+                path.display()
+            )),
+            SourceDescriptorParseError::UnexpectedEof => AppError::Validation(format!(
+                "failed to parse configuration marker '{}': unexpected EOF",
+                path.display()
+            )),
+        },
+    )
 }
 
 fn deduplicate_names(source_sets: &mut [ConfigInitSourceSet]) -> Result<(), AppError> {
