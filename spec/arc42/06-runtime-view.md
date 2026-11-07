@@ -208,7 +208,7 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    Полная выгрузка в формате Designer готовит хеши staging и после публикации записывает
    их в память именованной базы через общий `dump_config::publish_full_dump`. После отмены поколение не спрашивается и не
    записывается.
-7. Закрытие: свой агент получает `common shutdown`; [на 8.3.24–8.3.26 его не ждут](../rules/platform/an-agent-ignoring-shutdown-is-not-awaited.md);
+7. Закрытие: свой агент [отпускают `common disconnect-ib` и снимают, не дожидаясь выхода](../rules/platform/a-managed-agent-is-released-and-removed.md);
    от чужого и от шлюза раннер отключается.
 
 Правила: [готовность — аутентификация](../rules/platform/agent-readiness-is-authentication.md),

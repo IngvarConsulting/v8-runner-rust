@@ -370,7 +370,7 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
     );
     assert_eq!(
         lines.last().map(String::as_str),
-        Some("common shutdown"),
+        Some("common disconnect-ib"),
         "{lines:?}"
     );
 
