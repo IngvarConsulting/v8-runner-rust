@@ -687,7 +687,10 @@ fn a_failed_ibcmd_dump_preserves_the_published_snapshot() {
 fn ibcmd_restores_an_existing_or_new_file_infobase() {
     for mode in ["--replace", "--create"] {
         let (dir, config, base, calls) = setup("IBCMD");
-        let text = fs::read_to_string(&config).expect("config");
+        let text = fs::read_to_string(&config).expect("config").replace(
+            "infobase:\n",
+            "infobase:\n  user: admin\n  password: secret\n",
+        );
         fs::write(
             &config,
             text.replace("providers:\n", "providers:\n  infobase.restore: ibcmd\n"),
@@ -724,6 +727,16 @@ fn ibcmd_restores_an_existing_or_new_file_infobase() {
         assert_eq!(
             args.contains("--create-database"),
             mode == "--create",
+            "{args}"
+        );
+        assert_eq!(
+            args.contains("--user\nadmin\n"),
+            mode == "--replace",
+            "{args}"
+        );
+        assert_eq!(
+            args.contains("--password\nsecret\n"),
+            mode == "--replace",
             "{args}"
         );
         assert!(

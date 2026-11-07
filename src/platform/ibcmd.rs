@@ -280,10 +280,14 @@ impl<'a> IbcmdDsl<'a> {
     /// The caller marks restore as a critical write. --force does not end file sessions.
     pub fn restore_infobase(&self, source: &Path) -> Result<PlatformCommandResult, IbcmdError> {
         let present = self.probe_snapshot_access()?;
-        let mut args = self.authenticated_infobase_args(&["restore"]);
-        if !present {
+        let mut args = if present {
+            self.authenticated_infobase_args(&["restore"])
+        } else {
+            // The newly created empty base has no named users yet. The image brings them.
+            let mut args = self.infobase_args(&["restore"]);
             args.push("--create-database".to_owned());
-        }
+            args
+        };
         args.push(source.display().to_string());
         self.run(&args)
     }

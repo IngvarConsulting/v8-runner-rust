@@ -2746,6 +2746,32 @@ PID процесса `1cv8c`. После завершения клиента б�
 возвращала код 2 с ошибкой разбора параметра. Эти вызовы проверяют платформу напрямую.
 Раннер должен проверить блокировку до запуска и передать утилите staging-файл.
 
+Приёмка через исправленный раннер под `sudo` (uid 0), с явными
+`providers.infobase.dump|restore: ibcmd` и той же копией базы:
+
+```text
+sudo v8-runner --config <W>/runner-project/v8project.yaml --json-message infobase dump --output <W>/out/runner-busy.dt
+sudo v8-runner --config <W>/runner-project/v8project.yaml --json-message infobase restore --input <W>/out/free.dt --replace
+sudo v8-runner --config <W>/runner-project/v8project.yaml --json-message infobase dump --output <W>/out/runner-free.dt
+sudo v8-runner --config <W>/runner-restore-project/v8project.yaml --json-message infobase restore --input <W>/out/runner-free.dt --create
+sudo v8-runner --config <W>/runner-restore-project/v8project.yaml --json-message infobase restore --input <W>/out/runner-free.dt --replace
+```
+
+При открытом реальном тонком клиенте (PID 1950) обе команды отказали за 0,13 с
+с кодом 3, `infobase_busy`, PID держателя и `target_state: unchanged`.
+Обёртка вызова `ibcmd` не зарегистрировала ни одного запуска; заранее записанный
+DT остался неизменным. После закрытия клиента `F_GETLK` вернул `F_UNLCK`;
+выгрузка завершилась с кодом 0 за 127,89 с, `published: true`.
+
+Первая попытка создать базу с `restore --create-database --user Администратор`
+отказала с кодом 255: в новой пустой базе ещё нет такого пользователя.
+После исправления раннер передаёт учётные данные при замене существующей базы,
+а при создании не передаёт `--user` и `--password`: пользователей приносит образ.
+Создание в новый отдельный каталог завершилось с кодом 0 за 85,79 с,
+`restored: true`, `target_state: created`.
+Замена этой базы завершилась с кодом 0 за 100,88 с, `target_state: replaced`.
+Итоговый `1Cv8.1CD` — 2 009 254 400 байт, входной DT — 969 311 493 байта.
+
 ## Откат непринятого: `/RollbackCfg` и `ibcmd config reset`
 
 Замер 08.10.2026. Задача: [#235](https://github.com/IngvarConsulting/v8-runner-rust/issues/235)

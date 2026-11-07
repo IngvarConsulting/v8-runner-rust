@@ -161,11 +161,12 @@ fn copy_infobase(
 ) -> UseCaseResult<InitResult> {
     let dry_run = args.dry_run;
     let file_ibcmd = cfg!(unix) && config.target_kind() == TargetKind::File;
-    let default = if file_ibcmd {
-        Provider::Ibcmd
-    } else {
-        Provider::Designer
-    };
+    let can_restore =
+        |provider| provider == Provider::Designer || (file_ibcmd && provider == Provider::Ibcmd);
+    let default = crate::domain::capability::default_chain(Operation::Init, config.target_kind())
+        .into_iter()
+        .find(|provider| can_restore(*provider))
+        .unwrap_or(Provider::Designer);
     let provider = config
         .providers
         .get(&Operation::Init)
@@ -173,17 +174,13 @@ fn copy_infobase(
         .unwrap_or(default);
     let origin = match config.providers.get(&Operation::Init) {
         None => crate::domain::capability::ProviderOrigin::Default,
-        Some(Provider::Designer) | Some(Provider::Ibcmd)
-            if provider == Provider::Designer || file_ibcmd =>
-        {
-            crate::domain::capability::ProviderOrigin::Override {
-                file: config
-                    .provider_origins
-                    .get(&Operation::Init)
-                    .cloned()
-                    .unwrap_or_default(),
-            }
-        }
+        Some(_) if can_restore(provider) => crate::domain::capability::ProviderOrigin::Override {
+            file: config
+                .provider_origins
+                .get(&Operation::Init)
+                .cloned()
+                .unwrap_or_default(),
+        },
         Some(other) => {
             let error = UseCaseError::from(AppError::Validation(format!(
                 "infobase create --from cannot restore this target with providers.{}: {}: use designer, or ibcmd for a POSIX file infobase",

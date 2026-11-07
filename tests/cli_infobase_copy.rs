@@ -851,6 +851,13 @@ fn a_failed_load_into_a_file_base_hides_the_passwords() {
             source.display()
         ),
     );
+    // Keep exercising Designer diagnostics that actually echo the target credentials.
+    let project = fs::read_to_string(&worktree).expect("project");
+    fs::write(
+        &worktree,
+        project.replace("providers:\n", "providers:\n  infobase.create: designer\n"),
+    )
+    .expect("explicit Designer");
     fs::write(stand.root().join("fail-restore"), "").expect("fail restore");
 
     let output = run(&worktree, &["infobase", "create", "--from", "upstream"]);
