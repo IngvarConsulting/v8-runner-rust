@@ -228,11 +228,13 @@ v8-runner download --state db --output dist --dry-run
 v8-runner infobase dump --output dist/base.dt --dry-run
 ```
 
-`make` собирает пакет из исходников во временной базе раннера (`ibcmd`, иначе Конфигуратор) и
+`make` собирает пакет из исходников в постоянной базе под `workPath/temp/build-infobase/` (Конфигуратор, затем `ibcmd`) и
 базу проекта не трогает: ему не нужны ни `origin`, ни `--infobase`. **Несовместимо с прежним
 `make`:** в пакет попадает то, что лежит в исходниках, а не в базе разработки (невыгруженные
 правки Конфигуратора забирают `pull` или `download`); `providers.make: agent` и `--infobase` у
 `make` отвергаются.
+
+`make --full` пересоздаёт базу сборки. `convert --to package` переиспользует ту же базу.
 
 Без набора `make` и `download` пишут пакет каждого набора в каталог `--output`:
 `<каталог>/<набор>.cf`, `<набор>.cfe`, у `make` — ещё каталог `<набор>` внешних файлов;
@@ -244,8 +246,8 @@ v8-runner infobase dump --output dist/base.dt --dry-run
 Позиционный аргумент `push`, `pull`, `make`, `download` и `convert` — набор исходников
 (`v8-runner push my-ext`), никогда не база: базу называет `--infobase`. У `convert` на этом
 месте может стоять и файл пакета: `convert main.cf --to xml` разбирает пакет в XML, а
-`convert my-ext --to package` собирает пакет из набора — без базы проекта, через `ibcmd` во
-временной базе раннера. Пакет `.cf`/`.cfe`
+`convert my-ext --to package` собирает пакет из набора — без базы проекта, через `ibcmd` в
+базе сборки раннера под `workPath/temp/build-infobase`. Пакет `.cf`/`.cfe`
 забирает `download`, образ `.dt` — `infobase dump`. `infobase dump --output *.cf|*.cfe`
 отказывает до запуска платформы и называет `download`, `upload *.dt` — `infobase restore`.
 

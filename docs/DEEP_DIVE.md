@@ -219,35 +219,28 @@ runtime snapshot commit только указанным source-set.
 - Направление решает `convert_sources::resolve_direction` из `--to`, формата и вида входа.
   EDT ↔ XML исполняет `1cedtcli`; направления с пакетом — `convert_sources::package`: выбор
   исполнителя по строке `convert` матрицы (`provider_selection::select`, квитанция в
-  `data.provider`), затем `ThrowawayInfobase` под `workPath/temp/throwaway-infobases/` —
-  тот же владелец, что у `make`: `build_package` (`config import --out`) и `export_package`
-  (`config export --file`). Исходники EDT сперва переводит в XML
-  `ThrowawayInfobase::xml_from_edt` в каталог временной базы. Пакет публикуется
-  заменой файла, XML — заменой каталога со сторожем незафиксированной работы; цель
-  перепроверяется после работы исполнителя.
+  `data.provider`). Сборка пакета использует ту же базу, что `make`, через
+  `build_infobase::BuildSession`. Разбор пакета использует `ThrowawayInfobase`
+  под `workPath/temp/throwaway-infobases/` и `config export --file`.
+  Пакет публикуется заменой файла, XML — заменой каталога со сторожем
+  незафиксированной работы. Цель перепроверяется перед публикацией.
 
 ### `upload`, `make`, `artifacts`
 
 Это materialization сценарии поверх готовых артефактов или publish targets.
 
 - `upload` работает с готовыми `.cf` / `.cfe`.
-- `make` / `artifacts` собирают final `.cf`, `.cfe`, `.epf`, `.erf` из исходников и
-  публикуют их. База проекта не участвует: пакет собирается во временной базе раннера
-  (`use_cases::throwaway_infobase::ThrowawayInfobase`) под `workPath/temp/throwaway-infobases/`
-  — `ibcmd` (`infobase create` со своим `--data`, затем `config import --out`) или
-  Конфигуратор (`CREATEINFOBASE`, `/LoadConfigFromFiles` без файла версий, `/DumpCfg`;
-  расширение — поверх основной конфигурации). Исходники EDT сперва переводит в XML
-  `throwaway_infobase::edt_sources_to_xml` — единственный перевод у `make`, `convert` и
-  `infobase create` (временная база зовёт его через `ThrowawayInfobase::xml_from_edt`): шаг
-  сборки `build_project::execute_edt_export_step` в рабочей области `workPath/edt-workspace`,
-  общей сессией EDT команды, если она её держит, — тогда действует предел команды сессии
-  (`tools.edt_cli.command_timeout_ms`); одноразовым процессом у `make` и `infobase create` шаг
-  без предела, как у `push`, у `convert` — с пределом EDT команды. Других вызывающих шага, кроме сборки
-  `push`, нет — это держит проверка `the_edt_export_step_has_one_converter_besides_push`. База служит прогону, своя у каждого исполнителя (`artifacts::MakeSession`):
-  `make <SET>` — своя, обход без набора — общая на все наборы; внешние обработки Конфигуратор
-  собирает поверх основной конфигурации в своей базе; после прогона она убирается, а
-  брошенную описание `TempDirKind::ThrowawayInfobase` выдаёт уборке как свою. Замка базы и
-  метки владельца у `make` нет.
+- `make` собирает `.cf`, `.cfe`, `.epf` и `.erf` из исходников.
+  `build_infobase::BuildSession` открывает постоянную базу
+  `workPath/temp/build-infobase/`. Перед записью базы он снимает отметку
+  готовности, после загрузки сохраняет снимки и отметку с версией платформы,
+  состоянием файла базы и списком загруженных наборов. Список частичной
+  загрузки строит планировщик `push`.
+- Снимки исходников EDT и переведённого XML живут отдельно от памяти базы.
+  Изменившийся набор переводит `throwaway_infobase::edt_sources_to_xml`
+  через `build_project::execute_edt_export_step` в рабочей области EDT.
+  У `make` предел этого шага отсутствует, у `convert` действует предел
+  EDT команды. Конфигуратор и `ibcmd` выгружают рабочую конфигурацию.
 - Full replacement target publication идёт через staged publication model.
 
 ### `infobase create`

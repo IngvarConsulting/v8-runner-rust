@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::change_detection::hash_storage::{
     HashStorage, StorageError, StorageSnapshot, StoredFileState,
 };
-use crate::change_detection::scanner::{self, ScanError};
+use crate::change_detection::scanner::{self, ScanError, ScanScope};
 use crate::domain::source_set::SourceSetContext;
 
 /// A single detected file change.
@@ -116,7 +116,8 @@ pub fn analyze_context(
                 },
             };
             let excluded = scanner::work_path_inside(context.path(), work_path);
-            let scan = match scanner::scan_excluding(context.path(), excluded, interrupted) {
+            let scan = match scan_sources(context, context.path(), excluded.as_deref(), interrupted)
+            {
                 Ok(scan) => scan,
                 Err(ScanError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
                 Err(error) => {
@@ -124,6 +125,9 @@ pub fn analyze_context(
                     return Ok(AnalysisOutcome::Fallback);
                 }
             };
+            if scan.has_untracked_links {
+                return Ok(AnalysisOutcome::Fallback);
+            }
             let mut changes = detect_changes(&scan.files, &snapshot.entries);
             let seen_rel: HashSet<&str> = scan
                 .files
@@ -307,7 +311,7 @@ fn prepare_snapshot(
 ) -> Result<FullSnapshot, ChangeDetectionError> {
     // The caller records an already successful load/publication: cancellation must not
     // leave its memory describing the preceding database/tree.
-    let scan = scanner::scan_excluding(source_path, excluded, &mut || false)
+    let scan = scan_sources(context, source_path, excluded.as_deref(), &mut || false)
         .map_err(|error| map_scan_error(context, error))?;
     Ok(FullSnapshot {
         snapshot: scan
@@ -358,6 +362,20 @@ pub fn commit_full_snapshot(
             context.storage_identity(),
         )
         .map_err(|error| map_commit_error(context, storage.path(), error))
+}
+
+fn scan_sources(
+    context: &SourceSetContext,
+    path: &Path,
+    excluded: Option<&Path>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<scanner::ScanSnapshot, ScanError> {
+    let scope = if context.is_build_memory() {
+        ScanScope::Build
+    } else {
+        ScanScope::Push
+    };
+    scanner::scan_in_scope(path, excluded, interrupted, scope)
 }
 
 fn detect_changes(
