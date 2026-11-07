@@ -195,6 +195,21 @@ pub fn load_config_for_infobase_create(
     )
 }
 
+/// Загрузка для `status` и `platforms`: работают и без поднятого сервера.
+pub fn load_config_for_inspection(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+    preview: bool,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::Inspecting { preview },
+    )
+}
+
 pub fn load_config_for_launch(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
@@ -242,6 +257,9 @@ enum ConfigValidationMode {
     ManagedDbms,
     ManagedStandalone,
     InfobaseCreate {
+        preview: bool,
+    },
+    Inspecting {
         preview: bool,
     },
     Full,
@@ -361,11 +379,11 @@ fn build_config(
         })
         .collect();
     normalize_config_paths(&mut config, config_dir);
-    project_managed_standalone(&mut config, &validation_mode)?;
 
     if let Some(wd) = workdir_override {
         config.work_path = resolve_from(config_dir, Path::new(wd));
     }
+    project_managed_standalone(&mut config, &validation_mode)?;
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
@@ -383,8 +401,10 @@ fn build_config(
         ConfigValidationMode::ManagedStandalone => {
             crate::config::validate::validate_managed_standalone(&config)?
         }
-        ConfigValidationMode::InfobaseCreate { preview: false } => validate(&config)?,
-        ConfigValidationMode::InfobaseCreate { preview: true } => validate_read_only(&config)?,
+        ConfigValidationMode::InfobaseCreate { preview: false }
+        | ConfigValidationMode::Inspecting { preview: false } => validate(&config)?,
+        ConfigValidationMode::InfobaseCreate { preview: true }
+        | ConfigValidationMode::Inspecting { preview: true } => validate_read_only(&config)?,
         ConfigValidationMode::WithoutInfobase { operation, preview } => {
             validate_without_infobase(&config, operation, preview)?
         }
@@ -1475,6 +1495,12 @@ fn project_managed_standalone(
     validation_mode: &ConfigValidationMode,
 ) -> Result<(), ConfigLoadError> {
     use crate::config::model::{StandaloneExchangeChannel, StandaloneExchangeConfig};
+    // Память всякой базы со службой раннера, и соседей тоже: `status --all` читает их все.
+    for (name, infobase) in &mut config.infobases {
+        if infobase.declares_a_managed_server() {
+            infobase.managed_memory = Some(format!("managed:{name}"));
+        }
+    }
     if matches!(
         validation_mode,
         ConfigValidationMode::ManagedStandalone | ConfigValidationMode::ManagedDbms
@@ -1504,6 +1530,14 @@ fn project_managed_standalone(
             config.infobase.standalone = None;
         }
         return Ok(());
+    }
+    if let ConfigValidationMode::Inspecting { .. } = validation_mode {
+        // `status` и `platforms` сервера не требуют: показывают память и установки.
+        if running.is_none() {
+            let name = managed.name.as_deref().unwrap_or(infobase_name.as_str());
+            config.infobase.connection = format!("Srvr=127.0.0.1;Ref={name}");
+            return Ok(());
+        }
     }
     if let (Some(running), Some(name)) = (running, managed.name) {
         config.infobase.connection = running.ports.connection(&name);
@@ -2795,6 +2829,42 @@ mod tests {
             config.infobase.memory_address(dir.path()).as_deref(),
             Some("managed:origin")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_running_server_gives_the_target_its_addresses() {
+        use crate::platform::ibsrv::ServerPorts;
+        use crate::platform::service_record::{
+            machine_fingerprint, write_json, RecordState, ServicePaths, ServiceRecord,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = managed_standalone_config(dir.path());
+        let paths = ServicePaths::new(&config.work_path, "origin", "standalone");
+        let pid = std::process::id();
+        let facts = crate::platform::service::process_facts(pid).unwrap();
+        write_json(&paths.pins(), &ServerPorts::from_first(24000)).unwrap();
+        write_json(
+            &paths.record(),
+            &ServiceRecord {
+                state: RecordState::Running,
+                pid: Some(pid),
+                started: Some(facts.started),
+                image: Some(facts.image),
+                machine: machine_fingerprint(),
+                starter: None,
+                port: 24000,
+                explicit: true,
+                bin: std::path::PathBuf::from("ibsrv"),
+                version: None,
+            },
+        )
+        .unwrap();
+        super::project_managed_standalone(&mut config, &super::ConfigValidationMode::Full).unwrap();
+        assert_eq!(config.infobase.connection, "Srvr=127.0.0.1:24000;Ref=demo");
+        let standalone = config.infobase.standalone.as_ref().unwrap();
+        assert_eq!(standalone.gate.as_deref(), Some("127.0.0.1:24001"));
+        assert!(standalone.exchange.is_some());
     }
 
     fn managed_standalone_config(dir: &Path) -> crate::config::model::AppConfig {

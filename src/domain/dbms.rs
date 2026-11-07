@@ -62,8 +62,5 @@ pub struct DbmsResult {
     pub occupant_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_pid: Option<u32>,
-    /// Отмена, отложенная на время остановки.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
     pub duration_ms: u64,
 }

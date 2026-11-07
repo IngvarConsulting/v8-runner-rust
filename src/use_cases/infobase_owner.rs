@@ -380,9 +380,15 @@ fn declares<'a>(
     base_dir: &Path,
 ) -> bool {
     sections.into_iter().any(|infobase| {
-        V8Connection::from_connection_string(&infobase.connection)
-            .file_infobase_dir(project)
-            .is_some_and(|dir| same_path(&dir, base_dir))
+        let managed = infobase
+            .standalone
+            .as_ref()
+            .and_then(|standalone| standalone.managed.as_ref())
+            .and_then(|managed| managed.db_path.as_ref());
+        managed.is_some_and(|dir| same_path(dir, base_dir))
+            || V8Connection::from_connection_string(&infobase.connection)
+                .file_infobase_dir(project)
+                .is_some_and(|dir| same_path(&dir, base_dir))
     })
 }
 

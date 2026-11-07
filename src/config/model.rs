@@ -473,6 +473,17 @@ impl InfobaseConfig {
     /// У цели, которую приняла проверка конфигурации, он есть всегда
     /// (`INV.CONFIG.AN-ACCEPTED-TARGET-HAS-A-MEMORY-ADDRESS`); `None` — только у формы, которую
     /// проверка отвергает: такая цель память ни с кем не делит.
+    /// Сервер этой базы поднимает раннер.
+    pub fn declares_a_managed_server(&self) -> bool {
+        self.standalone
+            .as_ref()
+            .is_some_and(|standalone| standalone.managed.is_some())
+            || self
+                .cluster
+                .as_ref()
+                .is_some_and(|cluster| cluster.managed.is_some())
+    }
+
     pub fn memory_address(&self, base_path: &Path) -> Option<String> {
         if let Some(address) = &self.managed_memory {
             return Some(address.clone());

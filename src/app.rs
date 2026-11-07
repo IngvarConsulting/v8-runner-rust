@@ -372,7 +372,14 @@ pub(crate) fn load_cli_config(
         )
     } else if matches!(&cli.command, Command::Platforms) {
         // `platforms` только читает: рабочего каталога он не готовит.
-        load_config_for_preview(config_path, workdir, &selector)
+        crate::config::loader::load_config_for_inspection(config_path, workdir, &selector, true)
+    } else if matches!(&cli.command, Command::Status(_)) {
+        crate::config::loader::load_config_for_inspection(
+            config_path,
+            workdir,
+            &selector,
+            cli.dry_run,
+        )
     } else if matches!(&cli.command, Command::Launch(_)) {
         load_config_for_launch(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Dbms(_)) {

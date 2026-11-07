@@ -777,16 +777,16 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Publish(_) => CommandName::Publish,
         Command::Platforms => CommandName::Platforms,
         Command::Standalone(args) => match args.command {
-            crate::cli::args::DbmsCommandArgs::Start => CommandName::StandaloneStart,
-            crate::cli::args::DbmsCommandArgs::Status => CommandName::StandaloneStatus,
-            crate::cli::args::DbmsCommandArgs::Stop => CommandName::StandaloneStop,
-            crate::cli::args::DbmsCommandArgs::Restart => CommandName::StandaloneRestart,
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::StandaloneStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::StandaloneStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::StandaloneStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::StandaloneRestart,
         },
         Command::Dbms(args) => match args.command {
-            crate::cli::args::DbmsCommandArgs::Start => CommandName::DbmsStart,
-            crate::cli::args::DbmsCommandArgs::Status => CommandName::DbmsStatus,
-            crate::cli::args::DbmsCommandArgs::Stop => CommandName::DbmsStop,
-            crate::cli::args::DbmsCommandArgs::Restart => CommandName::DbmsRestart,
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::DbmsStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::DbmsStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::DbmsStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::DbmsRestart,
         },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
@@ -1492,21 +1492,21 @@ fn execute_reset(
 /// команда (`INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK`).
 fn execute_dbms(
     config: &AppConfig,
-    action: crate::cli::args::DbmsCommandArgs,
+    action: crate::cli::args::ServiceCommandArgs,
     command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    use crate::cli::args::DbmsCommandArgs as Action;
-    use crate::use_cases::managed_stand::{dbms_status, execute_dbms as run, DbmsCommand};
+    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::use_cases::managed_stand::{dbms_status, execute_dbms as run, ServiceCommand};
 
     let (name, command) = match action {
-        Action::Start => (CommandName::DbmsStart, DbmsCommand::Start),
-        Action::Status => (CommandName::DbmsStatus, DbmsCommand::Status),
-        Action::Stop => (CommandName::DbmsStop, DbmsCommand::Stop),
-        Action::Restart => (CommandName::DbmsRestart, DbmsCommand::Restart),
+        Action::Start => (CommandName::DbmsStart, ServiceCommand::Start),
+        Action::Status => (CommandName::DbmsStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::DbmsStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::DbmsRestart, ServiceCommand::Restart),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
@@ -1536,7 +1536,7 @@ fn execute_dbms(
             Err(error)
         }
     };
-    if command == DbmsCommand::Status {
+    if command == ServiceCommand::Status {
         return present(dbms_status(&context, config));
     }
     with_cli_workspace_lock(
@@ -1553,23 +1553,23 @@ fn execute_dbms(
 /// `standalone`: запись под замком `workPath`, `status` без него.
 fn execute_standalone(
     config: &AppConfig,
-    action: crate::cli::args::DbmsCommandArgs,
+    action: crate::cli::args::ServiceCommandArgs,
     command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    use crate::cli::args::DbmsCommandArgs as Action;
+    use crate::cli::args::ServiceCommandArgs as Action;
     use crate::use_cases::managed_stand::{
-        execute_standalone as run, standalone_status, StandaloneCommand,
+        execute_standalone as run, standalone_status, ServiceCommand,
     };
 
     let (name, command) = match action {
-        Action::Start => (CommandName::StandaloneStart, StandaloneCommand::Start),
-        Action::Status => (CommandName::StandaloneStatus, StandaloneCommand::Status),
-        Action::Stop => (CommandName::StandaloneStop, StandaloneCommand::Stop),
-        Action::Restart => (CommandName::StandaloneRestart, StandaloneCommand::Restart),
+        Action::Start => (CommandName::StandaloneStart, ServiceCommand::Start),
+        Action::Status => (CommandName::StandaloneStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::StandaloneStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::StandaloneRestart, ServiceCommand::Restart),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
@@ -1599,7 +1599,7 @@ fn execute_standalone(
             Err(error)
         }
     };
-    if command == StandaloneCommand::Status {
+    if command == ServiceCommand::Status {
         return present(standalone_status(&context, config));
     }
     with_cli_workspace_lock(
@@ -1756,9 +1756,6 @@ fn render_dbms_text(
     }
     if result.stale_record {
         presenter.print_bare("  the recorded process is gone");
-    }
-    for warning in &result.warnings {
-        presenter.print_bare(&format!("  {warning}"));
     }
 }
 

@@ -66,10 +66,12 @@ fn start_without_an_infobase_names_infobase_create() {
     let (code, answer) = run(dir.path(), &["standalone", "start"]);
     assert_ne!(code, 0, "{answer}");
     let text = answer.to_string();
-    assert!(
-        text.contains("infobase create") || text.contains("Windows"),
-        "{text}"
-    );
+    let expected = if cfg!(windows) {
+        "infobase create"
+    } else {
+        "Windows"
+    };
+    assert!(text.contains(expected), "{text}");
 }
 
 #[test]
@@ -95,5 +97,18 @@ fn a_preview_of_infobase_create_goes_for_the_file_base_of_the_server() {
     assert!(
         !answer.to_string().contains("not running"),
         "the server is not needed to create its base: {answer}"
+    );
+}
+
+#[test]
+fn status_and_platforms_work_without_the_server() {
+    let dir = temp_workspace();
+    project(dir.path(), MANAGED);
+    let (_, status) = run(dir.path(), &["status"]);
+    assert!(!status.to_string().contains("standalone start"), "{status}");
+    let (_, platforms) = run(dir.path(), &["platforms"]);
+    assert!(
+        !platforms.to_string().contains("standalone start"),
+        "{platforms}"
     );
 }

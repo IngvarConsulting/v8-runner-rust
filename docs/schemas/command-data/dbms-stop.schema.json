@@ -128,13 +128,6 @@
         "string",
         "null"
       ]
-    },
-    "warnings": {
-      "description": "Отмена, отложенная на время остановки.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
     }
   },
   "required": [

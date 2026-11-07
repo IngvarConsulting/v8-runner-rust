@@ -118,18 +118,70 @@ pub struct RunningServer {
     pub host_fingerprint: Option<String>,
 }
 
-/// Работающий свой сервер объявленной базы. Читает запись и спрашивает систему о процессе: адрес
-/// такой цели не объявлен, его знает только запись.
+/// Служба, как её видят запись и система.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Observed {
+    Nothing,
+    /// Запись есть, но процесса из неё нет.
+    Stale,
+    /// Её прямо сейчас поднимает живой раннер.
+    Starting(ServiceRecord),
+    Own(ServiceRecord),
+}
+
+/// Единственное чтение записи о службе. `adopt` решает судьбу записи `starting`, чей раннер умер:
+/// опознанный процесс делает её рабочей.
+pub fn observe_service(
+    paths: &ServicePaths,
+    machine: Option<&str>,
+    facts: &dyn Fn(u32) -> Option<ProcessFacts>,
+    adopt: &dyn Fn(&mut ServiceRecord) -> bool,
+) -> Observed {
+    let Some(mut record) = read_json::<ServiceRecord>(&paths.record()) else {
+        return Observed::Nothing;
+    };
+    if record.state == RecordState::Starting {
+        let starter_alive = record
+            .starter
+            .is_some_and(|(pid, started)| facts(pid).is_some_and(|facts| facts.started == started));
+        if starter_alive {
+            return Observed::Starting(record);
+        }
+        if record.machine.as_deref() == machine && adopt(&mut record) {
+            record.state = RecordState::Running;
+            record.starter = None;
+            return Observed::Own(record);
+        }
+        return Observed::Stale;
+    }
+    let seen = record.pid.and_then(facts);
+    if record.is_own(seen.as_ref(), machine) {
+        Observed::Own(record)
+    } else {
+        Observed::Stale
+    }
+}
+
+/// `adopt` для службы, чей pid записан сразу после запуска: она своя, если всё совпало.
+pub fn adopt_recorded_pid(
+    record: &ServiceRecord,
+    facts: &dyn Fn(u32) -> Option<ProcessFacts>,
+    machine: Option<&str>,
+) -> bool {
+    let seen = record.pid.and_then(facts);
+    record.is_own(seen.as_ref(), machine)
+}
+
+/// Работающий свой сервер объявленной базы. Адрес такой цели не объявлен, его знает только запись.
 pub fn running_standalone(work_path: &Path, infobase: &str) -> Option<RunningServer> {
     let paths = ServicePaths::new(work_path, infobase, "standalone");
-    let record = read_json::<ServiceRecord>(&paths.record())?;
-    if record.state != RecordState::Running {
+    let machine = machine_fingerprint();
+    let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
+        adopt_recorded_pid(record, &process_facts, machine.as_deref())
+    });
+    let Observed::Own(_) = observed else {
         return None;
-    }
-    let facts = record.pid.and_then(process_facts);
-    if !record.is_own(facts.as_ref(), machine_fingerprint().as_deref()) {
-        return None;
-    }
+    };
     Some(RunningServer {
         ports: read_json(&paths.pins())?,
         host_fingerprint: host_key_fingerprint(&paths.host_key()),

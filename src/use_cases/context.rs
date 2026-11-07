@@ -381,6 +381,17 @@ impl ExecutionContext {
         )
     }
 
+    /// Политика шага, который снимает поднятое этой командой. Отмена его не касается: отменённая
+    /// политика не запустила бы процесс вовсе, и поднятое осталось бы работать.
+    pub(crate) fn cleanup_policy(&self) -> ProcessExecutionPolicy {
+        ProcessExecutionPolicy::new(
+            None,
+            CancellationToken::new(),
+            InterruptionSafetyClass::GracefulThenKill.process_safety(),
+            self.work.clone(),
+        )
+    }
+
     /// Отметка работы исполнителя для этой команды: `provider_dispatched` ответа.
     pub fn work(&self) -> &WorkGiven {
         &self.work

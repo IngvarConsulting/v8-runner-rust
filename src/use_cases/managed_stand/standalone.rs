@@ -1,21 +1,23 @@
 //! Автономный сервер, которого поднимает раннер: `standalone start|status|stop|restart`.
 //! Адрес такой цели остальные команды берут из той же записи, её читает загрузчик настроек.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
-
-use super::ServiceHost;
+use super::{
+    await_gone, being_started, environment, forget_record, io_failure, occupant_of, port_offsets,
+    validation, write_record, ServiceCommand, ServiceHost,
+};
 use crate::config::model::AppConfig;
 use crate::domain::dbms::{ServiceAction, ServiceState};
 use crate::domain::standalone::StandaloneResult;
 use crate::platform::agent::write_service_host_key;
-use crate::platform::ibsrv::{self, ServerPorts, DIRECT_RANGE_WIDTH};
+use crate::platform::ibsrv::{self, ServerPorts};
 use crate::platform::process::ProcessRunner;
 use crate::platform::service::ServiceSpawnError;
 use crate::platform::service_record::{
-    read_json, write_json, RecordState, ServicePaths, ServiceRecord,
+    adopt_recorded_pid, observe_service, read_json, write_json, Observed, RecordState,
+    ServicePaths, ServiceRecord,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::interruption_before_safe_point;
@@ -24,33 +26,6 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, U
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const SOFT_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(200);
-const PORT_BASE: u32 = 20_000;
-const PORT_SPAN: u32 = 29_000;
-const PORT_TRIES: u32 = 64;
-
-fn validation(message: impl Into<String>) -> UseCaseError {
-    UseCaseError::new(UseCaseErrorKind::Validation, message)
-}
-
-fn environment(message: impl Into<String>) -> UseCaseError {
-    UseCaseError::new(UseCaseErrorKind::Environment, message)
-}
-
-fn io_failure(what: &str, path: &Path, error: &std::io::Error) -> UseCaseError {
-    UseCaseError::new(
-        UseCaseErrorKind::Runtime,
-        format!("{what} '{}': {error}", path.display()),
-    )
-}
-
-/// Какая из команд `standalone`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StandaloneCommand {
-    Start,
-    Status,
-    Stop,
-    Restart,
-}
 
 /// То, что сценарий узнаёт о цели из настроек.
 struct Declared {
@@ -86,13 +61,6 @@ fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
     })
 }
 
-enum Observed {
-    Nothing,
-    Stale,
-    Starting(ServiceRecord),
-    Own(ServiceRecord),
-}
-
 struct Server<'a> {
     context: &'a ExecutionContext,
     runner: &'a dyn ProcessRunner,
@@ -105,27 +73,14 @@ struct Server<'a> {
 
 impl Server<'_> {
     fn observe(&self) -> Observed {
-        let Some(record) = read_json::<ServiceRecord>(&self.paths.record()) else {
-            return Observed::Nothing;
-        };
-        let machine = self.host.machine();
-        let facts = record.pid.and_then(|pid| self.host.facts(pid));
-        if record.state == RecordState::Starting {
-            let starter_alive = record.starter.is_some_and(|(pid, started)| {
-                self.host
-                    .facts(pid)
-                    .is_some_and(|facts| facts.started == started)
-            });
-            if starter_alive {
-                return Observed::Starting(record);
-            }
-        }
-        // Запись `starting` от упавшего раннера: pid в ней свой, если всё совпало.
-        if record.is_own(facts.as_ref(), machine.as_deref()) {
-            Observed::Own(record)
-        } else {
-            Observed::Stale
-        }
+        let host = self.host;
+        let machine = host.machine();
+        observe_service(
+            &self.paths,
+            machine.as_deref(),
+            &|pid| host.facts(pid),
+            &|record| adopt_recorded_pid(record, &|pid| host.facts(pid), machine.as_deref()),
+        )
     }
 
     fn pins(&self) -> Option<ServerPorts> {
@@ -165,46 +120,23 @@ impl Server<'_> {
     }
 
     fn occupant(&self, ports: ServerPorts) -> Option<u32> {
-        ports.all().find_map(|port| self.host.listening_pid(port))
+        ports.all().find_map(|port| occupant_of(self.host, port))
     }
 
-    /// Блок портов на первый запуск выводится из пути копии; занятый заменяется при этом запуске.
+    /// Блок портов на первый запуск; занятый заменяется при этом запуске.
     fn choose_ports(&self) -> Result<ServerPorts, UseCaseError> {
-        let digest = Sha256::digest(self.paths.root().to_string_lossy().as_bytes());
-        let seed = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
-        let block = u32::from(DIRECT_RANGE_WIDTH) + 3;
-        for attempt in 0..PORT_TRIES {
-            let offset = seed.wrapping_add(attempt.wrapping_mul(block)) % PORT_SPAN;
-            let first = u16::try_from(PORT_BASE + offset).expect("the span stays below 49152");
-            let ports = ServerPorts::from_first(first);
-            if ports.all().all(|port| {
-                !self.host.port_answers(port) && self.host.listening_pid(port).is_none()
-            }) {
-                return Ok(ports);
-            }
-        }
-        Err(environment(format!(
-            "no free ports for ibsrv after {PORT_TRIES} tries"
-        )))
-    }
-
-    fn being_started(&self) -> UseCaseError {
-        UseCaseError::new(
-            UseCaseErrorKind::WorkspaceBusy,
-            format!(
-                "the server of '{}' is being started by another running command",
-                self.declared.infobase
-            ),
-        )
+        port_offsets(self.paths.root())
+            .map(ServerPorts::from_first)
+            .find(|ports| self.occupant(*ports).is_none())
+            .ok_or_else(|| environment("no free ports for ibsrv"))
     }
 
     fn write_record(&self, record: &ServiceRecord) -> Result<(), UseCaseError> {
-        write_json(&self.paths.record(), record)
-            .map_err(|error| io_failure("cannot write", &self.paths.record(), &error))
+        write_record(&self.paths, record)
     }
 
     fn forget_record(&self) {
-        let _ = std::fs::remove_file(self.paths.record());
+        forget_record(&self.paths);
     }
 
     fn start(&self, dry_run: bool) -> Result<StandaloneResult, UseCaseError> {
@@ -223,6 +155,8 @@ impl Server<'_> {
         };
         let stale = match self.observe() {
             Observed::Own(record) => {
+                // Запись упавшего раннера становится рабочей: её читают остальные команды.
+                self.write_record(&record)?;
                 let mut result = self.result(
                     ServiceState::StartedByThisCopy,
                     ServiceAction::AlreadyRunning,
@@ -230,10 +164,21 @@ impl Server<'_> {
                 result.ready = self.host.port_answers(record.port);
                 return Ok(self.describe(result, record.pid));
             }
-            Observed::Starting(_) => return Err(self.being_started()),
+            Observed::Starting(_) => {
+                return Err(being_started("the server", &self.declared.infobase))
+            }
             Observed::Stale => true,
             Observed::Nothing => false,
         };
+        if let Some(pid) = self.host.server_over(&self.declared.db_path) {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::WorkspaceBusy,
+                format!(
+                    "the infobase '{}' is served by ibsrv pid {pid}, which this runner did not start; it is left running",
+                    self.declared.db_path.display()
+                ),
+            ));
+        }
         if !self.declared.db_path.join("1Cv8.1CD").is_file() {
             return Err(validation(format!(
                 "there is no infobase in '{}': create it with `infobase create` before the server starts",
@@ -315,7 +260,10 @@ impl Server<'_> {
         record.pid = Some(pid);
         record.started = Some(facts.started);
         record.image = Some(facts.image);
-        self.write_record(&record)?;
+        if let Err(error) = self.write_record(&record) {
+            self.stop_process(&record);
+            return Err(error);
+        }
         self.await_ready(&record, ports)?;
         record.state = RecordState::Running;
         record.starter = None;
@@ -330,7 +278,7 @@ impl Server<'_> {
     }
 
     fn await_ready(&self, record: &ServiceRecord, ports: ServerPorts) -> Result<(), UseCaseError> {
-        let deadline = Instant::now() + self.host.ready_timeout_of(READY_TIMEOUT);
+        let deadline = Instant::now() + self.host.patience(READY_TIMEOUT);
         let pid = record.pid.expect("a started server has a pid");
         loop {
             if let Some(error) = interruption_before_safe_point(self.context, "waiting for ibsrv") {
@@ -389,18 +337,10 @@ impl Server<'_> {
             return false;
         };
         self.host.soft_stop(self.runner, pid, self.context);
-        let mut gone = self.await_gone(
-            pid,
-            record.started,
-            self.host.stop_timeout_of(SOFT_STOP_TIMEOUT),
-        );
+        let mut gone = self.await_gone(pid, record.started, self.host.patience(SOFT_STOP_TIMEOUT));
         if !gone {
             self.host.hard_stop(self.runner, pid, self.context);
-            gone = self.await_gone(
-                pid,
-                record.started,
-                self.host.stop_timeout_of(SOFT_STOP_TIMEOUT),
-            );
+            gone = self.await_gone(pid, record.started, self.host.patience(SOFT_STOP_TIMEOUT));
         }
         if gone {
             self.forget_record();
@@ -409,20 +349,7 @@ impl Server<'_> {
     }
 
     fn await_gone(&self, pid: u32, started: Option<u64>, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let same = self
-                .host
-                .facts(pid)
-                .is_some_and(|facts| Some(facts.started) == started);
-            if !same {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            self.host.sleep(POLL);
-        }
+        await_gone(self.host, pid, started, timeout)
     }
 
     fn stop(&self, dry_run: bool) -> Result<StandaloneResult, UseCaseError> {
@@ -431,7 +358,9 @@ impl Server<'_> {
         }
         let record = match self.observe() {
             Observed::Own(record) => record,
-            Observed::Starting(_) => return Err(self.being_started()),
+            Observed::Starting(_) => {
+                return Err(being_started("the server", &self.declared.infobase))
+            }
             Observed::Nothing => return Ok(self.nothing_to_stop(false)),
             Observed::Stale => {
                 self.forget_record();
@@ -460,7 +389,8 @@ impl Server<'_> {
     }
 
     fn name_occupant(&self, result: &mut StandaloneResult) {
-        if let Some(pid) = self.pins().and_then(|ports| self.occupant(ports)) {
+        let by_port = self.pins().and_then(|ports| self.occupant(ports));
+        if let Some(pid) = by_port.or_else(|| self.host.server_over(&self.declared.db_path)) {
             result.state = ServiceState::Foreign;
             result.occupant_pid = Some(pid);
         }
@@ -511,7 +441,7 @@ impl Server<'_> {
 pub(super) fn run_standalone(
     context: &ExecutionContext,
     config: &AppConfig,
-    command: StandaloneCommand,
+    command: ServiceCommand,
     dry_run: bool,
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
@@ -529,10 +459,10 @@ pub(super) fn run_standalone(
         started_at: Instant::now(),
     };
     let outcome = match command {
-        StandaloneCommand::Start => server.start(dry_run),
-        StandaloneCommand::Status => Ok(server.status()),
-        StandaloneCommand::Stop => server.stop(dry_run),
-        StandaloneCommand::Restart => server.restart(dry_run),
+        ServiceCommand::Start => server.start(dry_run),
+        ServiceCommand::Status => Ok(server.status()),
+        ServiceCommand::Stop => server.stop(dry_run),
+        ServiceCommand::Restart => server.restart(dry_run),
     };
     outcome.map_err(|error| UseCaseFailure::with_payload(error, server.failed()))
 }
@@ -555,6 +485,7 @@ mod tests {
     };
     use crate::platform::service::{ProcessFacts, ServiceRequest};
     use crate::use_cases::context::CommandName;
+    use std::path::Path;
 
     const PID: u32 = 7001;
     const STARTED: u64 = 11;
@@ -591,6 +522,7 @@ mod tests {
         soft_stops: RefCell<HashSet<u32>>,
         hard_stops: RefCell<HashSet<u32>>,
         last_args: RefCell<Vec<String>>,
+        foreign_server: Cell<Option<u32>>,
     }
 
     impl ServiceHost for Host {
@@ -649,17 +581,11 @@ mod tests {
             self.listeners.borrow_mut().clear();
         }
         fn sleep(&self, _duration: Duration) {}
-        fn ready_timeout(&self) -> Duration {
+        fn patience(&self, _default: Duration) -> Duration {
             Duration::ZERO
         }
-        fn stop_timeout(&self) -> Duration {
-            Duration::ZERO
-        }
-        fn ready_timeout_of(&self, _default: Duration) -> Duration {
-            Duration::ZERO
-        }
-        fn stop_timeout_of(&self, _default: Duration) -> Duration {
-            Duration::ZERO
+        fn server_over(&self, _db_path: &Path) -> Option<u32> {
+            self.foreign_server.get()
         }
     }
 
@@ -710,7 +636,7 @@ mod tests {
         }
         fn run(
             &self,
-            command: StandaloneCommand,
+            command: ServiceCommand,
             dry_run: bool,
             host: &Host,
         ) -> Result<StandaloneResult, UseCaseError> {
@@ -724,7 +650,7 @@ mod tests {
         fn run_in(
             &self,
             context: &ExecutionContext,
-            command: StandaloneCommand,
+            command: ServiceCommand,
             dry_run: bool,
             host: &Host,
         ) -> Result<StandaloneResult, UseCaseError> {
@@ -746,7 +672,7 @@ mod tests {
     fn start_runs_the_server_and_names_its_addresses() {
         let setup = setup();
         let host = Host::default();
-        let started = setup.run(StandaloneCommand::Start, false, &host).unwrap();
+        let started = setup.run(ServiceCommand::Start, false, &host).unwrap();
         assert_eq!(started.action, ServiceAction::Started);
         assert_eq!(started.pid, Some(PID));
         assert!(started.ready);
@@ -764,8 +690,8 @@ mod tests {
     fn a_second_start_names_the_running_server_and_starts_nothing() {
         let setup = setup();
         let host = Host::default();
-        setup.run(StandaloneCommand::Start, false, &host).unwrap();
-        let second = setup.run(StandaloneCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let second = setup.run(ServiceCommand::Start, false, &host).unwrap();
         assert_eq!(second.action, ServiceAction::AlreadyRunning);
         assert_eq!(host.spawned.get(), 1);
     }
@@ -774,10 +700,10 @@ mod tests {
     fn the_ports_and_the_key_stay_from_start_to_start() {
         let setup = setup();
         let host = Host::default();
-        let first = setup.run(StandaloneCommand::Start, false, &host).unwrap();
+        let first = setup.run(ServiceCommand::Start, false, &host).unwrap();
         let key = std::fs::read(setup.paths().host_key()).unwrap();
-        setup.run(StandaloneCommand::Stop, false, &host).unwrap();
-        let second = setup.run(StandaloneCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        let second = setup.run(ServiceCommand::Start, false, &host).unwrap();
         assert_eq!(first.connection, second.connection);
         assert_eq!(key, std::fs::read(setup.paths().host_key()).unwrap());
     }
@@ -796,9 +722,7 @@ mod tests {
             .as_ref()
             .unwrap();
         std::fs::remove_file(managed.db_path.as_ref().unwrap().join("1Cv8.1CD")).unwrap();
-        let refused = setup
-            .run(StandaloneCommand::Start, false, &host)
-            .unwrap_err();
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::Validation);
         assert!(refused.to_string().contains("infobase create"), "{refused}");
         assert_eq!(host.spawned.get(), 0);
@@ -808,8 +732,8 @@ mod tests {
     fn stop_is_soft_first_and_confirms_the_end_of_the_process() {
         let setup = setup();
         let host = Host::default();
-        setup.run(StandaloneCommand::Start, false, &host).unwrap();
-        let stopped = setup.run(StandaloneCommand::Stop, false, &host).unwrap();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
         assert_eq!(stopped.stopped_pid, Some(PID));
         assert!(host.soft_stops.borrow().contains(&PID));
         assert!(host.hard_stops.borrow().is_empty());
@@ -820,9 +744,9 @@ mod tests {
     fn a_server_that_ignores_the_soft_stop_is_stopped_hard() {
         let setup = setup();
         let host = Host::default();
-        setup.run(StandaloneCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
         host.ignores_soft_stop.set(true);
-        setup.run(StandaloneCommand::Stop, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
         assert!(host.hard_stops.borrow().contains(&PID));
         assert!(!setup.paths().record().exists());
     }
@@ -831,8 +755,8 @@ mod tests {
     fn a_foreign_process_on_a_pinned_port_is_named_and_left_alone() {
         let setup = setup();
         let host = Host::default();
-        let started = setup.run(StandaloneCommand::Start, false, &host).unwrap();
-        setup.run(StandaloneCommand::Stop, false, &host).unwrap();
+        let started = setup.run(ServiceCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Stop, false, &host).unwrap();
         let port: u16 = started
             .connection
             .unwrap()
@@ -842,15 +766,13 @@ mod tests {
             .and_then(|port| port.parse().ok())
             .unwrap();
         host.listeners.borrow_mut().insert(port, 555);
-        let refused = setup
-            .run(StandaloneCommand::Start, false, &host)
-            .unwrap_err();
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
         assert!(refused.to_string().contains("process 555"), "{refused}");
-        let status = setup.run(StandaloneCommand::Status, false, &host).unwrap();
+        let status = setup.run(ServiceCommand::Status, false, &host).unwrap();
         assert_eq!(status.state, ServiceState::Foreign);
         assert_eq!(status.occupant_pid, Some(555));
-        let stop = setup.run(StandaloneCommand::Stop, false, &host).unwrap();
+        let stop = setup.run(ServiceCommand::Stop, false, &host).unwrap();
         assert_eq!(stop.action, ServiceAction::NothingToStop);
         assert!(
             host.soft_stops.borrow().len() == 1,
@@ -863,9 +785,7 @@ mod tests {
         let setup = setup();
         let host = Host::default();
         host.exits_at_once.set(true);
-        let refused = setup
-            .run(StandaloneCommand::Start, false, &host)
-            .unwrap_err();
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::Platform);
         assert!(refused.to_string().contains("standalone"), "{refused}");
         assert!(!setup.paths().record().exists());
@@ -876,9 +796,7 @@ mod tests {
         let setup = setup();
         let host = Host::default();
         host.never_ready.set(true);
-        let refused = setup
-            .run(StandaloneCommand::Start, false, &host)
-            .unwrap_err();
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::Platform);
         assert!(host.soft_stops.borrow().contains(&PID));
         assert!(!setup.paths().record().exists());
@@ -892,7 +810,7 @@ mod tests {
         token.cancel();
         let context = ExecutionContext::cli(CommandName::StandaloneStart).with_cancellation(token);
         let error = setup
-            .run_in(&context, StandaloneCommand::Start, false, &host)
+            .run_in(&context, ServiceCommand::Start, false, &host)
             .unwrap_err();
         assert!(
             matches!(error.kind(), UseCaseErrorKind::Cancelled(_)),
@@ -905,13 +823,13 @@ mod tests {
     fn a_stale_record_is_named_and_replaced() {
         let setup = setup();
         let host = Host::default();
-        setup.run(StandaloneCommand::Start, false, &host).unwrap();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
         host.processes.borrow_mut().clear();
         host.listeners.borrow_mut().clear();
-        let status = setup.run(StandaloneCommand::Status, false, &host).unwrap();
+        let status = setup.run(ServiceCommand::Status, false, &host).unwrap();
         assert_eq!(status.state, ServiceState::NotRunning);
         assert!(status.stale_record);
-        let started = setup.run(StandaloneCommand::Start, false, &host).unwrap();
+        let started = setup.run(ServiceCommand::Start, false, &host).unwrap();
         assert_eq!(started.action, ServiceAction::Started);
         assert!(started.stale_record);
     }
@@ -921,14 +839,12 @@ mod tests {
         let setup = setup();
         let host = Host::default();
         host.unsupported.set(true);
-        let refused = setup
-            .run(StandaloneCommand::Start, false, &host)
-            .unwrap_err();
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
         for command in [
-            StandaloneCommand::Start,
-            StandaloneCommand::Stop,
-            StandaloneCommand::Restart,
+            ServiceCommand::Start,
+            ServiceCommand::Stop,
+            ServiceCommand::Restart,
         ] {
             assert_eq!(
                 setup.run(command, true, &host).unwrap().action,
@@ -946,10 +862,55 @@ mod tests {
         let host = Host::default();
         assert_eq!(
             setup
-                .run(StandaloneCommand::Status, false, &host)
+                .run(ServiceCommand::Status, false, &host)
                 .unwrap_err()
                 .kind(),
             UseCaseErrorKind::Validation
         );
+    }
+
+    #[test]
+    fn a_foreign_server_over_the_same_base_is_named_and_left_alone() {
+        let setup = setup();
+        let host = Host::default();
+        host.foreign_server.set(Some(30117));
+        let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+        assert!(refused.to_string().contains("30117"), "{refused}");
+        assert_eq!(host.spawned.get(), 0);
+        let status = setup.run(ServiceCommand::Status, false, &host).unwrap();
+        assert_eq!(status.state, ServiceState::Foreign);
+        assert_eq!(status.occupant_pid, Some(30117));
+        let stop = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
+        assert!(host.soft_stops.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_crashed_start_with_a_live_server_is_taken_over_and_the_record_becomes_running() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let mut record: ServiceRecord = read_json(&setup.paths().record()).unwrap();
+        record.state = RecordState::Starting;
+        record.starter = Some((900, 5));
+        write_json(&setup.paths().record(), &record).unwrap();
+        let again = setup.run(ServiceCommand::Start, false, &host).unwrap();
+        assert_eq!(again.action, ServiceAction::AlreadyRunning);
+        let written: ServiceRecord = read_json(&setup.paths().record()).unwrap();
+        assert_eq!(written.state, RecordState::Running);
+        assert_eq!(host.spawned.get(), 1);
+    }
+
+    #[test]
+    fn restart_stops_and_starts_the_server_on_the_same_ports() {
+        let setup = setup();
+        let host = Host::default();
+        let first = setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let again = setup.run(ServiceCommand::Restart, false, &host).unwrap();
+        assert_eq!(again.action, ServiceAction::Started);
+        assert_eq!(again.stopped_pid, Some(PID));
+        assert_eq!(first.connection, again.connection);
+        assert_eq!(host.spawned.get(), 2);
     }
 }

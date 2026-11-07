@@ -64,6 +64,36 @@ pub struct ProcessFacts {
 
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
+/// Чужой `ibsrv` над этой файловой базой: порты о нём не говорят, у него свои. Смотрит командные
+/// строки процессов, потому что других следов у сервера нет.
+pub fn ibsrv_over(db_path: &Path) -> Option<u32> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let query = "Get-CimInstance Win32_Process -Filter \"Name='ibsrv.exe'\" | ForEach-Object { [string]$_.ProcessId + ' ' + $_.CommandLine }";
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", query])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    server_over(&String::from_utf8_lossy(&output.stdout), db_path)
+}
+
+/// Разбор ответа: первый pid, в чьей командной строке этот `--db-path`.
+fn server_over(listing: &str, db_path: &Path) -> Option<u32> {
+    let needle = format!("--db-path={}", db_path.display())
+        .to_lowercase()
+        .replace('"', "");
+    listing.lines().find_map(|line| {
+        let (pid, command) = line.trim().split_once(' ')?;
+        let command = command.to_lowercase().replace('"', "");
+        command
+            .split(" --")
+            .any(|part| format!("--{}", part.trim_start_matches("--")).trim_end() == needle)
+            .then(|| pid.parse().ok())?
+    })
+}
+
 /// Имя файла образа в виде, в котором его сравнивает запись.
 #[cfg_attr(
     not(windows),
@@ -73,6 +103,20 @@ pub fn image_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_lowercase())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+
+    #[test]
+    fn a_server_is_found_by_its_own_db_path_only() {
+        let listing = r#"10 "C:\1cv8\ibsrv.exe" "--data=E:\a\data" "--db-path=E:\a\ib" --name=x
+20 C:\1cv8\ibsrv.exe --data=E:\b --db-path=E:\b\ib2 --name=y"#;
+        assert_eq!(server_over(listing, Path::new(r"E:\A\IB")), Some(10));
+        assert_eq!(server_over(listing, Path::new(r"E:\b\ib2")), Some(20));
+        assert_eq!(server_over(listing, Path::new(r"E:\a\i")), None);
+    }
 }
 
 #[cfg(windows)]
