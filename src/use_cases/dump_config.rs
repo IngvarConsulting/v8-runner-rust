@@ -1,3 +1,5 @@
+use crate::change_detection::analyzer::{record_dump_changes, watch_before_dump, DumpWatch};
+use crate::domain::source_set::SourceSetContext;
 use crate::use_cases::provider_selection::stamp_session;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,6 +134,49 @@ impl ResolvedDumpTarget {
             &DestructionConsent::RunnerOwned
         }
     }
+}
+
+/// Выгрузка по изменившемуся пишет прямо в каталог набора: что в нём было, отмечается перед
+/// запуском платформы, чтобы после выгрузки память узнала записанное (#557).
+fn dump_watch(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    set: Option<&SourceSetContext>,
+    plan: &DumpPlan,
+    objects: Option<&[PartialDumpSelector]>,
+) -> Option<DumpWatch> {
+    let incremental = config.format == SourceFormat::Designer
+        && matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
+        && objects.is_none()
+        && context.external_full_pull().is_none();
+    if !incremental {
+        return None;
+    }
+    watch_before_dump(set?, &config.work_path)
+}
+
+/// Выгрузка по изменившемуся над базой, которую во время неё не правили, записывает в память
+/// хеши того, что легло в каталог (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`). Базу правили
+/// или поколение неизвестно — память не трогается, и следующая отправка грузит изменённое.
+fn remember_dump_writes(
+    set: &SourceSetContext,
+    work_path: &Path,
+    watch: Option<&DumpWatch>,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Option<String> {
+    let watch = watch?;
+    if before.is_none() || before != after {
+        return None;
+    }
+    record_dump_changes(set, work_path, watch)
+        .err()
+        .map(|error| {
+            format!(
+                "the dump of source-set '{}' is in place, but hash memory was not updated: {error}; the next push loads what the dump wrote",
+                set.name()
+            )
+        })
 }
 
 /// Что выгрузка сообщает сверх ответа платформы.

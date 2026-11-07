@@ -45,9 +45,15 @@ const IGNORED_DIRS: &[&str] = &[
     ".git", ".gradle", ".build", "build", "target", "temp", "tmp", ".yaxunit",
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
+/// Name prefix of the file an incremental dump writes into the tree to read its clock.
+pub(super) const DUMP_START_PROBE: &str = ".v8-runner-dump-start-";
 
 /// An ignored file, or the temporary file of its atomic replacement left by a killed process.
 fn is_ignored_file(name: &str) -> bool {
+    // The clock probe of an incremental dump, left behind only by a killed process.
+    if name.starts_with(DUMP_START_PROBE) {
+        return true;
+    }
     IGNORED_FILES.iter().any(|ignored| {
         name.strip_prefix(ignored).is_some_and(|rest| {
             rest.is_empty() || rest.starts_with(crate::support::fs::ATOMIC_WRITE_CANDIDATE_SUFFIX)
@@ -152,6 +158,29 @@ fn scan_with_workers(
     scope: ScanScope,
     workers: usize,
 ) -> Result<ScanSnapshot, ScanError> {
+    let listed = list_in_scope(root, excluded, interrupted, scope)?;
+    let files = hash_listed_with(listed.files, workers, interrupted)?;
+    Ok(ScanSnapshot {
+        scan_started_at: listed.scan_started_at,
+        files,
+        has_untracked_links: listed.has_untracked_links,
+    })
+}
+
+/// The selected files of a tree with their metadata, before any content is read.
+pub(super) struct Listing {
+    pub(super) scan_started_at: u64,
+    pub(super) files: Vec<Candidate>,
+    pub(super) has_untracked_links: bool,
+}
+
+/// Walk the tree and select its source files without reading them.
+pub(super) fn list_in_scope(
+    root: &Path,
+    excluded: Option<&Path>,
+    interrupted: &mut dyn FnMut() -> bool,
+    scope: ScanScope,
+) -> Result<Listing, ScanError> {
     check_interruption(interrupted)?;
     let scan_started_at =
         mtime_nanos(std::time::SystemTime::now(), root).map_err(|source| ScanError::Mtime {
@@ -197,9 +226,29 @@ fn scan_with_workers(
         });
     }
 
-    let hashes = hash_candidates(&candidates, workers, interrupted, &hash_file)?;
+    Ok(Listing {
+        scan_started_at,
+        files: candidates,
+        has_untracked_links,
+    })
+}
+
+/// Hash listed files by content, in the order they were listed.
+pub(super) fn hash_listed(
+    files: Vec<Candidate>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<HashedFile>, ScanError> {
+    hash_listed_with(files, hash_workers(), interrupted)
+}
+
+fn hash_listed_with(
+    files: Vec<Candidate>,
+    workers: usize,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<HashedFile>, ScanError> {
+    let hashes = hash_candidates(&files, workers, interrupted, &hash_file)?;
     check_interruption(interrupted)?;
-    let files = candidates
+    Ok(files
         .into_iter()
         .zip(hashes)
         .map(|(candidate, hash)| HashedFile {
@@ -208,19 +257,14 @@ fn scan_with_workers(
             mtime_ns: candidate.mtime_ns,
             hash,
         })
-        .collect();
-    Ok(ScanSnapshot {
-        scan_started_at,
-        files,
-        has_untracked_links,
-    })
+        .collect())
 }
 
 /// A selected file whose content is still to be read.
-struct Candidate {
-    path: PathBuf,
-    rel_path: String,
-    mtime_ns: u64,
+pub(super) struct Candidate {
+    pub(super) path: PathBuf,
+    pub(super) rel_path: String,
+    pub(super) mtime_ns: u64,
 }
 
 /// Below this many files the threads cost more than they save; the set is read in order.
