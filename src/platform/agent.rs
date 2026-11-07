@@ -30,7 +30,6 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::platform::locator::{platform_version_of, PlatformVersion, UtilityType};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest, ProcessRunner};
 use crate::platform::sftp::{self, SftpClient, SftpError};
 use crate::support::authority::Host;
@@ -40,37 +39,18 @@ pub const JSON_MODE_COMMAND: &str = "options set --show-prompt=no --output-forma
 /// Вторая команда сессии: без подключения к базе любая команда `config` отвечает
 /// `DesignerNotConnectedToInfoBase` (замер 15.09.2026).
 pub const CONNECT_COMMAND: &str = "common connect-ib";
-/// Команда, которой управляемый агент завершает работу.
 /// Закрытие соединения с базой без завершения точки входа.
 pub const DISCONNECT_COMMAND: &str = "common disconnect-ib";
-pub const SHUTDOWN_COMMAND: &str = "common shutdown";
 /// Адрес, который слушает управляемый агент: он живёт на машине раннера.
 pub const MANAGED_LISTEN_HOST: std::net::IpAddr =
     std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 /// Файл карты пользовательских каталогов в `AgentBaseDir`.
 pub const BASE_DIR_MAP_FILE: &str = "agentbasedir.json";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
-/// Сколько управляемый агент ждут выйти после `common shutdown`.
-const MANAGED_EXIT_GRACE: Duration = Duration::from_secs(15);
-/// Границы версий, где `common shutdown` агента не завершает: на 8.3.24–8.3.26 команда остаётся
-/// без ответа, соединение не закрывается и процесс не выходит (замер 06.11.2026, Windows). Ниже
-/// 8.3.24 поведение не замерено.
-const FIRST_VERSION_IGNORING_SHUTDOWN: PlatformVersion = PlatformVersion {
-    major: 8,
-    minor: 3,
-    patch: 24,
-    build: 0,
-};
-const FIRST_VERSION_HONOURING_SHUTDOWN: PlatformVersion = PlatformVersion {
-    major: 8,
-    minor: 3,
-    patch: 27,
-    build: 0,
-};
-/// Срок каждого шага закрытия агента, который `common shutdown` заведомо не завершит: ждать
-/// там нечего.
-const IGNORED_SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
+const CLEANUP_GRACE: Duration = Duration::from_secs(30);
+/// Сколько управляемый агент ждут ответить на `common disconnect-ib`: команда отвечает за
+/// 40–190 мс (замер 07.11.2026); дольше агент её уже не выполнит, и процесс снимается.
+const RELEASE_GRACE: Duration = Duration::from_secs(5);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
 /// Строка журнала: отмена бросила ответ команды, которую не обязаны дожидаться.
 const AGENT_COMMAND_ABANDONED: &str = "agent command abandoned: the command was cancelled";
@@ -526,7 +506,18 @@ impl WaitPolicy {
     /// завершение обязано закончиться — иначе прерванная сессия висела бы вечно.
     /// Берётся меньшее из запаса на завершение и уже стоящего срока, если тот есть.
     pub fn cleanup(&self) -> Self {
-        self.cleanup_within(SHUTDOWN_GRACE)
+        self.cleanup_within(CLEANUP_GRACE)
+    }
+
+    /// Срок отпускания своего агента, который отмена команды не обрывает: агент, снятый
+    /// посреди `disconnect-ib`, мог бы держать базу дольше, чем стоят эти секунды.
+    fn release_window(grace: Duration) -> Self {
+        Self {
+            deadline: Some(Instant::now() + grace),
+            cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::Interruptible,
+            work: None,
+        }
     }
 
     fn cleanup_within(&self, grace: Duration) -> Self {
@@ -942,9 +933,15 @@ impl AgentSession {
     /// закрывает соединение с базой служебной командой — иначе точка входа держит
     /// блокировку Конфигуратора и после разрыва SSH — и саму сессию. Ответ не важен, работы
     /// команды это не отмечает.
-    pub fn release(mut self, policy: &WaitPolicy) {
+    pub fn release(self, policy: &WaitPolicy) {
+        self.release_under(&policy.cleanup());
+    }
+
+    fn release_under(mut self, cleanup: &WaitPolicy) {
         self.discard_stale();
-        let _ = self.run(DISCONNECT_COMMAND, &policy.cleanup().without_work());
+        if let Err(error) = self.run(DISCONNECT_COMMAND, &cleanup.without_work()) {
+            debug!(%error, "agent did not confirm common disconnect-ib");
+        }
         self.disconnect();
     }
 
@@ -1227,21 +1224,8 @@ impl AgentSession {
         }
     }
 
-    /// Просит агента завершиться и закрывает сессию; возвращает ответ, если он был.
-    /// Завершение — служебная команда: работы команды оно не отмечает.
-    pub fn shutdown(mut self, policy: &WaitPolicy, grace: Duration) -> Option<AgentReply> {
-        // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
-        // дольше короткого срока незачем, даже если бюджет команды не ограничен.
-        let capped = policy.cleanup_within(grace).without_work();
-        self.discard_stale();
-        // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
-        let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
-        self.disconnect();
-        reply
-    }
-
     /// Недочитанное от прежней команды — например, неверный ответ, на котором она
-    /// кончилась, — ответом на служебную команду (`disconnect-ib`, `shutdown`) не является:
+    /// кончилась, — ответом на служебную команду (`disconnect-ib`) не является:
     /// без сброса разбор упал бы на нём сразу (`InvalidReply`), не дождавшись ответа агента.
     /// Журнал сохраняет только размер сброшенного: неразобранные байты могут содержать секреты.
     fn discard_stale(&mut self) {
@@ -1596,7 +1580,6 @@ pub struct ManagedAgent {
     process: Option<crate::platform::process::ManagedSpawnResult>,
     session: Option<AgentSession>,
     base_dir: PathBuf,
-    ignores_shutdown: bool,
     /// Ключ хоста этого запуска: одноразовый файл живёт, пока жив агент.
     _host_key: LaunchHostKey,
 }
@@ -1625,7 +1608,6 @@ impl ManagedAgent {
                 source,
             }
         })?;
-        let ignores_shutdown = ignores_shutdown(&launch.v8);
         let request = launch.request();
         let mut process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
@@ -1701,7 +1683,6 @@ impl ManagedAgent {
             process: Some(process),
             session: Some(opened),
             base_dir: launch.base_dir,
-            ignores_shutdown,
             _host_key: launch.host_key,
         })
     }
@@ -1722,34 +1703,17 @@ impl ManagedAgent {
         &self.base_dir
     }
 
-    /// Просит агента завершиться и ждёт процесс; не вышедший вовремя — снимается. Версию, где
-    /// команда агента не завершает, не ждут, но команду ей всё равно отдают.
-    pub fn shutdown(mut self, policy: &WaitPolicy) {
-        let (reply_grace, exit_grace) = if self.ignores_shutdown {
-            (IGNORED_SHUTDOWN_WAIT, IGNORED_SHUTDOWN_WAIT)
-        } else {
-            (SHUTDOWN_GRACE, MANAGED_EXIT_GRACE)
-        };
+    /// Закрывает соединение агента с базой (`common disconnect-ib`) и сессию и снимает процесс,
+    /// не дожидаясь, что он выйдет сам: `common shutdown` агенту не отдаётся
+    /// (`INV.PLATFORM.A-MANAGED-AGENT-IS-RELEASED-AND-REMOVED`). Отказ или молчание
+    /// `disconnect-ib` снятия не отменяют, исхода команды они не меняют; отмена команды
+    /// срока отпускания не обрывает.
+    pub fn release_and_remove(mut self) {
         if let Some(session) = self.session.take() {
-            session.shutdown(policy, reply_grace);
+            session.release_under(&WaitPolicy::release_window(RELEASE_GRACE));
         }
         if let Some(process) = self.process.take() {
-            // Ожидание выхода агента — служебное: работы команды оно не отмечает.
-            let grace = ProcessExecutionPolicy::platform_step(
-                Some(exit_grace),
-                CancellationToken::new(),
-                ProcessInterruptionSafety::Interruptible,
-            );
-            match process.wait_for_exit(&grace) {
-                Ok(outcome) if outcome.timed_out && self.ignores_shutdown => {
-                    debug!("designer agent of this platform ignores shutdown and was terminated")
-                }
-                Ok(outcome) if outcome.timed_out => {
-                    warn!("designer agent ignored shutdown and was terminated")
-                }
-                Ok(_) => {}
-                Err(error) => warn!(error = %error, "designer agent shutdown wait failed"),
-            }
+            process.terminate();
         }
     }
 }
@@ -1760,15 +1724,6 @@ impl Drop for ManagedAgent {
         self.session.take();
         self.process.take();
     }
-}
-
-/// Известно ли, что агент этой установки не выполняет `common shutdown`. Версия вне замера и
-/// версия, которую путь не называет, считаются выполняющими: им достаётся полный срок, а не
-/// снятие раньше времени.
-fn ignores_shutdown(v8: &Path) -> bool {
-    platform_version_of(UtilityType::V8, v8).is_some_and(|version| {
-        (FIRST_VERSION_IGNORING_SHUTDOWN..FIRST_VERSION_HONOURING_SHUTDOWN).contains(&version)
-    })
 }
 
 /// Сколько знаков `/Out` агента приводит отказ.
@@ -2044,28 +1999,6 @@ mod tests {
             "nothing bounds how long an agent operation may take: the command has no deadline \
              and the measurement gives agent silence no upper bound to pick a threshold from"
         );
-    }
-
-    #[test]
-    fn only_a_platform_known_to_ignore_shutdown_is_not_awaited() {
-        let v8 = |version: &str| {
-            Path::new("1cv8")
-                .join(version)
-                .join("bin")
-                .join(UtilityType::V8.executable_name())
-        };
-        for version in ["8.3.24.1819", "8.3.25.1633", "8.3.26.1656"] {
-            assert!(ignores_shutdown(&v8(version)), "{version}");
-        }
-        for version in [
-            "8.3.23.1",
-            "8.3.27.0",
-            "8.3.27.2342",
-            "8.5.1.1529",
-            "custom",
-        ] {
-            assert!(!ignores_shutdown(&v8(version)), "{version}");
-        }
     }
 
     /// Очистка входит в срок команды и не заводит собственного: она берёт меньшее из

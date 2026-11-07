@@ -100,7 +100,7 @@ impl AgentHandle {
     /// команды и мог держать её столько же ещё раз.
     pub(crate) fn finish(self, wait: &WaitPolicy) {
         match self {
-            Self::Managed(agent) => agent.shutdown(wait),
+            Self::Managed(agent) => agent.release_and_remove(),
             Self::Attached { session, .. } | Self::Gate { session, .. } => session.release(wait),
         }
     }
