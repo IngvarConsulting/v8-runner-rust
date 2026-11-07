@@ -539,6 +539,216 @@ fn write_dt(path: &Path) -> PathBuf {
 }
 
 #[test]
+fn ibcmd_dumps_dt_only_when_the_file_infobase_has_no_sessions() {
+    let (_dir, config, base, calls) = setup("IBCMD");
+    let text = fs::read_to_string(&config).expect("config");
+    fs::write(
+        &config,
+        text.replace("providers:\n", "providers:\n  infobase.dump: ibcmd\n"),
+    )
+    .expect("explicit snapshot provider");
+    let output = base.join("dist/base.dt");
+    let result = v8_runner_command()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--json-message",
+            "infobase",
+            "dump",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("dump");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert_eq!(fs::read(output).expect("snapshot"), b"payload");
+    assert!(fs::read_to_string(calls).expect("argv").contains("dump"));
+}
+
+fn hold_platform_session(database: &Path, ready: &Path) -> support::RunnerGuard {
+    let child = std::process::Command::new("python3")
+        .args(["-c", "import fcntl, pathlib, sys, time; f=open(sys.argv[1], 'rb'); fcntl.lockf(f, fcntl.LOCK_SH, 1, 0x7ffffffffffffffe); pathlib.Path(sys.argv[2]).touch(); time.sleep(60)"])
+        .arg(database).arg(ready).spawn().expect("session holder");
+    let holder = support::RunnerGuard(child);
+    assert!(
+        support::wait_for_file(ready, std::time::Duration::from_secs(10)),
+        "session must hold the file"
+    );
+    holder
+}
+
+#[test]
+// Reintroduction guard: ibcmd truncates a failed dump. The DSL owns the kernel probe;
+// exercising both CLI operations detects a new dispatch path that bypasses that owner.
+fn a_busy_ibcmd_dt_transfer_names_the_holder_and_dispatches_nothing() {
+    let (dir, config, base, calls) = setup("IBCMD");
+    let text = fs::read_to_string(&config).expect("config");
+    fs::write(
+        &config,
+        text.replace(
+            "providers:\n",
+            "providers:\n  infobase.dump: ibcmd\n  infobase.restore: ibcmd\n",
+        ),
+    )
+    .expect("providers");
+    let database = base.join("ib/1Cv8.1CD");
+    let holder = hold_platform_session(&database, &dir.path().join("session-ready"));
+    let input = write_dt(&dir.path().join("input.dt"));
+    let output = write_dt(&base.join("dist/existing.dt"));
+    for args in [
+        vec!["dump", "--output", output.to_str().unwrap()],
+        vec!["restore", "--input", input.to_str().unwrap(), "--replace"],
+    ] {
+        let preview = v8_runner_command()
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "--json-message",
+                "--dry-run",
+                "infobase",
+            ])
+            .args(&args)
+            .output()
+            .expect("preview");
+        assert!(
+            preview.status.success(),
+            "{}",
+            String::from_utf8_lossy(&preview.stdout)
+        );
+        let result = v8_runner_command()
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "--json-message",
+                "infobase",
+            ])
+            .args(args)
+            .output()
+            .expect("busy transfer");
+        assert!(!result.status.success());
+        let envelope: Value = serde_json::from_slice(&result.stdout).expect("envelope");
+        assert_eq!(envelope["error"]["code"], "infobase_busy", "{envelope:#?}");
+        assert_eq!(
+            envelope["data"]["target_state"], "unchanged",
+            "{envelope:#?}"
+        );
+        assert!(
+            envelope.to_string().contains(&holder.0.id().to_string()),
+            "{envelope:#?}"
+        );
+        assert!(!calls.exists(), "busy transfer must never start ibcmd");
+        assert_eq!(fs::read(&database).expect("database"), b"database");
+        assert_eq!(fs::read(&input).expect("source"), b"payload");
+        assert_eq!(fs::read(&output).expect("old snapshot"), b"payload");
+    }
+}
+
+#[test]
+fn a_failed_ibcmd_dump_preserves_the_published_snapshot() {
+    let (dir, config, base, _calls) = setup("IBCMD");
+    let text = fs::read_to_string(&config).expect("config");
+    fs::write(
+        &config,
+        text.replace("providers:\n", "providers:\n  infobase.dump: ibcmd\n"),
+    )
+    .expect("provider");
+    write_shell_script(
+        &dir.path().join("ibcmd"),
+        "for last in \"$@\"; do :; done\nprintf partial > \"$last\"\nexit 255",
+    );
+    let output = write_dt(&base.join("dist/existing.dt"));
+    let result = v8_runner_command()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--json-message",
+            "infobase",
+            "dump",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed dump");
+    assert!(!result.status.success());
+    let envelope: Value = serde_json::from_slice(&result.stdout).expect("envelope");
+    assert_eq!(
+        envelope["error"]["code"], "platform_failure",
+        "{envelope:#?}"
+    );
+    assert_eq!(fs::read(output).expect("published snapshot"), b"payload");
+    assert_eq!(fs::read_dir(base.join("dist")).expect("dist").count(), 1);
+}
+
+#[test]
+fn ibcmd_restores_an_existing_or_new_file_infobase() {
+    for mode in ["--replace", "--create"] {
+        let (dir, config, base, calls) = setup("IBCMD");
+        let text = fs::read_to_string(&config).expect("config").replace(
+            "infobase:\n",
+            "infobase:\n  user: admin\n  password: secret\n",
+        );
+        fs::write(
+            &config,
+            text.replace("providers:\n", "providers:\n  infobase.restore: ibcmd\n"),
+        )
+        .expect("provider");
+        if mode == "--create" {
+            fs::remove_file(base.join("ib/1Cv8.1CD")).expect("absent target");
+        }
+        let input = write_dt(&dir.path().join("input.dt"));
+        write_shell_script(
+            &dir.path().join("ibcmd"),
+            &format!("printf '%s\\n' \"$@\" > '{}'\nexit 0", calls.display()),
+        );
+        let result = v8_runner_command()
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "--json-message",
+                "infobase",
+                "restore",
+                "--input",
+                input.to_str().unwrap(),
+                mode,
+            ])
+            .output()
+            .expect("restore");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let args = fs::read_to_string(&calls).expect("argv");
+        assert!(args.contains("restore\n"), "{args}");
+        assert_eq!(
+            args.contains("--create-database"),
+            mode == "--create",
+            "{args}"
+        );
+        assert_eq!(
+            args.contains("--user\nadmin\n"),
+            mode == "--replace",
+            "{args}"
+        );
+        assert_eq!(
+            args.contains("--password\nsecret\n"),
+            mode == "--replace",
+            "{args}"
+        );
+        assert!(
+            !args.contains("--force"),
+            "restore must not terminate sessions"
+        );
+        assert!(args.contains("--data\n"), "{args}");
+        assert_eq!(fs::read(input).expect("source"), b"payload");
+    }
+}
+
+#[test]
 fn restore_replaces_an_existing_infobase_through_designer() {
     let (dir, config, base, calls) = setup("DESIGNER");
     let input = write_dt(&dir.path().join("transfer/base.dt"));

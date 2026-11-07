@@ -67,11 +67,10 @@ fn run_init(
     // утилиты своим статусом: отказ выбора здесь не прерывает команду — у серверного
     // подключения и у чисто EDT-проекта этот шаг может и не понадобиться. Квитанция
     // при этом остаётся честной: никто не готов, пропущенные названы.
-    // Копию `--from` создаёт только Конфигуратор: квитанция называет его, а ключ, который
-    // назначает другого исполнителя, — отказ до снимка: названный ключом исполнитель не
-    // подменяется.
+    // Снимок источника делает Конфигуратор; исполнителя восстановления на целевой
+    // базе выбирает сценарий копирования и называет в квитанции.
     if args.from.is_some() {
-        return copy_with_the_designer(context, config, args, &mut utilities, started);
+        return copy_infobase(context, config, args, &mut utilities, started);
     }
     let (provider, receipt) =
         match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Init)
@@ -151,8 +150,9 @@ fn run_init(
 }
 
 /// `infobase create --from`: шаг копии и, у формата EDT, рабочая область. Исполнитель —
-/// Конфигуратор: снимок и загрузка образа идут им (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
-fn copy_with_the_designer(
+/// Снимок делает Конфигуратор; файловую копию на POSIX восстанавливает `ibcmd`
+/// (`INV.CLI.A-FILE-COPY-IS-CREATED-BY-IBCMD`).
+fn copy_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &InitRequest,
@@ -160,9 +160,21 @@ fn copy_with_the_designer(
     started: Instant,
 ) -> UseCaseResult<InitResult> {
     let dry_run = args.dry_run;
+    let file_ibcmd = cfg!(unix) && config.target_kind() == TargetKind::File;
+    let can_restore =
+        |provider| provider == Provider::Designer || (file_ibcmd && provider == Provider::Ibcmd);
+    let default = crate::domain::capability::default_chain(Operation::Init, config.target_kind())
+        .into_iter()
+        .find(|provider| can_restore(*provider))
+        .unwrap_or(Provider::Designer);
+    let provider = config
+        .providers
+        .get(&Operation::Init)
+        .copied()
+        .unwrap_or(default);
     let origin = match config.providers.get(&Operation::Init) {
         None => crate::domain::capability::ProviderOrigin::Default,
-        Some(Provider::Designer) => crate::domain::capability::ProviderOrigin::Override {
+        Some(_) if can_restore(provider) => crate::domain::capability::ProviderOrigin::Override {
             file: config
                 .provider_origins
                 .get(&Operation::Init)
@@ -171,7 +183,7 @@ fn copy_with_the_designer(
         },
         Some(other) => {
             let error = UseCaseError::from(AppError::Validation(format!(
-                "infobase create --from takes the snapshot and loads the image with the Designer, and providers.{} names {}: remove the key or set it to designer",
+                "infobase create --from cannot restore this target with providers.{}: {}: use designer, or ibcmd for a POSIX file infobase",
                 Operation::Init.as_str(),
                 other.as_str()
             )));
@@ -195,7 +207,7 @@ fn copy_with_the_designer(
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
     let mut shared_edt: Option<EdtDsl<'static>> = None;
-    let (step, source) = copy::ensure_copy(context, config, utilities, from, dry_run);
+    let (step, source) = copy::ensure_copy(context, config, utilities, from, dry_run, provider);
     record_step(&mut steps, &mut first_error, step);
     record_step(
         &mut steps,
@@ -205,7 +217,7 @@ fn copy_with_the_designer(
     let mut result = init_result(started, steps, first_error.is_none());
     result.source = source;
     result.provider = Some(crate::domain::capability::ProviderReceipt {
-        selected: Some(Provider::Designer),
+        selected: Some(provider),
         origin,
         skipped: Vec::new(),
         endpoint: None,

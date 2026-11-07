@@ -109,7 +109,7 @@ path=''
 previous=''
 for arg in "$@"; do
   case "$arg" in
-    create) if [ -z "$command" ]; then command="$arg"; fi ;;
+    create|restore) if [ -z "$command" ]; then command="$arg"; fi ;;
     generation-id) command=generation ;;
   esac
   if [ "$previous" = '--db-path' ]; then path="$arg"; fi
@@ -117,10 +117,22 @@ for arg in "$@"; do
 done
 case "$command" in
   create) mkdir -p "$path" && printf 'database of %s\n' "$path" > "$path/1Cv8.1CD" ;;
+  restore)
+    if [ -f '{hold_restore}' ]; then
+      : > '{restore_started}'
+      waited=0
+      while [ ! -e '{restore_release}' ] && [ "$waited" -lt 300 ]; do sleep 0.1; waited=$((waited + 1)); done
+    fi
+    if [ -f '{fail_restore}' ]; then printf 'the image is not loaded: %s\n' "$*" >&2; exit 255; fi
+    mkdir -p "$path" && cat "$previous" > "$path/1Cv8.1CD" ;;
   generation) printf '{TOKEN}\n' ;;
 esac
 exit 0"#,
             calls = calls.display(),
+            hold_restore = root.join("hold-restore").display(),
+            restore_started = root.join("restore-started").display(),
+            restore_release = root.join("restore-release").display(),
+            fail_restore = root.join("fail-restore").display(),
         ),
     );
     bin.join("1cv8")
@@ -329,7 +341,7 @@ fn debugging_on_a_copy_of_the_base_leaves_the_neighbour_untouched() {
     );
     let restore = log
         .lines()
-        .find(|line| line.contains("/RestoreIB"))
+        .find(|line| line.starts_with("ibcmd ") && line.contains(" restore "))
         .expect("restore call");
     assert!(restore.contains("upstream.dt"), "{restore}");
     assert!(
@@ -580,7 +592,7 @@ fn a_preview_names_the_snapshot_and_a_wrong_source_is_refused() {
         .as_str()
         .expect("message");
     assert!(
-        message.contains("/DumpIB") && message.contains("/RestoreIB"),
+        message.contains("/DumpIB") && message.contains("ibcmd") && message.contains("restore"),
         "{message}"
     );
 
@@ -839,6 +851,13 @@ fn a_failed_load_into_a_file_base_hides_the_passwords() {
             source.display()
         ),
     );
+    // Keep exercising Designer diagnostics that actually echo the target credentials.
+    let project = fs::read_to_string(&worktree).expect("project");
+    fs::write(
+        &worktree,
+        project.replace("providers:\n", "providers:\n  infobase.create: designer\n"),
+    )
+    .expect("explicit Designer");
     fs::write(stand.root().join("fail-restore"), "").expect("fail restore");
 
     let output = run(&worktree, &["infobase", "create", "--from", "upstream"]);
@@ -987,10 +1006,9 @@ fn a_push_of_one_set_keeps_the_copy_mark_until_every_set_is_remembered() {
     assert!(!mark.exists(), "every set is remembered now");
 }
 
-/// Копию создаёт Конфигуратор, и квитанция называет его; ключ, назначающий `infobase create`
-/// другого исполнителя, — отказ до снимка с именем ключа.
+/// Файловую копию по умолчанию восстанавливает ibcmd; недопустимый ключ не начинает снимок.
 #[test]
-fn a_copy_is_made_by_the_designer_and_a_key_naming_another_executor_is_refused() {
+fn a_file_copy_selects_ibcmd_and_refuses_an_unavailable_executor() {
     let stand = Stand::new();
     let (_neighbour, neighbour_base) = stand.neighbour();
     let worktree = stand.worktree(&neighbour_base);
@@ -1001,7 +1019,7 @@ fn a_copy_is_made_by_the_designer_and_a_key_naming_another_executor_is_refused()
         &["infobase", "create", "--from", "upstream", "--dry-run"],
     ));
     assert_eq!(
-        preview["data"]["provider"]["selected"], "designer",
+        preview["data"]["provider"]["selected"], "ibcmd",
         "{preview}"
     );
     assert_eq!(
@@ -1012,7 +1030,7 @@ fn a_copy_is_made_by_the_designer_and_a_key_naming_another_executor_is_refused()
     let project = fs::read_to_string(&worktree).expect("project");
     fs::write(
         &worktree,
-        project.replace("providers:\n", "providers:\n  infobase.create: ibcmd\n"),
+        project.replace("providers:\n", "providers:\n  infobase.create: agent\n"),
     )
     .expect("project with the key");
     let before = calls(stand.root());
@@ -1028,4 +1046,30 @@ fn a_copy_is_made_by_the_designer_and_a_key_naming_another_executor_is_refused()
         assert!(message.contains("providers.infobase.create"), "{message}");
     }
     assert_eq!(calls(stand.root()), before, "nothing is snapshotted");
+}
+
+#[test]
+fn a_file_copy_is_restored_by_ibcmd_without_changing_the_source() {
+    let stand = Stand::new();
+    let (_neighbour, source) = stand.neighbour();
+    let before = fs::read(source.join("1Cv8.1CD")).expect("source");
+    let worktree = stand.worktree(&source);
+    init_own_base(&worktree);
+    let result = succeeded(&run(
+        &worktree,
+        &["infobase", "create", "--from", "upstream"],
+    ));
+    assert_eq!(result["data"]["provider"]["selected"], "ibcmd", "{result}");
+    let log = calls(stand.root());
+    assert!(
+        log.lines().any(|line| line.starts_with("ibcmd ")
+            && line.contains(" restore ")
+            && line.contains("--create-database")),
+        "{log}"
+    );
+    assert_eq!(fs::read(source.join("1Cv8.1CD")).expect("source"), before);
+    assert_eq!(
+        fs::read(worktree.parent().unwrap().join("build/ib/1Cv8.1CD")).expect("copy"),
+        before
+    );
 }
