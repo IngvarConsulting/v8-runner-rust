@@ -74,6 +74,8 @@ pub enum Command {
     Init(InfobaseCreateArgs),
     /// Start and stop the PostgreSQL of an infobase declared with dbms.managed
     Dbms(DbmsArgs),
+    /// Start and stop the ibsrv of an infobase declared with standalone.managed
+    Standalone(StandaloneArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -184,19 +186,25 @@ pub struct BootstrapArgs {
 #[derive(Args, Debug)]
 pub struct DbmsArgs {
     #[command(subcommand)]
-    pub command: DbmsCommandArgs,
+    pub command: ServiceCommandArgs,
 }
 
 #[derive(Subcommand, Debug, Clone, Copy)]
-pub enum DbmsCommandArgs {
-    /// Start the PostgreSQL of this infobase and wait until it accepts connections
+pub enum ServiceCommandArgs {
+    /// Start the service of this infobase and wait until it accepts connections
     Start,
-    /// Say whether it runs, by whom it was started, its address and password file
+    /// Say whether it runs, who started it and where it listens
     Status,
-    /// Stop the PostgreSQL this working copy started; the data stays
+    /// Stop the service this working copy started; the data stays
     Stop,
     /// Stop and start it again
     Restart,
+}
+
+#[derive(Args, Debug)]
+pub struct StandaloneArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommandArgs,
 }
 
 #[derive(Args, Debug)]

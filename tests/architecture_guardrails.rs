@@ -269,7 +269,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 35,
+        report.accepted, 36,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -362,6 +362,10 @@ fn the_lock_guard_tells_locked_dispatches_from_unlocked_ones() {
 const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     (
         "crate::use_cases::managed_stand::dbms_status",
+        "читает запись без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::managed_stand::standalone_status",
         "читает запись без замка, чтобы отвечать и пока идёт другая команда",
     ),
     (

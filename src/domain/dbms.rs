@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// В каком состоянии служба сейчас.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum DbmsState {
+pub enum ServiceState {
     NotRunning,
     Starting,
     StartedByThisCopy,
@@ -18,7 +18,7 @@ pub enum DbmsState {
 /// Что сделала команда.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum DbmsAction {
+pub enum ServiceAction {
     Started,
     AlreadyRunning,
     Stopped,
@@ -31,8 +31,8 @@ pub enum DbmsAction {
 pub struct DbmsResult {
     pub ok: bool,
     pub infobase: String,
-    pub state: DbmsState,
-    pub action: DbmsAction,
+    pub state: ServiceState,
+    pub action: ServiceAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,8 +62,5 @@ pub struct DbmsResult {
     pub occupant_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_pid: Option<u32>,
-    /// Отмена, отложенная на время остановки.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
     pub duration_ms: u64,
 }

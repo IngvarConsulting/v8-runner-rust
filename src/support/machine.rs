@@ -149,6 +149,13 @@ pub fn machine_id() -> Option<String> {
     system_machine_id()
 }
 
+/// Hash of a machine identifier: what the runner keeps on disk instead of the value itself.
+pub fn machine_hash(identity: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("v8-runner/owner/{identity}").as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// A `machine-id` file's value, if it holds one: 32 hexadecimal digits. An empty file and
 /// `uninitialized` — a system still in its first boot — hold none.
 #[cfg(any(target_os = "linux", test))]

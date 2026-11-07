@@ -87,6 +87,15 @@ pub enum ConfigValidationError {
     #[error("infobase.{key}: the runner does not start this server yet; only the dbms commands work with this infobase")]
     ManagedServerNotAvailable { key: &'static str },
 
+    #[error("the standalone server of this infobase is not running: run `standalone start`")]
+    ManagedServerNotRunning,
+
+    #[error("the standalone server of this infobase is running: an infobase is not created under its server; run `standalone stop` first")]
+    ManagedServerIsRunning,
+
+    #[error("infobase.standalone.managed is not declared for this infobase: the standalone commands start only a server the runner owns")]
+    StandaloneNotManaged,
+
     #[error("infobase.dbms.managed is not declared for this infobase: the dbms commands start only a PostgreSQL the runner owns")]
     DbmsNotManaged,
 
@@ -429,6 +438,12 @@ impl ConfigValidationError {
             Self::ProviderRemoved { way_out, .. } => {
                 Some(crate::domain::next_step::NextStep::command(*way_out))
             }
+            Self::ManagedServerNotRunning => Some(crate::domain::next_step::NextStep::command(
+                "standalone start",
+            )),
+            Self::ManagedServerIsRunning => Some(crate::domain::next_step::NextStep::command(
+                "standalone stop",
+            )),
             _ => None,
         }
     }
@@ -503,6 +518,17 @@ pub fn validate_managed_dbms(config: &AppConfig) -> Result<(), ConfigValidationE
         .is_none_or(|dbms| dbms.managed.is_none())
     {
         return Err(ConfigValidationError::DbmsNotManaged);
+    }
+    Ok(())
+}
+
+/// Проверка для команд `standalone`: база объявляет `standalone.managed`.
+pub fn validate_managed_standalone(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_managed_declarations(&config.infobase)?;
+    if managed_server_key(&config.infobase) != Some("standalone.managed") {
+        return Err(ConfigValidationError::StandaloneNotManaged);
     }
     Ok(())
 }
@@ -1075,8 +1101,13 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
         })?;
     }
     validate_infobase_form(&config.infobase)?;
-    if let Some(key) = managed_server_key(&config.infobase) {
-        return Err(ConfigValidationError::ManagedServerNotAvailable { key });
+    match managed_server_key(&config.infobase) {
+        // Адрес работающего сервера подставил загрузчик; строки нет — сервера нет.
+        Some("standalone.managed") if config.infobase.connection.trim().is_empty() => {
+            return Err(ConfigValidationError::ManagedServerNotRunning);
+        }
+        Some("standalone.managed") | None => {}
+        Some(key) => return Err(ConfigValidationError::ManagedServerNotAvailable { key }),
     }
     validate_selected_infobase_environment(config)
 }
@@ -3103,6 +3134,7 @@ mod tests {
             ),
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig {
+                managed_memory: None,
                 connection: "Srvr=localhost;Ref=ib".to_owned(),
                 user: None,
                 password: None,

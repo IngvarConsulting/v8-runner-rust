@@ -23,7 +23,7 @@ use crate::config::loader::{load_declared_infobases, ConfigLoadError};
 use crate::config::model::{AppConfig, InfobaseConfig};
 use crate::platform::connection::V8Connection;
 use crate::support::fs::{read_optional, write_file_atomically};
-use crate::support::machine::{host_name, machine_id};
+use crate::support::machine::{host_name, machine_hash, machine_id};
 use crate::support::path::{nearest_existing_canonical_path, stable_path_identity};
 use crate::use_cases::infobase_lock::BaseAccess;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
@@ -133,13 +133,6 @@ impl ThisCopy {
     fn is_on_the_machine_of(&self, record: &OwnerRecord) -> bool {
         self.machine.as_deref() == Some(record.machine.as_str())
     }
-}
-
-/// Хеш идентификатора машины для метки: идентификатор в открытом виде не хранится.
-pub(crate) fn machine_hash(identity: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("v8-runner/owner/{identity}").as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Чего команда ждёт от проверки: прогон записывает свою копию, превью только называет то,
@@ -387,9 +380,15 @@ fn declares<'a>(
     base_dir: &Path,
 ) -> bool {
     sections.into_iter().any(|infobase| {
-        V8Connection::from_connection_string(&infobase.connection)
-            .file_infobase_dir(project)
-            .is_some_and(|dir| same_path(&dir, base_dir))
+        let managed = infobase
+            .standalone
+            .as_ref()
+            .and_then(|standalone| standalone.managed.as_ref())
+            .and_then(|managed| managed.db_path.as_ref());
+        managed.is_some_and(|dir| same_path(dir, base_dir))
+            || V8Connection::from_connection_string(&infobase.connection)
+                .file_infobase_dir(project)
+                .is_some_and(|dir| same_path(&dir, base_dir))
     })
 }
 
