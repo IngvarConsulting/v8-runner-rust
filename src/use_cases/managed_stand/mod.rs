@@ -529,7 +529,7 @@ impl<'a> Stand<'a> {
     /// Гасит только то, что подняла эта команда. Процесс появляется не сразу, а `postmaster.pid`
     /// может остаться от прошлого запуска, поэтому ждут опознанный `postgres`. Не дождались или не
     /// подтвердили его конец — запись остаётся: когда этого раннера не станет, её разберёт следующая
-    /// команда (`observe_starting`).
+    /// команда (`observe_service`).
     fn stop_started(&self, build: &PostgresBuild, port: u16) {
         let deadline = Instant::now() + self.host.patience(IDENTIFY_TIMEOUT);
         let mut identified = self.identified_postgres(port);

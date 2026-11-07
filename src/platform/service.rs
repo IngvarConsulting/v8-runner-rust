@@ -70,12 +70,25 @@ pub fn ibsrv_over(db_path: &Path) -> Option<u32> {
     if !cfg!(windows) {
         return None;
     }
-    let query = "Get-CimInstance Win32_Process -Filter \"Name='ibsrv.exe'\" | ForEach-Object { [string]$_.ProcessId + ' ' + $_.CommandLine }";
-    let output = std::process::Command::new("powershell")
+    let query = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process -Filter \"Name='ibsrv.exe'\" | ForEach-Object { [string]$_.ProcessId + ' ' + $_.CommandLine }";
+    let mut child = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", query])
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
+    // Ответ не дольше этого: зависший запрос не должен держать замок. Не ответил — чужого не нашли.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while child.try_wait().ok()?.is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().ok()?;
     server_over(&String::from_utf8_lossy(&output.stdout), db_path)
 }
 

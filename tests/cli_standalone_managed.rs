@@ -104,11 +104,41 @@ fn a_preview_of_infobase_create_goes_for_the_file_base_of_the_server() {
 fn status_and_platforms_work_without_the_server() {
     let dir = temp_workspace();
     project(dir.path(), MANAGED);
-    let (_, status) = run(dir.path(), &["status"]);
+    let (code, status) = run(dir.path(), &["status"]);
+    assert_eq!(code, 0, "{status}");
     assert!(!status.to_string().contains("standalone start"), "{status}");
-    let (_, platforms) = run(dir.path(), &["platforms"]);
+    let (code, platforms) = run(dir.path(), &["platforms"]);
+    assert_eq!(code, 0, "{platforms}");
     assert!(
         !platforms.to_string().contains("standalone start"),
         "{platforms}"
     );
+}
+
+#[test]
+fn a_deep_status_without_the_server_names_the_next_command() {
+    let dir = temp_workspace();
+    project(dir.path(), MANAGED);
+    let (code, answer) = run(dir.path(), &["status", "--deep"]);
+    assert_ne!(code, 0, "{answer}");
+    assert!(answer.to_string().contains("standalone start"), "{answer}");
+}
+
+#[test]
+fn the_work_path_of_the_run_is_the_one_the_record_is_read_from() {
+    let dir = temp_workspace();
+    project(dir.path(), MANAGED);
+    let other = dir.path().join("other");
+    hold_workspace_lock(&other);
+    let (code, answer) = run(
+        dir.path(),
+        &[
+            "--workdir",
+            other.to_str().expect("path"),
+            "standalone",
+            "stop",
+        ],
+    );
+    assert_ne!(code, 0, "{answer}");
+    assert_eq!(answer["error"]["code"], "workspace_busy", "{answer}");
 }
