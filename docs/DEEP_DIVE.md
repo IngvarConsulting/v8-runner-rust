@@ -312,6 +312,11 @@ execution model для CLI и MCP.
 
 Interruption policy:
 
+Перед DT через `ibcmd` адаптер проверяет POSIX-блокировки `1Cv8.1CD` через `F_GETLK`.
+Свою блокировку раннер не захватывает: она помешала бы самой утилите. Занятая база даёт
+`infobase_busy` до запуска; снимок проходит существующий staging и публикуется только
+после успеха. Восстановление `ibcmd`, как `/RestoreIB`, выполняется критической фазой.
+
 - timeout/cancellation являются общим CLI/MCP contract;
 - terminal cancellation и deferred interruption должны различаться;
 - отмена — род `interruption` у любой команды, и решает это сама ошибка, а не сигнал: отказ,

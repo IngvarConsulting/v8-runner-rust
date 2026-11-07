@@ -2720,6 +2720,32 @@ python3: fcntl(fd, F_GETLK, {F_WRLCK, start=0, len=0}) по 1Cv8.1CD; lockf/floc
 - Агент раннера держит базу только между `common connect-ib` и `common disconnect-ib`.
   Свой подключённый агент проверка увидит как сеанс.
 
+## IBCMD DT на Linux
+
+07.11.2026, Ubuntu 24.04.4 LTS x86_64, ядро 6.8.0-137-generic, ext4,
+платформа 8.5.1.1343. Отдельная копия DemoTrd (`1Cv8.1CD`, 2 019 942 400 байт).
+Исходный файл не открывался платформой. Каталоги данных `ibcmd` для прогонов раздельные.
+
+```text
+xvfb-run -a <platform>/1cv8c ENTERPRISE /F <W>/ib /N Администратор /DisableStartupDialogs /DisableStartupMessages /Out <W>/out/session.out
+ibcmd infobase --data <W>/ibcmd-busy --db-path <W>/ib dump --user Администратор <W>/out/busy.dt
+ibcmd infobase --data <W>/ibcmd-free --db-path <W>/ib dump --user Администратор <W>/out/free.dt
+ibcmd infobase --data <W>/ibcmd-restore --db-path <W>/restore restore --create-database <W>/out/free.dt
+```
+
+Без клиента `F_GETLK` с запросом `F_WRLCK` на весь `1Cv8.1CD` вернул `F_UNLCK`.
+Тонкий клиент удержал `F_RDLCK` на байте `9223372036854775806`, длина 1; ядро вернуло
+PID процесса `1cv8c`. После завершения клиента блокировка исчезла.
+
+При открытом сеансе `dump` вернул 255 за 11,90 с, сообщил об ошибке исключительной
+блокировки и обрезал заранее записанную цель до нуля байт. Без сеансов `dump` вернул 0
+за 255,30 с, файл DT — 969 311 493 байта. Восстановление в отдельный пустой каталог
+вернуло 0 за 109,41 с и создало `1Cv8.1CD` размером 2 019 942 400 байт.
+
+Ключ `--user` относится к команде `dump` или `restore`: перед командой эта сборка
+возвращала код 2 с ошибкой разбора параметра. Эти вызовы проверяют платформу напрямую.
+Раннер должен проверить блокировку до запуска и передать утилите staging-файл.
+
 ## Откат непринятого: `/RollbackCfg` и `ibcmd config reset`
 
 Замер 08.10.2026. Задача: [#235](https://github.com/IngvarConsulting/v8-runner-rust/issues/235)

@@ -768,9 +768,19 @@ pub(crate) fn run_restore_provider(
             // отвечает результатом, а не ошибкой.
             .map_err(|error| CommandFailure::without_deferral(AppError::from(error)))
         }
-        Provider::Ibcmd => Err(CommandFailure::without_deferral(AppError::capability(
-            "IBCMD DT restore is experimental and cannot be dispatched".to_owned(),
-        ))),
+        Provider::Ibcmd => {
+            let executable = executable_of(executable).map_err(CommandFailure::without_deferral)?;
+            let runner = crate::platform::process::ProcessExecutor;
+            crate::use_cases::dump_config::helpers::build_ibcmd_dsl(
+                context,
+                config,
+                executable,
+                &runner,
+                InterruptionSafetyClass::CriticalNonAbortable,
+            )
+            .and_then(|dsl| dsl.restore_infobase(source_file).map_err(AppError::from))
+            .map_err(CommandFailure::without_deferral)
+        }
     }
 }
 
@@ -1618,9 +1628,19 @@ pub(crate) fn run_snapshot_provider(
             .dump_infobase(staging_path)
             .map_err(AppError::from)
         }
-        Provider::Ibcmd => Err(AppError::capability(
-            "IBCMD DT export is experimental and cannot be dispatched".to_owned(),
-        )),
+        Provider::Ibcmd => {
+            let executable = executable_of(executable)?;
+            let runner = crate::platform::process::ProcessExecutor;
+            crate::use_cases::dump_config::helpers::build_ibcmd_dsl(
+                context,
+                config,
+                executable,
+                &runner,
+                InterruptionSafetyClass::GracefulThenKill,
+            )?
+            .dump_infobase(staging_path)
+            .map_err(AppError::from)
+        }
     }
 }
 
@@ -2332,6 +2352,7 @@ mod tests {
     #[track_caller]
     fn restore_cancelled_while_the_platform_writes(
         exit_code: i32,
+        provider: Provider,
     ) -> (
         tempfile::TempDir,
         crate::use_cases::result::UseCaseResult<
@@ -2381,8 +2402,8 @@ mod tests {
             target_mode: RestoreTargetMode::Replace,
         };
         let prepared = super::PreparedTransferProvider {
-            receipt: ProviderReceipt::new(Provider::Designer, ProviderOrigin::Default),
-            provider: Provider::Designer,
+            receipt: ProviderReceipt::new(provider, ProviderOrigin::Default),
+            provider,
             executable: Some(designer),
             configuration_state: None,
         };
@@ -2405,7 +2426,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_cancelled_designer_restore_runs_to_its_end_and_names_the_deferral() {
-        let (dir, outcome) = restore_cancelled_while_the_platform_writes(0);
+        let (dir, outcome) = restore_cancelled_while_the_platform_writes(0, Provider::Designer);
 
         let result = outcome.expect("the restore finishes despite the cancellation");
         assert!(
@@ -2433,12 +2454,40 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_ibcmd_restore_defers_cancellation_until_its_terminal_outcome() {
+        for exit_code in [0, 255] {
+            let (dir, outcome) =
+                restore_cancelled_while_the_platform_writes(exit_code, Provider::Ibcmd);
+            assert!(!dir.path().join("terminated").exists());
+            assert!(dir.path().join("finished").exists());
+            let result = match outcome {
+                Ok(result) => {
+                    assert_eq!(exit_code, 0);
+                    result
+                }
+                Err(failure) => {
+                    assert_ne!(exit_code, 0);
+                    failure.payload.expect("restore payload")
+                }
+            };
+            assert_eq!(result.restored, exit_code == 0);
+            assert_eq!(result.execution.interruptions.len(), 1);
+            assert!(result.execution.interruptions[0].deferred);
+            assert_eq!(
+                result.execution.interruptions[0].kind,
+                ExecutionInterruptionKind::Cancelled
+            );
+        }
+    }
+
     /// Загрузка, неудачная уже после отложенной отмены, называет и отмену: оператор
     /// просил остановить, и отказ говорит, почему его не послушали.
     #[cfg(unix)]
     #[test]
     fn a_failed_restore_after_a_deferred_cancellation_still_names_it() {
-        let (dir, outcome) = restore_cancelled_while_the_platform_writes(1);
+        let (dir, outcome) = restore_cancelled_while_the_platform_writes(1, Provider::Designer);
 
         let failure = outcome.expect_err("the platform reported a failure");
         assert!(!dir.path().join("terminated").exists());

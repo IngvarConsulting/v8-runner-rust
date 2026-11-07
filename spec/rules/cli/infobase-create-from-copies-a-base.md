@@ -11,7 +11,7 @@ check:
   - tests/cli_infobase_copy.rs::a_copy_into_a_standalone_server_is_refused_with_the_recipe
   - tests/cli_infobase_copy.rs::a_failed_load_into_the_cluster_names_the_image_and_hides_the_passwords
   - tests/cli_infobase_copy.rs::a_failed_load_into_a_file_base_hides_the_passwords
-  - tests/cli_infobase_copy.rs::a_copy_is_made_by_the_designer_and_a_key_naming_another_executor_is_refused
+  - tests/cli_infobase_copy.rs::a_file_copy_selects_ibcmd_and_refuses_an_unavailable_executor
 ---
 
 # `infobase create --from` копирует базу
@@ -19,13 +19,14 @@ check:
 `infobase create --from <база>` создаёт базу этой рабочей копии как копию другой базы,
 объявленной по имени в местном слое, с её данными и конфигурацией: снимает с источника образ
 DT Конфигуратором (`/DumpIB`) в `workPath/copies/<база>.dt` и поднимает из него новую базу
-Конфигуратором — файловую `/RestoreIB`, базу в кластере `CREATEINFOBASE`, затем `/RestoreIB`.
+через `ibcmd` на POSIX для файловой цели, через `/RestoreIB` на Windows либо по явному ключу
+`providers.infobase.create: designer`; базу в кластере создаёт `CREATEINFOBASE`, затем `/RestoreIB`.
 Новую базу на автономном сервере команда не создаёт: отказ рода подбора называет рецепт
 `ibcmd server config init` и `ibcmd infobase create`, и снимок не начинается. Источник, не
 объявленный в местном слое, файловый источник без базы на месте и база, которую команда
-создаёт, — отказ до платформы. Исполнитель копии — Конфигуратор, и квитанция называет его;
-ключ `providers.infobase.create`, назначающий другого исполнителя, — отказ `validation` до
-снимка с именем ключа: названный ключом исполнитель не подменяется.
+создаёт, — отказ до платформы. Квитанция называет исполнителя создания новой базы.
+Ключ `providers.infobase.create`, назначающий недоступного для этой цели исполнителя, —
+отказ `validation` до снимка с именем ключа; названный ключом исполнитель не подменяется.
 
 Источник читается как база целиком: его замок берёт граница команды вслед за замками своей
 базы и держит до конца команды; источник, который держит другая команда, — отказ
@@ -48,7 +49,7 @@ DT Конфигуратором (`/DumpIB`) в `workPath/copies/<база>.dt` �
 поколении конфигурации; нет ответа — предупреждение, которое называет пользователей
 источника и секцию базы, куда объявить их учётные данные.
 
-Файловая база из образа через `ibcmd` ждёт его исполнителя
+Файловую базу из образа на POSIX создаёт общий исполнитель `ibcmd infobase restore`
 (`INV.CLI.A-FILE-COPY-IS-CREATED-BY-IBCMD`). База в кластере создаётся в два шага
 (`INV.CLI.A-CLUSTER-COPY-IS-CREATED-IN-TWO-STEPS`).
 

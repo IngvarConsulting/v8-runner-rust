@@ -14,6 +14,24 @@ const CONFIG_EXPORT_THREADS_ARG: &str = "--threads=1";
 
 #[derive(Debug, Error)]
 pub enum IbcmdError {
+    #[cfg_attr(
+        not(unix),
+        allow(
+            dead_code,
+            reason = "only the POSIX kernel probe can report a lock holder"
+        )
+    )]
+    #[error("file infobase '{}' is held by process {pid}; close its sessions before an IBCMD DT transfer", path.display())]
+    SnapshotBusy { path: PathBuf, pid: i32 },
+
+    #[error("cannot probe file infobase '{}': {source}", path.display())]
+    SnapshotProbe {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("IBCMD DT transfers require a local POSIX file infobase; Windows session detection has not been measured")]
+    SnapshotUnsupported,
     #[error(transparent)]
     MissingServerDbmsField(#[from] MissingDbmsField),
 
@@ -240,6 +258,99 @@ impl<'a> IbcmdDsl<'a> {
     pub fn with_data_path(mut self, data_path: PathBuf) -> Self {
         self.data_path = Some(data_path);
         self
+    }
+
+    /// A DT is written to the caller's staging file: ibcmd truncates it even on failure.
+    pub fn dump_infobase(&self, target: &Path) -> Result<PlatformCommandResult, IbcmdError> {
+        let present = self.probe_snapshot_access()?;
+        if !present {
+            return Err(IbcmdError::SnapshotProbe {
+                path: self.snapshot_path()?,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "infobase does not exist",
+                ),
+            });
+        }
+        let mut args = self.authenticated_infobase_args(&["dump"]);
+        args.push(target.display().to_string());
+        self.run_with(&args, &self.execution_policy.for_reading())
+    }
+
+    /// The caller marks restore as a critical write. --force does not end file sessions.
+    pub fn restore_infobase(&self, source: &Path) -> Result<PlatformCommandResult, IbcmdError> {
+        let present = self.probe_snapshot_access()?;
+        let mut args = self.authenticated_infobase_args(&["restore"]);
+        if !present {
+            args.push("--create-database".to_owned());
+        }
+        args.push(source.display().to_string());
+        self.run(&args)
+    }
+
+    fn snapshot_path(&self) -> Result<PathBuf, IbcmdError> {
+        match &self.connection {
+            IbcmdConnection::File { database_path, .. } => Ok(database_path.join("1Cv8.1CD")),
+            IbcmdConnection::Server { .. } => Err(IbcmdError::SnapshotUnsupported),
+        }
+    }
+
+    /// Queries another process's lock without acquiring one that would also block ibcmd.
+    #[cfg(unix)]
+    fn probe_snapshot_access(&self) -> Result<bool, IbcmdError> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = self.snapshot_path()?;
+        // A malformed target such as a FIFO must fail the metadata check without blocking.
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(IbcmdError::SnapshotProbe { path, source }),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|source| IbcmdError::SnapshotProbe {
+                path: path.clone(),
+                source,
+            })?;
+        if !metadata.is_file() {
+            return Err(IbcmdError::SnapshotProbe {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "expected a regular 1Cv8.1CD file",
+                ),
+            });
+        }
+        // SAFETY: flock contains only integer fields. Zero means SEEK_SET, offset 0,
+        // length 0 (the whole file), and supplies valid storage for F_GETLK's answer.
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        // SAFETY: file owns a live descriptor, and lock is writable for this call.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } == -1 {
+            return Err(IbcmdError::SnapshotProbe {
+                path,
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        if lock.l_type != libc::F_UNLCK as libc::c_short {
+            return Err(IbcmdError::SnapshotBusy {
+                path,
+                pid: lock.l_pid,
+            });
+        }
+        Ok(true)
+    }
+
+    #[cfg(not(unix))]
+    fn probe_snapshot_access(&self) -> Result<bool, IbcmdError> {
+        Err(IbcmdError::SnapshotUnsupported)
     }
 
     /// Imports a full configuration or extension snapshot into the target infobase.
@@ -971,6 +1082,55 @@ mod tests {
     struct CapturingRunner {
         requests: std::cell::RefCell<Vec<crate::platform::process::ProcessRequest>>,
         spawn_error: Option<i32>,
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn dt_transfers_without_a_measured_lock_probe_never_dispatch() {
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+        assert!(matches!(
+            dsl.dump_infobase(Path::new("base.dt")),
+            Err(IbcmdError::SnapshotUnsupported)
+        ));
+        assert!(matches!(
+            dsl.restore_infobase(Path::new("base.dt")),
+            Err(IbcmdError::SnapshotUnsupported)
+        ));
+        assert!(runner.requests.borrow().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_snapshot_source_or_failed_probe_never_dispatches() {
+        let root = tempdir().expect("tempdir");
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            IbcmdConnection::File {
+                database_path: root.path().to_path_buf(),
+                user: None,
+                password: None,
+            },
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+        assert!(matches!(
+            dsl.dump_infobase(Path::new("base.dt")),
+            Err(IbcmdError::SnapshotProbe { .. })
+        ));
+        // A directory is not an absent database that restore may create.
+        std::fs::create_dir(root.path().join("1Cv8.1CD")).expect("invalid database");
+        assert!(matches!(
+            dsl.dump_infobase(Path::new("base.dt")),
+            Err(IbcmdError::SnapshotProbe { .. })
+        ));
+        assert!(runner.requests.borrow().is_empty());
     }
 
     impl ProcessRunner for CapturingRunner {

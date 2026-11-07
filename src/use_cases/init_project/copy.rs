@@ -5,8 +5,8 @@
 //! ([`run_snapshot_provider`]). Замок источника берёт граница команды
 //! ([`crate::use_cases::transport::hold_source_base`]) и держит до её конца; в метку источника
 //! ничего не пишется (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`). Новую базу из образа
-//! поднимает Конфигуратор `/RestoreIB` — исполнитель `infobase restore`
-//! ([`run_restore_provider`]): файловую, которой нет, он создаёт сам (замер «Загрузка
+//! поднимает исполнитель `infobase restore` ([`run_restore_provider`]): на POSIX файловую
+//! базу создаёт `ibcmd`, по явному ключу и на Windows — Конфигуратор (замер «Загрузка
 //! информационной базы из DT»), в кластере её прежде создаёт `CREATEINFOBASE` —
 //! [`ClusterCreation`], общий с `infobase create`. Сеансы источника раннер не завершает:
 //! неудавшийся снимок называет, как освободить источник
@@ -50,6 +50,7 @@ pub(super) fn ensure_copy(
     utilities: &mut PlatformUtilities,
     from: &str,
     dry_run: bool,
+    restorer: Provider,
 ) -> (StepOutcome, Option<InitSource>) {
     let started = Instant::now();
     let source = match source_config(config, from) {
@@ -67,6 +68,7 @@ pub(super) fn ensure_copy(
         snapshot: snapshot.clone(),
     });
     let copy = Copy {
+        restorer,
         context,
         config,
         source: &source,
@@ -201,6 +203,7 @@ enum SnapshotFailure {
 
 /// Одна копия: источник, его образ и цель команды.
 struct Copy<'a> {
+    restorer: Provider,
     context: &'a ExecutionContext,
     config: &'a AppConfig,
     source: &'a AppConfig,
@@ -260,6 +263,14 @@ impl Copy<'_> {
             Ok(binary) => binary,
             Err(error) => return self.failed(error),
         };
+        let restore_binary = if self.restorer == Provider::Designer {
+            designer.clone()
+        } else {
+            match locate_infobase_creator(self.restorer, utilities) {
+                Ok(binary) => binary,
+                Err(error) => return self.failed(error),
+            }
+        };
         if dry_run {
             return StepOutcome::planned(
                 "infobase",
@@ -303,7 +314,7 @@ impl Copy<'_> {
             let target = self.config.v8_connection().describe_target();
             match &creator {
                 Creator::File { dir } => {
-                    let created = self.restore(&designer)?;
+                    let created = self.restore(&restore_binary)?;
                     deferrals.note_result(INFOBASE_CREATE, &created);
                     let mut secrets = infobase_secrets(self.config);
                     secrets.extend(infobase_secrets(self.source));
@@ -312,7 +323,7 @@ impl Copy<'_> {
                 }
                 Creator::Cluster(cluster) => {
                     cluster.create(self.context, self.config, utilities, deferrals)?;
-                    let restored = self.restore(&designer);
+                    let restored = self.restore(&restore_binary);
                     if let Ok(result) = &restored {
                         deferrals.note_result(INFOBASE_CREATE, result);
                     }
@@ -353,9 +364,10 @@ impl Copy<'_> {
     fn plan(&self, creator: &Creator<'_>, designer: &Path) -> String {
         let creation = match creator {
             Creator::File { .. } => format!(
-                "{} from it via {} /RestoreIB",
+                "{} from it via {} {}",
                 self.config.v8_connection().describe_target(),
-                designer.display()
+                self.restorer.as_str(),
+                if self.restorer == Provider::Ibcmd { "infobase restore --create-database" } else { "/RestoreIB" }
             ),
             Creator::Cluster(cluster) => format!(
                 "{}; then /RestoreIB loads the image into it, and the data of an existing database of that name is overwritten by the image of '{}'",
@@ -441,13 +453,13 @@ impl Copy<'_> {
         AppError::Platform(message)
     }
 
-    /// `/RestoreIB` образа в базу команды — исполнителем `infobase restore`.
-    fn restore(&self, designer: &Path) -> Result<PlatformCommandResult, AppError> {
+    /// Загрузка образа в базу команды общим исполнителем `infobase restore`.
+    fn restore(&self, binary: &Path) -> Result<PlatformCommandResult, AppError> {
         run_restore_provider(
             self.context,
             self.config,
-            Provider::Designer,
-            Some(designer),
+            self.restorer,
+            Some(binary),
             self.snapshot,
         )
         .map_err(|failure| failure.into_error(INFOBASE_CREATE))

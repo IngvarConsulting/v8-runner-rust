@@ -146,8 +146,10 @@ v8-runner infobase create
   artifacts from project sources.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.
   A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`): the
-  agent, then Designer; experimental IBCMD DT (file base only) is skipped unless named
-  explicitly; `restore --create` skips the agent.
+  agent, then Designer; POSIX file DT transfers also accept explicit IBCMD via
+  `providers.infobase.dump|restore: ibcmd`. Close all file-base sessions first; a busy base
+  refuses with its holder PID. Windows IBCMD DT is unavailable until its session probe is measured.
+  `restore --create` skips the agent.
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
   `pull`, `download`; `upload`/`check` — Designer only; `extensions` — file `ibcmd → agent`,
   cluster `agent → designer` for `list` only. Set `providers.extensions: designer` on a cluster
