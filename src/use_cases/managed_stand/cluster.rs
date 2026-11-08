@@ -2,12 +2,14 @@
 //! `rmngr` и `rphost` и сервер администрирования `ras` — две службы со своими записями; адрес цели
 //! остальные команды берут из записи агента и закреплённых портов, их читает загрузчик настроек.
 
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{
     await_gone, being_started, environment, forget_record, io_failure, occupant_of, port_offsets,
-    validation, write_record, Database, ServiceCommand, ServiceHost, Stand,
+    other_cluster_over, owned_by_a_cluster, validation, write_record, Database, ServiceHost,
+    Stand,
 };
 use crate::config::model::{AppConfig, InfobaseDbmsConfig};
 use crate::domain::cluster::ClusterResult;
@@ -16,10 +18,10 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::rac::{self, Registration};
 use crate::platform::ragent::{self, ras_address, ClusterPorts};
 use crate::platform::secrets::mask_text;
-use crate::platform::service::{first_with_keys, ServiceSpawnError};
+use crate::platform::service::{first_with_keys, ProcessRow, ServiceSpawnError};
 use crate::platform::service_record::{
-    adopt_recorded_pid, observe_service, read_json, write_json, ClusterPins, Observed, RecordState,
-    ServicePaths, ServiceRecord,
+    adopt_recorded_pid, observe_service, read_json, record_names_own_process, write_json,
+    ClusterPins, Observed, PreviousRegistry, RecordState, ServicePaths, ServiceRecord,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::interruption_before_safe_point;
@@ -35,6 +37,40 @@ const AGENT_IMAGE: &str = "ragent.exe";
 const REMNANT_IMAGES: [&str; 2] = ["rmngr.exe", "rphost.exe"];
 /// Каталоги реестров под `managed/cluster/`.
 const REGISTRY_PREFIX: &str = "registry-";
+
+/// Команда кластера. Ключ `--new-regport` есть только у запуска.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterCommand {
+    Start { new_regport: bool },
+    Status,
+    Stop,
+    Restart,
+}
+
+/// Что сняла остановка агента.
+struct AgentStop {
+    pid: Option<u32>,
+    remnants: Vec<u32>,
+    stale: bool,
+}
+
+/// Почему закреплённые порты не годятся для запуска.
+enum Busy {
+    /// Чужой `ragent` работает над реестром этой копии: выхода нет, реестр живой.
+    ForeignAgent(UseCaseError),
+    /// Порт держит чужой процесс: выход — новый реестр.
+    Port(UseCaseError),
+    /// Порт занят, а перечня процессов нет: кто его держит, не сказать.
+    Unlisted(UseCaseError),
+}
+
+impl Busy {
+    fn into_error(self) -> UseCaseError {
+        match self {
+            Self::ForeignAgent(error) | Self::Port(error) | Self::Unlisted(error) => error,
+        }
+    }
+}
 
 /// То, что сценарий узнаёт о цели из настроек.
 struct Declared {
@@ -56,10 +92,7 @@ fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
         .ok_or_else(|| {
             validation("infobase.cluster.managed is not declared for this infobase: the cluster commands start only a cluster the runner owns")
         })?;
-    let name = managed
-        .name
-        .clone()
-        .ok_or_else(|| validation("infobase.cluster.managed.name is not declared"))?;
+    let name = managed.reference(&infobase);
     let database = config
         .infobase
         .dbms
@@ -213,57 +246,81 @@ impl Cluster<'_> {
     }
 
     /// Остатки упавшего агента: всё совпало по `INV.PLATFORM.A-CLUSTER-LEAVES-NO-REMNANTS`.
-    fn remnants(&self, record: &ServiceRecord) -> Vec<(u32, u64)> {
-        let (Some(parent), Some(since)) = (record.pid, record.started) else {
-            return Vec::new();
+    /// `None` — перечня процессов нет, и остатки не опознать.
+    fn remnants(&self, record: &ServiceRecord) -> Option<Vec<(u32, u64)>> {
+        let (Some(agent), Some(since)) = (record.pid, record.started) else {
+            return Some(Vec::new());
         };
-        let alive = self
-            .host
-            .facts(parent)
-            .is_some_and(|facts| facts.started == since);
-        if alive || self.host.machine().as_deref() != record.machine.as_deref() {
-            return Vec::new();
+        if self.host.machine().as_deref() != record.machine.as_deref() {
+            return Some(Vec::new());
         }
+        // pid агента может достаться новому процессу: его дети начались после него и не наши.
+        let reused = match self.host.facts(agent) {
+            Some(facts) if facts.started == since => return Some(Vec::new()),
+            Some(facts) => Some(facts.started),
+            None => None,
+        };
+        let rows = self.host.processes(&REMNANT_IMAGES)?;
         // Потомки агента: после его конца `rmngr` поднимает новые `rphost`, и их родитель — уже
         // остаток, а не агент (живой прогон #538).
-        let rows = self.host.processes(&REMNANT_IMAGES);
-        let mut found: Vec<(u32, u64)> = Vec::new();
-        loop {
-            let parents: Vec<u32> = std::iter::once(parent)
-                .chain(found.iter().map(|(pid, _)| *pid))
-                .collect();
-            let next: Vec<(u32, u64)> = rows
-                .iter()
-                .filter(|row| parents.contains(&row.parent))
-                .filter(|row| !found.iter().any(|(pid, _)| *pid == row.pid))
-                .filter_map(|row| {
-                    let facts = self.host.facts(row.pid)?;
-                    (REMNANT_IMAGES.contains(&facts.image.as_str()) && facts.started >= since)
-                        .then_some((row.pid, facts.started))
-                })
-                .collect();
-            if next.is_empty() {
-                return found;
+        let mut found = Vec::new();
+        let mut seen = HashSet::new();
+        let mut parents = VecDeque::from([agent]);
+        while let Some(parent) = parents.pop_front() {
+            for row in rows.iter().filter(|row| row.parent == parent) {
+                if !seen.insert(row.pid) {
+                    continue;
+                }
+                let Some(facts) = self.host.facts(row.pid) else {
+                    continue;
+                };
+                let before_reuse =
+                    parent != agent || reused.is_none_or(|reused| facts.started < reused);
+                if REMNANT_IMAGES.contains(&facts.image.as_str())
+                    && facts.started >= since
+                    && before_reuse
+                {
+                    found.push((row.pid, facts.started));
+                    parents.push_back(row.pid);
+                }
             }
-            found.extend(next);
         }
+        Some(found)
+    }
+
+    /// pid остатков для отчёта; без перечня процессов — ни одного.
+    fn remnant_pids(&self) -> Vec<u32> {
+        read_json::<ServiceRecord>(&self.agent.record())
+            .and_then(|record| self.remnants(&record))
+            .map(|remnants| remnants.into_iter().map(|(pid, _)| pid).collect())
+            .unwrap_or_default()
     }
 
     /// Снимает остатки по их pid: `taskkill /T` по мёртвому родителю их не находит (замер #534).
-    fn clear_remnants(&self, record: &ServiceRecord) -> Vec<u32> {
-        self.remnants(record)
-            .into_iter()
-            .filter_map(|(pid, started)| {
-                self.host.hard_stop(self.runner, pid, self.context);
+    /// Ошибка — какие-то остались или их не опознать: тогда запись агента нужна, чтобы узнать их
+    /// в следующий раз.
+    fn clear_remnants(&self, record: &ServiceRecord) -> Result<Vec<u32>, UseCaseError> {
+        let remnants = self.remnants(record).ok_or_else(|| {
+            platform("the process list did not answer, so the remnants of the fallen ragent cannot be told apart; repeat the command")
+        })?;
+        let (cleared, left): (Vec<_>, Vec<_>) =
+            remnants.into_iter().partition(|(pid, started)| {
+                self.host.hard_stop(self.runner, *pid, self.context);
                 await_gone(
                     self.host,
-                    pid,
-                    Some(started),
+                    *pid,
+                    Some(*started),
                     self.host.patience(SOFT_STOP_TIMEOUT),
                 )
-                .then_some(pid)
-            })
-            .collect()
+            });
+        if !left.is_empty() {
+            let left: Vec<String> = left.iter().map(|(pid, _)| pid.to_string()).collect();
+            return Err(platform(format!(
+                "the remnants of the fallen ragent did not stop (pid {}); repeat cluster stop",
+                left.join(", ")
+            )));
+        }
+        Ok(cleared.into_iter().map(|(pid, _)| pid).collect())
     }
 
     /// Мягко, с проверкой конца процесса; затем принудительно (`INV.PLATFORM.A-SERVICE-STOP-IS-CONFIRMED`).
@@ -305,44 +362,61 @@ impl Cluster<'_> {
         }
     }
 
-    /// Агент и его остатки. Устаревшая запись живёт, пока по ней не сняты остатки.
-    fn stop_agent(&self) -> Result<(Option<u32>, Vec<u32>, bool), UseCaseError> {
+    /// Агент и его остатки. Запись агента живёт, пока по ней не сняты все остатки: только по ней их
+    /// и узнать.
+    fn stop_agent(&self) -> Result<AgentStop, UseCaseError> {
         match self.observe(&self.agent) {
             Observed::Own(record) => {
                 if !self.stop_process(&record) {
-                    return Err(UseCaseError::new(
-                        UseCaseErrorKind::Platform,
-                        format!(
-                            "ragent pid {} did not stop; repeat cluster stop",
-                            record.pid.unwrap_or_default()
-                        ),
-                    ));
+                    return Err(platform(format!(
+                        "ragent pid {} did not stop; repeat cluster stop",
+                        record.pid.unwrap_or_default()
+                    )));
                 }
-                let remnants = self.clear_remnants(&record);
+                let remnants = self.clear_remnants(&record)?;
                 forget_record(&self.agent);
-                Ok((record.pid, remnants, false))
+                Ok(AgentStop {
+                    pid: record.pid,
+                    remnants,
+                    stale: false,
+                })
             }
             Observed::Starting(_) => Err(being_started("the cluster", &self.declared.infobase)),
             Observed::Stale => {
-                let remnants = read_json::<ServiceRecord>(&self.agent.record())
-                    .map(|record| self.clear_remnants(&record))
-                    .unwrap_or_default();
-                forget_record(&self.agent);
-                Ok((None, remnants, true))
+                let remnants = self.clear_stale()?;
+                Ok(AgentStop {
+                    pid: None,
+                    remnants,
+                    stale: true,
+                })
             }
-            Observed::Nothing => Ok((None, Vec::new(), false)),
+            Observed::Nothing => Ok(AgentStop {
+                pid: None,
+                remnants: Vec::new(),
+                stale: false,
+            }),
         }
     }
 
-    /// Свой процесс не поднялся до конца: снять его, записи и остатки.
+    /// Устаревшая запись агента: снять остатки по ней, затем её саму.
+    fn clear_stale(&self) -> Result<Vec<u32>, UseCaseError> {
+        let remnants = match read_json::<ServiceRecord>(&self.agent.record()) {
+            Some(record) => self.clear_remnants(&record)?,
+            None => Vec::new(),
+        };
+        forget_record(&self.agent);
+        Ok(remnants)
+    }
+
+    /// Свой процесс не поднялся до конца: снять его, записи и остатки. Что не снялось, остаётся в
+    /// записях для следующей команды.
     fn abandon(&self, agent: &ServiceRecord) {
         if let Some(ras) = self.own_ras() {
             if self.stop_process(&ras) {
                 forget_record(&self.ras);
             }
         }
-        if self.stop_process(agent) {
-            self.clear_remnants(agent);
+        if self.stop_process(agent) && self.clear_remnants(agent).is_ok() {
             forget_record(&self.agent);
         }
     }
@@ -353,19 +427,19 @@ impl Cluster<'_> {
         }
         let since = std::time::SystemTime::now();
         let ras = self.stop_ras()?;
-        let (pid, remnants, stale) = self.stop_agent()?;
+        let agent = self.stop_agent()?;
         self.forget_stop_dumps(since);
-        if pid.is_none() && ras.is_none() && remnants.is_empty() {
+        if agent.pid.is_none() && ras.is_none() && agent.remnants.is_empty() {
             let mut result = self.result(ServiceState::NotRunning, ServiceAction::NothingToStop);
-            result.stale_record = stale;
+            result.stale_record = agent.stale;
             self.name_occupant(&mut result);
             return Ok(result);
         }
         let mut result = self.result(ServiceState::NotRunning, ServiceAction::Stopped);
-        result.stopped_pid = pid;
+        result.stopped_pid = agent.pid;
         result.stopped_ras_pid = ras;
-        result.stopped_remnant_pids = remnants;
-        result.stale_record = stale;
+        result.stopped_remnant_pids = agent.remnants;
+        result.stale_record = agent.stale;
         Ok(result)
     }
 
@@ -395,8 +469,9 @@ impl Cluster<'_> {
 
     fn stop(&self, dry_run: bool) -> Result<ClusterResult, UseCaseError> {
         let mut result = self.stop_cluster(dry_run)?;
-        if !dry_run {
-            // Кластер гаснет первым: СУБД нужна ему до конца.
+        // Кластер гаснет первым: СУБД нужна ему до конца. Пока над ней работает свой автономный
+        // сервер этой базы, она нужна ему.
+        if !dry_run && !self.standalone_running() {
             if let Some(stand) = self.stand() {
                 result.stopped_dbms_pid = stand.stop_if_step()?;
             }
@@ -409,14 +484,7 @@ impl Cluster<'_> {
         let Some(pins) = self.pins() else {
             return;
         };
-        let remnants: Vec<u32> = read_json::<ServiceRecord>(&self.agent.record())
-            .map(|record| {
-                self.remnants(&record)
-                    .into_iter()
-                    .map(|(pid, _)| pid)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let remnants = self.remnant_pids();
         if let Some(pid) = pins
             .ports
             .all()
@@ -447,14 +515,7 @@ impl Cluster<'_> {
                 let mut result = self.result(ServiceState::NotRunning, ServiceAction::Reported);
                 if matches!(observed, Observed::Stale) {
                     result.stale_record = true;
-                    result.remnant_pids = read_json::<ServiceRecord>(&self.agent.record())
-                        .map(|record| {
-                            self.remnants(&record)
-                                .into_iter()
-                                .map(|(pid, _)| pid)
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    result.remnant_pids = self.remnant_pids();
                 }
                 self.name_occupant(&mut result);
                 if let Some(pins) = self.pins() {
@@ -483,11 +544,11 @@ impl Cluster<'_> {
 
     /// Свой автономный сервер той же базы: одна БД — один сервер.
     fn standalone_running(&self) -> bool {
-        let machine = self.host.machine();
-        read_json::<ServiceRecord>(&self.agent.sibling_record("standalone")).is_some_and(|record| {
-            let facts = record.pid.and_then(|pid| self.host.facts(pid));
-            record.is_own(facts.as_ref(), machine.as_deref())
-        })
+        record_names_own_process(
+            &self.agent.sibling_record("standalone"),
+            self.host.machine().as_deref(),
+            &|pid| self.host.facts(pid),
+        )
     }
 
     fn start(&self, dry_run: bool, new_regport: bool) -> Result<ClusterResult, UseCaseError> {
@@ -510,6 +571,7 @@ impl Cluster<'_> {
                 self.declared.infobase
             )));
         }
+        self.undo_interrupted_move()?;
         let mut stale = false;
         match self.observe(&self.agent) {
             Observed::Own(record) => {
@@ -542,41 +604,85 @@ impl Cluster<'_> {
                 return Err(being_started("the cluster", &self.declared.infobase))
             }
             Observed::Stale => {
-                if let Some(record) = read_json::<ServiceRecord>(&self.agent.record()) {
-                    self.clear_remnants(&record);
-                }
-                forget_record(&self.agent);
+                self.clear_stale()?;
                 stale = true;
             }
             Observed::Nothing => {}
         }
         // Свой `ras` без своего агента больше никому не нужен.
         self.stop_ras()?;
+        // Отказы, которым СУБД не нужна, — до её запуска.
+        let pins = self.pins();
+        match (&pins, new_regport) {
+            (Some(pins), false) => {
+                if let Some(busy) = self.busy(pins) {
+                    return Err(busy.into_error());
+                }
+            }
+            (Some(pins), true) => match self.busy(pins) {
+                None => {
+                    return Err(validation(format!(
+                        "the ports of the cluster of '{}' are free: `cluster start` starts it on its registry; --new-regport is for ports taken by another process",
+                        self.declared.infobase
+                    )))
+                }
+                Some(Busy::Port(_)) => {}
+                Some(refusal) => return Err(refusal.into_error()),
+            },
+            (None, true) => {
+                return Err(validation(format!(
+                    "the cluster of '{}' has no registry yet: `cluster start` makes it",
+                    self.declared.infobase
+                )))
+            }
+            (None, false) => {}
+        }
         // Шаг кластера: поднятая здесь СУБД гаснет при любой неудаче дальше.
         let stand = self.stand();
         let raised = match &stand {
             Some(stand) => stand.start(false)?.action == ServiceAction::Started,
             None => false,
         };
-        let outcome = if new_regport {
-            self.move_registry(&machine, stand.as_ref())
-        } else {
-            self.start_on_pins(&machine, stand.as_ref())
+        let outcome = match pins {
+            Some(old) if new_regport => self.move_registry(&machine, stand.as_ref(), old),
+            pins => self.start_on_pins(&machine, stand.as_ref(), pins),
         };
         match outcome {
             Ok(mut result) => {
                 result.stale_record |= stale;
                 Ok(result)
             }
-            Err(error) => {
-                if raised {
-                    if let Some(stand) = &stand {
-                        let _ = stand.stop_if_step();
-                    }
-                }
-                Err(error)
-            }
+            Err(error) => match stand.as_ref().filter(|_| raised).map(Stand::stop_if_step) {
+                Some(Err(stop)) => Err(error.followed_by(format!(
+                    "the PostgreSQL this command started did not stop: {stop}"
+                ))),
+                _ => Err(error),
+            },
         }
+    }
+
+    /// Прерванный `--new-regport`: закреплённое ещё помнит прежний реестр. Поднятое по новому
+    /// снимается, новый реестр удаляется, прежние порты возвращаются — и запуск идёт как обычно.
+    fn undo_interrupted_move(&self) -> Result<(), UseCaseError> {
+        let Some(pins) = self.pins() else {
+            return Ok(());
+        };
+        let Some(previous) = pins.previous.clone() else {
+            return Ok(());
+        };
+        self.stop_ras()?;
+        self.stop_agent()?;
+        let new_registry = self.registry(&pins);
+        self.write_pins(&ClusterPins {
+            ports: previous.ports,
+            registry: previous.registry,
+            registered: previous.registered,
+            previous: None,
+        })?;
+        if self.registry_is_free(&new_registry) {
+            let _ = std::fs::remove_dir_all(&new_registry);
+        }
+        Ok(())
     }
 
     /// Порт PostgreSQL раннера, чтобы блок кластера его не взял.
@@ -614,46 +720,58 @@ impl Cluster<'_> {
             .ok_or_else(|| environment("no free port for ras"))
     }
 
-    /// Чужой `ragent` над этим реестром: его ключ запуска `/d` — наш каталог.
-    fn foreign_agent(&self, registry: &Path) -> Option<u32> {
-        first_with_keys(
-            &self.host.processes(&[AGENT_IMAGE]),
-            &ragent::registry_keys(registry),
-        )
+    /// Работающие `ragent` машины; `None` — перечня нет.
+    fn agents(&self) -> Option<Vec<ProcessRow>> {
+        self.host.processes(&[AGENT_IMAGE])
+    }
+
+    /// Над реестром не работает ни один `ragent`; без перечня процессов этого не сказать.
+    fn registry_is_free(&self, registry: &Path) -> bool {
+        self.agents().is_some_and(|agents| {
+            first_with_keys(&agents, &ragent::registry_keys(registry)).is_none()
+        })
     }
 
     /// Закреплённые порты заняты: чужой агент над нашим реестром — отказ без выхода, иначе выход —
-    /// новый реестр (`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`).
-    fn busy(&self, pins: &ClusterPins) -> Option<UseCaseError> {
-        if let Some(pid) = self.foreign_agent(&self.registry(pins)) {
-            return Some(UseCaseError::new(
-                UseCaseErrorKind::WorkspaceBusy,
-                format!(
-                    "the registry of the cluster of '{}' is served by ragent pid {pid}, which this runner did not start; it is left running",
-                    self.declared.infobase
-                ),
-            ));
-        }
+    /// новый реестр (`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`). Перечень процессов нужен, только
+    /// если порт занят.
+    fn busy(&self, pins: &ClusterPins) -> Option<Busy> {
         let (port, pid) = pins
             .ports
             .all()
             .find_map(|port| occupant_of(self.host, port).map(|pid| (port, pid)))?;
+        let refusal =
+            |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);
+        let Some(agents) = self.agents() else {
+            return Some(Busy::Unlisted(refusal(format!(
+                "port {port} of the cluster of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
+                self.declared.infobase
+            ))));
+        };
+        if let Some(agent) = first_with_keys(&agents, &ragent::registry_keys(&self.registry(pins)))
+        {
+            return Some(Busy::ForeignAgent(refusal(format!(
+                "the registry of the cluster of '{}' is served by ragent pid {agent}, which this runner did not start; it is left running",
+                self.declared.infobase
+            ))));
+        }
         let who = if pid == 0 {
             "another process".to_owned()
         } else {
             format!("process {pid}")
         };
-        Some(UseCaseError::new(
-            UseCaseErrorKind::WorkspaceBusy,
-            format!(
-                "port {port} of the cluster of '{}' is taken by {who}, which this runner did not start; it is left running: free the port and repeat, or start a new registry on other ports with `cluster start --new-regport`",
-                self.declared.infobase
-            ),
-        ))
+        Some(Busy::Port(refusal(format!(
+            "port {port} of the cluster of '{}' is taken by {who}, which this runner did not start; it is left running: free the port and repeat, or start a new registry on other ports with `cluster start --new-regport`",
+            self.declared.infobase
+        ))))
     }
 
     /// Каталоги реестров, которых не называют закреплённые порты: остатки прерванного `--new-regport`.
+    /// Без перечня процессов ничего не удаляется.
     fn sweep_registries(&self, keep: &str) {
+        let Some(agents) = self.agents() else {
+            return;
+        };
         let Ok(entries) = std::fs::read_dir(self.agent.root()) else {
             return;
         };
@@ -661,28 +779,30 @@ impl Cluster<'_> {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with(REGISTRY_PREFIX)
                 && name != keep
-                && self.foreign_agent(&entry.path()).is_none()
+                && first_with_keys(&agents, &ragent::registry_keys(&entry.path())).is_none()
             {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
     }
 
+    /// Запуск на закреплённых портах; их нет — на новых. Порты уже проверены.
     fn start_on_pins(
         &self,
         machine: &str,
         stand: Option<&Stand<'_>>,
+        pins: Option<ClusterPins>,
     ) -> Result<ClusterResult, UseCaseError> {
         for paths in [&self.agent, &self.ras] {
             paths
                 .prepare()
                 .map_err(|error| io_failure("cannot prepare", paths.root(), &error))?;
         }
-        let pins = match self.pins() {
+        let pins = match pins {
+            // Реестры подметаются только при известных портах: если закреплённое потеряно, прежний
+            // реестр может быть тем, где зарегистрирована база.
             Some(pins) => {
-                if let Some(refusal) = self.busy(&pins) {
-                    return Err(refusal);
-                }
+                self.sweep_registries(&pins.registry);
                 pins
             }
             None => {
@@ -691,42 +811,28 @@ impl Cluster<'_> {
                     ports,
                     registry: format!("{REGISTRY_PREFIX}{}", ports.regport),
                     registered: false,
+                    previous: None,
                 };
                 self.write_pins(&pins)?;
                 pins
             }
         };
-        self.sweep_registries(&pins.registry);
         let agent = self.raise(&pins, machine)?;
         let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
         result.ready = true;
         Ok(self.describe(result, Some(&agent)))
     }
 
-    /// Новый реестр на новых портах, если прежние заняты. Прежний реестр удаляется только после
-    /// регистрации базы в новом и записи новых портов: отказ на любом шаге ничего не теряет.
+    /// Новый реестр на новых портах, если прежние заняты чужим процессом (это уже проверено).
+    /// Закреплённое сначала запоминает прежний реестр: прерванный перенос откатит следующий запуск.
+    /// Прежний реестр удаляется только после регистрации базы в новом: отказ ничего не теряет.
     fn move_registry(
         &self,
         machine: &str,
         stand: Option<&Stand<'_>>,
+        old: ClusterPins,
     ) -> Result<ClusterResult, UseCaseError> {
-        let Some(old) = self.pins() else {
-            return Err(validation(format!(
-                "the cluster of '{}' has no registry yet: `cluster start` makes it",
-                self.declared.infobase
-            )));
-        };
         let old_registry = self.registry(&old);
-        match self.busy(&old) {
-            None => {
-                return Err(validation(format!(
-                    "the ports of the cluster of '{}' are free: `cluster start` starts it on its registry; --new-regport is for ports taken by another process",
-                    self.declared.infobase
-                )))
-            }
-            Some(refusal) if self.foreign_agent(&old_registry).is_some() => return Err(refusal),
-            Some(_) => {}
-        }
         let existed = old.registered
             || match (&self.declared.database, stand) {
                 (Some(Database::Managed { name }), Some(stand)) => {
@@ -745,23 +851,39 @@ impl Cluster<'_> {
             (None, false) => None,
         };
         let ports = self.choose_ports(stand, Some(old.ports))?;
-        let pins = ClusterPins {
+        let moving = ClusterPins {
             ports,
             registry: format!("{REGISTRY_PREFIX}{}", ports.regport),
             registered: false,
+            previous: Some(PreviousRegistry {
+                ports: old.ports,
+                registry: old.registry.clone(),
+                registered: old.registered,
+            }),
         };
         for paths in [&self.agent, &self.ras] {
             paths
                 .prepare()
                 .map_err(|error| io_failure("cannot prepare", paths.root(), &error))?;
         }
-        let new_registry = self.registry(&pins);
-        let agent = match self.raise(&pins, machine) {
-            Ok(agent) => agent,
-            Err(error) => {
-                let _ = std::fs::remove_dir_all(&new_registry);
-                return Err(error);
+        self.write_pins(&moving)?;
+        let new_registry = self.registry(&moving);
+        let roll_back = |error: UseCaseError, agent: Option<&ServiceRecord>| {
+            if let Some(agent) = agent {
+                self.abandon(agent);
             }
+            let error = match self.write_pins(&old) {
+                Ok(()) => error,
+                Err(restore) => error.followed_by(format!(
+                    "the previous ports were not restored, the next cluster start restores them: {restore}"
+                )),
+            };
+            let _ = std::fs::remove_dir_all(&new_registry);
+            error
+        };
+        let agent = match self.raise(&moving, machine) {
+            Ok(agent) => agent,
+            Err(error) => return Err(roll_back(error, None)),
         };
         let registered = match (existed, database) {
             (true, Some(database)) => self.register(&agent, database, stand),
@@ -769,12 +891,11 @@ impl Cluster<'_> {
         };
         let pins = ClusterPins {
             registered: existed,
-            ..pins
+            previous: None,
+            ..moving
         };
         if let Err(error) = registered.and_then(|()| self.write_pins(&pins)) {
-            self.abandon(&agent);
-            let _ = std::fs::remove_dir_all(&new_registry);
-            return Err(error);
+            return Err(roll_back(error, Some(&agent)));
         }
         let _ = std::fs::remove_dir_all(&old_registry);
         let mut result = self.result(ServiceState::StartedByThisCopy, ServiceAction::Started);
@@ -1053,13 +1174,11 @@ fn cluster<'a>(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_cluster(
     context: &ExecutionContext,
     config: &AppConfig,
-    command: ServiceCommand,
+    command: ClusterCommand,
     dry_run: bool,
-    new_regport: bool,
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
     locate: &dyn Fn() -> Result<PathBuf, UseCaseError>,
@@ -1067,10 +1186,10 @@ pub(super) fn run_cluster(
     let cluster =
         cluster(config, context, runner, host, locate).map_err(UseCaseFailure::without_payload)?;
     let outcome = match command {
-        ServiceCommand::Start => cluster.start(dry_run, new_regport),
-        ServiceCommand::Status => Ok(cluster.status()),
-        ServiceCommand::Stop => cluster.stop(dry_run),
-        ServiceCommand::Restart => cluster.restart(dry_run),
+        ClusterCommand::Start { new_regport } => cluster.start(dry_run, new_regport),
+        ClusterCommand::Status => Ok(cluster.status()),
+        ClusterCommand::Stop => cluster.stop(dry_run),
+        ClusterCommand::Restart => cluster.restart(dry_run),
     };
     outcome.map_err(|error| UseCaseFailure::with_payload(error, cluster.failed()))
 }
@@ -1107,6 +1226,9 @@ pub(super) fn cluster_base(
     let database = cluster.declared.database.as_ref().ok_or_else(|| {
         validation("infobase.dbms is not declared: the infobase of a cluster lives in a DBMS")
     })?;
+    if let Some(owner) = other_cluster_over(config, host, database) {
+        return Err(owned_by_a_cluster(&owner));
+    }
     // Базу уже знает кластер (её зарегистрировали и без раннера): создавать нечего.
     if let Some(ras) = cluster.own_ras() {
         if let Some(id) = cluster.probe(&agent.bin, ras.port) {
@@ -1183,6 +1305,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
 
+    use super::super::ServiceCommand;
     use super::*;
     use crate::config::model::{
         InfobaseClusterConfig, InfobaseConfig, ManagedDbmsConfig, ManagedServerConfig,
@@ -1287,6 +1410,10 @@ mod tests {
         agent_exits_at_once: Cell<bool>,
         cluster_silent: Cell<bool>,
         hard_stops: RefCell<HashSet<u32>>,
+        /// Процессы, которых не снять.
+        immortal: RefCell<HashSet<u32>>,
+        /// Перечень процессов не отвечает.
+        unlisted: Cell<bool>,
         /// Чужие `ragent`: pid и командная строка.
         foreign_agents: RefCell<Vec<(u32, String)>>,
         database_exists: Cell<bool>,
@@ -1306,7 +1433,20 @@ mod tests {
                 },
             );
         }
+        /// Процесс, начавшийся в это время.
+        fn live_since(&self, pid: u32, image: &str, started: u64) {
+            self.processes.borrow_mut().insert(
+                pid,
+                ProcessFacts {
+                    started,
+                    image: image.to_owned(),
+                },
+            );
+        }
         fn kill(&self, pid: u32) {
+            if self.immortal.borrow().contains(&pid) {
+                return;
+            }
             self.processes.borrow_mut().remove(&pid);
             self.listeners.borrow_mut().retain(|_, held| *held != pid);
         }
@@ -1403,30 +1543,38 @@ mod tests {
         fn patience(&self, _default: Duration) -> Duration {
             Duration::ZERO
         }
-        fn processes(&self, images: &[&str]) -> Vec<ProcessRow> {
+        fn processes(&self, images: &[&str]) -> Option<Vec<ProcessRow>> {
+            if self.unlisted.get() {
+                return None;
+            }
             if images == [AGENT_IMAGE] {
-                return self
-                    .foreign_agents
+                return Some(
+                    self.foreign_agents
+                        .borrow()
+                        .iter()
+                        .map(|(pid, command)| ProcessRow {
+                            pid: *pid,
+                            parent: 1,
+                            command: command.clone(),
+                        })
+                        .collect(),
+                );
+            }
+            if images != REMNANT_IMAGES {
+                return Some(Vec::new());
+            }
+            Some(
+                self.parents
                     .borrow()
                     .iter()
-                    .map(|(pid, command)| ProcessRow {
+                    .filter(|(pid, _)| self.alive(**pid))
+                    .map(|(pid, parent)| ProcessRow {
                         pid: *pid,
-                        parent: 1,
-                        command: command.clone(),
+                        parent: *parent,
+                        command: String::new(),
                     })
-                    .collect();
-            }
-            assert_eq!(images, REMNANT_IMAGES);
-            self.parents
-                .borrow()
-                .iter()
-                .filter(|(pid, _)| self.alive(**pid))
-                .map(|(pid, parent)| ProcessRow {
-                    pid: *pid,
-                    parent: *parent,
-                    command: String::new(),
-                })
-                .collect()
+                    .collect(),
+            )
         }
     }
 
@@ -1503,12 +1651,17 @@ mod tests {
             host: &Host,
         ) -> Result<ClusterResult, UseCaseError> {
             let locate = || Ok(PathBuf::from("C:/1cv8/8.5.4.2028/bin/ragent.exe"));
+            let command = match command {
+                ServiceCommand::Start => ClusterCommand::Start { new_regport },
+                ServiceCommand::Status => ClusterCommand::Status,
+                ServiceCommand::Stop => ClusterCommand::Stop,
+                ServiceCommand::Restart => ClusterCommand::Restart,
+            };
             run_cluster(
                 &ExecutionContext::cli(CommandName::ClusterStart),
                 &self.config,
                 command,
                 false,
-                new_regport,
                 &Runner { host },
                 host,
                 &locate,
@@ -1824,6 +1977,158 @@ mod tests {
     }
 
     #[test]
+    fn a_child_of_a_process_that_got_the_dead_agents_pid_is_no_remnant() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        host.kill(AGENT_PID);
+        // Система отдала pid мёртвого агента новому `ragent` другой копии; у того свой `rmngr`.
+        host.live_since(AGENT_PID, "ragent.exe", STARTED + 100);
+        host.live_since(7020, "rmngr.exe", STARTED + 200);
+        host.parents.borrow_mut().insert(7020, AGENT_PID);
+        let status = setup.run(ServiceCommand::Status, &host).unwrap();
+        let mut remnants = status.remnant_pids.clone();
+        remnants.sort_unstable();
+        assert_eq!(remnants, [RMNGR_PID, RPHOST_PID], "only the old children");
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert!(host.alive(7020), "the foreign rmngr is left alone");
+        assert!(host.alive(AGENT_PID), "the new owner of the pid is left alone");
+        assert!(!host.alive(RMNGR_PID));
+    }
+
+    #[test]
+    fn a_child_on_another_machine_or_of_another_image_is_no_remnant() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        host.kill(AGENT_PID);
+        host.live(7021, "notepad.exe");
+        host.parents.borrow_mut().insert(7021, AGENT_PID);
+        let status = setup.run(ServiceCommand::Status, &host).unwrap();
+        assert!(!status.remnant_pids.contains(&7021), "{:?}", status.remnant_pids);
+        // Запись другой машины: её остатков здесь нет.
+        let mut record: ServiceRecord = read_json(&setup.agent().record()).unwrap();
+        record.machine = Some("another".to_owned());
+        write_json(&setup.agent().record(), &record).unwrap();
+        let status = setup.run(ServiceCommand::Status, &host).unwrap();
+        assert!(status.remnant_pids.is_empty(), "{:?}", status.remnant_pids);
+    }
+
+    #[test]
+    fn a_remnant_that_does_not_stop_keeps_the_agent_record() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        host.kill(AGENT_PID);
+        host.immortal.borrow_mut().insert(RPHOST_PID);
+        let refused = setup.run(ServiceCommand::Stop, &host).unwrap_err();
+        assert!(refused.to_string().contains(&RPHOST_PID.to_string()), "{refused}");
+        assert!(setup.agent().record().exists(), "the record still names the remnants");
+        host.immortal.borrow_mut().clear();
+        let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert!(stopped.stopped_remnant_pids.contains(&RPHOST_PID));
+        assert!(!setup.agent().record().exists());
+    }
+
+    #[test]
+    fn without_the_process_list_remnants_are_not_guessed_and_the_record_stays() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        host.kill(AGENT_PID);
+        host.unlisted.set(true);
+        host.spawned.borrow_mut().clear();
+        let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
+        assert!(refused.to_string().contains("process list"), "{refused}");
+        assert!(setup.agent().record().exists());
+        assert!(host.hard_stops.borrow().is_empty(), "nothing is stopped blindly");
+        assert!(!host.spawned.borrow().iter().any(|tool| tool == "ragent"));
+    }
+
+    #[test]
+    fn a_taken_port_without_the_process_list_is_refused_and_nothing_is_removed() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        let pins = setup.pins();
+        host.listeners.borrow_mut().insert(pins.ports.regport, 555);
+        host.unlisted.set(true);
+        let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
+        assert!(refused.to_string().contains("process list"), "{refused}");
+        assert!(setup.agent().root().join(&pins.registry).is_dir());
+    }
+
+    #[test]
+    fn a_lost_pins_file_does_not_remove_the_old_registry() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        let old = setup.pins();
+        std::fs::remove_file(setup.agent().pins()).unwrap();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        assert!(
+            setup.agent().root().join(&old.registry).is_dir(),
+            "the registry that may hold the base stays"
+        );
+    }
+
+    #[test]
+    fn start_rolls_back_an_interrupted_move() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        super::remember_registered(&setup.config).unwrap();
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        let old = setup.pins();
+        // Раннер умер посреди `--new-regport`: закреплённое называет новый реестр и помнит прежний.
+        let moving = ClusterPins {
+            ports: ClusterPorts::from_first(old.ports.agent + 100),
+            registry: "registry-moving".to_owned(),
+            registered: false,
+            previous: Some(PreviousRegistry {
+                ports: old.ports,
+                registry: old.registry.clone(),
+                registered: old.registered,
+            }),
+        };
+        std::fs::create_dir_all(setup.agent().root().join(&moving.registry)).unwrap();
+        write_json(&setup.agent().pins(), &moving).unwrap();
+        let started = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(started.action, ServiceAction::Started);
+        assert_eq!(setup.pins(), old, "the previous registry is back");
+        assert!(!setup.agent().root().join("registry-moving").exists());
+    }
+
+    #[test]
+    fn a_busy_regport_is_refused_before_the_postgres_starts() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        host.spawned.borrow_mut().clear();
+        host.listeners
+            .borrow_mut()
+            .insert(setup.pins().ports.regport, 555);
+        setup.run(ServiceCommand::Start, &host).unwrap_err();
+        assert!(host.spawned.borrow().is_empty(), "{:?}", host.spawned.borrow());
+    }
+
+    #[test]
+    fn stop_leaves_the_step_postgres_to_the_running_standalone() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        // Над PostgreSQL шага работает и свой автономный сервер этой базы: СУБД нужна ему.
+        own_standalone(&setup, &host);
+        let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert_eq!(stopped.stopped_pid, Some(AGENT_PID));
+        assert_eq!(stopped.stopped_dbms_pid, None);
+        assert!(host.alive(PG_PID));
+    }
+
+    #[test]
     fn a_busy_regport_is_refused_with_its_process_and_no_new_port_is_taken() {
         let setup = setup();
         let host = Host::default();
@@ -2071,5 +2376,131 @@ mod tests {
         host.unsupported.set(true);
         let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+    }
+
+    /// Ваша СУБД вместо PostgreSQL раннера.
+    fn own_dbms(server: &str) -> InfobaseDbmsConfig {
+        InfobaseDbmsConfig {
+            kind: Some("PostgreSQL".to_owned()),
+            server: Some(server.to_owned()),
+            name: Some("shared".to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// Работающий свой кластер другой базы.
+    fn running_cluster_of(setup: &Setup, host: &Host, infobase: &str) {
+        let paths = ServicePaths::new(&setup.config.work_path, infobase, "cluster");
+        paths.prepare().unwrap();
+        host.live(9200, "ragent.exe");
+        write_json(
+            &paths.record(),
+            &ServiceRecord {
+                state: RecordState::Running,
+                pid: Some(9200),
+                started: Some(STARTED),
+                image: Some("ragent.exe".to_owned()),
+                machine: Some(MACHINE.to_owned()),
+                starter: None,
+                port: 1,
+                explicit: true,
+                bin: PathBuf::from("ragent.exe"),
+                version: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_cluster_of_another_base_over_the_same_database_owns_it() {
+        let mut setup = setup();
+        let host = Host::default();
+        setup.config.infobase.dbms = Some(own_dbms("DbHost"));
+        let mut other = setup.config.infobase.clone();
+        // Регистр и пробелы адреса не различаются.
+        other.dbms = Some(own_dbms(" dbhost "));
+        setup.config.infobases.insert("other".to_owned(), other);
+        running_cluster_of(&setup, &host, "other");
+        let database = Database::declared(setup.config.infobase.dbms.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            super::super::cluster_over(&setup.config, &host, &database).as_deref(),
+            Some("other")
+        );
+        // Кластер этой базы работает, но базу над той же БД ему не создать.
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        let refused = setup.base(&host).err().expect("refused");
+        assert!(refused.to_string().contains("'other'"), "{refused}");
+        assert!(refused.to_string().contains("cluster stop"), "{refused}");
+    }
+
+    #[test]
+    fn localhost_and_the_loopback_address_are_different_databases() {
+        let mut setup = setup();
+        let host = Host::default();
+        setup.config.infobase.dbms = Some(own_dbms("localhost"));
+        let mut other = setup.config.infobase.clone();
+        other.dbms = Some(own_dbms("127.0.0.1"));
+        setup.config.infobases.insert("other".to_owned(), other);
+        running_cluster_of(&setup, &host, "other");
+        let database = Database::declared(setup.config.infobase.dbms.as_ref().unwrap()).unwrap();
+        assert_eq!(super::super::cluster_over(&setup.config, &host, &database), None);
+    }
+
+    #[test]
+    fn a_running_cluster_refuses_the_standalone_start_over_the_same_database() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        let mut config = setup.config.clone();
+        config.infobase.cluster = None;
+        config.infobase.standalone = Some(crate::config::model::StandaloneConfig {
+            managed: Some(ManagedServerConfig {
+                name: Some("demo".to_owned()),
+                db_path: None,
+            }),
+            gate: None,
+            host_fingerprint: None,
+            exchange: None,
+        });
+        host.spawned.borrow_mut().clear();
+        let refused = super::super::standalone::run_standalone(
+            &ExecutionContext::cli(CommandName::StandaloneStart),
+            &config,
+            ServiceCommand::Start,
+            false,
+            &Runner { host: &host },
+            &host,
+            &|| Ok(PathBuf::from("ibsrv.exe")),
+        )
+        .map_err(|failure| failure.error)
+        .unwrap_err();
+        assert!(refused.to_string().contains("cluster stop"), "{refused}");
+        assert!(
+            !host.spawned.borrow().iter().any(|tool| tool == "ibsrv"),
+            "{:?}",
+            host.spawned.borrow()
+        );
+    }
+
+    #[test]
+    fn a_cluster_without_a_name_takes_the_name_of_its_infobase() {
+        let mut setup = setup();
+        let host = Host::default();
+        setup
+            .config
+            .infobase
+            .cluster
+            .as_mut()
+            .unwrap()
+            .managed
+            .as_mut()
+            .unwrap()
+            .name = None;
+        let started = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert!(
+            started.connection.as_deref().unwrap().ends_with(";Ref=origin"),
+            "{:?}",
+            started.connection
+        );
     }
 }

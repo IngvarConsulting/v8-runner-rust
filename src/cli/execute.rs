@@ -1712,17 +1712,16 @@ fn execute_cluster(
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     use crate::cli::args::ClusterCommandArgs as Action;
-    use crate::use_cases::managed_stand::{cluster_status, execute_cluster as run, ServiceCommand};
+    use crate::use_cases::managed_stand::{cluster_status, execute_cluster as run, ClusterCommand};
 
-    let (name, command, new_regport) = match action {
+    let (name, command) = match action {
         Action::Start { new_regport } => (
             CommandName::ClusterStart,
-            ServiceCommand::Start,
-            new_regport,
+            ClusterCommand::Start { new_regport },
         ),
-        Action::Status => (CommandName::ClusterStatus, ServiceCommand::Status, false),
-        Action::Stop => (CommandName::ClusterStop, ServiceCommand::Stop, false),
-        Action::Restart => (CommandName::ClusterRestart, ServiceCommand::Restart, false),
+        Action::Status => (CommandName::ClusterStatus, ClusterCommand::Status),
+        Action::Stop => (CommandName::ClusterStop, ClusterCommand::Stop),
+        Action::Restart => (CommandName::ClusterRestart, ClusterCommand::Restart),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
@@ -1752,7 +1751,7 @@ fn execute_cluster(
             Err(error)
         }
     };
-    if command == ServiceCommand::Status {
+    if command == ClusterCommand::Status {
         return present(cluster_status(&context, config));
     }
     with_cli_workspace_lock(
@@ -1762,7 +1761,7 @@ fn execute_cluster(
         BaseAccess::Untouched,
         clean_before_execution,
         dry_run,
-        || present(run(&context, config, command, dry_run, new_regport)),
+        || present(run(&context, config, command, dry_run)),
     )
 }
 

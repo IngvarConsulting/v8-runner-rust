@@ -5,6 +5,7 @@ mod cluster;
 mod standalone;
 
 pub(crate) use cluster::ClusterBase;
+pub use cluster::ClusterCommand;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,8 @@ use crate::platform::process::{
 };
 use crate::platform::service::{self, ProcessFacts, ProcessRow, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
-    machine_fingerprint, observe_service, read_json, write_json, Observed, PinnedPorts,
+    machine_fingerprint, observe_service, read_json, record_names_own_process, write_json,
+    Observed, PinnedPorts,
     RecordState, ServicePaths, ServiceRecord,
 };
 use crate::use_cases::context::ExecutionContext;
@@ -60,9 +62,10 @@ pub(crate) trait ServiceHost {
     fn patience(&self, default: Duration) -> Duration {
         default
     }
-    /// Процессы с этими образами: чужой сервер по ключам запуска, остатки по родителю.
-    fn processes(&self, _images: &[&str]) -> Vec<ProcessRow> {
-        Vec::new()
+    /// Процессы с этими образами: чужой сервер по ключам запуска, остатки по родителю. `None` —
+    /// перечня нет.
+    fn processes(&self, _images: &[&str]) -> Option<Vec<ProcessRow>> {
+        Some(Vec::new())
     }
 }
 
@@ -95,7 +98,7 @@ impl ServiceHost for RealHost {
         let request = taskkill(&["/PID", &pid.to_string(), "/T", "/F"]);
         let _ = runner.run_with_policy(&request, &context.cleanup_policy());
     }
-    fn processes(&self, images: &[&str]) -> Vec<ProcessRow> {
+    fn processes(&self, images: &[&str]) -> Option<Vec<ProcessRow>> {
         service::processes(images)
     }
     fn sleep(&self, duration: Duration) {
@@ -279,18 +282,28 @@ impl Database {
 /// СУБД и именем БД. Пока он работает, другой сервер и прямой `ibcmd` эту БД не открывают
 /// (`INV.USE-CASES.ONE-SERVER-OWNS-A-DATABASE`).
 fn cluster_over(config: &AppConfig, host: &dyn ServiceHost, database: &Database) -> Option<String> {
-    let machine = host.machine();
-    let running = |infobase: &str| {
-        let paths = ServicePaths::new(&config.work_path, infobase, "cluster");
-        read_json::<ServiceRecord>(&paths.record()).is_some_and(|record| {
-            let facts = record.pid.and_then(|pid| host.facts(pid));
-            record.is_own(facts.as_ref(), machine.as_deref())
-        })
-    };
-    let own = config.infobase_name.as_deref();
-    if let Some(own) = own.filter(|own| running(own)) {
+    let own = config.infobase_name.as_deref()?;
+    if cluster_runs(config, host, own) {
         return Some(own.to_owned());
     }
+    other_cluster_over(config, host, database)
+}
+
+fn cluster_runs(config: &AppConfig, host: &dyn ServiceHost, infobase: &str) -> bool {
+    let paths = ServicePaths::new(&config.work_path, infobase, "cluster");
+    record_names_own_process(&paths.record(), host.machine().as_deref(), &|pid| {
+        host.facts(pid)
+    })
+}
+
+/// Свой работающий кластер другой объявленной базы над той же вашей БД. У PostgreSQL раннера
+/// у каждой базы своя БД, и другая база её не открывает.
+fn other_cluster_over(
+    config: &AppConfig,
+    host: &dyn ServiceHost,
+    database: &Database,
+) -> Option<String> {
+    let own = config.infobase_name.as_deref();
     let Database::Own(access) = database else {
         // PostgreSQL раннера у каждой базы свой: другая база его БД не открывает.
         return None;
@@ -313,7 +326,7 @@ fn cluster_over(config: &AppConfig, host: &dyn ServiceHost, database: &Database)
                         .as_deref()
                         .is_some_and(|server| same_address(server, &access.server))
                     && dbms.name.as_deref() == Some(access.name.as_str())
-            }) && running(name)
+            }) && cluster_runs(config, host, name)
         })
         .map(|(name, _)| name.clone())
 }
@@ -771,10 +784,11 @@ impl<'a> Stand<'a> {
     fn running_server(&self) -> Option<(&'static str, &'static str)> {
         let machine = self.host.machine();
         SERVERS.into_iter().find(|(service, _)| {
-            read_json::<ServiceRecord>(&self.paths.sibling_record(service)).is_some_and(|record| {
-                let facts = record.pid.and_then(|pid| self.host.facts(pid));
-                record.is_own(facts.as_ref(), machine.as_deref())
-            })
+            record_names_own_process(
+                &self.paths.sibling_record(service),
+                machine.as_deref(),
+                &|pid| self.host.facts(pid),
+            )
         })
     }
 
@@ -966,16 +980,14 @@ fn locate_ibsrv(config: &AppConfig) -> Result<PathBuf, UseCaseError> {
 pub fn execute_cluster(
     context: &ExecutionContext,
     config: &AppConfig,
-    command: ServiceCommand,
+    command: ClusterCommand,
     dry_run: bool,
-    new_regport: bool,
 ) -> UseCaseResult<crate::domain::cluster::ClusterResult> {
     cluster::run_cluster(
         context,
         config,
         command,
         dry_run,
-        new_regport,
         &ProcessExecutor,
         &RealHost,
         &|| locate(config, crate::platform::locator::UtilityType::Ragent),
@@ -990,8 +1002,7 @@ pub fn cluster_status(
     cluster::run_cluster(
         context,
         config,
-        ServiceCommand::Status,
-        false,
+        ClusterCommand::Status,
         false,
         &ProcessExecutor,
         &RealHost,

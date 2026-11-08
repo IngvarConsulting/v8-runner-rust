@@ -227,6 +227,14 @@ pub struct ManagedServerConfig {
     pub db_path: Option<PathBuf>,
 }
 
+impl ManagedServerConfig {
+    /// `Ref=` of the infobase on the server: `name`, or the declared infobase name. The single
+    /// owner of this default for the loader and the service commands.
+    pub fn reference(&self, infobase: &str) -> String {
+        self.name.clone().unwrap_or_else(|| infobase.to_owned())
+    }
+}
+
 /// A standalone server as the target. The Designer goes to its direct gate, declared by
 /// `InfobaseConfig::connection`, and keeps its files on the runner's side; the agent
 /// attaches to its SSH gate and exchanges files through a declared channel, never through

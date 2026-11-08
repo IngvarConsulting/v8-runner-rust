@@ -76,10 +76,11 @@ pub fn register_infobase(rac: &Path, ras: &str, base: &Registration<'_>) -> Proc
     request(rac, args)
 }
 
-/// Значения ключа во всех блоках ответа.
+/// Значения ключа во всех блоках ответа. `rac` пишет строку `ключ<пробелы> : значение`, и делит её
+/// именно ` : `: двоеточие внутри значения — например, `host:port` — строку не режет.
 pub fn values<'a>(answer: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
     answer.lines().filter_map(move |line| {
-        let (name, value) = line.split_once(':')?;
+        let (name, value) = line.split_once(" : ")?;
         (name.trim() == key).then(|| value.trim())
     })
 }
@@ -91,9 +92,11 @@ pub fn first_cluster(answer: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Есть ли база с этим именем в ответе `infobase summary list`.
+/// Есть ли база с этим именем в ответе `infobase summary list`. Платформа сравнивает имена баз без
+/// учёта регистра, и кириллицы тоже.
 pub fn lists_infobase(answer: &str, name: &str) -> bool {
-    values(answer, "name").any(|value| value.eq_ignore_ascii_case(name))
+    let name = name.to_lowercase();
+    values(answer, "name").any(|value| value.to_lowercase() == name)
 }
 
 #[cfg(test)]

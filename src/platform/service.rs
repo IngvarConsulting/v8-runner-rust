@@ -74,10 +74,12 @@ pub struct ProcessRow {
 }
 
 /// Процессы с этими именами образов. Единственный перечень процессов раннера: по командной строке
-/// узнают чужой сервер, по родителю — остатки упавшего агента кластера. Не ответил вовремя — пусто.
-pub fn processes(images: &[&str]) -> Vec<ProcessRow> {
+/// узнают чужой сервер, по родителю — остатки упавшего агента кластера. `None` — перечня нет (запрос
+/// не запустился или не ответил вовремя): это не «процессов нет», и разрушительные шаги по нему не
+/// идут.
+pub fn processes(images: &[&str]) -> Option<Vec<ProcessRow>> {
     if !cfg!(windows) || images.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let filter = images
         .iter()
@@ -94,7 +96,7 @@ pub fn processes(images: &[&str]) -> Vec<ProcessRow> {
         .stderr(std::process::Stdio::null())
         .spawn()
     else {
-        return Vec::new();
+        return None;
     };
     // Ответ не дольше этого: зависший запрос не должен держать замок.
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -107,14 +109,15 @@ pub fn processes(images: &[&str]) -> Vec<ProcessRow> {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Vec::new();
+                return None;
             }
         }
     }
-    child
-        .wait_with_output()
-        .map(|output| process_rows(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or_default()
+    let output = child.wait_with_output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| process_rows(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// Разбор строк `pid родитель командная строка`.

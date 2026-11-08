@@ -1554,7 +1554,7 @@ fn project_managed_standalone(
             // База в СУБД: цель остаётся автономной, её создаёт сценарий стенда. Адрес — заглушка
             // для проверок формы: сервера ещё нет.
             None => {
-                let name = managed.name.as_deref().unwrap_or(infobase_name.as_str());
+                let name = managed.reference(&infobase_name);
                 config.infobase.connection = format!("Srvr=127.0.0.1;Ref={name}");
             }
         }
@@ -1563,13 +1563,13 @@ fn project_managed_standalone(
     if let ConfigValidationMode::Inspecting { .. } = validation_mode {
         // `status` и `platforms` сервера не требуют: показывают память и установки.
         if running.is_none() {
-            let name = managed.name.as_deref().unwrap_or(infobase_name.as_str());
+            let name = managed.reference(&infobase_name);
             config.infobase.connection = format!("Srvr=127.0.0.1;Ref={name}");
             return Ok(());
         }
     }
-    if let (Some(running), Some(name)) = (running, managed.name) {
-        config.infobase.connection = running.ports.connection(&name);
+    if let Some(running) = running {
+        config.infobase.connection = running.ports.connection(&managed.reference(&infobase_name));
         if let Some(standalone) = config.infobase.standalone.as_mut() {
             standalone.gate = Some(running.ports.gate());
             standalone.host_fingerprint = running.host_fingerprint;
@@ -1612,7 +1612,7 @@ fn project_managed_cluster(
     if !config.infobase.connection.trim().is_empty() {
         return Ok(());
     }
-    let name = managed.name.unwrap_or_else(|| infobase_name.clone());
+    let name = managed.reference(&infobase_name);
     let running =
         crate::platform::service_record::running_cluster(&config.work_path, &infobase_name);
     let project = |config: &mut AppConfig, connection: String| {
@@ -2968,6 +2968,7 @@ mod tests {
             ports: ClusterPorts::from_first(24000),
             registry: "registry-24001".to_owned(),
             registered: false,
+            previous: None,
         };
         write_json(&paths.pins(), &pins).unwrap();
         write_json(

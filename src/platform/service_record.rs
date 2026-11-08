@@ -119,9 +119,21 @@ pub struct ClusterPins {
     pub registry: String,
     #[serde(default)]
     pub registered: bool,
+    /// Идёт перенос в новый реестр (`--new-regport`): прежний ещё не удалён. Прерванный перенос
+    /// откатывает следующий `cluster start`, а рабочие команды такой кластер не видят.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<PreviousRegistry>,
 }
 
-/// Работающий свой кластер объявленной базы.
+/// Реестр, из которого идёт перенос.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviousRegistry {
+    pub ports: ClusterPorts,
+    pub registry: String,
+    pub registered: bool,
+}
+
+/// Работающий свой кластер объявленной базы. Посреди переноса реестра его нет.
 pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> {
     let paths = ServicePaths::new(work_path, infobase, "cluster");
     let machine = machine_fingerprint();
@@ -131,17 +143,24 @@ pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> 
     let Observed::Own(_) = observed else {
         return None;
     };
-    read_json(&paths.pins())
+    read_json::<ClusterPins>(&paths.pins()).filter(|pins| pins.previous.is_none())
 }
 
 /// Работает ли своя служба PostgreSQL этой базы.
 pub fn running_postgres(work_path: &Path, infobase: &str) -> bool {
     let paths = ServicePaths::new(work_path, infobase, "postgres");
-    let machine = machine_fingerprint();
-    read_json::<ServiceRecord>(&paths.record()).is_some_and(|record| {
-        let facts = record.pid.and_then(process_facts);
-        record.is_own(facts.as_ref(), machine.as_deref())
-    })
+    record_names_own_process(&paths.record(), machine_fingerprint().as_deref(), &process_facts)
+}
+
+/// Запись называет живой свой процесс. Единственная такая проверка вне `observe_service`: ею
+/// отказывают, пока работает другая служба (`one-server-owns-a-database`, `dbms stop`). Запись
+/// `starting` без pid процесса не называет.
+pub fn record_names_own_process(
+    record: &Path,
+    machine: Option<&str>,
+    facts: &dyn Fn(u32) -> Option<ProcessFacts>,
+) -> bool {
+    read_json::<ServiceRecord>(record).is_some_and(|record| adopt_recorded_pid(&record, facts, machine))
 }
 
 /// Хеш `machine_id`; `None`, если система идентификатора не дала.
@@ -256,6 +275,31 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Защита от повторения: «работает ли своя служба» решают `observe_service` и
+    /// `record_names_own_process`, а не копии `read_json` + `is_own` по сценариям (ревью #538).
+    #[test]
+    fn only_this_module_tells_an_own_process_by_its_record() {
+        fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    sources(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&root, &mut files);
+        let offenders: Vec<_> = files
+            .iter()
+            .filter(|path| !path.ends_with("platform/service_record.rs"))
+            .filter(|path| std::fs::read_to_string(path).unwrap().contains(".is_own("))
+            .collect();
+        assert!(offenders.is_empty(), "{offenders:?}");
+    }
 
     fn record() -> ServiceRecord {
         ServiceRecord {

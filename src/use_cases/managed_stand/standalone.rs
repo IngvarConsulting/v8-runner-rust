@@ -59,10 +59,7 @@ fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
         .ok_or_else(|| {
             validation("infobase.standalone.managed is not declared for this infobase: the standalone commands start only a server the runner owns")
         })?;
-    let name = managed
-        .name
-        .clone()
-        .ok_or_else(|| validation("infobase.standalone.managed.name is not declared"))?;
+    let name = managed.reference(&infobase);
     let storage = match (&managed.db_path, &config.infobase.dbms) {
         (Some(db_path), None) => Storage::File(db_path.clone()),
         (None, Some(dbms)) => Storage::Dbms(Database::declared(dbms)?),
@@ -119,7 +116,12 @@ impl Server<'_> {
                 ibsrv::database_keys(&server, &name)
             }
         };
-        crate::platform::service::first_with_keys(&self.host.processes(&[IBSRV_IMAGE]), &keys)
+        // Без перечня процессов чужой сервер не назвать: отказ по нему только сообщает, а запуск
+        // упрётся в занятый порт.
+        crate::platform::service::first_with_keys(
+            &self.host.processes(&[IBSRV_IMAGE]).unwrap_or_default(),
+            &keys,
+        )
     }
 
     /// СУБД, которую поднимает раннер, как шаг этого сервера.
@@ -885,17 +887,19 @@ mod tests {
         fn patience(&self, _default: Duration) -> Duration {
             Duration::ZERO
         }
-        fn processes(&self, images: &[&str]) -> Vec<crate::platform::service::ProcessRow> {
+        fn processes(&self, images: &[&str]) -> Option<Vec<crate::platform::service::ProcessRow>> {
             assert_eq!(images, ["ibsrv.exe"]);
-            self.foreign
-                .borrow()
-                .iter()
-                .map(|(pid, command)| crate::platform::service::ProcessRow {
-                    pid: *pid,
-                    parent: 1,
-                    command: command.clone(),
-                })
-                .collect()
+            Some(
+                self.foreign
+                    .borrow()
+                    .iter()
+                    .map(|(pid, command)| crate::platform::service::ProcessRow {
+                        pid: *pid,
+                        parent: 1,
+                        command: command.clone(),
+                    })
+                    .collect(),
+            )
         }
     }
 

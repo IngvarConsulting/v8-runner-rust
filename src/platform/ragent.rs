@@ -21,7 +21,8 @@ pub struct ClusterPorts {
 }
 
 impl ClusterPorts {
-    /// Порты блоком от `first`: блоки разных копий выводятся из пути и не пересекаются.
+    /// Порты блоком от `first`. Первый порт выводится из пути копии, но блок шире шага между
+    /// попытками: блок другой копии может задеть закреплённый, и тогда выход — `--new-regport`.
     pub fn from_first(first: u16) -> Self {
         Self {
             agent: first,
@@ -31,7 +32,8 @@ impl ClusterPorts {
     }
 
     pub fn range_end(self) -> u16 {
-        self.range_start + WORKER_RANGE_WIDTH - 1
+        // Закреплённое читается из файла: правленное руками не должно переполнить порт.
+        self.range_start.saturating_add(WORKER_RANGE_WIDTH - 1)
     }
 
     /// Все порты блока.
