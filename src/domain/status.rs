@@ -99,7 +99,8 @@ pub enum MemoryState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RecordedGeneration {
     pub token: String,
-    /// Инструмент, которым токен получен: токены разных инструментов несравнимы.
+    /// Инструмент, которым токен получен: токены разных инструментов сравнимы только у
+    /// основной конфигурации файловой базы (агент, Конфигуратор и `ibcmd`, замер #559).
     pub tool: Provider,
     /// После чего записан токен.
     pub after: GenerationAfter,
@@ -162,7 +163,7 @@ pub enum GenerationVerdict {
     /// Тот же инструмент отдал другой токен: база ушла вперёд, и `push`, который грузит этот
     /// набор без `--force`, откажет `non_fast_forward`.
     MovedAhead,
-    /// Запись сделана другим инструментом: сравнивать не с чем.
+    /// Запись сделана инструментом, чей токен с этим несравним: сравнивать не с чем.
     OtherTool,
     /// Записи этой пары нет.
     NoRecord,

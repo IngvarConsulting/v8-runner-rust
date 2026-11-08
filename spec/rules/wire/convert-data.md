@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.CONVERT-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/convert.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -18,6 +18,8 @@ check:
 (`INV.CLI.A-PACKAGE-DIRECTION-OF-CONVERT-HAS-AN-EXECUTOR-CHAIN`). Охват `PACKAGE` значит,
 что на входе был файл пакета: у записи `outputs[]` тогда нет `source_set`. `workspace_path`
 — рабочая область EDT, и его нет у направления, которое обходится без `1cedtcli`.
+
+**Что изменила версия 3.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 ## Пример
 

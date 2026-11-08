@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.EXTENSIONS-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/extensions.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -15,6 +15,8 @@ check:
 
 Чтение состава отвечает другой формой — [`CTR.WIRE.EXTENSIONS-INVENTORY-DATA`](extensions-inventory-data.md):
 у чтения есть список расширений, которого у изменения нет.
+
+**Что изменила версия 4.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 **Что изменила версия 3.** Квитанция `provider` получила необязательное поле
 `endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
