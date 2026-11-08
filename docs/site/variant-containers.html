@@ -53,6 +53,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -144,7 +145,7 @@ source-set:
     connection: &quot;Srvr=cluster.example:1541;Ref=demo&quot;            # адрес для работы после запуска кластера
     dbms:                                                       # прямое подключение ibcmd к СУБД
       kind: PostgreSQL                                          # тип СУБД
-      server: &quot;localhost:5432&quot;                                  # порт СУБД, опубликованный на хосте
+      server: &quot;localhost port=5432&quot;                                  # порт СУБД, опубликованный на хосте
       name: demo_data                                           # физическое имя БД, не Ref
       user: dbadmin                                             # пользователь СУБД
       password: &quot;db-password&quot;                                   # пароль пользователя СУБД

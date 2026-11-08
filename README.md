@@ -148,7 +148,7 @@ v8-runner infobase create
 
 Команда создаёт ИБ по виду цели и, для `EDT`, импортирует workspace (рабочую область):
 файловую — `ibcmd` сразу с основной конфигурацией из исходников (запасной — Конфигуратор),
-в кластере — Конфигуратор `CREATEINFOBASE` по секции `infobase.dbms` (с `locale`) и
+в кластере — Конфигуратор `CREATEINFOBASE` по секции `infobase.dbms` (с `locale`; порт СУБД в `dbms.server` пока не проходит, [#546](https://github.com/IngvarConsulting/v8-runner-rust/issues/546)) и
 `cluster.user`. Исходники EDT перед сборкой
 файловой базы переводятся в XML. Существующая файловая база и автономный сервер получают отказ.
 
