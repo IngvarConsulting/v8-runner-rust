@@ -601,6 +601,17 @@ fn run_dump_selected(
                 true,
             )
         } else {
+            // Без поколения до выгрузки записанное не запоминается: список дерева не нужен.
+            let inventory = SourceSetInventory::new(config);
+            let watch = generation_before.as_ref().and_then(|_| {
+                dump_watch(
+                    context,
+                    config,
+                    inventory.designer_context(&resolved.source_set_name),
+                    &plan,
+                    partial_objects,
+                )
+            });
             let result = match (config.format, &plan, provider, partial_objects, edt_binary) {
                 (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
                     crate::use_cases::unimplemented_provider(Operation::Dump, other),
@@ -800,12 +811,21 @@ fn run_dump_selected(
                         SourceSetInventory::new(config)
                             .designer_context(&resolved.source_set_name)
                             .and_then(|set| {
-                                crate::use_cases::exchange_guard::record_after_dump(
-                                    set,
-                                    &config.work_path,
-                                    provider,
-                                    generation_before.as_deref(),
-                                    generation_after.as_deref(),
+                                merge_optional_messages(
+                                    crate::use_cases::exchange_guard::record_after_dump(
+                                        set,
+                                        &config.work_path,
+                                        provider,
+                                        generation_before.as_deref(),
+                                        generation_after.as_deref(),
+                                    ),
+                                    remember_dump_writes(
+                                        set,
+                                        &config.work_path,
+                                        watch.as_ref(),
+                                        generation_before.as_deref(),
+                                        generation_after.as_deref(),
+                                    ),
                                 )
                             })
                     })

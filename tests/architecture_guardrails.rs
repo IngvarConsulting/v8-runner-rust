@@ -489,7 +489,7 @@ fn an_ibcmd_process_is_built_only_by_those_who_give_it_a_data_directory() {
         [
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
             "crate::use_cases::managed_stand::standalone::create_base",
-            "crate::use_cases::throwaway_infobase::ThrowawayInfobase::ibcmd",
+            "crate::use_cases::throwaway_infobase::FileInfobase::ibcmd",
         ]
         .map(str::to_owned)
         .into_iter()
@@ -3583,9 +3583,17 @@ fn staged_publication_methods(index: &SourceIndex, owner: &[String]) -> (Vec<Str
 fn change_detection_has_no_background_watcher() {
     // Изменения ищет та команда, которой нужен ответ; фонового наблюдателя нет. Наблюдатель —
     // это поток рядом с командой или крейт слежения за файловой системой: слой анализа
-    // потоков не заводит, а раннер такого крейта не тянет.
+    // потоков вне команды не заводит, а раннер такого крейта не тянет. Чтение файлов набора в
+    // потоках `std::thread::scope` (#556) фоном не является: все они заканчиваются раньше, чем
+    // анализ отвечает, — поэтому разрешены только эти потоки и вопросы о числе ядер и панике.
     const WATCHER_CRATES: &[&str] = &["notify", "notify-debouncer-mini", "hotwatch"];
     const BACKGROUND_WORK: &[&str] = &["spawn", "thread::"];
+    const SCOPED_WORK: &[&str] = &[
+        "std::thread::scope(",
+        "scope.spawn(",
+        "std::thread::available_parallelism(",
+        "std::thread::panicking(",
+    ];
 
     let manifest = read("Cargo.toml");
     let watchers: Vec<&str> = manifest
@@ -3604,7 +3612,10 @@ fn change_detection_has_no_background_watcher() {
     let mut offenders = Vec::new();
     for file in collect_rust_files(&repo_path("src/change_detection")) {
         let relative = file.strip_prefix(repo_root).expect("relative path");
-        let production = without_doc_attributes(&production_tokens(&file));
+        let production = SCOPED_WORK.iter().fold(
+            without_doc_attributes(&production_tokens(&file)),
+            |tokens, scoped| tokens.replace(scoped, ""),
+        );
         for marker in BACKGROUND_WORK {
             if production.contains(marker) {
                 offenders.push(format!("{} names `{marker}`", relative.display()));

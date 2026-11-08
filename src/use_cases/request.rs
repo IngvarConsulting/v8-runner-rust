@@ -345,6 +345,8 @@ impl ArtifactsModeRequest {
 /// `make` без набора: пакет каждого набора проекта в каталог.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MakeAllRequest {
+    /// Recreate the build infobase before building the first source set.
+    pub full: bool,
     /// Каталог `--output`, уже проверенный: файл им быть не может.
     pub output_directory: std::path::PathBuf,
     /// Спланировать каждую сборку, ничего не собирая и не выкладывая.
@@ -365,6 +367,8 @@ pub struct DownloadAllRequest {
 /// Transport-neutral request for the `artifacts` use case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactsRequest {
+    /// Recreate the build infobase before building.
+    pub full: bool,
     /// Shared runner execution block for packaging-like scenarios.
     pub execution: ScenarioExecutionRequest,
     /// Requested artifact export mode.
