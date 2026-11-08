@@ -136,7 +136,7 @@ impl ThisCopy {
 }
 
 /// Хеш идентификатора машины для метки: идентификатор в открытом виде не хранится.
-fn machine_hash(identity: &str) -> String {
+pub(crate) fn machine_hash(identity: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("v8-runner/owner/{identity}").as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()

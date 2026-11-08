@@ -1,7 +1,7 @@
 ---
 id: INV.PLATFORM.A-SERVICE-STOP-IS-CONFIRMED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - src/use_cases/managed_stand/mod.rs::stop_that_failed_keeps_the_record_and_a_repeat_goes_on
 ---
 
 # Остановка службы подтверждается концом процесса

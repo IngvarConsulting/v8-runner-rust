@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.MANAGED-DBMS-OWNERSHIP
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
 ---
 
 # Кто поднял СУБД, тот её и гасит

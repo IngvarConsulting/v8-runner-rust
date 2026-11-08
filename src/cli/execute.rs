@@ -247,6 +247,15 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Platforms => execute_platforms(config, presenter),
+        Command::Dbms(args) => execute_dbms(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Status(args) => execute_status(
             config,
             args,
@@ -758,6 +767,12 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
         Command::Platforms => CommandName::Platforms,
+        Command::Dbms(args) => match args.command {
+            crate::cli::args::DbmsCommandArgs::Start => CommandName::DbmsStart,
+            crate::cli::args::DbmsCommandArgs::Status => CommandName::DbmsStatus,
+            crate::cli::args::DbmsCommandArgs::Stop => CommandName::DbmsStop,
+            crate::cli::args::DbmsCommandArgs::Restart => CommandName::DbmsRestart,
+        },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
     }
@@ -1456,6 +1471,147 @@ fn execute_reset(
             }
         },
     )
+}
+
+/// `dbms`: запись под замком `workPath`, `status` без него, чтобы отвечать и пока идёт другая
+/// команда (`INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK`).
+fn execute_dbms(
+    config: &AppConfig,
+    action: crate::cli::args::DbmsCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::DbmsCommandArgs as Action;
+    use crate::use_cases::managed_stand::{dbms_status, execute_dbms as run, DbmsCommand};
+
+    let (name, command) = match action {
+        Action::Start => (CommandName::DbmsStart, DbmsCommand::Start),
+        Action::Status => (CommandName::DbmsStatus, DbmsCommand::Status),
+        Action::Stop => (CommandName::DbmsStop, DbmsCommand::Stop),
+        Action::Restart => (CommandName::DbmsRestart, DbmsCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::dbms::DbmsResult,
+    >| match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+            } else {
+                render_dbms_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == DbmsCommand::Status {
+        return present(dbms_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+fn render_dbms_text(
+    name: CommandName,
+    result: &crate::domain::dbms::DbmsResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{DbmsAction, DbmsState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", pid {pid}"))
+        .unwrap_or_default();
+    let line = match result.action {
+        DbmsAction::Started => format!("started PostgreSQL{pid}"),
+        DbmsAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        DbmsAction::Stopped => format!(
+            "PostgreSQL pid {} stopped",
+            result
+                .stopped_pid
+                .map_or_else(|| "?".to_owned(), |pid| pid.to_string())
+        ),
+        DbmsAction::NothingToStop => "nothing to stop".to_owned(),
+        DbmsAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        DbmsAction::Reported => match result.state {
+            DbmsState::NotRunning => format!("{}: PostgreSQL is not running", result.infobase),
+            DbmsState::Starting => format!("{}: PostgreSQL is starting", result.infobase),
+            DbmsState::StartedByThisCopy => {
+                format!(
+                    "{}: PostgreSQL, started by this working copy{pid}",
+                    result.infobase
+                )
+            }
+            DbmsState::Foreign => {
+                format!("{}: the port is taken by another process", result.infobase)
+            }
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("address", result.address.clone()),
+        ("user", result.user.clone()),
+        (
+            "password",
+            result
+                .password_file
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "data",
+            result
+                .data_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        presenter.print_bare("  the recorded process is gone");
+    }
+    for warning in &result.warnings {
+        presenter.print_bare(&format!("  {warning}"));
+    }
 }
 
 fn execute_diff(

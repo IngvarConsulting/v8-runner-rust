@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.SERVICE-COMMANDS-TAKE-A-DECLARED-BASE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - src/use_cases/managed_stand/mod.rs::an_ad_hoc_connection_is_refused
+  - tests/cli_dbms.rs::a_connection_string_is_refused
 ---
 
 # Команды служб принимают только объявленную базу

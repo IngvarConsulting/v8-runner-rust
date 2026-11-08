@@ -1,7 +1,7 @@
 ---
 id: INV.PLATFORM.MANAGED-POSTGRES-PASSWORD-STAYS-OUT-OF-THE-OUTPUT
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - src/use_cases/managed_stand/mod.rs::the_password_stays_out_of_the_answer_and_the_arguments
 ---
 
 # Пароль управляемого PostgreSQL не попадает в вывод

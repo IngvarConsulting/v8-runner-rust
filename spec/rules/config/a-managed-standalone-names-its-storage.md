@@ -1,7 +1,7 @@
 ---
 id: INV.CONFIG.A-MANAGED-STANDALONE-NAMES-ITS-STORAGE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - src/config/validate.rs::a_managed_standalone_names_exactly_one_storage
 ---
 
 # Автономный сервер под управлением раннера называет одно хранилище

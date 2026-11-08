@@ -1,7 +1,8 @@
 ---
 id: INV.PLATFORM.MANAGED-PORTS-ARE-PINNED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - src/use_cases/managed_stand/mod.rs::the_first_start_creates_the_data_directory_and_the_second_reuses_it
+  - src/use_cases/managed_stand/mod.rs::a_foreign_process_on_the_pinned_port_is_named_and_left_alone
 ---
 
 # Порт, на который ссылаются данные, закреплён

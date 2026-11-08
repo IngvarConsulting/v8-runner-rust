@@ -29,6 +29,10 @@ pub enum CommandName {
     Launch,
     Publish,
     Platforms,
+    DbmsStart,
+    DbmsStatus,
+    DbmsStop,
+    DbmsRestart,
     Status,
 }
 
@@ -56,6 +60,10 @@ impl CommandName {
             Self::Launch => "launch",
             Self::Publish => "publish",
             Self::Platforms => "platforms",
+            Self::DbmsStart => "dbms start",
+            Self::DbmsStatus => "dbms status",
+            Self::DbmsStop => "dbms stop",
+            Self::DbmsRestart => "dbms restart",
             Self::Status => "status",
         }
     }

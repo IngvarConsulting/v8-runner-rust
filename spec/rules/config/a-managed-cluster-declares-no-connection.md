@@ -1,7 +1,7 @@
 ---
 id: INV.CONFIG.A-MANAGED-CLUSTER-DECLARES-NO-CONNECTION
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/538
+check:
+  - src/config/validate.rs::a_managed_cluster_declares_no_connection
 ---
 
 # У кластера под управлением раннера нет строки соединения

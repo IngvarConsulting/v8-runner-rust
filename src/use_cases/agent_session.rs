@@ -1245,6 +1245,7 @@ mod tests {
             ("[::1]:1543", "[::1]:1543"),
         ] {
             let (host, port) = crate::config::model::StandaloneConfig {
+                managed: None,
                 gate: Some(record.to_owned()),
                 host_fingerprint: None,
                 exchange: None,

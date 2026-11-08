@@ -103,6 +103,10 @@ command_data_forms! {
     "launch", "launch" => crate::domain::launch::LaunchResult;
     "publish", "publish" => crate::domain::publish::PublishResult;
     "platforms", "platforms" => crate::domain::platforms::PlatformsResult;
+    "dbms start", "dbms-start" => crate::domain::dbms::DbmsResult;
+    "dbms status", "dbms-status" => crate::domain::dbms::DbmsResult;
+    "dbms stop", "dbms-stop" => crate::domain::dbms::DbmsResult;
+    "dbms restart", "dbms-restart" => crate::domain::dbms::DbmsResult;
     "status", "status" => crate::domain::status::StatusResult;
     "*", "refusal" => crate::cli::output::RefusalData;
     "*", "mcp-refusal" => crate::mcp::service::McpRefusalData;

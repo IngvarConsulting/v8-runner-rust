@@ -610,7 +610,16 @@ infobases:
 отвергается; `infobase.dbms` и `infobase.cluster` — тоже: `ibsrv` — один процесс вместо
 кластера, и `ras` им не управляет.
 
-> **В разработке.** Управляемый стенд, где раннер сам поднимает PostgreSQL, кластер и `ibsrv` (`dbms.managed`, `cluster.managed`, `standalone.managed`, команды `dbms`, `cluster`, `standalone`), ещё не реализован: [#536](https://github.com/IngvarConsulting/v8-runner-rust/issues/536), [#537](https://github.com/IngvarConsulting/v8-runner-rust/issues/537), [#538](https://github.com/IngvarConsulting/v8-runner-rust/issues/538), [#495](https://github.com/IngvarConsulting/v8-runner-rust/issues/495). Первый круг — только Windows.
+#### Управляемый стенд
+
+`dbms.managed: {}` поручает PostgreSQL раннеру (команды `dbms`, только Windows); рядом с ним остаются
+`dbms.name` и `dbms.locale`, а `kind`, `server`, `user`, `password` — отказ с именем ключа. Ключ
+принимается только рядом с `cluster.managed` или `standalone.managed`. `tools.postgres.path` — каталог
+сборки PostgreSQL для 1С или его `bin`.
+
+`cluster.managed: { name }` не допускает `connection` рядом; `standalone.managed: { name, db-path }`
+называет ровно одно хранилище: `db-path` или секцию `dbms`. Сами серверы раннер пока не поднимает, и
+остальные команды с такой базой отказывают: [#537](https://github.com/IngvarConsulting/v8-runner-rust/issues/537), [#538](https://github.com/IngvarConsulting/v8-runner-rust/issues/538), [#495](https://github.com/IngvarConsulting/v8-runner-rust/issues/495).
 
 Исполнители автономного сервера:
 

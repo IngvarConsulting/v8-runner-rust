@@ -67,6 +67,8 @@ pub mod launch_app;
 mod launch_keys;
 /// Load packaged artifacts into infobase.
 pub mod load_artifact;
+/// Managed stand: services the runner starts and stops.
+pub mod managed_stand;
 /// `platforms`: установленные платформы и выбор раннера для проекта.
 pub mod platforms;
 /// Text-mode live progress events shared by CLI-facing use cases.

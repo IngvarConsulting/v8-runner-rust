@@ -152,6 +152,20 @@ pub fn load_config_without_infobase(
     )
 }
 
+/// Загрузка для команд `dbms`: нужна только объявленная база.
+pub fn load_config_for_managed_dbms(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::ManagedDbms,
+    )
+}
+
 pub fn load_config_for_launch(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
@@ -196,6 +210,7 @@ pub fn load_planned_config(
 }
 
 enum ConfigValidationMode {
+    ManagedDbms,
     Full,
     Preview,
     Planned,
@@ -328,6 +343,9 @@ fn build_config(
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
         ConfigValidationMode::Launch => validate_launch(&config)?,
+        ConfigValidationMode::ManagedDbms => {
+            crate::config::validate::validate_managed_dbms(&config)?
+        }
         ConfigValidationMode::WithoutInfobase { operation, preview } => {
             validate_without_infobase(&config, operation, preview)?
         }

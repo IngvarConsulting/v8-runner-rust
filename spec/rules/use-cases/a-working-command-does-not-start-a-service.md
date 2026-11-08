@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-WORKING-COMMAND-DOES-NOT-START-A-SERVICE
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
 ---
 
 # Рабочая команда службу не поднимает

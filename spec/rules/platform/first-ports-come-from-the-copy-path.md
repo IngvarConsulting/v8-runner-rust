@@ -1,7 +1,7 @@
 ---
 id: INV.PLATFORM.FIRST-PORTS-COME-FROM-THE-COPY-PATH
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/536
+check:
+  - src/use_cases/managed_stand/mod.rs::a_first_port_taken_by_someone_is_chosen_again
 ---
 
 # Первый порт выводится из пути рабочей копии
