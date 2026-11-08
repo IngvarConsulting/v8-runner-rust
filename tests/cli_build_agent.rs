@@ -516,7 +516,7 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
     );
     assert_eq!(
         lines.last().map(String::as_str),
-        Some("common shutdown"),
+        Some("common disconnect-ib"),
         "{lines:?}"
     );
     assert_eq!(

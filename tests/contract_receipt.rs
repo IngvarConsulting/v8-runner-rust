@@ -88,10 +88,10 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
         (vec!["dump", "--force", "--dry-run"], "agent"),
         // Файловую базу первым создаёт `ibcmd`: сразу с основной конфигурацией (#204).
         (vec!["infobase", "create", "--dry-run"], "ibcmd"),
-        // `make` собирает во временной базе раннера: первым в цепочке стоит `ibcmd`.
+        // `make` использует базу сборки: первым в цепочке стоит Конфигуратор.
         (
             vec!["make", "main", "--output", &artifact, "--dry-run"],
-            "ibcmd",
+            "designer",
         ),
         (vec!["load", "--path", &artifact, "--dry-run"], "designer"),
         (

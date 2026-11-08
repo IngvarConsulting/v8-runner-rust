@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.MAKE-DATA
-version: 6
+version: 7
 artifact: docs/schemas/command-data/make.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -21,7 +21,7 @@ check:
 выложен.
 
 Прерывание называет, что прервано. Остановка на безопасной точке — перед сборкой, перед
-созданием временной базы, загрузкой, выгрузкой или публикацией — даёт запись
+созданием базы сборки, загрузкой, выгрузкой или публикацией — даёт запись
 `command_boundary`, работа исполнителя, снятая после его запуска, — `provider_command`.
 Рядом с записью стоят `status: cancelled` и ошибка `cancelled` в
 `execution.errors[]` с тем же текстом. Отказ, пришедший, когда прерывание уже запрошено,
@@ -31,6 +31,9 @@ check:
 Квитанция `provider` внешнего набора (`.epf`, `.erf`) называет `designer` с
 `origin: default` и тогда, когда `providers.make` назначен: внешние наборы собирает только
 Конфигуратор, и ключ их не касается.
+
+**Что изменила версия 7.** Успешная сборка называет в `execution.payload.build`
+режим `full`, `partial` или `unchanged` и его причину. В превью поля нет.
 
 **Что изменила версия 6.** Квитанция `provider` получила необязательное поле
 `endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`
@@ -43,18 +46,18 @@ check:
 
 ```json
 {
-  "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
+  "provider": {"selected": "designer", "origin": {"kind": "default"}},
   "ok": true,
   "provider_dispatched": false,
   "mode": "configuration_cf",
   "source_set": "main",
   "output_path": "build/main.cf",
   "duration_ms": 0,
-  "message": "would build ConfigurationCf into 'build/main.cf' via /opt/1cv8/bin/ibcmd in a throwaway infobase; nothing published",
+  "message": "would build ConfigurationCf into 'build/main.cf' via /opt/1cv8/bin/1cv8 in the build infobase; nothing published",
   "execution": {
     "status": "succeeded",
     "diagnostics": [
-      "would build ConfigurationCf into 'build/main.cf' via /opt/1cv8/bin/ibcmd in a throwaway infobase; nothing published"
+      "would build ConfigurationCf into 'build/main.cf' via /opt/1cv8/bin/1cv8 in the build infobase; nothing published"
     ],
     "payload": {
       "artifact_type": "configuration_cf",
