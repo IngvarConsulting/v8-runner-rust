@@ -47,6 +47,10 @@ pub struct SourceSetContext {
 enum SnapshotMemory {
     Shared,
     Disabled,
+    Build {
+        path: PathBuf,
+        identity: String,
+    },
     Infobase {
         base: String,
         identity: String,
@@ -116,6 +120,12 @@ impl SourceSetContext {
         self
     }
 
+    /// Bind a build-cache snapshot to its slot and source.
+    pub(crate) fn with_build_memory(mut self, path: PathBuf, identity: String) -> Self {
+        self.memory = SnapshotMemory::Build { path, identity };
+        self
+    }
+
     /// A context whose changes are never remembered: it has no storage path at all.
     pub fn without_memory(mut self) -> Self {
         self.memory = SnapshotMemory::Disabled;
@@ -127,9 +137,15 @@ impl SourceSetContext {
         !matches!(self.memory, SnapshotMemory::Disabled)
     }
 
+    pub(crate) fn is_build_memory(&self) -> bool {
+        matches!(self.memory, SnapshotMemory::Build { .. })
+    }
+
     pub fn storage_identity(&self) -> Option<&str> {
         match &self.memory {
-            SnapshotMemory::Infobase { identity, .. } => Some(identity),
+            SnapshotMemory::Infobase { identity, .. } | SnapshotMemory::Build { identity, .. } => {
+                Some(identity)
+            }
             SnapshotMemory::Shared | SnapshotMemory::Disabled => None,
         }
     }
@@ -147,6 +163,7 @@ impl SourceSetContext {
     pub fn storage_path(&self, work_path: &Path) -> Option<PathBuf> {
         match &self.memory {
             SnapshotMemory::Disabled => None,
+            SnapshotMemory::Build { path, .. } => Some(path.clone()),
             SnapshotMemory::Infobase { base, subject, .. } => {
                 let hashes = infobase_memory_dir(work_path, base).join("hashes");
                 Some(match subject {
@@ -193,9 +210,10 @@ impl SourceSetContext {
                 subject: MemorySubject::SourceSet,
                 ..
             } => Some(base),
-            SnapshotMemory::Infobase { .. } | SnapshotMemory::Shared | SnapshotMemory::Disabled => {
-                None
-            }
+            SnapshotMemory::Infobase { .. }
+            | SnapshotMemory::Shared
+            | SnapshotMemory::Disabled
+            | SnapshotMemory::Build { .. } => None,
         }
     }
 }
