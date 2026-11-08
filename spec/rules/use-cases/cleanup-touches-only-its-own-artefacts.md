@@ -21,14 +21,17 @@ check:
   - src/use_cases/infobase_export.rs::orphan_cleanup_removes_only_owned_stale_export_files
   - src/use_cases/staged_publication.rs::orphan_cleanup_requires_exact_target_kind_and_run_name_contract
   - src/use_cases/throwaway_infobase.rs::orphan_cleanup_removes_only_stale_own_throwaway_bases
+  - tests/cli_convert.rs::convert_cleans_stale_throwaway_bases_and_keeps_the_build_infobase
 ---
 
 # Уборка трогает только собственные следы
 
 Уборка удаляет устаревшие промежуточные и резервные копии — файлы и каталоги — и
-временные базы `make`,
+временные базы разбора пакетов,
 опознанные как свои по собственным метаданным и имени. Свежий свой след она оставляет, а
 чужой или нечитаемый рядом с целью не трогает.
+
+База сборки под `workPath/temp/build-infobase/` сохраняется после уборки.
 
 Резервная копия при отсутствующей цели — след гибели процесса между заменой и единственная
 копия, поэтому в любом возрасте она не удаляется. `pull` под замком цели возвращает свою

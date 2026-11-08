@@ -232,31 +232,31 @@
       "cluster": [
         {
           "implemented": true,
-          "provider": "ibcmd"
+          "provider": "designer"
         },
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "ibcmd"
         }
       ],
       "file": [
         {
           "implemented": true,
-          "provider": "ibcmd"
+          "provider": "designer"
         },
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "ibcmd"
         }
       ],
       "standalone": [
         {
           "implemented": true,
-          "provider": "ibcmd"
+          "provider": "designer"
         },
         {
           "implemented": true,
-          "provider": "designer"
+          "provider": "ibcmd"
         }
       ]
     },

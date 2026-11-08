@@ -5,8 +5,7 @@
 //! До первой сборки цели всех пакетов сверяются с каталогами наборов и `workPath`
 //! ([`SourceSetInventory::check_package_targets`]). Каждый набор собирается тем же
 //! сценарием, что `make <SET>`, в [`package_in_directory`]; отказ набора останавливает обход.
-//! Временная база у обхода одна ([`super::MakeSession`]): основная конфигурация попадает в
-//! неё один раз, расширения ложатся поверх, и после обхода база убирается.
+//! Все наборы используют одну базу сборки и её память ([`super::MakeSession`]).
 
 use std::time::Instant;
 
@@ -49,11 +48,6 @@ fn run_all(
     }
     let mut session = super::MakeSession::new(config);
     let walked = walk(context, config, request, &sets, &mut session, &mut result);
-    // База обхода убирается и после отказа; неудачную уборку называет последний набор.
-    let warning = session.close();
-    if let Some(last) = result.sets.last_mut() {
-        super::note_cleanup_warning(last, warning);
-    }
     if let Err(error) = walked {
         return Err(set_walk::fail(error, result, started));
     }
@@ -80,6 +74,7 @@ fn walk(
             source_set: Some(source_set.name.clone()),
             extension: None,
             dry_run: request.dry_run,
+            full: request.full,
             // Каталог внешнего набора назван именем набора: точка в имени суффиксом не
             // становится.
             output_is_directory: matches!(
@@ -118,7 +113,9 @@ mod tests {
             std::fs::create_dir_all(base.join(set)).expect("set dir");
         }
         // Конфигуратор не запускается: отмена приходит раньше.
-        let platform = dir.path().join("1cv8");
+        let platform = dir
+            .path()
+            .join(format!("1cv8{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&platform, "#!/bin/sh\nexit 1\n").expect("platform");
         #[cfg(unix)]
         {
@@ -163,6 +160,7 @@ mod tests {
         cancellation.cancel();
         let context = ExecutionContext::cli(CommandName::Artifacts).with_cancellation(cancellation);
         let request = MakeAllRequest {
+            full: false,
             output_directory: dir.path().join("out"),
             dry_run: false,
         };

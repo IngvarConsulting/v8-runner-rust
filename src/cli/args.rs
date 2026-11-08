@@ -813,7 +813,7 @@ fn convert_to_parser(
 #[derive(Args, Debug)]
 #[command(
     next_help_heading = "Command options",
-    after_help = "<SET|FILE>: a value ending in .cf or .cfe names a package file, anything else a source set; without it every set is converted. --to picks the target: xml (Designer files), edt (EDT project) or package (.cf/.cfe). Without --to a set goes to the format the project is not in, and a package file goes to xml. Sets in Designer format go to edt or package, sets in EDT format go to xml or package (through xml), a package file goes to xml. A package direction needs no infobase: ibcmd works in a throwaway infobase of the runner under workPath, and the answer names the executor in data.provider; without ibcmd the command is refused with kind environment. --to package takes the configuration and extension sets: one named external set is refused, and without <SET> external sets are left out."
+    after_help = "<SET|FILE>: a value ending in .cf or .cfe names a package file, anything else a source set; without it every set is converted. --to picks the target: xml (Designer files), edt (EDT project) or package (.cf/.cfe). Without --to a set goes to the format the project is not in, and a package file goes to xml. Sets in Designer format go to edt or package, sets in EDT format go to xml or package (through xml), a package file goes to xml. A package direction needs no infobase: ibcmd works in the runner's own infobase under workPath, and the answer names the executor in data.provider; without ibcmd the command is refused with kind environment. --to package takes the configuration and extension sets: one named external set is refused, and without <SET> external sets are left out."
 )]
 pub struct ConvertArgs {
     /// Source set declared in v8project.yaml, or a .cf/.cfe package file
@@ -860,6 +860,10 @@ pub struct ArtifactsArgs {
     /// Extension name in the infobase for cfe export
     #[arg(long)]
     pub extension: Option<String>,
+
+    /// Recreate the build infobase and load the full sources
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1642,6 +1646,7 @@ mod tests {
                 output,
                 source_set,
                 extension,
+                full: _,
             }) => {
                 assert_eq!(output, "dist/main.cf");
                 assert!(source_set.name().is_none());
@@ -1735,6 +1740,7 @@ mod tests {
                 output,
                 source_set,
                 extension,
+                full: _,
             }) => {
                 assert_eq!(output, "dist/ext.cfe");
                 assert_eq!(source_set.name(), Some("ext-sales"));
