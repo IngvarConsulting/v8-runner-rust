@@ -1457,6 +1457,8 @@ mod tests {
     #[derive(Default)]
     struct Host {
         unsupported: Cell<bool>,
+        /// Отмена команды, наступающая, как только поднят `ragent`.
+        cancel_on_agent: RefCell<Option<tokio_util::sync::CancellationToken>>,
         processes: RefCell<HashMap<u32, ProcessFacts>>,
         /// Родитель процесса, как его видит перечень.
         parents: RefCell<HashMap<u32, u32>>,
@@ -1546,6 +1548,9 @@ mod tests {
                 }
                 "ragent" => {
                     self.agent_args.replace(request.args.clone());
+                    if let Some(token) = self.cancel_on_agent.borrow().as_ref() {
+                        token.cancel();
+                    }
                     if !self.agent_exits_at_once.get() {
                         self.live(AGENT_PID, "ragent.exe");
                         let port = |key: &str| -> u16 {
@@ -1706,6 +1711,20 @@ mod tests {
             new_regport: bool,
             host: &Host,
         ) -> Result<ClusterResult, UseCaseError> {
+            self.run_in(
+                &ExecutionContext::cli(CommandName::ClusterStart),
+                command,
+                new_regport,
+                host,
+            )
+        }
+        fn run_in(
+            &self,
+            context: &ExecutionContext,
+            command: ServiceCommand,
+            new_regport: bool,
+            host: &Host,
+        ) -> Result<ClusterResult, UseCaseError> {
             let locate = || Ok(PathBuf::from("C:/1cv8/8.5.4.2028/bin/ragent.exe"));
             let command = match command {
                 ServiceCommand::Start => ClusterCommand::Start { new_regport },
@@ -1714,7 +1733,7 @@ mod tests {
                 ServiceCommand::Restart => ClusterCommand::Restart,
             };
             run_cluster(
-                &ExecutionContext::cli(CommandName::ClusterStart),
+                context,
                 &self.config,
                 command,
                 false,
@@ -1724,7 +1743,7 @@ mod tests {
             )
             .map_err(|failure| failure.error)
         }
-        fn dbms(&self, command: ServiceCommand, host: &Host) {
+        fn dbms(&self, command: ServiceCommand, host: &Host) -> crate::domain::dbms::DbmsResult {
             super::super::run_dbms(
                 &ExecutionContext::cli(CommandName::DbmsStart),
                 &self.config,
@@ -1734,7 +1753,7 @@ mod tests {
                 host,
             )
             .map_err(|failure| failure.error)
-            .unwrap();
+            .unwrap()
         }
         fn dbms_record(&self) -> ServiceRecord {
             read_json(&ServicePaths::new(&self.config.work_path, "origin", "postgres").record())
@@ -2462,6 +2481,133 @@ mod tests {
             refused.to_string().contains("infobase.dbms.name"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn a_crashed_cluster_still_takes_its_step_postgres_down() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        for pid in [AGENT_PID, RAS_PID, RMNGR_PID, RPHOST_PID] {
+            host.kill(pid);
+        }
+        let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert_eq!(stopped.action, ServiceAction::NothingToStop);
+        assert!(stopped.stale_record);
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+        assert!(!host.alive(PG_PID));
+        assert!(
+            !setup.agent().record().exists(),
+            "the record of the fallen agent is gone"
+        );
+    }
+
+    #[test]
+    fn a_fallen_postgres_under_a_live_cluster_is_named_and_comes_back_explicit_on_its_port() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        let port = setup.dbms_record().port;
+        host.kill(PG_PID);
+        let status = setup.dbms(ServiceCommand::Status, &host);
+        assert_eq!(status.state, ServiceState::NotRunning);
+        assert!(status.stale_record, "the fall is named");
+        let started = setup.dbms(ServiceCommand::Start, &host);
+        assert_eq!(started.action, ServiceAction::Started);
+        let record = setup.dbms_record();
+        assert_eq!(record.port, port, "the same port");
+        assert!(record.explicit, "dbms start makes it explicit");
+        let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, None);
+        assert!(host.alive(PG_PID), "cluster stop leaves the explicit one");
+    }
+
+    #[test]
+    fn a_cancelled_cluster_start_stops_the_postgres_it_raised() {
+        let setup = setup();
+        let host = Host::default();
+        let token = tokio_util::sync::CancellationToken::new();
+        host.cancel_on_agent.replace(Some(token.clone()));
+        let context = ExecutionContext::cli(CommandName::ClusterStart).with_cancellation(token);
+        let error = setup
+            .run_in(&context, ServiceCommand::Start, false, &host)
+            .unwrap_err();
+        assert!(
+            matches!(error.kind(), UseCaseErrorKind::Cancelled(_)),
+            "{error}"
+        );
+        for pid in [AGENT_PID, RAS_PID, RMNGR_PID, RPHOST_PID, PG_PID] {
+            assert!(!host.alive(pid), "pid {pid} is left");
+        }
+
+        // Явный PostgreSQL отмена кластера не трогает.
+        let host = Host::default();
+        setup.dbms(ServiceCommand::Start, &host);
+        let token = tokio_util::sync::CancellationToken::new();
+        host.cancel_on_agent.replace(Some(token.clone()));
+        let context = ExecutionContext::cli(CommandName::ClusterStart).with_cancellation(token);
+        let error = setup
+            .run_in(&context, ServiceCommand::Start, false, &host)
+            .unwrap_err();
+        assert!(
+            matches!(error.kind(), UseCaseErrorKind::Cancelled(_)),
+            "{error}"
+        );
+        assert!(host.alive(PG_PID), "the explicit one stays");
+    }
+
+    #[test]
+    fn after_a_reboot_the_cluster_starts_again_with_its_postgres_as_a_step() {
+        let setup = setup();
+        let host = Host::default();
+        let first = setup.run(ServiceCommand::Start, &host).unwrap();
+        let port = setup.dbms_record().port;
+        // Перезагрузка: процессов нет, записи остались.
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        let status = setup.run(ServiceCommand::Status, &host).unwrap();
+        assert_eq!(status.state, ServiceState::NotRunning);
+        assert!(status.stale_record);
+        let second = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(second.action, ServiceAction::Started);
+        assert!(second.stale_record);
+        assert_eq!(second.connection, first.connection, "the same regport");
+        let record = setup.dbms_record();
+        assert_eq!(record.port, port);
+        assert!(!record.explicit, "this start raised it as its step");
+        let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+    }
+
+    #[test]
+    fn after_a_reboot_the_command_that_raises_the_postgres_decides_whether_it_is_explicit() {
+        // Явный до перезагрузки, после неё поднят кластером — шаг кластера.
+        let setup = setup();
+        let host = Host::default();
+        setup.dbms(ServiceCommand::Start, &host);
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        assert!(setup.dbms_record().explicit);
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        assert!(!setup.dbms_record().explicit, "cluster start raised it");
+        let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+
+        // Шаг до перезагрузки, после неё поднят `dbms start` — явный.
+        drop(setup);
+        let setup = self::setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        assert!(!setup.dbms_record().explicit);
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        setup.dbms(ServiceCommand::Start, &host);
+        assert!(setup.dbms_record().explicit, "dbms start raised it");
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, None);
+        assert!(host.alive(PG_PID));
     }
 
     #[test]
