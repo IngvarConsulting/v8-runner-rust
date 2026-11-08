@@ -344,7 +344,7 @@ fn publish_full_dump(
             }
         }
         if let Some(source) = published_source {
-            if let Some(warning) = external.record_generation(source, &config.work_path) {
+            if let Some(warning) = external.record_generation(config, source) {
                 warnings.push(warning);
             }
         }

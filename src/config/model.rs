@@ -878,6 +878,43 @@ impl AppConfig {
         }
     }
 
+    /// План операции с учётом её объёма и причина порядка для квитанции.
+    ///
+    /// Без ключа `providers.*` у `push` и `pull` файловой базы раннер упорядочивает цепочку
+    /// по объёму (`capability::chain_for_size`): целиком — `ibcmd` первым, по изменившемуся —
+    /// строка как есть. Ключ остаётся строгим, кластер и автономный сервер держат строку, а
+    /// при подключённом агенте (`tools.designer_agent.attach`) порядок не меняется: запись
+    /// `ibcmd` в базу, открытую чужим Конфигуратором, не замерена. Причина — `Some` только
+    /// там, где порядок выбран по объёму.
+    pub fn provider_plan_sized(
+        &self,
+        operation: Operation,
+        size: capability::OperationSize,
+    ) -> (ProviderPlan, Option<capability::OperationSize>) {
+        let plan = self.provider_plan(operation);
+        if !self.orders_by_size(operation) {
+            return (plan, None);
+        }
+        let ProviderPlan::Default { chain } = plan else {
+            return (plan, None);
+        };
+        (
+            ProviderPlan::Default {
+                chain: capability::chain_for_size(chain, size),
+            },
+            Some(size),
+        )
+    }
+
+    /// Упорядочивает ли объём цепочку операции у этого проекта — единственное место этого
+    /// решения: нет ключа `providers.<операция>`, операция и вид базы такие, что
+    /// `capability::ordered_by_size`, и агент не подключён (`tools.designer_agent.attach`).
+    pub fn orders_by_size(&self, operation: Operation) -> bool {
+        !self.providers.contains_key(&operation)
+            && capability::ordered_by_size(operation, self.target_kind())
+            && self.tools.designer_agent.attach.is_none()
+    }
+
     /// Форма проекта, которая сужает цепочки умолчаний (`capability::serves_project`).
     pub fn project_shape(&self) -> capability::ProjectShape {
         capability::ProjectShape {
@@ -1541,6 +1578,107 @@ mod tests {
         DesignerAgentConfig, DesignerAgentMode, EdtCliConfig, Host, InfobaseConfig,
         PlatformToolConfig, StandaloneConfig,
     };
+
+    fn project_on(connection: &str) -> super::AppConfig {
+        super::AppConfig {
+            base_path: std::path::PathBuf::from("/tmp/base"),
+            work_path: std::path::PathBuf::from("/tmp/work"),
+            format: super::SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: InfobaseConfig::file(connection),
+            infobases: Default::default(),
+            infobase_name: None,
+            working_copy: None,
+            source_sets: Vec::new(),
+            tools: super::ToolsConfig::default(),
+            mcp: Default::default(),
+            tests: super::TestsConfig::default(),
+        }
+    }
+
+    /// Без ключа у `push` и `pull` файловой базы цепочку упорядочивает объём (#559): целиком —
+    /// `ibcmd`, агент, Конфигуратор; по изменившемуся — строка матрицы. Квитанция называет
+    /// причину только у такого умолчания: ключ строгий, кластер, подключённый агент и другие
+    /// операции держат свою цепочку без причины.
+    #[test]
+    fn a_file_base_orders_push_and_pull_by_size_without_a_key() {
+        use crate::domain::capability::{Operation, ProviderPlan};
+        use crate::domain::capability::{
+            OperationSize::{ByChanges, Whole},
+            Provider::{Agent, Designer, Ibcmd},
+        };
+        let file = project_on("File=/tmp/ib");
+        for operation in [Operation::Build, Operation::Dump] {
+            assert_eq!(
+                file.provider_plan_sized(operation, Whole),
+                (
+                    ProviderPlan::Default {
+                        chain: vec![Ibcmd, Agent, Designer]
+                    },
+                    Some(Whole)
+                ),
+                "{operation}"
+            );
+            assert_eq!(
+                file.provider_plan_sized(operation, ByChanges),
+                (
+                    ProviderPlan::Default {
+                        chain: vec![Agent, Designer, Ibcmd]
+                    },
+                    Some(ByChanges)
+                ),
+                "{operation}"
+            );
+        }
+        assert_eq!(file.provider_plan_sized(Operation::Apply, Whole).1, None);
+
+        let mut edt = project_on("File=/tmp/ib");
+        edt.format = super::SourceFormat::Edt;
+        assert_eq!(
+            edt.provider_plan_sized(Operation::Build, Whole).0,
+            ProviderPlan::Default {
+                chain: vec![Ibcmd, Designer]
+            },
+            "the project shape still drops the agent"
+        );
+
+        let mut keyed = project_on("File=/tmp/ib");
+        keyed.providers.insert(Operation::Build, Designer);
+        assert_eq!(
+            keyed.provider_plan_sized(Operation::Build, Whole),
+            (
+                ProviderPlan::Override {
+                    provider: Designer,
+                    file: crate::config::loader::DEFAULT_CONFIG_FILE_NAME.to_owned()
+                },
+                None
+            )
+        );
+
+        let cluster = project_on("Srvr=host;Ref=base");
+        assert_eq!(
+            cluster.provider_plan_sized(Operation::Build, Whole),
+            (
+                ProviderPlan::Default {
+                    chain: vec![Agent, Designer]
+                },
+                None
+            )
+        );
+
+        let mut attached = project_on("File=/tmp/ib");
+        attached.tools.designer_agent.attach = Some("127.0.0.1:1543".to_owned());
+        assert_eq!(
+            attached.provider_plan_sized(Operation::Dump, Whole),
+            (
+                ProviderPlan::Default {
+                    chain: vec![Agent, Designer, Ibcmd]
+                },
+                None
+            )
+        );
+    }
 
     #[test]
     fn edt_cli_path_is_a_location_unless_it_is_a_bare_name() {

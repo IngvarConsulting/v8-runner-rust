@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.APPLY-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/apply.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -29,6 +29,8 @@ check:
 **Без смены версии.** Определение значений `generation` в схеме называется
 `GenerationRecordFate` вместо `ApplyGeneration`: тот же набор значений делит форма `reset`
 (`CTR.WIRE.RESET-DATA`). Значения и поля не изменились.
+
+**Что изменила версия 2.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 ## Пример
 

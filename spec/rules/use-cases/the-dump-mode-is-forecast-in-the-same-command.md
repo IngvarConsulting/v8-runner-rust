@@ -12,7 +12,7 @@ check:
   - src/use_cases/dump_config.rs::an_ibcmd_full_forecast_dumps_through_the_stage_without_sync
   - src/use_cases/dump_config.rs::an_ibcmd_partial_dump_follows_a_full_forecast_too
   - tests/cli_push_generation.rs::a_designer_pull_with_an_unchanged_generation_dumps_nothing
-  - tests/cli_dump_agent.rs::a_generation_recorded_by_another_tool_does_not_skip_a_dump
+  - tests/cli_dump_agent.rs::a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_not
   - tests/cli_dump_agent.rs::an_unchanged_generation_skips_an_incremental_dump
 ---
 

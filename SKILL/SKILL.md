@@ -150,7 +150,11 @@ v8-runner infobase create
   agent, then Designer; experimental IBCMD DT (file base only) is skipped unless named
   explicitly; `restore --create` skips the agent.
 - Default chains: file base `agent → designer → ibcmd`, cluster `agent → designer` for `push`,
-  `pull`, `download`; `upload`/`check` — Designer only; `extensions` — file `ibcmd → agent`,
+  `pull`, `download`. Without a `providers` key a file-base `push`/`pull` where every set goes
+  whole (`--force`, `--full`, a set without hash memory, a pull without a usable version file)
+  runs `ibcmd → agent → designer` (receipt `reason: whole`; by changes — `by_changes`, agent
+  first); not with an attached agent. Only a missing `ibcmd` moves on; an `ibcmd` that fails
+  does not fall back; `upload`/`check` — Designer only; `extensions` — file `ibcmd → agent`,
   cluster `agent → designer` for `list` only. Set `providers.extensions: designer` on a cluster
   for names-only inventory. Other extension operations with that override fail `capability_unavailable`.
   The agent drops out of `push`/`pull` for `format: EDT` and out of `push`

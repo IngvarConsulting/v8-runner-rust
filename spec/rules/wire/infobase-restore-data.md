@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.INFOBASE-RESTORE-DATA
-version: 7
+version: 8
 artifact: docs/schemas/command-data/infobase-restore.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -17,6 +17,8 @@ check:
 
 Отказ исполнителя, так и не получившего работу, базу не трогал:
 `target_state` остаётся `unchanged`, и предупреждения о неудавшемся откате в ответе нет.
+
+**Что изменила версия 8.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 **Что изменила версия 7.** Квитанция `provider` получила необязательное поле
 `endpoint` — точку входа сессии агента, через которую шло исполнение: `mode`

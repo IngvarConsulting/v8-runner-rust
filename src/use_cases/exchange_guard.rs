@@ -34,9 +34,10 @@ use crate::domain::next_step::NextStep;
 use crate::domain::reset::HashMemoryFate;
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::{GenerationAfter, GenerationVerdict, MemoryState};
+use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    ApplyMark, GenerationComparison, GenerationLedger, GenerationRecord, Recorded,
+    ApplyMark, GenerationComparison, GenerationLedger, GenerationRecord, Recorded, TokenScope,
 };
 use crate::use_cases::context::{shell_word, ExecutionContext};
 use crate::use_cases::ignored_files::VERSION_FILE_NAME;
@@ -500,15 +501,46 @@ pub(crate) fn recorded_generation(
     }
 }
 
-/// Что покажет сверка поколения перед загрузкой набора — единственное место этого решения:
-/// по нему отказывает `push` ([`GenerationGate`]) и отвечает `status --deep`. Ничего не пишет
-/// и не отказывает. Токены сравниваются только внутри одного инструмента
-/// (`INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`).
+/// Чьи токены сравнимы у записи набора — единственное место этого решения
+/// (`INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`): у основной
+/// конфигурации файловой базы — любого из агента, Конфигуратора и `ibcmd` (замер #559), у
+/// расширения, кластера и автономного сервера — только своего инструмента.
+pub(crate) fn token_scope(config: &AppConfig, set: &SourceSetContext) -> TokenScope {
+    let main_configuration = config.source_sets.iter().any(|source_set| {
+        source_set.name == set.name()
+            && source_set.purpose == crate::config::model::SourceSetPurpose::Configuration
+    });
+    if main_configuration && config.target_kind() == TargetKind::File {
+        TokenScope::AnyTool
+    } else {
+        TokenScope::OwnTool
+    }
+}
+
+/// Имя расширения набора для вопроса о поколении: у набора расширения — его имя.
+fn extension_of<'a>(config: &AppConfig, set: &'a SourceSetContext) -> Option<&'a str> {
+    config
+        .source_sets
+        .iter()
+        .any(|source_set| {
+            source_set.name == set.name()
+                && source_set.purpose == crate::config::model::SourceSetPurpose::Extension
+        })
+        .then(|| set.name())
+}
+
+/// Что покажет сверка поколения перед загрузкой набора — единственное место сравнения токена с
+/// записью: по нему отказывает `push` ([`GenerationGate`]) и отвечает `status --deep`. Ничего
+/// не пишет и не отказывает. Токены сравниваются в пределах `scope` ([`token_scope`]).
+/// Запись другого инструмента при несравнимых токенах `status --deep` называет `other_tool`
+/// и инструментом записи не спрашивает: его сессия держала бы базу. `push` такую запись
+/// сверяет инструментом записи и без его ответа отказывает ([`GenerationGate::check_foreign`]).
 ///
 /// `answer` — инструмент и токен, которыми ответила база; `None` — ответа нет.
 pub(crate) fn predict(
     record: Option<&GenerationRecord>,
     answer: Option<(Provider, &str)>,
+    scope: TokenScope,
 ) -> GenerationVerdict {
     let Some(record) = record else {
         return GenerationVerdict::NoRecord;
@@ -516,7 +548,7 @@ pub(crate) fn predict(
     let Some((tool, token)) = answer else {
         return GenerationVerdict::NoAnswer;
     };
-    match record.compare(tool, token) {
+    match record.compare(tool, token, scope) {
         GenerationComparison::Unchanged => GenerationVerdict::Unchanged,
         GenerationComparison::Changed => GenerationVerdict::MovedAhead,
         GenerationComparison::NoAnswer => GenerationVerdict::OtherTool,
@@ -608,6 +640,10 @@ impl<'a> GenerationGate<'a> {
             return Ok(());
         }
         for set in sets {
+            // Набор, сверенный первым проходом инструментом записи, не спрашивается снова.
+            if self.checked.borrow().contains_key(set.name()) {
+                continue;
+            }
             let before = self
                 .compare(set, tool, || read(set))
                 .map_err(|error| (set.name().to_owned(), error))?;
@@ -650,13 +686,26 @@ impl<'a> GenerationGate<'a> {
         {
             return Ok(BeforeLoad::Unchecked);
         }
-        let Some(record) = self.record_of(set, tool) else {
+        let Some(record) = recorded_generation(set, &self.config.work_path) else {
             return Ok(BeforeLoad::Unchecked);
         };
+        let scope = token_scope(self.config, set);
+        if self.foreign(&record, tool, scope) {
+            // Сюда доходит только набор, не сверенный первым проходом
+            // ([`Self::check_foreign`]): сверка та же.
+            return self.compare_foreign(
+                set,
+                &record,
+                &mut PlatformUtilities::from_config(self.config),
+            );
+        }
+        if !scope.compares(record.tool, tool) {
+            return Ok(BeforeLoad::Unchecked);
+        }
         let Some(token) = read()? else {
             return Ok(BeforeLoad::Unchecked);
         };
-        match predict(Some(&record), Some((tool, &token))) {
+        match predict(Some(&record), Some((tool, &token)), scope) {
             GenerationVerdict::Unchanged => Ok(BeforeLoad::Matched),
             GenerationVerdict::MovedAhead => Err(self.moved_ahead(set.name(), &token, &record)),
             GenerationVerdict::OtherTool
@@ -665,9 +714,120 @@ impl<'a> GenerationGate<'a> {
         }
     }
 
-    /// Запись набора, сделанная тем же инструментом.
-    fn record_of(&self, set: &SourceSetContext, tool: Provider) -> Option<GenerationRecord> {
-        recorded_generation(set, &self.config.work_path).filter(|record| record.tool == tool)
+    /// Сверка заранее наборов, чью запись сделал другой известный инструмент при несравнимых
+    /// токенах (расширение, кластер, автономный сервер; #559): поколение спрашивает инструмент
+    /// записи. Первым проходом — до первого своего чтения и до сессии загрузчика, и даже у
+    /// одного набора: файловая база, которую держит сессия агента, Конфигуратору и `ibcmd`
+    /// не отвечает. Нет ответа — отказ, а не пропуск сверки. Ответы [`Self::before_load`]
+    /// берёт, а не спрашивает снова. Отказ — с именем набора.
+    pub(crate) fn check_foreign(
+        &self,
+        sets: &[&SourceSetContext],
+        tool: Provider,
+    ) -> Result<(), (String, AppError)> {
+        if self.mode == PushMode::Force
+            || crate::use_cases::interruption::pending_interruption_error(
+                self.context,
+                "the configuration generation",
+            )
+            .is_some()
+        {
+            return Ok(());
+        }
+        let mut utilities = None;
+        for set in sets {
+            let Some(record) = recorded_generation(set, &self.config.work_path) else {
+                continue;
+            };
+            if !self.foreign(&record, tool, token_scope(self.config, set)) {
+                continue;
+            }
+            let utilities =
+                utilities.get_or_insert_with(|| PlatformUtilities::from_config(self.config));
+            let before = self
+                .compare_foreign(set, &record, utilities)
+                .map_err(|error| (set.name().to_owned(), error))?;
+            self.checked
+                .borrow_mut()
+                .insert(set.name().to_owned(), before);
+        }
+        Ok(())
+    }
+
+    /// Запись сделал другой известный инструмент, и с токеном загрузчика её токен несравним.
+    fn foreign(&self, record: &GenerationRecord, tool: Provider, scope: TokenScope) -> bool {
+        !scope.compares(record.tool, tool) && TokenScope::measured(record.tool)
+    }
+
+    /// Сверка инструментом записи: расхождение — `non_fast_forward`, нет ответа — отказ с
+    /// причиной.
+    fn compare_foreign(
+        &self,
+        set: &SourceSetContext,
+        record: &GenerationRecord,
+        utilities: &mut PlatformUtilities,
+    ) -> Result<BeforeLoad, AppError> {
+        use crate::use_cases::generation_reader::{read_with_record_tool, RecordToolAnswer};
+        let answer = read_with_record_tool(
+            self.context,
+            self.config,
+            utilities,
+            record.tool,
+            &format!("push-{}-record-generation", set.name()),
+            extension_of(self.config, set),
+        )?;
+        let token = match answer {
+            RecordToolAnswer::Token(token) => token,
+            RecordToolAnswer::NoAnswer(why) => {
+                return Err(self.unanswered(set.name(), record, &why))
+            }
+        };
+        match predict(
+            Some(record),
+            Some((record.tool, &token)),
+            token_scope(self.config, set),
+        ) {
+            GenerationVerdict::Unchanged => Ok(BeforeLoad::Matched),
+            GenerationVerdict::MovedAhead => Err(self.moved_ahead(set.name(), &token, record)),
+            // Недостижимо: запись есть, ответ дал её же инструмент. Ветки держит общий
+            // `predict`, а не эта сверка.
+            GenerationVerdict::OtherTool
+            | GenerationVerdict::NoRecord
+            | GenerationVerdict::NoAnswer => Ok(BeforeLoad::Unchecked),
+        }
+    }
+
+    /// Отказ, когда инструмент записи поколением не ответил: сверить нечем, а пропустить
+    /// сверку значило бы грузить в базу, которая могла уйти вперёд.
+    fn unanswered(&self, set: &str, record: &GenerationRecord, why: &str) -> AppError {
+        let standing = Standing::of(self.config);
+        let target = self.config.v8_connection().describe_target();
+        let push_force = self
+            .context
+            .advised_command(&format!("push {} --force", shell_word(set)));
+        let pull = self
+            .context
+            .advised_command(&format!("pull {}", shell_word(set)));
+        let tool = record.tool;
+        let mut message = format!(
+            "cannot push source-set '{set}': its configuration generation was recorded by {tool} ({}), and only {tool} can tell whether {target} moved ahead since, but {why}",
+            record.recorded_at
+        );
+        let way_out = if standing.offers_pull() {
+            message.push_str(&format!(
+                "; take the state of the infobase with {pull}, which records its generation again, or overwrite it with {push_force}"
+            ));
+            WayOut::Pull
+        } else {
+            message.push_str(&format!("; to overwrite the infobase run {push_force}"));
+            WayOut::PushForce
+        };
+        message.push('.');
+        message.push_str(&standing.caveats());
+        AppError::Refused(Box::new(
+            UseCaseError::new(UseCaseErrorKind::NonFastForward, message)
+                .with_next(way_out.step(set, Some(set))),
+        ))
     }
 
     fn moved_ahead(&self, set: &str, base: &str, record: &GenerationRecord) -> AppError {
@@ -770,12 +930,7 @@ impl<'a> GenerationGate<'a> {
     /// отправка откажет `non_fast_forward` и скажет, что базу изменила либо эта загрузка,
     /// либо другая копия, а не выдаст своё за чужое; совпадёт — загрузка базу не тронула.
     /// Строку для шага неудачной загрузки отдаёт [`Self::failed_load_note`].
-    pub(crate) fn after_failed_load(
-        &self,
-        set: &SourceSetContext,
-        tool: Provider,
-        error: &AppError,
-    ) {
+    pub(crate) fn after_failed_load(&self, set: &SourceSetContext, error: &AppError) {
         // A refused invocation has no partial load to reconcile.
         if matches!(error, AppError::SourceLoadNotStarted(_)) {
             return;
@@ -784,10 +939,11 @@ impl<'a> GenerationGate<'a> {
         let not_recorded = format!(
             "the configuration generation of source-set '{name}' is not recorded after the failed load"
         );
+        // Запись помечается с её инструментом: токен записи — его, а не загрузчика.
         let marked = GenerationLedger::of(set, &self.config.work_path).and_then(|ledger| {
-            self.record_of(set, tool).map(|record| {
+            recorded_generation(set, &self.config.work_path).map(|record| {
                 ledger.record_as(
-                    tool,
+                    record.tool,
                     &record.token,
                     GenerationAfter::FailedBuild,
                     record.mark(),
@@ -911,24 +1067,26 @@ pub(crate) fn apply_after_failed_load(
     }))
 }
 
-/// Пропуск выгрузки по изменившемуся: поколение до неё совпало с записанным тем же
-/// инструментом — в базе нечего брать с прошлого обмена. Строка — ответ «всё актуально»;
-/// `None` — выгружать (`INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED`).
+/// Пропуск выгрузки по изменившемуся: поколение до неё совпало с записанным сравнимым
+/// инструментом ([`token_scope`]) — в базе нечего брать с прошлого обмена. Строка — ответ
+/// «всё актуально»; `None` — выгружать (`INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED`).
 pub(crate) fn unchanged_since_the_record(
+    config: &AppConfig,
     set: &SourceSetContext,
-    work_path: &Path,
     tool: Provider,
     token: &str,
 ) -> Option<String> {
-    let Recorded::Ours(record) = GenerationLedger::of(set, work_path)?.read() else {
+    let Recorded::Ours(record) = GenerationLedger::of(set, &config.work_path)?.read() else {
         return None;
     };
-    (record.compare(tool, token) == GenerationComparison::Unchanged).then(|| {
-        format!(
+    (record.compare(tool, token, token_scope(config, set)) == GenerationComparison::Unchanged).then(
+        || {
+            format!(
             "configuration generation {token} is unchanged since the last {} ({}); nothing to dump",
             record.after, record.recorded_at
         )
-    })
+        },
+    )
 }
 
 /// Поколение у выгрузки: до и после. Совпало — запись после выгрузки. Изменилось — базу
@@ -937,8 +1095,8 @@ pub(crate) fn unchanged_since_the_record(
 /// если памяти о базе до этой выгрузки не было. Без ответа до или после запись не меняется.
 /// Выгрузка уже прошла, поэтому сбой записи — строка для ответа, а не отказ.
 pub(crate) fn record_after_dump(
+    config: &AppConfig,
     set: &SourceSetContext,
-    work_path: &Path,
     tool: Provider,
     before: Option<&str>,
     after: Option<&str>,
@@ -946,12 +1104,14 @@ pub(crate) fn record_after_dump(
     let (Some(before), Some(after)) = (before, after) else {
         return None;
     };
-    let ledger = GenerationLedger::of(set, work_path)?;
-    // Выгрузка берёт основную конфигурацию и непринятого не снимает: запись того же
-    // инструмента и того же поколения, загруженная без применения, остаётся непринятой.
+    let ledger = GenerationLedger::of(set, &config.work_path)?;
+    // Выгрузка берёт основную конфигурацию и непринятого не снимает: запись сравнимого
+    // инструмента ([`token_scope`]) и того же поколения, загруженная без применения, остаётся
+    // непринятой — и тогда, когда выгружает другой инструмент, чем загружал.
     let mark = match ledger.read() {
         Recorded::Ours(record)
-            if record.compare(tool, before) == GenerationComparison::Unchanged =>
+            if record.compare(tool, before, token_scope(config, set))
+                == GenerationComparison::Unchanged =>
         {
             record.mark()
         }
@@ -1111,14 +1271,15 @@ fn remember_edt_source(config: &AppConfig, memory: &AssembledMemory) -> Option<S
 
 /// Для тестов сценариев: память о базе у каждого набора, о котором её ещё нет, — запись
 /// журнала поколений, которую поддельный исполнитель не подтвердит и не опровергнет. Хеш-память
-/// теста она не трогает.
+/// теста она не трогает. Запись делает `ibcmd-rs`: поколения он не отдаёт, и с ним не сравнивает
+/// ни один исполнитель — иначе расширение спросило бы инструмент записи, которого у теста нет.
 #[cfg(test)]
 pub(crate) fn remember_unknown_sets(config: &AppConfig) {
     for set in SourceSetsService::new(config).designer_contexts() {
         if let Some(ledger) = GenerationLedger::of(&set, &config.work_path) {
             if !remembers(&set, &config.work_path) {
                 ledger
-                    .record(Provider::Designer, &"0".repeat(40), GenerationAfter::Build)
+                    .record(Provider::IbcmdRs, &"0".repeat(40), GenerationAfter::Build)
                     .expect("generation record");
             }
         }
@@ -1211,7 +1372,7 @@ mod tests {
                 .record_as(tool, &token, GenerationAfter::Build, ApplyMark::Unapplied)
                 .expect("record prior successful load");
 
-            gate.after_failed_load(main, tool, &error);
+            gate.after_failed_load(main, &error);
 
             let Recorded::Ours(record) = ledger.read() else {
                 panic!("the previous load must stay recorded");

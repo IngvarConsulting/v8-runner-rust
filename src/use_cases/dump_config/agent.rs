@@ -95,8 +95,8 @@ fn dump_through(
     if matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile)) && objects.is_none() {
         if let Some(unchanged) = set.and_then(|set| {
             crate::use_cases::exchange_guard::unchanged_since_the_record(
+                config,
                 set,
-                &config.work_path,
                 Provider::Agent,
                 &generation,
             )
@@ -339,8 +339,8 @@ fn dump_through(
             let after = generation_id(handle.session(), extension, wait).ok();
             merge_optional_messages(
                 crate::use_cases::exchange_guard::record_after_dump(
+                    config,
                     set,
-                    &config.work_path,
                     Provider::Agent,
                     Some(&generation),
                     after.as_deref(),

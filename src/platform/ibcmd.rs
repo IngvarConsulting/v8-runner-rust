@@ -556,6 +556,15 @@ impl<'a> IbcmdDsl<'a> {
         self.run_with(&args, &self.execution_policy.for_reading())
     }
 
+    /// `config export info --out=<каталог>`: один файл версий `ConfigDumpInfo.xml` основной
+    /// конфигурации в каталог `out_dir`. `--out` — каталог, не файл; файл тот же, что пишет
+    /// полная выгрузка и Конфигуратор (замер «Версия формата файла версий», #403). Чтение базы.
+    pub fn config_export_info(&self, out_dir: &Path) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "export", "info"]);
+        args.push(format!("--out={}", out_dir.display()));
+        self.run_with(&args, &self.execution_policy.for_reading())
+    }
+
     /// The same answer as a file: unlike stdout, it is UTF-8 with a BOM in any console code page.
     pub fn config_export_status_to_file(
         &self,

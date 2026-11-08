@@ -90,6 +90,7 @@ fn run_init(
                         origin: crate::domain::capability::ProviderOrigin::Default,
                         skipped: Vec::new(),
                         endpoint: None,
+                        reason: None,
                     }
                 } else {
                     receipt
@@ -197,6 +198,7 @@ fn copy_with_the_designer(
                 },
                 skipped: Vec::new(),
                 endpoint: None,
+                reason: None,
             });
             return Err(InitExecutionFailure::with_payload(error, result));
         }
@@ -219,6 +221,7 @@ fn copy_with_the_designer(
         origin,
         skipped: Vec::new(),
         endpoint: None,
+        reason: None,
     });
     if dry_run {
         log_live_stage("init: preview", "[Init] preview only, nothing created");

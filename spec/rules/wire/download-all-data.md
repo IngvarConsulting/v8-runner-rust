@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DOWNLOAD-ALL-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/download-all.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -21,6 +21,8 @@ check:
 нет: их не выгружали. `if_installed` бывает только у превью — наборы расширений проекта,
 которые прогон выгрузит, если их расширение в базе есть. Пустые `not_installed` и
 `if_installed` не пишутся.
+
+**Что изменила версия 2.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 ## Пример
 
