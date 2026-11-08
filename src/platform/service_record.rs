@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::platform::agent::host_key_fingerprint;
 use crate::platform::ibsrv::ServerPorts;
+use crate::platform::ragent::ClusterPorts;
 use crate::platform::service::{process_facts, ProcessFacts};
 use crate::support::fs::write_file_atomically;
 use crate::support::machine::{machine_hash, machine_id};
@@ -107,6 +108,40 @@ pub struct ServiceRecord {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinnedPorts {
     pub port: u16,
+}
+
+/// Закреплённое кластера: порты, каталог реестра и создана ли в нём база. Признак базы живёт с
+/// реестром: новый реестр (`cluster start --new-regport`) получает его только после регистрации.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClusterPins {
+    pub ports: ClusterPorts,
+    /// Имя каталога реестра под `managed/cluster/`.
+    pub registry: String,
+    #[serde(default)]
+    pub registered: bool,
+}
+
+/// Работающий свой кластер объявленной базы.
+pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> {
+    let paths = ServicePaths::new(work_path, infobase, "cluster");
+    let machine = machine_fingerprint();
+    let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
+        adopt_recorded_pid(record, &process_facts, machine.as_deref())
+    });
+    let Observed::Own(_) = observed else {
+        return None;
+    };
+    read_json(&paths.pins())
+}
+
+/// Работает ли своя служба PostgreSQL этой базы.
+pub fn running_postgres(work_path: &Path, infobase: &str) -> bool {
+    let paths = ServicePaths::new(work_path, infobase, "postgres");
+    let machine = machine_fingerprint();
+    read_json::<ServiceRecord>(&paths.record()).is_some_and(|record| {
+        let facts = record.pid.and_then(process_facts);
+        record.is_own(facts.as_ref(), machine.as_deref())
+    })
 }
 
 /// Хеш `machine_id`; `None`, если система идентификатора не дала.

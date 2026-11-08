@@ -2,6 +2,7 @@
 id: INV.CLI.A-SERVICE-STATUS-HAS-NO-PREVIEW
 check:
   - tests/cli_dbms.rs::status_has_no_preview
+  - tests/cli_cluster_managed.rs::status_has_no_preview
 ---
 
 # У `status` служб нет превью

@@ -10,6 +10,8 @@ pub mod bootstrap;
 pub mod build;
 /// Capability matrix: who executes which operation on which target.
 pub mod capability;
+/// Ответ команд `cluster`.
+pub mod cluster;
 /// Config bootstrap domain models.
 pub mod config_init;
 /// Source-format conversion domain models.

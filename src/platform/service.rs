@@ -65,43 +65,81 @@ pub struct ProcessFacts {
 
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
-/// Чужой `ibsrv` над этой базой: порты о нём не говорят, у него свои. Смотрит командные строки
-/// процессов, потому что других следов у сервера нет. `keys` — все ключи, которые его выдают.
-pub fn ibsrv_with(keys: &[String]) -> Option<u32> {
-    if !cfg!(windows) {
-        return None;
+/// Процесс из перечня системы: кто его родитель и с какой командной строкой он запущен.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRow {
+    pub pid: u32,
+    pub parent: u32,
+    pub command: String,
+}
+
+/// Процессы с этими именами образов. Единственный перечень процессов раннера: по командной строке
+/// узнают чужой сервер, по родителю — остатки упавшего агента кластера. Не ответил вовремя — пусто.
+pub fn processes(images: &[&str]) -> Vec<ProcessRow> {
+    if !cfg!(windows) || images.is_empty() {
+        return Vec::new();
     }
-    let query = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process -Filter \"Name='ibsrv.exe'\" | ForEach-Object { [string]$_.ProcessId + ' ' + $_.CommandLine }";
-    let mut child = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", query])
+    let filter = images
+        .iter()
+        .map(|image| format!("Name='{image}'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let query = format!(
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process -Filter \"{filter}\" | ForEach-Object {{ [string]$_.ProcessId + ' ' + [string]$_.ParentProcessId + ' ' + $_.CommandLine }}"
+    );
+    let Ok(mut child) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &query])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok()?;
-    // Ответ не дольше этого: зависший запрос не должен держать замок. Не ответил — чужого не нашли.
+    else {
+        return Vec::new();
+    };
+    // Ответ не дольше этого: зависший запрос не должен держать замок.
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while child.try_wait().ok()?.is_none() {
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
-    let output = child.wait_with_output().ok()?;
-    server_with(&String::from_utf8_lossy(&output.stdout), keys)
+    child
+        .wait_with_output()
+        .map(|output| process_rows(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or_default()
 }
 
-/// Разбор ответа: первый pid, в чьей командной строке есть все эти ключи.
-fn server_with(listing: &str, keys: &[String]) -> Option<u32> {
+/// Разбор строк `pid родитель командная строка`.
+fn process_rows(listing: &str) -> Vec<ProcessRow> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.trim().splitn(3, ' ');
+            Some(ProcessRow {
+                pid: parts.next()?.parse().ok()?,
+                parent: parts.next()?.parse().ok()?,
+                command: parts.next().unwrap_or_default().to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Первый процесс, в чьей командной строке есть все эти ключи.
+pub fn first_with_keys(rows: &[ProcessRow], keys: &[String]) -> Option<u32> {
     let keys: Vec<String> = keys.iter().map(|key| key.to_lowercase()).collect();
-    listing.lines().find_map(|line| {
-        let (pid, command) = line.trim().split_once(' ')?;
-        let tokens = spelled_keys(command_tokens(&command.to_lowercase()));
+    rows.iter().find_map(|row| {
+        let tokens = spelled_keys(command_tokens(&row.command.to_lowercase()));
         keys.iter()
             .all(|key| tokens.contains(key))
-            .then(|| pid.parse().ok())?
+            .then_some(row.pid)
     })
 }
 
@@ -177,6 +215,31 @@ pub fn image_name(path: &Path) -> String {
 #[cfg(test)]
 mod listing_tests {
     use super::*;
+
+    /// Строки перечня в старом виде `pid командная строка`, с родителем 1.
+    fn server_with(listing: &str, keys: &[String]) -> Option<u32> {
+        let rows: Vec<ProcessRow> = listing
+            .lines()
+            .filter_map(|line| {
+                let (pid, command) = line.trim().split_once(' ')?;
+                Some(ProcessRow {
+                    pid: pid.parse().ok()?,
+                    parent: 1,
+                    command: command.to_owned(),
+                })
+            })
+            .collect();
+        first_with_keys(&rows, keys)
+    }
+
+    #[test]
+    fn a_listing_names_the_parent_and_keeps_the_command_whole() {
+        let rows = process_rows("10 4 C:\\1cv8\\rmngr.exe -port 24001 -host w\n11 4 \n bad\n");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].parent, 4);
+        assert_eq!(rows[0].command, "C:\\1cv8\\rmngr.exe -port 24001 -host w");
+        assert_eq!(rows[1].command, "");
+    }
 
     #[test]
     fn a_trailing_backslash_before_the_quote_is_one_backslash() {

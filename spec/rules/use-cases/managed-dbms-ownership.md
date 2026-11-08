@@ -7,6 +7,11 @@ check:
   - src/use_cases/managed_stand/standalone.rs::restart_leaves_the_postgres_alone
   - src/use_cases/managed_stand/standalone.rs::a_failed_server_stops_only_what_this_command_raised
   - src/use_cases/managed_stand/standalone.rs::a_crashed_server_still_takes_its_step_postgres_down
+  - src/use_cases/managed_stand/cluster.rs::stop_takes_ras_then_the_agent_then_the_step_postgres
+  - src/use_cases/managed_stand/cluster.rs::an_explicit_postgres_outlives_its_cluster
+  - src/use_cases/managed_stand/cluster.rs::a_later_dbms_start_makes_a_step_postgres_explicit
+  - src/use_cases/managed_stand/cluster.rs::restart_leaves_the_postgres_alone
+  - src/use_cases/managed_stand/cluster.rs::a_failed_cluster_stops_only_what_this_command_raised
   - src/use_cases/managed_stand/mod.rs::stop_refuses_under_a_running_own_server_and_names_it
   - src/use_cases/managed_stand/mod.rs::a_stale_record_is_replaced_and_named_and_the_data_stays
   - src/use_cases/managed_stand/mod.rs::stop_that_failed_keeps_the_record_and_a_repeat_goes_on

@@ -274,6 +274,7 @@ pub fn run() -> i32 {
         | Command::Reset(_)
         | Command::Dbms(_)
         | Command::Standalone(_)
+        | Command::Cluster(_)
         | Command::Diff(_)
         | Command::Load(_)
         | Command::Test(_)
@@ -386,6 +387,8 @@ pub(crate) fn load_cli_config(
         crate::config::loader::load_config_for_managed_dbms(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Standalone(_)) {
         crate::config::loader::load_config_for_managed_standalone(config_path, workdir, &selector)
+    } else if matches!(&cli.command, Command::Cluster(_)) {
+        crate::config::loader::load_config_for_managed_cluster(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Init(_)) {
         crate::config::loader::load_config_for_infobase_create(
             config_path,

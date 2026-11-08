@@ -379,6 +379,9 @@ fn ensure_infobase(
                 StepOutcome::failed("infobase", "create", started, standalone_refusal())
             }
         }
+        TargetKind::Cluster if is_managed_cluster(config) => {
+            ensure_managed_cluster_base(context, config, utilities, dry_run)
+        }
         TargetKind::Cluster => ensure_cluster_infobase(context, config, utilities, dry_run),
         TargetKind::File => match config.v8_connection().file_path().map(PathBuf::from) {
             Some(infobase_dir) => ensure_file_infobase(
@@ -397,6 +400,47 @@ fn ensure_infobase(
                 AppError::Runtime("a file target names no infobase path".to_owned()),
             ),
         },
+    }
+}
+
+/// Цель — кластер, которым управляет раннер.
+fn is_managed_cluster(config: &AppConfig) -> bool {
+    config
+        .infobase
+        .cluster
+        .as_ref()
+        .is_some_and(|cluster| cluster.managed.is_some())
+}
+
+/// База кластера раннера: `CREATEINFOBASE` к работающему кластеру с доступом к СУБД, который сценарий
+/// стенда собрал сам. Созданная база отмечается в реестре: рабочие команды её откроют.
+fn ensure_managed_cluster_base(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    dry_run: bool,
+) -> StepOutcome {
+    use crate::use_cases::managed_stand::{cluster_base, remember_cluster_base, ClusterBase};
+
+    let started = Instant::now();
+    match cluster_base(context, config, dry_run) {
+        Err(error) => StepOutcome::failed("infobase", "create", started, error),
+        Ok(ClusterBase::AlreadyRegistered(message)) if dry_run => {
+            StepOutcome::planned("infobase", "create", started, message)
+        }
+        Ok(ClusterBase::AlreadyRegistered(message)) => {
+            StepOutcome::ok("infobase", "create", started, message)
+        }
+        Ok(ClusterBase::Create(target)) => {
+            let step = ensure_cluster_infobase(context, &target, utilities, dry_run);
+            if dry_run || step.error.is_some() {
+                return step;
+            }
+            match remember_cluster_base(config) {
+                Ok(()) => step,
+                Err(error) => StepOutcome::failed("infobase", "create", started, error),
+            }
+        }
     }
 }
 

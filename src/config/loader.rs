@@ -166,6 +166,20 @@ pub fn load_config_for_managed_dbms(
     )
 }
 
+/// Загрузка для команд `cluster`: нужна только объявленная база.
+pub fn load_config_for_managed_cluster(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        selector,
+        ConfigValidationMode::ManagedCluster,
+    )
+}
+
 /// Загрузка для команд `standalone`: нужна только объявленная база.
 pub fn load_config_for_managed_standalone(
     config_path: Option<&str>,
@@ -256,6 +270,7 @@ pub fn load_planned_config(
 enum ConfigValidationMode {
     ManagedDbms,
     ManagedStandalone,
+    ManagedCluster,
     InfobaseCreate {
         preview: bool,
     },
@@ -384,6 +399,7 @@ fn build_config(
         config.work_path = resolve_from(config_dir, Path::new(wd));
     }
     project_managed_standalone(&mut config, &validation_mode)?;
+    project_managed_cluster(&mut config, &validation_mode)?;
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
@@ -400,6 +416,9 @@ fn build_config(
         }
         ConfigValidationMode::ManagedStandalone => {
             crate::config::validate::validate_managed_standalone(&config)?
+        }
+        ConfigValidationMode::ManagedCluster => {
+            crate::config::validate::validate_managed_cluster(&config)?
         }
         ConfigValidationMode::InfobaseCreate { preview: false }
         | ConfigValidationMode::Inspecting { preview: false } => validate(&config)?,
@@ -1503,7 +1522,9 @@ fn project_managed_standalone(
     }
     if matches!(
         validation_mode,
-        ConfigValidationMode::ManagedStandalone | ConfigValidationMode::ManagedDbms
+        ConfigValidationMode::ManagedStandalone
+            | ConfigValidationMode::ManagedDbms
+            | ConfigValidationMode::ManagedCluster
     ) {
         return Ok(());
     }
@@ -1555,6 +1576,85 @@ fn project_managed_standalone(
             standalone.exchange = Some(StandaloneExchangeConfig::Named(
                 StandaloneExchangeChannel::Sftp,
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Цель `cluster.managed` адреса в настройках не несёт: у работающего кластера его знают запись агента
+/// и закреплённые порты. Выведенная строка помечена: правило «у `cluster.managed` нет `connection`»
+/// касается только объявленной. Доступ к СУБД загрузчик не подставляет: он нужен одному
+/// `infobase create`, и тот берёт его сам.
+fn project_managed_cluster(
+    config: &mut AppConfig,
+    validation_mode: &ConfigValidationMode,
+) -> Result<(), ConfigLoadError> {
+    if matches!(
+        validation_mode,
+        ConfigValidationMode::ManagedStandalone
+            | ConfigValidationMode::ManagedDbms
+            | ConfigValidationMode::ManagedCluster
+    ) {
+        return Ok(());
+    }
+    let Some(infobase_name) = config.infobase_name.clone() else {
+        return Ok(());
+    };
+    let Some(managed) = config
+        .infobase
+        .cluster
+        .as_ref()
+        .and_then(|cluster| cluster.managed.clone())
+    else {
+        return Ok(());
+    };
+    // Объявленная строка рядом с `cluster.managed` — ошибка, её назовёт проверка.
+    if !config.infobase.connection.trim().is_empty() {
+        return Ok(());
+    }
+    let name = managed.name.unwrap_or_else(|| infobase_name.clone());
+    let running =
+        crate::platform::service_record::running_cluster(&config.work_path, &infobase_name);
+    let project = |config: &mut AppConfig, connection: String| {
+        config.infobase.connection = connection;
+        config.infobase.connection_projected = true;
+    };
+    match (validation_mode, running) {
+        // `status` и `platforms` кластера не требуют: показывают память и установки.
+        (ConfigValidationMode::Inspecting { .. }, None) => {
+            project(config, format!("Srvr=127.0.0.1;Ref={name}"));
+        }
+        (ConfigValidationMode::InfobaseCreate { .. }, None) => {
+            return Err(
+                crate::config::validate::managed_server_not_running("cluster.managed").into(),
+            );
+        }
+        (
+            ConfigValidationMode::InfobaseCreate { .. } | ConfigValidationMode::Inspecting { .. },
+            Some(pins),
+        ) => {
+            project(config, pins.ports.connection(&name));
+        }
+        // Рабочая команда: без кластера строки нет, и отказ называет `cluster start`.
+        (_, None) => {}
+        (_, Some(pins)) => {
+            let dbms_managed = config
+                .infobase
+                .dbms
+                .as_ref()
+                .is_some_and(|dbms| dbms.managed.is_some());
+            if dbms_managed
+                && !crate::platform::service_record::running_postgres(
+                    &config.work_path,
+                    &infobase_name,
+                )
+            {
+                return Err(ConfigValidationError::ManagedDbmsNotRunning.into());
+            }
+            if !pins.registered {
+                return Err(ConfigValidationError::ManagedBaseNotCreated.into());
+            }
+            project(config, pins.ports.connection(&name));
         }
     }
     Ok(())
@@ -2837,6 +2937,68 @@ mod tests {
             config.infobase.memory_address(dir.path()).as_deref(),
             Some("managed:origin")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_running_cluster_without_its_base_or_postgres_names_the_next_command() {
+        use crate::platform::ragent::ClusterPorts;
+        use crate::platform::service_record::{
+            machine_fingerprint, write_json, ClusterPins, RecordState, ServicePaths, ServiceRecord,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = managed_standalone_config(dir.path());
+        config.infobase.standalone = None;
+        config.infobase.cluster = Some(crate::config::model::InfobaseClusterConfig {
+            managed: Some(crate::config::model::ManagedServerConfig {
+                name: Some("demo".to_owned()),
+                db_path: None,
+            }),
+            ..Default::default()
+        });
+        config.infobase.dbms = Some(crate::config::model::InfobaseDbmsConfig {
+            managed: Some(crate::config::model::ManagedDbmsConfig::default()),
+            name: Some("demo_data".to_owned()),
+            ..Default::default()
+        });
+        let paths = ServicePaths::new(&config.work_path, "origin", "cluster");
+        let pid = std::process::id();
+        let facts = crate::platform::service::process_facts(pid).unwrap();
+        let mut pins = ClusterPins {
+            ports: ClusterPorts::from_first(24000),
+            registry: "registry-24001".to_owned(),
+            registered: false,
+        };
+        write_json(&paths.pins(), &pins).unwrap();
+        write_json(
+            &paths.record(),
+            &ServiceRecord {
+                state: RecordState::Running,
+                pid: Some(pid),
+                started: Some(facts.started),
+                image: Some(facts.image),
+                machine: machine_fingerprint(),
+                starter: None,
+                port: 24000,
+                explicit: true,
+                bin: std::path::PathBuf::from("ragent"),
+                version: None,
+            },
+        )
+        .unwrap();
+        let project = |config: &mut crate::config::model::AppConfig| {
+            super::project_managed_cluster(config, &super::ConfigValidationMode::Full)
+        };
+        let refused = project(&mut config.clone()).unwrap_err();
+        assert!(refused.to_string().contains("dbms start"), "{refused}");
+        config.infobase.dbms.as_mut().unwrap().managed = None;
+        let refused = project(&mut config.clone()).unwrap_err();
+        assert!(refused.to_string().contains("infobase create"), "{refused}");
+        pins.registered = true;
+        write_json(&paths.pins(), &pins).unwrap();
+        project(&mut config).unwrap();
+        assert_eq!(config.infobase.connection, "Srvr=127.0.0.1:24001;Ref=demo");
+        assert!(config.infobase.connection_projected);
     }
 
     #[cfg(windows)]

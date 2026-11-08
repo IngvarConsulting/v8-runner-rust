@@ -111,6 +111,10 @@ command_data_forms! {
     "standalone status", "standalone-status" => crate::domain::standalone::StandaloneResult;
     "standalone stop", "standalone-stop" => crate::domain::standalone::StandaloneResult;
     "standalone restart", "standalone-restart" => crate::domain::standalone::StandaloneResult;
+    "cluster start", "cluster-start" => crate::domain::cluster::ClusterResult;
+    "cluster status", "cluster-status" => crate::domain::cluster::ClusterResult;
+    "cluster stop", "cluster-stop" => crate::domain::cluster::ClusterResult;
+    "cluster restart", "cluster-restart" => crate::domain::cluster::ClusterResult;
     "status", "status" => crate::domain::status::StatusResult;
     "*", "refusal" => crate::cli::output::RefusalData;
     "*", "mcp-refusal" => crate::mcp::service::McpRefusalData;

@@ -628,7 +628,27 @@ v8-runner standalone restart [--dry-run]
   `ibsrv` получает через stdin; `ibcmd infobase create` несёт его в аргументах.
 - СУБД, поднятая шагом `standalone start`, гаснет вместе с сервером; поднятая `dbms start` остаётся. `standalone restart` её не трогает.
 
-Кластер — #538. Команды, которым нужна база с `cluster.managed`, пока отказывают и называют этот ключ.
+### `cluster`
+
+```text
+v8-runner cluster start [--dry-run] [--new-regport]
+v8-runner cluster status
+v8-runner cluster stop [--dry-run]
+v8-runner cluster restart [--dry-run]
+```
+
+- Поднимают кластер базы из `cluster.managed` на Windows, без службы: `ragent` с `rmngr` и `rphost`, затем `ras`;
+  готовность — ответ `rac cluster list`. Адрес `Srvr=127.0.0.1:<regport>;Ref=<name>` называет `status`, остальные
+  команды берут его из записи и работают с базой как с обычной кластерной.
+- Цикл: `cluster start` → `infobase create` → `push` → `test` → `cluster stop`. Без кластера рабочая команда отказывает и
+  называет `cluster start`; при работающем кластере, но несозданной базе — `infobase create`; при упавшем PostgreSQL раннера —
+  `dbms start`. Базу, которую кластер уже знает, `infobase create` не создаёт.
+- База кластера живёт в СУБД: `dbms.managed` (PostgreSQL поднимается шагом `cluster start` и гаснет с `cluster stop`) или
+  ваша секция `dbms`. Пароль СУБД `CREATEINFOBASE` и `rac` получают в аргументах.
+- Порт агента, `regport` и диапазон рабочих процессов закреплены: их хранит реестр кластера. Занятый чужим процессом —
+  `workspace_busy` с советом `--new-regport`: новый реестр на других портах и регистрация базы над прежней БД.
+- `cluster stop` гасит `ras`, агента, остатки упавшего агента по их pid и PostgreSQL, поднятый шагом. `status` работает
+  без замка `workPath`. Пока кластер базы работает, автономный сервер над той же БД не поднимается.
 
 
 ### `tools download`

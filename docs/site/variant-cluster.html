@@ -260,7 +260,7 @@ source-set:
     connection: &quot;Srvr=localhost:1541;Ref=demo&quot;  # кластер запущен в вашей консоли</code></pre>
 <p>Запустите сервер перед командой раннера и оставьте консоль открытой до её завершения. Файл проекта не управляет запуском и остановкой кластера; чтобы его поднимал раннер, объявите <a href="#d-cluster-managed">кластер под управлением раннера</a>.</p>
 
-<h3 id="d-cluster-managed">Кластер под управлением раннера <span class="plan-badge">План</span></h3>
+<h3 id="d-cluster-managed">Кластер под управлением раннера</h3>
 <p>Кластер нужен для разработки и тестов на своей машине Windows, а запускать сервер 1С руками не хочется. Раннер запускает его как приложение, а не службой, — <code>ragent</code> с <code>rmngr</code> и рабочими процессами <code>rphost</code> — командой <a href="cli-cluster.html#op-cluster-start"><code>cluster start</code></a> и останавливает командой <a href="cli-cluster.html#op-cluster-stop"><code>cluster stop</code></a>. Каталог данных кластера раннер держит под <code>workPath</code>, порты агента, менеджера и диапазон рабочих процессов выбирает свободными и отдаёт ответ после того, как агент принял соединение. Кластер живёт между командами, пока его не остановит <code>cluster stop</code>. Данные базы хранит ваша СУБД или <a href="#d-cluster-managed-dbms">PostgreSQL, который поднимает раннер</a>. На Linux и macOS раннер кластер не запускает: команда отказывает.</p>
 <!-- diagram:d-cluster-managed -->
 <div class="diagram" role="img" aria-label="Кластер под управлением раннера: сервер 1С запущен раннером как приложение на его машине">
@@ -288,7 +288,7 @@ source-set:
 <g class="lbl"><rect x="185.5" y="193.5" width="127" height="24" rx="4"/><text><tspan x="249.0" y="205.5">процесс на запуск</tspan></text></g>
 <g class="lbl"><rect x="80.0" y="223.0" width="40" height="24" rx="4"/><text><tspan x="100.0" y="235.0">файл</tspan></text></g>
 <g class="lbl"><rect x="226.0" y="320.3" width="148" height="24" rx="4"/><text><tspan x="300.0" y="332.3">cluster start · stop</tspan></text></g>
-<g class="lbl"><rect x="500.0" y="101.0" width="188" height="24" rx="4"/><text><tspan x="594.0" y="113.0">TCP, Srvr=localhost:&lt;порт&gt;</tspan></text></g>
+<g class="lbl"><rect x="500.0" y="101.0" width="188" height="24" rx="4"/><text><tspan x="594.0" y="113.0">TCP, Srvr=127.0.0.1:&lt;regport&gt;</tspan></text></g>
 <g class="lbl"><rect x="579.0" y="195.0" width="34" height="24" rx="4"/><text><tspan x="596.0" y="207.0">TCP</tspan></text></g>
 </svg>
 </div>
@@ -316,9 +316,10 @@ v8-runner test
 v8-runner cluster stop</code></pre>
 <p>В отличие от автономного сервера, базу кластера создают в работающем кластере, поэтому <a href="cli-infobase-create.html#create-cluster-managed"><code>infobase create</code></a> идёт после <code>cluster start</code>. Останавливает раннер только кластер, который запустил сам; кластер службы или вашей консоли на тех же портах он не трогает и называет в ответе.</p>
 <p>Процессы кластера и <code>ras</code> слушают все интерфейсы машины, ключей ограничить их адресом нет, а администраторов у нового кластера нет: база без пользователей открывается без учётных данных. Закройте порты брандмауэром, если машина доступна из сети.</p>
+<p>Порты кластера раннер закрепляет при первом запуске: реестр кластера их хранит. Если закреплённый порт занял чужой процесс — например, кластер второй рабочей копии, — <code>cluster start</code> отказывает и называет его, а <a href="cli-cluster.html#op-cluster-new-regport"><code>--new-regport</code></a> переносит базу в новый реестр на других портах. Пока кластер этой базы работает, автономный сервер над той же БД не поднимается: одну БД держит один сервер.</p>
 <p>Кластеру нужна лицензия на этой машине. Без неё сервер запускается, но Конфигуратор и клиент получают отказ «На сервере 1С:Предприятия не найдена лицензия».</p>
 <p>Пароль PostgreSQL виден в командной строке при создании и регистрации базы в кластере: у этих команд другого способа передать его нет.</p>
-<h4 id="d-cluster-managed-dbms">PostgreSQL под управлением раннера <span class="plan-badge">План</span></h4>
+<h4 id="d-cluster-managed-dbms">PostgreSQL под управлением раннера</h4>
 <p>Если своей СУБД нет, её тоже поднимает раннер: PostgreSQL из сборки для 1С, без службы и без прав администратора. Он слушает только <code>127.0.0.1</code>, вход защищён сгенерированным паролем, а адрес и путь к файлу пароля называет <a href="cli-dbms.html#op-dbms-status"><code>dbms status</code></a>.</p>
 <pre data-config-example="local"><code>infobases:
   origin:

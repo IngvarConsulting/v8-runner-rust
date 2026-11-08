@@ -24,6 +24,8 @@ pub mod locator;
 /// PostgreSQL build for 1C: utility arguments and data directory files.
 pub mod postgres;
 pub mod process;
+pub mod rac;
+pub mod ragent;
 pub mod result;
 /// Маскирование секретов в составленных аргументах.
 pub mod secrets;

@@ -1,7 +1,10 @@
 //! Управляемый стенд: единственный владелец записи о службе, различия своего и чужого, порядка
 //! подъёма и отмены. Команды `dbms` здесь; `cluster` и `standalone` лягут на тот же механизм.
 
+mod cluster;
 mod standalone;
+
+pub(crate) use cluster::ClusterBase;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -15,7 +18,7 @@ use crate::platform::postgres::{self, PostgresBuild};
 use crate::platform::process::{
     ProcessExecutionPolicy, ProcessExecutor, ProcessRequest, ProcessRunner, WorkGiven,
 };
-use crate::platform::service::{self, ProcessFacts, ServiceRequest, ServiceSpawnError};
+use crate::platform::service::{self, ProcessFacts, ProcessRow, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
     machine_fingerprint, observe_service, read_json, write_json, Observed, PinnedPorts,
     RecordState, ServicePaths, ServiceRecord,
@@ -57,9 +60,9 @@ pub(crate) trait ServiceHost {
     fn patience(&self, default: Duration) -> Duration {
         default
     }
-    /// Чужой сервер с этими ключами запуска.
-    fn server_with(&self, _keys: &[String]) -> Option<u32> {
-        None
+    /// Процессы с этими образами: чужой сервер по ключам запуска, остатки по родителю.
+    fn processes(&self, _images: &[&str]) -> Vec<ProcessRow> {
+        Vec::new()
     }
 }
 
@@ -92,8 +95,8 @@ impl ServiceHost for RealHost {
         let request = taskkill(&["/PID", &pid.to_string(), "/T", "/F"]);
         let _ = runner.run_with_policy(&request, &context.cleanup_policy());
     }
-    fn server_with(&self, keys: &[String]) -> Option<u32> {
-        service::ibsrv_with(keys)
+    fn processes(&self, images: &[&str]) -> Vec<ProcessRow> {
+        service::processes(images)
     }
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
@@ -195,6 +198,142 @@ fn declared_base(config: &AppConfig) -> Result<String, UseCaseError> {
     config.infobase_name.clone().ok_or_else(|| {
         validation("dbms takes a declared infobase: a connection string has neither a record nor a managed section")
     })
+}
+
+/// База сервера в СУБД, как её объявили: PostgreSQL раннера или ваша СУБД.
+enum Database {
+    /// PostgreSQL поднимает раннер; доступ к нему — из его записи и файла пароля.
+    Managed { name: String },
+    /// СУБД ваша; доступ — из `infobase.dbms`.
+    Own(DbmsAccess),
+}
+
+/// Доступ сервера 1С к БД.
+#[derive(Debug, Clone)]
+struct DbmsAccess {
+    kind: String,
+    server: String,
+    name: String,
+    user: Option<String>,
+    password: Option<String>,
+}
+
+impl Database {
+    /// `infobase.dbms` как база сервера раннера.
+    fn declared(dbms: &crate::config::model::InfobaseDbmsConfig) -> Result<Self, UseCaseError> {
+        let name = dbms
+            .name
+            .clone()
+            .ok_or_else(|| validation("infobase.dbms.name is not declared"))?;
+        if dbms.managed.is_some() {
+            return Ok(Self::Managed { name });
+        }
+        let required = |value: &Option<String>, key: &str| {
+            value
+                .clone()
+                .ok_or_else(|| validation(format!("infobase.dbms.{key} is not declared")))
+        };
+        Ok(Self::Own(DbmsAccess {
+            kind: required(&dbms.kind, "kind")?,
+            server: required(&dbms.server, "server")?,
+            name,
+            user: dbms.user.clone(),
+            password: dbms.password.clone(),
+        }))
+    }
+
+    /// Адрес сервера СУБД и имя БД без поднятия чего-либо: у PostgreSQL раннера — по закреплённому
+    /// порту, если он уже запускался.
+    fn address(&self, stand: Option<&Stand<'_>>) -> Option<(String, String)> {
+        match self {
+            Self::Managed { name } => Some((
+                postgres::server_address(stand?.pinned_port()?),
+                name.clone(),
+            )),
+            Self::Own(access) => Some((access.server.clone(), access.name.clone())),
+        }
+    }
+
+    /// Доступ для сервера 1С. У PostgreSQL раннера он должен работать.
+    fn access(&self, stand: Option<&Stand<'_>>) -> Result<DbmsAccess, UseCaseError> {
+        match (self, stand) {
+            (Self::Own(access), _) => Ok(access.clone()),
+            (Self::Managed { name }, Some(stand)) => {
+                let (port, _) = stand.running_record()?;
+                Ok(DbmsAccess {
+                    kind: "PostgreSQL".to_owned(),
+                    server: postgres::server_address(port),
+                    name: name.clone(),
+                    user: Some(postgres::SUPERUSER.to_owned()),
+                    password: Some(stand.password()?),
+                })
+            }
+            (Self::Managed { .. }, None) => Err(validation(
+                "the PostgreSQL of this infobase could not be reached",
+            )),
+        }
+    }
+}
+
+/// Свой работающий кластер над той же БД: этой же базы или другой объявленной базы с тем же адресом
+/// СУБД и именем БД. Пока он работает, другой сервер и прямой `ibcmd` эту БД не открывают
+/// (`INV.USE-CASES.ONE-SERVER-OWNS-A-DATABASE`).
+fn cluster_over(config: &AppConfig, host: &dyn ServiceHost, database: &Database) -> Option<String> {
+    let machine = host.machine();
+    let running = |infobase: &str| {
+        let paths = ServicePaths::new(&config.work_path, infobase, "cluster");
+        read_json::<ServiceRecord>(&paths.record()).is_some_and(|record| {
+            let facts = record.pid.and_then(|pid| host.facts(pid));
+            record.is_own(facts.as_ref(), machine.as_deref())
+        })
+    };
+    let own = config.infobase_name.as_deref();
+    if let Some(own) = own.filter(|own| running(own)) {
+        return Some(own.to_owned());
+    }
+    let Database::Own(access) = database else {
+        // PostgreSQL раннера у каждой базы свой: другая база его БД не открывает.
+        return None;
+    };
+    config
+        .infobases
+        .iter()
+        .filter(|(name, _)| Some(name.as_str()) != own)
+        .filter(|(_, infobase)| {
+            infobase
+                .cluster
+                .as_ref()
+                .is_some_and(|cluster| cluster.managed.is_some())
+        })
+        .find(|(name, infobase)| {
+            infobase.dbms.as_ref().is_some_and(|dbms| {
+                dbms.managed.is_none()
+                    && dbms
+                        .server
+                        .as_deref()
+                        .is_some_and(|server| same_address(server, &access.server))
+                    && dbms.name.as_deref() == Some(access.name.as_str())
+            }) && running(name)
+        })
+        .map(|(name, _)| name.clone())
+}
+
+/// Отказ: БД держит свой кластер.
+fn owned_by_a_cluster(infobase: &str) -> UseCaseError {
+    validation(format!(
+        "the cluster of '{infobase}' is running over this database, and one server owns a database: run `cluster stop` for '{infobase}' first"
+    ))
+}
+
+/// Один адрес СУБД в двух записях: регистр и пробелы не различаются, иначе сравнение буквальное.
+fn same_address(left: &str, right: &str) -> bool {
+    let normal = |text: &str| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    normal(left) == normal(right)
 }
 
 struct Stand<'a> {
@@ -820,13 +959,71 @@ pub fn standalone_status(
 }
 
 fn locate_ibsrv(config: &AppConfig) -> Result<PathBuf, UseCaseError> {
+    locate(config, crate::platform::locator::UtilityType::Ibsrv)
+}
+
+/// `cluster start|stop|restart`: команда записи, под замком `workPath`.
+pub fn execute_cluster(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    command: ServiceCommand,
+    dry_run: bool,
+    new_regport: bool,
+) -> UseCaseResult<crate::domain::cluster::ClusterResult> {
+    cluster::run_cluster(
+        context,
+        config,
+        command,
+        dry_run,
+        new_regport,
+        &ProcessExecutor,
+        &RealHost,
+        &|| locate(config, crate::platform::locator::UtilityType::Ragent),
+    )
+}
+
+/// `cluster status`: читает записи без замка, чтобы отвечать и пока идёт другая команда.
+pub fn cluster_status(
+    context: &ExecutionContext,
+    config: &AppConfig,
+) -> UseCaseResult<crate::domain::cluster::ClusterResult> {
+    cluster::run_cluster(
+        context,
+        config,
+        ServiceCommand::Status,
+        false,
+        false,
+        &ProcessExecutor,
+        &RealHost,
+        &|| locate(config, crate::platform::locator::UtilityType::Ragent),
+    )
+}
+
+/// `infobase create` в кластере раннера: цель для `CREATEINFOBASE` или ответ, что база уже есть.
+pub(crate) fn cluster_base(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    dry_run: bool,
+) -> Result<ClusterBase, UseCaseError> {
+    cluster::cluster_base(context, config, dry_run, &ProcessExecutor, &RealHost)
+}
+
+/// База создана в реестре кластера раннера: рабочие команды её откроют.
+pub(crate) fn remember_cluster_base(config: &AppConfig) -> Result<(), UseCaseError> {
+    cluster::remember_registered(config)
+}
+
+fn locate(
+    config: &AppConfig,
+    utility: crate::platform::locator::UtilityType,
+) -> Result<PathBuf, UseCaseError> {
     crate::platform::utilities::PlatformUtilities::from_config(config)
-        .locate(crate::platform::locator::UtilityType::Ibsrv)
+        .locate(utility)
         .map(|location| location.path)
         .map_err(|error| environment(error.to_string()))
 }
 
-/// Какая из команд службы: `dbms` или `standalone`.
+/// Какая из команд службы: `dbms`, `standalone` или `cluster`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceCommand {
     Start,

@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::{
-    await_gone, being_started, environment, forget_record, io_failure, occupant_of, port_offsets,
-    validation, write_record, ServiceCommand, ServiceHost, Stand,
+    await_gone, being_started, cluster_over, environment, forget_record, io_failure, occupant_of,
+    owned_by_a_cluster, port_offsets, validation, write_record, Database, DbmsAccess,
+    ServiceCommand, ServiceHost, Stand,
 };
 use crate::config::model::AppConfig;
 use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
@@ -27,6 +28,8 @@ use crate::use_cases::context::InterruptionSafetyClass;
 use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
+/// Образ сервера в перечне процессов.
+const IBSRV_IMAGE: &str = "ibsrv.exe";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const SOFT_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(200);
@@ -34,18 +37,7 @@ const POLL: Duration = Duration::from_millis(200);
 /// Где лежит база сервера.
 enum Storage {
     File(PathBuf),
-    /// PostgreSQL поднимает раннер.
-    ManagedDbms {
-        name: String,
-    },
-    /// СУБД ваша.
-    OwnDbms {
-        kind: String,
-        server: String,
-        name: String,
-        user: Option<String>,
-        password: Option<String>,
-    },
+    Dbms(Database),
 }
 
 /// То, что сценарий узнаёт о цели из настроек.
@@ -73,28 +65,7 @@ fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
         .ok_or_else(|| validation("infobase.standalone.managed.name is not declared"))?;
     let storage = match (&managed.db_path, &config.infobase.dbms) {
         (Some(db_path), None) => Storage::File(db_path.clone()),
-        (None, Some(dbms)) => {
-            let database = dbms
-                .name
-                .clone()
-                .ok_or_else(|| validation("infobase.dbms.name is not declared"))?;
-            if dbms.managed.is_some() {
-                Storage::ManagedDbms { name: database }
-            } else {
-                let required = |value: &Option<String>, key: &str| {
-                    value
-                        .clone()
-                        .ok_or_else(|| validation(format!("infobase.dbms.{key} is not declared")))
-                };
-                Storage::OwnDbms {
-                    kind: required(&dbms.kind, "kind")?,
-                    server: required(&dbms.server, "server")?,
-                    name: database,
-                    user: dbms.user.clone(),
-                    password: dbms.password.clone(),
-                }
-            }
-        }
+        (None, Some(dbms)) => Storage::Dbms(Database::declared(dbms)?),
         _ => {
             return Err(validation(
                 "infobase.standalone.managed names one storage: either db-path or the section infobase.dbms",
@@ -143,21 +114,23 @@ impl Server<'_> {
     fn foreign_server(&self) -> Option<u32> {
         let keys = match &self.declared.storage {
             Storage::File(path) => ibsrv::file_base_keys(path),
-            Storage::ManagedDbms { name } => {
-                let port = self.stand()?.pinned_port()?;
-                ibsrv::database_keys(&postgres::server_address(port), name)
+            Storage::Dbms(database) => {
+                let (server, name) = database.address(self.stand().as_ref())?;
+                ibsrv::database_keys(&server, &name)
             }
-            Storage::OwnDbms { server, name, .. } => ibsrv::database_keys(server, name),
         };
-        self.host.server_with(&keys)
+        crate::platform::service::first_with_keys(&self.host.processes(&[IBSRV_IMAGE]), &keys)
     }
 
     /// СУБД, которую поднимает раннер, как шаг этого сервера.
     fn stand(&self) -> Option<Stand<'_>> {
-        matches!(self.declared.storage, Storage::ManagedDbms { .. })
-            .then(|| Stand::new(self.config, self.context, self.runner, self.host).ok())
-            .flatten()
-            .map(Stand::server_step)
+        matches!(
+            self.declared.storage,
+            Storage::Dbms(Database::Managed { .. })
+        )
+        .then(|| Stand::new(self.config, self.context, self.runner, self.host).ok())
+        .flatten()
+        .map(Stand::server_step)
     }
 
     fn pins(&self) -> Option<ServerPorts> {
@@ -256,6 +229,11 @@ impl Server<'_> {
                     self.declared.infobase
                 ),
             ));
+        }
+        if let Storage::Dbms(database) = &self.declared.storage {
+            if let Some(owner) = cluster_over(self.config, self.host, database) {
+                return Err(owned_by_a_cluster(&owner));
+            }
         }
         if let Some(db_path) = self.db_path() {
             if !db_path.join("1Cv8.1CD").is_file() {
@@ -385,42 +363,20 @@ impl Server<'_> {
 
     /// Значения для ключей `ibsrv`. У управляемой СУБД они из её записи, и БД должна уже быть.
     fn server_storage(&self, stand: Option<&Stand<'_>>) -> Result<OwnedStorage, UseCaseError> {
-        match (&self.declared.storage, stand) {
-            (Storage::File(path), _) => Ok(OwnedStorage::File(path.clone())),
-            (Storage::ManagedDbms { name }, Some(stand)) => {
-                let (port, bin) = stand.running_record()?;
-                if !stand.database_exists(port, &bin, name)? {
-                    return Err(validation(format!(
-                        "there is no database '{name}' in the PostgreSQL of this infobase: create it with `infobase create` before the server starts"
-                    )));
+        match &self.declared.storage {
+            Storage::File(path) => Ok(OwnedStorage::File(path.clone())),
+            Storage::Dbms(database) => {
+                let access = database.access(stand)?;
+                if let (Database::Managed { name }, Some(stand)) = (database, stand) {
+                    let (port, bin) = stand.running_record()?;
+                    if !stand.database_exists(port, &bin, name)? {
+                        return Err(validation(format!(
+                            "there is no database '{name}' in the PostgreSQL of this infobase: create it with `infobase create` before the server starts"
+                        )));
+                    }
                 }
-                Ok(OwnedStorage::Dbms {
-                    kind: "PostgreSQL".to_owned(),
-                    server: postgres::server_address(port),
-                    name: name.clone(),
-                    user: Some(postgres::SUPERUSER.to_owned()),
-                    password: Some(stand.password()?),
-                })
+                Ok(OwnedStorage::Dbms(access))
             }
-            (
-                Storage::OwnDbms {
-                    kind,
-                    server,
-                    name,
-                    user,
-                    password,
-                },
-                _,
-            ) => Ok(OwnedStorage::Dbms {
-                kind: kind.clone(),
-                server: server.clone(),
-                name: name.clone(),
-                user: user.clone(),
-                password: password.clone(),
-            }),
-            (Storage::ManagedDbms { .. }, None) => Err(validation(
-                "the PostgreSQL of this infobase could not be reached",
-            )),
         }
     }
 
@@ -631,31 +587,19 @@ pub(super) fn run_standalone(
 /// Значения для ключей `ibsrv`, владеющие своими строками.
 enum OwnedStorage {
     File(PathBuf),
-    Dbms {
-        kind: String,
-        server: String,
-        name: String,
-        user: Option<String>,
-        password: Option<String>,
-    },
+    Dbms(DbmsAccess),
 }
 
 impl OwnedStorage {
     fn view(&self) -> ServerStorage<'_> {
         match self {
             Self::File(path) => ServerStorage::File(path),
-            Self::Dbms {
-                kind,
-                server,
-                name,
-                user,
-                password,
-            } => ServerStorage::Dbms(DbmsTarget {
-                kind,
-                server,
-                name,
-                user: user.as_deref(),
-                password: password.as_deref(),
+            Self::Dbms(access) => ServerStorage::Dbms(DbmsTarget {
+                kind: &access.kind,
+                server: &access.server,
+                name: &access.name,
+                user: access.user.as_deref(),
+                password: access.password.as_deref(),
             }),
         }
     }
@@ -673,51 +617,45 @@ pub(super) fn create_base(
 ) -> Result<String, UseCaseError> {
     let declared = declared(config)?;
     let paths = ServicePaths::new(&config.work_path, &declared.infobase, "standalone");
-    let (kind, server, name, user, password) = match &declared.storage {
+    let database = match &declared.storage {
         Storage::File(_) => {
             return Err(validation("a file infobase is created by its own path"));
         }
-        Storage::ManagedDbms { name } => {
-            let stand = Stand::new(config, context, runner, host)?;
-            let Some((port, bin)) = stand.running_record().ok() else {
-                return Err(UseCaseError::new(
-                    UseCaseErrorKind::Validation,
-                    "the PostgreSQL of this infobase is not running: run `dbms start`".to_owned(),
-                ));
-            };
-            if dry_run {
-                return Ok(format!(
-                    "would create the database '{name}' on {}",
-                    postgres::server_address(port)
-                ));
-            }
-            if stand.database_exists(port, &bin, name)? {
-                return Err(validation(format!(
-                    "the database '{name}' already exists in the PostgreSQL of this infobase: name another with infobase.dbms.name, or drop it with PostgreSQL tools using the password file `dbms status` names"
-                )));
-            }
-            (
-                "PostgreSQL".to_owned(),
-                postgres::server_address(port),
-                name.clone(),
-                Some(postgres::SUPERUSER.to_owned()),
-                Some(stand.password()?),
-            )
-        }
-        Storage::OwnDbms {
-            kind,
-            server,
-            name,
-            user,
-            password,
-        } => (
-            kind.clone(),
-            server.clone(),
-            name.clone(),
-            user.clone(),
-            password.clone(),
-        ),
+        Storage::Dbms(database) => database,
     };
+    // Раньше вопроса о БД: иначе отказ назвал бы не ту причину.
+    if let Some(owner) = cluster_over(config, host, database) {
+        return Err(owned_by_a_cluster(&owner));
+    }
+    let stand = match database {
+        Database::Managed { .. } => Some(Stand::new(config, context, runner, host)?),
+        Database::Own(_) => None,
+    };
+    if let (Database::Managed { name }, Some(stand)) = (database, &stand) {
+        let Some((port, bin)) = stand.running_record().ok() else {
+            return Err(validation(
+                "the PostgreSQL of this infobase is not running: run `dbms start`",
+            ));
+        };
+        if dry_run {
+            return Ok(format!(
+                "would create the database '{name}' on {}",
+                postgres::server_address(port)
+            ));
+        }
+        if stand.database_exists(port, &bin, name)? {
+            return Err(validation(format!(
+                "the database '{name}' already exists in the PostgreSQL of this infobase: name another with infobase.dbms.name, or drop it with PostgreSQL tools using the password file `dbms status` names"
+            )));
+        }
+    }
+    let DbmsAccess {
+        kind,
+        server,
+        name,
+        user,
+        password,
+    } = database.access(stand.as_ref())?;
     if dry_run {
         return Ok(format!("would create the database '{name}' on {server}"));
     }
@@ -857,8 +795,8 @@ mod tests {
         soft_stops: RefCell<HashSet<u32>>,
         hard_stops: RefCell<HashSet<u32>>,
         last_args: RefCell<Vec<String>>,
-        foreign_server: Cell<Option<u32>>,
-        foreign_keys: RefCell<Vec<String>>,
+        /// Чужие `ibsrv`: pid и командная строка.
+        foreign: RefCell<Vec<(u32, String)>>,
         database_exists: Cell<bool>,
         calls: RefCell<Vec<Vec<String>>>,
         pg_stops: Cell<u32>,
@@ -947,9 +885,17 @@ mod tests {
         fn patience(&self, _default: Duration) -> Duration {
             Duration::ZERO
         }
-        fn server_with(&self, keys: &[String]) -> Option<u32> {
-            self.foreign_keys.borrow_mut().extend_from_slice(keys);
-            self.foreign_server.get()
+        fn processes(&self, images: &[&str]) -> Vec<crate::platform::service::ProcessRow> {
+            assert_eq!(images, ["ibsrv.exe"]);
+            self.foreign
+                .borrow()
+                .iter()
+                .map(|(pid, command)| crate::platform::service::ProcessRow {
+                    pid: *pid,
+                    parent: 1,
+                    command: command.clone(),
+                })
+                .collect()
         }
     }
 
@@ -1237,7 +1183,28 @@ mod tests {
     fn a_foreign_server_over_the_same_base_is_named_and_left_alone() {
         let setup = setup();
         let host = Host::default();
-        host.foreign_server.set(Some(30117));
+        let db_path = setup
+            .config
+            .infobase
+            .standalone
+            .as_ref()
+            .unwrap()
+            .managed
+            .as_ref()
+            .unwrap()
+            .db_path
+            .clone()
+            .unwrap();
+        host.foreign.borrow_mut().extend([
+            (
+                30118,
+                format!("ibsrv.exe \"--db-path={}x\"", db_path.display()),
+            ),
+            (
+                30117,
+                format!("ibsrv.exe \"--db-path={}\" --name=other", db_path.display()),
+            ),
+        ]);
         let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
         assert!(refused.to_string().contains("30117"), "{refused}");
@@ -1362,20 +1329,23 @@ mod tests {
         )
         .map_err(|failure| failure.error)
         .unwrap();
-        host.foreign_server.set(Some(30117));
+        let pins: crate::platform::service_record::PinnedPorts =
+            read_json(&ServicePaths::new(&setup.config.work_path, "origin", "postgres").pins())
+                .unwrap();
+        host.foreign.borrow_mut().extend([
+            (
+                30118,
+                format!("ibsrv.exe \"--db-server=127.0.0.1 port={}\" --db-name=other", pins.port),
+            ),
+            (
+                30117,
+                format!("ibsrv.exe --dbms=PostgreSQL \"--db-server=127.0.0.1 port={}\" --db-name=demo_data -W", pins.port),
+            ),
+        ]);
         let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+        assert!(refused.to_string().contains("30117"), "{refused}");
         assert_eq!(host.spawned.get(), 0, "no second server");
-        let keys = host.foreign_keys.borrow();
-        assert!(
-            keys.iter().any(|key| key == "--db-name=demo_data"),
-            "{keys:?}"
-        );
-        assert!(
-            keys.iter()
-                .any(|key| key.starts_with("--db-server=127.0.0.1 port=")),
-            "{keys:?}"
-        );
     }
 
     #[test]

@@ -256,6 +256,15 @@ pub fn execute_command(
             dry_run,
             cancellation,
         ),
+        Command::Cluster(args) => execute_cluster(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Dbms(args) => execute_dbms(
             config,
             args.command,
@@ -781,6 +790,12 @@ pub fn command_name(command: &Command) -> CommandName {
             crate::cli::args::ServiceCommandArgs::Status => CommandName::StandaloneStatus,
             crate::cli::args::ServiceCommandArgs::Stop => CommandName::StandaloneStop,
             crate::cli::args::ServiceCommandArgs::Restart => CommandName::StandaloneRestart,
+        },
+        Command::Cluster(args) => match args.command.service() {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::ClusterStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::ClusterStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::ClusterStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::ClusterRestart,
         },
         Command::Dbms(args) => match args.command {
             crate::cli::args::ServiceCommandArgs::Start => CommandName::DbmsStart,
@@ -1674,6 +1689,193 @@ fn render_standalone_text(
         (
             "occupant",
             result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        presenter.print_bare("  the recorded process is gone");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_cluster(
+    config: &AppConfig,
+    action: crate::cli::args::ClusterCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ClusterCommandArgs as Action;
+    use crate::use_cases::managed_stand::{cluster_status, execute_cluster as run, ServiceCommand};
+
+    let (name, command, new_regport) = match action {
+        Action::Start { new_regport } => (
+            CommandName::ClusterStart,
+            ServiceCommand::Start,
+            new_regport,
+        ),
+        Action::Status => (CommandName::ClusterStatus, ServiceCommand::Status, false),
+        Action::Stop => (CommandName::ClusterStop, ServiceCommand::Stop, false),
+        Action::Restart => (CommandName::ClusterRestart, ServiceCommand::Restart, false),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::cluster::ClusterResult,
+    >| match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+            } else {
+                render_cluster_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ServiceCommand::Status {
+        return present(cluster_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run, new_regport)),
+    )
+}
+
+fn render_cluster_text(
+    name: CommandName,
+    result: &crate::domain::cluster::ClusterResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", ragent pid {pid}"))
+        .unwrap_or_default();
+    let version = result
+        .version
+        .as_deref()
+        .map(|version| format!(" {version}"))
+        .unwrap_or_default();
+    let pids = |pids: &[u32]| {
+        pids.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let line = match result.action {
+        ServiceAction::Started => format!("started the cluster{version}{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => {
+            let mut stopped = Vec::new();
+            if let Some(pid) = result.stopped_pid {
+                stopped.push(format!("ragent pid {pid}"));
+            }
+            if let Some(pid) = result.stopped_ras_pid {
+                stopped.push(format!("ras pid {pid}"));
+            }
+            if !result.stopped_remnant_pids.is_empty() {
+                stopped.push(format!("remnants {}", pids(&result.stopped_remnant_pids)));
+            }
+            format!("{} stopped", stopped.join(", "))
+        }
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: the cluster is not running", result.infobase),
+            ServiceState::Starting => format!("{}: the cluster is starting", result.infobase),
+            ServiceState::StartedByThisCopy => format!(
+                "{}: cluster{version}, started by this working copy{pid}",
+                result.infobase
+            ),
+            ServiceState::Foreign => format!(
+                "{}: another process holds a port of this cluster",
+                result.infobase
+            ),
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("connection", result.connection.clone()),
+        ("agent", result.agent.clone()),
+        ("ras", result.ras.clone()),
+        ("worker range", result.worker_range.clone()),
+        ("ras pid", result.ras_pid.map(|pid| pid.to_string())),
+        (
+            "rac cluster list",
+            matches!(result.state, ServiceState::StartedByThisCopy).then(|| {
+                if result.ready {
+                    "answers"
+                } else {
+                    "does not answer"
+                }
+                .to_owned()
+            }),
+        ),
+        (
+            "infobase",
+            result.connection.as_ref().map(|_| {
+                if result.registered {
+                    "created".to_owned()
+                } else {
+                    "not created yet: run infobase create".to_owned()
+                }
+            }),
+        ),
+        (
+            "previous regport",
+            result.previous_regport.map(|port| port.to_string()),
+        ),
+        (
+            "registry",
+            result
+                .registry_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "remnants",
+            (!result.remnant_pids.is_empty()).then(|| pids(&result.remnant_pids)),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+        (
+            "PostgreSQL stopped",
+            result.stopped_dbms_pid.map(|pid| format!("pid {pid}")),
         ),
     ];
     for (label, value) in details {
