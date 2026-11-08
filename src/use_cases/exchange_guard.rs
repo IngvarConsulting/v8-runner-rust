@@ -1271,14 +1271,15 @@ fn remember_edt_source(config: &AppConfig, memory: &AssembledMemory) -> Option<S
 
 /// Для тестов сценариев: память о базе у каждого набора, о котором её ещё нет, — запись
 /// журнала поколений, которую поддельный исполнитель не подтвердит и не опровергнет. Хеш-память
-/// теста она не трогает.
+/// теста она не трогает. Запись делает `ibcmd-rs`: поколения он не отдаёт, и с ним не сравнивает
+/// ни один исполнитель — иначе расширение спросило бы инструмент записи, которого у теста нет.
 #[cfg(test)]
 pub(crate) fn remember_unknown_sets(config: &AppConfig) {
     for set in SourceSetsService::new(config).designer_contexts() {
         if let Some(ledger) = GenerationLedger::of(&set, &config.work_path) {
             if !remembers(&set, &config.work_path) {
                 ledger
-                    .record(Provider::Designer, &"0".repeat(40), GenerationAfter::Build)
+                    .record(Provider::IbcmdRs, &"0".repeat(40), GenerationAfter::Build)
                     .expect("generation record");
             }
         }
