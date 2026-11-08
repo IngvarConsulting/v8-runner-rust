@@ -33,6 +33,10 @@ pub enum CommandName {
     DbmsStatus,
     DbmsStop,
     DbmsRestart,
+    StandaloneStart,
+    StandaloneStatus,
+    StandaloneStop,
+    StandaloneRestart,
     Status,
 }
 
@@ -64,6 +68,10 @@ impl CommandName {
             Self::DbmsStatus => "dbms status",
             Self::DbmsStop => "dbms stop",
             Self::DbmsRestart => "dbms restart",
+            Self::StandaloneStart => "standalone start",
+            Self::StandaloneStatus => "standalone status",
+            Self::StandaloneStop => "standalone stop",
+            Self::StandaloneRestart => "standalone restart",
             Self::Status => "status",
         }
     }
@@ -369,6 +377,17 @@ impl ExecutionContext {
             timeout_cap,
             self.cancellation(),
             safety.process_safety(),
+            self.work.clone(),
+        )
+    }
+
+    /// Политика шага, который снимает поднятое этой командой. Отмена его не касается: отменённая
+    /// политика не запустила бы процесс вовсе, и поднятое осталось бы работать.
+    pub(crate) fn cleanup_policy(&self) -> ProcessExecutionPolicy {
+        ProcessExecutionPolicy::new(
+            None,
+            CancellationToken::new(),
+            InterruptionSafetyClass::GracefulThenKill.process_safety(),
             self.work.clone(),
         )
     }

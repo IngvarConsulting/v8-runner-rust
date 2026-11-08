@@ -1798,6 +1798,40 @@ impl LaunchHostKey {
     }
 }
 
+/// Ключ ED25519 из зерна и его текст в формате OpenSSH.
+fn ed25519_key(
+    seed: &[u8; 32],
+    comment: &str,
+) -> Result<(russh::keys::PrivateKey, String), String> {
+    let key = russh::keys::PrivateKey::new(
+        russh::keys::ssh_key::private::KeypairData::Ed25519(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(seed),
+        ),
+        comment,
+    )
+    .map_err(|error| error.to_string())?;
+    let text = key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .map_err(|error| error.to_string())?;
+    Ok((key, text.to_string()))
+}
+
+/// Ключ хоста для SSH-шлюза службы. Живёт вместе с её записью: от запуска к запуску он тот же, и
+/// закреплённый отпечаток остаётся верным.
+pub fn write_service_host_key(path: &Path) -> std::io::Result<()> {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).map_err(std::io::Error::other)?;
+    let (_, text) =
+        ed25519_key(&seed, "v8-runner managed server").map_err(std::io::Error::other)?;
+    crate::support::fs::write_file_atomically(path, |file| file.write_all(text.as_bytes()))
+}
+
+/// Отпечаток ключа хоста в виде, который принимает `standalone.host-fingerprint`.
+pub fn host_key_fingerprint(path: &Path) -> Option<String> {
+    let key = russh::keys::load_secret_key(path, None).ok()?;
+    Some(key.public_key().fingerprint(HashAlg::Sha256).to_string())
+}
+
 /// Префикс имени одноразового ключа; за ним — номер процесса раннера, который ключ создал.
 const ONE_TIME_KEY_PREFIX: &str = "host-key-";
 
@@ -1843,16 +1877,7 @@ impl EphemeralHostKey {
                 "the system random generator gave no seed for the one-time host key: {error}"
             )),
         })?;
-        let key = russh::keys::PrivateKey::new(
-            russh::keys::ssh_key::private::KeypairData::Ed25519(
-                russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&seed),
-            ),
-            "v8-runner managed agent",
-        )
-        .map_err(|error| invalid(error.to_string()))?;
-        let text = key
-            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
-            .map_err(|error| invalid(error.to_string()))?;
+        let (key, text) = ed25519_key(&seed, "v8-runner managed agent").map_err(invalid)?;
         remove_orphaned_keys(dir);
         let path = dir.join(format!(
             "{ONE_TIME_KEY_PREFIX}{}-{}",

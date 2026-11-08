@@ -247,6 +247,15 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Platforms => execute_platforms(config, presenter),
+        Command::Standalone(args) => execute_standalone(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Dbms(args) => execute_dbms(
             config,
             args.command,
@@ -767,11 +776,17 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
         Command::Platforms => CommandName::Platforms,
+        Command::Standalone(args) => match args.command {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::StandaloneStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::StandaloneStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::StandaloneStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::StandaloneRestart,
+        },
         Command::Dbms(args) => match args.command {
-            crate::cli::args::DbmsCommandArgs::Start => CommandName::DbmsStart,
-            crate::cli::args::DbmsCommandArgs::Status => CommandName::DbmsStatus,
-            crate::cli::args::DbmsCommandArgs::Stop => CommandName::DbmsStop,
-            crate::cli::args::DbmsCommandArgs::Restart => CommandName::DbmsRestart,
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::DbmsStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::DbmsStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::DbmsStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::DbmsRestart,
         },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
@@ -1477,21 +1492,21 @@ fn execute_reset(
 /// команда (`INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK`).
 fn execute_dbms(
     config: &AppConfig,
-    action: crate::cli::args::DbmsCommandArgs,
+    action: crate::cli::args::ServiceCommandArgs,
     command_line: &CommandLineTarget,
     presenter: &Presenter,
     clean_before_execution: bool,
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    use crate::cli::args::DbmsCommandArgs as Action;
-    use crate::use_cases::managed_stand::{dbms_status, execute_dbms as run, DbmsCommand};
+    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::use_cases::managed_stand::{dbms_status, execute_dbms as run, ServiceCommand};
 
     let (name, command) = match action {
-        Action::Start => (CommandName::DbmsStart, DbmsCommand::Start),
-        Action::Status => (CommandName::DbmsStatus, DbmsCommand::Status),
-        Action::Stop => (CommandName::DbmsStop, DbmsCommand::Stop),
-        Action::Restart => (CommandName::DbmsRestart, DbmsCommand::Restart),
+        Action::Start => (CommandName::DbmsStart, ServiceCommand::Start),
+        Action::Status => (CommandName::DbmsStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::DbmsStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::DbmsRestart, ServiceCommand::Restart),
     };
     let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
     let present = |outcome: crate::use_cases::result::UseCaseResult<
@@ -1521,7 +1536,7 @@ fn execute_dbms(
             Err(error)
         }
     };
-    if command == DbmsCommand::Status {
+    if command == ServiceCommand::Status {
         return present(dbms_status(&context, config));
     }
     with_cli_workspace_lock(
@@ -1535,38 +1550,171 @@ fn execute_dbms(
     )
 }
 
-fn render_dbms_text(
+/// `standalone`: запись под замком `workPath`, `status` без него.
+fn execute_standalone(
+    config: &AppConfig,
+    action: crate::cli::args::ServiceCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::use_cases::managed_stand::{
+        execute_standalone as run, standalone_status, ServiceCommand,
+    };
+
+    let (name, command) = match action {
+        Action::Start => (CommandName::StandaloneStart, ServiceCommand::Start),
+        Action::Status => (CommandName::StandaloneStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::StandaloneStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::StandaloneRestart, ServiceCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::standalone::StandaloneResult,
+    >| match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+            } else {
+                render_standalone_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ServiceCommand::Status {
+        return present(standalone_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+fn render_standalone_text(
     name: CommandName,
-    result: &crate::domain::dbms::DbmsResult,
+    result: &crate::domain::standalone::StandaloneResult,
     presenter: &Presenter,
 ) {
-    use crate::domain::dbms::{DbmsAction, DbmsState};
+    use crate::domain::dbms::{ServiceAction, ServiceState};
 
     let pid = result
         .pid
         .map(|pid| format!(", pid {pid}"))
         .unwrap_or_default();
     let line = match result.action {
-        DbmsAction::Started => format!("started PostgreSQL{pid}"),
-        DbmsAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
-        DbmsAction::Stopped => format!(
+        ServiceAction::Started => format!("started ibsrv{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => format!(
+            "ibsrv pid {} stopped",
+            result
+                .stopped_pid
+                .map_or_else(|| "?".to_owned(), |pid| pid.to_string())
+        ),
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: the server is not running", result.infobase),
+            ServiceState::Starting => format!("{}: the server is starting", result.infobase),
+            ServiceState::StartedByThisCopy => {
+                format!(
+                    "{}: standalone server, started by this working copy{pid}",
+                    result.infobase
+                )
+            }
+            ServiceState::Foreign => {
+                format!("{}: a port is taken by another process", result.infobase)
+            }
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("direct gate", result.connection.clone()),
+        ("ssh gate", result.gate.clone()),
+        ("http", result.http.clone()),
+        (
+            "data",
+            result
+                .data_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        presenter.print_bare("  the recorded process is gone");
+    }
+}
+
+fn render_dbms_text(
+    name: CommandName,
+    result: &crate::domain::dbms::DbmsResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", pid {pid}"))
+        .unwrap_or_default();
+    let line = match result.action {
+        ServiceAction::Started => format!("started PostgreSQL{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => format!(
             "PostgreSQL pid {} stopped",
             result
                 .stopped_pid
                 .map_or_else(|| "?".to_owned(), |pid| pid.to_string())
         ),
-        DbmsAction::NothingToStop => "nothing to stop".to_owned(),
-        DbmsAction::Planned => "plan: nothing was started or stopped".to_owned(),
-        DbmsAction::Reported => match result.state {
-            DbmsState::NotRunning => format!("{}: PostgreSQL is not running", result.infobase),
-            DbmsState::Starting => format!("{}: PostgreSQL is starting", result.infobase),
-            DbmsState::StartedByThisCopy => {
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: PostgreSQL is not running", result.infobase),
+            ServiceState::Starting => format!("{}: PostgreSQL is starting", result.infobase),
+            ServiceState::StartedByThisCopy => {
                 format!(
                     "{}: PostgreSQL, started by this working copy{pid}",
                     result.infobase
                 )
             }
-            DbmsState::Foreign => {
+            ServiceState::Foreign => {
                 format!("{}: the port is taken by another process", result.infobase)
             }
         },
@@ -1608,9 +1756,6 @@ fn render_dbms_text(
     }
     if result.stale_record {
         presenter.print_bare("  the recorded process is gone");
-    }
-    for warning in &result.warnings {
-        presenter.print_bare(&format!("  {warning}"));
     }
 }
 

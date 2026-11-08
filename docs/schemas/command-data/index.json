@@ -71,6 +71,18 @@
     "reset": [
       "reset"
     ],
+    "standalone restart": [
+      "standalone-restart"
+    ],
+    "standalone start": [
+      "standalone-start"
+    ],
+    "standalone status": [
+      "standalone-status"
+    ],
+    "standalone stop": [
+      "standalone-stop"
+    ],
     "status": [
       "status"
     ],

@@ -607,9 +607,23 @@ v8-runner dbms restart [--dry-run]
   процессом порт — `workspace_busy`. Значение пароля в ответ не попадает: `status` называет файл.
 - `status` работает без замка `workPath`. `stop` при работающем своём сервере отказывает.
 
-Команды `cluster` и `standalone` и работа остальных команд с такой базой ещё не реализованы:
-#537, #538, #495. До них команды, которым нужна база с `cluster.managed` или `standalone.managed`,
-отказывают и называют этот ключ.
+### `standalone`
+
+```text
+v8-runner standalone start [--dry-run]
+v8-runner standalone status
+v8-runner standalone stop [--dry-run]
+v8-runner standalone restart [--dry-run]
+```
+
+- Поднимают `ibsrv` базы из `standalone.managed` на Windows, без службы. Адрес, SSH-шлюз и HTTP называет `status`,
+  остальные команды берут их из записи и работают с базой как с обычным автономным сервером.
+- Цикл: `infobase create` (файловая база в `db-path`, до запуска сервера) → `standalone start` → `push` → `test` →
+  `standalone stop`. Без сервера рабочая команда отказывает и называет `standalone start`.
+- Порты и ключ хоста SSH-шлюза закреплены от запуска к запуску. Прямой шлюз слушает все интерфейсы.
+
+База в СУБД у такого сервера — #537, кластер — #538. Команды, которым нужна база с `cluster.managed`, пока отказывают
+и называют этот ключ.
 
 
 ### `tools download`

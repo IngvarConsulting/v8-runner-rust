@@ -1,7 +1,8 @@
 ---
 id: INV.USE-CASES.A-MANAGED-TARGET-MEMORY-FOLLOWS-ITS-NAME
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - src/config/loader.rs::a_managed_standalone_without_a_running_server_has_no_address_and_keeps_its_memory_by_name
+  - src/config/loader.rs::infobase_create_sees_the_managed_standalone_as_its_file_base_with_the_same_memory
 ---
 
 # Память управляемой цели привязана к её имени

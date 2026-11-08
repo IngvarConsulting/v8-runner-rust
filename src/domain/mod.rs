@@ -48,6 +48,8 @@ pub mod reset;
 pub mod runner;
 /// Source set domain models.
 pub mod source_set;
+/// Ответ команд `standalone`.
+pub mod standalone;
 /// Состояние пары «каталог ↔ база» у `status`.
 pub mod status;
 /// Syntax-check domain models.
