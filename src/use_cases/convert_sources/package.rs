@@ -1,13 +1,5 @@
-//! Направления `convert` с пакетом: наборы в `.cf` и `.cfe` и файл пакета в XML платформы.
-//!
-//! Исполнителя выбирает строка `convert` матрицы (`provider_selection`), и квитанция
-//! называет его в ответе. `ibcmd` работает во временной базе раннера под `workPath`
-//! ([`ThrowawayInfobase`]) — тем же владельцем, что у `make`: сборка — `config import --out`,
-//! разбор — `config export --file`. База проекта не выбирается и не открывается. Исходники
-//! формата EDT сперва переводит в XML тот же владелец (`ThrowawayInfobase::xml_from_edt`).
-//!
-//! Пакет публикуется заменой файла, как у `make`; каталог XML — заменой каталога со
-//! сторожем незафиксированной работы, как у перевода между EDT и XML.
+//! Convert source sets to packages in the shared build infobase, or unpack a package
+//! to XML in a throwaway infobase. Neither direction selects a project infobase.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -22,6 +14,7 @@ use crate::support::error::AppError;
 use crate::support::path::{
     is_filesystem_root, nearest_existing_canonical_path, stable_path_identity,
 };
+use crate::use_cases::build_infobase::{self, BuildEnvironment, BuildSession};
 use crate::use_cases::context::{CommandName, ExecutionContext};
 use crate::use_cases::destruction_guard::{
     discard_note, losses_in, preview_note, Destruction, DestructionConsent, WaysOut,
@@ -33,7 +26,7 @@ use crate::use_cases::source_inventory::{
     names_a_file, package_in_directory, paths_overlap, SourceSetInventory,
 };
 use crate::use_cases::staged_publication::StagedPublication;
-use crate::use_cases::throwaway_infobase::{edt_workspace, Builder, Package, ThrowawayInfobase};
+use crate::use_cases::throwaway_infobase::{edt_workspace, Builder, ThrowawayInfobase};
 
 use super::{
     deferred_interruption_warning, ensure_platform_success, ensure_success_of,
@@ -140,6 +133,7 @@ fn resolve_source_sets(
     explicit_output_root: Option<&Path>,
 ) -> Result<Vec<Item>, AppError> {
     require_source_sets(config)?;
+    build_infobase::validate_project(config)?;
     let inventory = SourceSetInventory::new(config);
     let packages: Vec<(&SourceSetConfig, Option<&str>)> = match &request.scope {
         ConvertScopeRequest::SourceSet { name } => {
@@ -347,6 +341,7 @@ fn checked_target(
     is_explicit_output: bool,
 ) -> Result<(PathBuf, String), AppError> {
     validate_convert_target(config, target_path, subject, is_explicit_output)?;
+    build_infobase::reject_overlap(&config.work_path, target_path)?;
     let canonical = nearest_existing_canonical_path(target_path).map_err(|error| {
         AppError::Runtime(format!(
             "failed to canonicalize convert output '{}': {error}",
@@ -432,21 +427,21 @@ impl Run<'_> {
         }
 
         let runner = utilities.runner_for(UtilityType::Ibcmd);
-        let mut base = ThrowawayInfobase::create(
-            self.context,
-            &self.config.work_path,
-            Builder {
-                provider: selected.provider,
-                binary,
-            },
-            runner,
-        )
-        .map_err(|error| self.refusal(error, Vec::new()))?;
+        let builder = Builder {
+            provider: selected.provider,
+            binary,
+        };
+        if self.direction != ConvertDirection::PackageToDesigner {
+            return self.build_source_packages(resolved, &builder, runner);
+        }
+        let mut base =
+            ThrowawayInfobase::create(self.context, &self.config.work_path, builder, runner)
+                .map_err(|error| self.refusal(error, Vec::new()))?;
 
         let mut outputs = Vec::new();
         let mut messages = Vec::new();
         for item in &resolved.items {
-            match self.convert_item(&mut base, runner, resolved, item) {
+            match export_package(self.context, &mut base, runner, resolved, item) {
                 Ok(notes) => {
                     messages.extend(notes);
                     outputs.push(item.output());
@@ -500,46 +495,46 @@ impl Run<'_> {
         self.answer(Outcome::Done, outputs, Some(message))
     }
 
-    /// Один вход: сборка пакета или разбор пакета во временной базе и публикация. Ответ —
-    /// предупреждения перевода EDT и публикации.
-    fn convert_item(
+    fn build_source_packages(
         &self,
-        base: &mut ThrowawayInfobase,
-        runner: &dyn ProcessRunner,
         resolved: &ResolvedPackageRequest,
-        item: &Item,
-    ) -> Result<Vec<String>, AppError> {
-        match &item.input {
-            Input::SourceSet { name, extension } => {
-                let (source_dir, mut notes) = if needs_edt(self.direction) {
-                    let source_set = SourceSetInventory::new(self.config).named(name)?;
-                    base.xml_from_edt(
-                        self.context,
-                        self.config,
-                        source_set,
-                        self.context.edt_timeout(),
-                    )?
-                } else {
-                    (item.source_path.clone(), Vec::new())
-                };
-                notes.extend(build_package(
-                    self.context,
-                    base,
-                    runner,
-                    item,
-                    name,
-                    extension.as_deref(),
-                    &source_dir,
-                )?);
-                Ok(notes)
+        builder: &Builder,
+        runner: &dyn ProcessRunner,
+    ) -> UseCaseResult<ConvertResult> {
+        let env = BuildEnvironment {
+            context: self.context,
+            config: self.config,
+            builder,
+            runner,
+        };
+        let inventory = SourceSetInventory::new(self.config);
+        let mut session = BuildSession::default();
+        let mut outputs = Vec::new();
+        let mut notes = Vec::new();
+        for item in &resolved.items {
+            let Input::SourceSet { name, extension } = &item.input else {
+                return Err(self.refusal(
+                    AppError::Runtime("expected source set for package build".to_owned()),
+                    outputs,
+                ));
+            };
+            let built = inventory
+                .named(name)
+                .and_then(|set| build_package(&env, &mut session, item, set, extension.as_deref()));
+            match built {
+                Ok(messages) => {
+                    notes.extend(messages);
+                    outputs.push(item.output());
+                }
+                Err(error) => return Err(self.refusal(error, outputs)),
             }
-            Input::PackageFile => export_package(self.context, base, runner, resolved, item),
         }
+        Ok(self.answer(Outcome::Done, outputs, merge_messages(notes)))
     }
 }
 
 /// Направление с пакетом: разрешение, выбор исполнителя по строке `convert`, превью или
-/// работа во временной базе раннера. Квитанция едет и в ответе, и в отказе после выбора.
+/// работа в базе сборки или во временной базе разбора. Квитанция едет и в ответе, и в отказе после выбора.
 pub(super) fn run(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -577,14 +572,13 @@ fn needs_edt(direction: ConvertDirection) -> bool {
 }
 
 fn build_package(
-    context: &ExecutionContext,
-    base: &mut ThrowawayInfobase,
-    runner: &dyn ProcessRunner,
+    env: &BuildEnvironment<'_>,
+    session: &mut BuildSession,
     item: &Item,
-    name: &str,
+    source: &SourceSetConfig,
     extension: Option<&str>,
-    source_dir: &Path,
 ) -> Result<Vec<String>, AppError> {
+    let mut prepared = session.prepare(env, source, extension, None, None)?;
     let file_extension = item
         .target_path
         .extension()
@@ -597,38 +591,29 @@ fn build_package(
         file_extension,
     )?;
     let staging_file = publication.staging_path().to_path_buf();
-    let package = match extension {
-        Some(extension) => Package::Extension(extension),
-        None => Package::Configuration,
-    };
-    let built = base
-        .build_package(
-            context,
-            runner,
-            name,
-            source_dir,
-            package,
-            &staging_file,
-            None,
-        )
+    let built = prepared
+        .dump(env, &staging_file, extension, None)
         .and_then(|result| {
-            ensure_platform_success(name, "designer-to-package", &result)?;
+            ensure_platform_success(&source.name, "designer-to-package", &result)?;
             if staging_file.is_file() {
-                Ok(())
+                prepared.record_successful_access()
             } else {
                 Err(AppError::Platform(format!(
                     "{} did not produce package file '{}'",
-                    base.provider(),
+                    env.builder.provider,
                     staging_file.display()
                 )))
             }
         });
-    if let Err(error) = built.and_then(|()| revalidate_before_publish(item)) {
+    if let Err(error) = built.and_then(|()| {
+        build_infobase::reject_overlap(&env.config.work_path, &item.target_path)?;
+        revalidate_before_publish(item)
+    }) {
         return Err(publication.cleanup_failure(error));
     }
     // Неудачная замена оставляет промежуточный файл: в нём может быть единственная копия.
-    let published = publication.publish_file(context, "failed to publish convert package")?;
-    let mut notes = Vec::new();
+    let published = publication.publish_file(env.context, "failed to publish convert package")?;
+    let mut notes = prepared.warnings;
     notes.extend(published.cleanup_warning);
     notes.extend(deferred_interruption_warning(
         published.deferred_interruption,

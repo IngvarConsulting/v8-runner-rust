@@ -6,9 +6,10 @@ pub mod apply;
 pub mod artifacts;
 /// Bootstrap project from an existing infobase.
 pub mod bootstrap_project;
+/// Build orchestration use case.
+mod build_infobase;
 /// Shared build timeline progress vocabulary.
 mod build_progress;
-/// Build orchestration use case.
 pub mod build_project;
 /// Syntax-check orchestration use case.
 pub mod check_syntax;

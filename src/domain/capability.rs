@@ -322,21 +322,15 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Designer, ArgvTested),
     ];
     const DIFF_SERVER: &[Capability] = &[implemented(Designer, ArgvTested)];
-    // `make` собирает пакет из исходников во временной базе раннера, а не выгружает базу
-    // проекта, поэтому строка от вида цели не зависит. `ibcmd`: `infobase create`, затем
-    // `config import --out` (замер #182, 06.10.2026, 8.3.27.2074); Конфигуратор:
-    // `CREATEINFOBASE`, `/LoadConfigFromFiles`, `/DumpCfg` (тот же замер). Цепочку назначил
-    // владелец (#364). `ibcmd-rs` строки не имеет до замера #413, агент снят: ему нужна база
-    // проекта.
+    // `make` собирает пакет из исходников в базе сборки раннера.
+    // #471/#472: Designer leads incremental assembly in the persistent build infobase.
+    // Both providers assemble the working configuration; neither applies it.
     const MAKE: &[Capability] = &[
-        implemented(Ibcmd, ArgvTested),
         implemented(Designer, ArgvTested),
+        implemented(Ibcmd, ArgvTested),
     ];
-    // `convert` с пакетом базы проекта не открывает: `ibcmd` работает во временной базе
-    // раннера, поэтому строка от вида цели не зависит. XML → пакет — `config import --out`
-    // (замер #182); пакет → XML — `config export --file` (вызов взят у `extensions`, живой
-    // замер во временной базе — #416). `ibcmd-rs` идёт за `ibcmd` после замера #413, до него
-    // строки не имеет.
+    // Source-to-package uses the same build infobase as make; package-to-XML uses a
+    // throwaway infobase. Convert's independent provider chain stays on ibcmd.
     const CONVERT: &[Capability] = &[implemented(Ibcmd, ArgvTested)];
     // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
     // прогнаны раннером на 8.3.27 15.09.2026. У файловой базы состав и свойства первым
@@ -500,7 +494,7 @@ pub fn has_a_choice(operation: Operation, target: TargetKind) -> bool {
 }
 
 /// Не зависит ли строка операции от вида цели: такой операции база проекта не нужна
-/// (`make` и `convert` работают во временной базе раннера), и вид цели её не касается.
+/// (`make` и `convert` работают в своей базе раннера), и вид цели её не касается.
 pub fn needs_no_target(operation: Operation) -> bool {
     TargetKind::ALL
         .into_iter()
@@ -520,10 +514,10 @@ pub struct RemovedProvider {
 /// конфигурации и называет выход.
 pub const fn removed_provider(operation: Operation, provider: Provider) -> Option<RemovedProvider> {
     match (operation, provider) {
-        // `make` собирает пакет из исходников во временной базе раннера (#364), а агент
+        // `make` собирает пакет из исходников в базе сборки раннера (#364), а агент
         // работает только с базой проекта: пакет этой базы выгружает `download`.
         (Operation::Make, Provider::Agent) => Some(RemovedProvider {
-            reason: "make builds the package from the sources in a throwaway infobase of the runner, and the agent works only with the project infobase",
+            reason: "make builds the package from the sources in the build infobase of the runner, and the agent works only with the project infobase",
             way_out: "download",
         }),
         _ => None,
