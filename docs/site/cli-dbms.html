@@ -138,7 +138,7 @@
 <h4 id="dbms-server-running">Сервер ещё работает</h4>
 <pre data-output-example="dbms-server-running" data-output-schema="dbms-stop"><code>ERROR: validation error: the standalone of 'origin' is still running on this PostgreSQL; run standalone stop first</code></pre>
 <h4 id="dbms-no-build">Нет сборки</h4>
-<pre data-output-example="dbms-no-build" data-output-schema="dbms-start"><code>ERROR: environment unavailable: the PostgreSQL build was not found: declare tools.postgres.path</code></pre>
+<pre data-output-example="dbms-no-build" data-output-schema="dbms-start"><code>ERROR: environment unavailable: the PostgreSQL build was not found, and the runner does not download it: declare tools.postgres.path, the directory of the build or its bin; the free build "PostgreSQL for 1C" by Postgres Professional is the current Setup.exe in https://repo.postgrespro.ru/1c/1c-17/win/, under the PostgreSQL License (license.txt in the build); its installer needs administrator rights and may register its own service, which the runner does not use; the runner needs only the bin directory with pg_ctl</code></pre>
 </main>
 <script type="application/json" id="output-examples">{
   "dbms-started": {
@@ -248,7 +248,7 @@
     "error": {
       "kind": "environment",
       "code": "environment_unavailable",
-      "message": "the PostgreSQL build was not found: declare tools.postgres.path"
+      "message": "the PostgreSQL build was not found, and the runner does not download it: declare tools.postgres.path, the directory of the build or its bin; the free build \"PostgreSQL for 1C\" by Postgres Professional is the current Setup.exe in https://repo.postgrespro.ru/1c/1c-17/win/, under the PostgreSQL License (license.txt in the build); its installer needs administrator rights and may register its own service, which the runner does not use; the runner needs only the bin directory with pg_ctl"
     }
   }
 }</script>

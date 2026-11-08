@@ -913,7 +913,7 @@ mod tests {
         let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
             panic!("{:?}", analysis.outcome);
         };
-        let names: Vec<_> = changes
+        let mut names: Vec<_> = changes
             .iter()
             .map(|change| {
                 (
@@ -922,6 +922,8 @@ mod tests {
                 )
             })
             .collect();
+        // Порядок изменений идёт от обхода каталога и не обещан: сверяется набор.
+        names.sort_by(|left, right| left.0.cmp(&right.0));
         assert_eq!(
             names,
             vec![

@@ -665,14 +665,16 @@ impl<'a> Stand<'a> {
 
     fn build(&self) -> Result<PostgresBuild, UseCaseError> {
         let Some(path) = self.config.tools.postgres.path.as_ref() else {
-            return Err(environment(
-                "the PostgreSQL build was not found: declare tools.postgres.path",
-            ));
+            return Err(environment(format!(
+                "the PostgreSQL build was not found, and the runner does not download it: declare tools.postgres.path, the directory of the build or its bin; {}",
+                postgres::WHERE_TO_GET_A_BUILD
+            )));
         };
         PostgresBuild::locate(path).ok_or_else(|| {
             environment(format!(
-                "the PostgreSQL build was not found in '{}': tools.postgres.path names a directory with pg_ctl",
-                path.display()
+                "the PostgreSQL build was not found in '{}', and the runner does not download it: tools.postgres.path names the directory of the build or its bin; {}",
+                path.display(),
+                postgres::WHERE_TO_GET_A_BUILD
             ))
         })
     }
@@ -900,6 +902,8 @@ impl<'a> Stand<'a> {
         if !self.host.supported() {
             return Err(not_on_this_system());
         }
+        // Без сборки второй половины не будет: работающий PostgreSQL остаётся работать.
+        self.build()?;
         let stopped = self.stop(false)?;
         if let Some(error) =
             interruption_before_safe_point(self.context, "starting PostgreSQL again")
@@ -1664,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn a_start_without_the_build_names_the_key() {
+    fn a_start_without_the_build_names_where_to_get_it() {
         let mut setup = setup();
         let host = FakeHost::default();
         let runner = FakeRunner::new(&host);
@@ -1673,19 +1677,60 @@ mod tests {
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
         assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_names_where_to_get_a_build(&refused.to_string());
+        let missing = setup.root.path().join("no-such");
+        setup.config.tools.postgres.path = Some(missing.clone());
+        let refused = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
         assert!(
-            refused.to_string().contains("tools.postgres.path"),
+            refused.to_string().contains(&missing.display().to_string()),
             "{refused}"
         );
-        setup.config.tools.postgres.path = Some(setup.root.path().join("no-such"));
-        assert_eq!(
-            setup
-                .run(ServiceCommand::Start, false, &runner, &host)
-                .unwrap_err()
-                .kind(),
-            UseCaseErrorKind::Environment
-        );
+        assert_names_where_to_get_a_build(&refused.to_string());
+        assert!(host.processes.borrow().is_empty(), "nothing is started");
         let _ = setup.build;
+    }
+
+    #[test]
+    fn a_restart_without_the_build_leaves_the_running_postgres_alone() {
+        let mut setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        let started = setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        setup.config.tools.postgres.path = None;
+        let refused = setup
+            .run(ServiceCommand::Restart, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_names_where_to_get_a_build(&refused.to_string());
+        let pid = started.pid.unwrap();
+        assert!(
+            host.processes.borrow().contains_key(&pid),
+            "it keeps running"
+        );
+    }
+
+    fn assert_names_where_to_get_a_build(refused: &str) {
+        assert!(
+            !refused.contains("  "),
+            "one line, single spaces: {refused}"
+        );
+        for part in [
+            "tools.postgres.path",
+            "pg_ctl",
+            "does not download",
+            "PostgreSQL for 1C",
+            "https://repo.postgrespro.ru/1c/1c-17/win/",
+            "PostgreSQL License",
+            "license.txt",
+            "administrator rights",
+        ] {
+            assert!(refused.contains(part), "{part}: {refused}");
+        }
     }
 
     #[test]
