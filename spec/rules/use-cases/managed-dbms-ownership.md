@@ -7,12 +7,23 @@ check:
   - src/use_cases/managed_stand/standalone.rs::restart_leaves_the_postgres_alone
   - src/use_cases/managed_stand/standalone.rs::a_failed_server_stops_only_what_this_command_raised
   - src/use_cases/managed_stand/standalone.rs::a_crashed_server_still_takes_its_step_postgres_down
+  - src/use_cases/managed_stand/standalone.rs::a_fallen_postgres_under_a_live_server_is_named_and_comes_back_explicit_on_its_port
+  - src/use_cases/managed_stand/standalone.rs::after_a_reboot_the_server_starts_again_with_its_postgres_as_a_step
+  - src/use_cases/managed_stand/standalone.rs::after_a_reboot_an_explicit_postgres_raised_by_the_server_becomes_its_step
+  - src/use_cases/managed_stand/standalone.rs::a_cancelled_start_over_postgres_stops_the_server_and_the_postgres_it_raised
+  - src/use_cases/managed_stand/standalone.rs::a_server_that_does_not_stop_keeps_its_record_and_its_postgres_and_a_repeat_goes_on
   - src/use_cases/managed_stand/cluster.rs::stop_takes_ras_then_the_agent_then_the_step_postgres
   - src/use_cases/managed_stand/cluster.rs::an_explicit_postgres_outlives_its_cluster
   - src/use_cases/managed_stand/cluster.rs::a_later_dbms_start_makes_a_step_postgres_explicit
   - src/use_cases/managed_stand/cluster.rs::restart_leaves_the_postgres_alone
   - src/use_cases/managed_stand/cluster.rs::a_failed_cluster_stops_only_what_this_command_raised
   - src/use_cases/managed_stand/cluster.rs::stop_leaves_the_step_postgres_to_the_running_standalone
+  - src/use_cases/managed_stand/cluster.rs::a_crashed_cluster_still_takes_its_step_postgres_down
+  - src/use_cases/managed_stand/cluster.rs::a_fallen_postgres_under_a_live_cluster_is_named_and_comes_back_explicit_on_its_port
+  - src/use_cases/managed_stand/cluster.rs::a_cancelled_cluster_start_stops_the_postgres_it_raised
+  - src/use_cases/managed_stand/cluster.rs::after_a_reboot_the_cluster_starts_again_with_its_postgres_as_a_step
+  - src/use_cases/managed_stand/cluster.rs::after_a_reboot_the_command_that_raises_the_postgres_decides_whether_it_is_explicit
+  - src/use_cases/managed_stand/cluster.rs::a_remnant_that_does_not_stop_keeps_the_agent_record
   - src/use_cases/managed_stand/mod.rs::stop_refuses_under_a_running_own_server_and_names_it
   - src/use_cases/managed_stand/mod.rs::a_stale_record_is_replaced_and_named_and_the_data_stays
   - src/use_cases/managed_stand/mod.rs::stop_that_failed_keeps_the_record_and_a_repeat_goes_on

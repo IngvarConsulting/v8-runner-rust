@@ -794,6 +794,10 @@ mod tests {
         exits_at_once: Cell<bool>,
         never_ready: Cell<bool>,
         ignores_soft_stop: Cell<bool>,
+        /// `ibsrv`, которого не снять ничем.
+        immortal: Cell<bool>,
+        /// Отмена команды, наступающая, как только поднят `ibsrv`.
+        cancel_on_server: RefCell<Option<tokio_util::sync::CancellationToken>>,
         soft_stops: RefCell<HashSet<u32>>,
         hard_stops: RefCell<HashSet<u32>>,
         last_args: RefCell<Vec<String>>,
@@ -837,6 +841,9 @@ mod tests {
                 return Ok(7);
             }
             self.spawned.set(self.spawned.get() + 1);
+            if let Some(token) = self.cancel_on_server.borrow().as_ref() {
+                token.cancel();
+            }
             self.last_args.replace(request.args.clone());
             self.last_stdin.replace(request.stdin.clone());
             if !self.exits_at_once.get() {
@@ -880,6 +887,9 @@ mod tests {
         }
         fn hard_stop(&self, _runner: &dyn ProcessRunner, pid: u32, _context: &ExecutionContext) {
             self.hard_stops.borrow_mut().insert(pid);
+            if pid == PID && self.immortal.get() {
+                return;
+            }
             self.processes.borrow_mut().remove(&pid);
             self.listeners.borrow_mut().retain(|_, held| *held != pid);
         }
@@ -1489,6 +1499,111 @@ mod tests {
         let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
         assert_eq!(stopped.action, ServiceAction::NothingToStop);
         assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+    }
+
+    #[test]
+    fn a_fallen_postgres_under_a_live_server_is_named_and_comes_back_explicit_on_its_port() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let port = dbms_record(&setup).port;
+        host.processes.borrow_mut().remove(&PG_PID);
+        host.listeners.borrow_mut().retain(|_, pid| *pid != PG_PID);
+        let status = run_dbms(&setup, &host, ServiceCommand::Status);
+        assert_eq!(status.state, ServiceState::NotRunning);
+        assert!(status.stale_record, "the fall is named");
+        let started = run_dbms(&setup, &host, ServiceCommand::Start);
+        assert_eq!(started.action, ServiceAction::Started);
+        let record = dbms_record(&setup);
+        assert_eq!(record.port, port, "the same port");
+        assert!(record.explicit, "dbms start makes it explicit");
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, None);
+        assert!(host.processes.borrow().contains_key(&PG_PID));
+    }
+
+    #[test]
+    fn after_a_reboot_the_server_starts_again_with_its_postgres_as_a_step() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        let port = dbms_record(&setup).port;
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        let started = setup.run(ServiceCommand::Start, false, &host).unwrap();
+        assert_eq!(started.action, ServiceAction::Started);
+        assert!(started.stale_record);
+        let record = dbms_record(&setup);
+        assert_eq!(record.port, port);
+        assert!(!record.explicit, "this start raised it as its step");
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+    }
+
+    #[test]
+    fn after_a_reboot_an_explicit_postgres_raised_by_the_server_becomes_its_step() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        run_dbms(&setup, &host, ServiceCommand::Start);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        assert!(dbms_record(&setup).explicit);
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        assert!(!dbms_record(&setup).explicit, "standalone start raised it");
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+    }
+
+    #[test]
+    fn a_cancelled_start_over_postgres_stops_the_server_and_the_postgres_it_raised() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        host.never_ready.set(true);
+        let token = tokio_util::sync::CancellationToken::new();
+        host.cancel_on_server.replace(Some(token.clone()));
+        let context = ExecutionContext::cli(CommandName::StandaloneStart).with_cancellation(token);
+        let error = setup
+            .run_in(&context, ServiceCommand::Start, false, &host)
+            .unwrap_err();
+        assert!(
+            matches!(error.kind(), UseCaseErrorKind::Cancelled(_)),
+            "{error}"
+        );
+        assert!(
+            host.processes.borrow().is_empty(),
+            "{:?}",
+            host.processes.borrow()
+        );
+    }
+
+    #[test]
+    fn a_server_that_does_not_stop_keeps_its_record_and_its_postgres_and_a_repeat_goes_on() {
+        let setup = over_postgres();
+        let host = Host::default();
+        host.database_exists.set(true);
+        setup.run(ServiceCommand::Start, false, &host).unwrap();
+        host.ignores_soft_stop.set(true);
+        host.immortal.set(true);
+        let refused = setup.run(ServiceCommand::Stop, false, &host).unwrap_err();
+        assert!(refused.to_string().contains(&PID.to_string()), "{refused}");
+        assert!(
+            setup.paths().record().exists(),
+            "the record names the live server"
+        );
+        assert!(
+            host.processes.borrow().contains_key(&PG_PID),
+            "its database stays"
+        );
+        host.immortal.set(false);
+        let stopped = setup.run(ServiceCommand::Stop, false, &host).unwrap();
+        assert_eq!(stopped.stopped_pid, Some(PID));
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+        assert!(host.processes.borrow().is_empty());
     }
 
     #[test]
