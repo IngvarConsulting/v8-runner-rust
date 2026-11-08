@@ -550,7 +550,9 @@ fn a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_no
         serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
     assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
 
-    // Контроль: запись того же инструмента с тем же токеном выгрузку пропускает.
+    // Контроль: запись того же инструмента с тем же токеном выгрузку пропускает. Выгрузка
+    // выше оставила файлы вне учёта; без фиксации сторож откажет.
+    commit_project(&harness);
     let (code, payload) = run_dump(&harness, &[]);
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
