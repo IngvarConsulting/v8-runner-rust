@@ -17,6 +17,15 @@ pub const SUPERUSER: &str = "postgres";
 /// Форму `ru-RU` платформа отвергает (замер #534).
 const WINDOWS_LOCALE: &str = "Russian_Russia";
 
+/// Где взять сборку: вызывающий сам решает, качать ли её и ставить ли. Каталог вендора держит только
+/// последнюю сборку ветки, поэтому ссылка — на каталог, а не на файл; ветка 17 — та, что замерена.
+pub const WHERE_TO_GET_A_BUILD: &str = concat!(
+    "the free build \"PostgreSQL for 1C\" by Postgres Professional is the current Setup.exe in ",
+    "https://repo.postgrespro.ru/1c/1c-17/win/, under the PostgreSQL License (license.txt in the build); ",
+    "its installer needs administrator rights and may register its own service, which the runner does not use; ",
+    "the runner needs only the bin directory with pg_ctl"
+);
+
 /// Каталог `bin` сборки, найденный по `tools.postgres.path`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresBuild {

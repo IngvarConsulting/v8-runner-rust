@@ -624,6 +624,11 @@ v8-runner dbms restart [--dry-run]
   `environment_unavailable`.
 - `tools.postgres.path` называет каталог сборки PostgreSQL для 1С. Данные, журнал, пароль и запись
   лежат под `workPath/infobases/<база>/managed/postgres/`; удаление `workPath` уничтожает базу.
+- Раннер сборку не скачивает и не устанавливает. Без неё `start` и `restart` отвечают `environment_unavailable`
+  с инструкцией: бесплатная «PostgreSQL для 1С» от Postgres Professional лежит на
+  `https://repo.postgrespro.ru/1c/1c-17/win/` под лицензией PostgreSQL, её установщику нужны права
+  администратора, раннеру нужен только каталог `bin`. Скачать, установить или спросить человека решает
+  вызывающий.
 - PostgreSQL слушает только `127.0.0.1`, порт закрепляется при первом запуске, занятый чужим
   процессом порт — `workspace_busy`. Значение пароля в ответ не попадает: `status` называет файл.
 - `status` работает без замка `workPath`. `stop` при работающем своём сервере отказывает.

@@ -636,7 +636,8 @@ infobases:
 `dbms.managed: {}` поручает PostgreSQL раннеру (команды `dbms`, только Windows); рядом с ним остаются
 `dbms.name` и `dbms.locale`, а `kind`, `server`, `user`, `password` — отказ с именем ключа. Ключ
 принимается только рядом с `cluster.managed` или `standalone.managed`. `tools.postgres.path` — каталог
-сборки PostgreSQL для 1С или его `bin`.
+сборки PostgreSQL для 1С или его `bin`. Раннер её не скачивает: без ключа или без `pg_ctl` в каталоге
+`dbms start` и `dbms restart` отказывают и называют, где взять бесплатную сборку и на каких условиях; работающий PostgreSQL `restart` не трогает.
 
 `standalone.managed: { name, db-path }` поручает `ibsrv` раннеру (команды `standalone`, только Windows): `db-path` — файловая
 база сервера, от каталога конфигурации. Шлюзы и адреса не объявляются. Вместо `db-path` можно объявить секцию `dbms`: управляемую
