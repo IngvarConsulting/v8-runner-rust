@@ -317,6 +317,7 @@ fn a_new_owner_is_offered_no_pull_until_its_first_push() {
         )],
     );
     // Память записана Конфигуратором с нулевым токеном, а база ответит другим.
+    recorded_by_designer(&project);
     project.base_generation(FIRST);
 
     let payload = envelope(&project.run(&["push"]));
@@ -361,6 +362,7 @@ fn a_copied_base_offers_no_pull_before_its_first_push() {
         r#"{"source":"upstream","snapshot":"/work/copies/upstream.dt","since":"2026-10-07T00:00:00Z"}"#,
     )
     .expect("copy mark");
+    recorded_by_designer(&project);
     project.base_generation(FIRST);
 
     let payload = envelope(&project.run(&["push"]));
@@ -978,6 +980,10 @@ fn an_ibcmd_pull_with_an_unchanged_generation_dumps_nothing() {
             r#"printf '%s\n' "$*" >> '{calls}'
 case "$*" in
   *'generation-id'*) cat '{token}'; exit 0 ;;
+  *'export info'*)
+    for arg in "$@"; do case "$arg" in --out=*) out="${{arg#--out=}}" ;; esac; done
+    printf '<ConfigDumpInfo version="2.17"/>\n' > "$out/ConfigDumpInfo.xml"
+    exit 0 ;;
 esac
 exit 0"#,
             calls = root.join("calls.log").display(),
@@ -1210,4 +1216,12 @@ fn without_a_generation_answer_a_no_memory_refusal_offers_pull_force() {
     let file = envelope(&Project::new("File=ib").run(&["push"]));
     assert_eq!(file["error"]["next"]["command"], "pull", "{file}");
     assert!(file["error"]["next"].get("keys").is_none(), "{file}");
+}
+
+/// Запись памяти о базе — от Конфигуратора с нулевым токеном: его ответ поколением с ней
+/// сравним, и отказ проверяет именно расхождение токенов.
+fn recorded_by_designer(project: &Project) {
+    let ledger = project.root().join("work/infobases/origin/generation.json");
+    let text = fs::read_to_string(&ledger).expect("generation ledger");
+    fs::write(&ledger, text.replace("\"ibcmd-rs\"", "\"designer\"")).expect("ledger");
 }
