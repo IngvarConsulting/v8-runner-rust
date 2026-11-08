@@ -213,9 +213,9 @@ impl TargetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Implementation {
-    /// В цепочке умолчаний.
+    /// Исполнитель реализован; участие в умолчаниях задаёт строка матрицы.
     Implemented,
-    /// Реализован, но в умолчания не входит: назначается только переопределением.
+    /// Экспериментальный исполнитель, назначаемый только переопределением.
     Experimental,
 }
 
@@ -234,6 +234,7 @@ pub struct Capability {
     pub provider: Provider,
     pub implementation: Implementation,
     pub evidence: Evidence,
+    in_default_chain: bool,
 }
 
 const fn implemented(provider: Provider, evidence: Evidence) -> Capability {
@@ -241,21 +242,23 @@ const fn implemented(provider: Provider, evidence: Evidence) -> Capability {
         provider,
         implementation: Implementation::Implemented,
         evidence,
+        in_default_chain: true,
     }
 }
 
-const fn experimental(provider: Provider, evidence: Evidence) -> Capability {
+const fn explicit_only(provider: Provider, evidence: Evidence) -> Capability {
     Capability {
         provider,
-        implementation: Implementation::Experimental,
+        implementation: Implementation::Implemented,
         evidence,
+        in_default_chain: false,
     }
 }
 
 /// Строки матрицы в порядке умолчаний.
 ///
-/// Первый реализованный исполнитель в строке — умолчание; остальные реализованные
-/// пробуются, если он не готов; экспериментальные назначаются только переопределением.
+/// Участники цепочки пробуются в порядке строки; строка также может объявлять
+/// реализованного исполнителя только для явного ключа настройки.
 pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capability] {
     use Evidence::{ArgvTested, Documented, LiveVerified};
     use Provider::{Agent, Designer, Ibcmd, Webinst};
@@ -360,7 +363,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     const SNAPSHOT_FILE: &[Capability] = &[
         implemented(Agent, LiveVerified),
         implemented(Designer, ArgvTested),
-        experimental(Ibcmd, Documented),
+        explicit_only(Ibcmd, LiveVerified),
     ];
     const SNAPSHOT_CLUSTER: &[Capability] = &[
         implemented(Agent, LiveVerified),
@@ -422,7 +425,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
 pub fn default_chain(operation: Operation, target: TargetKind) -> Vec<Provider> {
     capabilities(operation, target)
         .iter()
-        .filter(|capability| capability.implementation == Implementation::Implemented)
+        .filter(|capability| capability.in_default_chain)
         .map(|capability| capability.provider)
         .collect()
 }
@@ -933,8 +936,8 @@ mod tests {
                             .map(|capability| {
                                 serde_json::json!({
                                     "provider": capability.provider.as_str(),
-                                    "implemented":
-                                        capability.implementation == Implementation::Implemented,
+                                    // The pinned site's legacy field describes the default chain.
+                                    "implemented": capability.in_default_chain,
                                 })
                             })
                             .collect();
@@ -1035,6 +1038,19 @@ mod tests {
                     target.as_str()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn ibcmd_snapshots_are_implemented_but_require_an_explicit_key() {
+        for operation in [Operation::InfobaseDump, Operation::InfobaseRestore] {
+            let capability = capability_of(operation, TargetKind::File, Provider::Ibcmd)
+                .expect("file snapshot capability");
+            assert_eq!(capability.implementation, Implementation::Implemented);
+            assert_eq!(
+                default_chain(operation, TargetKind::File),
+                [Provider::Agent, Provider::Designer]
+            );
         }
     }
 

@@ -8,7 +8,9 @@ use tracing::debug;
 use crate::config::model::{
     declared_name, AppConfig, MissingDbmsField, SourceFormat, SourceSetConfig,
 };
-use crate::domain::capability::{Operation, Provider, TargetKind};
+use crate::domain::capability::{
+    Operation, Provider, ProviderPlan, ProviderReceipt, SkippedProvider, TargetKind,
+};
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::platform::connection::ClusterInfobaseCreation;
 use crate::platform::designer::DesignerDsl;
@@ -67,11 +69,10 @@ fn run_init(
     // утилиты своим статусом: отказ выбора здесь не прерывает команду — у серверного
     // подключения и у чисто EDT-проекта этот шаг может и не понадобиться. Квитанция
     // при этом остаётся честной: никто не готов, пропущенные названы.
-    // Копию `--from` создаёт только Конфигуратор: квитанция называет его, а ключ, который
-    // назначает другого исполнителя, — отказ до снимка: названный ключом исполнитель не
-    // подменяется.
+    // Снимок источника делает Конфигуратор; исполнителя загрузки образа в базу команды
+    // выбирает сценарий копирования по готовности и называет в квитанции.
     if args.from.is_some() {
-        return copy_with_the_designer(context, config, args, &mut utilities, started);
+        return copy_infobase(context, config, args, &mut utilities, started);
     }
     let (provider, receipt) =
         match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Init)
@@ -161,9 +162,11 @@ fn run_init(
     }
 }
 
-/// `infobase create --from`: шаг копии и, у формата EDT, рабочая область. Исполнитель —
-/// Конфигуратор: снимок и загрузка образа идут им (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
-fn copy_with_the_designer(
+/// `infobase create --from`: шаг копии и, у формата EDT, рабочая область. Снимок делает
+/// Конфигуратор; образ в базу команды загружает первый готовый исполнитель строки
+/// `infobase create`, который умеет загрузку образа: у файловой базы на POSIX — `ibcmd`
+/// (`INV.CLI.A-FILE-COPY-IS-CREATED-BY-IBCMD`), без него — Конфигуратор.
+fn copy_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &InitRequest,
@@ -171,43 +174,49 @@ fn copy_with_the_designer(
     started: Instant,
 ) -> UseCaseResult<InitResult> {
     let dry_run = args.dry_run;
-    let origin = match config.providers.get(&Operation::Init) {
-        None => crate::domain::capability::ProviderOrigin::Default,
-        Some(Provider::Designer) => crate::domain::capability::ProviderOrigin::Override {
-            file: config
-                .provider_origins
-                .get(&Operation::Init)
-                .cloned()
-                .unwrap_or_default(),
-        },
-        Some(other) => {
-            let error = UseCaseError::from(AppError::Validation(format!(
-                "infobase create --from takes the snapshot and loads the image with the Designer, and providers.{} names {}: remove the key or set it to designer",
-                Operation::Init.as_str(),
-                other.as_str()
-            )));
-            let mut result = init_result(started, Vec::new(), false);
-            result.provider = Some(crate::domain::capability::ProviderReceipt {
-                selected: None,
-                origin: crate::domain::capability::ProviderOrigin::Override {
-                    file: config
-                        .provider_origins
-                        .get(&Operation::Init)
-                        .cloned()
-                        .unwrap_or_default(),
-                },
-                skipped: Vec::new(),
-                endpoint: None,
-                reason: None,
-            });
-            return Err(InitExecutionFailure::with_payload(error, result));
+    let refuse = |error: AppError, receipt: ProviderReceipt| {
+        let mut result = init_result(started, Vec::new(), false);
+        result.provider = Some(receipt);
+        Err(InitExecutionFailure::with_payload(
+            UseCaseError::from(error),
+            result,
+        ))
+    };
+    let plan = config.provider_plan(Operation::Init);
+    let (plan, skipped) = match copy_restore_plan(plan) {
+        Ok(narrowed) => narrowed,
+        Err((error, receipt)) => return refuse(error, receipt),
+    };
+    // Выбор по готовности идёт внутри шага, после отказов по `--from` и по виду цели;
+    // отказ до выбора оставляет квитанцию, в которой никто не выбран.
+    let mut receipt = plan.receipt_for_nobody(skipped.clone());
+    let select = |utilities: &mut PlatformUtilities| {
+        let mut skipped = skipped;
+        let selected = crate::use_cases::provider_selection::select_from(
+            config,
+            utilities,
+            Operation::Init,
+            plan,
+        );
+        match selected {
+            Ok(mut selected) => {
+                skipped.append(&mut selected.receipt.skipped);
+                selected.receipt = selected.receipt.with_skipped(skipped);
+                receipt = selected.receipt.clone();
+                Ok(selected)
+            }
+            Err((error, mut refused)) => {
+                skipped.append(&mut refused.skipped);
+                receipt = refused.with_skipped(skipped);
+                Err(error)
+            }
         }
     };
     let from = args.from.as_deref().unwrap_or_default();
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
     let mut shared_edt: Option<EdtDsl<'static>> = None;
-    let (step, source) = copy::ensure_copy(context, config, utilities, from, dry_run);
+    let (step, source) = copy::ensure_copy(context, config, utilities, from, dry_run, select);
     record_step(&mut steps, &mut first_error, step);
     record_step(
         &mut steps,
@@ -216,19 +225,62 @@ fn copy_with_the_designer(
     );
     let mut result = init_result(started, steps, first_error.is_none());
     result.source = source;
-    result.provider = Some(crate::domain::capability::ProviderReceipt {
-        selected: Some(Provider::Designer),
-        origin,
-        skipped: Vec::new(),
-        endpoint: None,
-        reason: None,
-    });
+    result.provider = Some(receipt);
     if dry_run {
         log_live_stage("init: preview", "[Init] preview only, nothing created");
     }
     match first_error {
         Some(error) => Err(InitExecutionFailure::with_payload(error, result)),
         None => Ok(result),
+    }
+}
+
+/// План `infobase create` без исполнителей, которые не загружают образ DT в эту базу:
+/// исключённые из умолчания названы в квитанции с причиной, а ключ, назначивший такого
+/// исполнителя, — отказ `validation` до снимка: названный ключом исполнитель не подменяется.
+/// Можно ли `ibcmd` передать DT на этой ОС, решает его адаптер.
+#[allow(clippy::result_large_err)] // The refusal carries the receipt the answer reports.
+fn copy_restore_plan(
+    plan: ProviderPlan,
+) -> Result<(ProviderPlan, Vec<SkippedProvider>), (AppError, ProviderReceipt)> {
+    let refusal = |provider: Provider| match provider {
+        Provider::Designer => None,
+        Provider::Ibcmd => {
+            crate::platform::ibcmd::dt_transfer_refusal().map(|error| error.to_string())
+        }
+        other => Some(format!(
+            "{other} does not load a DT image into the infobase of infobase create --from"
+        )),
+    };
+    match plan {
+        ProviderPlan::Override { provider, .. } => match refusal(provider) {
+            None => Ok((plan, Vec::new())),
+            Some(reason) => Err((
+                AppError::Validation(format!(
+                    "infobase create --from cannot load the image with providers.{}: {}: {reason}; remove the key or set it to designer",
+                    Operation::Init.as_str(),
+                    provider.as_str()
+                )),
+                plan.receipt_for_nobody(vec![SkippedProvider { provider, reason }]),
+            )),
+        },
+        ProviderPlan::Default { chain } => {
+            let mut skipped = Vec::new();
+            let chain = chain
+                .into_iter()
+                .filter(|provider| match refusal(*provider) {
+                    None => true,
+                    Some(reason) => {
+                        skipped.push(SkippedProvider {
+                            provider: *provider,
+                            reason,
+                        });
+                        false
+                    }
+                })
+                .collect();
+            Ok((ProviderPlan::Default { chain }, skipped))
+        }
     }
 }
 
@@ -2247,5 +2299,62 @@ mod tests {
         assert_eq!(workspace_step(&result).status, InitStepStatus::Ok);
         assert_eq!(edt_calls_text.matches("START").count(), 1);
         assert_eq!(edt_calls_text.matches("import --project").count(), 2);
+    }
+
+    /// Копия берёт исполнителя загрузки из строки `infobase create` по готовности: `ibcmd`
+    /// остаётся в цепочке там, где его адаптер передаёт DT, и иначе назван пропущенным;
+    /// ключ, назначивший исполнителя без загрузки образа, — отказ с именем ключа.
+    #[test]
+    fn a_copy_restores_with_the_chain_its_adapters_can_run() {
+        use crate::domain::capability::{Provider, ProviderPlan};
+
+        let (plan, skipped) = super::copy_restore_plan(ProviderPlan::Default {
+            chain: vec![Provider::Ibcmd, Provider::Designer],
+        })
+        .expect("default chain");
+        if cfg!(unix) {
+            assert_eq!(plan.candidates(), [Provider::Ibcmd, Provider::Designer]);
+            assert!(skipped.is_empty(), "{skipped:?}");
+        } else {
+            assert_eq!(plan.candidates(), [Provider::Designer]);
+            assert_eq!(skipped.len(), 1, "{skipped:?}");
+            assert_eq!(skipped[0].provider, Provider::Ibcmd);
+            assert!(skipped[0].reason.contains("Windows"), "{skipped:?}");
+        }
+
+        let designer = ProviderPlan::Override {
+            provider: Provider::Designer,
+            file: "v8project.yaml".to_owned(),
+        };
+        let (plan, skipped) = super::copy_restore_plan(designer.clone()).expect("designer key");
+        assert_eq!(plan, designer);
+        assert!(skipped.is_empty());
+
+        for provider in [Provider::Agent, Provider::Ibcmd] {
+            let named = super::copy_restore_plan(ProviderPlan::Override {
+                provider,
+                file: "v8project.yaml".to_owned(),
+            });
+            let refused = provider == Provider::Agent || cfg!(not(unix));
+            match named {
+                Ok((plan, _)) => {
+                    assert!(!refused, "{provider:?} must be refused");
+                    assert_eq!(plan.candidates(), [provider]);
+                }
+                Err((error, receipt)) => {
+                    assert!(refused, "{provider:?} must be kept: {error}");
+                    assert!(matches!(
+                        error,
+                        crate::support::error::AppError::Validation(_)
+                    ));
+                    assert!(
+                        error.to_string().contains("providers.infobase.create"),
+                        "{error}"
+                    );
+                    assert_eq!(receipt.selected, None);
+                    assert_eq!(receipt.skipped[0].provider, provider);
+                }
+            }
+        }
     }
 }

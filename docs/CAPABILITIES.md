@@ -34,7 +34,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `test --no-push` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без `push` |
 | `pull` | у файловой базы цепочка `agent` → `designer` → `ibcmd`, а без ключа `providers.pull` у полной выгрузки (`--force` или выгрузка без годного файла версий) — `ibcmd` → `agent` → `designer` (квитанция: `reason: whole`); у кластера `agent` → `designer`; при `format=EDT` агент в цепочку файловой базы и кластера не входит; у автономного сервера — `designer` по прямому шлюзу → `agent` через SSH-шлюз | Инкрементальная (без ключей), object-scoped partial (`--object`) или полная (`--force`) выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `incremental` агент, Конфигуратор или `ibcmd` спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки тем же инструментом — у основной конфигурации файловой базы любым из агента, Конфигуратора и `ibcmd` — означает «выгружать нечего» (`up_to_date`, выгрузка не запускается); при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; до запуска платформы любая выгрузка без `--force` — и поверх каталога, и с заменой — спрашивает git, что в каталоге цели не восстановить, и найдя незафиксированное, файл вне учёта или в игноре (кроме `ConfigDumpInfo.xml` в корне цели выгрузки в формате Конфигуратора — она пишет его заново; у reverse sync EDT и у `convert` исключения нет), отказывает и называет потери; каталог вне системы контроля версий (git не отвечает) с файлами — такой же отказ, потеря — каждый файл (отказ называет их счёт и первые имена); `pull --force` — само согласие: уничтожает найденное без копии и называет его в `data.losses` — счёт и первые двадцать путей; превью (`--dry-run`) называет потери так же |
 | `download` | у файловой базы цепочка `agent` → `designer` → `ibcmd`, у кластера `agent` → `designer`; `--state db` — те же без `agent`; у автономного сервера (`infobase.standalone`) — `designer` по прямому шлюзу → `agent` через SSH-шлюз, `--state db` — только `designer` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; конфигурацию базы данных (`--state db`) выгружают `designer` (`/DumpDBCfg`) и `ibcmd` (`config save --db`), а `providers.download: agent` при ней отказывает с `capability_unavailable` до запуска; у `agent` только `working` (`config dump-cfg`), файл пишется в каталог агента и переносится в staging |
-| `infobase dump` | цепочка `agent` → `designer`; у файловой базы `ibcmd` только по `providers.infobase.dump`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/DumpIB`): через SSH-шлюз `dump-ib` роняет `ibsrv` 8.3.27 | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; адаптер появится только вместе с проверкой монопольного доступа до запуска и ждёт живого замера [#435](https://github.com/IngvarConsulting/v8-runner-rust/issues/435); у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
+| `infobase dump` | цепочка `agent` → `designer`; у файловой базы `ibcmd` только по `providers.infobase.dump`; у автономного сервера (`infobase.standalone`) — только `designer` по прямому шлюзу (`/DumpIB`): через SSH-шлюз `dump-ib` роняет `ibsrv` 8.3.27 | Выгружает полную ИБ в переносимый `.dt`; это не backup; `ibcmd` на POSIX перед запуском проверяет блокировку `1Cv8.1CD` (`F_GETLK`): открытый сеанс — `infobase_busy` с PID держателя (или «неизвестный держатель» у OFD-блокировки) без запуска утилиты; на Windows он отказывает до запуска, пока признак сеансов там не замерен; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | EDT ↔ XML — `1cedtcli`; направления с пакетом — `ibcmd`; `ibcmd-rs` после замера [#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413) | Наборы в `.cf`/`.cfe` собираются в общей базе сборки `make`; файл пакета разбирается в XML во временной базе прогона. База проекта не нужна |
 | `upload` | `format=DESIGNER`, провайдер только `designer`; у автономного сервера — по прямому шлюзу | Загрузка `.cf` / `.cfe` артефактов в ИБ. Перед `.cfe` у кластера и автономного сервера список читает исполнитель `extensions list`, секция `infobase.dbms` не нужна. Если выбранный агент не поднялся, команда отказывает с родом `environment` до загрузки |
 | `make` / `artifacts` | Конфигуратор → `ibcmd`; `.epf`/`.erf` — Конфигуратор; любой формат | Собирает пакеты из исходников в постоянной базе `workPath/temp/build-infobase/`; при повторе переводит и загружает только необходимое; `--full` пересоздаёт базу |
@@ -572,10 +572,12 @@ v8-runner infobase create [--from <INFOBASE>] [--dry-run]
   в `v8project.local.yaml`, с её данными и конфигурацией. С источника Конфигуратор снимает
   образ `/DumpIB` в `workPath/copies/<база>.dt`; замок источника команда держит до конца, и
   источник, занятый другой командой, — отказ `infobase_busy` до снимка. В метку источника
-  копия не пишется, новая база записывается в метку за этой копией. Новую базу из образа
-  создаёт Конфигуратор: файловую — `/RestoreIB`, базу в кластере — `CREATEINFOBASE` (реквизиты
-  как выше), затем `/RestoreIB`. Создание файловой базы через `ibcmd` ждёт его исполнителя
-  `.dt` ([#226](https://github.com/IngvarConsulting/v8-runner-rust/issues/226)). На стенде
+  копия не пишется, новая база записывается в метку за этой копией. Базу в кластере
+  создаёт Конфигуратор через `CREATEINFOBASE` (реквизиты как выше), затем `/RestoreIB`.
+  Файловую копию загружает первый готовый исполнитель строки `infobase create`: на POSIX —
+  `ibcmd infobase restore` с проверкой сеансов, без найденного `ibcmd`, на Windows или по
+  `providers.infobase.create: designer` — Конфигуратор `/RestoreIB`; квитанция называет
+  пропущенный `ibcmd` с причиной, превью — выбранного исполнителя и его утилиту. На стенде
   8.3.27.2074 с PostgreSQL при занятом `Ref` `CREATEINFOBASE` отказал до создания БД.
   При усечённом `.dt` на свежей цели после отказа `/RestoreIB` остались зарегистрированная
   ИБ и её БД без таблиц справочников и документов. Шаблон `/UseTemplate` раннер
@@ -584,8 +586,9 @@ v8-runner infobase create [--from <INFOBASE>] [--dry-run]
   [Замер #434](../references/1c/confirmed-runtime-measurements.md#createinfobase-с-dt-шаблоном-в-кластере).
   При неудаче `/RestoreIB` раннер называет `infobase restore --input <образ> --replace`.
   Ответ называет источник и снимок в `data.source.infobase` и `data.source.snapshot`.
-  Квитанция называет Конфигуратор. `providers.infobase.create`, который
-  назначает другого исполнителя, с `--from` — отказ `validation` до снимка.
+  Квитанция называет исполнителя загрузки образа. `providers.infobase.create`, назначающий
+  исполнителя, который образ сюда не загружает (кроме `designer` и `ibcmd`; `ibcmd` на
+  Windows), с `--from` — отказ `validation` до снимка.
 - Сеансы источника раннер не завершает: снимок требует свободного источника. Неудачный снимок —
   отказ `platform` с рецептом: у файловой базы закрыть Конфигуратор и клиенты копии-владельца
   (отказ называет её по метке), у базы в кластере — окно обслуживания `sessions deny`,
@@ -1457,18 +1460,19 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
 - Сохраняет полную ИБ с данными в переносимый DT-файл. DT не является резервной копией.
 - `--output` с расширением `.cf` или `.cfe` отклоняется до запуска платформы, и отказ называет
   `download`: пакет конфигурации пишет она.
-- Умолчание — цепочка `agent` → `designer`. `ibcmd` для DT стоит в матрице файловой базы
-  experimental: в цепочку умолчаний не входит, а названный `providers.infobase.dump: ibcmd`
-  отказывает при запуске — адаптера нет. У кластера `ibcmd` в строке нет.
+- Умолчание — цепочка `agent` → `designer`. На POSIX `ibcmd` реализован для файловой базы
+  и выбирается явно через `providers.infobase.dump: ibcmd`. У кластера `ibcmd` в строке нет.
 - Если implemented provider есть, но binary/version/connection не готовы, возвращается
   `environment_unavailable`; `capability_unavailable` означает отсутствие implemented adapter.
 - Для файловой ИБ readiness обоих process providers требует существующий файл
   `<infobase>/1Cv8.1CD`; один каталог или найденный бинарник не считаются готовой ИБ.
 - Selection показывает каждого кандидата через независимые `implementation`, `readiness` и
   `evidence`; `argv_tested` не выдаётся за live proof.
-- Когда у IBCMD появится адаптер DT, он запустится только после проверки монопольного доступа:
-  при открытом сеансе — отказ до запуска `ibcmd infobase dump`. Признак сеанса у файловой базы
-  и поведение `ibcmd` при открытом сеансе ещё не замерены — [#435](https://github.com/IngvarConsulting/v8-runner-rust/issues/435).
+- Перед IBCMD DT раннер проверяет блокировку `1Cv8.1CD` через `F_GETLK`. Открытый сеанс
+  даёт `infobase_busy` с PID держателя (или «неизвестный держатель» у OFD-блокировки) до
+  запуска утилиты. Ошибка проверки также не допускает запуск. Снимок публикуется из staging только после успеха: сам `ibcmd` при отказе обрезает
+  выходной файл. Проверено на Linux и macOS; на Windows этот исполнитель DT отказывает,
+  пока признак сеанса не измерен. [Замеры](../references/1c/confirmed-runtime-measurements.md#ibcmd-dt-на-linux).
 - Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
   отсутствующий `source-set` равнозначен `source-set: []`, а сломанные project sources не блокируют чтение ИБ.
   Push/source/test/EDT/client-MCP настройки для этих команд не валидируются.
@@ -1499,9 +1503,10 @@ v8-runner infobase restore --input <FILE.dt> --create  [--dry-run]
   просит разрешение на перезапуск, а раннер на вопросы не отвечает. Назначенный ключом, он на такой
   платформе отказывает до запуска; где версия не видна из пути и у чужого агента (`attached`), он
   остаётся в цепочке ([правило](../spec/rules/use-cases/a-restore-below-8-3-27-skips-the-agent.md)).
-  IBCMD `infobase restore` стоит в матрице файловой базы `experimental`, но адаптера у него нет:
-  названный ключом, он отказывает при запуске — как и IBCMD DT export; адаптер ждёт той же
-  проверки монопольного доступа и замера [#435](https://github.com/IngvarConsulting/v8-runner-rust/issues/435).
+  На POSIX `providers.infobase.restore: ibcmd` выбирает восстановление файловой базы после
+  проверки `F_GETLK`. Для `--create` передаётся `--create-database`; `--replace` восстанавливает
+  существующую базу. Сеансы не завершаются. Восстановление — критическая фаза, отмена ждёт
+  его исхода. На Windows признак сеансов этого исполнителя DT ещё не измерен.
 - `target_state` различает `created` и `replaced`. Если провайдер упал, `target_state` —
   `uncertain`: сколько данных он успел заменить, отсюда не видно.
 - `restored=true` означает, что провайдер сообщил о завершённой загрузке.
