@@ -29,10 +29,12 @@ use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    connect, generation_id, transcript_log, wait_policy, AgentHandle, GenerationRecord,
+    connect, generation_id, transcript_log, wait_policy, AgentHandle, GenerationRecord, TokenScope,
 };
 use crate::use_cases::context::ExecutionContext;
-use crate::use_cases::exchange_guard::{memory_of, new_owner_since, predict, recorded_generation};
+use crate::use_cases::exchange_guard::{
+    memory_of, new_owner_since, predict, recorded_generation, token_scope,
+};
 use crate::use_cases::generation_reader::{
     designer_log_file, read_generation, read_unapplied, GenerationProcess,
 };
@@ -205,9 +207,9 @@ fn deepen(
         else {
             continue;
         };
-        let record = inventory
-            .designer_context(&declared.name)
-            .and_then(|context| recorded_generation(context, &config.work_path));
+        let memory = inventory.designer_context(&declared.name);
+        let record = memory.and_then(|context| recorded_generation(context, &config.work_path));
+        let scope = memory.map_or(TokenScope::OwnTool, |context| token_scope(config, context));
         set.base = Some(match asker.as_mut() {
             Ok(asker) => {
                 let base = base_generation(
@@ -217,6 +219,7 @@ fn deepen(
                         .as_ref()
                         .map(Option::as_deref),
                     record.as_ref(),
+                    scope,
                 );
                 let unapplied = asker
                     .unapplied(context, config, *extension)
@@ -224,7 +227,7 @@ fn deepen(
                 with_unapplied(base, unapplied)
             }
             Err(error) => with_unapplied(
-                base_generation(tool, Err(&*error), record.as_ref()),
+                base_generation(tool, Err(&*error), record.as_ref(), scope),
                 Err(error.to_string()),
             ),
         });
@@ -254,6 +257,7 @@ fn base_generation(
     tool: Option<Provider>,
     answer: Result<Option<&str>, &AppError>,
     record: Option<&GenerationRecord>,
+    scope: TokenScope,
 ) -> BaseGeneration {
     let (token, reason) = match answer {
         Ok(Some(token)) => (Some(token.to_owned()), None),
@@ -263,7 +267,7 @@ fn base_generation(
         ),
         Err(error) => (None, Some(error.to_string())),
     };
-    let comparison = predict(record, tool.zip(token.as_deref()));
+    let comparison = predict(record, tool.zip(token.as_deref()), scope);
     BaseGeneration {
         tool,
         token,
@@ -575,12 +579,37 @@ mod tests {
             ),
         ];
         for (tool, answer, record, expected) in cases {
-            assert_eq!(base_generation(tool, answer, record).comparison, expected);
+            assert_eq!(
+                base_generation(tool, answer, record, TokenScope::OwnTool).comparison,
+                expected
+            );
+        }
+        // Основная конфигурация файловой базы (#559): ответ другого инструмента сверяется с
+        // записью, как ответ того же.
+        for (token, expected) in [
+            (a.as_str(), GenerationVerdict::Unchanged),
+            (b.as_str(), GenerationVerdict::MovedAhead),
+        ] {
+            assert_eq!(
+                base_generation(
+                    Some(Provider::Ibcmd),
+                    Ok(Some(token)),
+                    Some(&designer),
+                    TokenScope::AnyTool
+                )
+                .comparison,
+                expected
+            );
         }
         assert_eq!(
-            base_generation(Some(Provider::Designer), Ok(None), Some(&designer))
-                .reason
-                .as_deref(),
+            base_generation(
+                Some(Provider::Designer),
+                Ok(None),
+                Some(&designer),
+                TokenScope::OwnTool
+            )
+            .reason
+            .as_deref(),
             Some("the tool gave no configuration generation")
         );
     }

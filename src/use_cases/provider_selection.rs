@@ -64,6 +64,27 @@ pub fn select(
     )
 }
 
+/// Первый готовый исполнитель операции данного объёма (`AppConfig::provider_plan_sized`):
+/// квитанция и в удаче, и в отказе называет причину порядка, если порядок выбран по объёму.
+///
+/// Дальше по цепочке выбор идёт только по готовности, как у [`select`]: исполнитель, утилита
+/// которого найдена, выбран, и его отказ при исполнении на следующего не переводит.
+pub fn select_sized(
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    operation: Operation,
+    size: crate::domain::capability::OperationSize,
+) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
+    let (plan, reason) = config.provider_plan_sized(operation, size);
+    match select_from(config, utilities, operation, plan) {
+        Ok(mut selected) => {
+            selected.receipt = selected.receipt.with_reason(reason);
+            Ok(selected)
+        }
+        Err((error, receipt)) => Err((error, receipt.with_reason(reason))),
+    }
+}
+
 /// Первый готовый исполнитель из данного плана: так операция сужает план, когда часть её
 /// работы умеет только один исполнитель (`make` внешних обработок — Конфигуратор).
 pub fn select_from(

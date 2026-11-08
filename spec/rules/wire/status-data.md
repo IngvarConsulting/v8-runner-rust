@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.STATUS-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/status.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -26,6 +26,8 @@ check:
 расширения-инструмента клиентского MCP `tool: true`, — и, у файловой
 базы, `holders` — копии из метки владельца. Без `--deep` этих полей нет. Что платформа не
 ответила, форма называет `null` с причиной в `reason`, а не отказом команды.
+
+**Что изменила версия 6.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 **Что изменила версия 5.** У расширения из пакетного списка Конфигуратора `active: null`.
 Имя из списка участвует в сопоставлении с наборами проекта.

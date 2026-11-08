@@ -1,12 +1,13 @@
 ---
 id: CTR.WIRE.PULL-DATA
-version: 7
+version: 8
 artifact: docs/schemas/command-data/pull.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
   - tests/cli_dump.rs::a_pull_answer_does_not_grow_with_the_losses
+  - tests/contract_receipt.rs::a_file_base_picks_the_executor_by_the_size_of_the_operation
 ---
 
 # `data` команды `pull`
@@ -20,6 +21,13 @@ check:
 
 Размер ответа не растёт с числом файлов в каталоге набора: потери он называет счётом и
 первыми именами, а не каждым путём.
+
+**Что изменила версия 8.** Квитанция `provider` получила необязательное поле `reason` — почему
+цепочка умолчаний стоит в этом порядке: `whole` — каждый набор команды идёт целиком, и первым
+стоит `ibcmd`; `by_changes` — хоть один набор идёт по изменившемуся или выборкой, и первым
+стоит агент ([правило](../use-cases/the-agent-leads-a-default-chain.md)). Поле есть только у
+умолчания файловой базы, которое раннер упорядочил по объёму; у ключа `providers.*`, у кластера,
+автономного сервера и подключённого агента его нет. Прежде объём выбор не менял.
 
 **Что изменила версия 7.** `losses` — объект, а не перечень: `count` — сколько путей
 пропадает, `named` — первые из них, не больше двадцати. Пути прежние: от корня рабочей копии,

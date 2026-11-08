@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PUBLISH-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/publish.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -17,6 +17,8 @@ check:
 целиком, потому что публикация замещает `default.vrd` без остатка. Целиком — значит без
 пропущенных параметров, а не без маскирования: `-connstr` несёт строку соединения, и
 пароль в ней закрыт как везде.
+
+**Что изменила версия 5.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 **Что изменила версия 4.** Схема квитанции `provider` допускает необязательное поле
 `endpoint` — точку входа сессии агента ([правило](a-session-receipt-names-its-endpoint.md)): тип квитанции

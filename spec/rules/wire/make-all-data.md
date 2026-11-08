@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.MAKE-ALL-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/make-all.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -17,6 +17,8 @@ check:
 порядке обхода; после первого отказа обход останавливается, и последняя запись — отказавший
 набор. `provider_dispatched` — получил ли исполнитель работу хотя бы у одного набора; у превью
 `false`.
+
+**Что изменила версия 3.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 ## Пример
 

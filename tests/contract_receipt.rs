@@ -82,10 +82,11 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     let artifact = dir.path().join("main.cf").display().to_string();
 
     let expectations: Vec<(Vec<&str>, &str)> = vec![
-        // У файловой базы `push` и `pull` первым пробуют агента: его поднимает раннер, и
-        // готов он тогда же, когда найдена платформа.
-        (vec!["build", "--dry-run"], "agent"),
-        (vec!["dump", "--force", "--dry-run"], "agent"),
+        // У файловой базы полные `push` и `pull` первым пробуют `ibcmd` (#559): у первой
+        // отправки памяти исходников нет, и набор грузится целиком; по изменившемуся первым
+        // идёт агент — это проверяет `a_file_base_picks_the_executor_by_the_size_of_the_operation`.
+        (vec!["build", "--dry-run"], "ibcmd"),
+        (vec!["dump", "--force", "--dry-run"], "ibcmd"),
         // Файловую базу первым создаёт `ibcmd`: сразу с основной конфигурацией (#204).
         (vec!["infobase", "create", "--dry-run"], "ibcmd"),
         // `make` использует базу сборки: первым в цепочке стоит Конфигуратор.
@@ -118,15 +119,28 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     }
 }
 
-/// Умолчание — цепочка: без платформы сборка идёт через `ibcmd`, и квитанция называет
-/// пропущенных с причиной — агента, которого раннер поднимает той же платформой, и
-/// Конфигуратор.
+/// Файл версий, по которому выгрузка идёт по изменившемуся: формат 2.20 пишет платформа
+/// 8.3.27 из раскладки `write_project`.
+fn with_version_file(dir: &Path) {
+    fs::write(
+        dir.join("project")
+            .join("configuration")
+            .join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.20\"/>\n",
+    )
+    .expect("version file");
+}
+
+/// Умолчание — цепочка: без платформы выгрузка по изменившемуся идёт через `ibcmd`, и
+/// квитанция называет пропущенных с причиной — агента, которого раннер поднимает той же
+/// платформой, и Конфигуратор.
 #[test]
 fn a_default_chain_reports_who_was_skipped_and_why() {
     let dir = temp_workspace();
     let config_path = write_project(dir.path(), &["ibcmd"], "");
+    with_version_file(dir.path());
 
-    let (code, payload) = run(&config_path, &["build", "--dry-run"]);
+    let (code, payload) = run(&config_path, &["dump", "--dry-run"]);
 
     assert_eq!(code, 0, "{payload}");
     let receipt = &payload["data"]["provider"];
@@ -138,6 +152,63 @@ fn a_default_chain_reports_who_was_skipped_and_why() {
             .as_str()
             .is_some_and(|reason| reason.contains("not ready")));
     }
+}
+
+/// Без ключа у файловой базы исполнителя `push` и `pull` выбирает объём (#559): целиком —
+/// `ibcmd`, по изменившемуся — агент; квитанция называет причину полем `reason`. Без `ibcmd`
+/// цепочка идёт дальше прежним порядком, а ключ `providers.pull` остаётся строгим и причины
+/// не называет.
+#[test]
+fn a_file_base_picks_the_executor_by_the_size_of_the_operation() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), &["1cv8", "ibcmd"], "");
+    let receipt = |arguments: &[&str]| {
+        let (code, payload) = run(&config_path, arguments);
+        assert_eq!(code, 0, "`{}`: {payload}", arguments.join(" "));
+        payload["data"]["provider"].clone()
+    };
+
+    for whole in [
+        &["dump", "--force", "--dry-run"][..],
+        &["dump", "--dry-run"][..],
+        &["build", "--dry-run"][..],
+        &["build", "--force", "--dry-run"][..],
+    ] {
+        let provider = receipt(whole);
+        assert_eq!(provider["selected"], "ibcmd", "{provider}");
+        assert_eq!(provider["reason"], "whole", "{provider}");
+        assert_eq!(provider["origin"]["kind"], "default", "{provider}");
+    }
+
+    with_version_file(dir.path());
+    let provider = receipt(&["dump", "--dry-run"]);
+    assert_eq!(provider["selected"], "agent", "{provider}");
+    assert_eq!(provider["reason"], "by_changes", "{provider}");
+
+    fs::remove_file(
+        dir.path()
+            .join("platform")
+            .join("8.3.27.2074")
+            .join("bin")
+            .join("ibcmd"),
+    )
+    .expect("remove ibcmd");
+    let provider = receipt(&["dump", "--force", "--dry-run"]);
+    assert_eq!(provider["selected"], "agent", "{provider}");
+    assert_eq!(provider["reason"], "whole", "{provider}");
+    assert_eq!(provider["skipped"][0]["provider"], "ibcmd", "{provider}");
+
+    let config_path = write_project(
+        dir.path(),
+        &["1cv8", "ibcmd"],
+        "providers:\n  pull: designer\n",
+    );
+    let (code, payload) = run(&config_path, &["dump", "--force", "--dry-run"]);
+    assert_eq!(code, 0, "{payload}");
+    let provider = &payload["data"]["provider"];
+    assert_eq!(provider["selected"], "designer", "{provider}");
+    assert_eq!(provider["origin"]["kind"], "override", "{provider}");
+    assert!(provider.get("reason").is_none(), "{provider}");
 }
 
 /// Переопределение называет файл, из которого пришло, и не откатывается.

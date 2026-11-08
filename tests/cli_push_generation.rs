@@ -540,18 +540,42 @@ exit 0"#,
     assert_eq!(payload["error"]["base_generation"], SECOND, "{payload}");
 }
 
-/// Поколение, записанное Конфигуратором, `ibcmd` не сверяет: токены разных инструментов
-/// несравнимы, и расхождения они не дают.
-#[test]
-fn a_generation_of_another_tool_does_not_refuse_a_push() {
-    let project = Project::new("File=ib");
-    project.base_generation(FIRST);
-    succeeded(&project.run(&["push", "--force"]));
+/// Поддельный `ibcmd`: поколение основной конфигурации из файла `token`, расширения `ext` —
+/// из `token-ext`, если он есть; `config export info` пишет файл версий в каталог `--out` и,
+/// при файле `drift`, сдвигает поколение.
+fn ibcmd(root: &Path) -> String {
+    format!(
+        r#"printf '%s\n' "$*" >> '{calls}'
+case "$*" in
+  *'generation-id'*'--extension'*)
+    if [ -f '{token}-ext' ]; then cat '{token}-ext'; else cat '{token}'; fi
+    exit 0 ;;
+  *'generation-id'*) cat '{token}'; exit 0 ;;
+  *'export info'*)
+    for arg in "$@"; do case "$arg" in --out=*) out="${{arg#--out=}}" ;; esac; done
+    mkdir -p "$out"
+    printf '<ConfigDumpInfo version="2.20" by="ibcmd"/>\n' > "$out/ConfigDumpInfo.xml"
+    if [ -f '{drift}' ]; then cp '{drift}' '{token}'; fi
+    exit 0 ;;
+  *'config export status'*) exit 0 ;;
+  *'config export'*)
+    for arg in "$@"; do target="$arg"; done
+    mkdir -p "$target"
+    printf '<Configuration/>\n' > "$target/Configuration.xml"
+    printf '<ConfigDumpInfo version="2.20" by="export"/>\n' > "$target/ConfigDumpInfo.xml"
+    exit 0 ;;
+esac
+exit 0"#,
+        calls = root.join("calls.log").display(),
+        token = root.join("token").display(),
+        drift = root.join("drift").display(),
+    )
+}
+
+/// Переключает отправку проекта на `ibcmd` ключом `providers.push`.
+fn push_through_ibcmd(project: &Project) {
     let root = project.root().to_path_buf();
-    write_shell_script(
-        &root.join("ibcmd"),
-        &format!("case \"$*\" in *generation-id*) printf '{SECOND}\\n' ;; esac\nexit 0"),
-    );
+    write_shell_script(&root.join("ibcmd"), &ibcmd(&root));
     fs::write(
         &project.config,
         fs::read_to_string(&project.config)
@@ -563,10 +587,231 @@ fn a_generation_of_another_tool_does_not_refuse_a_push() {
             ),
     )
     .expect("config");
-    project.edit();
+}
 
+/// Основная конфигурация файловой базы (#559): поколение, записанное Конфигуратором, `ibcmd`
+/// сверяет — токены агента, Конфигуратора и `ibcmd` у неё общие. База ушла вперёд — отказ
+/// `non_fast_forward` до загрузки; то же поколение — отправка проходит.
+#[test]
+fn a_generation_of_another_tool_refuses_a_push_into_a_base_that_moved_ahead() {
+    let project = Project::new("File=ib");
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    assert_eq!(project.ledger()["main"]["tool"], "designer");
+    push_through_ibcmd(&project);
+    project.edit();
+    project.base_generation(SECOND);
+    project.forget_calls();
+
+    let payload = envelope(&project.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(payload["error"]["base_generation"], SECOND, "{payload}");
+    assert_eq!(payload["error"]["local_generation"], FIRST, "{payload}");
+    assert!(
+        !project.calls().contains("config import"),
+        "{}",
+        project.calls()
+    );
+
+    project.base_generation(FIRST);
     succeeded(&project.run(&["push"]));
-    assert_eq!(project.ledger()["main"]["tool"], "ibcmd");
+    let record = &project.ledger()["main"];
+    assert_eq!(record["tool"], "ibcmd", "{record}");
+    assert_eq!(record["token"], FIRST, "{record}");
+}
+
+/// У расширения токены инструментов различаются, поэтому запись Конфигуратора перед
+/// загрузкой `ibcmd` сверяет сам Конфигуратор: расширение ушло вперёд — отказ
+/// `non_fast_forward` до загрузки; то же поколение — отправка проходит, и запись переходит к
+/// `ibcmd`. Смена исполнителя сверку расширения не снимает.
+#[test]
+fn an_extension_generation_of_another_tool_is_checked_by_that_tool_before_a_push() {
+    let project = Project::new("File=ib").with_extension();
+    let root = project.root().to_path_buf();
+    let bin = root.join("platform").join("8.3.27.2074").join("bin");
+    write_shell_script(&bin.join("1cv8"), &platform(&root));
+    write_shell_script(&bin.join("ibcmd"), &ibcmd(&root));
+    let config = |push: &str| {
+        format!(
+            "workPath: work\nformat: DESIGNER\nproviders:\n  push: {push}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\n  - name: ext\n    type: EXTENSION\n    path: ext\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
+            root.join("platform").display()
+        )
+    };
+    fs::write(&project.config, config("designer")).expect("config");
+    project.base_generation(FIRST);
+    project.extension_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    assert_eq!(project.ledger()["ext"]["tool"], "designer");
+    fs::write(&project.config, config("ibcmd")).expect("config");
+    project.edit_extension();
+    project.extension_generation(SECOND);
+    project.forget_calls();
+
+    let payload = envelope(&project.run(&["push"]));
+
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(payload["error"]["base_generation"], SECOND, "{payload}");
+    assert_eq!(payload["error"]["local_generation"], FIRST, "{payload}");
+    let calls = project.calls();
+    assert!(calls.contains("/GetConfigGenerationID"), "{calls}");
+    assert!(!calls.contains("config import"), "{calls}");
+
+    project.extension_generation(FIRST);
+    succeeded(&project.run(&["push"]));
+    let record = &project.ledger()["ext"];
+    assert_eq!(record["tool"], "ibcmd", "{record}");
+    assert_eq!(record["token"], FIRST, "{record}");
+}
+
+/// Отправка `ibcmd`, загрузившая без применения, оставляет запись «не применено»; выгрузка
+/// Конфигуратором того же поколения её не снимает: инструменты сравнимы, и признак
+/// непринятого переживает смену инструмента.
+#[test]
+fn an_unapplied_mark_survives_a_dump_by_another_tool() {
+    let project = Project::new("File=ib");
+    project.ignore_version_files();
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    succeeded(&project.run(&["push", "--force"]));
+    support::commit_sources(project.root());
+    let designer_config = fs::read_to_string(&project.config).expect("config");
+    push_through_ibcmd(&project);
+    project.edit();
+    succeeded(&project.run(&["push", "--no-apply"]));
+    let record = &project.ledger()["main"];
+    assert_eq!(record["tool"], "ibcmd", "{record}");
+    assert_eq!(record["applied"], false, "{record}");
+    support::commit_sources(project.root());
+    fs::write(&project.config, designer_config).expect("back to the Designer");
+
+    succeeded(&project.run(&["pull", "main", "--force"]));
+
+    let record = &project.ledger()["main"];
+    assert_eq!(record["tool"], "designer", "{record}");
+    assert_eq!(record["after"], "dump", "{record}");
+    assert_eq!(record["applied"], false, "{record}");
+}
+
+/// Проект без ключа `providers.push` с установкой, где есть и Конфигуратор, и `ibcmd`:
+/// полную отправку файловой базы раннер отдаёт `ibcmd` (#559).
+fn project_without_a_push_key() -> Project {
+    let project = Project::new("File=ib");
+    let root = project.root().to_path_buf();
+    let bin = root.join("platform").join("8.3.27.2074").join("bin");
+    write_shell_script(&bin.join("1cv8"), &platform(&root));
+    write_shell_script(&bin.join("ibcmd"), &ibcmd(&root));
+    fs::write(
+        &project.config,
+        format!(
+            "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
+            root.join("platform").display()
+        ),
+    )
+    .expect("config");
+    project
+}
+
+/// `ibcmd config import` файла версий не пишет: после полной отправки через `ibcmd` раннер
+/// выгружает его `config export info`, кладёт в каталог набора и делает копией раннера, если
+/// поколение до и после одно и то же, — и следующая выгрузка идёт по нему.
+#[test]
+fn a_full_ibcmd_push_writes_the_version_file_and_the_next_pull_goes_by_it() {
+    let project = project_without_a_push_key();
+    project.base_generation(FIRST);
+    fs::write(
+        project.sources.join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.20\" stale=\"1\"/>\n",
+    )
+    .expect("stale version file");
+
+    let pushed = succeeded(&project.run(&["push", "--force"]));
+
+    assert_eq!(pushed["data"]["provider"]["selected"], "ibcmd", "{pushed}");
+    assert_eq!(pushed["data"]["provider"]["reason"], "whole", "{pushed}");
+    assert!(
+        project.calls().contains("export info"),
+        "{}",
+        project.calls()
+    );
+    let written = "<ConfigDumpInfo version=\"2.20\" by=\"ibcmd\"/>\n";
+    assert_eq!(
+        fs::read_to_string(project.sources.join("ConfigDumpInfo.xml")).expect("version file"),
+        written
+    );
+    assert_eq!(
+        fs::read_to_string(
+            project
+                .root()
+                .join("work/infobases/origin/dump-info/main/ConfigDumpInfo.xml")
+        )
+        .expect("runner copy"),
+        written
+    );
+
+    let preview = succeeded(&project.run(&["pull", "main", "--dry-run"]));
+
+    assert_eq!(preview["data"]["mode"], "INCREMENTAL", "{preview}");
+    assert_eq!(
+        preview["data"]["provider"]["reason"], "by_changes",
+        "{preview}"
+    );
+    assert_eq!(
+        preview["data"]["provider"]["selected"], "agent",
+        "{preview}"
+    );
+}
+
+/// Поколение изменилось, пока `ibcmd` выгружал файл версий: опись не доказана, прежний файл
+/// из каталога и копия раннера убираются, ответ говорит, что следующая выгрузка пойдёт
+/// полной, — и настоящая выгрузка идёт полной.
+#[test]
+fn a_version_file_the_base_moved_under_is_removed_after_an_ibcmd_push() {
+    let project = project_without_a_push_key();
+    project.ignore_version_files();
+    support::commit_sources(project.root());
+    project.base_generation(FIRST);
+    let runner_copy = project
+        .root()
+        .join("work/infobases/origin/dump-info/main/ConfigDumpInfo.xml");
+    fs::create_dir_all(runner_copy.parent().expect("copy dir")).expect("copy dir");
+    fs::write(
+        &runner_copy,
+        "<ConfigDumpInfo version=\"2.20\" stale=\"1\"/>\n",
+    )
+    .expect("stale runner copy");
+    fs::write(project.root().join("drift"), format!("{SECOND}\n")).expect("drift");
+    fs::write(
+        project.sources.join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.20\" stale=\"1\"/>\n",
+    )
+    .expect("stale version file");
+
+    let pushed = succeeded(&project.run(&["push", "--force"]));
+
+    assert_eq!(pushed["data"]["provider"]["selected"], "ibcmd", "{pushed}");
+    assert!(!project.sources.join("ConfigDumpInfo.xml").exists());
+    let message = pushed["data"]["steps"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(message.contains("next pull runs full"), "{message}");
+
+    assert!(!runner_copy.exists(), "the runner's copy is dropped too");
+
+    let preview = succeeded(&project.run(&["pull", "main", "--dry-run"]));
+    assert_eq!(preview["data"]["mode"], "FULL", "{preview}");
+    assert_eq!(preview["data"]["provider"]["reason"], "whole", "{preview}");
+    assert_eq!(
+        preview["data"]["provider"]["selected"], "ibcmd",
+        "{preview}"
+    );
+
+    fs::remove_file(project.root().join("drift")).expect("drift");
+    support::commit_sources(project.root());
+    let pulled = succeeded(&project.run(&["pull", "main"]));
+    assert_eq!(pulled["data"]["mode"], "FULL", "{pulled}");
+    assert_eq!(pulled["data"]["provider"]["selected"], "ibcmd", "{pulled}");
+    assert_eq!(pulled["data"]["provider"]["reason"], "whole", "{pulled}");
 }
 
 /// Первый `pull` без памяти о базе, во время которого базу правили: ответ это называет, а

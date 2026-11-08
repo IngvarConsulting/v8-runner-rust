@@ -367,13 +367,7 @@ fn plan_partial_or_full_load(
 ) -> StepPlan {
     let edt_extension =
         source.forces_full_for_extension() && source_set.purpose == SourceSetPurpose::Extension;
-    // When the prior snapshot has no entries, every current file is new.
-    // A warm snapshot with one added file can still be loaded partially.
-    let nothing_to_compare = changes.len() == prepared.snapshot.len()
-        && changes
-            .iter()
-            .all(|change| change.kind == analyzer::ChangeKind::Added);
-    let decision = if edt_extension || nothing_to_compare {
+    let decision = if edt_extension || nothing_to_compare(&changes, &prepared) {
         LoadDecision::Full
     } else {
         partial_load::decide(&changes, context_path)
@@ -414,6 +408,27 @@ fn plan_partial_or_full_load(
                 commit: StepCommit::Prepared(prepared),
             }
         }
+    }
+}
+
+/// When the prior snapshot has no entries, every current file is new.
+/// A warm snapshot with one added file can still be loaded partially.
+fn nothing_to_compare(changes: &[analyzer::FileChange], prepared: &PreparedStateUpdate) -> bool {
+    changes.len() == prepared.snapshot.len()
+        && changes
+            .iter()
+            .all(|change| change.kind == analyzer::ChangeKind::Added)
+}
+
+/// Загрузит ли набор целиком по разбору его изменений, ещё до правил частичной загрузки:
+/// разбор без памяти о каталоге (`Fallback`) или снимок, с которым нечего сравнить. По этому
+/// признаку отправка выбирает исполнителя (#559); план шага строит
+/// [`plan_configurator_load_step`] по тому же разбору.
+pub(super) fn loads_whole(outcome: &AnalysisOutcome) -> bool {
+    match outcome {
+        AnalysisOutcome::Fallback => true,
+        AnalysisOutcome::Changes { changes, prepared } => nothing_to_compare(changes, prepared),
+        AnalysisOutcome::NoChanges => false,
     }
 }
 
