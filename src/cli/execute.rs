@@ -1633,6 +1633,15 @@ fn render_standalone_text(
     result: &crate::domain::standalone::StandaloneResult,
     presenter: &Presenter,
 ) {
+    for line in standalone_text(name, result) {
+        presenter.print_bare(&line);
+    }
+}
+
+fn standalone_text(
+    name: CommandName,
+    result: &crate::domain::standalone::StandaloneResult,
+) -> Vec<String> {
     use crate::domain::dbms::{ServiceAction, ServiceState};
 
     let pid = result
@@ -1667,7 +1676,7 @@ fn render_standalone_text(
             }
         },
     };
-    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let mut lines = vec![format!("{}: {line}", name.as_str())];
     let details = [
         ("direct gate", result.connection.clone()),
         ("ssh gate", result.gate.clone()),
@@ -1690,15 +1699,20 @@ fn render_standalone_text(
             "occupant",
             result.occupant_pid.map(|pid| format!("process {pid}")),
         ),
+        (
+            "PostgreSQL stopped",
+            result.stopped_dbms_pid.map(|pid| format!("pid {pid}")),
+        ),
     ];
     for (label, value) in details {
         if let Some(value) = value {
-            presenter.print_bare(&format!("  {label}  {value}"));
+            lines.push(format!("  {label}  {value}"));
         }
     }
     if result.stale_record {
-        presenter.print_bare("  the recorded process is gone");
+        lines.push("  the recorded process is gone".to_owned());
     }
+    lines
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7083,5 +7097,45 @@ mod tests {
             interruption.message.as_deref(),
             Some(recorded.message.as_str())
         );
+    }
+
+    #[test]
+    fn standalone_stop_names_the_postgres_it_stopped_with_the_server() {
+        use crate::domain::dbms::{ServiceAction, ServiceState};
+        use crate::domain::standalone::StandaloneResult;
+        use crate::use_cases::context::CommandName;
+
+        let result = StandaloneResult {
+            ok: true,
+            infobase: "origin".to_owned(),
+            state: ServiceState::NotRunning,
+            action: ServiceAction::Stopped,
+            pid: None,
+            connection: None,
+            gate: None,
+            http: None,
+            data_dir: None,
+            log_path: None,
+            ready: false,
+            stale_record: false,
+            occupant_pid: None,
+            stopped_pid: Some(8576),
+            stopped_dbms_pid: Some(6320),
+            duration_ms: 0,
+        };
+        let lines = super::standalone_text(CommandName::StandaloneStop, &result);
+        assert_eq!(
+            lines,
+            [
+                "standalone stop: ibsrv pid 8576 stopped",
+                "  PostgreSQL stopped  pid 6320"
+            ]
+        );
+        let explicit = StandaloneResult {
+            stopped_dbms_pid: None,
+            ..result
+        };
+        let lines = super::standalone_text(CommandName::StandaloneStop, &explicit);
+        assert_eq!(lines, ["standalone stop: ibsrv pid 8576 stopped"]);
     }
 }
