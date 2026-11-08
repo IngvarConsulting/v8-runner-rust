@@ -168,7 +168,10 @@ source-set:
     assert_ne!(code, 0, "{answer}");
     let message = answer["error"]["message"].as_str().expect("message");
     assert!(message.contains("cluster start"), "{answer}");
-    assert_eq!(answer["error"]["next"]["command"], "cluster start", "{answer}");
+    assert_eq!(
+        answer["error"]["next"]["command"], "cluster start",
+        "{answer}"
+    );
     let (_, neighbour) = run(dir.path(), &["--dry-run", "extensions", "list"]);
     let text = neighbour.to_string();
     assert!(!text.contains("cluster start"), "{text}");

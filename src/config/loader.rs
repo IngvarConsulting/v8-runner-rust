@@ -1625,9 +1625,9 @@ fn project_managed_cluster(
             project(config, format!("Srvr=127.0.0.1;Ref={name}"));
         }
         (ConfigValidationMode::InfobaseCreate { .. }, None) => {
-            return Err(
-                crate::config::validate::ManagedServer::Cluster.not_running().into(),
-            );
+            return Err(crate::config::validate::ManagedServer::Cluster
+                .not_running()
+                .into());
         }
         (
             ConfigValidationMode::InfobaseCreate { .. } | ConfigValidationMode::Inspecting { .. },

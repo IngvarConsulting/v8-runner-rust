@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{
-    await_gone, being_started, environment, forget_record, io_failure, occupant_of, port_offsets,
-    other_cluster_over, owned_by_a_cluster, validation, write_record, Database, ServiceHost,
-    Stand,
+    await_gone, being_started, environment, forget_record, io_failure, occupant_of,
+    other_cluster_over, owned_by_a_cluster, port_offsets, validation, write_record, Database,
+    ServiceHost, Stand,
 };
 use crate::config::model::{AppConfig, InfobaseDbmsConfig};
 use crate::domain::cluster::ClusterResult;
@@ -303,16 +303,15 @@ impl Cluster<'_> {
         let remnants = self.remnants(record).ok_or_else(|| {
             platform("the process list did not answer, so the remnants of the fallen ragent cannot be told apart; repeat the command")
         })?;
-        let (cleared, left): (Vec<_>, Vec<_>) =
-            remnants.into_iter().partition(|(pid, started)| {
-                self.host.hard_stop(self.runner, *pid, self.context);
-                await_gone(
-                    self.host,
-                    *pid,
-                    Some(*started),
-                    self.host.patience(SOFT_STOP_TIMEOUT),
-                )
-            });
+        let (cleared, left): (Vec<_>, Vec<_>) = remnants.into_iter().partition(|(pid, started)| {
+            self.host.hard_stop(self.runner, *pid, self.context);
+            await_gone(
+                self.host,
+                *pid,
+                Some(*started),
+                self.host.patience(SOFT_STOP_TIMEOUT),
+            )
+        });
         if !left.is_empty() {
             let left: Vec<String> = left.iter().map(|(pid, _)| pid.to_string()).collect();
             return Err(platform(format!(
@@ -762,8 +761,7 @@ impl Cluster<'_> {
     /// новый реестр (`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`). Перечень процессов нужен, только
     /// если порт занят.
     fn busy(&self, pins: &ClusterPins) -> Option<Busy> {
-        let refusal =
-            |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);
+        let refusal = |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);
         let foreign = |agents: &[ProcessRow]| {
             first_with_keys(agents, &ragent::registry_keys(&self.registry(pins))).map(|agent| {
                 Busy::ForeignAgent(refusal(format!(
@@ -2036,7 +2034,10 @@ mod tests {
         assert_eq!(remnants, [RMNGR_PID, RPHOST_PID], "only the old children");
         setup.run(ServiceCommand::Stop, &host).unwrap();
         assert!(host.alive(7020), "the foreign rmngr is left alone");
-        assert!(host.alive(AGENT_PID), "the new owner of the pid is left alone");
+        assert!(
+            host.alive(AGENT_PID),
+            "the new owner of the pid is left alone"
+        );
         assert!(!host.alive(RMNGR_PID));
     }
 
@@ -2049,7 +2050,11 @@ mod tests {
         host.live(7021, "notepad.exe");
         host.parents.borrow_mut().insert(7021, AGENT_PID);
         let status = setup.run(ServiceCommand::Status, &host).unwrap();
-        assert!(!status.remnant_pids.contains(&7021), "{:?}", status.remnant_pids);
+        assert!(
+            !status.remnant_pids.contains(&7021),
+            "{:?}",
+            status.remnant_pids
+        );
         // Запись другой машины: её остатков здесь нет.
         let mut record: ServiceRecord = read_json(&setup.agent().record()).unwrap();
         record.machine = Some("another".to_owned());
@@ -2066,8 +2071,14 @@ mod tests {
         host.kill(AGENT_PID);
         host.immortal.borrow_mut().insert(RPHOST_PID);
         let refused = setup.run(ServiceCommand::Stop, &host).unwrap_err();
-        assert!(refused.to_string().contains(&RPHOST_PID.to_string()), "{refused}");
-        assert!(setup.agent().record().exists(), "the record still names the remnants");
+        assert!(
+            refused.to_string().contains(&RPHOST_PID.to_string()),
+            "{refused}"
+        );
+        assert!(
+            setup.agent().record().exists(),
+            "the record still names the remnants"
+        );
         host.immortal.borrow_mut().clear();
         let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
         assert!(stopped.stopped_remnant_pids.contains(&RPHOST_PID));
@@ -2085,7 +2096,10 @@ mod tests {
         let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
         assert!(refused.to_string().contains("process list"), "{refused}");
         assert!(setup.agent().record().exists());
-        assert!(host.hard_stops.borrow().is_empty(), "nothing is stopped blindly");
+        assert!(
+            host.hard_stops.borrow().is_empty(),
+            "nothing is stopped blindly"
+        );
         assert!(!host.spawned.borrow().iter().any(|tool| tool == "ragent"));
     }
 
@@ -2156,7 +2170,11 @@ mod tests {
             .borrow_mut()
             .insert(setup.pins().ports.regport, 555);
         setup.run(ServiceCommand::Start, &host).unwrap_err();
-        assert!(host.spawned.borrow().is_empty(), "{:?}", host.spawned.borrow());
+        assert!(
+            host.spawned.borrow().is_empty(),
+            "{:?}",
+            host.spawned.borrow()
+        );
     }
 
     #[test]
@@ -2494,7 +2512,10 @@ mod tests {
         let registry = setup.agent().root().join(&pins.registry);
         host.foreign_agents.borrow_mut().push((
             9100,
-            format!("ragent.exe /agent /port 30000 /d \"{}\"", registry.display()),
+            format!(
+                "ragent.exe /agent /port 30000 /d \"{}\"",
+                registry.display()
+            ),
         ));
         host.spawned.borrow_mut().clear();
         let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
@@ -2539,7 +2560,10 @@ mod tests {
         setup.config.infobases.insert("other".to_owned(), other);
         running_cluster_of(&setup, &host, "other");
         let database = Database::declared(setup.config.infobase.dbms.as_ref().unwrap()).unwrap();
-        assert_eq!(super::super::cluster_over(&setup.config, &host, &database), None);
+        assert_eq!(
+            super::super::cluster_over(&setup.config, &host, &database),
+            None
+        );
     }
 
     #[test]
@@ -2594,7 +2618,11 @@ mod tests {
             .name = None;
         let started = setup.run(ServiceCommand::Start, &host).unwrap();
         assert!(
-            started.connection.as_deref().unwrap().ends_with(";Ref=origin"),
+            started
+                .connection
+                .as_deref()
+                .unwrap()
+                .ends_with(";Ref=origin"),
             "{:?}",
             started.connection
         );

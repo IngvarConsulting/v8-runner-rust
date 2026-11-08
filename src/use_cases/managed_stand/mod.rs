@@ -22,8 +22,7 @@ use crate::platform::process::{
 use crate::platform::service::{self, ProcessFacts, ProcessRow, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
     machine_fingerprint, observe_service, read_json, record_names_own_process, write_json,
-    Observed, PinnedPorts,
-    RecordState, ServicePaths, ServiceRecord,
+    Observed, PinnedPorts, RecordState, ServicePaths, ServiceRecord,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::interruption_before_safe_point;

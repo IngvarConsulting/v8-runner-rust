@@ -149,7 +149,11 @@ pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> 
 /// Работает ли своя служба PostgreSQL этой базы.
 pub fn running_postgres(work_path: &Path, infobase: &str) -> bool {
     let paths = ServicePaths::new(work_path, infobase, "postgres");
-    record_names_own_process(&paths.record(), machine_fingerprint().as_deref(), &process_facts)
+    record_names_own_process(
+        &paths.record(),
+        machine_fingerprint().as_deref(),
+        &process_facts,
+    )
 }
 
 /// Запись называет живой свой процесс. Единственная такая проверка вне `observe_service`: ею
@@ -160,7 +164,8 @@ pub fn record_names_own_process(
     machine: Option<&str>,
     facts: &dyn Fn(u32) -> Option<ProcessFacts>,
 ) -> bool {
-    read_json::<ServiceRecord>(record).is_some_and(|record| adopt_recorded_pid(&record, facts, machine))
+    read_json::<ServiceRecord>(record)
+        .is_some_and(|record| adopt_recorded_pid(&record, facts, machine))
 }
 
 /// Хеш `machine_id`; `None`, если система идентификатора не дала.
@@ -306,7 +311,9 @@ mod tests {
                     .filter(|(_, line)| line.contains("adopt_recorded_pid("))
                     .filter(|(at, _)| {
                         let from = at.saturating_sub(6);
-                        !lines[from..*at].iter().any(|line| line.contains("observe_service("))
+                        !lines[from..*at]
+                            .iter()
+                            .any(|line| line.contains("observe_service("))
                     })
                     .map(|(at, _)| format!("{}:{}", path.display(), at + 1))
                     .collect::<Vec<_>>()
