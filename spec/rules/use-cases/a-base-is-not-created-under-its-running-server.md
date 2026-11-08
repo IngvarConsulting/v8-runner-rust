@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-BASE-IS-NOT-CREATED-UNDER-ITS-RUNNING-SERVER
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/537
+check:
+  - src/config/loader.rs::infobase_create_is_refused_under_the_running_server
 ---
 
 # База автономного сервера не создаётся под работающим сервером

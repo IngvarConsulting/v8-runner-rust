@@ -454,6 +454,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "готовность кандидата `ibcmd` в его же переборе",
         ),
         (
+            "crate::use_cases::managed_stand::standalone::create_base",
+            "создание базы автономного сервера в СУБД: другого исполнителя у него нет, каталог данных его службы",
+        ),
+        (
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
             "единственный построитель `ibcmd` к базе проекта: его зовёт шаг, выбравший `ibcmd`",
         ),
@@ -484,6 +488,7 @@ fn an_ibcmd_process_is_built_only_by_those_who_give_it_a_data_directory() {
         ),
         [
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
+            "crate::use_cases::managed_stand::standalone::create_base",
             "crate::use_cases::throwaway_infobase::FileInfobase::ibcmd",
         ]
         .map(str::to_owned)

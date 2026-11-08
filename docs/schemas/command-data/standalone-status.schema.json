@@ -108,6 +108,15 @@
     "state": {
       "$ref": "#/$defs/ServiceState"
     },
+    "stopped_dbms_pid": {
+      "description": "PostgreSQL, погашенный вместе с сервером, потому что поднят его шагом.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "stopped_pid": {
       "format": "uint32",
       "minimum": 0,

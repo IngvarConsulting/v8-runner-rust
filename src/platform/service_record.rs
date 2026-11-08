@@ -36,6 +36,9 @@ impl ServicePaths {
     pub fn data(&self) -> PathBuf {
         self.root.join("data")
     }
+    pub fn passfile(&self) -> PathBuf {
+        self.root.join("passfile")
+    }
     pub fn host_key(&self) -> PathBuf {
         self.root.join("host-key")
     }

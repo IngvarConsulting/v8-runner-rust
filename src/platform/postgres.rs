@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::platform::process::ProcessRequest;
 use crate::platform::service::ServiceRequest;
 
+const BACKSLASH: char = '\\';
+const QUOTE: char = '\'';
+const ESCAPED_QUOTE: &str = "\\'";
+
 /// Пользователь СУБД, которого создаёт `initdb`.
 pub const SUPERUSER: &str = "postgres";
 
@@ -90,6 +94,7 @@ impl PostgresBuild {
             // Иначе служба держала бы каталог, из которого её запустили.
             workdir: data.parent().map(Path::to_path_buf),
             log_path: log.with_extension("start.log"),
+            stdin: None,
         }
     }
 
@@ -105,6 +110,27 @@ impl PostgresBuild {
                 "-w".to_owned(),
                 "-t".to_owned(),
                 "60".to_owned(),
+            ],
+        )
+    }
+
+    /// Есть ли БД с этим именем. Пароль идёт файлом `passfile`, в командной строке его нет; `-w` не
+    /// даёт `psql` спросить его с консоли. В строке подключения обратная косая черта — экранирование,
+    /// поэтому путь идёт с прямыми.
+    pub fn database_exists(&self, port: u16, passfile: &Path, name: &str) -> ProcessRequest {
+        self.request(
+            "psql",
+            vec![
+                "-w".to_owned(),
+                format!(
+                    "host=127.0.0.1 port={port} user={SUPERUSER} dbname=postgres passfile='{}'",
+                    conninfo_value(passfile)
+                ),
+                "-Atc".to_owned(),
+                format!(
+                    "select 1 from pg_database where datname = '{}'",
+                    name.replace('\'', "''")
+                ),
             ],
         )
     }
@@ -125,6 +151,20 @@ impl PostgresBuild {
 
 fn executable(tool: &str) -> String {
     format!("{tool}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// Путь как значение строки подключения: в кавычках он выдерживает пробел, а обратная косая черта там —
+/// экранирование, поэтому разделители прямые.
+fn conninfo_value(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace(BACKSLASH, "/")
+        .replace(QUOTE, ESCAPED_QUOTE)
+}
+
+/// Строка файла `passfile` для этого порта.
+pub fn passfile_line(port: u16, password: &str) -> String {
+    format!("127.0.0.1:{port}:*:{SUPERUSER}:{password}")
 }
 
 /// Значение `--db-server` для этого порта.
@@ -172,6 +212,39 @@ mod tests {
             .args
             .contains(&"-p 24432 -c listen_addresses=127.0.0.1".to_owned()));
         assert_eq!(start.workdir.as_deref(), Some(Path::new("root")));
+    }
+
+    #[test]
+    fn the_database_question_keeps_the_password_out_and_never_prompts() {
+        let request = PostgresBuild::at(PathBuf::from("bin")).database_exists(
+            24432,
+            Path::new(r"E:\w\passfile"),
+            "o'brien",
+        );
+        assert!(
+            request.args.contains(&"-w".to_owned()),
+            "{:?}",
+            request.args
+        );
+        assert!(request
+            .args
+            .iter()
+            .any(|arg| arg.contains("passfile='E:/w/passfile'")));
+        assert!(request.args.iter().any(|arg| arg.contains("'o''brien'")));
+    }
+
+    #[test]
+    fn a_passfile_path_with_a_space_stays_one_value() {
+        let request = PostgresBuild::at(PathBuf::from("bin")).database_exists(
+            24432,
+            Path::new("E:/work dir/o'neil/passfile"),
+            "demo",
+        );
+        let conninfo = &request.args[1];
+        assert!(
+            conninfo.ends_with("passfile='E:/work dir/o\\'neil/passfile'"),
+            "{conninfo}"
+        );
     }
 
     #[test]

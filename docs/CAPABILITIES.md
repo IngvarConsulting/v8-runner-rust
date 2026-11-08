@@ -622,8 +622,12 @@ v8-runner standalone restart [--dry-run]
   `standalone stop`. Без сервера рабочая команда отказывает и называет `standalone start`.
 - Порты и ключ хоста SSH-шлюза закреплены от запуска к запуску. Прямой шлюз слушает все интерфейсы.
 
-База в СУБД у такого сервера — #537, кластер — #538. Команды, которым нужна база с `cluster.managed`, пока отказывают
-и называют этот ключ.
+- База может лежать в СУБД: `dbms.managed` или ваша секция `dbms` вместо `db-path`. Цикл с PostgreSQL раннера:
+  `dbms start` → `infobase create` → `standalone start` → `push` → `test` → `standalone stop` → `dbms stop`. Пароль СУБД
+  `ibsrv` получает через stdin; `ibcmd infobase create` несёт его в аргументах.
+- СУБД, поднятая шагом `standalone start`, гаснет вместе с сервером; поднятая `dbms start` остаётся. `standalone restart` её не трогает.
+
+Кластер — #538. Команды, которым нужна база с `cluster.managed`, пока отказывают и называют этот ключ.
 
 
 ### `tools download`

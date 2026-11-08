@@ -52,36 +52,78 @@ impl ServerPorts {
     }
 }
 
-/// Запуск над файловой базой. Без `--enable-extended-designer-features`: с ним сервер не сообщает о
-/// готовности, и `ibcmd --pid` не подключается (замер #82).
-pub fn start_over_file_base(
+/// Где база сервера.
+pub enum ServerStorage<'a> {
+    File(&'a Path),
+    Dbms(DbmsTarget<'a>),
+}
+
+/// База в СУБД: ключи `--dbms`, `--db-server`, `--db-name`, `--db-user`.
+pub struct DbmsTarget<'a> {
+    pub kind: &'a str,
+    pub server: &'a str,
+    pub name: &'a str,
+    pub user: Option<&'a str>,
+    pub password: Option<&'a str>,
+}
+
+/// Ключи запуска, которые называют файловую базу. По ним же узнают чужой сервер над ней.
+pub fn file_base_keys(db_path: &Path) -> Vec<String> {
+    vec![format!("--db-path={}", db_path.display())]
+}
+
+/// Ключи запуска, которые называют базу в СУБД. По ним же узнают чужой сервер над ней.
+pub fn database_keys(server: &str, name: &str) -> Vec<String> {
+    vec![format!("--db-server={server}"), format!("--db-name={name}")]
+}
+
+/// Запуск сервера. Без `--enable-extended-designer-features`: с ним сервер не сообщает о готовности,
+/// и `ibcmd --pid` не подключается (замер #82). Пароль СУБД уходит через stdin ключом `-W`: в командной
+/// строке долгоживущего процесса его видели бы все пользователи машины.
+pub fn start_server(
     ibsrv: &Path,
     data: &Path,
-    db_path: &Path,
+    storage: &ServerStorage<'_>,
     name: &str,
     ports: ServerPorts,
     host_key: &Path,
     log: &Path,
 ) -> ServiceRequest {
+    let mut args = vec![format!("--data={}", data.display())];
+    let mut stdin = None;
+    match storage {
+        ServerStorage::File(db_path) => args.extend(file_base_keys(db_path)),
+        ServerStorage::Dbms(target) => {
+            args.push(format!("--dbms={}", target.kind));
+            args.extend(database_keys(target.server, target.name));
+            if let Some(user) = target.user {
+                args.push(format!("--db-user={user}"));
+            }
+            if let Some(password) = target.password {
+                args.push("-W".to_owned());
+                stdin = Some(password.to_owned());
+            }
+        }
+    }
+    args.extend([
+        format!("--name={name}"),
+        format!("--http-port={}", ports.http),
+        format!("--direct-regport={}", ports.direct),
+        format!(
+            "--direct-range={}:{}",
+            ports.range_start,
+            ports.range_start + DIRECT_RANGE_WIDTH - 1
+        ),
+        "--enable-ssh-gate".to_owned(),
+        format!("--ssh-port={}", ports.ssh),
+        format!("--ssh-host-key={}", host_key.display()),
+    ]);
     ServiceRequest {
         program: ibsrv.to_path_buf(),
-        args: vec![
-            format!("--data={}", data.display()),
-            format!("--db-path={}", db_path.display()),
-            format!("--name={name}"),
-            format!("--http-port={}", ports.http),
-            format!("--direct-regport={}", ports.direct),
-            format!(
-                "--direct-range={}:{}",
-                ports.range_start,
-                ports.range_start + DIRECT_RANGE_WIDTH - 1
-            ),
-            "--enable-ssh-gate".to_owned(),
-            format!("--ssh-port={}", ports.ssh),
-            format!("--ssh-host-key={}", host_key.display()),
-        ],
+        args,
         workdir: data.parent().map(Path::to_path_buf),
         log_path: log.to_path_buf(),
+        stdin,
     }
 }
 
@@ -103,10 +145,10 @@ mod tests {
 
     #[test]
     fn the_server_starts_with_the_ssh_gate_and_without_the_extended_designer_features() {
-        let request = start_over_file_base(
+        let request = start_server(
             Path::new("ibsrv"),
             Path::new("root/data"),
-            Path::new("ib"),
+            &ServerStorage::File(Path::new("ib")),
             "demo",
             ServerPorts::from_first(24000),
             Path::new("key"),
@@ -122,5 +164,30 @@ mod tests {
             .iter()
             .any(|arg| arg.contains("extended-designer")));
         assert_eq!(request.workdir.as_deref(), Some(Path::new("root")));
+    }
+
+    #[test]
+    fn the_dbms_password_goes_through_stdin_and_never_through_an_argument() {
+        let request = start_server(
+            Path::new("ibsrv"),
+            Path::new("root/data"),
+            &ServerStorage::Dbms(DbmsTarget {
+                kind: "PostgreSQL",
+                server: "127.0.0.1 port=24432",
+                name: "demo_data",
+                user: Some("postgres"),
+                password: Some("secret-value"),
+            }),
+            "demo",
+            ServerPorts::from_first(24000),
+            Path::new("key"),
+            Path::new("log"),
+        );
+        assert!(request.args.contains(&"-W".to_owned()));
+        assert!(request
+            .args
+            .contains(&"--db-server=127.0.0.1 port=24432".to_owned()));
+        assert!(!request.args.iter().any(|arg| arg.contains("secret-value")));
+        assert_eq!(request.stdin.as_deref(), Some("secret-value"));
     }
 }
