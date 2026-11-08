@@ -1565,9 +1565,6 @@ mod tests {
         setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap();
-        let mut server = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
-        server.pid = Some(777);
-        write_json(&setup.paths().sibling_record("cluster"), &server).unwrap();
         host.processes.borrow_mut().insert(
             777,
             ProcessFacts {
@@ -1575,10 +1572,20 @@ mod tests {
                 image: "postgres.exe".to_owned(),
             },
         );
-        for command in [ServiceCommand::Stop, ServiceCommand::Restart] {
-            let refused = setup.run(command, false, &runner, &host).unwrap_err();
-            assert_eq!(refused.kind(), UseCaseErrorKind::Validation);
-            assert!(refused.to_string().contains("cluster stop"), "{refused}");
+        for (service, next) in [
+            ("cluster", "cluster stop"),
+            ("standalone", "standalone stop"),
+        ] {
+            let mut server = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
+            server.pid = Some(777);
+            let record = setup.paths().sibling_record(service);
+            write_json(&record, &server).unwrap();
+            for command in [ServiceCommand::Stop, ServiceCommand::Restart] {
+                let refused = setup.run(command, false, &runner, &host).unwrap_err();
+                assert_eq!(refused.kind(), UseCaseErrorKind::Validation);
+                assert!(refused.to_string().contains(next), "{service}: {refused}");
+            }
+            std::fs::remove_file(record).unwrap();
         }
         assert!(host.processes.borrow().contains_key(&PID));
     }
