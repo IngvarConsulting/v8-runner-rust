@@ -409,15 +409,33 @@ impl Cluster<'_> {
     }
 
     /// Свой процесс не поднялся до конца: снять его, записи и остатки. Что не снялось, остаётся в
-    /// записях для следующей команды.
-    fn abandon(&self, agent: &ServiceRecord) {
+    /// записях для следующей команды, а ошибка это называет.
+    fn abandon(&self, agent: &ServiceRecord) -> Result<(), UseCaseError> {
         if let Some(ras) = self.own_ras() {
-            if self.stop_process(&ras) {
-                forget_record(&self.ras);
+            if !self.stop_process(&ras) {
+                return Err(platform(format!(
+                    "ras pid {} did not stop; repeat cluster stop",
+                    ras.pid.unwrap_or_default()
+                )));
             }
+            forget_record(&self.ras);
         }
-        if self.stop_process(agent) && self.clear_remnants(agent).is_ok() {
-            forget_record(&self.agent);
+        if !self.stop_process(agent) {
+            return Err(platform(format!(
+                "ragent pid {} did not stop; repeat cluster stop",
+                agent.pid.unwrap_or_default()
+            )));
+        }
+        self.clear_remnants(agent)?;
+        forget_record(&self.agent);
+        Ok(())
+    }
+
+    /// Неудача: снять поднятое здесь; что не снялось, дописывается к исходной ошибке.
+    fn give_up(&self, agent: &ServiceRecord, error: UseCaseError) -> UseCaseError {
+        match self.abandon(agent) {
+            Ok(()) => error,
+            Err(left) => error.followed_by(format!("not everything was taken down: {left}")),
         }
     }
 
@@ -570,6 +588,14 @@ impl Cluster<'_> {
                 "the standalone server of '{}' is running over this infobase, and one server owns a database: run `standalone stop` first",
                 self.declared.infobase
             )));
+        }
+        if let Some(owner) = self
+            .declared
+            .database
+            .as_ref()
+            .and_then(|database| other_cluster_over(self.config, self.host, database))
+        {
+            return Err(owned_by_a_cluster(&owner));
         }
         self.undo_interrupted_move()?;
         let mut stale = false;
@@ -736,24 +762,33 @@ impl Cluster<'_> {
     /// новый реестр (`INV.USE-CASES.A-BUSY-REGPORT-IS-REFUSED`). Перечень процессов нужен, только
     /// если порт занят.
     fn busy(&self, pins: &ClusterPins) -> Option<Busy> {
-        let (port, pid) = pins
-            .ports
-            .all()
-            .find_map(|port| occupant_of(self.host, port).map(|pid| (port, pid)))?;
         let refusal =
             |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);
+        let foreign = |agents: &[ProcessRow]| {
+            first_with_keys(agents, &ragent::registry_keys(&self.registry(pins))).map(|agent| {
+                Busy::ForeignAgent(refusal(format!(
+                    "the registry of the cluster of '{}' is served by ragent pid {agent}, which this runner did not start; it is left running",
+                    self.declared.infobase
+                )))
+            })
+        };
+        let Some((port, pid)) = pins
+            .ports
+            .all()
+            .find_map(|port| occupant_of(self.host, port).map(|pid| (port, pid)))
+        else {
+            // Порты свободны, но чужой агент может работать над нашим реестром на других портах:
+            // второй агент над тем же реестром его испортит. Без перечня запуск идёт как есть.
+            return self.agents().and_then(|agents| foreign(&agents));
+        };
         let Some(agents) = self.agents() else {
             return Some(Busy::Unlisted(refusal(format!(
                 "port {port} of the cluster of '{}' is taken, and the process list did not answer to tell by whom; repeat the command",
                 self.declared.infobase
             ))));
         };
-        if let Some(agent) = first_with_keys(&agents, &ragent::registry_keys(&self.registry(pins)))
-        {
-            return Some(Busy::ForeignAgent(refusal(format!(
-                "the registry of the cluster of '{}' is served by ragent pid {agent}, which this runner did not start; it is left running",
-                self.declared.infobase
-            ))));
+        if let Some(busy) = foreign(&agents) {
+            return Some(busy);
         }
         let who = if pid == 0 {
             "another process".to_owned()
@@ -869,8 +904,16 @@ impl Cluster<'_> {
         self.write_pins(&moving)?;
         let new_registry = self.registry(&moving);
         let roll_back = |error: UseCaseError, agent: Option<&ServiceRecord>| {
-            if let Some(agent) = agent {
-                self.abandon(agent);
+            let error = match agent {
+                Some(agent) => self.give_up(agent, error),
+                None => error,
+            };
+            // Агент нового реестра не снялся: закреплённое остаётся переносом, и следующий
+            // `cluster start` откатит его, сняв агента.
+            if !matches!(self.observe(&self.agent), Observed::Nothing) {
+                return error.followed_by(
+                    "the move to the new registry is left for the next cluster start to roll back",
+                );
             }
             let error = match self.write_pins(&old) {
                 Ok(()) => error,
@@ -1003,18 +1046,15 @@ impl Cluster<'_> {
         agent.started = Some(facts.started);
         agent.image = Some(facts.image);
         if let Err(error) = write_record(&self.agent, &agent) {
-            self.abandon(&agent);
-            return Err(error);
+            return Err(self.give_up(&agent, error));
         }
         if let Err(error) = self.raise_ras(&agent, pins.ports, machine) {
-            self.abandon(&agent);
-            return Err(error);
+            return Err(self.give_up(&agent, error));
         }
         agent.state = RecordState::Running;
         agent.starter = None;
         if let Err(error) = write_record(&self.agent, &agent) {
-            self.abandon(&agent);
-            return Err(error);
+            return Err(self.give_up(&agent, error));
         }
         Ok(agent)
     }
@@ -1222,7 +1262,11 @@ pub(super) fn cluster_base(
     let Observed::Own(agent) = cluster.observe(&cluster.agent) else {
         return Err(not_running());
     };
-    let pins = cluster.pins().ok_or_else(not_running)?;
+    // Посреди переноса реестра базу не создают: следующий `cluster start` этот реестр откатит.
+    let pins = cluster
+        .pins()
+        .filter(|pins| pins.previous.is_none())
+        .ok_or_else(not_running)?;
     let database = cluster.declared.database.as_ref().ok_or_else(|| {
         validation("infobase.dbms is not declared: the infobase of a cluster lives in a DBMS")
     })?;
@@ -2420,17 +2464,69 @@ mod tests {
         // Регистр и пробелы адреса не различаются.
         other.dbms = Some(own_dbms(" dbhost "));
         setup.config.infobases.insert("other".to_owned(), other);
+        // Кластер этой базы поднят раньше; потом над той же БД поднялся кластер другой базы.
+        setup.run(ServiceCommand::Start, &host).unwrap();
         running_cluster_of(&setup, &host, "other");
         let database = Database::declared(setup.config.infobase.dbms.as_ref().unwrap()).unwrap();
         assert_eq!(
-            super::super::cluster_over(&setup.config, &host, &database).as_deref(),
+            super::super::other_cluster_over(&setup.config, &host, &database).as_deref(),
             Some("other")
         );
-        // Кластер этой базы работает, но базу над той же БД ему не создать.
-        setup.run(ServiceCommand::Start, &host).unwrap();
+        // Базу над той же БД этому кластеру не создать.
         let refused = setup.base(&host).err().expect("refused");
         assert!(refused.to_string().contains("'other'"), "{refused}");
         assert!(refused.to_string().contains("cluster stop"), "{refused}");
+        // И заново его не поднять.
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        host.spawned.borrow_mut().clear();
+        let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
+        assert!(refused.to_string().contains("'other'"), "{refused}");
+        assert!(host.spawned.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_foreign_agent_over_this_registry_on_other_ports_is_refused() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        let pins = setup.pins();
+        let registry = setup.agent().root().join(&pins.registry);
+        host.foreign_agents.borrow_mut().push((
+            9100,
+            format!("ragent.exe /agent /port 30000 /d \"{}\"", registry.display()),
+        ));
+        host.spawned.borrow_mut().clear();
+        let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
+        assert!(refused.to_string().contains("ragent pid 9100"), "{refused}");
+        assert!(host.spawned.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_move_whose_new_agent_does_not_stop_is_left_to_the_next_start() {
+        let setup = setup();
+        let host = Host::default();
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        super::remember_registered(&setup.config).unwrap();
+        setup.run(ServiceCommand::Stop, &host).unwrap();
+        let old = setup.pins();
+        host.listeners.borrow_mut().insert(old.ports.regport, 555);
+        host.registration_fails.set(true);
+        host.immortal.borrow_mut().insert(AGENT_PID);
+        let refused = setup
+            .run_with(ServiceCommand::Start, true, &host)
+            .unwrap_err();
+        assert!(refused.to_string().contains("roll back"), "{refused}");
+        let moving = setup.pins();
+        assert!(moving.previous.is_some(), "the move is still recorded");
+        assert!(setup.agent().root().join(&moving.registry).is_dir());
+        // `infobase create` такой кластер работающим не считает.
+        assert!(setup.base(&host).is_err());
+        host.immortal.borrow_mut().clear();
+        host.registration_fails.set(false);
+        host.listeners.borrow_mut().remove(&old.ports.regport);
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(setup.pins(), old, "the next start rolled the move back");
     }
 
     #[test]

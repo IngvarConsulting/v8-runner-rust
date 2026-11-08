@@ -96,12 +96,21 @@ pub fn first_cluster(answer: &str) -> Option<String> {
 /// учёта регистра, и кириллицы тоже.
 pub fn lists_infobase(answer: &str, name: &str) -> bool {
     let name = name.to_lowercase();
-    values(answer, "name").any(|value| value.to_lowercase() == name)
+    // Имя с пробелом `rac` пишет в кавычках.
+    values(answer, "name").any(|value| value.trim_matches('"').to_lowercase() == name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_listed_name_matches_without_case_and_quotes() {
+        let answer = "infobase : x\nname     : \"Учёт Склада\"\n\ninfobase : y\nname     : Демо\n";
+        assert!(lists_infobase(answer, "учёт склада"));
+        assert!(lists_infobase(answer, "ДЕМО"));
+        assert!(!lists_infobase(answer, "другая"));
+    }
 
     const CLUSTERS: &str = "cluster                       : 6c5a8a62-3a8c-4e4b-b0a6-2f4c4b1f1d10\nhost                          : 127.0.0.1\nport                          : 24001\nname                          : \"Local cluster\"\n\n";
 

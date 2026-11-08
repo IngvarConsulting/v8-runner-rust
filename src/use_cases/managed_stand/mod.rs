@@ -282,8 +282,11 @@ impl Database {
 /// СУБД и именем БД. Пока он работает, другой сервер и прямой `ibcmd` эту БД не открывают
 /// (`INV.USE-CASES.ONE-SERVER-OWNS-A-DATABASE`).
 fn cluster_over(config: &AppConfig, host: &dyn ServiceHost, database: &Database) -> Option<String> {
-    let own = config.infobase_name.as_deref()?;
-    if cluster_runs(config, host, own) {
+    if let Some(own) = config
+        .infobase_name
+        .as_deref()
+        .filter(|own| cluster_runs(config, host, own))
+    {
         return Some(own.to_owned());
     }
     other_cluster_over(config, host, database)

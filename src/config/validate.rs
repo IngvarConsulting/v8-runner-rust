@@ -466,22 +466,45 @@ impl ConfigValidationError {
     }
 }
 
-/// Ключ сервера, который поднимает раннер, если он объявлен.
-fn managed_server_key(infobase: &crate::config::model::InfobaseConfig) -> Option<&'static str> {
-    if infobase
-        .cluster
-        .as_ref()
-        .is_some_and(|cluster| cluster.managed.is_some())
-    {
-        Some("cluster.managed")
-    } else if infobase
-        .standalone
-        .as_ref()
-        .is_some_and(|standalone| standalone.managed.is_some())
-    {
-        Some("standalone.managed")
-    } else {
-        None
+/// Сервер, который поднимает раннер.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedServer {
+    Cluster,
+    Standalone,
+}
+
+impl ManagedServer {
+    /// Объявленный у базы сервер раннера, если он есть.
+    fn of(infobase: &crate::config::model::InfobaseConfig) -> Option<Self> {
+        if infobase
+            .cluster
+            .as_ref()
+            .is_some_and(|cluster| cluster.managed.is_some())
+        {
+            Some(Self::Cluster)
+        } else if infobase
+            .standalone
+            .as_ref()
+            .is_some_and(|standalone| standalone.managed.is_some())
+        {
+            Some(Self::Standalone)
+        } else {
+            None
+        }
+    }
+
+    /// Отказ рабочей команды, чей сервер раннера не поднят: называет команду, которая его поднимает.
+    pub fn not_running(self) -> ConfigValidationError {
+        match self {
+            Self::Cluster => ConfigValidationError::ManagedServerNotRunning {
+                what: "cluster",
+                start: "cluster start",
+            },
+            Self::Standalone => ConfigValidationError::ManagedServerNotRunning {
+                what: "standalone server",
+                start: "standalone start",
+            },
+        }
     }
 }
 
@@ -500,7 +523,7 @@ fn validate_managed_declarations(
         if let Some((field, _)) = declared.into_iter().find(|(_, present)| *present) {
             return Err(ConfigValidationError::ManagedDbmsWithAccessField { field });
         }
-        if managed_server_key(infobase).is_none() {
+        if ManagedServer::of(infobase).is_none() {
             return Err(ConfigValidationError::ManagedDbmsNeedsManagedServer);
         }
     }
@@ -539,27 +562,12 @@ pub fn validate_managed_dbms(config: &AppConfig) -> Result<(), ConfigValidationE
     Ok(())
 }
 
-/// Отказ рабочей команды, чей сервер раннера не поднят: называет команду, которая его поднимает.
-pub fn managed_server_not_running(key: &str) -> ConfigValidationError {
-    if key == "cluster.managed" {
-        ConfigValidationError::ManagedServerNotRunning {
-            what: "cluster",
-            start: "cluster start",
-        }
-    } else {
-        ConfigValidationError::ManagedServerNotRunning {
-            what: "standalone server",
-            start: "standalone start",
-        }
-    }
-}
-
 /// Проверка для команд `cluster`: база объявляет `cluster.managed`.
 pub fn validate_managed_cluster(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     validate_planned_work_path(config)?;
     validate_managed_declarations(&config.infobase)?;
-    if managed_server_key(&config.infobase) != Some("cluster.managed") {
+    if ManagedServer::of(&config.infobase) != Some(ManagedServer::Cluster) {
         return Err(ConfigValidationError::ClusterNotManaged);
     }
     Ok(())
@@ -570,7 +578,7 @@ pub fn validate_managed_standalone(config: &AppConfig) -> Result<(), ConfigValid
     validate_base_path(&config.base_path)?;
     validate_planned_work_path(config)?;
     validate_managed_declarations(&config.infobase)?;
-    if managed_server_key(&config.infobase) != Some("standalone.managed") {
+    if ManagedServer::of(&config.infobase) != Some(ManagedServer::Standalone) {
         return Err(ConfigValidationError::StandaloneNotManaged);
     }
     Ok(())
@@ -1144,10 +1152,10 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
         })?;
     }
     validate_infobase_form(&config.infobase)?;
-    match managed_server_key(&config.infobase) {
+    match ManagedServer::of(&config.infobase) {
         // Адрес работающего сервера подставил загрузчик; строки нет — сервера нет.
-        Some(key) if config.infobase.connection.trim().is_empty() => {
-            return Err(managed_server_not_running(key));
+        Some(server) if config.infobase.connection.trim().is_empty() => {
+            return Err(server.not_running());
         }
         _ => {}
     }
@@ -1163,7 +1171,7 @@ fn validate_infobase_form(
 ) -> Result<(), ConfigValidationError> {
     validate_managed_declarations(infobase)?;
     // Строки у такой цели нет: её адрес знает раннер. Рядом с обычной базой она никому не мешает.
-    if managed_server_key(infobase).is_some() {
+    if ManagedServer::of(infobase).is_some() {
         return Ok(());
     }
     let connection = infobase.connection.trim();

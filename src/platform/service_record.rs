@@ -248,7 +248,7 @@ pub fn running_standalone(work_path: &Path, infobase: &str) -> Option<RunningSer
 impl ServiceRecord {
     /// Свой ли процесс: совпали pid, время старта, образ и машина. Нет `machine_id` — чужой
     /// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
-    pub fn is_own(&self, facts: Option<&ProcessFacts>, machine: Option<&str>) -> bool {
+    fn is_own(&self, facts: Option<&ProcessFacts>, machine: Option<&str>) -> bool {
         let (Some(facts), Some(machine)) = (facts, machine) else {
             return false;
         };
@@ -277,7 +277,8 @@ mod tests {
     use super::*;
 
     /// Защита от повторения: «работает ли своя служба» решают `observe_service` и
-    /// `record_names_own_process`, а не копии `read_json` + `is_own` по сценариям (ревью #538).
+    /// `record_names_own_process`. `is_own` закрыт в этом модуле, а `adopt_recorded_pid` вне его
+    /// живёт только как `adopt` для `observe_service`, рядом с ним (ревью #538).
     #[test]
     fn only_this_module_tells_an_own_process_by_its_record() {
         fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -293,10 +294,23 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         sources(&root, &mut files);
-        let offenders: Vec<_> = files
+        let offenders: Vec<String> = files
             .iter()
             .filter(|path| !path.ends_with("platform/service_record.rs"))
-            .filter(|path| std::fs::read_to_string(path).unwrap().contains(".is_own("))
+            .flat_map(|path| {
+                let text = std::fs::read_to_string(path).unwrap();
+                let lines: Vec<&str> = text.lines().collect();
+                lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains("adopt_recorded_pid("))
+                    .filter(|(at, _)| {
+                        let from = at.saturating_sub(6);
+                        !lines[from..*at].iter().any(|line| line.contains("observe_service("))
+                    })
+                    .map(|(at, _)| format!("{}:{}", path.display(), at + 1))
+                    .collect::<Vec<_>>()
+            })
             .collect();
         assert!(offenders.is_empty(), "{offenders:?}");
     }

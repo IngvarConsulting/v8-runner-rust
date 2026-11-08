@@ -1626,7 +1626,7 @@ fn project_managed_cluster(
         }
         (ConfigValidationMode::InfobaseCreate { .. }, None) => {
             return Err(
-                crate::config::validate::managed_server_not_running("cluster.managed").into(),
+                crate::config::validate::ManagedServer::Cluster.not_running().into(),
             );
         }
         (
