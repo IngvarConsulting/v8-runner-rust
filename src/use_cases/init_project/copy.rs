@@ -5,8 +5,9 @@
 //! ([`run_snapshot_provider`]). Замок источника берёт граница команды
 //! ([`crate::use_cases::transport::hold_source_base`]) и держит до её конца; в метку источника
 //! ничего не пишется (`INV.USE-CASES.READING-A-BASE-MAKES-NO-OWNER`). Новую базу из образа
-//! поднимает исполнитель `infobase restore` ([`run_restore_provider`]): на POSIX файловую
-//! базу создаёт `ibcmd`, по явному ключу и на Windows — Конфигуратор (замер «Загрузка
+//! поднимает исполнитель `infobase restore` ([`run_restore_provider`]), выбранный по
+//! готовности из строки `infobase create`: файловую базу на POSIX создаёт `ibcmd`, без него,
+//! по явному ключу и на Windows — Конфигуратор (замер «Загрузка
 //! информационной базы из DT»), в кластере её прежде создаёт `CREATEINFOBASE` —
 //! [`ClusterCreation`], общий с `infobase create`. Сеансы источника раннер не завершает:
 //! неудавшийся снимок называет, как освободить источник
@@ -18,6 +19,7 @@ use std::time::Instant;
 
 use crate::config::model::{is_infobase_name, AppConfig};
 use crate::domain::capability::{Provider, TargetKind};
+use crate::domain::infobase_export::RestoreTargetMode;
 use crate::domain::init::InitSource;
 use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
@@ -32,6 +34,7 @@ use crate::use_cases::infobase_export::{
 };
 use crate::use_cases::interruption::collecting_deferrals;
 use crate::use_cases::progress::log_live_stage;
+use crate::use_cases::provider_selection::SelectedProvider;
 
 use super::{
     ensure_created, existing_file_infobase, failure_details, infobase_marker_path,
@@ -44,13 +47,16 @@ const SNAPSHOTS_DIR: &str = "copies";
 
 /// Шаг создания базы копией `from` и источник для ответа: база и путь снимка. Источника нет,
 /// пока база-источник не найдена.
+///
+/// Исполнителя загрузки образа `select` выбирает по готовности только после отказов по
+/// `--from` и по виду цели: отказ с рецептом не подменяется отказом окружения.
 pub(super) fn ensure_copy(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     from: &str,
     dry_run: bool,
-    restorer: Provider,
+    select: impl FnOnce(&mut PlatformUtilities) -> Result<SelectedProvider, AppError>,
 ) -> (StepOutcome, Option<InitSource>) {
     let started = Instant::now();
     let source = match source_config(config, from) {
@@ -68,7 +74,6 @@ pub(super) fn ensure_copy(
         snapshot: snapshot.clone(),
     });
     let copy = Copy {
-        restorer,
         context,
         config,
         source: &source,
@@ -76,7 +81,7 @@ pub(super) fn ensure_copy(
         snapshot: &snapshot,
         started,
     };
-    (copy.run(utilities, dry_run), answer)
+    (copy.run(utilities, dry_run, select), answer)
 }
 
 /// Конфигурация источника: та же, что у команды, с секцией базы `from` из местного слоя.
@@ -203,13 +208,18 @@ enum SnapshotFailure {
 
 /// Одна копия: источник, его образ и цель команды.
 struct Copy<'a> {
-    restorer: Provider,
     context: &'a ExecutionContext,
     config: &'a AppConfig,
     source: &'a AppConfig,
     from: &'a str,
     snapshot: &'a Path,
     started: Instant,
+}
+
+/// Исполнитель `infobase restore`, выбранный для загрузки образа, и его утилита.
+struct Restorer {
+    provider: Provider,
+    binary: PathBuf,
 }
 
 /// Чем создаётся база по виду цели.
@@ -225,7 +235,12 @@ impl Copy<'_> {
         StepOutcome::failed("infobase", "create", self.started, error)
     }
 
-    fn run(&self, utilities: &mut PlatformUtilities, dry_run: bool) -> StepOutcome {
+    fn run(
+        &self,
+        utilities: &mut PlatformUtilities,
+        dry_run: bool,
+        select: impl FnOnce(&mut PlatformUtilities) -> Result<SelectedProvider, AppError>,
+    ) -> StepOutcome {
         match self.source.target_kind() {
             TargetKind::Standalone => return self.failed(standalone_source_refusal(self.from)),
             TargetKind::File => {
@@ -257,26 +272,34 @@ impl Copy<'_> {
                 Creator::File { dir }
             }
         };
+        // Исполнитель загрузки выбирается по готовности, и превью называет его утилиту.
         // Конфигуратор ищется так же, как у `infobase create`: превью отказывает на той же
         // отсутствующей платформе, что и прогон.
+        let selected = match select(utilities) {
+            Ok(selected) => selected,
+            Err(error) => return self.failed(error),
+        };
         let designer = match locate_infobase_creator(Provider::Designer, utilities) {
             Ok(binary) => binary,
             Err(error) => return self.failed(error),
         };
-        let restore_binary = if self.restorer == Provider::Designer {
-            designer.clone()
-        } else {
-            match locate_infobase_creator(self.restorer, utilities) {
+        let binary = match selected.location {
+            Some(location) => location.path,
+            None => match locate_infobase_creator(selected.provider, utilities) {
                 Ok(binary) => binary,
                 Err(error) => return self.failed(error),
-            }
+            },
+        };
+        let restorer = Restorer {
+            provider: selected.provider,
+            binary,
         };
         if dry_run {
             return StepOutcome::planned(
                 "infobase",
                 "create",
                 self.started,
-                self.plan(&creator, &designer),
+                self.plan(&creator, &designer, &restorer),
             );
         }
         if let Some(outcome) = interruption_step_outcome(
@@ -314,7 +337,7 @@ impl Copy<'_> {
             let target = self.config.v8_connection().describe_target();
             match &creator {
                 Creator::File { dir } => {
-                    let created = self.restore(&restore_binary)?;
+                    let created = self.restore(&restorer, RestoreTargetMode::Create)?;
                     deferrals.note_result(INFOBASE_CREATE, &created);
                     let mut secrets = infobase_secrets(self.config);
                     secrets.extend(infobase_secrets(self.source));
@@ -323,7 +346,7 @@ impl Copy<'_> {
                 }
                 Creator::Cluster(cluster) => {
                     cluster.create(self.context, self.config, utilities, deferrals)?;
-                    let restored = self.restore(&restore_binary);
+                    let restored = self.restore(&restorer, RestoreTargetMode::Replace);
                     if let Ok(result) = &restored {
                         deferrals.note_result(INFOBASE_CREATE, result);
                     }
@@ -361,13 +384,18 @@ impl Copy<'_> {
 
     /// План превью: снимок и создание; у кластера — с предупреждением, что существующая база
     /// данных с тем же именем будет перезаписана образом.
-    fn plan(&self, creator: &Creator<'_>, designer: &Path) -> String {
+    fn plan(&self, creator: &Creator<'_>, designer: &Path, restorer: &Restorer) -> String {
         let creation = match creator {
             Creator::File { .. } => format!(
-                "{} from it via {} {}",
+                "{} from it via {} {} {}",
                 self.config.v8_connection().describe_target(),
-                self.restorer.as_str(),
-                if self.restorer == Provider::Ibcmd { "infobase restore --create-database" } else { "/RestoreIB" }
+                restorer.provider.as_str(),
+                restorer.binary.display(),
+                if restorer.provider == Provider::Ibcmd {
+                    "infobase restore --create-database"
+                } else {
+                    "/RestoreIB"
+                }
             ),
             Creator::Cluster(cluster) => format!(
                 "{}; then /RestoreIB loads the image into it, and the data of an existing database of that name is overwritten by the image of '{}'",
@@ -454,13 +482,18 @@ impl Copy<'_> {
     }
 
     /// Загрузка образа в базу команды общим исполнителем `infobase restore`.
-    fn restore(&self, binary: &Path) -> Result<PlatformCommandResult, AppError> {
+    fn restore(
+        &self,
+        restorer: &Restorer,
+        mode: RestoreTargetMode,
+    ) -> Result<PlatformCommandResult, AppError> {
         run_restore_provider(
             self.context,
             self.config,
-            self.restorer,
-            Some(binary),
+            restorer.provider,
+            Some(&restorer.binary),
             self.snapshot,
+            mode,
         )
         .map_err(|failure| failure.into_error(INFOBASE_CREATE))
     }

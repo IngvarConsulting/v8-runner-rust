@@ -1048,6 +1048,64 @@ fn a_file_copy_selects_ibcmd_and_refuses_an_unavailable_executor() {
     assert_eq!(calls(stand.root()), before, "nothing is snapshotted");
 }
 
+/// Без `ibcmd` на машине файловую копию загружает Конфигуратор: и превью, и прогон выбирают
+/// его по готовности, квитанция называет пропущенный `ibcmd`.
+#[test]
+fn a_file_copy_without_ibcmd_falls_back_to_the_designer() {
+    let stand = Stand::new();
+    let (_neighbour, source) = stand.neighbour();
+    let before = fs::read(source.join("1Cv8.1CD")).expect("source");
+    let worktree = stand.worktree(&source);
+    init_own_base(&worktree);
+    fs::remove_file(stand.root().join("bin/ibcmd")).expect("no ibcmd");
+    let skipped_ibcmd = |payload: &Value| {
+        payload["data"]["provider"]["skipped"]
+            .as_array()
+            .is_some_and(|skipped| skipped.iter().any(|entry| entry["provider"] == "ibcmd"))
+    };
+
+    let preview = succeeded(&run(
+        &worktree,
+        &["infobase", "create", "--from", "upstream", "--dry-run"],
+    ));
+    assert_eq!(
+        preview["data"]["provider"]["selected"], "designer",
+        "{preview}"
+    );
+    assert!(skipped_ibcmd(&preview), "{preview}");
+    let message = preview["data"]["steps"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(message.contains("/RestoreIB"), "{message}");
+
+    let before_calls = calls(stand.root());
+    let result = succeeded(&run(
+        &worktree,
+        &["infobase", "create", "--from", "upstream"],
+    ));
+    assert_eq!(
+        result["data"]["provider"]["selected"], "designer",
+        "{result}"
+    );
+    assert!(skipped_ibcmd(&result), "{result}");
+    let log = calls(stand.root());
+    let new_calls = &log[before_calls.len()..];
+    assert!(
+        new_calls
+            .lines()
+            .any(|line| line.starts_with("1cv8 ") && line.contains("/RestoreIB")),
+        "{new_calls}"
+    );
+    assert!(
+        !new_calls.lines().any(|line| line.starts_with("ibcmd ")),
+        "{new_calls}"
+    );
+    assert_eq!(
+        fs::read(worktree.parent().unwrap().join("build/ib/1Cv8.1CD")).expect("copy"),
+        before
+    );
+}
+
 #[test]
 fn a_file_copy_is_restored_by_ibcmd_without_changing_the_source() {
     let stand = Stand::new();

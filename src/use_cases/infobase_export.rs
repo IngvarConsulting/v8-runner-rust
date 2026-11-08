@@ -647,6 +647,7 @@ fn run_infobase_restore(
         prepared.provider,
         prepared.executable.as_deref(),
         &request.input,
+        request.target_mode,
     ) {
         Ok(platform_result) => platform_result,
         Err(failure) => {
@@ -738,6 +739,7 @@ pub(crate) fn run_restore_provider(
     provider: Provider,
     executable: Option<&Path>,
     source_file: &Path,
+    target_mode: RestoreTargetMode,
 ) -> Result<PlatformCommandResult, CommandFailure> {
     match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
@@ -778,7 +780,10 @@ pub(crate) fn run_restore_provider(
                 &runner,
                 InterruptionSafetyClass::CriticalNonAbortable,
             )
-            .and_then(|dsl| dsl.restore_infobase(source_file).map_err(AppError::from))
+            .and_then(|dsl| {
+                dsl.restore_infobase(source_file, target_mode)
+                    .map_err(AppError::from)
+            })
             .map_err(CommandFailure::without_deferral)
         }
     }
