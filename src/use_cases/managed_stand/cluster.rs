@@ -76,8 +76,9 @@ impl Busy {
 struct Declared {
     infobase: String,
     name: String,
-    /// База кластера живёт в СУБД; без `dbms` кластер поднимается, но базы в нём не создать.
-    database: Option<Database>,
+    /// PostgreSQL раннера поднимается шагом кластера. Остальное о БД нужно только тому, кто
+    /// регистрирует базу, и разбирается там (`Cluster::database`).
+    dbms_managed: bool,
 }
 
 fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
@@ -93,16 +94,15 @@ fn declared(config: &AppConfig) -> Result<Declared, UseCaseError> {
             validation("infobase.cluster.managed is not declared for this infobase: the cluster commands start only a cluster the runner owns")
         })?;
     let name = managed.reference(&infobase);
-    let database = config
+    let dbms_managed = config
         .infobase
         .dbms
         .as_ref()
-        .map(Database::declared)
-        .transpose()?;
+        .is_some_and(|dbms| dbms.managed.is_some());
     Ok(Declared {
         infobase,
         name,
-        database,
+        dbms_managed,
     })
 }
 
@@ -161,9 +161,20 @@ impl Cluster<'_> {
         self.agent.root().join(&pins.registry)
     }
 
+    /// БД базы кластера, как её объявили; без `dbms` кластер поднимается, но базы в нём не создать.
+    fn database(&self) -> Result<Option<Database>, UseCaseError> {
+        self.config
+            .infobase
+            .dbms
+            .as_ref()
+            .map(Database::declared)
+            .transpose()
+    }
+
     /// PostgreSQL раннера как шаг кластера.
     fn stand(&self) -> Option<Stand<'_>> {
-        matches!(self.declared.database, Some(Database::Managed { .. }))
+        self.declared
+            .dbms_managed
             .then(|| Stand::new(self.config, self.context, self.runner, self.host).ok())
             .flatten()
             .map(Stand::server_step)
@@ -588,11 +599,12 @@ impl Cluster<'_> {
                 self.declared.infobase
             )));
         }
+        // Неполная секция `dbms` с чужой не сравнивается: регистрация базы её всё равно отвергнет.
         if let Some(owner) = self
-            .declared
-            .database
-            .as_ref()
-            .and_then(|database| other_cluster_over(self.config, self.host, database))
+            .database()
+            .ok()
+            .flatten()
+            .and_then(|database| other_cluster_over(self.config, self.host, &database))
         {
             return Err(owned_by_a_cluster(&owner));
         }
@@ -866,15 +878,16 @@ impl Cluster<'_> {
         old: ClusterPins,
     ) -> Result<ClusterResult, UseCaseError> {
         let old_registry = self.registry(&old);
+        let declared = self.database()?;
         let existed = old.registered
-            || match (&self.declared.database, stand) {
+            || match (&declared, stand) {
                 (Some(Database::Managed { name }), Some(stand)) => {
                     let (port, bin) = stand.running_record()?;
                     stand.database_exists(port, &bin, name)?
                 }
                 _ => false,
             };
-        let database = match (&self.declared.database, existed) {
+        let database = match (&declared, existed) {
             (Some(database), _) => Some(database),
             (None, true) => {
                 return Err(validation(
@@ -1265,9 +1278,10 @@ pub(super) fn cluster_base(
         .pins()
         .filter(|pins| pins.previous.is_none())
         .ok_or_else(not_running)?;
-    let database = cluster.declared.database.as_ref().ok_or_else(|| {
+    let database = cluster.database()?.ok_or_else(|| {
         validation("infobase.dbms is not declared: the infobase of a cluster lives in a DBMS")
     })?;
+    let database = &database;
     if let Some(owner) = other_cluster_over(config, host, database) {
         return Err(owned_by_a_cluster(&owner));
     }
@@ -2429,6 +2443,25 @@ mod tests {
         let answer = setup.base(&host);
         assert!(matches!(answer, Ok(ClusterBase::AlreadyRegistered(_))));
         assert!(setup.pins().registered);
+    }
+
+    #[test]
+    fn a_managed_postgres_without_a_database_name_still_starts_and_stops_with_the_cluster() {
+        let mut setup = setup();
+        let host = Host::default();
+        setup.config.infobase.dbms.as_mut().unwrap().name = None;
+        let started = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(started.action, ServiceAction::Started);
+        assert!(host.alive(PG_PID), "the step PostgreSQL is up");
+        let stopped = setup.run(ServiceCommand::Stop, &host).unwrap();
+        assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
+        // Создать базу без имени БД нельзя: отказ называет ключ.
+        setup.run(ServiceCommand::Start, &host).unwrap();
+        let refused = setup.base(&host).err().expect("refused");
+        assert!(
+            refused.to_string().contains("infobase.dbms.name"),
+            "{refused}"
+        );
     }
 
     #[test]
