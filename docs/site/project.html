@@ -62,6 +62,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -171,7 +172,7 @@ infobases:
 <p><code>server</code>, <code>wsdir</code> и <code>dir</code> нужны команде <a href="cli-web-publish.html"><code>web publish</code></a>; <code>url</code> — команде <a href="cli-launch.html"><code>launch</code></a>. Для <code>apache2</code> и <code>apache22</code> также нужен <code>conf</code> — путь к файлу конфигурации Apache. На платформе 8.5.4 и новее <code>apache22</code> нет, см. <a href="#platform-versions">версии платформы</a>. Для IIS можно задать <code>os-auth: true</code> — аутентификацию средствами ОС.</p>
 <pre><code>v8-runner web publish</code></pre>
 <h2 id="tools">Инструменты</h2>
-<p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С.</p>
+<p><code>tools</code> задаёт поиск и запуск внешних утилит. Например, <code>tools.platform</code> настраивает поиск платформы 1С. <code>tools.postgres.path</code> называет каталог сборки PostgreSQL для 1С, которую поднимает <a href="cli-dbms.html"><code>dbms</code></a>.</p>
 <h3 id="platform-selection">Выбор платформы <span class="plan-badge">План</span></h3>
 <p>Выберите один способ: <code>version</code> — поиск подходящей установленной платформы, <code>path</code> — использование платформы по указанному пути.</p>
 <pre data-config-example="main"><code># Фрагмент v8project.yaml
@@ -210,6 +211,7 @@ providers:        # явно выбранные исполнители опер�
   push: designer  # отправка через Конфигуратор
   pull: designer  # выгрузка через Конфигуратор</code></pre>
 <p>Если ключ не задан, раннер выбирает исполнителя сам. Если задан — использует только указанного исполнителя, без переключения на другого. Для <code>check</code> ветка определяется форматом проекта.</p>
+<p>У файловой базы без ключа <code>push</code> и <code>pull</code> выбирают исполнителя ещё и по объёму операции. Когда каждый набор команды идёт целиком — <code>push --force</code> или <code>--full</code>, <code>pull --force</code>, загрузка без снимка, выгрузка без годного файла версий, — первым идёт <code>ibcmd</code>: целиком он выгружает и загружает быстрее. Остальные операции, в том числе команда, где хоть один набор идёт по изменившемуся, начинает агент. Подключённый агент (<code>tools.designer_agent.attach</code>), кластер и автономный сервер выбирают как прежде. Ответ называет выбор полем <code>reason</code> квитанции исполнителя. После полной загрузки через <code>ibcmd</code> раннер записывает файл версий, и следующий <code>pull</code> идёт по изменившемуся.</p>
 <div class="tablewrap"><table>
 <thead><tr><th>ключ</th><th>чем управляет</th></tr></thead>
 <tbody>

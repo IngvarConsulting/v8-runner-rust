@@ -9,8 +9,10 @@ use crate::platform::process::{
 };
 use crate::platform::result::PlatformCommandResult;
 
-// Parallel config export can fail on valid packages (#476).
-const CONFIG_EXPORT_THREADS_ARG: &str = "--threads=1";
+// Разбор пакета (`export --file`) в несколько потоков отказывает на годных пакетах (#476),
+// поэтому он идёт в один поток. Выгрузка из базы ключа не несёт и идёт в потоках платформы:
+// `INV.PLATFORM.AN-IBCMD-EXPORT-FROM-A-BASE-KEEPS-PLATFORM-THREADS`.
+const PACKAGE_EXPORT_THREADS_ARG: &str = "--threads=1";
 
 #[derive(Debug, Error)]
 pub enum IbcmdError {
@@ -233,6 +235,7 @@ pub struct IbcmdDsl<'a> {
     runner: &'a dyn ProcessRunner,
     execution_policy: ProcessExecutionPolicy,
     data_path: Option<PathBuf>,
+    locale: Option<String>,
 }
 
 impl<'a> IbcmdDsl<'a> {
@@ -251,7 +254,14 @@ impl<'a> IbcmdDsl<'a> {
             runner,
             execution_policy,
             data_path: None,
+            locale: None,
         }
+    }
+
+    /// Национальные настройки новой базы в СУБД: `--locale` у `infobase create`.
+    pub fn with_locale(mut self, locale: Option<String>) -> Self {
+        self.locale = locale;
+        self
     }
 
     /// Uses an isolated standalone-server data directory for every IBCMD call.
@@ -594,7 +604,6 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
-        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -641,7 +650,7 @@ impl<'a> IbcmdDsl<'a> {
         args.push("export".to_owned());
         args.extend(self.connection.auth_args());
         args.extend(self.connection.dbms_auth_args());
-        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
+        args.push(PACKAGE_EXPORT_THREADS_ARG.to_owned());
         args.push(format!("--file={}", source_file.display()));
         args.push(target_dir.display().to_string());
         self.run(&args)
@@ -659,6 +668,15 @@ impl<'a> IbcmdDsl<'a> {
             push_option_value(&mut args, "--extension", extension);
         }
         args.push(format!("--base={}", version_file.display()));
+        self.run_with(&args, &self.execution_policy.for_reading())
+    }
+
+    /// `config export info --out=<каталог>`: один файл версий `ConfigDumpInfo.xml` основной
+    /// конфигурации в каталог `out_dir`. `--out` — каталог, не файл; файл тот же, что пишет
+    /// полная выгрузка и Конфигуратор (замер «Версия формата файла версий», #403). Чтение базы.
+    pub fn config_export_info(&self, out_dir: &Path) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "export", "info"]);
+        args.push(format!("--out={}", out_dir.display()));
         self.run_with(&args, &self.execution_policy.for_reading())
     }
 
@@ -682,7 +700,6 @@ impl<'a> IbcmdDsl<'a> {
         extension: Option<&str>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "export"]);
-        args.push(CONFIG_EXPORT_THREADS_ARG.to_owned());
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
@@ -713,6 +730,9 @@ impl<'a> IbcmdDsl<'a> {
         let mut args = self.infobase_args(&["create"]);
         if matches!(self.connection, IbcmdConnection::Server { .. }) {
             args.push("--create-database".to_owned());
+            if let Some(locale) = &self.locale {
+                args.push(format!("--locale={locale}"));
+            }
         }
         args.extend(self.connection.auth_args());
         args.extend(self.connection.dbms_auth_args());
@@ -1041,6 +1061,56 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("export"));
         assert!(args.contains("--force"));
+        assert!(!args.contains("--threads"), "{args}");
+    }
+
+    /// Страж #481: один поток только у разбора пакета (#476); выгрузка из базы ключа не несёт.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_package_export_is_single_threaded() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let calls_log = dir.path().join("calls.log");
+        write_script(
+            &script,
+            &format!(
+                "printf '%s ' \"$@\" >> \"{log}\"\nprintf '\\n' >> \"{log}\"\nexit 0",
+                log = calls_log.display()
+            ),
+        );
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+        let target = dir.path().join("xml");
+
+        for extension in [None, Some("ext")] {
+            dsl.config_export_full(&target, extension).expect("full");
+            dsl.config_export_incremental(&target, extension)
+                .expect("incremental");
+        }
+        dsl.config_export_file(&dir.path().join("package.cf"), &target)
+            .expect("package");
+
+        let calls = fs::read_to_string(calls_log).expect("calls");
+        let exports = calls
+            .lines()
+            .filter(|call| call.contains(" export "))
+            .collect::<Vec<_>>();
+        assert_eq!(exports.len(), 5, "{calls}");
+        for call in exports {
+            assert_eq!(
+                call.contains("--threads"),
+                call.contains("--file="),
+                "{call}"
+            );
+            if call.contains("--file=") {
+                assert!(call.contains(" --threads=1 "), "{call}");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1378,7 +1448,6 @@ mod tests {
                 "/ib".to_owned(),
                 "config".to_owned(),
                 "export".to_owned(),
-                "--threads=1".to_owned(),
                 "--force".to_owned(),
                 dir.path().display().to_string(),
             ]
@@ -1439,7 +1508,8 @@ mod tests {
             .expect("export");
 
         let args = fs::read_to_string(args_log).expect("args");
-        assert!(args.contains("export\n--threads=1\n--sync\n"), "{args}");
+        assert!(args.contains("export\n--sync\n"), "{args}");
+        assert!(!args.contains("--threads"), "{args}");
         assert!(!args.contains("--force"), "{args}");
     }
 

@@ -516,7 +516,7 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
     );
     assert_eq!(
         lines.last().map(String::as_str),
-        Some("common shutdown"),
+        Some("common disconnect-ib"),
         "{lines:?}"
     );
     assert_eq!(
@@ -847,4 +847,113 @@ fn failed_agent_load_keeps_the_nearest_filename_and_typed_cause_after_long_logs(
     assert!(!commands(&harness)
         .iter()
         .any(|line| line.starts_with("config update-db-cfg")));
+}
+
+/// Стенд с набором расширения `ext`, чью запись поколения сделал `ibcmd`: у расширения токены
+/// инструментов несравнимы, а грузит агент (#559). `ibcmd` в установке отвечает токеном
+/// `answer`; `None` — утилиты нет.
+fn harness_with_an_extension_recorded_by_ibcmd(answer: Option<&str>) -> Harness {
+    let harness = harness();
+    let root = harness.dir.path().to_path_buf();
+    let ext = root.join("project").join("ext");
+    fs::create_dir_all(&ext).expect("extension sources");
+    fs::write(ext.join("Configuration.xml"), "<Configuration/>").expect("extension root");
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(
+        &harness.config_path,
+        config.replace(
+            "    path: project/configuration\n",
+            "    path: project/configuration\n  - name: ext\n    type: EXTENSION\n    path: project/ext\n",
+        ),
+    )
+    .expect("config");
+    support::memory::remember_base(
+        &root.join("work"),
+        "origin",
+        support::memory::Base::File(&root.join("ib")),
+        &[
+            support::memory::Set::configuration("main", &harness.sources),
+            support::memory::Set::extension("ext", &ext),
+        ],
+    );
+    let ledger_path = root.join("work/infobases/origin/generation.json");
+    let mut ledger: Value =
+        serde_json::from_str(&fs::read_to_string(&ledger_path).expect("ledger")).expect("json");
+    ledger["ext"]["tool"] = Value::from("ibcmd");
+    ledger["ext"]["token"] = Value::from("1".repeat(40));
+    fs::write(&ledger_path, ledger.to_string()).expect("ledger");
+    if let Some(answer) = answer {
+        support::write_shell_script(
+            &root
+                .join("platform")
+                .join("8.3.27.2074")
+                .join("bin")
+                .join("ibcmd"),
+            &format!(
+                "printf '%s\n' \"$*\" >> '{}'\ncase \"$*\" in *generation-id*) printf '{answer}\n' ;; esac\nexit 0",
+                root.join("ibcmd-calls.log").display()
+            ),
+        );
+    }
+    harness
+}
+
+/// Агент грузит основную конфигурацию и расширение, а запись расширения сделал `ibcmd`:
+/// поколение расширения спрашивает `ibcmd` первым проходом — раньше, чем открыта сессия
+/// агента, которая держала бы файловую базу, — и расширение, ушедшее вперёд, отказывает
+/// `non_fast_forward` до загрузки.
+#[test]
+fn an_extension_recorded_by_ibcmd_is_checked_before_the_agent_session_opens() {
+    let second = "2".repeat(40);
+    let harness = harness_with_an_extension_recorded_by_ibcmd(Some(&second));
+
+    let (code, payload) = run(&harness, &["push"]);
+
+    assert_eq!(code, 3, "{payload}");
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    assert_eq!(
+        payload["error"]["base_generation"],
+        second.as_str(),
+        "{payload}"
+    );
+    let ibcmd_calls = read_or_empty(&harness.dir.path().join("ibcmd-calls.log"));
+    assert_eq!(
+        ibcmd_calls
+            .lines()
+            .filter(|line| line.contains("generation-id"))
+            .count(),
+        1,
+        "only the record tool's read of the extension: {ibcmd_calls}"
+    );
+    assert!(
+        ibcmd_calls.lines().all(|line| line.contains("--extension")),
+        "{ibcmd_calls}"
+    );
+    assert!(
+        commands(&harness).is_empty(),
+        "no agent session was opened before the refusal: {:?}",
+        commands(&harness)
+    );
+}
+
+/// Инструмент записи поколением не ответил — здесь `ibcmd` нет в установке: сверить нечем,
+/// и отправка отказывает, называя причину и выход, а не грузит без сверки.
+#[test]
+fn a_record_tool_without_an_answer_refuses_the_push() {
+    let harness = harness_with_an_extension_recorded_by_ibcmd(None);
+
+    let (code, payload) = run(&harness, &["push"]);
+
+    assert_eq!(code, 3, "{payload}");
+    assert_eq!(payload["error"]["code"], "non_fast_forward", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("recorded by ibcmd"), "{message}");
+    assert!(message.contains("ibcmd is not found"), "{message}");
+    assert!(message.contains("push ext --force"), "{message}");
+    assert!(
+        !commands(&harness)
+            .iter()
+            .any(|line| line.starts_with("config load-config-from-files")),
+        "nothing is loaded"
+    );
 }

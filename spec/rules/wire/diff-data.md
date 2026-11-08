@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.DIFF-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/diff.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -42,6 +42,8 @@ Designer обозначает пустой список одной сигнат�
 `provider` объясняет выбор. `provider_dispatched` берётся из отметки работы исполнителя.
 Обычный `diff` проходит границу владельца как команда записи, `diff --against` — как
 команда чтения, по `INV.USE-CASES.A-DEVELOPMENT-BASE-IS-HELD-BY-ONE-WORKING-COPY`.
+
+**Что изменила версия 2.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 ## Пример
 

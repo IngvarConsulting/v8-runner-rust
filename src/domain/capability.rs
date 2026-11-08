@@ -488,6 +488,44 @@ pub fn default_chain_for(
         .collect()
 }
 
+/// Объём операции, по которому раннер упорядочивает цепочку умолчаний (#559).
+///
+/// Имя идёт в квитанцию полем `reason`: им раннер объясняет, почему первым в цепочке стоит
+/// тот, кто стоит.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationSize {
+    /// Каждый набор, который команда загружает или выгружает, идёт целиком.
+    Whole,
+    /// Хотя бы один набор идёт по изменившемуся или выборкой.
+    ByChanges,
+}
+
+/// Упорядочивает ли объём цепочку умолчаний операции на цели: только `push` и `pull`
+/// файловой базы. Кластер и автономный сервер держат строку матрицы.
+pub const fn ordered_by_size(operation: Operation, target: TargetKind) -> bool {
+    matches!(
+        (operation, target),
+        (Operation::Build | Operation::Dump, TargetKind::File)
+    )
+}
+
+/// Цепочка умолчаний для объёма: целиком — `ibcmd` первым, остальные в порядке строки;
+/// по изменившемуся — строка как есть. Цепочку без `ibcmd` объём не меняет. Замер,
+/// по которому решено (#559): полная выгрузка и полная загрузка файловой базы через `ibcmd`
+/// вдвое быстрее Конфигуратора и агента, частичная — медленнее.
+pub fn chain_for_size(chain: Vec<Provider>, size: OperationSize) -> Vec<Provider> {
+    match size {
+        OperationSize::ByChanges => chain,
+        OperationSize::Whole => {
+            let (ibcmd, rest): (Vec<_>, Vec<_>) = chain
+                .into_iter()
+                .partition(|provider| *provider == Provider::Ibcmd);
+            ibcmd.into_iter().chain(rest).collect()
+        }
+    }
+}
+
 /// Есть ли у пары «операция и цель» настоящая развилка.
 ///
 /// Переопределение имеет смысл только там, где есть из чего выбирать: второй
@@ -591,6 +629,11 @@ pub struct ProviderReceipt {
     /// открывалась: исполнял процесс платформы, это превью или отказ до подключения.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<SessionEndpoint>,
+    /// Почему цепочка умолчаний стоит в этом порядке: объём операции. Есть только у
+    /// умолчания, которое раннер упорядочил по объёму (`push` и `pull` файловой базы);
+    /// у ключа `providers.*` и у остальных цепочек поля нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<OperationSize>,
 }
 
 /// Как раннер добрался до точки входа агента.
@@ -622,6 +665,7 @@ impl ProviderReceipt {
             origin,
             skipped: Vec::new(),
             endpoint: None,
+            reason: None,
         }
     }
 
@@ -632,7 +676,14 @@ impl ProviderReceipt {
             origin,
             skipped,
             endpoint: None,
+            reason: None,
         }
+    }
+
+    /// Квитанция с причиной порядка цепочки.
+    pub fn with_reason(mut self, reason: Option<OperationSize>) -> Self {
+        self.reason = reason;
+        self
     }
 
     pub fn with_skipped(mut self, skipped: Vec<SkippedProvider>) -> Self {
@@ -1000,6 +1051,63 @@ mod tests {
                 default_chain(operation, TargetKind::File),
                 [Provider::Agent, Provider::Designer]
             );
+        }
+    }
+
+    /// Объём упорядочивает только `push` и `pull` файловой базы (#559): целиком `ibcmd` идёт
+    /// первым, остальные в порядке строки и с сужением формой проекта; по изменившемуся строка
+    /// не меняется. Кластер, автономный сервер и другие операции объём не упорядочивает.
+    #[test]
+    fn a_whole_push_or_pull_of_a_file_base_leads_with_ibcmd() {
+        use Provider::{Agent, Designer, Ibcmd};
+        let edt = ProjectShape {
+            edt_sources: true,
+            ..ProjectShape::default()
+        };
+        for operation in [Operation::Build, Operation::Dump] {
+            assert!(ordered_by_size(operation, TargetKind::File));
+            assert!(!ordered_by_size(operation, TargetKind::Cluster));
+            assert!(!ordered_by_size(operation, TargetKind::Standalone));
+            let row = default_chain(operation, TargetKind::File);
+            assert_eq!(
+                chain_for_size(row.clone(), OperationSize::Whole),
+                [Ibcmd, Agent, Designer]
+            );
+            assert_eq!(chain_for_size(row.clone(), OperationSize::ByChanges), row);
+            assert_eq!(
+                chain_for_size(
+                    default_chain_for(operation, TargetKind::File, edt),
+                    OperationSize::Whole
+                ),
+                [Ibcmd, Designer]
+            );
+        }
+        assert_eq!(
+            chain_for_size(vec![Agent, Designer], OperationSize::Whole),
+            [Agent, Designer]
+        );
+        for operation in Operation::ALL {
+            if !matches!(operation, Operation::Build | Operation::Dump) {
+                for target in TargetKind::ALL {
+                    assert!(!ordered_by_size(operation, target), "{operation}");
+                }
+            }
+        }
+    }
+
+    /// Причина порядка в квитанции — `whole` или `by_changes`; без неё поля нет.
+    #[test]
+    fn a_receipt_names_the_size_only_when_it_ordered_the_chain() {
+        let plain = ProviderReceipt::new(Provider::Agent, ProviderOrigin::Default);
+        let json = serde_json::to_value(&plain).expect("receipt");
+        assert!(json.get("reason").is_none(), "{json}");
+        for (size, name) in [
+            (OperationSize::Whole, "whole"),
+            (OperationSize::ByChanges, "by_changes"),
+        ] {
+            let json =
+                serde_json::to_value(plain.clone().with_reason(Some(size))).expect("receipt");
+            assert_eq!(json["reason"], name, "{json}");
         }
     }
 

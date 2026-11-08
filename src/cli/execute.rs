@@ -247,6 +247,33 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Platforms => execute_platforms(config, presenter),
+        Command::Standalone(args) => execute_standalone(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
+        Command::Cluster(args) => execute_cluster(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
+        Command::Dbms(args) => execute_dbms(
+            config,
+            args.command,
+            command_line,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
         Command::Status(args) => execute_status(
             config,
             args,
@@ -758,6 +785,24 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Launch(_) => CommandName::Launch,
         Command::Publish(_) => CommandName::Publish,
         Command::Platforms => CommandName::Platforms,
+        Command::Standalone(args) => match args.command {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::StandaloneStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::StandaloneStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::StandaloneStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::StandaloneRestart,
+        },
+        Command::Cluster(args) => match args.command.service() {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::ClusterStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::ClusterStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::ClusterStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::ClusterRestart,
+        },
+        Command::Dbms(args) => match args.command {
+            crate::cli::args::ServiceCommandArgs::Start => CommandName::DbmsStart,
+            crate::cli::args::ServiceCommandArgs::Status => CommandName::DbmsStatus,
+            crate::cli::args::ServiceCommandArgs::Stop => CommandName::DbmsStop,
+            crate::cli::args::ServiceCommandArgs::Restart => CommandName::DbmsRestart,
+        },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
     }
@@ -1456,6 +1501,466 @@ fn execute_reset(
             }
         },
     )
+}
+
+/// `dbms`: запись под замком `workPath`, `status` без него, чтобы отвечать и пока идёт другая
+/// команда (`INV.USE-CASES.A-SERVICE-STATUS-TAKES-NO-LOCK`).
+fn execute_dbms(
+    config: &AppConfig,
+    action: crate::cli::args::ServiceCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::use_cases::managed_stand::{dbms_status, execute_dbms as run, ServiceCommand};
+
+    let (name, command) = match action {
+        Action::Start => (CommandName::DbmsStart, ServiceCommand::Start),
+        Action::Status => (CommandName::DbmsStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::DbmsStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::DbmsRestart, ServiceCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::dbms::DbmsResult,
+    >| match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+            } else {
+                render_dbms_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ServiceCommand::Status {
+        return present(dbms_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+/// `standalone`: запись под замком `workPath`, `status` без него.
+fn execute_standalone(
+    config: &AppConfig,
+    action: crate::cli::args::ServiceCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ServiceCommandArgs as Action;
+    use crate::use_cases::managed_stand::{
+        execute_standalone as run, standalone_status, ServiceCommand,
+    };
+
+    let (name, command) = match action {
+        Action::Start => (CommandName::StandaloneStart, ServiceCommand::Start),
+        Action::Status => (CommandName::StandaloneStatus, ServiceCommand::Status),
+        Action::Stop => (CommandName::StandaloneStop, ServiceCommand::Stop),
+        Action::Restart => (CommandName::StandaloneRestart, ServiceCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::standalone::StandaloneResult,
+    >| match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+            } else {
+                render_standalone_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ServiceCommand::Status {
+        return present(standalone_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+fn render_standalone_text(
+    name: CommandName,
+    result: &crate::domain::standalone::StandaloneResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", pid {pid}"))
+        .unwrap_or_default();
+    let line = match result.action {
+        ServiceAction::Started => format!("started ibsrv{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => format!(
+            "ibsrv pid {} stopped",
+            result
+                .stopped_pid
+                .map_or_else(|| "?".to_owned(), |pid| pid.to_string())
+        ),
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: the server is not running", result.infobase),
+            ServiceState::Starting => format!("{}: the server is starting", result.infobase),
+            ServiceState::StartedByThisCopy => {
+                format!(
+                    "{}: standalone server, started by this working copy{pid}",
+                    result.infobase
+                )
+            }
+            ServiceState::Foreign => {
+                format!(
+                    "{}: another process holds a port or the infobase of this server",
+                    result.infobase
+                )
+            }
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("direct gate", result.connection.clone()),
+        ("ssh gate", result.gate.clone()),
+        ("http", result.http.clone()),
+        (
+            "data",
+            result
+                .data_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        presenter.print_bare("  the recorded process is gone");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_cluster(
+    config: &AppConfig,
+    action: crate::cli::args::ClusterCommandArgs,
+    command_line: &CommandLineTarget,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::ClusterCommandArgs as Action;
+    use crate::use_cases::managed_stand::{cluster_status, execute_cluster as run, ClusterCommand};
+
+    let (name, command) = match action {
+        Action::Start { new_regport } => (
+            CommandName::ClusterStart,
+            ClusterCommand::Start { new_regport },
+        ),
+        Action::Status => (CommandName::ClusterStatus, ClusterCommand::Status),
+        Action::Stop => (CommandName::ClusterStop, ClusterCommand::Stop),
+        Action::Restart => (CommandName::ClusterRestart, ClusterCommand::Restart),
+    };
+    let context = cli_context(config, name, cancellation).with_command_line(command_line.clone());
+    let present = |outcome: crate::use_cases::result::UseCaseResult<
+        crate::domain::cluster::ClusterResult,
+    >| match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(name.as_str(), result.duration_ms, result));
+            } else {
+                render_cluster_text(name, &result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                print_failure(
+                    presenter,
+                    name,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    if command == ClusterCommand::Status {
+        return present(cluster_status(&context, config));
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || present(run(&context, config, command, dry_run)),
+    )
+}
+
+fn render_cluster_text(
+    name: CommandName,
+    result: &crate::domain::cluster::ClusterResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", ragent pid {pid}"))
+        .unwrap_or_default();
+    let version = result
+        .version
+        .as_deref()
+        .map(|version| format!(" {version}"))
+        .unwrap_or_default();
+    let pids = |pids: &[u32]| {
+        pids.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let line = match result.action {
+        ServiceAction::Started => format!("started the cluster{version}{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => {
+            let mut stopped = Vec::new();
+            if let Some(pid) = result.stopped_pid {
+                stopped.push(format!("ragent pid {pid}"));
+            }
+            if let Some(pid) = result.stopped_ras_pid {
+                stopped.push(format!("ras pid {pid}"));
+            }
+            if !result.stopped_remnant_pids.is_empty() {
+                stopped.push(format!("remnants {}", pids(&result.stopped_remnant_pids)));
+            }
+            format!("{} stopped", stopped.join(", "))
+        }
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: the cluster is not running", result.infobase),
+            ServiceState::Starting => format!("{}: the cluster is starting", result.infobase),
+            ServiceState::StartedByThisCopy => format!(
+                "{}: cluster{version}, started by this working copy{pid}",
+                result.infobase
+            ),
+            ServiceState::Foreign => format!(
+                "{}: another process holds a port of this cluster",
+                result.infobase
+            ),
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("connection", result.connection.clone()),
+        ("agent", result.agent.clone()),
+        ("ras", result.ras.clone()),
+        ("worker range", result.worker_range.clone()),
+        ("ras pid", result.ras_pid.map(|pid| pid.to_string())),
+        (
+            "rac cluster list",
+            matches!(result.state, ServiceState::StartedByThisCopy).then(|| {
+                if result.ready {
+                    "answers"
+                } else {
+                    "does not answer"
+                }
+                .to_owned()
+            }),
+        ),
+        (
+            "infobase",
+            result.connection.as_ref().map(|_| {
+                if result.registered {
+                    "created".to_owned()
+                } else {
+                    "not created yet: run infobase create".to_owned()
+                }
+            }),
+        ),
+        (
+            "previous regport",
+            result.previous_regport.map(|port| port.to_string()),
+        ),
+        (
+            "registry",
+            result
+                .registry_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "remnants",
+            (!result.remnant_pids.is_empty()).then(|| pids(&result.remnant_pids)),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+        (
+            "PostgreSQL stopped",
+            result.stopped_dbms_pid.map(|pid| format!("pid {pid}")),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        presenter.print_bare("  the recorded process is gone");
+    }
+}
+
+fn render_dbms_text(
+    name: CommandName,
+    result: &crate::domain::dbms::DbmsResult,
+    presenter: &Presenter,
+) {
+    use crate::domain::dbms::{ServiceAction, ServiceState};
+
+    let pid = result
+        .pid
+        .map(|pid| format!(", pid {pid}"))
+        .unwrap_or_default();
+    let line = match result.action {
+        ServiceAction::Started => format!("started PostgreSQL{pid}"),
+        ServiceAction::AlreadyRunning => format!("already running for {}{pid}", result.infobase),
+        ServiceAction::Stopped => format!(
+            "PostgreSQL pid {} stopped",
+            result
+                .stopped_pid
+                .map_or_else(|| "?".to_owned(), |pid| pid.to_string())
+        ),
+        ServiceAction::NothingToStop => "nothing to stop".to_owned(),
+        ServiceAction::Planned => "plan: nothing was started or stopped".to_owned(),
+        ServiceAction::Reported => match result.state {
+            ServiceState::NotRunning => format!("{}: PostgreSQL is not running", result.infobase),
+            ServiceState::Starting => format!("{}: PostgreSQL is starting", result.infobase),
+            ServiceState::StartedByThisCopy => {
+                format!(
+                    "{}: PostgreSQL, started by this working copy{pid}",
+                    result.infobase
+                )
+            }
+            ServiceState::Foreign => {
+                format!("{}: the port is taken by another process", result.infobase)
+            }
+        },
+    };
+    presenter.print_bare(&format!("{}: {line}", name.as_str()));
+    let details = [
+        ("address", result.address.clone()),
+        ("user", result.user.clone()),
+        (
+            "password",
+            result
+                .password_file
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "data",
+            result
+                .data_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "log",
+            result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ),
+        (
+            "occupant",
+            result.occupant_pid.map(|pid| format!("process {pid}")),
+        ),
+    ];
+    for (label, value) in details {
+        if let Some(value) = value {
+            presenter.print_bare(&format!("  {label}  {value}"));
+        }
+    }
+    if result.stale_record {
+        presenter.print_bare("  the recorded process is gone");
+    }
 }
 
 fn execute_diff(

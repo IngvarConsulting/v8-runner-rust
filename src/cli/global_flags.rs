@@ -140,6 +140,66 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "dbms start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "dbms status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "dbms stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "dbms restart",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "standalone restart",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "cluster start",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "cluster status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "cluster stop",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "cluster restart",
+        preview: Preview::Runs,
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "diff",
         preview: Preview::Absent("it reads the selected infobase to obtain the answer"),
         base: Base::Resolves,

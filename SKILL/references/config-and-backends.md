@@ -32,17 +32,20 @@ settings before CLI overrides.
 There is no global backend switch. The executor is chosen per operation from a capability
 matrix, and `providers.<operation>` names one explicitly.
 
-- Executors are `designer`, `ibcmd`, and `agent`.
+- Executors are `designer`, `agent`, `ibcmd`, `ibcmd-rs`, and `webinst`.
 - The key is accepted only where the matrix gives this target more than one executor. On a file
   or cluster infobase that means `infobase.create`, `push`, `pull`, `extensions`,
   `download`, `infobase.dump`, `infobase.restore`, and `make`. Naming an
   executor for a single-executor operation is a config error. The loader rejects
   `providers.syntax`, `providers.check`, `providers.publish`, and `providers.sessions` as unknown keys.
-- Defaults: `infobase.create`, `push`, `pull`, `download` try Designer then `ibcmd`;
-  `infobase.dump` and `infobase.restore` use Designer (experimental IBCMD DT only when named);
-  `upload` and `syntax` are Designer-only; `extensions` defaults to `ibcmd`. `agent` is
-  experimental for most rows and is reached only by naming it — except on a standalone server,
-  where its SSH gate is the only executor there is.
+- Defaults: `push`, `pull`, `download` — file base `agent → designer → ibcmd`, cluster
+  `agent → designer`, standalone server Designer through the direct gate, then the agent
+  through the SSH gate. Without a key a file-base `push`/`pull` where every set goes whole runs
+  `ibcmd → agent → designer` (receipt `reason: whole`), except with an attached agent; by
+  changes the agent leads (`reason: by_changes`). `infobase.create` — file `ibcmd → designer`,
+  cluster Designer; `infobase.dump`/`infobase.restore` — `agent → designer` (experimental IBCMD
+  DT only when named); `upload` and `syntax` are Designer-only; `extensions` — file
+  `ibcmd → agent`, cluster `agent → designer`. `format: EDT` drops the agent from `push`/`pull`.
 - An override is strict: if the named executor is not ready the command refuses with a reason
   and never falls back to the default chain.
 - The key is allowed in `v8project.local.yaml` too; the response receipt names the file it came from.

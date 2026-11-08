@@ -53,6 +53,7 @@
     <a class="cli-operation" data-cli-group="Окружение" href="cli-tools-download.html#op-tools-download">tools download</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-standalone.html#op-standalone-start">standalone</a>
     <a class="cli-operation" data-cli-group="Окружение" href="cli-cluster.html#op-cluster-start">cluster</a>
+    <a class="cli-operation" data-cli-group="Окружение" href="cli-dbms.html#op-dbms-start">dbms</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -177,7 +178,7 @@ source-set:
     web:
       url: &quot;http://srv.example:8314/demo&quot;    # встроенный HTTP-сервер</code></pre>
 <p>srv.example — машина с ibsrv. Конфигуратор использует прямой шлюз и локальные файлы; агентский путь использует SSH и SFTP. Если на машине раннера нет платформы, оставьте standalone и уберите connection: обмен пойдёт через агентский шлюз.</p>
-<h2 id="d-standalone-managed">Автономный сервер под управлением раннера <span class="plan-badge">План</span></h2>
+<h2 id="d-standalone-managed">Автономный сервер под управлением раннера</h2>
 <p>Сервер нужен для разработки и тестов на своей машине, а поднимать его руками не хочется. Раннер поднимает <code>ibsrv</code> командой <a href="cli-standalone.html#op-standalone-start"><code>standalone start</code></a> и останавливает командой <a href="cli-standalone.html#op-standalone-stop"><code>standalone stop</code></a>. Порты прямого шлюза, SSH-шлюза и HTTP раннер выбирает свободными, для SSH-шлюза создаёт одноразовый ключ хоста, без которого сервер не стартует, а готовность проверяет пробой прямого шлюза <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами: <code>push</code>, <code>test</code> и остальные подключаются к нему так же, как к вашему.</p>
 <!-- diagram:d-standalone-managed -->
 <div class="diagram" role="img" aria-label="Автономный сервер под управлением раннера: ibsrv поднят на машине раннера командой standalone start">
@@ -202,7 +203,7 @@ source-set:
 <g class="n n-svc"><rect x="625.0" y="161.0" width="270.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="181.0">прямой шлюз</tspan><tspan x="760.0" y="199.0">свободный порт, проба готовности</tspan></text></g>
 <g class="n n-sw"><rect x="989.0" y="161.0" width="142.0" height="58.0" rx="8"/><text><tspan x="1060.0" y="181.0">ibsrv</tspan><tspan x="1060.0" y="199.0">поднят раннером</tspan></text></g>
 <g class="n n-svc"><rect x="983.0" y="51.0" width="154.0" height="58.0" rx="29.0"/><text><tspan x="1060.0" y="71.0">HTTP</tspan><tspan x="1060.0" y="89.0">свободный порт</tspan></text></g>
-<g class="n n-cyl"><path d="M1215.0,167.0 v46.0 a85.0,7.0 0 0 0 170.0,0 v-46.0"/><ellipse cx="1300.0" cy="167.0" rx="85.0" ry="7.0"/><text><tspan x="1300.0" y="181.0">файловая база</tspan><tspan x="1300.0" y="199.0">managed.db-path</tspan></text></g>
+<g class="n n-cyl"><path d="M1215.0,167.0 v46.0 a85.0,7.0 0 0 0 170.0,0 v-46.0"/><ellipse cx="1300.0" cy="167.0" rx="85.0" ry="7.0"/><text><tspan x="1300.0" y="181.0">db-path</tspan><tspan x="1300.0" y="199.0">или база в СУБД</tspan></text></g>
 <g class="lbl"><rect x="246.0" y="205.1" width="168" height="24" rx="4"/><text><tspan x="330.0" y="217.1">standalone start · stop</tspan></text></g>
 <g class="lbl"><rect x="204.8" y="70.5" width="228" height="24" rx="4"/><text><tspan x="318.8" y="82.5">SSH: команда строкой, ответ JSON</tspan></text></g>
 <g class="lbl"><rect x="195.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="266.0" y="160.0">процесс на операцию</tspan></text></g>
@@ -222,6 +223,21 @@ source-set:
       managed:               # ibsrv поднимает раннер
         db-path: build/ib    # файловая база сервера, от каталога этого файла
         name: demo           # имя базы на сервере, Ref= прямого шлюза</code></pre>
+<p id="d-standalone-managed-dbms">База сервера может лежать в СУБД: вместо <code>db-path</code> объявите секцию <code>dbms</code>. <code>dbms.managed</code> поднимает PostgreSQL раннер <span class="ref">(<a href="cli-dbms.html">dbms</a>)</span>; можно назвать и вашу СУБД.</p>
+<pre data-config-example="local"><code>infobases:
+  origin:
+    user: developer
+    password: &quot;ib-password&quot;
+    standalone:
+      managed:
+        name: demo
+    dbms:
+      managed: {}            # PostgreSQL поднимает раннер
+      name: demo_data        # физическое имя БД
+      locale: ru             # Locale= для создания базы
+tools:
+  postgres:
+    path: &quot;C:/PostgreSQL-1C/17&quot;  # каталог сборки</code></pre>
 <p>Шлюзы, адрес HTTP и каталог обмена не объявляются: раннер знает их сам, потому что сам поднял сервер, а называет их <a href="cli-standalone.html#op-standalone-status"><code>standalone status</code></a>. <code>ibsrv</code> берётся из той же установки платформы, что выбирают остальные команды. Запись о поднятом сервере — процесс, порты, ключ — раннер держит под <code>workPath</code>.</p>
 <h3 id="d-standalone-managed-cycle">Цикл работы</h3>
 <pre class="sh"><code>v8-runner infobase create   # база в db-path с конфигурацией из исходников
@@ -230,6 +246,16 @@ v8-runner push
 v8-runner test
 v8-runner standalone stop</code></pre>
 <p><a href="cli-infobase-create.html#create-standalone-managed"><code>infobase create</code></a> создаёт базу до запуска сервера, как того требует платформа <span class="ref">(<a href="platform.html#t75">75</a>)</span>. Команде, которой нужен сервер, а он не поднят, раннер отвечает отказом и называет <code>standalone start</code> следующим шагом.</p>
+<p>С базой в СУБД цикл начинается с СУБД: базу создают до запуска сервера, а для этого нужна работающая СУБД.</p>
+<pre class="sh"><code>v8-runner dbms start
+v8-runner infobase create
+v8-runner standalone start
+v8-runner push
+v8-runner test
+v8-runner standalone stop
+v8-runner dbms stop</code></pre>
+<p>Прямой шлюз <code>ibsrv</code> и его диапазон слушают все интерфейсы машины, ключей ограничить их адресом нет; HTTP и SSH-шлюз слушают только <code>127.0.0.1</code>. База без пользователей открывается по прямому шлюзу без учётных данных. Закройте порты брандмауэром, если машина доступна из сети.</p>
+<p>При <code>dbms.managed</code> данные лежат под <code>workPath/infobases/&lt;база&gt;/managed/</code>: удаление <code>workPath</code> уничтожает базу. Команды удаления данных у раннера нет.</p>
 <p>Останавливает раннер только сервер, который поднял сам. <code>ibsrv</code>, поднятый не раннером над той же базой или на том же порту, он не трогает и называет в ответе.</p>
 <p class="hint">Возможности операций — на странице <a href="architecture.html#d-ops">Компоненты</a>.</p>
 </main>

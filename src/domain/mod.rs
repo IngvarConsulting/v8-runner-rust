@@ -10,10 +10,14 @@ pub mod bootstrap;
 pub mod build;
 /// Capability matrix: who executes which operation on which target.
 pub mod capability;
+/// Ответ команд `cluster`.
+pub mod cluster;
 /// Config bootstrap domain models.
 pub mod config_init;
 /// Source-format conversion domain models.
 pub mod convert;
+/// Ответ команд `dbms`.
+pub mod dbms;
 /// Ответ и предмет сравнения команды `diff`.
 pub mod diff;
 /// Dump domain models.
@@ -46,6 +50,8 @@ pub mod reset;
 pub mod runner;
 /// Source set domain models.
 pub mod source_set;
+/// Ответ команд `standalone`.
+pub mod standalone;
 /// Состояние пары «каталог ↔ база» у `status`.
 pub mod status;
 /// Syntax-check domain models.

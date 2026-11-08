@@ -221,8 +221,8 @@ impl ExternalFullPull {
 
     pub(super) fn record_generation(
         &self,
+        config: &crate::config::model::AppConfig,
         set: &crate::domain::source_set::SourceSetContext,
-        work: &Path,
     ) -> Option<String> {
         self.generation
             .lock()
@@ -230,8 +230,8 @@ impl ExternalFullPull {
             .as_ref()
             .and_then(|observation| {
                 super::exchange_guard::record_after_dump(
+                    config,
                     set,
-                    work,
                     observation.provider,
                     observation.before.as_deref(),
                     observation.after.as_deref(),

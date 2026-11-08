@@ -336,8 +336,8 @@ impl<'a> DesignerDsl<'a> {
     /// `CREATEINFOBASE <клиент-серверная строка> /DisableStartupDialogs`: регистрация базы в
     /// кластере и база данных в СУБД одной командой (замер #181, 8.5.4.1878). Без
     /// `/DisableStartupDialogs` при заполненном списке администраторов кластера и без `SUsr`
-    /// клиент спросил бы пароль окном. `/Out` не ставится: строка успеха в нём повторяет всю
-    /// строку соединения вместе с `DBPwd` и `SPwd`.
+    /// клиент спросил бы пароль окном. Путь `/Out`, если задан, должен быть закрытым временным
+    /// файлом: платформа может повторить строку соединения с `DBPwd` и `SPwd`.
     pub fn create_cluster_infobase(
         &self,
         creation: &ClusterInfobaseCreation<'_>,
@@ -348,12 +348,32 @@ impl<'a> DesignerDsl<'a> {
             .ok_or(DesignerError::ConnectionForm(
                 "a cluster connection Srvr=…;Ref=…",
             ))?;
-        // The caller masks creation diagnostics with the DBMS and cluster credentials.
-        self.run_raw(&[
+        let mut args = vec![
             "CREATEINFOBASE".to_owned(),
             connection,
             "/DisableStartupDialogs".to_owned(),
-        ])
+        ];
+        if let Some(log_file) = &self.log_file {
+            args.push("/Out".to_owned());
+            args.push(log_file.display().to_string());
+        }
+        let mut result = self.run_raw(&args)?;
+        let passwords = creation.passwords();
+        let connection = args[1].as_str();
+        let masked_connection = mask_text(connection, &passwords);
+        // Mask an echoed connection as a separate value: its last field can be a
+        // password, and its range must not swallow the following diagnostic.
+        let mask_output = |output: &str| {
+            output
+                .split(connection)
+                .map(|part| mask_text(part, &passwords))
+                .collect::<Vec<_>>()
+                .join(&masked_connection)
+        };
+        result.process.stdout = mask_output(&result.process.stdout);
+        result.process.stderr = mask_output(&result.process.stderr);
+        result.platform_log = result.platform_log.as_deref().map(mask_output);
+        Ok(result)
     }
 
     /// `/DumpConfigToFiles <dir> -update -getChanges <file> [-Extension <name>]`: прогноз
@@ -1274,24 +1294,16 @@ mod tests {
         assert!(args.contains("File='/tmp/my ib'"));
     }
 
-    /// `CREATEINFOBASE` кластера: строка создания одним аргументом и
-    /// `/DisableStartupDialogs`, без `/Out`, даже когда журнал задан.
-    #[cfg(unix)]
     #[test]
-    fn create_cluster_infobase_passes_the_string_and_disables_dialogs_without_out() {
+    fn create_cluster_infobase_passes_the_string_and_requests_the_configured_log() {
         let dir = tempdir().expect("tempdir");
-        let script = dir.path().join("1cv8");
-        let args_log = dir.path().join("args.log");
-        write_script(
-            &script,
-            &format!("printf '%s\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
-        );
-        let runner = ProcessExecutor;
+        let log = dir.path().join("out.log");
+        let runner = CapturingRunner::default();
         let dsl = DesignerDsl::new(
-            script,
+            "1cv8.exe".into(),
             V8Connection::from_connection_string("Srvr=srv;Ref=demo"),
-            &runner as &dyn ProcessRunner,
-            Some(dir.path().join("out.log")),
+            &runner,
+            Some(log.clone()),
             ProcessExecutionPolicy::default(),
         );
 
@@ -1307,10 +1319,15 @@ mod tests {
         })
         .expect("create infobase");
 
-        let args = fs::read_to_string(args_log).expect("args log");
         assert_eq!(
-            args,
-            "CREATEINFOBASE\nSrvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;CrSQLDB=Y;Locale=ru;SchJobDn=Y\n/DisableStartupDialogs\n"
+            runner.0.borrow()[0].args,
+            [
+                "CREATEINFOBASE",
+                "Srvr=srv;Ref=demo;DBMS=PostgreSQL;DBSrvr=db;DB=demo;CrSQLDB=Y;Locale=ru;SchJobDn=Y",
+                "/DisableStartupDialogs",
+                "/Out",
+                &log.to_string_lossy(),
+            ]
         );
     }
 

@@ -15,6 +15,10 @@ check:
   - src/change_detection/scanner.rs::partial_reads_fail_without_a_hash_and_cancel_before_the_next_read
   - src/change_detection/scanner.rs::an_interrupted_scan_returns_no_partial_snapshot
   - src/change_detection/scanner.rs::hashing_streams_files_larger_than_its_working_buffer
+  - src/change_detection/scanner.rs::a_parallel_read_gives_the_snapshot_of_a_sequential_one
+  - src/change_detection/scanner.rs::a_failed_read_stops_the_other_workers_without_a_snapshot
+  - src/change_detection/scanner.rs::a_cancellation_stops_the_workers_without_a_snapshot
+  - src/change_detection/scanner.rs::the_earliest_failing_file_is_reported_whichever_fails_first
   - src/change_detection/analyzer.rs::a_module_restored_with_an_old_mtime_is_a_change
   - src/change_detection/analyzer.rs::a_file_rewritten_with_the_same_content_is_not_a_change
   - src/change_detection/source_sets.rs::an_ad_hoc_base_is_remembered_by_its_address_and_empty_sources_skip
@@ -37,11 +41,15 @@ check:
 восстановление или новая отметка времени сами по себе не означают изменения: одинаковые
 байты не вызывают загрузку. Метаданные не заменяют чтение содержимого. Хеширование идёт
 потоком с ограниченным рабочим буфером без ограничения размера файла.
+Набор с достаточным числом файлов читается в несколько потоков; снимок и решение от числа потоков и порядка
+их завершения не зависят, записи снимка идут в порядке обхода.
 
 Анализ решения перед загрузкой замечает отмену между файлами и до и после чтения
 очередного блока. Это кооперативная проверка, не гарантия срока прерывания блокирующего
 чтения. Прерванный анализ не отдаёт частичный снимок, не пишет память и не превращается
-в запасную полную загрузку. Отмену команды оформляет её существующий владелец
+в запасную полную загрузку. Признак отмены спрашивает поток, начавший анализ; отмена
+останавливает потоки между файлами и между блоками, ошибка чтения — потоки на более поздних
+файлах, и сообщается самый ранний по обходу отказавший файл. Отмену команды оформляет её существующий владелец
 (`INV.WIRE.A-CANCELLATION-ANSWERS-AS-A-CANCELLATION`). После завершённого успешного шага или
 публикации память результата записывается и при отложенной отмене.
 

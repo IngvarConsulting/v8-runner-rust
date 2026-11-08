@@ -90,6 +90,51 @@ fn raw_process_spawn_apis_stay_inside_platform_layer() {
     }
 }
 
+/// Служба стенда запускается одним путём: второй способ поднять долгоживущий процесс не появится
+/// незаметно (`INV.PLATFORM.A-SERVICE-OUTLIVES-THE-RUNNER`, #536).
+#[test]
+fn a_service_starts_only_through_the_process_executor_mode() {
+    const CREATE_PROCESS_OWNER: &str = "src/platform/service.rs";
+    const SPAWN_SERVICE_OWNERS: &[&str] = &[
+        "src/platform/process.rs",
+        "src/use_cases/managed_stand/mod.rs",
+    ];
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in collect_rust_files(&repo_path("src")) {
+        let relative = file
+            .strip_prefix(repo_root)
+            .expect("relative path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = fs::read_to_string(&file)
+            .expect("source")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if relative != CREATE_PROCESS_OWNER {
+            for forbidden in [
+                "CreateProcessW",
+                "CreateProcessAsUser",
+                "ShellExecute",
+                "DETACHED_PROCESS",
+                "CREATE_BREAKAWAY_FROM_JOB",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{relative} starts a process past the service mode: {forbidden}"
+                );
+            }
+        }
+        if relative != CREATE_PROCESS_OWNER && !SPAWN_SERVICE_OWNERS.contains(&relative.as_str()) {
+            assert!(
+                !text.contains("spawn_service") && !text.contains("spawn_hidden"),
+                "{relative} starts a service past the managed stand"
+            );
+        }
+    }
+}
+
 /// Приставку `\\?\` снимает один проход на выходе: новый писатель в stdout обошёл бы его.
 /// Журнал действий ответом не считается.
 #[test]
@@ -224,7 +269,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 34,
+        report.accepted, 37,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -316,6 +361,18 @@ fn the_lock_guard_tells_locked_dispatches_from_unlocked_ones() {
 /// больше никто не пользуется, валит проверку.
 const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     (
+        "crate::use_cases::managed_stand::dbms_status",
+        "читает запись без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::managed_stand::standalone_status",
+        "читает запись без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::managed_stand::cluster_status",
+        "читает записи и спрашивает rac без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
         "crate::use_cases::transport::preview_boundary",
         "превью замков не берёт: метку владельца оно читает без замка и ничего в неё не пишет",
     ),
@@ -401,6 +458,10 @@ fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
             "готовность кандидата `ibcmd` в его же переборе",
         ),
         (
+            "crate::use_cases::managed_stand::standalone::create_base",
+            "создание базы автономного сервера в СУБД: другого исполнителя у него нет, каталог данных его службы",
+        ),
+        (
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
             "единственный построитель `ibcmd` к базе проекта: его зовёт шаг, выбравший `ibcmd`",
         ),
@@ -431,6 +492,7 @@ fn an_ibcmd_process_is_built_only_by_those_who_give_it_a_data_directory() {
         ),
         [
             "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
+            "crate::use_cases::managed_stand::standalone::create_base",
             "crate::use_cases::throwaway_infobase::FileInfobase::ibcmd",
         ]
         .map(str::to_owned)
@@ -3525,9 +3587,17 @@ fn staged_publication_methods(index: &SourceIndex, owner: &[String]) -> (Vec<Str
 fn change_detection_has_no_background_watcher() {
     // Изменения ищет та команда, которой нужен ответ; фонового наблюдателя нет. Наблюдатель —
     // это поток рядом с командой или крейт слежения за файловой системой: слой анализа
-    // потоков не заводит, а раннер такого крейта не тянет.
+    // потоков вне команды не заводит, а раннер такого крейта не тянет. Чтение файлов набора в
+    // потоках `std::thread::scope` (#556) фоном не является: все они заканчиваются раньше, чем
+    // анализ отвечает, — поэтому разрешены только эти потоки и вопросы о числе ядер и панике.
     const WATCHER_CRATES: &[&str] = &["notify", "notify-debouncer-mini", "hotwatch"];
     const BACKGROUND_WORK: &[&str] = &["spawn", "thread::"];
+    const SCOPED_WORK: &[&str] = &[
+        "std::thread::scope(",
+        "scope.spawn(",
+        "std::thread::available_parallelism(",
+        "std::thread::panicking(",
+    ];
 
     let manifest = read("Cargo.toml");
     let watchers: Vec<&str> = manifest
@@ -3546,7 +3616,10 @@ fn change_detection_has_no_background_watcher() {
     let mut offenders = Vec::new();
     for file in collect_rust_files(&repo_path("src/change_detection")) {
         let relative = file.strip_prefix(repo_root).expect("relative path");
-        let production = without_doc_attributes(&production_tokens(&file));
+        let production = SCOPED_WORK.iter().fold(
+            without_doc_attributes(&production_tokens(&file)),
+            |tokens, scoped| tokens.replace(scoped, ""),
+        );
         for marker in BACKGROUND_WORK {
             if production.contains(marker) {
                 offenders.push(format!("{} names `{marker}`", relative.display()));
