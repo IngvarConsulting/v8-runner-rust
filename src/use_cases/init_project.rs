@@ -382,6 +382,9 @@ fn ensure_infobase(
                 StepOutcome::failed("infobase", "create", started, standalone_refusal())
             }
         }
+        TargetKind::Cluster if is_managed_cluster(config) => {
+            ensure_managed_cluster_base(context, config, utilities, dry_run)
+        }
         TargetKind::Cluster => ensure_cluster_infobase(context, config, utilities, dry_run),
         TargetKind::File => match config.v8_connection().file_path().map(PathBuf::from) {
             Some(infobase_dir) => ensure_file_infobase(
@@ -400,6 +403,47 @@ fn ensure_infobase(
                 AppError::Runtime("a file target names no infobase path".to_owned()),
             ),
         },
+    }
+}
+
+/// Цель — кластер, которым управляет раннер.
+fn is_managed_cluster(config: &AppConfig) -> bool {
+    config
+        .infobase
+        .cluster
+        .as_ref()
+        .is_some_and(|cluster| cluster.managed.is_some())
+}
+
+/// База кластера раннера: `CREATEINFOBASE` к работающему кластеру с доступом к СУБД, который сценарий
+/// стенда собрал сам. Созданная база отмечается в реестре: рабочие команды её откроют.
+fn ensure_managed_cluster_base(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    dry_run: bool,
+) -> StepOutcome {
+    use crate::use_cases::managed_stand::{cluster_base, remember_cluster_base, ClusterBase};
+
+    let started = Instant::now();
+    match cluster_base(context, config, dry_run) {
+        Err(error) => StepOutcome::failed("infobase", "create", started, error),
+        Ok(ClusterBase::AlreadyRegistered(message)) if dry_run => {
+            StepOutcome::planned("infobase", "create", started, message)
+        }
+        Ok(ClusterBase::AlreadyRegistered(message)) => {
+            StepOutcome::ok("infobase", "create", started, message)
+        }
+        Ok(ClusterBase::Create(target)) => {
+            let step = ensure_cluster_infobase(context, &target, utilities, dry_run);
+            if dry_run || step.error.is_some() {
+                return step;
+            }
+            match remember_cluster_base(config) {
+                Ok(()) => step,
+                Err(error) => StepOutcome::failed("infobase", "create", started, error),
+            }
+        }
     }
 }
 
@@ -885,15 +929,27 @@ impl<'a> ClusterCreation<'a> {
             .locate(UtilityType::V8)
             .map_err(AppError::from)?
             .path;
+        let log_dir = crate::support::temp::private_temp_dir(&config.work_path, "cluster-create-")
+            .map_err(|error| {
+                AppError::Runtime(format!(
+                    "failed to prepare private CREATEINFOBASE log: {error}"
+                ))
+            })?;
+        let log_file = crate::support::path::normalize_windows_verbatim_path(
+            &log_dir.path().join("designer.log"),
+        );
         let created = DesignerDsl::new(
             binary,
             config.v8_connection(),
             utilities.runner_for(UtilityType::V8),
-            None,
+            Some(log_file),
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
         )
-        .create_cluster_infobase(&self.creation)
-        .map_err(AppError::from)?;
+        .create_cluster_infobase(&self.creation);
+        if let Err(error) = log_dir.close() {
+            tracing::warn!(%error, "failed to remove private CREATEINFOBASE log");
+        }
+        let created = created.map_err(AppError::from)?;
         deferrals.note_result(INFOBASE_CREATE, &created);
         if created.process.outcome().is_err() {
             return Err(self.failure(&created));
@@ -901,24 +957,31 @@ impl<'a> ClusterCreation<'a> {
         Ok(())
     }
 
-    /// Отказ `CREATEINFOBASE`. Причину по прозе платформы раннер не угадывает
-    /// (`INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS`), поэтому отказ называет то, что известно без
-    /// неё: без администратора кластера — этот уровень и его ключи; и что неудача может
-    /// оставить базу данных в СУБД. Пароли в выводе платформы скрыты.
+    /// Отказ `CREATEINFOBASE` передаёт диагностику как улику с маскированием паролей.
+    /// Код выхода общий для разных причин. Без диагностики остаётся условная подсказка
+    /// для кластеров с администраторами.
     fn failure(&self, result: &PlatformCommandResult) -> AppError {
         let mut message = format_failure_evidence(
             format!(
                 "create infobase failed for 'infobase' with exit code {}",
                 result.process.exit_code
             ),
-            &mask_text(&result.process.stdout, &self.secrets()),
-            &mask_text(&result.process.stderr, &self.secrets()),
-            None,
+            &result.process.stdout,
+            &result.process.stderr,
+            result.platform_log.as_deref(),
             None,
         );
-        if self.creation.cluster_user.is_none() {
+        let has_diagnostics = [
+            Some(result.process.stdout.as_str()),
+            Some(result.process.stderr.as_str()),
+            result.platform_log.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|text| !text.trim().is_empty());
+        if self.creation.cluster_user.is_none() && !has_diagnostics {
             message.push_str(
-                "; no cluster administrator is declared: a cluster with administrators admits the creation only for one — declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
+                "; if the cluster has administrators, declare infobase.cluster.user and infobase.cluster.password (cluster administrator level) in v8project.local.yaml",
             );
         }
         message.push_str(&format!(
@@ -926,17 +989,6 @@ impl<'a> ClusterCreation<'a> {
             self.database
         ));
         AppError::Platform(message)
-    }
-
-    /// Пароли СУБД и администратора кластера — для маскирования вывода платформы.
-    fn secrets(&self) -> Vec<&str> {
-        [
-            self.creation.database_password,
-            self.creation.cluster_password,
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
     }
 }
 

@@ -640,9 +640,9 @@ infobases:
 
 `standalone.managed: { name, db-path }` поручает `ibsrv` раннеру (команды `standalone`, только Windows): `db-path` — файловая
 база сервера, от каталога конфигурации. Шлюзы и адреса не объявляются. Вместо `db-path` можно объявить секцию `dbms`: управляемую
-или вашу. Рядом с автономным сервером, который поднимаете вы, `dbms` остаётся отказом. `cluster.managed: { name }` не допускает `connection`
-рядом, а поднимать кластер раннер пока не умеет, поэтому команды с такой базой отказывают:
-[#538](https://github.com/IngvarConsulting/v8-runner-rust/issues/538).
+или вашу. Рядом с автономным сервером, который поднимаете вы, `dbms` остаётся отказом. `cluster.managed: { name }` поручает кластер раннеру (команды `cluster`, только Windows; `name` — имя базы в кластере, `Ref=`, по умолчанию — имя базы в `infobases`, так же у `standalone.managed`): `connection` рядом — отказ,
+адрес раннер выводит из своей записи. База кластера живёт в СУБД — `dbms.managed` или ваша секция `dbms`; без `dbms`
+кластер поднимается, но `infobase create` отказывает.
 
 Исполнители автономного сервера:
 
@@ -771,7 +771,7 @@ infobases:
 Поддержанные поля:
 
 - `kind` — вид СУБД (`PostgreSQL`, `MSSQLServer`, …): `DBMS=` строки создания, `--dbms` у `ibcmd`;
-- `server` — сервер СУБД: `DBSrvr=`, `--database-server`;
+- `server` — сервер СУБД: `DBSrvr=`, `--database-server`. Для PostgreSQL на нестандартном порту задайте `server: "host port=N"`;
 - `name` — имя базы данных: `DB=`, `--database-name`;
 - `user`, `password` — учётная запись СУБД: `DBUID=`/`DBPwd=`, `--database-user`/`--database-password`;
   без `user` строка создания идёт без `DBUID`, и сервер 1С подставляет пользователя ОС своего

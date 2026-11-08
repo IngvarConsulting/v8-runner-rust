@@ -37,6 +37,10 @@ pub enum CommandName {
     StandaloneStatus,
     StandaloneStop,
     StandaloneRestart,
+    ClusterStart,
+    ClusterStatus,
+    ClusterStop,
+    ClusterRestart,
     Status,
 }
 
@@ -72,6 +76,10 @@ impl CommandName {
             Self::StandaloneStatus => "standalone status",
             Self::StandaloneStop => "standalone stop",
             Self::StandaloneRestart => "standalone restart",
+            Self::ClusterStart => "cluster start",
+            Self::ClusterStatus => "cluster status",
+            Self::ClusterStop => "cluster stop",
+            Self::ClusterRestart => "cluster restart",
             Self::Status => "status",
         }
     }

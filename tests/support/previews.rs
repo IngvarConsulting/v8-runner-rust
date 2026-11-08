@@ -215,6 +215,24 @@ pub fn with_preview(dir: &Path) -> Vec<Previewed> {
             "standalone restart",
             work.clone(),
         ),
+        row(
+            &["--infobase", "stand", "cluster", "start"],
+            "cluster start",
+            "cluster start",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "cluster", "stop"],
+            "cluster stop",
+            "cluster stop",
+            work.clone(),
+        ),
+        row(
+            &["--infobase", "stand", "cluster", "restart"],
+            "cluster restart",
+            "cluster restart",
+            work.clone(),
+        ),
         row(&["extensions"], "extensions", "extensions", work.clone()),
         row(
             &["extensions", "list"],

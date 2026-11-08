@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::platform::agent::host_key_fingerprint;
 use crate::platform::ibsrv::ServerPorts;
+use crate::platform::ragent::ClusterPorts;
 use crate::platform::service::{process_facts, ProcessFacts};
 use crate::support::fs::write_file_atomically;
 use crate::support::machine::{machine_hash, machine_id};
@@ -109,6 +110,64 @@ pub struct PinnedPorts {
     pub port: u16,
 }
 
+/// Закреплённое кластера: порты, каталог реестра и создана ли в нём база. Признак базы живёт с
+/// реестром: новый реестр (`cluster start --new-regport`) получает его только после регистрации.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClusterPins {
+    pub ports: ClusterPorts,
+    /// Имя каталога реестра под `managed/cluster/`.
+    pub registry: String,
+    #[serde(default)]
+    pub registered: bool,
+    /// Идёт перенос в новый реестр (`--new-regport`): прежний ещё не удалён. Прерванный перенос
+    /// откатывает следующий `cluster start`, а рабочие команды такой кластер не видят.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<PreviousRegistry>,
+}
+
+/// Реестр, из которого идёт перенос.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviousRegistry {
+    pub ports: ClusterPorts,
+    pub registry: String,
+    pub registered: bool,
+}
+
+/// Работающий свой кластер объявленной базы. Посреди переноса реестра его нет.
+pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> {
+    let paths = ServicePaths::new(work_path, infobase, "cluster");
+    let machine = machine_fingerprint();
+    let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
+        adopt_recorded_pid(record, &process_facts, machine.as_deref())
+    });
+    let Observed::Own(_) = observed else {
+        return None;
+    };
+    read_json::<ClusterPins>(&paths.pins()).filter(|pins| pins.previous.is_none())
+}
+
+/// Работает ли своя служба PostgreSQL этой базы.
+pub fn running_postgres(work_path: &Path, infobase: &str) -> bool {
+    let paths = ServicePaths::new(work_path, infobase, "postgres");
+    record_names_own_process(
+        &paths.record(),
+        machine_fingerprint().as_deref(),
+        &process_facts,
+    )
+}
+
+/// Запись называет живой свой процесс. Единственная такая проверка вне `observe_service`: ею
+/// отказывают, пока работает другая служба (`one-server-owns-a-database`, `dbms stop`). Запись
+/// `starting` без pid процесса не называет.
+pub fn record_names_own_process(
+    record: &Path,
+    machine: Option<&str>,
+    facts: &dyn Fn(u32) -> Option<ProcessFacts>,
+) -> bool {
+    read_json::<ServiceRecord>(record)
+        .is_some_and(|record| adopt_recorded_pid(&record, facts, machine))
+}
+
 /// Хеш `machine_id`; `None`, если система идентификатора не дала.
 pub fn machine_fingerprint() -> Option<String> {
     Some(machine_hash(&machine_id()?))
@@ -194,7 +253,7 @@ pub fn running_standalone(work_path: &Path, infobase: &str) -> Option<RunningSer
 impl ServiceRecord {
     /// Свой ли процесс: совпали pid, время старта, образ и машина. Нет `machine_id` — чужой
     /// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
-    pub fn is_own(&self, facts: Option<&ProcessFacts>, machine: Option<&str>) -> bool {
+    fn is_own(&self, facts: Option<&ProcessFacts>, machine: Option<&str>) -> bool {
         let (Some(facts), Some(machine)) = (facts, machine) else {
             return false;
         };
@@ -221,6 +280,47 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Защита от повторения: «работает ли своя служба» решают `observe_service` и
+    /// `record_names_own_process`. `is_own` закрыт в этом модуле, а `adopt_recorded_pid` вне его
+    /// живёт только как `adopt` для `observe_service`, рядом с ним (ревью #538).
+    #[test]
+    fn only_this_module_tells_an_own_process_by_its_record() {
+        fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    sources(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&root, &mut files);
+        let offenders: Vec<String> = files
+            .iter()
+            .filter(|path| !path.ends_with("platform/service_record.rs"))
+            .flat_map(|path| {
+                let text = std::fs::read_to_string(path).unwrap();
+                let lines: Vec<&str> = text.lines().collect();
+                lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains("adopt_recorded_pid("))
+                    .filter(|(at, _)| {
+                        let from = at.saturating_sub(6);
+                        !lines[from..*at]
+                            .iter()
+                            .any(|line| line.contains("observe_service("))
+                    })
+                    .map(|(at, _)| format!("{}:{}", path.display(), at + 1))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(offenders.is_empty(), "{offenders:?}");
+    }
 
     fn record() -> ServiceRecord {
         ServiceRecord {

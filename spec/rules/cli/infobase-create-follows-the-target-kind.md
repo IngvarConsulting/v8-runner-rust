@@ -4,6 +4,7 @@ check:
   - tests/cli_init.rs::a_file_base_is_created_by_ibcmd_with_the_main_configuration_and_remembers_it
   - tests/cli_init.rs::init_designer_creates_infobase_and_skips_edt_workspace
   - tests/cli_init.rs::a_cluster_base_is_created_by_the_designer_with_the_client_server_string
+  - src/platform/connection.rs::cluster_creation_quotes_a_dbms_server_with_a_port
   - tests/cli_init.rs::a_cluster_base_without_a_required_dbms_field_is_refused_before_the_platform_starts
   - tests/cli_init.rs::a_standalone_target_is_refused_with_the_recipe
   - tests/cli_init.rs::an_existing_file_base_is_refused_and_the_preview_names_it
@@ -23,7 +24,8 @@ check:
 обновление базы данных. В кластере Конфигуратор одной командой `CREATEINFOBASE` с
 клиент-серверной строкой регистрирует базу и создаёт базу данных в СУБД, всегда с запретом
 регламентных заданий (`SchJobDn=Y`); реквизиты берутся
-из секции `dbms`, включая `locale`, и из `cluster.user` и `cluster.password`. Без
+из секции `dbms`, включая `locale`, и из `cluster.user` и `cluster.password`. Сервер СУБД с
+портом задаётся как `server: "host port=N"`; раннер передаёт `DBSrvr='host port=N'`. Без
 обязательного реквизита `dbms` — отказ до запуска платформы с именем ключа. Автономный сервер
 получает отказ рода подбора с рецептом `ibcmd server config init` и `ibcmd infobase create`.
 Превью базы в кластере предупреждает, что `CrSQLDB=Y` молча берёт существующую базу данных

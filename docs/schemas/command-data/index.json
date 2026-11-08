@@ -10,6 +10,18 @@
     "clone": [
       "clone"
     ],
+    "cluster restart": [
+      "cluster-restart"
+    ],
+    "cluster start": [
+      "cluster-start"
+    ],
+    "cluster status": [
+      "cluster-status"
+    ],
+    "cluster stop": [
+      "cluster-stop"
+    ],
     "convert": [
       "convert"
     ],

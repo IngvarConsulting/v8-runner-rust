@@ -74,63 +74,107 @@
 <h1>cluster</h1>
 <p class="lede">Команды <code>cluster</code> запускают и останавливают сервер 1С — <code>ragent</code>, <code>rmngr</code> и <code>rphost</code> — на машине раннера Windows для базы, объявленной <a href="variant-cluster.html#d-cluster-managed">кластером под управлением раннера</a>. Кластер службы или вашей консоли раннер только использует и не трогает его процессы.</p>
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
-<h2 class="command-variant" id="op-cluster-start">cluster start <span class="plan-badge">План</span></h2>
+<h2 class="command-variant" id="op-cluster-start">cluster start</h2>
 <pre data-output-command><code>v8-runner cluster start</code></pre>
-<p>Запускает сервер 1С как приложение той же платформы, что выбирают остальные команды (<code>tools.platform</code>). Каталог данных кластера лежит под <code>workPath</code>; порты агента, менеджера и диапазон рабочих процессов раннер выбирает свободными вне динамического диапазона и отдаёт ответ после того, как агент принял соединение. <code>regport</code> закрепляется при первом запуске: реестр кластера привязан к нему. <code>ras</code> запускается рядом с агентом и работает до <code>cluster stop</code>. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Кластер живёт между командами, пока его не остановит <a href="#op-cluster-stop"><code>cluster stop</code></a>. Запись о процессе и портах раннер держит под <code>workPath</code>. На Linux и macOS команда отказывает.</p>
-<p>Если кластер уже запущен раннером этой копии, команда ничего не запускает и называет его. Остатки своего упавшего кластера снимает. Если закреплённый <code>regport</code> занят чужим процессом, команда отказывает, называет его и предлагает <a href="#op-cluster-new-regport"><code>--new-regport</code></a>; другой порт сама не берёт.</p>
+<p>Запускает сервер 1С как приложение той же платформы, что выбирают остальные команды (<code>tools.platform</code>): агент <code>ragent</code> с реестром под <code>workPath</code>, затем сервер администрирования <code>ras</code>, и отдаёт ответ после того, как <code>rac cluster list</code> назвал кластер. Порт агента, <code>regport</code> и диапазон рабочих процессов раннер выбирает свободными вне динамического диапазона и закрепляет при первом запуске: реестр кластера хранит их все. Порт <code>ras</code> выбирается заново при каждом запуске. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Кластер живёт между командами, пока его не остановит <a href="#op-cluster-stop"><code>cluster stop</code></a>. Запись о процессах и портах раннер держит под <code>workPath</code>. На Linux и macOS команда отказывает.</p>
+<p>Если кластер уже запущен раннером этой копии, команда ничего не запускает и называет его; упавший <code>ras</code> поднимает заново. Остатки своего упавшего агента — <code>rmngr</code> и <code>rphost</code> — снимает по их PID и запускает кластер на прежних портах. Если закреплённый порт занят чужим процессом, команда отказывает, называет его и предлагает <a href="#op-cluster-new-regport"><code>--new-regport</code></a>; другой порт сама не берёт. Пока работает свой автономный сервер этой базы, команда отказывает и называет <code>standalone stop</code>: одну БД держит один сервер.</p>
 <pre data-output-command><code>v8-runner cluster start --dry-run</code></pre>
-<p>Показывает исполняемый файл, каталог данных и выбранные порты. Ничего не запускает. Такое же превью есть у <code>cluster stop</code> и <code>cluster restart</code>. Команды <code>cluster</code> принимают только объявленную базу: строка соединения в <code>--infobase</code> — отказ.</p>
+<p>Показывает состояние, закреплённые адреса и каталог реестра, если кластер уже запускался. Ничего не запускает. Такое же превью есть у <code>cluster stop</code> и <code>cluster restart</code>. Команды <code>cluster</code> принимают только объявленную базу: строка соединения в <code>--infobase</code> — отказ.</p>
 <pre data-output-command id="op-cluster-new-regport"><code>v8-runner cluster start --new-regport</code></pre>
-<p>Заводит новый реестр на свободном порту и регистрирует объявленную базу над прежней БД. UUID базы меняется, данные, поколение конфигурации и память раннера остаются. Если базы ещё нет, остаётся только новый реестр. Прежний реестр удаляется после регистрации и успешной пробы базы.</p>
-<h2 class="command-variant" id="op-cluster-status">cluster status <span class="plan-badge">План</span></h2>
+<p>Когда закреплённые порты заняты чужим процессом: заводит новый реестр на свободных портах и регистрирует объявленную базу над прежней БД без её создания. UUID базы меняется, данные, поколение конфигурации и память раннера остаются. Если базы ещё не было, остаётся только новый реестр. Прежний реестр удаляется после регистрации и пробы базы, поэтому отказ на любом шаге ничего не теряет. При свободных портах ключ — отказ. Если на прежних портах работает чужой <code>ragent</code> над реестром этой копии, команда отказывает без нового реестра: такой реестр живой.</p>
+<h2 class="command-variant" id="op-cluster-status">cluster status</h2>
 <pre data-output-command><code>v8-runner cluster status</code></pre>
-<p>Отвечает, запущен ли кластер этой копии: не запущен, запущен раннером или порт занят не раннером. Для своего кластера называет PID агента, версию платформы, адрес <code>Srvr=</code> и прошла ли проба <code>rac cluster list</code>. Называет и остатки упавшего кластера. Клиент и Конфигуратор команда не запускает, замок рабочей копии ей не нужен, ключа <code>--dry-run</code> у неё нет.</p>
-<h2 class="command-variant" id="op-cluster-stop">cluster stop <span class="plan-badge">План</span></h2>
+<p>Отвечает, запущен ли кластер этой копии: не запущен, запущен раннером или его порт занят не раннером. Для своего кластера называет PID агента и <code>ras</code>, версию платформы, адрес <code>Srvr=</code>, адреса агента и <code>ras</code> и ответил ли <code>rac cluster list</code>. Говорит, создана ли база в реестре. Называет и остатки упавшего агента, не трогая их. Клиент и Конфигуратор команда не запускает, замок рабочей копии ей не нужен, ключа <code>--dry-run</code> у неё нет.</p>
+<h2 class="command-variant" id="op-cluster-stop">cluster stop</h2>
 <pre data-output-command><code>v8-runner cluster stop</code></pre>
-<p>Останавливает кластер, который запустил раннер этой копии, вместе с <code>ras</code> и рабочими процессами и ждёт их завершения; снимает и остатки упавшего кластера. Данные базы в СУБД остаются. PostgreSQL, поднятый шагом <code>cluster start</code>, гасит следом, а поднятый <code>dbms start</code> не трогает (<a href="cli-dbms.html#dbms-ownership">таблица владения</a>). Кластер службы или консоли не останавливает. Если кластера нет и гасить нечего, команда успешна.</p>
-<h2 class="command-variant" id="op-cluster-restart">cluster restart <span class="plan-badge">План</span></h2>
+<p>Останавливает кластер, который запустил раннер этой копии: сначала <code>ras</code>, он переживает агента, затем <code>ragent</code> с его рабочими процессами, и ждёт их завершения; снимает и остатки упавшего агента. Аварийные дампы, которые процессы платформы пишут при такой остановке, удаляет. Данные базы в СУБД и реестр остаются. PostgreSQL, поднятый шагом <code>cluster start</code>, гасит следом, а поднятый <code>dbms start</code> не трогает (<a href="cli-dbms.html#dbms-ownership">таблица владения</a>). Кластер службы или консоли не останавливает. Если кластера нет и гасить нечего, команда успешна.</p>
+<h2 class="command-variant" id="op-cluster-restart">cluster restart</h2>
 <pre data-output-command><code>v8-runner cluster restart</code></pre>
 <p>То же, что <code>cluster stop</code> и затем <code>cluster start</code>, для своего кластера. PostgreSQL не трогает.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
-<tbody><tr data-response-class="planned"><td>Кластер запущен</td><td><code>cluster start</code> запустил сервер 1С, агент принял соединение. <a href="#cluster-started">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Состояние</td><td><code>cluster status</code> называет свой кластер или говорит, что он не запущен. <a href="#cluster-status-own">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Кластер остановлен</td><td><code>cluster stop</code> завершил свои процессы. <a href="#cluster-stopped">Пример</a></td></tr>
-<tr data-response-class="planned"><td>Нет серверных компонентов</td><td>На машине нет <code>ragent</code> выбранной платформы или это Linux либо macOS: <code>environment_unavailable</code>, выход CLI 2. <a href="#cluster-no-server">Пример</a></td></tr>
+<tbody><tr data-response-class="outcome"><td>Кластер запущен</td><td><code>cluster start</code> поднял <code>ragent</code> и <code>ras</code>, <code>rac cluster list</code> ответил. <a href="#cluster-started">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Состояние</td><td><code>cluster status</code> называет свой кластер или говорит, что он не запущен. <a href="#cluster-status-own">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Остатки упавшего агента</td><td>Агент упал, его <code>rmngr</code> и <code>rphost</code> живы: <code>cluster status</code> их называет, <code>cluster start</code> и <code>cluster stop</code> снимают. <a href="#cluster-remnants">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Кластер остановлен</td><td><code>cluster stop</code> завершил свои процессы. <a href="#cluster-stopped">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Порт занят</td><td>Закреплённый порт держит чужой процесс: <code>workspace_busy</code>, выход CLI 3, совет — <code>--new-regport</code>. <a href="#cluster-port-taken">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Новый реестр</td><td><code>cluster start --new-regport</code> перенёс базу в реестр на новых портах. <a href="#cluster-new-registry">Пример</a></td></tr>
+<tr data-response-class="outcome"><td>Нет серверных компонентов</td><td>На машине нет <code>ragent</code> выбранной платформы или это Linux либо macOS: <code>environment_unavailable</code>, выход CLI 2. <a href="#cluster-no-server">Пример</a></td></tr>
 </tbody>
 </table></div>
 <p class="hint">Причины отказов и различия между ошибкой команды, ошибкой шага и диагностикой запуска — в <a href="glossary.html#command-responses">словаре ответов</a>.</p>
 <h3>Варианты ответа</h3>
 <h4 id="cluster-started">Кластер запущен</h4>
-<pre data-output-example="cluster-started" data-output-schema="planned"><code>✓ cluster: start - ragent 8.3.27.2074, pid 51220
-│   connection  Srvr=127.0.0.1:24541;Ref=demo
-│   agent       127.0.0.1:24540
-│   rphost      24560:24591
-│   ready in 6.8 s</code></pre>
+<pre data-output-example="cluster-started" data-output-schema="cluster-start"><code>cluster start: started the cluster 8.5.4.2028, ragent pid 6312
+  connection  Srvr=127.0.0.1:46761;Ref=demo
+  agent  127.0.0.1:46760
+  ras  127.0.0.1:25425
+  worker range  46762:46777
+  ras pid  16980
+  rac cluster list  answers
+  infobase  not created yet: run infobase create
+  registry  build/infobases/origin/managed/cluster/registry-46761
+  log  build/infobases/origin/managed/cluster/cluster.log</code></pre>
 <h4 id="cluster-status-own">Состояние своего кластера</h4>
-<pre data-output-example="cluster-status-own" data-output-schema="planned"><code>origin: cluster, started by this working copy
-  pid 51220 · ragent 8.3.27.2074 · ready
-  connection  Srvr=127.0.0.1:24541;Ref=demo</code></pre>
+<pre data-output-example="cluster-status-own" data-output-schema="cluster-status"><code>cluster status: origin: cluster 8.5.4.2028, started by this working copy, ragent pid 6312
+  connection  Srvr=127.0.0.1:46761;Ref=demo
+  agent  127.0.0.1:46760
+  ras  127.0.0.1:25425
+  worker range  46762:46777
+  ras pid  16980
+  rac cluster list  answers
+  infobase  created
+  registry  build/infobases/origin/managed/cluster/registry-46761
+  log  build/infobases/origin/managed/cluster/cluster.log</code></pre>
+<h4 id="cluster-remnants">Остатки упавшего агента</h4>
+<pre data-output-example="cluster-remnants" data-output-schema="cluster-status"><code>cluster status: origin: the cluster is not running
+  connection  Srvr=127.0.0.1:46761;Ref=demo
+  infobase  created
+  remnants  4644
+  the recorded process is gone</code></pre>
 <h4 id="cluster-stopped">Кластер остановлен</h4>
-<pre data-output-example="cluster-stopped" data-output-schema="planned"><code>✓ cluster: stop - ragent pid 51220 and its workers stopped</code></pre>
+<pre data-output-example="cluster-stopped" data-output-schema="cluster-stop"><code>cluster stop: ragent pid 6312, ras pid 16980 stopped
+  PostgreSQL stopped  pid 15604</code></pre>
+<h4 id="cluster-port-taken">Порт занят</h4>
+<pre data-output-example="cluster-port-taken" data-output-schema="cluster-start"><code>ERROR: workspace busy: port 46761 of the cluster of 'origin' is taken by process 9008, which this runner did not start; it is left running: free the port and repeat, or start a new registry on other ports with `cluster start --new-regport`</code></pre>
+<h4 id="cluster-new-registry">Новый реестр</h4>
+<pre data-output-example="cluster-new-registry" data-output-schema="cluster-start"><code>cluster start: started the cluster 8.5.4.2028, ragent pid 11160
+  connection  Srvr=127.0.0.1:46793;Ref=demo
+  agent  127.0.0.1:46792
+  ras  127.0.0.1:25425
+  worker range  46794:46809
+  ras pid  10884
+  rac cluster list  answers
+  infobase  created
+  previous regport  46761
+  registry  build/infobases/origin/managed/cluster/registry-46793
+  log  build/infobases/origin/managed/cluster/cluster.log</code></pre>
 <h4 id="cluster-no-server">Нет серверных компонентов</h4>
-<pre data-output-example="cluster-no-server" data-output-schema="planned"><code>ERROR: environment unavailable: utility 'ragent' was not found: server components are not installed for 8.3.27.2074</code></pre>
+<pre data-output-example="cluster-no-server" data-output-schema="cluster-start"><code>ERROR: environment unavailable: utility 'ragent' was not found: version 8.3.27.2074 is installed (8.3.27.2074) but has no 1C:Enterprise server; no version has 1C:Enterprise server</code></pre>
 </main>
 <script type="application/json" id="output-examples">{
   "cluster-started": {
     "ok": true,
     "command": "cluster start",
-    "duration_ms": 6810,
+    "duration_ms": 9100,
     "data": {
+      "ok": true,
       "infobase": "origin",
       "state": "started_by_this_copy",
-      "pid": 51220,
-      "platform_version": "8.3.27.2074",
-      "connection": "Srvr=127.0.0.1:24541;Ref=demo",
-      "agent": "127.0.0.1:24540",
-      "worker_range": "24560:24591",
-      "ready": true
+      "action": "started",
+      "pid": 6312,
+      "ras_pid": 16980,
+      "version": "8.5.4.2028",
+      "connection": "Srvr=127.0.0.1:46761;Ref=demo",
+      "agent": "127.0.0.1:46760",
+      "ras": "127.0.0.1:25425",
+      "worker_range": "46762:46777",
+      "registry_dir": "build/infobases/origin/managed/cluster/registry-46761",
+      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "ready": true,
+      "registered": false,
+      "duration_ms": 9100
     },
     "warnings": [],
     "steps": []
@@ -138,14 +182,43 @@
   "cluster-status-own": {
     "ok": true,
     "command": "cluster status",
-    "duration_ms": 35,
+    "duration_ms": 420,
     "data": {
+      "ok": true,
       "infobase": "origin",
       "state": "started_by_this_copy",
-      "pid": 51220,
-      "platform_version": "8.3.27.2074",
-      "connection": "Srvr=127.0.0.1:24541;Ref=demo",
-      "ready": true
+      "action": "reported",
+      "pid": 6312,
+      "ras_pid": 16980,
+      "version": "8.5.4.2028",
+      "connection": "Srvr=127.0.0.1:46761;Ref=demo",
+      "agent": "127.0.0.1:46760",
+      "ras": "127.0.0.1:25425",
+      "worker_range": "46762:46777",
+      "registry_dir": "build/infobases/origin/managed/cluster/registry-46761",
+      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "ready": true,
+      "registered": true,
+      "duration_ms": 420
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "cluster-remnants": {
+    "ok": true,
+    "command": "cluster status",
+    "duration_ms": 610,
+    "data": {
+      "ok": true,
+      "infobase": "origin",
+      "state": "not_running",
+      "action": "reported",
+      "connection": "Srvr=127.0.0.1:46761;Ref=demo",
+      "ready": false,
+      "registered": true,
+      "stale_record": true,
+      "remnant_pids": [4644],
+      "duration_ms": 610
     },
     "warnings": [],
     "steps": []
@@ -153,11 +226,68 @@
   "cluster-stopped": {
     "ok": true,
     "command": "cluster stop",
-    "duration_ms": 2140,
+    "duration_ms": 3300,
     "data": {
+      "ok": true,
       "infobase": "origin",
       "state": "not_running",
-      "stopped_pid": 51220
+      "action": "stopped",
+      "ready": false,
+      "registered": false,
+      "stopped_pid": 6312,
+      "stopped_ras_pid": 16980,
+      "stopped_dbms_pid": 15604,
+      "duration_ms": 3300
+    },
+    "warnings": [],
+    "steps": []
+  },
+  "cluster-port-taken": {
+    "ok": false,
+    "command": "cluster start",
+    "duration_ms": 700,
+    "data": {
+      "ok": false,
+      "infobase": "origin",
+      "state": "foreign",
+      "action": "reported",
+      "connection": "Srvr=127.0.0.1:46761;Ref=demo",
+      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "ready": false,
+      "registered": true,
+      "occupant_pid": 9008,
+      "duration_ms": 700
+    },
+    "warnings": [],
+    "steps": [],
+    "error": {
+      "kind": "workspace",
+      "code": "workspace_busy",
+      "message": "port 46761 of the cluster of 'origin' is taken by process 9008, which this runner did not start; it is left running: free the port and repeat, or start a new registry on other ports with `cluster start --new-regport`"
+    }
+  },
+  "cluster-new-registry": {
+    "ok": true,
+    "command": "cluster start",
+    "duration_ms": 11800,
+    "data": {
+      "ok": true,
+      "infobase": "origin",
+      "state": "started_by_this_copy",
+      "action": "started",
+      "pid": 11160,
+      "ras_pid": 10884,
+      "version": "8.5.4.2028",
+      "connection": "Srvr=127.0.0.1:46793;Ref=demo",
+      "agent": "127.0.0.1:46792",
+      "ras": "127.0.0.1:25425",
+      "worker_range": "46794:46809",
+      "registry_dir": "build/infobases/origin/managed/cluster/registry-46793",
+      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "ready": true,
+      "registered": true,
+      "previous_regport": 46761,
+      "duration_ms": 11800
     },
     "warnings": [],
     "steps": []
@@ -165,17 +295,23 @@
   "cluster-no-server": {
     "ok": false,
     "command": "cluster start",
-    "duration_ms": 12,
+    "duration_ms": 30,
     "data": {
+      "ok": false,
       "infobase": "origin",
-      "state": "not_running"
+      "state": "not_running",
+      "action": "reported",
+      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "ready": false,
+      "registered": false,
+      "duration_ms": 30
     },
     "warnings": [],
     "steps": [],
     "error": {
       "kind": "environment",
       "code": "environment_unavailable",
-      "message": "utility 'ragent' was not found: server components are not installed for 8.3.27.2074"
+      "message": "utility 'ragent' was not found: version 8.3.27.2074 is installed (8.3.27.2074) but has no 1C:Enterprise server; no version has 1C:Enterprise server"
     }
   }
 }</script>

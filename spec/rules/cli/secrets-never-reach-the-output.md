@@ -16,6 +16,7 @@ check:
   - tests/cli_extensions.rs::cluster_designer_invalid_list_output_does_not_echo_credentials
   - tests/cli_init.rs::server_infobase_create_never_echoes_the_connection_string_credentials
   - tests/cli_init.rs::a_failed_cluster_create_never_echoes_the_passwords
+  - tests/cli_init.rs::cluster_creation_reports_the_masked_platform_log_without_guessing_the_cause
   - src/platform/secrets.rs::masks_the_dbms_and_cluster_passwords_of_a_creation_string
   - tests/cli_config_init.rs::init_in_a_new_worktree_redirects_the_copied_origin_and_keeps_it_as_upstream
 ---

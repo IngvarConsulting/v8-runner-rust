@@ -76,6 +76,8 @@ pub enum Command {
     Dbms(DbmsArgs),
     /// Start and stop the ibsrv of an infobase declared with standalone.managed
     Standalone(StandaloneArgs),
+    /// Start and stop the cluster (ragent and ras) of an infobase declared with cluster.managed
+    Cluster(ClusterArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Update extension security properties or manage installed extensions
@@ -205,6 +207,40 @@ pub enum ServiceCommandArgs {
 pub struct StandaloneArgs {
     #[command(subcommand)]
     pub command: ServiceCommandArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct ClusterArgs {
+    #[command(subcommand)]
+    pub command: ClusterCommandArgs,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum ClusterCommandArgs {
+    /// Start the cluster of this infobase and wait until rac answers
+    Start {
+        /// The pinned ports are taken: start a new registry on other ports and register the
+        /// infobase in it over its database
+        #[arg(long)]
+        new_regport: bool,
+    },
+    /// Say whether it runs, who started it and where it listens
+    Status,
+    /// Stop the cluster this working copy started, with its remnants; the data stays
+    Stop,
+    /// Stop and start it again
+    Restart,
+}
+
+impl ClusterCommandArgs {
+    pub fn service(self) -> crate::cli::args::ServiceCommandArgs {
+        match self {
+            Self::Start { .. } => ServiceCommandArgs::Start,
+            Self::Status => ServiceCommandArgs::Status,
+            Self::Stop => ServiceCommandArgs::Stop,
+            Self::Restart => ServiceCommandArgs::Restart,
+        }
+    }
 }
 
 #[derive(Args, Debug)]

@@ -84,11 +84,22 @@ pub enum ConfigValidationError {
     #[error("infobase.standalone.managed names one storage: either db-path or the section infobase.dbms")]
     ManagedStandaloneStorage,
 
-    #[error("infobase.{key}: the runner does not start this server yet; only the dbms commands work with this infobase")]
-    ManagedServerNotAvailable { key: &'static str },
+    #[error("the {what} of this infobase is not running: run `{start}`")]
+    ManagedServerNotRunning {
+        what: &'static str,
+        start: &'static str,
+    },
 
-    #[error("the standalone server of this infobase is not running: run `standalone start`")]
-    ManagedServerNotRunning,
+    #[error("the PostgreSQL of this infobase is not running under its cluster: run `dbms start`")]
+    ManagedDbmsNotRunning,
+
+    #[error(
+        "the infobase is not created in the cluster of this infobase yet: run `infobase create`"
+    )]
+    ManagedBaseNotCreated,
+
+    #[error("infobase.cluster.managed is not declared for this infobase: the cluster commands start only a cluster the runner owns")]
+    ClusterNotManaged,
 
     #[error("the standalone server of this infobase is running: an infobase is not created under its server; run `standalone stop` first")]
     ManagedServerIsRunning,
@@ -438,8 +449,14 @@ impl ConfigValidationError {
             Self::ProviderRemoved { way_out, .. } => {
                 Some(crate::domain::next_step::NextStep::command(*way_out))
             }
-            Self::ManagedServerNotRunning => Some(crate::domain::next_step::NextStep::command(
-                "standalone start",
+            Self::ManagedServerNotRunning { start, .. } => {
+                Some(crate::domain::next_step::NextStep::command(*start))
+            }
+            Self::ManagedDbmsNotRunning => {
+                Some(crate::domain::next_step::NextStep::command("dbms start"))
+            }
+            Self::ManagedBaseNotCreated => Some(crate::domain::next_step::NextStep::command(
+                "infobase create",
             )),
             Self::ManagedServerIsRunning => Some(crate::domain::next_step::NextStep::command(
                 "standalone stop",
@@ -449,22 +466,45 @@ impl ConfigValidationError {
     }
 }
 
-/// Ключ сервера, который поднимает раннер, если он объявлен.
-fn managed_server_key(infobase: &crate::config::model::InfobaseConfig) -> Option<&'static str> {
-    if infobase
-        .cluster
-        .as_ref()
-        .is_some_and(|cluster| cluster.managed.is_some())
-    {
-        Some("cluster.managed")
-    } else if infobase
-        .standalone
-        .as_ref()
-        .is_some_and(|standalone| standalone.managed.is_some())
-    {
-        Some("standalone.managed")
-    } else {
-        None
+/// Сервер, который поднимает раннер.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedServer {
+    Cluster,
+    Standalone,
+}
+
+impl ManagedServer {
+    /// Объявленный у базы сервер раннера, если он есть.
+    fn of(infobase: &crate::config::model::InfobaseConfig) -> Option<Self> {
+        if infobase
+            .cluster
+            .as_ref()
+            .is_some_and(|cluster| cluster.managed.is_some())
+        {
+            Some(Self::Cluster)
+        } else if infobase
+            .standalone
+            .as_ref()
+            .is_some_and(|standalone| standalone.managed.is_some())
+        {
+            Some(Self::Standalone)
+        } else {
+            None
+        }
+    }
+
+    /// Отказ рабочей команды, чей сервер раннера не поднят: называет команду, которая его поднимает.
+    pub fn not_running(self) -> ConfigValidationError {
+        match self {
+            Self::Cluster => ConfigValidationError::ManagedServerNotRunning {
+                what: "cluster",
+                start: "cluster start",
+            },
+            Self::Standalone => ConfigValidationError::ManagedServerNotRunning {
+                what: "standalone server",
+                start: "standalone start",
+            },
+        }
     }
 }
 
@@ -483,7 +523,7 @@ fn validate_managed_declarations(
         if let Some((field, _)) = declared.into_iter().find(|(_, present)| *present) {
             return Err(ConfigValidationError::ManagedDbmsWithAccessField { field });
         }
-        if managed_server_key(infobase).is_none() {
+        if ManagedServer::of(infobase).is_none() {
             return Err(ConfigValidationError::ManagedDbmsNeedsManagedServer);
         }
     }
@@ -491,7 +531,7 @@ fn validate_managed_declarations(
         .cluster
         .as_ref()
         .is_some_and(|cluster| cluster.managed.is_some());
-    if cluster_managed && !infobase.connection.trim().is_empty() {
+    if cluster_managed && !infobase.connection_projected && !infobase.connection.trim().is_empty() {
         return Err(ConfigValidationError::ManagedClusterWithConnection);
     }
     if let Some(managed) = infobase
@@ -522,12 +562,23 @@ pub fn validate_managed_dbms(config: &AppConfig) -> Result<(), ConfigValidationE
     Ok(())
 }
 
+/// Проверка для команд `cluster`: база объявляет `cluster.managed`.
+pub fn validate_managed_cluster(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_managed_declarations(&config.infobase)?;
+    if ManagedServer::of(&config.infobase) != Some(ManagedServer::Cluster) {
+        return Err(ConfigValidationError::ClusterNotManaged);
+    }
+    Ok(())
+}
+
 /// Проверка для команд `standalone`: база объявляет `standalone.managed`.
 pub fn validate_managed_standalone(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     validate_planned_work_path(config)?;
     validate_managed_declarations(&config.infobase)?;
-    if managed_server_key(&config.infobase) != Some("standalone.managed") {
+    if ManagedServer::of(&config.infobase) != Some(ManagedServer::Standalone) {
         return Err(ConfigValidationError::StandaloneNotManaged);
     }
     Ok(())
@@ -1101,13 +1152,12 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
         })?;
     }
     validate_infobase_form(&config.infobase)?;
-    match managed_server_key(&config.infobase) {
+    match ManagedServer::of(&config.infobase) {
         // Адрес работающего сервера подставил загрузчик; строки нет — сервера нет.
-        Some("standalone.managed") if config.infobase.connection.trim().is_empty() => {
-            return Err(ConfigValidationError::ManagedServerNotRunning);
+        Some(server) if config.infobase.connection.trim().is_empty() => {
+            return Err(server.not_running());
         }
-        Some("standalone.managed") | None => {}
-        Some(key) => return Err(ConfigValidationError::ManagedServerNotAvailable { key }),
+        _ => {}
     }
     validate_selected_infobase_environment(config)
 }
@@ -1121,7 +1171,7 @@ fn validate_infobase_form(
 ) -> Result<(), ConfigValidationError> {
     validate_managed_declarations(infobase)?;
     // Строки у такой цели нет: её адрес знает раннер. Рядом с обычной базой она никому не мешает.
-    if managed_server_key(infobase).is_some() {
+    if ManagedServer::of(infobase).is_some() {
         return Ok(());
     }
     let connection = infobase.connection.trim();
@@ -3135,6 +3185,7 @@ mod tests {
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig {
                 managed_memory: None,
+                connection_projected: false,
                 connection: "Srvr=localhost;Ref=ib".to_owned(),
                 user: None,
                 password: None,
@@ -3719,6 +3770,14 @@ mod tests {
             super::validate_managed_declarations(&infobase),
             Err(ConfigValidationError::ManagedClusterWithConnection)
         ));
+    }
+
+    #[test]
+    fn a_projected_connection_of_the_managed_cluster_is_not_a_declared_one() {
+        let mut infobase = managed_infobase(managed_dbms());
+        infobase.connection = "Srvr=127.0.0.1:24001;Ref=demo".to_owned();
+        infobase.connection_projected = true;
+        assert!(super::validate_managed_declarations(&infobase).is_ok());
     }
 
     #[test]

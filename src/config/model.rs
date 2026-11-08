@@ -164,6 +164,11 @@ pub struct InfobaseConfig {
     /// (`INV.USE-CASES.A-MANAGED-TARGET-MEMORY-FOLLOWS-ITS-NAME`). Ставит загрузчик.
     #[serde(skip)]
     pub managed_memory: Option<String>,
+
+    /// `connection` вывел загрузчик из записи службы раннера, а не объявил пользователь: правило
+    /// «у `cluster.managed` нет `connection`» её не касается.
+    #[serde(skip)]
+    pub connection_projected: bool,
 }
 
 /// The cluster section of a server infobase. Every key is optional: each operation asks
@@ -220,6 +225,14 @@ pub struct ManagedServerConfig {
     /// File infobase of a standalone server, relative to the file that declares it.
     #[serde(default)]
     pub db_path: Option<PathBuf>,
+}
+
+impl ManagedServerConfig {
+    /// `Ref=` of the infobase on the server: `name`, or the declared infobase name. The single
+    /// owner of this default for the loader and the service commands.
+    pub fn reference(&self, infobase: &str) -> String {
+        self.name.clone().unwrap_or_else(|| infobase.to_owned())
+    }
 }
 
 /// A standalone server as the target. The Designer goes to its direct gate, declared by
@@ -515,6 +528,7 @@ impl InfobaseConfig {
             standalone: None,
             cluster: None,
             managed_memory: None,
+            connection_projected: false,
         }
     }
 
@@ -587,6 +601,7 @@ impl InfobaseConfig {
             dbms: Some(dbms),
             cluster: None,
             managed_memory: None,
+            connection_projected: false,
         }
     }
 }
