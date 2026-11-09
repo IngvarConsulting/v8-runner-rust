@@ -20,9 +20,9 @@ use crate::config::model::{AppConfig, DesignerAgentMode};
 use crate::domain::capability::{Provider, SessionEndpoint, SessionMode};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::agent::{
-    self, free_managed_port, AgentEndpoint, AgentError, AgentLaunch, AgentSession,
-    AgentSessionRequest, EphemeralHostKey, HostKeyExpectation, LaunchHostKey, ManagedAgent,
-    WaitPolicy,
+    self, agent_reads_host_key_at, free_managed_port, host_key_fallback_roots, AgentEndpoint,
+    AgentError, AgentLaunch, AgentSession, AgentSessionRequest, EphemeralHostKey,
+    HostKeyExpectation, LaunchHostKey, ManagedAgent, WaitPolicy,
 };
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
@@ -262,13 +262,7 @@ fn open_handle(
                 None => free_managed_port().map_err(AppError::from)?,
             };
             // Ключ не объявлен — одноразовый на этот запуск, и сессия закреплена на нём.
-            let host_key = match agent.host_key.clone() {
-                Some(declared) => LaunchHostKey::Declared(declared),
-                None => LaunchHostKey::OneTime(
-                    EphemeralHostKey::create(&config.work_path.join("agent").join("host-keys"))
-                        .map_err(AppError::from)?,
-                ),
-            };
+            let host_key = launch_host_key(agent.host_key.clone(), &config.work_path)?;
             let launch = AgentLaunch {
                 v8: v8.to_path_buf(),
                 infobase_args: connection.infobase_args(),
@@ -297,6 +291,26 @@ fn open_handle(
             .map_err(AppError::from)?;
             Ok(AgentHandle::Managed(Box::new(managed)))
         }
+    }
+}
+
+/// Ключ хоста управляемого агента. Агент читает его только по пути в ASCII
+/// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`): объявленный ключ по другому пути — отказ до запуска,
+/// одноразовый — [`EphemeralHostKey::create_for`].
+fn launch_host_key(declared: Option<PathBuf>, work_path: &Path) -> Result<LaunchHostKey, AppError> {
+    match declared {
+        Some(declared) if !agent_reads_host_key_at(&declared) => {
+            Err(AppError::EnvironmentUnavailable(format!(
+                "tools.designer_agent.host-key '{}' is not an ASCII path: the Designer agent \
+                 cannot read its host key there and exits; move the key to an ASCII path",
+                declared.display()
+            )))
+        }
+        Some(declared) => Ok(LaunchHostKey::Declared(declared)),
+        None => Ok(LaunchHostKey::OneTime(EphemeralHostKey::create_for(
+            work_path,
+            &host_key_fallback_roots(),
+        )?)),
     }
 }
 
@@ -1254,6 +1268,26 @@ impl GenerationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Объявленный ключ хоста по пути не в ASCII — отказ до запуска, называющий путь
+    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    #[cfg(windows)]
+    #[test]
+    fn a_declared_host_key_outside_ascii_is_refused_before_the_launch() {
+        let declared = PathBuf::from("ключи").join("host_ed25519");
+        let refused = launch_host_key(Some(declared), Path::new("work"))
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&refused, AppError::EnvironmentUnavailable(message)
+                if message.contains("ключи") && message.contains("ASCII")),
+            "{refused}"
+        );
+        assert!(matches!(
+            launch_host_key(Some(PathBuf::from("keys/host_ed25519")), Path::new("work")),
+            Ok(LaunchHostKey::Declared(_))
+        ));
+    }
 
     /// Адрес квитанции — `host:port` без учётных данных. Запись с `user:pass@` не
     /// разбирается ни у чужого агента, ни у шлюза, поэтому до адреса не доходит; разобранная
