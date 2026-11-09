@@ -415,12 +415,12 @@
       "oneOf": [
         {
           "const": "remembered",
-          "description": "Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `no_memory`.",
+          "description": "Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `untracked_base`.",
           "type": "string"
         },
         {
           "const": "none",
-          "description": "Памяти нет: `push` откажет `no_memory`.",
+          "description": "Памяти нет: `push` откажет `untracked_base`.",
           "type": "string"
         },
         {

@@ -47,7 +47,7 @@ fn previews(dir: &Path) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// Память о базе образца перед превью `push`: без неё оно называет отказ `no_memory`
+/// Память о базе образца перед превью `push`: без неё оно называет отказ `untracked_base`
 /// (`INV.USE-CASES.A-PUSH-WITHOUT-MEMORY-OF-THE-BASE-IS-REFUSED`). Возвращает содержимое
 /// следа после записи памяти — превью его менять не вправе; у прочих листьев — `None`.
 fn remember_for(leaf: &str, dir: &Path, trace: &Path) -> Option<Vec<(String, Vec<u8>)>> {
@@ -159,7 +159,7 @@ fn no_leaf_with_a_preview_creates_the_work_path() {
     for previewed in with_preview(dir.path()) {
         let _ = fs::remove_dir_all(&previewed.trace);
         let leaf = previewed.leaf;
-        // Превью `push` без памяти о базе называет отказ `no_memory`; память лежит в рабочем
+        // Превью `push` без памяти о базе называет отказ `untracked_base`; память лежит в рабочем
         // каталоге, поэтому у него след — всё, чего не было до превью.
         let remembered = remember_for(leaf, dir.path(), &previewed.trace);
         let mut arguments = previewed.arguments;
@@ -337,7 +337,7 @@ fn no_preview_claims_that_an_executor_got_work() {
     for with_platform in [true, false] {
         let dir = temp_workspace();
         write_project(dir.path(), with_platform);
-        // Память о базе — чтобы превью `push` доходило до плана, а не до отказа `no_memory`.
+        // Память о базе — чтобы превью `push` доходило до плана, а не до отказа `untracked_base`.
         support::memory::remember_sample(dir.path());
         // Артефакт на месте, чтобы превью `upload` доходило до плана, а не до отказа.
         fs::write(dir.path().join("main.cf"), "cf").expect("artifact");

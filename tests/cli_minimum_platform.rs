@@ -243,7 +243,7 @@ fn status_deep_and_a_push_without_memory_name_the_minimum_as_a_reason() {
     let output = run(&config, &["push"]);
     assert_eq!(output.status.code(), Some(3), "{output:?}");
     let answer = envelope(&output);
-    assert_eq!(answer["error"]["code"], "no_memory", "{answer}");
+    assert_eq!(answer["error"]["code"], "untracked_base", "{answer}");
     let skipped = answer["data"]["provider"]["skipped"]
         .as_array()
         .expect("skipped");
