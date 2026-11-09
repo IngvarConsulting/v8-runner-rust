@@ -95,8 +95,8 @@ fn dump_through(
     if matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile)) && objects.is_none() {
         if let Some(unchanged) = set.and_then(|set| {
             crate::use_cases::exchange_guard::unchanged_since_the_record(
+                config,
                 set,
-                &config.work_path,
                 Provider::Agent,
                 &generation,
             )
@@ -105,6 +105,7 @@ fn dump_through(
         }
     }
 
+    let watch = dump_watch(context, config, set, plan, objects);
     let run = run_id();
     let stage = match plan.mode() {
         DumpMode::Full => "dump: full",
@@ -336,12 +337,21 @@ fn dump_through(
                 .is_none() =>
         {
             let after = generation_id(handle.session(), extension, wait).ok();
-            crate::use_cases::exchange_guard::record_after_dump(
-                set,
-                &config.work_path,
-                Provider::Agent,
-                Some(&generation),
-                after.as_deref(),
+            merge_optional_messages(
+                crate::use_cases::exchange_guard::record_after_dump(
+                    config,
+                    set,
+                    Provider::Agent,
+                    Some(&generation),
+                    after.as_deref(),
+                ),
+                remember_dump_writes(
+                    set,
+                    &config.work_path,
+                    watch.as_ref(),
+                    Some(&generation),
+                    after.as_deref(),
+                ),
             )
         }
         _ => None,

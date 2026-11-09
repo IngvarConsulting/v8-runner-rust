@@ -49,9 +49,12 @@ pub(crate) fn client_mcp_edt_source_path(config: &AppConfig) -> Option<PathBuf> 
     (source.format.unwrap_or(config.format) == SourceFormat::Edt).then(|| source.path.clone())
 }
 
+/// `provider` — исполнитель, выбранный для `push` этой команды: расширение ставит тот же, кто
+/// грузит наборы (у полной отправки файловой базы без ключа это может быть `ibcmd`, #559).
 pub(crate) fn prepare_client_mcp_extension(
     context: &ExecutionContext,
     config: &AppConfig,
+    provider: Provider,
     full_rebuild: bool,
     dry_run: bool,
     apply: ApplyPolicy,
@@ -59,20 +62,29 @@ pub(crate) fn prepare_client_mcp_extension(
     let Some(extension) = client_mcp_extension(config) else {
         return Ok(None);
     };
-    prepare_extension(context, config, extension, full_rebuild, dry_run, apply)
-        .map(Some)
-        .map_err(|error| {
-            let message = error.to_string();
-            ToolExtensionFailure {
-                step: failed_build_step(extension, message),
-                error,
-            }
-        })
+    prepare_extension(
+        context,
+        config,
+        provider,
+        extension,
+        full_rebuild,
+        dry_run,
+        apply,
+    )
+    .map(Some)
+    .map_err(|error| {
+        let message = error.to_string();
+        ToolExtensionFailure {
+            step: failed_build_step(extension, message),
+            error,
+        }
+    })
 }
 
 fn prepare_extension(
     context: &ExecutionContext,
     config: &AppConfig,
+    provider: Provider,
     extension: &ToolExtensionConfig,
     full_rebuild: bool,
     dry_run: bool,
@@ -91,6 +103,7 @@ fn prepare_extension(
         return preview_extension(
             context,
             config,
+            provider,
             extension,
             &mut utilities,
             full_rebuild,
@@ -103,6 +116,7 @@ fn prepare_extension(
         ToolExtensionInput::Source(source) => prepare_source_extension(
             context,
             config,
+            provider,
             extension,
             source,
             &mut utilities,
@@ -145,12 +159,13 @@ fn prepare_extension(
 fn preview_extension(
     context: &ExecutionContext,
     config: &AppConfig,
+    provider: Provider,
     extension: &ToolExtensionConfig,
     utilities: &mut PlatformUtilities,
     full_rebuild: bool,
     started: Instant,
 ) -> Result<BuildStep, AppError> {
-    let tools = locate_extension_tools(config, extension, utilities)?;
+    let tools = locate_extension_tools(config, provider, extension, utilities)?;
     // Словарь тот же, что у соседнего шага набора исходников: в одном ответе шаги не
     // должны говорить о запланированном разными словами.
     let planned = |what: String| {
@@ -218,6 +233,7 @@ fn preview_extension(
 /// же порядке: при исходниках EDT сначала ищется EDT CLI, потом исполнитель сборки.
 fn locate_extension_tools(
     config: &AppConfig,
+    provider: Provider,
     extension: &ToolExtensionConfig,
     utilities: &mut PlatformUtilities,
 ) -> Result<String, AppError> {
@@ -241,7 +257,7 @@ fn locate_extension_tools(
             named.push(format!("EDT CLI `{}`", binary.display()));
         }
     }
-    match config.selected_provider(Operation::Build) {
+    match provider {
         other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => {
             return Err(crate::use_cases::unimplemented_provider(
                 Operation::Build,
@@ -272,6 +288,7 @@ fn locate_extension_tools(
 fn prepare_source_extension(
     context: &ExecutionContext,
     config: &AppConfig,
+    provider: Provider,
     extension: &ToolExtensionConfig,
     source: &ToolExtensionSourceConfig,
     utilities: &mut PlatformUtilities,
@@ -297,7 +314,7 @@ fn prepare_source_extension(
     };
     if full_rebuild {
         prepare_source_extension_full(
-            context, config, extension, source, utilities, apply, deferrals,
+            context, config, provider, extension, source, utilities, apply, deferrals,
         )?;
         return loaded(&|| {
             commit_tool_extension_full_rescan(&source_context, &config.work_path, true)
@@ -327,7 +344,7 @@ fn prepare_source_extension(
         }
         Err(_error) if storage_needs_recovery(&source_context, &config.work_path) => {
             prepare_source_extension_full(
-                context, config, extension, source, utilities, apply, deferrals,
+                context, config, provider, extension, source, utilities, apply, deferrals,
             )?;
             return loaded(&|| {
                 commit_tool_extension_full_rescan(&source_context, &config.work_path, true)
@@ -344,13 +361,13 @@ fn prepare_source_extension(
         )),
         AnalysisOutcome::Fallback => {
             prepare_source_extension_full(
-                context, config, extension, source, utilities, apply, deferrals,
+                context, config, provider, extension, source, utilities, apply, deferrals,
             )?;
             loaded(&|| commit_tool_extension_full_rescan(&source_context, &config.work_path, false))
         }
         AnalysisOutcome::Changes { prepared, .. } => {
             prepare_source_extension_full(
-                context, config, extension, source, utilities, apply, deferrals,
+                context, config, provider, extension, source, utilities, apply, deferrals,
             )?;
             loaded(&|| {
                 analyzer::commit_success(&source_context, &config.work_path, &prepared)
@@ -360,9 +377,11 @@ fn prepare_source_extension(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_source_extension_full(
     context: &ExecutionContext,
     config: &AppConfig,
+    provider: Provider,
     extension: &ToolExtensionConfig,
     source: &ToolExtensionSourceConfig,
     utilities: &mut PlatformUtilities,
@@ -373,6 +392,7 @@ fn prepare_source_extension_full(
         SourceFormat::Designer => prepare_designer_source_extension(
             context,
             config,
+            provider,
             extension,
             &source.path,
             utilities,
@@ -383,7 +403,7 @@ fn prepare_source_extension_full(
             let exported =
                 export_edt_source_extension(context, config, extension, &source.path, utilities)?;
             prepare_designer_source_extension(
-                context, config, extension, &exported, utilities, apply, deferrals,
+                context, config, provider, extension, &exported, utilities, apply, deferrals,
             )
         }
     }
@@ -463,16 +483,18 @@ fn remove_storage_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_designer_source_extension(
     context: &ExecutionContext,
     config: &AppConfig,
+    provider: Provider,
     extension: &ToolExtensionConfig,
     source_path: &Path,
     utilities: &mut PlatformUtilities,
     apply: ApplyPolicy,
     deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
-    match config.selected_provider(Operation::Build) {
+    match provider {
         other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => Err(
             crate::use_cases::unimplemented_provider(Operation::Build, other),
         ),

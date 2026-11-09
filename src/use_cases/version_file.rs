@@ -166,6 +166,16 @@ impl RunnerVersionFile {
         self.record_when(|written| before != Some(written))
     }
 
+    /// Копия больше не описывает базу: она стирается, и следующая выгрузка по изменившемуся
+    /// не подложит её в каталог. Копии не было — не ошибка.
+    pub(crate) fn forget(&self) -> Result<(), AppError> {
+        match fs::remove_file(&self.copy) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error("remove", &self.copy, &error)),
+        }
+    }
+
     fn record_when(&self, rewritten: impl Fn(&Fingerprint) -> bool) -> Option<String> {
         let recorded = fingerprint(&self.in_directory).and_then(|written| match written {
             Some(written) if rewritten(&written) => self.write_copy(write_identity),

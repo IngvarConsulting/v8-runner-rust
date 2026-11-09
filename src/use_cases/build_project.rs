@@ -5,10 +5,11 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::change_detection::analyzer;
+use crate::change_detection::analyzer::AnalysisOutcome;
 use crate::change_detection::partial_load;
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::build::{BuildMode, BuildResult};
-use crate::domain::capability::{Operation, Provider};
+use crate::domain::capability::{Operation, OperationSize, Provider};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -42,7 +43,7 @@ pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
     apply_subject, build_designer_dsl, change_detection_failure, commit_step_state,
     designer_log_file, dump_designer_version_file, extension_name, fail_from_source_set_index,
-    interruption_before_safe_point, map_ibcmd_error, plan_configurator_load_step,
+    interruption_before_safe_point, loads_whole, map_ibcmd_error, plan_configurator_load_step,
     plan_edt_export_step, plan_generated_designer_load_step, push_build_step, push_loaded_step,
     read_designer_generation, read_ibcmd_generation, remove_storage_path, AfterLoad,
     AnalysisByName, Loaded, StepCommit, StepPlan,
@@ -92,19 +93,6 @@ fn run_build_branch(
     config: &AppConfig,
     args: &BuildArgs,
 ) -> UseCaseResult<BuildResult> {
-    // Сборка без изменений не запускает платформу, и раньше не требовала её: исполнитель
-    // ищется лениво, по первому набору, которому есть что грузить. Поэтому отказ выбора
-    // здесь не прерывает команду — он остаётся в квитанции, а нужна ли платформа,
-    // решают шаги.
-    let mut utilities = PlatformUtilities::from_config(config);
-    let (provider, receipt) = match crate::use_cases::provider_selection::select(
-        config,
-        &mut utilities,
-        Operation::Build,
-    ) {
-        Ok(selected) => (selected.provider, selected.receipt),
-        Err((_error, receipt)) => (config.selected_provider(Operation::Build), receipt),
-    };
     // Пока стоит признак копии, отправка полная у каждого набора: каталог с содержимым копии
     // сравнивать не с чем (`INV.USE-CASES.A-COPIED-BASE-STARTS-WITH-A-FULL-PUSH`).
     let promoted;
@@ -119,8 +107,41 @@ fn run_build_branch(
     } else {
         args
     };
-    let outcome = match require_memory(context, config, args) {
-        Ok(()) => run_build_selected(context, config, args, provider),
+    let memory = require_memory(context, config, args);
+    // Объём отправки выбирает исполнителя (#559), поэтому разбор изменений идёт до выбора, а
+    // не внутри исполнителя: исходники хешируются один раз. Память о базе проверена раньше —
+    // без неё разбор не нужен.
+    let analysis = match &memory {
+        Ok(()) => match analysis_before_selection(context, config, args) {
+            Ok(analysis) => analysis,
+            Err(error) => return Err(BuildExecutionFailure::without_payload(error)),
+        },
+        Err(_) => None,
+    };
+    let size = push_size(config, args, analysis.as_ref());
+    // Сборка без изменений не запускает платформу, и раньше не требовала её: исполнитель
+    // ищется лениво, по первому набору, которому есть что грузить. Поэтому отказ выбора
+    // здесь не прерывает команду — он остаётся в квитанции, а нужна ли платформа,
+    // решают шаги.
+    let mut utilities = PlatformUtilities::from_config(config);
+    let (provider, receipt) = match crate::use_cases::provider_selection::select_sized(
+        config,
+        &mut utilities,
+        Operation::Build,
+        size,
+    ) {
+        Ok(selected) => (selected.provider, selected.receipt),
+        Err((_error, receipt)) => (
+            config
+                .provider_plan_sized(Operation::Build, size)
+                .0
+                .first()
+                .unwrap_or_else(|| config.selected_provider(Operation::Build)),
+            receipt,
+        ),
+    };
+    let outcome = match memory {
+        Ok(()) => run_build_selected(context, config, args, provider, analysis),
         Err(error) => Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
@@ -134,6 +155,71 @@ fn run_build_branch(
     };
     let outcome = forget_new_owner_after_a_push(config, args, outcome);
     crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+/// Разбор изменений до выбора исполнителя — там, где объём выбирает исполнителя: у исходников
+/// Конфигуратора, у отправки по изменившемуся и у цепочки, которую раннер упорядочивает по
+/// объёму. Иначе `None`, и разбирает, как прежде, сам исполнитель. Неверно названный набор и
+/// опись версий в индексе гита тоже дают `None`: их отказ — дело исполнителя, а разбор до
+/// него был бы лишней работой.
+fn analysis_before_selection(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+) -> Result<Option<AnalysisByName>, AppError> {
+    if config.format != SourceFormat::Designer
+        || args.load.is_whole()
+        || !config.orders_by_size(Operation::Build)
+        || refuse_tracked_version_files(config, args).is_err()
+    {
+        return Ok(None);
+    }
+    let inventory = SourceSetInventory::new(config);
+    let Ok(source_sets) = selected_ordered_source_sets(&inventory, args.source_set.as_deref())
+    else {
+        return Ok(None);
+    };
+    let contexts = designer_contexts_for_source_sets(&inventory, &source_sets);
+    analyze_contexts_by_name(context, &inventory, &contexts).map(Some)
+}
+
+/// Объём отправки (#559): целиком, если каждый набор, который она загрузит, идёт целиком —
+/// `--force`, `--full`, полная отправка копии базы или разбор изменений без памяти о каталоге
+/// (`helpers::loads_whole`). Набор без изменений не загружается и объёма не меняет; отправка,
+/// которой грузить нечего, идёт по изменившемуся. Набор с частичной загрузкой, неразобранный
+/// или с отказом разбора делает отправку частичной.
+fn push_size(
+    config: &AppConfig,
+    args: &BuildArgs,
+    analysis: Option<&AnalysisByName>,
+) -> OperationSize {
+    if args.load.is_whole() {
+        return OperationSize::Whole;
+    }
+    let Some(analysis) = analysis else {
+        return OperationSize::ByChanges;
+    };
+    let inventory = SourceSetInventory::new(config);
+    let Ok(source_sets) = selected_ordered_source_sets(&inventory, args.source_set.as_deref())
+    else {
+        return OperationSize::ByChanges;
+    };
+    let mut loads = false;
+    for source_set in source_sets
+        .iter()
+        .filter(|source_set| !source_set.purpose.is_external())
+    {
+        match analysis.get(&source_set.name) {
+            Some(Ok(AnalysisOutcome::NoChanges)) => {}
+            Some(Ok(outcome)) if loads_whole(outcome) => loads = true,
+            Some(Ok(_) | Err(_)) | None => return OperationSize::ByChanges,
+        }
+    }
+    if loads {
+        OperationSize::Whole
+    } else {
+        OperationSize::ByChanges
+    }
 }
 
 /// Память о базе у каждого набора, который пойдёт в неё, — до анализа изменений и до
@@ -199,12 +285,13 @@ fn run_build_selected(
     config: &AppConfig,
     args: &BuildArgs,
     provider: Provider,
+    analysis: Option<AnalysisByName>,
 ) -> UseCaseResult<BuildResult> {
     if config.format == SourceFormat::Edt {
         return run_build_edt(context, config, args, provider);
     }
 
-    if let Some(error) = validate_designer_supported_matrix(config)
+    if let Some(error) = validate_designer_supported_matrix(config, provider)
         .or_else(|| refuse_tracked_version_files(config, args).err())
     {
         return Err(BuildExecutionFailure::with_payload(
@@ -220,9 +307,9 @@ fn run_build_selected(
     }
 
     match provider {
-        Provider::Designer => run_build_designer(context, config, args),
-        Provider::Ibcmd => run_build_ibcmd(context, config, args),
-        Provider::Agent => run_build_agent(context, config, args),
+        Provider::Designer => run_build_designer(context, config, args, analysis),
+        Provider::Ibcmd => run_build_ibcmd(context, config, args, analysis),
+        Provider::Agent => run_build_agent(context, config, args, analysis),
         other => Err(BuildExecutionFailure::with_payload(
             crate::use_cases::unimplemented_provider(Operation::Build, other),
             BuildResult {
@@ -240,10 +327,18 @@ fn run_build_designer(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    analysis: Option<AnalysisByName>,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     let started = Instant::now();
-    let mut result = coordinator::run_build_designer(context, config, args)?;
-    append_client_mcp_extension_step(context, config, args, started, &mut result)?;
+    let mut result = coordinator::run_build_designer(context, config, args, analysis)?;
+    append_client_mcp_extension_step(
+        context,
+        config,
+        args,
+        Provider::Designer,
+        started,
+        &mut result,
+    )?;
     Ok(result)
 }
 
@@ -251,10 +346,11 @@ fn run_build_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    analysis: Option<AnalysisByName>,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     let started = Instant::now();
-    let mut result = coordinator::run_build_ibcmd(context, config, args)?;
-    append_client_mcp_extension_step(context, config, args, started, &mut result)?;
+    let mut result = coordinator::run_build_ibcmd(context, config, args, analysis)?;
+    append_client_mcp_extension_step(context, config, args, Provider::Ibcmd, started, &mut result)?;
     Ok(result)
 }
 
@@ -262,26 +358,30 @@ fn run_build_agent(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    analysis: Option<AnalysisByName>,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     let started = Instant::now();
-    let mut result = coordinator::run_build_agent(context, config, args)?;
-    append_client_mcp_extension_step(context, config, args, started, &mut result)?;
+    let mut result = coordinator::run_build_agent(context, config, args, analysis)?;
+    append_client_mcp_extension_step(context, config, args, Provider::Agent, started, &mut result)?;
     Ok(result)
 }
 
-/// Отказ `push`, если выбранный для него исполнитель этот формат проекта не грузит; `None` —
-/// грузит. Тот же ответ видит `status --deep`, прежде чем спросить поколение.
+/// Отказ `push`, если исполнитель отправки по изменившемуся этот формат проекта не грузит;
+/// `None` — грузит. Тот же ответ видит `status --deep`, прежде чем спросить поколение: он
+/// спрашивает исполнителя частичной отправки, а полную у файловой базы без ключа грузит
+/// `ibcmd` (#559).
 pub(crate) fn unsupported_push_executor(config: &AppConfig) -> Option<AppError> {
+    let provider = config.selected_provider(Operation::Build);
     match config.format {
-        SourceFormat::Designer => validate_designer_supported_matrix(config),
-        SourceFormat::Edt => validate_edt_supported_matrix(config),
+        SourceFormat::Designer => validate_designer_supported_matrix(config, provider),
+        SourceFormat::Edt => validate_edt_supported_matrix(config, provider),
     }
 }
 
-fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
+fn validate_designer_supported_matrix(config: &AppConfig, provider: Provider) -> Option<AppError> {
     if config.format == SourceFormat::Designer
         && matches!(
-            config.selected_provider(Operation::Build),
+            provider,
             Provider::Designer | Provider::Ibcmd | Provider::Agent
         )
     {
@@ -312,12 +412,9 @@ fn refuse_tracked_version_files(config: &AppConfig, args: &BuildArgs) -> Result<
         .try_for_each(|context| refuse_tracked_version_file(context.path()))
 }
 
-fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {
+fn validate_edt_supported_matrix(config: &AppConfig, provider: Provider) -> Option<AppError> {
     if config.format == SourceFormat::Edt
-        && matches!(
-            config.selected_provider(Operation::Build),
-            Provider::Designer | Provider::Ibcmd
-        )
+        && matches!(provider, Provider::Designer | Provider::Ibcmd)
     {
         None
     } else {
@@ -333,7 +430,7 @@ fn run_build_edt(
 ) -> Result<BuildResult, BuildExecutionFailure> {
     let started = Instant::now();
     let mut result = coordinator::run_build_edt(context, config, args, provider)?;
-    append_client_mcp_extension_step(context, config, args, started, &mut result)?;
+    append_client_mcp_extension_step(context, config, args, provider, started, &mut result)?;
     Ok(result)
 }
 
@@ -341,12 +438,14 @@ fn append_client_mcp_extension_step(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    provider: Provider,
     started: Instant,
     result: &mut BuildResult,
 ) -> Result<(), BuildExecutionFailure> {
     match tool_extension::prepare_client_mcp_extension(
         context,
         config,
+        provider,
         args.load.is_whole(),
         args.dry_run,
         args.apply,

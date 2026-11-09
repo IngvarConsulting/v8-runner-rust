@@ -19,6 +19,10 @@ pub enum UtilityType {
     EdtCli,
     /// `webinst`
     Webinst,
+    /// `ibsrv`
+    Ibsrv,
+    /// `ragent`: агент кластера, который поднимает раннер. `ras` и `rac` лежат рядом с ним.
+    Ragent,
 }
 
 impl UtilityType {
@@ -30,6 +34,8 @@ impl UtilityType {
             Self::Ibcmd => executable_name_for("ibcmd"),
             Self::EdtCli => executable_name_for("1cedtcli"),
             Self::Webinst => executable_name_for("webinst"),
+            Self::Ibsrv => executable_name_for("ibsrv"),
+            Self::Ragent => executable_name_for("ragent"),
         }
     }
 
@@ -47,6 +53,8 @@ impl UtilityType {
             Self::V8 => "full client",
             Self::V8C => "thin client",
             Self::Ibcmd => "server tools",
+            Self::Ibsrv => "server tools",
+            Self::Ragent => "1C:Enterprise server",
             Self::Webinst => "web server extensions",
             Self::EdtCli => "EDT CLI",
         }
@@ -459,7 +467,12 @@ impl Locator {
         };
         let current = match (utility, self.platform_policy, self.pinned_platform.as_ref()) {
             (
-                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd | UtilityType::Webinst,
+                UtilityType::V8
+                | UtilityType::V8C
+                | UtilityType::Ibcmd
+                | UtilityType::Ibsrv
+                | UtilityType::Ragent
+                | UtilityType::Webinst,
                 PlatformResolutionPolicy::Strict,
                 Some(pinned),
             ) => select_pinned_candidate(
@@ -469,7 +482,12 @@ impl Locator {
                 &pinned.root,
             ),
             (
-                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd | UtilityType::Webinst,
+                UtilityType::V8
+                | UtilityType::V8C
+                | UtilityType::Ibcmd
+                | UtilityType::Ibsrv
+                | UtilityType::Ragent
+                | UtilityType::Webinst,
                 PlatformResolutionPolicy::Strict,
                 None,
             ) => {
@@ -482,7 +500,12 @@ impl Locator {
                 )
             }
             (
-                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd | UtilityType::Webinst,
+                UtilityType::V8
+                | UtilityType::V8C
+                | UtilityType::Ibcmd
+                | UtilityType::Ibsrv
+                | UtilityType::Ragent
+                | UtilityType::Webinst,
                 PlatformResolutionPolicy::Lenient,
                 Some(_) | None,
             ) => select_candidate(
@@ -934,10 +957,12 @@ impl InstalledPlatform {
 }
 
 /// Компоненты, состав которых различает опись.
-const INVENTORIED_COMPONENTS: [UtilityType; 4] = [
+const INVENTORIED_COMPONENTS: [UtilityType; 6] = [
     UtilityType::V8,
     UtilityType::V8C,
     UtilityType::Ibcmd,
+    UtilityType::Ibsrv,
+    UtilityType::Ragent,
     UtilityType::Webinst,
 ];
 
@@ -1486,11 +1511,14 @@ fn infer_version(utility: UtilityType, path: &Path) -> Option<UtilityVersion> {
     let installation_root = installation_root_for_executable(path);
     let version_text = installation_root.file_name().and_then(|name| name.to_str());
     match utility {
-        UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd | UtilityType::Webinst => {
-            version_text
-                .and_then(PlatformVersion::parse_strict)
-                .map(UtilityVersion::Platform)
-        }
+        UtilityType::V8
+        | UtilityType::V8C
+        | UtilityType::Ibcmd
+        | UtilityType::Ibsrv
+        | UtilityType::Ragent
+        | UtilityType::Webinst => version_text
+            .and_then(PlatformVersion::parse_strict)
+            .map(UtilityVersion::Platform),
         UtilityType::EdtCli => version_text
             .and_then(EdtVersion::parse_lenient)
             .map(UtilityVersion::Edt),
@@ -1524,6 +1552,8 @@ fn executable_name_for(base: &'static str) -> &'static str {
             "1cv8" => "1cv8.exe",
             "1cv8c" => "1cv8c.exe",
             "ibcmd" => "ibcmd.exe",
+            "ibsrv" => "ibsrv.exe",
+            "ragent" => "ragent.exe",
             "1cedtcli" => "1cedtcli.exe",
             "webinst" => "webinst.exe",
             _ => base,
@@ -1588,6 +1618,39 @@ mod tests {
         PlatformChoice, PlatformResolutionPolicy, PlatformVersion, PlatformVersionRequirement,
         ResolutionSource, UtilityType, UtilityVersion,
     };
+
+    /// Новый тип утилиты без строки в таблице имён на Windows ищется без `.exe` и не находится
+    /// (так было с `ibsrv` в #537 и с `ragent` в #538).
+    #[test]
+    #[cfg(windows)]
+    fn every_utility_has_an_exe_name_on_windows() {
+        use super::UtilityType;
+        for utility in [
+            UtilityType::V8,
+            UtilityType::V8C,
+            UtilityType::Ibcmd,
+            UtilityType::EdtCli,
+            UtilityType::Webinst,
+            UtilityType::Ibsrv,
+            UtilityType::Ragent,
+        ] {
+            // Перечень обязан быть полным: новый вариант без строки здесь не соберётся.
+            match utility {
+                UtilityType::V8
+                | UtilityType::V8C
+                | UtilityType::Ibcmd
+                | UtilityType::EdtCli
+                | UtilityType::Webinst
+                | UtilityType::Ibsrv
+                | UtilityType::Ragent => {}
+            }
+            assert!(
+                utility.executable_name().ends_with(".exe"),
+                "{utility:?}: {}",
+                utility.executable_name()
+            );
+        }
+    }
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;

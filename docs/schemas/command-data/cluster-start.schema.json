@@ -1,0 +1,207 @@
+{
+  "$defs": {
+    "ServiceAction": {
+      "description": "Что сделала команда.",
+      "enum": [
+        "started",
+        "already_running",
+        "stopped",
+        "nothing_to_stop",
+        "reported",
+        "planned"
+      ],
+      "type": "string"
+    },
+    "ServiceState": {
+      "description": "В каком состоянии служба сейчас.",
+      "oneOf": [
+        {
+          "enum": [
+            "not_running",
+            "starting",
+            "started_by_this_copy"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Порт записи слушает процесс, которого раннер этой копии не запускал.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/cluster-start.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/ServiceAction"
+    },
+    "agent": {
+      "description": "Адрес агента.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "connection": {
+      "description": "Строка соединения с базой кластера.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "infobase": {
+      "type": "string"
+    },
+    "log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occupant_pid": {
+      "description": "Чужой процесс на закреплённом порту.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "pid": {
+      "description": "PID агента `ragent`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "previous_regport": {
+      "description": "`regport` прежнего реестра, если команда завела новый (`--new-regport`).",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ras": {
+      "description": "Адрес `ras` для `rac`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ras_pid": {
+      "description": "PID сервера администрирования `ras`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ready": {
+      "description": "Ответил ли `rac cluster list`.",
+      "type": "boolean"
+    },
+    "registered": {
+      "description": "Создана ли база в этом реестре.",
+      "type": "boolean"
+    },
+    "registry_dir": {
+      "description": "Каталог реестра кластера.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remnant_pids": {
+      "description": "Процессы `rmngr` и `rphost` упавшего агента, ещё живые.",
+      "items": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "stale_record": {
+      "description": "Запись была, но процесса из неё уже нет.",
+      "type": "boolean"
+    },
+    "state": {
+      "$ref": "#/$defs/ServiceState"
+    },
+    "stopped_dbms_pid": {
+      "description": "PostgreSQL, погашенный вместе с кластером, потому что поднят его шагом.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "stopped_pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "stopped_ras_pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "stopped_remnant_pids": {
+      "description": "Остатки упавшего агента, снятые по их pid.",
+      "items": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Версия платформы кластера.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "worker_range": {
+      "description": "Диапазон портов рабочих процессов.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ok",
+    "infobase",
+    "state",
+    "action",
+    "ready",
+    "registered",
+    "duration_ms"
+  ],
+  "title": "ClusterResult",
+  "type": "object"
+}

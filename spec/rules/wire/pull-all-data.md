@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PULL-ALL-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/pull-all.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -24,6 +24,11 @@ check:
 выгрузит, если их расширение в базе есть. `not_declared` — расширения без набора, которым
 набор не объявлен, полями `name` и `reason`. Пустые `not_installed`, `not_declared` и
 `if_installed` не пишутся.
+
+**Что изменила версия 4.** Квитанция `provider` обхода и каждой записи `sets` несёт
+необязательное `reason` формы `CTR.WIRE.PULL-DATA` версии 8. Квитанция обхода называет `whole`
+только у `--force`; без него — `by_changes`, а каждый набор выбирает исполнителя по своему
+объёму.
 
 **Что изменила версия 3.** Каждая запись `sets` несёт форму `CTR.WIRE.PULL-DATA` версии 7:
 `losses` — счёт и первые имена вместо перечня каждого пути.

@@ -1,0 +1,143 @@
+{
+  "$defs": {
+    "ServiceAction": {
+      "description": "Что сделала команда.",
+      "enum": [
+        "started",
+        "already_running",
+        "stopped",
+        "nothing_to_stop",
+        "reported",
+        "planned"
+      ],
+      "type": "string"
+    },
+    "ServiceState": {
+      "description": "В каком состоянии служба сейчас.",
+      "oneOf": [
+        {
+          "enum": [
+            "not_running",
+            "starting",
+            "started_by_this_copy"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Порт записи слушает процесс, которого раннер этой копии не запускал.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/dbms-restart.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/ServiceAction"
+    },
+    "address": {
+      "description": "Значение для `--db-server`: `127.0.0.1 port=<порт>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "data_dir": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "explicit": {
+      "description": "Поднята явно, а не шагом сервера; `None`, пока службы нет.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "infobase": {
+      "type": "string"
+    },
+    "log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occupant_pid": {
+      "description": "Чужой процесс на порту записи.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "password_file": {
+      "description": "Путь к файлу пароля. Значения в ответе нет\n(`INV.PLATFORM.MANAGED-POSTGRES-PASSWORD-STAYS-OUT-OF-THE-OUTPUT`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "stale_record": {
+      "description": "Запись была, но процесса из неё уже нет.",
+      "type": "boolean"
+    },
+    "state": {
+      "$ref": "#/$defs/ServiceState"
+    },
+    "stopped_pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "user": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ok",
+    "infobase",
+    "state",
+    "action",
+    "ready",
+    "duration_ms"
+  ],
+  "title": "DbmsResult",
+  "type": "object"
+}

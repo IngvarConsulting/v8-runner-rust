@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::change_detection::file_state::mtime_nanos;
 use crate::change_detection::hash_storage::{
     HashStorage, StorageError, StorageSnapshot, StoredFileState,
 };
@@ -370,12 +371,149 @@ fn scan_sources(
     excluded: Option<&Path>,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<scanner::ScanSnapshot, ScanError> {
-    let scope = if context.is_build_memory() {
+    scanner::scan_in_scope(path, excluded, interrupted, scan_scope(context))
+}
+
+fn scan_scope(context: &SourceSetContext) -> ScanScope {
+    if context.is_build_memory() {
         ScanScope::Build
     } else {
         ScanScope::Push
+    }
+}
+
+/// The source tree as an incremental dump found it: which files it held and when the dump
+/// began. Taken before the platform starts writing into the tree.
+pub struct DumpWatch {
+    started_ns: u64,
+    /// Every listed file with its modification time.
+    before: HashMap<String, u64>,
+}
+
+/// Lists the tree before an incremental dump, without reading files. `None` when the set keeps
+/// no memory of this base or the tree cannot be listed: the dump then records nothing and the
+/// next push loads what the dump wrote, as before (#557).
+pub fn watch_before_dump(context: &SourceSetContext, work_path: &Path) -> Option<DumpWatch> {
+    if !context.persists_snapshot() || snapshot_memory(context, work_path) != SnapshotMemory::Own {
+        return None;
+    }
+    let watch = list_before_dump(context, work_path);
+    if let Err(error) = &watch {
+        tracing::debug!(
+            source_set = %context.name(),
+            %error,
+            "the tree was not listed before the dump; what the dump writes is not remembered"
+        );
+    }
+    watch.ok()
+}
+
+fn list_before_dump(context: &SourceSetContext, work_path: &Path) -> Result<DumpWatch, String> {
+    // The dump's files are stamped by the clock of the tree's file system, which can be coarser
+    // than this process's clock or, on a share, apart from it: the start is read from a file
+    // written there, and the file is gone before the tree is listed.
+    let started_ns = {
+        let probe = tempfile::Builder::new()
+            .prefix(scanner::DUMP_START_PROBE)
+            .tempfile_in(context.path())
+            .map_err(|error| format!("clock probe: {error}"))?;
+        let modified = probe
+            .as_file()
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map_err(|error| format!("clock probe: {error}"))?;
+        mtime_nanos(modified, context.path()).map_err(|error| error.to_string())?
     };
-    scanner::scan_in_scope(path, excluded, interrupted, scope)
+    let excluded = scanner::work_path_inside(context.path(), work_path);
+    let listed = scanner::list_in_scope(
+        context.path(),
+        excluded.as_deref(),
+        &mut || false,
+        scan_scope(context),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(DumpWatch {
+        started_ns,
+        before: listed
+            .files
+            .into_iter()
+            .map(|file| (file.rel_path, file.mtime_ns))
+            .collect(),
+    })
+}
+
+/// After a successful incremental dump over an unchanged base, remembers what the dump wrote:
+/// a file is written by the dump when its modification time is not before the dump began and
+/// it is new or its time moved since the listing — so an edit saved in the very clock tick the
+/// dump began stays a change. Written files are hashed by content and replace their entries,
+/// files that were there before the dump and are gone are forgotten.
+/// Every other entry stays, so a user edit made before the dump remains a change. An edit made
+/// while the dump ran cannot be told from the platform's writes and is remembered too (#170).
+pub fn record_dump_changes(
+    context: &SourceSetContext,
+    work_path: &Path,
+    watch: &DumpWatch,
+) -> Result<(), ChangeDetectionError> {
+    let Some(path) = context.storage_path(work_path) else {
+        return Ok(());
+    };
+    let storage = HashStorage::new(path);
+    // Unreadable memory is not repaired here: the next push falls back to a full load.
+    let Some(mut snapshot) = load_bound_snapshot(context, &storage)? else {
+        return Ok(());
+    };
+    let excluded = scanner::work_path_inside(context.path(), work_path);
+    let listed = scanner::list_in_scope(
+        context.path(),
+        excluded.as_deref(),
+        &mut || false,
+        scan_scope(context),
+    )
+    .map_err(|error| map_scan_error(context, error))?;
+    let after: HashSet<&str> = listed
+        .files
+        .iter()
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    let removed: Vec<&str> = watch
+        .before
+        .keys()
+        .map(String::as_str)
+        .filter(|rel_path| !after.contains(rel_path))
+        .collect();
+    let written: Vec<scanner::Candidate> = listed
+        .files
+        .into_iter()
+        .filter(|file| {
+            file.mtime_ns >= watch.started_ns
+                && watch.before.get(&file.rel_path) != Some(&file.mtime_ns)
+        })
+        .collect();
+    if written.is_empty() && removed.is_empty() {
+        return Ok(());
+    }
+    for rel_path in removed {
+        snapshot.entries.remove(rel_path);
+    }
+    for file in scanner::hash_listed(written, &mut || false)
+        .map_err(|error| map_scan_error(context, error))?
+    {
+        snapshot.entries.insert(
+            file.rel_path,
+            StoredFileState {
+                mtime_ns: file.mtime_ns,
+                hash: file.hash,
+            },
+        );
+    }
+    storage
+        .commit_snapshot_with_identity(
+            &snapshot.entries,
+            snapshot.watermark.unwrap_or(0).max(watch.started_ns),
+            snapshot.generation,
+            context.storage_identity(),
+        )
+        .map_err(|error| map_commit_error(context, storage.path(), error))
 }
 
 fn detect_changes(
@@ -481,8 +619,8 @@ fn map_scan_error(context: &SourceSetContext, err: ScanError) -> ChangeDetection
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_context, rescan_and_commit_full, AnalysisOutcome, ChangeDetectionError, ChangeKind,
-        FileChange,
+        analyze_context, record_dump_changes, rescan_and_commit_full, watch_before_dump,
+        AnalysisOutcome, ChangeDetectionError, ChangeKind, FileChange,
     };
     use crate::change_detection::partial_load::decide;
     use crate::domain::source_set::SourceSetContext;
@@ -727,6 +865,85 @@ mod tests {
             Ok(AnalysisOutcome::NoChanges)
         ));
     }
+    /// What an incremental dump wrote is remembered; a user edit made before it is not (#557).
+    #[test]
+    fn a_dump_remembers_what_it_wrote_and_keeps_an_earlier_user_edit() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for name in [
+            "Written.bsl",
+            "Removed.bsl",
+            "Mine.bsl",
+            "Ahead.bsl",
+            "Kept.bsl",
+        ] {
+            std::fs::write(root.join(name), "before").expect(name);
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+
+        // The user's edit lands before the dump starts.
+        std::fs::write(root.join("Mine.bsl"), "mine").expect("user edit");
+        File::options()
+            .write(true)
+            .open(root.join("Mine.bsl"))
+            .expect("open")
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(60))
+            .expect("old mtime");
+        // An edit stamped no earlier than the dump's start, as in the tick the dump begins.
+        std::fs::write(root.join("Ahead.bsl"), "mine too").expect("user edit");
+        File::options()
+            .write(true)
+            .open(root.join("Ahead.bsl"))
+            .expect("open")
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(3600))
+            .expect("late mtime");
+        let watch = watch_before_dump(&context, &work).expect("memory of this base");
+
+        // The dump rewrites one file, adds one and removes one.
+        std::fs::write(root.join("Written.bsl"), "from the base").expect("written");
+        std::fs::write(root.join("Added.bsl"), "new in the base").expect("added");
+        std::fs::remove_file(root.join("Removed.bsl")).expect("removed");
+        record_dump_changes(&context, &work, &watch).expect("record");
+
+        let analysis = analyze_context(&context, &work, &mut || false);
+        let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
+            panic!("{:?}", analysis.outcome);
+        };
+        let mut names: Vec<_> = changes
+            .iter()
+            .map(|change| {
+                (
+                    change.path.file_name().expect("name").to_owned(),
+                    change.kind.clone(),
+                )
+            })
+            .collect();
+        // Порядок изменений идёт от обхода каталога и не обещан: сверяется набор.
+        names.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            names,
+            vec![
+                ("Ahead.bsl".into(), ChangeKind::Modified),
+                ("Mine.bsl".into(), ChangeKind::Modified)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_set_without_memory_of_the_base_is_not_watched() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        std::fs::create_dir(&root).expect("root");
+        std::fs::write(root.join("A.bsl"), "a").expect("A");
+        let context = SourceSetContext::new("main", root, "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        assert!(watch_before_dump(&context, &dir.path().join("work")).is_none());
+    }
+
     /// Cancellation is distinct from a full-load fallback and leaves committed memory alone.
     #[test]
     fn interrupted_analysis_keeps_memory_and_never_falls_back() {

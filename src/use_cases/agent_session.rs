@@ -100,7 +100,7 @@ impl AgentHandle {
     /// команды и мог держать её столько же ещё раз.
     pub(crate) fn finish(self, wait: &WaitPolicy) {
         match self {
-            Self::Managed(agent) => agent.shutdown(wait),
+            Self::Managed(agent) => agent.release_and_remove(),
             Self::Attached { session, .. } | Self::Gate { session, .. } => session.release(wait),
         }
     }
@@ -1001,8 +1001,9 @@ pub(crate) fn generation_id(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct GenerationRecord {
     pub token: String,
-    /// Инструмент, которым получен токен: токены разных инструментов несравнимы
-    /// (`INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`).
+    /// Инструмент, которым получен токен: токены разных инструментов сравнимы только там,
+    /// где это замерено ([`TokenScope`],
+    /// `INV.USE-CASES.A-GENERATION-TOKEN-IS-COMPARED-WITHIN-ITS-OWN-TOOL`).
     pub tool: Provider,
     /// Что было сделано, когда токен записан.
     pub after: GenerationAfter,
@@ -1048,19 +1049,53 @@ impl GenerationRecord {
 /// Ответ записи на вопрос «менялась ли база с прошлого чтения».
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GenerationComparison {
-    /// Тот же инструмент отдал тот же токен: основную конфигурацию не трогали.
+    /// Сравнимый инструмент отдал тот же токен: основную конфигурацию не трогали.
     Unchanged,
-    /// Тот же инструмент отдал другой токен: была запись, возможно того же самого.
+    /// Сравнимый инструмент отдал другой токен: была запись, возможно того же самого.
     Changed,
-    /// Токен получен другим инструментом: ответа нет — ни совпадения, ни расхождения.
+    /// Токен получен несравнимым инструментом: ответа нет — ни совпадения, ни расхождения.
     NoAnswer,
 }
 
+/// Чьи токены поколения сравнимы у записи набора.
+///
+/// Замер #559 (файловые базы, 8.3.24, 8.3.27, 8.5.4): токен основной конфигурации у агента,
+/// Конфигуратора и `ibcmd` один и тот же в каждом состоянии — как есть, после применённой
+/// правки, загруженной без применения и применённой снова. У расширения токены инструментов
+/// различаются (один читает загруженное, другой применённое), кластер и автономный сервер не
+/// замерены: там токен сравнивается только внутри своего инструмента.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenScope {
+    /// Только тот же инструмент.
+    OwnTool,
+    /// Любой из агента, Конфигуратора и `ibcmd`.
+    AnyTool,
+}
+
+impl TokenScope {
+    /// Сравним ли токен инструмента `read` с токеном, записанным инструментом `recorded`.
+    pub(crate) fn compares(self, recorded: Provider, read: Provider) -> bool {
+        recorded == read
+            || (self == Self::AnyTool && Self::measured(recorded) && Self::measured(read))
+    }
+
+    /// Отвечает ли инструмент поколением, которое раннер записывает: агент, Конфигуратор и
+    /// `ibcmd`.
+    pub(crate) const fn measured(tool: Provider) -> bool {
+        matches!(tool, Provider::Agent | Provider::Designer | Provider::Ibcmd)
+    }
+}
+
 impl GenerationRecord {
-    /// Сравнивает записанный токен с прочитанным сейчас, только внутри одного
-    /// инструмента. Токен пустой базы сравнивается как любой другой.
-    pub(crate) fn compare(&self, tool: Provider, token: &str) -> GenerationComparison {
-        if self.tool != tool {
+    /// Сравнивает записанный токен с прочитанным сейчас инструментом `tool` в пределах
+    /// `scope`. Токен пустой базы сравнивается как любой другой.
+    pub(crate) fn compare(
+        &self,
+        tool: Provider,
+        token: &str,
+        scope: TokenScope,
+    ) -> GenerationComparison {
+        if !scope.compares(self.tool, tool) {
             GenerationComparison::NoAnswer
         } else if self.token == token {
             GenerationComparison::Unchanged
@@ -1245,6 +1280,7 @@ mod tests {
             ("[::1]:1543", "[::1]:1543"),
         ] {
             let (host, port) = crate::config::model::StandaloneConfig {
+                managed: None,
                 gate: Some(record.to_owned()),
                 host_fingerprint: None,
                 exchange: None,
@@ -1453,7 +1489,7 @@ mod tests {
         let record = recorded(&main);
         assert_eq!(record.tool, Provider::Agent);
         assert_eq!(
-            record.compare(Provider::Agent, "abc"),
+            record.compare(Provider::Agent, "abc", TokenScope::OwnTool),
             GenerationComparison::Unchanged
         );
     }
@@ -1465,13 +1501,13 @@ mod tests {
         main.record(Provider::Ibcmd, "abc", GenerationAfter::Dump)
             .expect("record");
         assert_eq!(
-            recorded(&main).compare(Provider::Ibcmd, "def"),
+            recorded(&main).compare(Provider::Ibcmd, "def", TokenScope::OwnTool),
             GenerationComparison::Changed
         );
     }
 
-    /// Токен другого инструмента — отсутствие ответа: ни совпадения при равных значениях,
-    /// ни расхождения при разных.
+    /// Токен другого инструмента там, где токены сравниваются только внутри своего, —
+    /// отсутствие ответа: ни совпадения при равных значениях, ни расхождения при разных.
     #[test]
     fn a_token_of_another_tool_is_no_answer() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1485,9 +1521,39 @@ mod tests {
             (Provider::Agent, "def"),
         ] {
             assert_eq!(
-                record.compare(tool, token),
+                record.compare(tool, token, TokenScope::OwnTool),
                 GenerationComparison::NoAnswer,
                 "{tool} {token}"
+            );
+        }
+    }
+
+    /// Основная конфигурация файловой базы (#559): запись любого из агента, Конфигуратора и
+    /// `ibcmd` сравнивается с токеном, прочитанным любым другим из них, — и совпадением, и
+    /// расхождением. Инструмент без замера и там сравним только с собой.
+    #[test]
+    fn a_token_of_another_measured_tool_is_compared_where_tokens_are_shared() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let main = ledger(root.path(), "main", "base-a");
+        for recorded_by in [Provider::Agent, Provider::Designer, Provider::Ibcmd] {
+            main.record(recorded_by, "abc", GenerationAfter::Build)
+                .expect("record");
+            let record = recorded(&main);
+            for read_by in [Provider::Agent, Provider::Designer, Provider::Ibcmd] {
+                assert_eq!(
+                    record.compare(read_by, "abc", TokenScope::AnyTool),
+                    GenerationComparison::Unchanged,
+                    "{recorded_by} then {read_by}"
+                );
+                assert_eq!(
+                    record.compare(read_by, "def", TokenScope::AnyTool),
+                    GenerationComparison::Changed,
+                    "{recorded_by} then {read_by}"
+                );
+            }
+            assert_eq!(
+                record.compare(Provider::IbcmdRs, "abc", TokenScope::AnyTool),
+                GenerationComparison::NoAnswer
             );
         }
     }
@@ -1505,7 +1571,7 @@ mod tests {
             main.record(Provider::Ibcmd, token, GenerationAfter::Build)
                 .expect("record");
             assert_eq!(
-                recorded(&main).compare(Provider::Ibcmd, token),
+                recorded(&main).compare(Provider::Ibcmd, token, TokenScope::OwnTool),
                 GenerationComparison::Unchanged,
                 "{token}"
             );

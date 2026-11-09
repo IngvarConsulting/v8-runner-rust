@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.EXTENSIONS-INVENTORY-DATA
-version: 6
+version: 7
 artifact: docs/schemas/command-data/extensions-inventory.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -24,6 +24,8 @@ check:
 это свойство. `ibcmd` читает его из сохранённого состояния БД и сверяет запись
 с инвентаризацией; агент пока сообщает `null`. Подмена рабочей конфигурацией
 после `upload` до `apply` недопустима.
+
+**Что изменила версия 7.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 
 **Что изменила версия 6.** При чтении через пакетный Конфигуратор на кластере элемент
 `extensions` содержит только `name`. Полные записи агента и `ibcmd` сохраняют прежние поля.

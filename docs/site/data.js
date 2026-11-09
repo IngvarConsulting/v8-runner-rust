@@ -137,7 +137,7 @@ window.RUNNER_DATA = (function () {
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['connection — прямой шлюз', 'standalone.gate и exchange — для agent', 'source-set[]'], note: 'Конфигуратор по прямому шлюзу читает исходники у раннера; agent — load-config-from-files + update-db-cfg одной сессией, файлы через канал обмена' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection', 'source-set[]'], note: 'одна сессия агента на всю команду; без агента — Designer' };
-        return { chain: [P.agent, P.designer, P.ibcmd], config: ['connection', 'source-set[]'], note: 'одна сессия агента на всю команду; без агента — Designer' };
+        return { chain: [P.agent, P.designer, P.ibcmd], config: ['connection', 'source-set[]'], note: 'одна сессия агента на всю команду; без агента — Designer; когда все наборы идут целиком (--force, --full, без снимка), первым идёт ibcmd' };
       }
     },
     {
@@ -201,7 +201,7 @@ window.RUNNER_DATA = (function () {
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['connection', 'source-set[]', 'standalone.gate и exchange — для agent'], note: 'Конфигуратор пишет выгрузку у раннера; agent — dump-config-to-files по SSH, результат через объявленный канал обмена' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection', 'source-set[]'], note: 'выгрузка агента соответствует выгрузке Конфигуратора' };
-        return { chain: [P.agent, P.designer, P.ibcmd], config: ['connection', 'source-set[]'], note: 'выгрузка агента соответствует выгрузке Конфигуратора' };
+        return { chain: [P.agent, P.designer, P.ibcmd], config: ['connection', 'source-set[]'], note: 'выгрузка агента соответствует выгрузке Конфигуратора; полную выгрузку (--force, без годного файла версий) первым делает ibcmd' };
       }
     },
     {

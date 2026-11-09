@@ -10,8 +10,32 @@
     "clone": [
       "clone"
     ],
+    "cluster restart": [
+      "cluster-restart"
+    ],
+    "cluster start": [
+      "cluster-start"
+    ],
+    "cluster status": [
+      "cluster-status"
+    ],
+    "cluster stop": [
+      "cluster-stop"
+    ],
     "convert": [
       "convert"
+    ],
+    "dbms restart": [
+      "dbms-restart"
+    ],
+    "dbms start": [
+      "dbms-start"
+    ],
+    "dbms status": [
+      "dbms-status"
+    ],
+    "dbms stop": [
+      "dbms-stop"
     ],
     "diff": [
       "diff"
@@ -58,6 +82,18 @@
     ],
     "reset": [
       "reset"
+    ],
+    "standalone restart": [
+      "standalone-restart"
+    ],
+    "standalone start": [
+      "standalone-start"
+    ],
+    "standalone status": [
+      "standalone-status"
+    ],
+    "standalone stop": [
+      "standalone-stop"
     ],
     "status": [
       "status"

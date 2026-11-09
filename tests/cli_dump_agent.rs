@@ -370,7 +370,7 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
     );
     assert_eq!(
         lines.last().map(String::as_str),
-        Some("common shutdown"),
+        Some("common disconnect-ib"),
         "{lines:?}"
     );
 
@@ -485,11 +485,12 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
     );
 }
 
-/// Токен, записанный другим инструментом или записью без имени инструмента (журнал
-/// прежних версий), — отсутствие ответа: выгрузка по изменившемуся не пропускается, и
-/// команда не падает.
+/// Основная конфигурация файловой базы (#559): токен, записанный другим инструментом из
+/// агента, Конфигуратора и `ibcmd`, сравнивается с токеном агента — равный пропускает
+/// выгрузку. Запись без имени инструмента (журнал прежних версий) — отсутствие ответа:
+/// выгрузка по изменившемуся не пропускается, и команда не падает.
 #[test]
-fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
+fn a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_not() {
     let harness = harness(true, Some(true), false);
     let (first, payload) = run_dump(&harness, &["--force"]);
     assert_eq!(first, 0, "{payload}");
@@ -512,45 +513,50 @@ fn a_generation_recorded_by_another_tool_does_not_skip_a_dump() {
             })
             .count()
     };
-    fn another_tool(record: &mut Value) {
-        record["tool"] = Value::from("designer");
-    }
-    fn no_tool(record: &mut Value) {
-        record.as_object_mut().expect("record").remove("tool");
-    }
-    type Rewrite = fn(&mut Value);
-    let rewrites: [(Rewrite, usize); 2] = [(another_tool, 2), (no_tool, 3)];
-    for (rewrite, expected_dumps) in rewrites {
+    let rewrite = |change: fn(&mut Value)| {
         let mut ledger: Value =
             serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
-        rewrite(&mut ledger["main"]);
+        change(&mut ledger["main"]);
         fs::write(&ledger_file, ledger.to_string()).expect("rewrite ledger");
         // Прошлая выгрузка оставила файлы вне учёта; без фиксации сторож откажет.
         commit_project(&harness);
+    };
 
-        let (code, payload) = run_dump(&harness, &[]);
-
-        assert_eq!(code, 0, "{payload}");
-        assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
-        assert_eq!(dumps(&harness), expected_dumps, "{payload}");
-        // Прогноз в той же сессии перед выгрузкой по изменившемуся; пустой список — изменившееся.
-        assert!(
-            commands(&harness)
-                .iter()
-                .any(|line| line.contains("--update --get-changes=")),
-            "{payload}"
-        );
-        assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
-        let ledger: Value =
-            serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
-        assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
-    }
-
-    // Контроль: запись того же инструмента с тем же токеном выгрузку пропускает.
+    // Запись Конфигуратора с тем же токеном: у основной конфигурации файловой базы токены
+    // инструментов общие, и выгружать нечего.
+    rewrite(|record| record["tool"] = Value::from("designer"));
     let (code, payload) = run_dump(&harness, &[]);
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
-    assert_eq!(dumps(&harness), 3, "{payload}");
+    assert_eq!(dumps(&harness), 1, "{payload}");
+
+    // Запись без имени инструмента — отсутствие ответа: выгрузка идёт.
+    rewrite(|record| {
+        record.as_object_mut().expect("record").remove("tool");
+    });
+    let (code, payload) = run_dump(&harness, &[]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
+    assert_eq!(dumps(&harness), 2, "{payload}");
+    // Прогноз в той же сессии перед выгрузкой по изменившемуся; пустой список — изменившееся.
+    assert!(
+        commands(&harness)
+            .iter()
+            .any(|line| line.contains("--update --get-changes=")),
+        "{payload}"
+    );
+    assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
+    let ledger: Value =
+        serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
+    assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
+
+    // Контроль: запись того же инструмента с тем же токеном выгрузку пропускает. Выгрузка
+    // выше оставила файлы вне учёта; без фиксации сторож откажет.
+    commit_project(&harness);
+    let (code, payload) = run_dump(&harness, &[]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
+    assert_eq!(dumps(&harness), 2, "{payload}");
 }
 
 /// Каталог без файла версий: выгрузка по изменившемуся идёт полной поверх каталога —

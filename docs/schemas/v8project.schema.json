@@ -214,6 +214,17 @@
           ],
           "description": "The central server agent (`ragent`) and its administrator."
         },
+        "managed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagedServerSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The runner starts this cluster itself; `connection` is not declared next to it."
+        },
         "password": {
           "description": "Cluster administrator password.",
           "type": [
@@ -254,6 +265,17 @@
             "string",
             "null"
           ]
+        },
+        "managed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagedDbmsSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The runner starts this PostgreSQL itself; `kind`, `server`, `user` and `password` are\nrefused next to it."
         },
         "name": {
           "description": "Physical database name passed to `ibcmd --database-name`.",
@@ -406,6 +428,17 @@
         "host-fingerprint": {
           "description": "SHA256 fingerprint the gate must present, as `SHA256:<base64>`.",
           "type": "string"
+        },
+        "managed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManagedServerSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The runner starts this server itself."
         }
       },
       "type": "object"
@@ -455,6 +488,32 @@
         },
         "wsdir": {
           "description": "Virtual directory name (`webinst -wsdir`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ManagedDbmsSchema": {
+      "additionalProperties": false,
+      "description": "`dbms.managed`: an empty map; the runner starts this PostgreSQL itself.",
+      "type": "object"
+    },
+    "ManagedServerSchema": {
+      "additionalProperties": false,
+      "description": "A server the runner starts itself.",
+      "properties": {
+        "db-path": {
+          "description": "File infobase of a standalone server; not for `cluster.managed`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Name of the infobase on the server, `Ref=`.",
           "type": [
             "string",
             "null"
@@ -556,6 +615,19 @@
         },
         "version": {
           "description": "Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PostgresToolSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Directory of the build, or its `bin`.",
           "type": [
             "string",
             "null"
@@ -981,6 +1053,10 @@
         "platform": {
           "$ref": "#/$defs/PlatformToolSchema",
           "description": "Platform executable discovery settings."
+        },
+        "postgres": {
+          "$ref": "#/$defs/PostgresToolSchema",
+          "description": "PostgreSQL build for 1C."
         },
         "va": {
           "$ref": "#/$defs/VanessaToolSchema",

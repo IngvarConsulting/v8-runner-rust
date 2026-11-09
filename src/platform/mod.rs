@@ -17,12 +17,22 @@ pub mod extension_inventory;
 pub mod generation;
 pub mod git;
 pub mod ibcmd;
+/// `ibsrv` the runner starts itself.
+pub mod ibsrv;
 pub mod interactive;
 pub mod locator;
+/// PostgreSQL build for 1C: utility arguments and data directory files.
+pub mod postgres;
 pub mod process;
+pub mod rac;
+pub mod ragent;
 pub mod result;
 /// Маскирование секретов в составленных аргументах.
 pub mod secrets;
+/// Long-lived services of the managed stand.
+pub mod service;
+/// The record of a service: what is running, on which ports, whose it is.
+pub mod service_record;
 pub mod sftp;
 #[cfg(test)]
 pub(crate) mod test_git;

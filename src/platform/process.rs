@@ -474,6 +474,22 @@ pub trait ProcessRunner {
     }
 }
 
+impl ProcessExecutor {
+    /// Запуск службы стенда: она переживает выход раннера, вне его Job, со своей скрытой консолью,
+    /// без унаследованных дескрипторов, вывод в журнал. Единственный путь запуска такого процесса
+    /// (`INV.PLATFORM.A-SERVICE-OUTLIVES-THE-RUNNER`).
+    pub fn spawn_service(
+        &self,
+        request: &crate::platform::service::ServiceRequest,
+        work: &WorkGiven,
+    ) -> Result<u32, crate::platform::service::ServiceSpawnError> {
+        debug!(program = %request.program.display(), "starting a service");
+        let pid = crate::platform::service::spawn_hidden(request)?;
+        work.mark_work_given();
+        Ok(pid)
+    }
+}
+
 /// Standard subprocess runner backed by `std::process::Command`.
 pub struct ProcessExecutor;
 
