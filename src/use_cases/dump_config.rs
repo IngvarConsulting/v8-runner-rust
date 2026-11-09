@@ -243,6 +243,9 @@ fn observe_dump(
     watch: Option<&DumpWatch>,
     interrupted: &(dyn Fn() -> bool + Sync),
 ) -> DumpObservation {
+    // Конец выгрузки по часам файловой системы набора, тем же, что отметили её начало: файл,
+    // изменённый позже, правили уже после платформы (#170). Не отмечен — граница не ставится.
+    let ended = watch.and_then(|_| mark_dump_start(set.path()).ok());
     let listed = list_after_dump(set, work_path, interrupted);
     let fact = fact_mark.and_then(|mark| match (mark, &listed) {
         (Ok(start), Ok(listing)) => Some(listing.fact(*start)),
@@ -251,7 +254,9 @@ fn observe_dump(
         (Err(_), _) | (Ok(_), Err(_)) => Some(DumpFact::Unlisted),
     });
     let writes = watch.map(|watch| {
-        listed.and_then(|listing| observe_dump_writes(set, work_path, watch, listing, interrupted))
+        listed.and_then(|listing| {
+            observe_dump_writes(set, work_path, watch, ended, listing, interrupted)
+        })
     });
     DumpObservation { fact, writes }
 }
