@@ -1026,7 +1026,19 @@ fn a_preview_names_the_mode_the_pull_would_run() {
     assert_eq!(restored["data"]["mode"], "INCREMENTAL", "{restored}");
     assert_eq!(read(&version_file), "<ConfigDumpInfo/>\n");
     let response = succeeded(run(&project, &["pull", "--source-set", "main"]));
-    assert_eq!(response["data"]["mode"], "INCREMENTAL", "{response}");
+    // Выгрузка шла с `-update`; поддельная платформа переписала каждый файл каталога, и
+    // режим по факту — полный (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+    assert!(
+        read(&project.calls)
+            .lines()
+            .any(|line| line.contains("/DumpConfigToFiles") && line.contains("-update")),
+        "{response}"
+    );
+    assert_eq!(response["data"]["mode"], "FULL", "{response}");
+    assert_eq!(
+        response["data"]["mode_reason"], "platform_rewrote_all",
+        "{response}"
+    );
 
     fs::remove_file(&version_file).expect("a lost version file");
     let lost = preview(&project);
@@ -1173,8 +1185,16 @@ fn a_push_after_a_pull_by_changes_loads_nothing() {
         for round in 1..=2 {
             edit_base(&project, round);
             let response = succeeded(pull_by_changes(&project));
+            // Поддельные Конфигуратор и агент переписывают каждый файл каталога: режим по
+            // факту полный. `ibcmd` называет режим по прогнозу.
+            let (mode, reason) = if provider == "ibcmd" {
+                ("INCREMENTAL", Value::Null)
+            } else {
+                ("FULL", Value::from("platform_rewrote_all"))
+            };
+            assert_eq!(response["data"]["mode"], mode, "{provider}: {response}");
             assert_eq!(
-                response["data"]["mode"], "INCREMENTAL",
+                response["data"]["mode_reason"], reason,
                 "{provider}: {response}"
             );
             if project.agent_generation.is_none() {

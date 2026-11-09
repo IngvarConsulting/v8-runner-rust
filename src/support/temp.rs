@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tempfile::{NamedTempFile, TempPath};
+use tempfile::NamedTempFile;
 
 /// Private scratch space for complete database snapshots. The directory is
 /// created with its restricted access policy before a CFE is written to it.
@@ -193,17 +193,6 @@ pub fn partial_list_file(work_path: &Path) -> std::io::Result<NamedTempFile> {
         .prefix("partial-list-")
         .suffix(".txt")
         .tempfile_in(partial_lists_dir(work_path)?)
-}
-
-/// Файл, куда Конфигуратор или агент пишет прогноз выгрузки (`-getChanges`); убирается вместе
-/// с `TempPath`. Дескриптор закрыт: пока файл открыт на запись, Конфигуратор на Windows в него
-/// не пишет и отвечает «Ошибка приемника потока».
-pub fn dump_forecast_file(work_path: &Path) -> std::io::Result<TempPath> {
-    tempfile::Builder::new()
-        .prefix("dump-forecast-")
-        .suffix(".txt")
-        .tempfile_in(partial_lists_dir(work_path)?)
-        .map(NamedTempFile::into_temp_path)
 }
 
 /// Create a temporary text file for a partial dump object list inside

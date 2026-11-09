@@ -1,7 +1,29 @@
 ---
 id: INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/571
+check:
+  - src/use_cases/dump_config.rs::the_designer_asks_no_forecast
+  - tests/cli_dump_agent.rs::the_agent_asks_no_forecast
+  - src/use_cases/dump_config.rs::a_dump_that_rewrote_every_file_is_full_by_fact
+  - src/use_cases/dump_config.rs::a_partly_rewritten_dump_is_incremental
+  - src/use_cases/dump_config.rs::a_stray_file_keeps_the_dump_incremental
+  - src/use_cases/dump_config.rs::an_empty_scope_is_not_full
+  - src/use_cases/dump_config.rs::a_failed_listing_reports_the_mode_as_unknown
+  - src/use_cases/dump_config.rs::an_edt_dump_decides_its_mode_on_the_designer_mirror
+  - src/use_cases/dump_config.rs::a_set_without_memory_still_decides_by_fact
+  - src/change_detection/partial_load.rs::a_dump_file_belongs_to_the_deepest_element_its_path_names
+  - src/change_detection/analyzer.rs::only_the_files_of_dropped_elements_are_named
+  - src/platform/dump_format.rs::the_dump_elements_are_read_at_every_depth
+  - tests/cli_agent_standalone.rs::an_sftp_dump_removes_the_files_of_removed_elements
+  - tests/cli_agent_standalone.rs::an_sftp_dump_keeps_stray_files
+  - tests/cli_agent_standalone.rs::an_sftp_dump_without_a_readable_prior_description_deletes_nothing
+  - src/platform/dump_forecast.rs::the_changes_list_is_read_by_its_measured_keys
+  - src/platform/dump_forecast.rs::the_export_status_is_read_by_its_measured_keys
+  - src/use_cases/dump_config.rs::an_ibcmd_full_forecast_dumps_through_the_stage_without_sync
+  - src/use_cases/dump_config.rs::an_ibcmd_partial_dump_follows_a_full_forecast_too
+  - src/use_cases/dump_config.rs::a_dump_without_a_version_file_asks_for_no_forecast
+  - tests/cli_push_generation.rs::a_designer_pull_with_an_unchanged_generation_dumps_nothing
+  - tests/cli_dump_agent.rs::an_unchanged_generation_skips_an_incremental_dump
+  - tests/cli_dump_agent.rs::a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_not
 ---
 
 # Режим выгрузки называет то, что выгрузка сделала

@@ -378,6 +378,56 @@ fn validate_removals(
     Some(())
 }
 
+/// Elements a Designer dump lays out under an object's directory: the folder and the kind the
+/// element's full name carries (`Catalog.X.Form.F`).
+const NESTED_ELEMENTS: &[(&str, &str)] = &[
+    ("Forms", "Form"),
+    ("Templates", "Template"),
+    ("Commands", "Command"),
+    ("Subsystems", "Subsystem"),
+];
+
+/// The deepest element of a Designer dump that owns the file at `path`, relative to the dump
+/// root, named as the version file `ConfigDumpInfo.xml` names it: `Catalog.X` for
+/// `Catalogs/X.xml` and everything under `Catalogs/X/`, `Catalog.X.Form.F` under `Forms/F.xml`
+/// and `Forms/F/`, likewise `Template` (`Templates/`), `Command` (only `Commands/C/`) and a
+/// nested `Subsystem` (`Subsystems/`, at any depth). `None` when the top-level folder is not a
+/// kind of [`METADATA_TYPES`] (`Configuration.xml`, `Ext/`, a stray file).
+pub(crate) fn dump_element_of(path: &Path) -> Option<String> {
+    let (kind, name) = top_level_object(path)?;
+    let mut owner = format!("{kind}.{name}");
+    let mut owner_kind = kind;
+    let mut rest = path.iter().skip(2).peekable();
+    while let Some(folder) = rest.next().and_then(|part| part.to_str()) {
+        let Some(&(_, nested)) = NESTED_ELEMENTS.iter().find(|(directory, nested)| {
+            directory.eq_ignore_ascii_case(folder)
+                && (*nested != "Subsystem" || owner_kind == "Subsystem")
+        }) else {
+            break;
+        };
+        let Some(entry) = rest.next() else {
+            break;
+        };
+        let child = if rest.peek().is_some() {
+            entry.to_str()
+        } else {
+            // A file right in the folder is the element's descriptor `<Name>.xml`; a command
+            // has none.
+            let file = Path::new(entry);
+            file.extension()
+                .and_then(|extension| extension.to_str())
+                .filter(|extension| extension.eq_ignore_ascii_case("xml") && nested != "Command")
+                .and_then(|_| file.file_stem()?.to_str())
+        };
+        let Some(child) = child else {
+            break;
+        };
+        owner = format!("{owner}.{nested}.{child}");
+        owner_kind = nested;
+    }
+    Some(owner)
+}
+
 fn top_level_descriptor(path: &Path) -> Option<(&'static str, &str)> {
     (path.components().count() == 2).then_some(())?;
     top_level_object(path)
@@ -524,8 +574,50 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{decide, relative_paths, root_dependencies, write_list_file, LoadDecision};
+    use super::{
+        decide, dump_element_of, relative_paths, root_dependencies, write_list_file, LoadDecision,
+    };
     use crate::change_detection::analyzer::{ChangeKind, FileChange};
+
+    /// Владелец файла выгрузки — самый глубокий элемент, который раннер узнаёт по пути
+    /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+    #[test]
+    fn a_dump_file_belongs_to_the_deepest_element_its_path_names() {
+        let owner = |path: &str| dump_element_of(std::path::Path::new(path));
+        for (path, expected) in [
+            ("Catalogs/Items.xml", Some("Catalog.Items")),
+            ("catalogs/Items/Ext/ObjectModule.bsl", Some("Catalog.Items")),
+            ("Catalogs/Items/Stray.txt", Some("Catalog.Items")),
+            (
+                "Catalogs/Items/Forms/Item.xml",
+                Some("Catalog.Items.Form.Item"),
+            ),
+            (
+                "Catalogs/Items/Forms/Item/Ext/Form/Module.bsl",
+                Some("Catalog.Items.Form.Item"),
+            ),
+            (
+                "Documents/Order/Templates/Print/Ext/Template.xml",
+                Some("Document.Order.Template.Print"),
+            ),
+            (
+                "Catalogs/Items/Commands/Open/Ext/CommandModule.bsl",
+                Some("Catalog.Items.Command.Open"),
+            ),
+            ("Catalogs/Items/Commands/Open.xml", Some("Catalog.Items")),
+            (
+                "Subsystems/Sales/Subsystems/Orders/Subsystems/Lines.xml",
+                Some("Subsystem.Sales.Subsystem.Orders.Subsystem.Lines"),
+            ),
+            ("Catalogs/Items/Subsystems/Other.xml", Some("Catalog.Items")),
+            ("CommonForms/Form/Ext/Form.xml", Some("CommonForm.Form")),
+            ("Configuration.xml", None),
+            ("Ext/ParentConfigurations.bin", None),
+            ("Unknowns/Thing.xml", None),
+        ] {
+            assert_eq!(owner(path).as_deref(), expected, "{path}");
+        }
+    }
 
     #[test]
     fn write_list_file_skips_empty_relative_paths() {

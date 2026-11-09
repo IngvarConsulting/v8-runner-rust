@@ -485,6 +485,42 @@ fn an_unchanged_generation_skips_an_incremental_dump() {
     );
 }
 
+/// Агент прогноза не спрашивает: перед `--update` нет `--get-changes`, а режим называет то,
+/// что выгрузка сделала с каталогом — файл, которого она не переписала, оставляет его
+/// `INCREMENTAL` (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+#[test]
+fn the_agent_asks_no_forecast() {
+    let harness = harness(true, Some(true), false);
+    fs::write(
+        harness.target.join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo version=\"2.20\"/>",
+    )
+    .expect("version file");
+    commit_project(&harness);
+
+    let (code, payload) = run_dump(&harness, &[]);
+
+    assert_eq!(code, 0, "{payload}");
+    let dumps: Vec<String> = commands(&harness)
+        .into_iter()
+        .filter(|line| line.starts_with("config dump-config-to-files"))
+        .collect();
+    assert_eq!(dumps.len(), 1, "{dumps:?}");
+    assert!(dumps[0].ends_with("--update"), "{dumps:?}");
+    assert!(!dumps[0].contains("--get-changes"), "{dumps:?}");
+    assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
+    assert!(payload["data"]["mode_reason"].is_null(), "{payload}");
+    let leftovers: Vec<_> = fs::read_dir(&harness.target)
+        .expect("target")
+        .map(|entry| entry.expect("entry").file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".v8-runner-dump-start-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the clock probe is removed: {leftovers:?}"
+    );
+}
+
 /// Основная конфигурация файловой базы (#559): токен, записанный другим инструментом из
 /// агента, Конфигуратора и `ibcmd`, сравнивается с токеном агента — равный пропускает
 /// выгрузку. Запись без имени инструмента (журнал прежних версий) — отсутствие ответа:
@@ -504,13 +540,10 @@ fn a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_no
         serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
     assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");
 
-    // Прогноз (`--get-changes`) — вопрос, а не выгрузка.
     let dumps = |harness: &Harness| {
         commands(harness)
             .iter()
-            .filter(|line| {
-                line.starts_with("config dump-config-to-files") && !line.contains("--get-changes")
-            })
+            .filter(|line| line.starts_with("config dump-config-to-files"))
             .count()
     };
     let rewrite = |change: fn(&mut Value)| {
@@ -538,14 +571,18 @@ fn a_generation_of_another_tool_skips_a_dump_and_a_record_without_a_tool_does_no
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
     assert_eq!(dumps(&harness), 2, "{payload}");
-    // Прогноз в той же сессии перед выгрузкой по изменившемуся; пустой список — изменившееся.
+    // Прогноза нет; двойник переписал каждый файл каталога, и режим по факту — полный.
     assert!(
-        commands(&harness)
+        !commands(&harness)
             .iter()
-            .any(|line| line.contains("--update --get-changes=")),
+            .any(|line| line.contains("--get-changes")),
         "{payload}"
     );
-    assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
+    assert_eq!(payload["data"]["mode"], "FULL", "{payload}");
+    assert_eq!(
+        payload["data"]["mode_reason"], "platform_rewrote_all",
+        "{payload}"
+    );
     let ledger: Value =
         serde_json::from_str(&read_or_empty(&ledger_file)).expect("generation ledger");
     assert_eq!(ledger["main"]["tool"], "agent", "{ledger}");

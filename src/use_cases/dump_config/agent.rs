@@ -14,9 +14,9 @@ use crate::platform::locator::UtilityLocation;
 use crate::platform::process::ProcessResult;
 use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
-    argument, collect_dir, collect_file, collect_into_dir, connect, expose_output_dir,
-    generation_id, make_output_dir, run_id, stage_file, tidy, transcript_log, wait_policy,
-    withdraw_dir, write_text, AgentHandle, Exchange, GenerationLedger, Recorded,
+    argument, collect_dir, collect_into_dir, connect, expose_output_dir, generation_id,
+    make_output_dir, run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir,
+    write_text, AgentHandle, Exchange, GenerationLedger, Recorded,
 };
 
 /// Выгрузка одного плана через одну сессию. Выгрузка по изменившемуся без годного файла
@@ -105,7 +105,10 @@ fn dump_through(
         }
     }
 
-    let watch = dump_watch(context, config, set, plan, objects);
+    // Агент прогноза не спрашивает: начало выгрузки по изменившемуся отмечается в каталоге,
+    // куда она ляжет, и режим узнаётся по факту.
+    let by_fact = mark_start(context, resolved, plan, objects);
+    let watch = dump_watch(config, set, by_fact);
     let run = run_id();
     let stage = match plan.mode() {
         DumpMode::Full => "dump: full",
@@ -169,21 +172,6 @@ fn dump_through(
                         &target_relative,
                         &resolved.platform_target_path,
                     )?;
-                    let forecast = forecast_for(how, || {
-                        forecast_through(
-                            context,
-                            config,
-                            handle,
-                            &exchange,
-                            &ForecastRequest {
-                                target: &target,
-                                extension,
-                                run: &run,
-                            },
-                            wait,
-                        )
-                    })
-                    .inspect_err(|_| withdraw_dir(user_dir, &target))?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={}{update}",
@@ -194,20 +182,22 @@ fn dump_through(
                     log_live_stage(stage, "[агент] exporting configuration files");
                     let outcome = run_command(handle, &command, wait);
                     withdraw_dir(user_dir, &target);
-                    (
-                        outcome?,
-                        DumpNotes {
-                            forecast,
-                            ..DumpNotes::default()
-                        },
-                    )
+                    (outcome?, DumpNotes::default())
                 }
                 // По сети цель целиком не возится: точке входа хватает описи выгрузки
                 // (`ConfigDumpInfo.xml`), чтобы выгрузить только изменённое; обратно
-                // приходят изменённые файлы и новая опись, поверх локальной цели.
+                // приходят изменённые файлы и новая опись, поверх локальной цели. Удалений
+                // точка входа не возвращает: их раннер переносит сам по двум описям.
                 Exchange::Sftp => {
                     make_output_dir(handle, &exchange, &target_relative)?;
-                    let dump_info = resolved.platform_target_path.join("ConfigDumpInfo.xml");
+                    let dump_info = resolved.platform_target_path.join(VERSION_FILE_NAME);
+                    // Прежняя опись читается до того, как выгрузка её перепишет.
+                    let elements_before = match how {
+                        OverDirectory::ByVersionFile => {
+                            crate::platform::dump_format::read_dump_elements(&dump_info)
+                        }
+                        OverDirectory::Whole(_) => None,
+                    };
                     if dump_info.is_file() {
                         stage_file(
                             handle,
@@ -216,20 +206,6 @@ fn dump_through(
                             &dump_info,
                         )?;
                     }
-                    let forecast = forecast_for(how, || {
-                        forecast_through(
-                            context,
-                            config,
-                            handle,
-                            &exchange,
-                            &ForecastRequest {
-                                target: &target_relative,
-                                extension,
-                                run: &run,
-                            },
-                            wait,
-                        )
-                    })?;
                     let command = with_extension(
                         format!(
                             "config dump-config-to-files --dir={}{update}",
@@ -250,13 +226,10 @@ fn dump_through(
                     tidy(handle, &exchange, &target_relative);
                     let transcript = outcome?;
                     collected.transpose()?;
-                    (
-                        transcript,
-                        DumpNotes {
-                            forecast,
-                            ..DumpNotes::default()
-                        },
-                    )
+                    if let Some(before) = &elements_before {
+                        remove_dropped_elements(config, set, &dump_info, before)?;
+                    }
+                    (transcript, DumpNotes::default())
                 }
             }
         }
@@ -327,6 +300,7 @@ fn dump_through(
     // Поколение спрашивается и после выгрузки: то же — память записывается, другое — базу
     // правили во время выгрузки, и ответ это называет. Выборка объектов каталог с базой не
     // сводит и поколения не пишет; после отмены поколение не спрашивается.
+    let mut fact = None;
     let changed_note = match (set, plan) {
         (Some(set), DumpPlan::Full | DumpPlan::OverDirectory(_))
             if context.external_full_pull().is_none()
@@ -336,14 +310,16 @@ fn dump_through(
                 )
                 .is_none() =>
         {
-            // Обход записанного идёт, пока агент отвечает про поколение (#571).
+            // Перечень каталога идёт, пока агент отвечает про поколение (#571).
             let (after, observed) = observe_dump_writes_while(
                 Some(set),
                 &config.work_path,
+                by_fact,
                 watch.as_ref(),
                 &|| crate::use_cases::interruption::interruption_pending(context),
                 || generation_id(handle.session(), extension, wait).ok(),
             );
+            fact = observed.fact;
             merge_optional_messages(
                 crate::use_cases::exchange_guard::record_after_dump(
                     config,
@@ -355,7 +331,7 @@ fn dump_through(
                 remember_dump_writes(
                     set,
                     &config.work_path,
-                    observed,
+                    observed.writes,
                     Some(&generation),
                     after.as_deref(),
                 ),
@@ -365,67 +341,65 @@ fn dump_through(
     };
     let mut notes = cleanup.after(foreign_note);
     notes.message = merge_optional_messages(notes.message, changed_note);
+    notes.fact = fact;
     Ok((transcript, notes, false))
 }
 
-/// Прогноз нужен только выгрузке по изменившемуся.
-fn forecast_for(
-    how: &OverDirectory,
-    ask: impl FnOnce() -> Result<DumpForecast, AppError>,
-) -> Result<Option<DumpForecast>, AppError> {
-    match how {
-        OverDirectory::ByVersionFile => ask().map(Some),
-        OverDirectory::Whole(_) => Ok(None),
-    }
-}
-
-/// Куда агент кладёт прогноз и что спросить: цель выгрузки и расширение.
-struct ForecastRequest<'r> {
-    target: &'r str,
-    extension: Option<&'r str>,
-    run: &'r str,
-}
-
-/// Прогноз агента: `--get-changes` в той же сессии перед `--update` (замер #166). Список
-/// агент пишет в корень своего каталога пользователя, как в замере; раннер его забирает.
-/// Отказ агента и список вне словаря — «неизвестен», выгрузка идёт как просили; обрыв
-/// сессии, предел ожидания и отмена — ошибка, как у любой команды.
-fn forecast_through(
-    context: &ExecutionContext,
+/// Удаления выгрузки по SFTP (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`):
+/// файл, чей владелец был в прежней описи `before` и пропал из новой в `dump_info`, удаляется
+/// из каталога набора — в его области обхода, без ссылок, до того как раннер запомнит
+/// записанное. Новая опись не разобрана — не удаляется ничего. Неудачное удаление — отказ с
+/// перечнем оставшегося: каталог тогда не равен базе, и молчать об этом нельзя.
+fn remove_dropped_elements(
     config: &AppConfig,
-    handle: &mut AgentHandle,
-    exchange: &Exchange,
-    request: &ForecastRequest<'_>,
-    wait: &WaitPolicy,
-) -> Result<DumpForecast, AppError> {
-    let list_relative = format!("dump-forecast-{}.txt", request.run);
-    let command = with_extension(
-        format!(
-            "config dump-config-to-files --dir={} --update --get-changes={}",
-            argument(request.target),
-            argument(&list_relative)
-        ),
-        request.extension,
-    );
-    log_live_stage("dump: forecast", "[агент] asking what the dump will do");
-    let reply = handle
-        .session()
-        .run(&command, wait)
-        .map_err(AppError::from)?;
-    ensure_interruption_clear(context, "after the dump forecast")?;
-    if reply.outcome().is_err() {
-        return Ok(DumpForecast::Unknown);
-    }
-    let local = crate::support::temp::dump_forecast_file(&config.work_path).map_err(|error| {
-        AppError::Runtime(format!("failed to create the dump forecast file: {error}"))
+    set: Option<&SourceSetContext>,
+    dump_info: &Path,
+    before: &std::collections::HashSet<String>,
+) -> Result<(), AppError> {
+    let (Some(set), Some(after)) = (
+        set,
+        crate::platform::dump_format::read_dump_elements(dump_info),
+    ) else {
+        return Ok(());
+    };
+    let dropped = crate::change_detection::analyzer::files_of_dropped_elements(
+        set,
+        &config.work_path,
+        before,
+        &after,
+    )
+    .map_err(|error| {
+        AppError::Runtime(format!(
+            "the dump of source-set '{}' is in place, but the files of removed elements were not found: {error}",
+            set.name()
+        ))
     })?;
-    let read = collect_file(handle, exchange, &list_relative, &local)
-        .ok()
-        .and_then(|()| std::fs::read(&local).ok());
-    tidy(handle, exchange, &list_relative);
-    Ok(read.map_or(DumpForecast::Unknown, |bytes| {
-        crate::platform::dump_forecast::read_changes_list(&bytes)
-    }))
+    let mut left = Vec::new();
+    for file in &dropped {
+        if let Err(error) = std::fs::remove_file(file) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                left.push(format!("'{}': {error}", file.display()));
+            }
+            continue;
+        }
+        // Каталоги, опустевшие от удалений, уходят вслед; непустой каталог не удаляется.
+        let mut dir = file.parent();
+        while let Some(current) = dir.filter(|current| *current != set.path()) {
+            if std::fs::remove_dir(current).is_err() {
+                break;
+            }
+            dir = current.parent();
+        }
+    }
+    if left.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::Runtime(format!(
+        "the dump of source-set '{}' is in place, but {} file(s) of removed elements were not deleted: {}",
+        set.name(),
+        left.len(),
+        left.join("; ")
+    )))
 }
 
 fn with_extension(mut command: String, extension: Option<&str>) -> String {

@@ -1,10 +1,12 @@
-//! Прогноз режима выгрузки по изменившемуся: что платформа сделает с `-update` по этому файлу
-//! версий (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+//! Списки изменений платформы: что она выгрузит по этому файлу версий.
 //!
-//! Конфигуратор и агент отвечают списком `-getChanges` (`--get-changes`), `ibcmd` — ответом
-//! `config export status`. Словари замерены (`references/1c/confirmed-runtime-measurements.md`,
-//! разделы о прогнозе режима): от языка интерфейса они не зависят. Решение берётся по ключу
-//! строки, а не по прозе; всё, что словарю не принадлежит, — прогноз «неизвестен».
+//! `ibcmd` отвечает `config export status` — по нему выгрузка `ibcmd` выбирает путь
+//! (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`). Конфигуратор отвечает
+//! списком `-getChanges` — его читает `diff`; выгрузка Конфигуратора и агента прогноза не
+//! спрашивает и режим узнаёт по факту. Словари замерены
+//! (`references/1c/confirmed-runtime-measurements.md`, разделы о прогнозе режима): от языка
+//! интерфейса они не зависят. Решение берётся по ключу строки, а не по прозе; всё, что словарю
+//! не принадлежит, — прогноз «неизвестен».
 
 use crate::domain::diff::ChangeKind;
 
@@ -17,12 +19,6 @@ pub enum DumpForecast {
     Changes,
     /// Ответ вне замеренного словаря или прогноз не получен.
     Unknown,
-}
-
-/// Список `-getChanges`: одиночная `FullDump` — полная; только `New:` и `Modified:` или
-/// пусто — изменившееся.
-pub fn read_changes_list(bytes: &[u8]) -> DumpForecast {
-    forecast(parse_changes_list(&String::from_utf8_lossy(bytes)))
 }
 
 /// Ответ `ibcmd config export status` в полной форме: `modified: all` — полная; только
@@ -45,7 +41,7 @@ fn forecast(list: Option<ChangeList<'_>>) -> DumpForecast {
 }
 
 /// An empty list produced by Designer consists solely of the UTF-8 signature.
-/// Keep this stricter check out of the `pull` forecast, which also accepts an empty response.
+/// A list of `-getChanges`: a single `FullDump`, or only `New:` and `Modified:` lines.
 pub(crate) fn parse_designer_diff(text: &str) -> Option<ChangeList<'_>> {
     let list = parse_changes_list(text)?;
     match &list {
@@ -103,9 +99,7 @@ fn parse<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_designer_diff, read_changes_list, read_export_status, ChangeList, DumpForecast,
-    };
+    use super::{parse_designer_diff, read_export_status, ChangeList, DumpForecast};
 
     #[test]
     fn only_the_utf8_signature_is_a_valid_empty_designer_diff() {
@@ -117,30 +111,30 @@ mod tests {
         }
     }
 
-    /// Замеренные ответы Конфигуратора и агента (UTF-8 с BOM, CRLF).
+    /// Замеренные ответы Конфигуратора (UTF-8 с BOM, CRLF), которые читает `diff`.
     #[test]
     fn the_changes_list_is_read_by_its_measured_keys() {
-        assert_eq!(read_changes_list(b"\xEF\xBB\xBF"), DumpForecast::Changes);
-        assert_eq!(
-            read_changes_list(b"\xEF\xBB\xBFFullDump\r\n"),
-            DumpForecast::Full
-        );
-        assert_eq!(
-            read_changes_list(
+        assert!(matches!(
+            parse_designer_diff("\u{feff}"),
+            Some(ChangeList::Objects(objects)) if objects.is_empty()
+        ));
+        assert!(matches!(
+            parse_designer_diff("\u{feff}FullDump\r\n"),
+            Some(ChangeList::FullDump)
+        ));
+        assert!(matches!(
+            parse_designer_diff(
                 "\u{feff}New: Catalog.Справочник9\r\nModified: CommonModule.ОбщийМодуль1\r\n"
-                    .as_bytes()
             ),
-            DumpForecast::Changes
-        );
-        assert_eq!(
-            read_changes_list(b"Deleted: Catalog.X\r\n"),
-            DumpForecast::Unknown
-        );
-        assert_eq!(
-            read_changes_list(b"FullDump\r\nModified: Catalog.X\r\n"),
-            DumpForecast::Unknown
-        );
-        assert_eq!(read_changes_list(b"Modified:\r\n"), DumpForecast::Unknown);
+            Some(ChangeList::Objects(objects)) if objects.len() == 2
+        ));
+        for unknown in [
+            "Deleted: Catalog.X\r\n",
+            "FullDump\r\nModified: Catalog.X\r\n",
+            "Modified:\r\n",
+        ] {
+            assert!(parse_designer_diff(unknown).is_none(), "{unknown:?}");
+        }
     }
 
     /// Замеренные ответы `ibcmd` (stdout без BOM и файл `--out` с BOM и CRLF).

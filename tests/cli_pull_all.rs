@@ -109,6 +109,9 @@ impl Project {
                 "<ConfigDumpInfo version=\"2.17\"/>\n",
             )
             .expect("version file");
+            // Файл, которого выгрузка по изменившемуся не переписывает: режим по факту —
+            // `INCREMENTAL`, как у настоящей платформы при правке части объектов.
+            fs::write(set_dir.join("Kept.bsl"), "kept\n").expect("an untouched file");
         }
         fs::create_dir_all(root.join("ib")).expect("infobase");
         fs::write(root.join("ib").join("1Cv8.1CD"), "database").expect("infobase file");

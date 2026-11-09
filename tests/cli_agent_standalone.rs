@@ -14,6 +14,7 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use support::fake_agent::{
@@ -30,6 +31,8 @@ struct Harness {
     port: u16,
     /// Что объявлено в `infobase.standalone.host-fingerprint`, если объявлено.
     declared_fingerprint: Option<String>,
+    /// Опись, которую напишет выгрузка двойника; `None` — опись без элементов.
+    dump_info: Arc<Mutex<Option<String>>>,
 }
 
 const GATE_USER: &str = "agent";
@@ -139,6 +142,7 @@ fn harness_holding_sftp(
     let mut gate = FakeAgent::gate(commands_log.clone(), GATE_USER, user_dir.clone());
     gate.sftp_read_only = channel == Channel::SftpReadOnly;
     gate.sftp_hold = sftp_hold;
+    let dump_info = Arc::clone(&gate.dump_info);
     let port = start_fake_agent_with_host_key(gate, host_key);
     let harness = Harness {
         config_path: root.join("v8project.yaml"),
@@ -146,6 +150,7 @@ fn harness_holding_sftp(
         user_dir,
         port,
         declared_fingerprint,
+        dump_info,
         dir,
     };
     let infobase = match channel {
@@ -462,6 +467,131 @@ fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
         target.join("Untouched.xml").is_file(),
         "files the server did not touch stay"
     );
+}
+
+/// Опись выгрузки с элементами `names`, как её пишет платформа.
+fn dump_info(names: &[&str]) -> String {
+    let elements = names
+        .iter()
+        .map(|name| format!("\t\t<Metadata name=\"{name}\" id=\"{name}\"/>\n"))
+        .collect::<String>();
+    format!(
+        "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ConfigDumpInfo xmlns=\"http://v8.1c.ru/8.3/xcf/dumpinfo\" format=\"Hierarchical\" version=\"2.17\">\n\t<ConfigVersions>\n{elements}\t</ConfigVersions>\n</ConfigDumpInfo>\n"
+    )
+}
+
+/// Каталог набора с прежней описью `before` и файлами `files`, зафиксированный в гите; выгрузка
+/// двойника напишет опись `after`.
+fn sftp_target(harness: &Harness, before: &str, after: &[&str], files: &[&str]) -> PathBuf {
+    let target = harness.dir.path().join("project").join("configuration");
+    fs::write(target.join("ConfigDumpInfo.xml"), before).expect("dump info before");
+    for file in files {
+        let path = target.join(file);
+        fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        fs::write(&path, file).expect("file");
+    }
+    *harness.dump_info.lock().expect("dump info") = Some(dump_info(after));
+    let project = harness.dir.path().join("project");
+    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    support::commit_sources(&project);
+    target
+}
+
+/// Точка входа по SFTP удалений не возвращает: файлы объекта и формы, которых нет в новой
+/// описи, раннер удаляет сам, а файлы элементов, что остались, не трогает
+/// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+#[test]
+fn an_sftp_dump_removes_the_files_of_removed_elements() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = sftp_target(
+        &harness,
+        &dump_info(&[
+            "Catalog.Items",
+            "Catalog.Items.Form.Kept",
+            "Catalog.Items.Form.Old",
+            "Catalog.Gone",
+        ]),
+        &["Catalog.Items", "Catalog.Items.Form.Kept"],
+        &[
+            "Catalogs/Items/Forms/Kept.xml",
+            "Catalogs/Items/Forms/Old.xml",
+            "Catalogs/Items/Forms/Old/Ext/Form.xml",
+            "Catalogs/Gone.xml",
+            "Catalogs/Gone/Ext/ObjectModule.bsl",
+        ],
+    );
+
+    let (code, payload) = run(&harness, &["dump"]);
+
+    assert_eq!(code, 0, "{payload}");
+    for gone in [
+        "Catalogs/Items/Forms/Old.xml",
+        "Catalogs/Items/Forms/Old",
+        "Catalogs/Gone.xml",
+        "Catalogs/Gone",
+    ] {
+        assert!(!target.join(gone).exists(), "{gone} stays: {payload}");
+    }
+    for kept in [
+        "Configuration.xml",
+        "Catalogs/Items.xml",
+        "Catalogs/Items/Forms/Kept.xml",
+    ] {
+        assert!(target.join(kept).is_file(), "{kept} is gone: {payload}");
+    }
+    // Описи файлов, которых выгрузка не трогала, остались прежними: режим по изменившемуся.
+    assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
+}
+
+/// Посторонний файл в каталоге оставшегося объекта, файл вида, которого раннер не знает, и
+/// элемент, которого не было в прежней описи, удаление не трогает.
+#[test]
+fn an_sftp_dump_keeps_stray_files() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let names = ["Catalog.Items", "Catalog.Items.Form.Dropped"];
+    let files = [
+        "Catalogs/Items/Stray.txt",
+        "Catalogs/Items/Forms/Dropped.xml",
+        "Catalogs/Items/Forms/Never.xml",
+        "Unknowns/Thing.xml",
+        "Notes.txt",
+    ];
+    let target = sftp_target(&harness, &dump_info(&names), &["Catalog.Items"], &files);
+
+    let (code, payload) = run(&harness, &["dump"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(
+        !target.join("Catalogs/Items/Forms/Dropped.xml").exists(),
+        "the form dropped from the description is removed: {payload}"
+    );
+    for kept in files.iter().filter(|file| !file.ends_with("Dropped.xml")) {
+        assert!(target.join(kept).is_file(), "{kept} is gone: {payload}");
+    }
+}
+
+/// Прежнюю опись разобрать нельзя — удаления не переносятся: по ней не сказать, что пропало.
+#[test]
+fn an_sftp_dump_without_a_readable_prior_description_deletes_nothing() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = sftp_target(
+        &harness,
+        "<ConfigDumpInfo version=\"2.17\"><Metadata name=\"Catalog.Gone\"></ConfigDumpInfo>",
+        &[],
+        &["Catalogs/Gone.xml"],
+    );
+
+    let (code, payload) = run(&harness, &["dump"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(
+        commands(&harness).iter().any(|line| line
+            .starts_with("config dump-config-to-files --dir=target/")
+            && line.ends_with("--update")),
+        "{:?}",
+        commands(&harness)
+    );
+    assert!(target.join("Catalogs/Gone.xml").is_file(), "{payload}");
 }
 
 /// Шлюз, чей SFTP не принимает запись (живой `ibsrv` 8.3.27): сборка отказывает
