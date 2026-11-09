@@ -189,11 +189,6 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             let mut listener = Listener::bind(&name).unwrap();
-            assert_eq!(
-                Listener::bind(&name).err().map(|error| error.kind()),
-                Some(std::io::ErrorKind::AddrInUse),
-                "a second keeper on the same channel is refused"
-            );
             #[cfg(windows)]
             {
                 let sddl = pipe_dacl(listener.handle());
@@ -220,7 +215,15 @@ mod tests {
             let mut answer = [0u8; 4];
             client.read_exact(&mut answer).await.unwrap();
             assert_eq!(&answer, b"ping");
-            server.await.unwrap().remove();
+            let listener = server.await.unwrap();
+            // После обмена: на Unix второй сторож пробует сокет подключением, и сервер,
+            // принявший бы эту пробу первой, не дождался бы данных.
+            assert_eq!(
+                Listener::bind(&name).err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::AddrInUse),
+                "a second keeper on the same channel is refused"
+            );
+            listener.remove();
         });
     }
 

@@ -1903,6 +1903,9 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Скрытые служебные подкоманды (путь, имя): сторож живого агента (#577).
+    const INTERNAL_COMMANDS: &[(&[&str], &str)] = &[(&[], "agent"), (&["agent"], "keeper")];
+
     /// Скрытое имя дерева разбора: где живёт, что скрыто и чьё оно, если это псевдоним.
     type Hidden = (Vec<String>, crate::cli::synonyms::Previous, Option<String>);
 
@@ -1947,6 +1950,14 @@ mod tests {
         }
         for subcommand in command.get_subcommands() {
             let name = subcommand.get_name();
+            // Служебные подкоманды раннер зовёт сам: это не прежние имена, и перечня
+            // синонимов они не касаются.
+            if INTERNAL_COMMANDS
+                .iter()
+                .any(|(at, internal)| *at == path && *internal == name)
+            {
+                continue;
+            }
             if subcommand.is_hide_set() {
                 hidden.push((path.to_vec(), Previous::Command(name), None));
                 continue;
