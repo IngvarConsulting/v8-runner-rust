@@ -1858,6 +1858,67 @@ fn remove_orphaned_keys(dir: &Path) {
     }
 }
 
+/// Путь, который агент Конфигуратора читает в `/AgentSSHHostKey`: только ASCII. По пути с
+/// кириллицей он отвечает «Фатальная ошибка SSH-сервера: Ошибка установки ключа хоста» и
+/// выходит (замер #582; `INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+pub fn host_key_path_is_readable(path: &Path) -> bool {
+    path.to_str().is_some_and(str::is_ascii)
+}
+
+/// Каталог одноразовых ключей хоста (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`): `workPath`, если
+/// путь к нему в ASCII, иначе каталог учётной записи во временном каталоге ОС, иначе — на
+/// Windows — в `%ProgramData%`. Чужой каталог создаётся доступным только владельцу и назван по
+/// хешу профиля учётной записи, поэтому учётные записи не делят ключи. Ни одного пути в ASCII —
+/// отказ до запуска, называющий причину.
+pub fn one_time_key_dir(work_path: &Path) -> Result<PathBuf, AgentError> {
+    let own = work_path.join("agent").join("host-keys");
+    if host_key_path_is_readable(&own) {
+        return Ok(own);
+    }
+    let profile =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
+    let account = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(profile.to_string_lossy().as_bytes());
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let name = format!("v8-runner-host-keys-{account}");
+    let mut roots = vec![std::env::temp_dir()];
+    if cfg!(windows) {
+        if let Some(data) = std::env::var_os("ProgramData") {
+            roots.push(PathBuf::from(data).join("v8-runner"));
+        }
+    }
+    for root in roots {
+        let dir = root.join(&name);
+        if !host_key_path_is_readable(&dir) {
+            continue;
+        }
+        let made = std::fs::create_dir_all(&root).and_then(|()| {
+            match crate::support::temp::create_private_dir(&dir) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                other => other,
+            }
+        });
+        match made {
+            Ok(()) => return Ok(dir),
+            Err(error) => debug!(dir = %dir.display(), %error, "host key directory refused"),
+        }
+    }
+    Err(AgentError::Workspace {
+        path: own,
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the Designer agent reads its host key only from an ASCII path, and neither workPath, \
+             the system temporary directory nor %ProgramData% gives one; move the project to an \
+             ASCII path or declare tools.designer_agent.host-key there",
+        ),
+    })
+}
+
 impl EphemeralHostKey {
     pub fn create(dir: &Path) -> Result<Self, AgentError> {
         let workspace = |source| AgentError::Workspace {
