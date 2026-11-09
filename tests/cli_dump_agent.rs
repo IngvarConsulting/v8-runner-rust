@@ -123,7 +123,7 @@ fn harness_with(
             base.display()
         )
     } else {
-        format!("    port: {port}\n{extra_yaml}")
+        format!("    port: {port}\n    live: false\n{extra_yaml}")
     };
     let config_path = root.join("v8project.yaml");
     fs::write(

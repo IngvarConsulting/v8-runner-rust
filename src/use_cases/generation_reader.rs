@@ -240,7 +240,7 @@ pub(crate) fn read_with_record_tool(
                 }
             };
             let token =
-                crate::use_cases::agent_session::generation_id(handle.session(), extension, &wait);
+                crate::use_cases::agent_session::generation_id(&mut handle, extension, &wait);
             handle.finish(&wait);
             return match token {
                 Ok(token) => Ok(RecordToolAnswer::Token(token)),

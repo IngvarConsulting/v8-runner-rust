@@ -1,7 +1,8 @@
 ---
 id: INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/agent_keeper.rs::the_agent_dies_with_its_keeper
+  - src/platform/agent_keeper/client.rs::the_keeper_runs_from_its_own_copy_of_the_runner
 ---
 
 # Живой агент не переживает своего сторожа

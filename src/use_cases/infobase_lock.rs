@@ -116,6 +116,71 @@ pub(crate) fn acquire_infobase_lock(
     })
 }
 
+/// Живые агенты той же базы перед командой, которая её открывает
+/// (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`). Простаивающий агент к базе
+/// не подключён и команде не мешает. Агент, подключённый к базе сессией другой команды, —
+/// отказ `infobase_busy`, называющий его команду и держателей. Команда, которая пересоздаёт
+/// базу (`recreates`), снимает простаивающих агентов этой базы: их ключ больше ничему не
+/// отвечает.
+pub(crate) fn settle_live_agents(
+    config: &AppConfig,
+    command_name: &str,
+    recreates: bool,
+) -> Result<(), AppError> {
+    // Нет каталога состояния — нет и живых агентов.
+    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+        return Ok(());
+    };
+    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
+    let found = crate::platform::agent_keeper::client::keepers_of(&state, &infobase);
+    for (_, status) in &found {
+        let Ok(status) = status else {
+            continue;
+        };
+        if status.holds_the_infobase() {
+            let holders = if status.holders.is_empty() {
+                "no holders".to_owned()
+            } else {
+                status
+                    .holders
+                    .iter()
+                    .map(|holder| match holder {
+                        crate::platform::agent_keeper::protocol::Holder::Process {
+                            pid, ..
+                        } => {
+                            format!("process {pid}")
+                        }
+                        crate::platform::agent_keeper::protocol::Holder::Ttl { id, .. } => {
+                            format!("'{id}' with a term")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(AppError::InfobaseBusy(format!(
+                "cannot start {command_name}: infobase '{infobase}' is in use by the live Designer agent (pid {}) running '{}' ({holders}); retry when it finishes",
+                status
+                    .agent_pid
+                    .map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
+                status.command().unwrap_or("a command"),
+            )));
+        }
+    }
+    if recreates {
+        for (keeper, _) in found {
+            match keeper.client.stop() {
+                Ok(()) => {
+                    tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed")
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "the live agent of the recreated infobase was not removed")
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Файл замка рядом с каталогом базы: `.<имя каталога>.v8-runner.infobase.lock`.
 fn infobase_lock_path(base_dir: &Path) -> Option<PathBuf> {
     let parent = base_dir.parent()?;

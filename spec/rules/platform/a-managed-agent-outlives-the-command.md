@@ -1,7 +1,10 @@
 ---
 id: INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/agent_keeper.rs::a_second_client_reuses_the_live_agent_without_a_new_launch
+  - tests/agent_keeper.rs::a_session_left_without_end_disconnects_the_agent
+  - tests/cli_live_agent.rs::a_second_command_reuses_the_live_agent
+  - src/platform/agent_keeper/channel.rs::the_channel_is_open_to_its_own_account_only
 ---
 
 # Процесс своего агента и его сессия переживают команду

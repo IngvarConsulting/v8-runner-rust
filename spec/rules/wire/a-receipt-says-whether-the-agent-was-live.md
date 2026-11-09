@@ -1,7 +1,11 @@
 ---
 id: INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - src/use_cases/context.rs::the_live_agent_receipt_lands_in_the_same_session_slot
+  - tests/cli_live_agent.rs::a_second_command_reuses_the_live_agent
+  - tests/cli_live_agent.rs::live_off_removes_the_live_agent_and_works_one_shot
+  - tests/cli_live_agent.rs::over_the_limit_an_idle_agent_gives_way_and_a_held_one_does_not
+  - tests/cli_live_agent.rs::an_interrupted_command_removes_the_live_agent
 ---
 
 # Квитанция говорит, был ли агент живым

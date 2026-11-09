@@ -1,7 +1,8 @@
 ---
 id: INV.PLATFORM.A-LIVE-AGENT-CLOSES-WITH-ITS-HOLDER
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/agent_keeper.rs::the_agent_closes_when_its_holder_process_exits
+  - tests/agent_keeper.rs::a_ttl_holder_expires_and_takes_the_agent_with_it
 ---
 
 # Живой агент уходит вместе с последним держателем

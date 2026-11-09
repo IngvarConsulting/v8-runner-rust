@@ -91,12 +91,11 @@ pub struct KeeperStatus {
     #[serde(default)]
     pub last: Option<String>,
     pub holders: Vec<Holder>,
+    /// Сколько агент простаивает: без команды и без сессии; занятый — ноль.
+    #[serde(default)]
+    pub idle_ms: u64,
 }
 
-#[allow(
-    dead_code,
-    reason = "проверку занятой базы другим режимом запуска встраивает этап 3 #577"
-)]
 impl KeeperStatus {
     /// Держит ли агент базу: выполняет команду или подключён к ней сессией команды.
     pub fn holds_the_infobase(&self) -> bool {

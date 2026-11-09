@@ -123,7 +123,7 @@ fn harness_speaking(
     fs::write(
         &config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '{version}'\n  designer_agent:\n    port: {port}\n",
+            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '{version}'\n  designer_agent:\n    port: {port}\n    live: false\n",
             work = work_path.display(),
             password = AGENT_PASSWORD,
             platform = root.join("platform").display(),
@@ -203,7 +203,11 @@ fn a_managed_agent_session_is_named_in_the_receipt() {
     assert_eq!(receipt["selected"], "agent", "{payload}");
     assert_eq!(
         receipt["endpoint"],
-        serde_json::json!({"mode": "managed", "address": format!("127.0.0.1:{}", harness.port)}),
+        serde_json::json!({
+            "mode": "managed",
+            "address": format!("127.0.0.1:{}", harness.port),
+            "live": {"reused": false, "holders": [], "kept": false, "reason": "live_agent_off"},
+        }),
         "{payload}"
     );
     assert!(

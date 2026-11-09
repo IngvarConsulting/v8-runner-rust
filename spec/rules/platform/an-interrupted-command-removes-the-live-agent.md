@@ -1,7 +1,9 @@
 ---
 id: INV.PLATFORM.AN-INTERRUPTED-COMMAND-REMOVES-THE-LIVE-AGENT
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/agent_keeper.rs::a_client_leaving_in_the_middle_of_a_command_removes_the_agent
+  - src/platform/agent_keeper/client.rs::a_cancelled_run_leaves_the_channel_and_the_keeper_sees_it
+  - tests/cli_live_agent.rs::an_interrupted_command_removes_the_live_agent
 ---
 
 # Прерванная команда снимает живого агента

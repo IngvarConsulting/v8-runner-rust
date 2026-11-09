@@ -464,9 +464,7 @@ impl Asker {
                 },
                 extension,
             ),
-            How::Agent { handle, wait } => {
-                generation_id(handle.session(), extension, wait).map(Some)
-            }
+            How::Agent { handle, wait } => generation_id(handle, extension, wait).map(Some),
         }
     }
 

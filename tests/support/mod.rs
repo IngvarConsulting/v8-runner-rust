@@ -67,8 +67,29 @@ pub fn commit_sources(dir: &Path) {
     git(&["commit", "-q", "--allow-empty", "-m", "sources"]);
 }
 
+/// Команда раннера с каталогом состояния учётной записи этого прогона тестов: живые агенты
+/// тестов не попадают в каталог состояния пользователя и не встречаются с ним.
 pub fn v8_runner_command() -> Command {
-    Command::cargo_bin("v8-runner").expect("binary")
+    let mut command = Command::cargo_bin("v8-runner").expect("binary");
+    command.env("V8_RUNNER_STATE_DIR", test_state_dir());
+    command
+}
+
+/// Каталог состояния прогона тестов. На Unix — короткий путь в `/tmp`: путь сокета сторожа
+/// живого агента ограничен.
+pub fn test_state_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if cfg!(unix) {
+            tempfile::Builder::new()
+                .prefix("v8rs")
+                .tempdir_in("/tmp")
+                .expect("state dir")
+        } else {
+            tempfile::tempdir().expect("state dir")
+        }
+    })
+    .path()
 }
 
 pub fn v8_runner_binary() -> PathBuf {

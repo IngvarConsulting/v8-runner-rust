@@ -1583,6 +1583,14 @@ fn excerpt(text: &str, limit: usize) -> String {
 }
 
 /// Protocol values stay intact; only this display copy masks decoded strings and keys.
+/// Строка журнала разговора для одного массива ответа: с маской секретов, как её пишет сессия.
+/// Её же пишет команда, которая говорит с живым агентом через сторожа.
+pub fn transcript_line(batch: &[AgentMessage], secrets: &[&str]) -> String {
+    let mut display = serde_json::to_value(batch).expect("agent messages serialize");
+    mask_agent_display(&mut display, secrets);
+    display.to_string()
+}
+
 fn mask_agent_display(value: &mut serde_json::Value, secrets: &[&str]) {
     match value {
         serde_json::Value::String(text) => {
@@ -1823,6 +1831,10 @@ impl ManagedAgent {
 
     pub fn session(&mut self) -> &mut AgentSession {
         self.session.as_mut().expect("session lives with the agent")
+    }
+
+    pub fn session_ref(&self) -> &AgentSession {
+        self.session.as_ref().expect("session lives with the agent")
     }
 
     /// Точка входа сессии с поднятым агентом.

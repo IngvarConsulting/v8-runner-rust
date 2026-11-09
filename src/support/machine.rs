@@ -423,6 +423,14 @@ pub mod account {
         Ok(dir)
     }
 
+    /// The state directory of this OS account if it already exists: a reader that only looks
+    /// for records does not create it.
+    pub fn existing_account_state_dir() -> Option<PathBuf> {
+        state_dir_location(&|name| std::env::var_os(name))
+            .ok()
+            .filter(|dir| dir.is_dir())
+    }
+
     /// Creates `dir` owner-only, with its parents as usual. An existing one is kept only when
     /// it is a directory of this account, not a link: on Unix its uid is the account's and its
     /// mode is narrowed to 0700 through the opened directory itself; on Windows its owner is

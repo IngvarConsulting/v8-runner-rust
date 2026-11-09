@@ -84,7 +84,7 @@ fn harness_holding_credentials(hold: Option<Hold>, user: &str, password: &str) -
     fs::write(
         &config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\nproviders:\n  build: agent\n  dump: agent\ninfobase:\n  connection: 'File={ib}'\n  user: {user}\n  password: {password}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
+            "workPath: {work}\nformat: DESIGNER\nproviders:\n  build: agent\n  dump: agent\ninfobase:\n  connection: 'File={ib}'\n  user: {user}\n  password: {password}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n    live: false\n",
             work = work_path.display(),
             ib = root.join("ib").display(),
             user = serde_json::to_string(user).expect("YAML user"),

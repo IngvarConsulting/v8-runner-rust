@@ -17,13 +17,19 @@ use crate::platform::result::PlatformCommandResult;
 use serde::{Deserialize, Serialize};
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
-use crate::domain::capability::{Provider, SessionEndpoint, SessionMode};
+use crate::domain::capability::{
+    LiveAgentHolder, LiveAgentReason, LiveAgentReceipt, Provider, SessionEndpoint, SessionMode,
+};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::agent::{
     self, agent_reads_host_key_at, free_managed_port, host_key_fallback_roots, AgentEndpoint,
-    AgentError, AgentLaunch, AgentSession, AgentSessionRequest, EphemeralHostKey,
-    HostKeyExpectation, LaunchHostKey, ManagedAgent, WaitPolicy,
+    AgentError, AgentLaunch, AgentMessage, AgentReply, AgentSession, AgentSessionRequest,
+    EphemeralHostKey, HostKeyExpectation, LaunchHostKey, ManagedAgent, WaitPolicy,
 };
+use crate::platform::agent_keeper::client::{
+    Credentials, KeeperClient, KeeperLaunch, KeeperStartError,
+};
+use crate::platform::agent_keeper::protocol::Holder;
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
@@ -32,9 +38,15 @@ use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::{CommandFailure, Deferrals};
 
-/// Открытая точка входа: свой процесс с сессией или только сессия к чужому.
+/// Открытая точка входа: живой агент через сторожа, свой разовый процесс с сессией или
+/// только сессия к чужому.
 pub(crate) enum AgentHandle {
-    Managed(Box<ManagedAgent>),
+    /// Живой агент: процесс и сессию SSH держит сторож, команда владеет только подключением к
+    /// базе (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`).
+    Live(Box<LiveHandle>),
+    /// Разовый агент команды и причина, по которой он не живой
+    /// (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+    Managed(Box<ManagedAgent>, LiveAgentReason),
     Attached {
         session: AgentSession,
         base_dir: PathBuf,
@@ -57,11 +69,126 @@ pub(crate) enum Exchange {
     Sftp,
 }
 
+/// Живой агент команды: сессия команды у сторожа и всё, что команда о ней помнит сама.
+pub(crate) struct LiveHandle {
+    client: KeeperClient,
+    /// `AgentBaseDir` агента в каталоге состояния учётной записи.
+    base_dir: PathBuf,
+    endpoint: AgentEndpoint,
+    /// Каталог на томе `workPath`, в котором ложится то, что агент пишет: агенту он выставлен
+    /// ссылкой, и выгрузка не копируется между томами.
+    exchange_root: PathBuf,
+    /// Контекст команды: в его слот сессии дописывается квитанция живого агента.
+    context: ExecutionContext,
+    receipt: LiveAgentReceipt,
+    /// Журнал разговора пишет команда, а не сторож.
+    transcript: Option<std::fs::File>,
+    secrets: Vec<String>,
+}
+
+impl LiveHandle {
+    fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
+        use std::io::Write as _;
+        let secrets: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
+        let transcript = &mut self.transcript;
+        let outcome = self
+            .client
+            .run(command, policy, &mut |batch: &[AgentMessage]| {
+                if let Some(log) = transcript.as_mut() {
+                    let _ = writeln!(log, "{}", agent::transcript_line(batch, &secrets));
+                }
+            });
+        if self.client.interrupted() {
+            self.receipt.kept = false;
+            self.receipt.reason = Some(LiveAgentReason::Interrupted);
+        }
+        outcome
+    }
+
+    /// Закрывает сессию команды; агент остаётся сторожу, если его не сняли.
+    fn finish(mut self) {
+        self.client.end();
+        if self.receipt.kept {
+            if let Ok(status) = self.client.status() {
+                self.receipt.holders = status.holders.iter().map(holder_receipt).collect();
+            }
+        }
+        self.context.note_live(self.receipt);
+    }
+}
+
+/// Держатель живого агента в квитанции: процесс — номером и временем старта, срок — мгновением.
+fn holder_receipt(holder: &Holder) -> LiveAgentHolder {
+    let rfc3339 = |at: std::time::SystemTime| {
+        chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    match holder {
+        Holder::Process { pid, started } => LiveAgentHolder::Process {
+            pid: *pid,
+            started_at: crate::platform::service::started_at(*started).map(rfc3339),
+        },
+        Holder::Ttl { until_ms, .. } => LiveAgentHolder::Ttl {
+            until: rfc3339(std::time::UNIX_EPOCH + Duration::from_millis(*until_ms)),
+        },
+    }
+}
+
 impl AgentHandle {
-    pub(crate) fn session(&mut self) -> &mut AgentSession {
+    /// SSH-сессия точки входа: для обмена файлами по SFTP. У живого агента её держит сторож, и
+    /// файлы с ним идут только каталогом.
+    pub(crate) fn ssh(&mut self) -> Result<&mut AgentSession, AgentError> {
         match self {
-            Self::Managed(agent) => agent.session(),
-            Self::Attached { session, .. } | Self::Gate { session, .. } => session,
+            Self::Live(_) => Err(AgentError::Keeper {
+                detail: "the live agent exchanges files through its directory, not over SFTP"
+                    .to_owned(),
+            }),
+            Self::Managed(agent, _) => Ok(agent.session()),
+            Self::Attached { session, .. } | Self::Gate { session, .. } => Ok(session),
+        }
+    }
+
+    /// Одна команда агенту.
+    pub(crate) fn run(
+        &mut self,
+        command: &str,
+        wait: &WaitPolicy,
+    ) -> Result<AgentReply, AgentError> {
+        match self {
+            Self::Live(live) => live.run(command, wait),
+            Self::Managed(agent, _) => agent.session().run(command, wait),
+            Self::Attached { session, .. } | Self::Gate { session, .. } => {
+                session.run(command, wait)
+            }
+        }
+    }
+
+    /// Прерывание, отложенное в критической фазе за всю сессию.
+    pub(crate) fn deferred_interruption(&self) -> Option<ProcessInterruptionReason> {
+        match self {
+            Self::Live(live) => live.client.deferred_interruption(),
+            Self::Managed(agent, _) => agent.session_ref().deferred_interruption(),
+            Self::Attached { session, .. } | Self::Gate { session, .. } => {
+                session.deferred_interruption()
+            }
+        }
+    }
+
+    /// Прерывание, которое отложила последняя команда.
+    pub(crate) fn last_command_deferral(&self) -> Option<ProcessInterruptionReason> {
+        match self {
+            Self::Live(live) => live.client.last_command_deferral(),
+            Self::Managed(agent, _) => agent.session_ref().last_command_deferral(),
+            Self::Attached { session, .. } | Self::Gate { session, .. } => {
+                session.last_command_deferral()
+            }
+        }
+    }
+
+    /// Каталог тома `workPath`, в котором ложится то, что пишет живой агент.
+    fn exchange_root(&self) -> Option<&Path> {
+        match self {
+            Self::Live(live) => Some(&live.exchange_root),
+            _ => None,
         }
     }
 
@@ -69,7 +196,8 @@ impl AgentHandle {
     /// SSH-клиент, напечатанный из хоста и порта; учётных данных в нём нет.
     pub(crate) fn endpoint(&self) -> SessionEndpoint {
         match self {
-            Self::Managed(agent) => session_endpoint(SessionMode::Managed, agent.endpoint()),
+            Self::Live(live) => session_endpoint(SessionMode::Managed, &live.endpoint),
+            Self::Managed(agent, _) => session_endpoint(SessionMode::Managed, agent.endpoint()),
             Self::Attached { session, .. } => {
                 session_endpoint(SessionMode::Attached, session.endpoint())
             }
@@ -82,7 +210,8 @@ impl AgentHandle {
     /// объявил конфиг.
     pub(crate) fn exchange(&self, config: &AppConfig) -> Result<Exchange, AppError> {
         let base_dir = match self {
-            Self::Managed(agent) => agent.base_dir(),
+            Self::Live(live) => live.base_dir.as_path(),
+            Self::Managed(agent, _) => agent.base_dir(),
             Self::Attached { base_dir, .. } => base_dir,
             Self::Gate { exchange, .. } => return Ok(exchange.clone()),
         };
@@ -100,7 +229,8 @@ impl AgentHandle {
     /// команды и мог держать её столько же ещё раз.
     pub(crate) fn finish(self, wait: &WaitPolicy) {
         match self {
-            Self::Managed(agent) => agent.release_and_remove(),
+            Self::Live(live) => live.finish(),
+            Self::Managed(agent, _) => agent.release_and_remove(),
             Self::Attached { session, .. } | Self::Gate { session, .. } => session.release(wait),
         }
     }
@@ -112,6 +242,7 @@ fn session_endpoint(mode: SessionMode, endpoint: &AgentEndpoint) -> SessionEndpo
     SessionEndpoint {
         mode,
         address: endpoint.to_string(),
+        live: None,
     }
 }
 
@@ -181,8 +312,18 @@ pub(crate) fn connect(
     transcript_log: PathBuf,
     wait: &WaitPolicy,
 ) -> Result<AgentHandle, AppError> {
-    let handle = open_handle(config, utilities, v8, transcript_log, wait)?;
+    let handle = open_handle(context, config, utilities, v8, transcript_log, wait)?;
     context.note_session(handle.endpoint());
+    match &handle {
+        AgentHandle::Live(live) => context.note_live(live.receipt.clone()),
+        AgentHandle::Managed(_, reason) => context.note_live(LiveAgentReceipt {
+            reused: false,
+            holders: Vec::new(),
+            kept: false,
+            reason: Some(*reason),
+        }),
+        AgentHandle::Attached { .. } | AgentHandle::Gate { .. } => {}
+    }
     Ok(handle)
 }
 
@@ -191,6 +332,7 @@ pub(crate) fn connect(
 const GATE_WITHOUT_A_CHANNEL: &str = "the agent works with a standalone server through its SSH gate, and files travel there only by a declared channel: set infobase.standalone.exchange to `sftp` (through the gate) or to `{ dir: … }` — the gate user's directory as the runner sees it";
 
 fn open_handle(
+    context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     v8: Option<&Path>,
@@ -255,6 +397,17 @@ fn open_handle(
                         .to_owned(),
                 )
             })?;
+            let reason = if agent.live_enabled() {
+                match open_live(context, config, v8, port, &transcript_log)? {
+                    Ok(live) => return Ok(AgentHandle::Live(Box::new(live))),
+                    Err(reason) => reason,
+                }
+            } else {
+                // Живой агент выключен: живой агент этой рабочей копии, если остался, снимается
+                // (`INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF`).
+                remove_live_agent(config, v8);
+                LiveAgentReason::LiveAgentOff
+            };
             // Порт не объявлен — свободный на этот запуск: фиксированный порт отдал бы сессию
             // первому, кто на нём слушает.
             let port = match port {
@@ -289,8 +442,141 @@ fn open_handle(
                 wait,
             )
             .map_err(AppError::from)?;
-            Ok(AgentHandle::Managed(Box::new(managed)))
+            Ok(AgentHandle::Managed(Box::new(managed), reason))
         }
+    }
+}
+
+/// Ключ живого агента: строка подключения базы, платформа, пользователь базы, `workPath`, версия
+/// раннера и учётная запись ОС (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`). Пароля
+/// базы в ключе нет: учётные данные сторож сверяет с каждым запросом.
+fn live_key(state: &Path, config: &AppConfig, v8: &Path) -> std::io::Result<String> {
+    let connection = config.v8_connection();
+    let address = connection.infobase_args().join("\u{1f}");
+    let platform = v8.display().to_string();
+    let user = connection.user.clone().unwrap_or_default();
+    let work_path = config.work_path.display().to_string();
+    crate::support::machine::account::account_key(
+        state,
+        &[
+            "live-agent",
+            &address,
+            &platform,
+            &user,
+            &work_path,
+            env!("CARGO_PKG_VERSION"),
+        ],
+    )
+}
+
+/// Путь базы в каноническом виде: по нему находят живых агентов одной базы из разных рабочих
+/// копий.
+pub(crate) fn canonical_infobase(config: &AppConfig) -> String {
+    let connection = config.v8_connection();
+    connection
+        .snapshot_identity(&config.base_path)
+        .unwrap_or_else(|| connection.infobase_args().join(" "))
+}
+
+/// Поднимает или берёт живого агента. `Ok(Err(reason))` — живого агента не будет, и команда
+/// работает с разовым: раннер в Job без права выхода (`INV.PLATFORM.A-CLOSED-JOB-KEEPS-THE-AGENT-ONE-SHOT`)
+/// или живых агентов уже на пределе (`INV.PLATFORM.A-COMMAND-OVER-THE-LIMIT-USES-A-ONE-SHOT-AGENT`).
+fn open_live(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    v8: &Path,
+    port: Option<u16>,
+    transcript_log: &Path,
+) -> Result<Result<LiveHandle, LiveAgentReason>, AppError> {
+    let agent = &config.tools.designer_agent;
+    let connection = config.v8_connection();
+    let state = crate::support::machine::account::account_state_dir().map_err(|error| {
+        AppError::EnvironmentUnavailable(format!(
+            "the live Designer agent needs the account state directory: {error}; \
+             set tools.designer_agent.live: false to work without it"
+        ))
+    })?;
+    let key = live_key(&state, config, v8)
+        .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
+    // Объявленный ключ хоста проверяется до запуска, как у разового агента.
+    let host_key = match agent.host_key.clone() {
+        Some(declared) => match launch_host_key(Some(declared), &config.work_path)? {
+            LaunchHostKey::Declared(path) => Some(path),
+            LaunchHostKey::OneTime(_) => None,
+        },
+        None => None,
+    };
+    let launch = KeeperLaunch {
+        v8: v8.to_path_buf(),
+        infobase_args: connection.infobase_args(),
+        port,
+        host_key,
+        startup_timeout_ms: agent.startup_timeout_ms.max(1),
+        infobase: canonical_infobase(config),
+    };
+    let credentials = Credentials {
+        user: connection.user.clone().unwrap_or_default(),
+        password: connection.password.clone().unwrap_or_default(),
+    };
+    let client = match KeeperClient::connect_or_start(
+        &key,
+        &launch,
+        &credentials,
+        agent.live_limit(),
+        context.work(),
+    ) {
+        Ok(client) => client,
+        Err(KeeperStartError::Job) => return Ok(Err(LiveAgentReason::Job)),
+        Err(KeeperStartError::Limit { .. }) => return Ok(Err(LiveAgentReason::Limit)),
+        Err(KeeperStartError::Agent(error)) => return Err(AppError::from(error)),
+    };
+    let port = client.port().ok_or_else(|| {
+        AppError::EnvironmentUnavailable("the live agent keeper names no agent port".to_owned())
+    })?;
+    let transcript = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(transcript_log)
+        .ok();
+    let receipt = LiveAgentReceipt {
+        reused: client.reused(),
+        holders: Vec::new(),
+        kept: true,
+        reason: None,
+    };
+    Ok(Ok(LiveHandle {
+        base_dir: client.base_dir(),
+        endpoint: AgentEndpoint {
+            host: crate::support::authority::Host::Address(std::net::IpAddr::V4(
+                std::net::Ipv4Addr::LOCALHOST,
+            )),
+            port,
+        },
+        exchange_root: config.work_path.join("agent").join("exchange"),
+        context: context.clone(),
+        receipt,
+        transcript,
+        secrets: [credentials.user, credentials.password]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect(),
+        client,
+    }))
+}
+
+/// Снимает живого агента этой рабочей копии, если он есть: с `live: false` его не остаётся.
+/// Отказ снятия команду не останавливает: она работает с разовым агентом и так.
+fn remove_live_agent(config: &AppConfig, v8: &Path) {
+    let Ok(state) = crate::support::machine::account::account_state_dir() else {
+        return;
+    };
+    let Ok(key) = live_key(&state, config, v8) else {
+        return;
+    };
+    match crate::platform::agent_keeper::client::stop_keeper(&state, &key) {
+        Ok(true) => tracing::info!("the live agent of this working copy is removed: live is off"),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "the live agent of this working copy was not removed"),
     }
 }
 
@@ -578,7 +864,7 @@ pub(crate) fn with_session(
     let outcome = handle
         .exchange(config)
         .and_then(|exchange| work(&mut handle, &wait, &exchange));
-    let deferred = handle.session().deferred_interruption();
+    let deferred = handle.deferred_interruption();
     handle.finish(&wait);
     match outcome {
         Ok(transcript) => Ok(platform_result(transcript, log, deferred)),
@@ -615,7 +901,6 @@ pub(crate) fn run_critical_typed(
 ) -> Result<agent::AgentReply, AgentError> {
     let outcome = run_checked(handle, command, &wait.critical());
     let deferral = handle
-        .session()
         .last_command_deferral()
         .map(ProcessInterruption::deferred);
     deferrals.note_outcome(action, &outcome, deferral);
@@ -641,7 +926,7 @@ fn run_checked(
     command: &str,
     wait: &WaitPolicy,
 ) -> Result<agent::AgentReply, AgentError> {
-    let reply = handle.session().run(command, wait)?;
+    let reply = handle.run(command, wait)?;
     reply.outcome()?;
     Ok(reply)
 }
@@ -694,7 +979,7 @@ pub(crate) fn stage_dir(
     match exchange {
         Exchange::Dir(user_dir) => expose_dir(user_dir, relative, local, work_path),
         Exchange::Sftp => handle
-            .session()
+            .ssh()?
             .sftp_put_dir(local, relative)
             .map(|()| relative.to_owned())
             .map_err(AppError::from),
@@ -739,7 +1024,7 @@ pub(crate) fn stage_dir_partially(
     selected.dedup();
     let paths = relative_paths(&selected, local)
         .map_err(|error| AppError::SourceLoadNotStarted(error.to_string()))?;
-    let session = handle.session();
+    let session = handle.ssh()?;
     session.sftp_mkdir_all(relative).map_err(AppError::from)?;
     for inside in paths {
         let file = local.join(&inside);
@@ -767,7 +1052,7 @@ pub(crate) fn stage_file(
     match exchange {
         Exchange::Dir(user_dir) => expose_file(user_dir, relative, local),
         Exchange::Sftp => {
-            let session = handle.session();
+            let session = handle.ssh()?;
             if let Some((parent, _)) = relative.rsplit_once('/') {
                 session.sftp_mkdir_all(parent).map_err(AppError::from)?;
             }
@@ -815,7 +1100,7 @@ pub(crate) fn write_bytes(
             })
         }
         Exchange::Sftp => {
-            let session = handle.session();
+            let session = handle.ssh()?;
             if let Some((parent, _)) = relative.rsplit_once('/') {
                 session.sftp_mkdir_all(parent).map_err(AppError::from)?;
             }
@@ -831,11 +1116,46 @@ pub(crate) fn make_output_dir(
     relative: &str,
 ) -> Result<(), AppError> {
     match exchange {
-        Exchange::Dir(user_dir) => output_dir(user_dir, relative).map(|_| ()),
+        Exchange::Dir(user_dir) => match handle.exchange_root() {
+            // Каталог живого агента лежит в каталоге состояния, часто на другом томе: то, что
+            // агент пишет, ложится сразу на том `workPath` через ссылку и потом не копируется
+            // между томами (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`). Где ссылку
+            // создать нельзя, каталог настоящий, как у разового агента.
+            Some(root) => {
+                let real = root.join(relative);
+                std::fs::create_dir_all(&real).map_err(|error| {
+                    AppError::Runtime(format!(
+                        "failed to prepare the agent output dir '{}': {error}",
+                        real.display()
+                    ))
+                })?;
+                if expose_output_dir(user_dir, relative, &real).is_err() {
+                    tidy_run_path(root, relative);
+                    output_dir(user_dir, relative)?;
+                }
+                Ok(())
+            }
+            None => output_dir(user_dir, relative).map(|_| ()),
+        },
         Exchange::Sftp => handle
-            .session()
+            .ssh()?
             .sftp_mkdir_all(relative)
             .map_err(AppError::from),
+    }
+}
+
+/// Где на самом деле лежит то, что агент написал под `user_dir/relative`: за ссылкой — каталог
+/// на томе `workPath`, его и переносят.
+fn produced_at(user_dir: &Path, relative: &str) -> PathBuf {
+    let produced = user_dir.join(relative);
+    produced.canonicalize().unwrap_or(produced)
+}
+
+/// Убирает за живым агентом его каталог на томе `workPath` и ссылку на него.
+fn tidy_exchange(handle: &AgentHandle, user_dir: &Path, relative: &str) {
+    if let Some(root) = handle.exchange_root() {
+        tidy_run_path(user_dir, relative);
+        tidy_run_path(root, relative);
     }
 }
 
@@ -854,11 +1174,11 @@ pub(crate) fn collect_dir(
     }
     match exchange {
         Exchange::Dir(user_dir) => {
-            let produced = user_dir.join(relative);
+            let produced = produced_at(user_dir, relative);
             if !produced.is_dir() {
                 return Err(AppError::Platform(format!(
                     "agent reported success but wrote nothing into '{}'",
-                    produced.display()
+                    user_dir.join(relative).display()
                 )));
             }
             let _ = crate::support::fs::remove_path_if_exists(destination);
@@ -867,10 +1187,12 @@ pub(crate) fn collect_dir(
                     "failed to collect the agent's dir '{}': {error}",
                     produced.display()
                 ))
-            })
+            })?;
+            tidy_exchange(handle, user_dir, relative);
+            Ok(())
         }
         Exchange::Sftp => {
-            let session = handle.session();
+            let session = handle.ssh()?;
             let _ = crate::support::fs::remove_path_if_exists(destination);
             session
                 .sftp_get_dir(relative, destination)
@@ -894,7 +1216,7 @@ pub(crate) fn collect_into_dir(
 ) -> Result<(), AppError> {
     match exchange {
         Exchange::Dir(user_dir) => {
-            let produced = user_dir.join(relative);
+            let produced = produced_at(user_dir, relative);
             copy_dir_recursively(&produced, existing).map_err(|error| {
                 AppError::Runtime(format!(
                     "failed to collect the agent's dir '{}': {error}",
@@ -902,10 +1224,11 @@ pub(crate) fn collect_into_dir(
                 ))
             })?;
             tidy_run_path(user_dir, relative);
+            tidy_exchange(handle, user_dir, relative);
             Ok(())
         }
         Exchange::Sftp => {
-            let session = handle.session();
+            let session = handle.ssh()?;
             session
                 .sftp_get_dir(relative, existing)
                 .map_err(AppError::from)?;
@@ -923,11 +1246,11 @@ pub(crate) fn collect_file(
 ) -> Result<(), AppError> {
     match exchange {
         Exchange::Dir(user_dir) => {
-            let produced = user_dir.join(relative);
+            let produced = produced_at(user_dir, relative);
             if !produced.is_file() {
                 return Err(AppError::Platform(format!(
                     "agent reported success but wrote no file at '{}'",
-                    produced.display()
+                    user_dir.join(relative).display()
                 )));
             }
             crate::support::fs::move_file(&produced, destination).map_err(|error| {
@@ -938,7 +1261,7 @@ pub(crate) fn collect_file(
             })
         }
         Exchange::Sftp => {
-            let session = handle.session();
+            let session = handle.ssh()?;
             session
                 .sftp_get_file(relative, destination)
                 .map_err(|error| {
@@ -962,11 +1285,15 @@ pub(crate) fn unstage(handle: &mut AgentHandle, exchange: &Exchange, relative: &
 /// Убирает след прогона со стороны точки входа: путь и опустевшие родители.
 pub(crate) fn tidy(handle: &mut AgentHandle, exchange: &Exchange, relative: &str) {
     match exchange {
-        Exchange::Dir(user_dir) => tidy_run_path(user_dir, relative),
+        Exchange::Dir(user_dir) => {
+            tidy_run_path(user_dir, relative);
+            tidy_exchange(handle, user_dir, relative);
+        }
         Exchange::Sftp => {
-            let session = handle.session();
-            let _ = session.sftp_remove_all(relative);
-            session.sftp_remove_empty_parents(relative);
+            if let Ok(session) = handle.ssh() {
+                let _ = session.sftp_remove_all(relative);
+                session.sftp_remove_empty_parents(relative);
+            }
         }
     }
 }
@@ -991,7 +1318,7 @@ pub(crate) fn withdraw_dir(user_dir: &Path, relative: &str) {
 /// Тело ответа — строка из 40 hex; сравнивать её можно только на равенство
 /// (Приложение 7, `/GetConfigGenerationID`).
 pub(crate) fn generation_id(
-    session: &mut AgentSession,
+    handle: &mut AgentHandle,
     extension: Option<&str>,
     wait: &WaitPolicy,
 ) -> Result<String, AppError> {
@@ -999,7 +1326,7 @@ pub(crate) fn generation_id(
     if let Some(extension) = extension {
         command.push_str(&format!(" --extension={}", argument(extension)));
     }
-    let reply = session.run(&command, wait).map_err(AppError::from)?;
+    let reply = handle.run(&command, wait).map_err(AppError::from)?;
     let body = reply.outcome().map_err(AppError::from)?;
     body.and_then(|value| value.as_str())
         .filter(|token| !token.is_empty())

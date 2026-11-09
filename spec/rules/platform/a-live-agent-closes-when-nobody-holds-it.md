@@ -1,7 +1,9 @@
 ---
 id: INV.PLATFORM.A-LIVE-AGENT-CLOSES-WHEN-NOBODY-HOLDS-IT
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/agent_keeper.rs::an_idle_agent_closes_after_its_idle_limit
+  - tests/agent_keeper.rs::status_and_hold_answer_during_a_long_run
+  - tests/agent_keeper.rs::an_open_session_keeps_the_agent_from_idling_out
 ---
 
 # Живой агент без держателя закрывается после 15 минут простоя

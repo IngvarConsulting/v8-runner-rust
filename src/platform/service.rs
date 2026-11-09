@@ -62,6 +62,45 @@ pub struct ProcessFacts {
 
 pub use imp::{listening_pid, process_facts, spawn_hidden};
 
+/// Мгновение старта процесса по [`ProcessFacts::started`]: тики FILETIME на Windows, тики часов
+/// после загрузки на Linux, микросекунды эпохи на macOS. `None` — система мгновения не называет.
+#[cfg(windows)]
+pub fn started_at(started: u64) -> Option<std::time::SystemTime> {
+    /// Секунд между 1601-01-01 и 1970-01-01.
+    const FILETIME_TO_UNIX: u64 = 11_644_473_600;
+    let since_unix = (started / 10).checked_sub(FILETIME_TO_UNIX * 1_000_000)?;
+    std::time::UNIX_EPOCH.checked_add(Duration::from_micros(since_unix))
+}
+
+#[cfg(target_os = "linux")]
+pub fn started_at(started: u64) -> Option<std::time::SystemTime> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let boot: u64 = stat
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    // SAFETY: `sysconf` takes a plain value and cannot fail in a way that harms memory.
+    let ticks = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+        .ok()
+        .filter(|ticks| *ticks > 0)?;
+    let micros = boot
+        .checked_mul(1_000_000)?
+        .checked_add(started.checked_mul(1_000_000)? / ticks)?;
+    std::time::UNIX_EPOCH.checked_add(Duration::from_micros(micros))
+}
+
+#[cfg(target_vendor = "apple")]
+pub fn started_at(started: u64) -> Option<std::time::SystemTime> {
+    std::time::UNIX_EPOCH.checked_add(Duration::from_micros(started))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_vendor = "apple")))]
+pub fn started_at(_started: u64) -> Option<std::time::SystemTime> {
+    None
+}
+
 /// Процесс из перечня системы: кто его родитель и с какой командной строкой он запущен.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessRow {

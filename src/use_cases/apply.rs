@@ -588,8 +588,7 @@ impl Executor {
                 return Ok(None);
             }
             let (handle, wait) = self.session(context, config)?;
-            return agent_session::generation_id(handle.session(), target.extension, wait)
-                .map(Some);
+            return agent_session::generation_id(handle, target.extension, wait).map(Some);
         }
         read_by_record_tool(
             context,

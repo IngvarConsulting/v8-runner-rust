@@ -705,6 +705,12 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
                         connected: state.session.is_some(),
                         last: state.session.as_ref().and_then(|open| open.last.clone()),
                         holders: state.holders.clone(),
+                        idle_ms: if state.busy.is_none() && state.session.is_none() {
+                            u64::try_from(state.idle_since.elapsed().as_millis())
+                                .unwrap_or(u64::MAX)
+                        } else {
+                            0
+                        },
                     },
                 }
             }

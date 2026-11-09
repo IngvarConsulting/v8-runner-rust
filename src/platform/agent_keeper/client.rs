@@ -13,7 +13,7 @@ use super::protocol::{read_line, write_line, Frame, Holder, KeeperStatus, Reques
 use super::{credentials_digest, KeeperHome};
 use crate::platform::agent::{AgentError, AgentMessage, AgentReply, WaitPolicy};
 use crate::platform::live_registry::lock_agent_registry;
-use crate::platform::process::{ProcessExecutor, WorkGiven};
+use crate::platform::process::{ProcessExecutor, ProcessInterruptionReason, WorkGiven};
 use crate::platform::service::{process_facts, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
     adopt_recorded_pid, machine_fingerprint, observe_service, read_json, write_json, Observed,
@@ -64,6 +64,10 @@ pub enum KeeperStartError {
     /// работает с разовым агентом (`INV.PLATFORM.A-CLOSED-JOB-KEEPS-THE-AGENT-ONE-SHOT`).
     #[error("the runner runs in a Job that kills its processes on close and forbids leaving it")]
     Job,
+    /// Живых агентов учётной записи уже столько, сколько допускает предел, и снять
+    /// простаивающего некого (`INV.PLATFORM.A-COMMAND-OVER-THE-LIMIT-USES-A-ONE-SHOT-AGENT`).
+    #[error("the OS account already keeps {limit} live agents, and none of them is idle")]
+    Limit { limit: u8 },
     #[error(transparent)]
     Agent(#[from] AgentError),
 }
@@ -102,6 +106,12 @@ pub struct KeeperClient {
     /// Взят ли уже живой агент, а не поднят этим клиентом.
     reused: bool,
     session: Option<OpenSession>,
+    /// Прерывание, отложенное в критической фазе за всю сессию, и последней командой.
+    deferred: Option<ProcessInterruptionReason>,
+    last_deferral: Option<ProcessInterruptionReason>,
+    /// Команду прервали, пока агент выполнял её запрос, или его сессия оборвалась: сторож
+    /// снимает агента (`INV.PLATFORM.AN-INTERRUPTED-COMMAND-REMOVES-THE-LIVE-AGENT`).
+    interrupted: bool,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -112,6 +122,14 @@ enum Found {
     Starting,
     /// Его нет: запись «запускается» уже стоит за этим клиентом.
     Absent,
+    /// Его нет, а живых агентов других ключей уже столько, сколько допускает предел.
+    OverLimit,
+}
+
+/// Живой сторож учётной записи, найденный по записи.
+pub struct LiveKeeper {
+    pub key: String,
+    pub client: KeeperClient,
 }
 
 /// Чем кончилось ожидание поднятого сторожа.
@@ -135,6 +153,7 @@ impl KeeperClient {
         key: &str,
         launch: &KeeperLaunch,
         credentials: &Credentials,
+        limit: u8,
         work: &WorkGiven,
     ) -> Result<Self, KeeperStartError> {
         let state = crate::support::machine::account::account_state_dir()?;
@@ -147,13 +166,26 @@ impl KeeperClient {
             keeper: 0,
             reused: true,
             session: None,
+            deferred: None,
+            last_deferral: None,
+            interrupted: false,
             runtime: runtime()?,
         };
         let deadline =
             Instant::now() + Duration::from_millis(launch.startup_timeout_ms) + START_MARGIN;
         let mut respawns = 0;
+        let mut evictions = 0;
         loop {
-            match client.find()? {
+            match client.find(limit)? {
+                Found::OverLimit => {
+                    // Сверх предела снимается свой простаивающий агент без держателей;
+                    // занятого раннер не снимает.
+                    if evictions > usize::from(limit) || !evict_idle(client.home.state(), key)? {
+                        return Err(KeeperStartError::Limit { limit });
+                    }
+                    evictions += 1;
+                    continue;
+                }
                 Found::Live(keeper) => {
                     client.keeper = keeper;
                     match client.take() {
@@ -235,6 +267,9 @@ impl KeeperClient {
             keeper,
             reused: true,
             session: None,
+            deferred: None,
+            last_deferral: None,
+            interrupted: false,
             runtime: runtime()?,
         }))
     }
@@ -242,6 +277,13 @@ impl KeeperClient {
     /// Взят ли уже живой агент.
     pub fn reused(&self) -> bool {
         self.reused
+    }
+
+    /// Порт агента из записи сторожа.
+    pub fn port(&self) -> Option<u16> {
+        read_json::<ServiceRecord>(&self.home.paths().record())
+            .map(|record| record.port)
+            .filter(|port| *port != 0)
     }
 
     /// `AgentBaseDir` агента.
@@ -256,8 +298,10 @@ impl KeeperClient {
         self.begin()
     }
 
-    /// Ищет сторожа под замком реестра; не нашёл — ставит запись «запускается» за собой.
-    fn find(&self) -> Result<Found, KeeperStartError> {
+    /// Ищет сторожа под замком реестра; не нашёл — ставит запись «запускается» за собой, если
+    /// живых агентов других ключей меньше `limit`. Подсчёт и запись идут под одним замком,
+    /// поэтому одновременные команды предел вместе не превысят.
+    fn find(&self, limit: u8) -> Result<Found, KeeperStartError> {
         let _registry = lock_agent_registry(self.home.state())?;
         let paths = self.home.paths();
         let machine = machine_fingerprint();
@@ -268,6 +312,13 @@ impl KeeperClient {
             Observed::Own(record) => Ok(record.pid.map_or(Found::Starting, Found::Live)),
             Observed::Starting(_) => Ok(Found::Starting),
             Observed::Nothing | Observed::Stale => {
+                let others = live_keys(self.home.state())
+                    .into_iter()
+                    .filter(|(key, _)| key != self.home.key())
+                    .count();
+                if others >= usize::from(limit) {
+                    return Ok(Found::OverLimit);
+                }
                 let own = std::process::id();
                 let started = process_facts(own).map(|facts| facts.started);
                 let record = ServiceRecord {
@@ -432,6 +483,54 @@ impl KeeperClient {
     /// прихода. Отмена некритической команды пишет сторожу `cancel` и уходит — сторож бросает
     /// команду и снимает агента; критическую отмена не прерывает: её доводят до исхода.
     pub fn run(
+        &mut self,
+        command: &str,
+        policy: &WaitPolicy,
+        on_batch: &mut dyn FnMut(&[AgentMessage]),
+    ) -> Result<AgentReply, AgentError> {
+        self.last_deferral = None;
+        let outcome = self.exchange_run(command, policy, on_batch);
+        // Критическую команду отмена не прерывает: сторож доводит её до исхода, а команда
+        // называет отложенное прерывание, как с разовым агентом.
+        if policy.is_critical() && policy.cancellation.is_cancelled() {
+            self.last_deferral = Some(ProcessInterruptionReason::Cancelled);
+            self.deferred
+                .get_or_insert(ProcessInterruptionReason::Cancelled);
+        }
+        if outcome.as_ref().is_err_and(|error| {
+            matches!(
+                error,
+                AgentError::Cancelled {
+                    delivered: true,
+                    ..
+                } | AgentError::SessionClosed { .. }
+                    | AgentError::InvalidReply { .. }
+                    | AgentError::TimedOut { .. }
+                    | AgentError::LiveAgentGone { .. }
+                    | AgentError::KeeperUnreachable { .. }
+            )
+        }) {
+            self.interrupted = true;
+        }
+        outcome
+    }
+
+    /// Прерывание, отложенное в критической фазе за всю сессию.
+    pub fn deferred_interruption(&self) -> Option<ProcessInterruptionReason> {
+        self.deferred
+    }
+
+    /// Прерывание, которое отложила последняя команда.
+    pub fn last_command_deferral(&self) -> Option<ProcessInterruptionReason> {
+        self.last_deferral
+    }
+
+    /// Прервана ли команда посреди запроса агенту: тогда сторож снимает агента.
+    pub fn interrupted(&self) -> bool {
+        self.interrupted
+    }
+
+    fn exchange_run(
         &self,
         command: &str,
         policy: &WaitPolicy,
@@ -502,6 +601,7 @@ impl KeeperClient {
         }
     }
 
+    #[allow(dead_code, reason = "`agent hold` встраивает этап 4 #577")]
     pub fn hold(&self, holder: Holder) -> Result<Vec<Holder>, AgentError> {
         match self.exchange(&Request::Hold { holder })? {
             Frame::Holders { holders } => Ok(holders),
@@ -509,6 +609,7 @@ impl KeeperClient {
         }
     }
 
+    #[allow(dead_code, reason = "`agent release` встраивает этап 4 #577")]
     pub fn release(&self, holder: Holder) -> Result<Vec<Holder>, AgentError> {
         match self.exchange(&Request::Release { holder })? {
             Frame::Holders { holders } => Ok(holders),
@@ -543,6 +644,129 @@ impl KeeperClient {
                 }),
             }
         })
+    }
+}
+
+/// Ключи живых сторожей учётной записи и их записи: свой процесс по записи или запуск, который
+/// ведёт живой раннер. Читается под замком реестра.
+fn live_keys(state: &Path) -> Vec<(String, ServiceRecord)> {
+    let machine = machine_fingerprint();
+    let Ok(dirs) = std::fs::read_dir(state.join("agents")) else {
+        return Vec::new();
+    };
+    dirs.flatten()
+        .filter(|dir| dir.path().is_dir())
+        .filter_map(|dir| {
+            let key = dir.file_name().to_str()?.to_owned();
+            let paths =
+                crate::platform::service_record::ServicePaths::under(&dir.path(), super::SERVICE);
+            match observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
+                adopt_recorded_pid(record, &process_facts, machine.as_deref())
+            }) {
+                Observed::Own(record) | Observed::Starting(record) => Some((key, record)),
+                Observed::Nothing | Observed::Stale => None,
+            }
+        })
+        .collect()
+}
+
+/// Живые сторожа учётной записи с каналом, которому можно задать вопрос.
+pub fn live_keepers(state: &Path) -> Vec<LiveKeeper> {
+    let found = match lock_agent_registry(state) {
+        Ok(_registry) => live_keys(state),
+        Err(_) => return Vec::new(),
+    };
+    found
+        .into_iter()
+        .filter_map(|(key, record)| {
+            let keeper = record.pid?;
+            let home = KeeperHome::open(state, &key).ok()?;
+            Some(LiveKeeper {
+                client: KeeperClient {
+                    channel: home.channel(),
+                    home,
+                    digest: String::new(),
+                    keeper,
+                    reused: true,
+                    session: None,
+                    deferred: None,
+                    last_deferral: None,
+                    interrupted: false,
+                    runtime: runtime().ok()?,
+                },
+                key,
+            })
+        })
+        .collect()
+}
+
+/// Живые агенты базы `infobase` (путь в каноническом виде) с их состоянием. Состояние
+/// спрашивается под замком реестра: пока его держат, новый агент не поднимается.
+pub fn keepers_of(
+    state: &Path,
+    infobase: &str,
+) -> Vec<(LiveKeeper, Result<KeeperStatus, AgentError>)> {
+    let Ok(_registry) = lock_agent_registry(state) else {
+        return Vec::new();
+    };
+    live_keys(state)
+        .into_iter()
+        .filter_map(|(key, record)| {
+            record.agent.filter(|agent| agent.infobase == infobase)?;
+            let keeper = record.pid?;
+            let home = KeeperHome::open(state, &key).ok()?;
+            let client = KeeperClient {
+                channel: home.channel(),
+                home,
+                digest: String::new(),
+                keeper,
+                reused: true,
+                session: None,
+                deferred: None,
+                last_deferral: None,
+                interrupted: false,
+                runtime: runtime().ok()?,
+            };
+            let status = client.status();
+            Some((LiveKeeper { key, client }, status))
+        })
+        .collect()
+}
+
+/// Снимает живого агента ключа `key`, если он есть; ответ — был ли он.
+pub fn stop_keeper(state: &Path, key: &str) -> Result<bool, AgentError> {
+    match KeeperClient::attach(state, key) {
+        Ok(Some(keeper)) => keeper.stop().map(|()| true),
+        Ok(None) => Ok(false),
+        Err(KeeperStartError::Agent(error)) => Err(error),
+        Err(other) => Err(AgentError::Keeper {
+            detail: other.to_string(),
+        }),
+    }
+}
+
+/// Снимает простаивающего дольше всех живого агента без держателей, кроме своего ключа `own`;
+/// ответ — снят ли кто-то. Агента, который выполняет команду или подключён к базе, не трогает.
+fn evict_idle(state: &Path, own: &str) -> Result<bool, KeeperStartError> {
+    let idle = live_keepers(state)
+        .into_iter()
+        .filter(|keeper| keeper.key != own)
+        .filter_map(|keeper| {
+            let status = keeper.client.status().ok()?;
+            (!status.holds_the_infobase() && status.holders.is_empty())
+                .then_some((status.idle_ms, keeper))
+        })
+        .max_by_key(|(idle_ms, _)| *idle_ms);
+    let Some((_, keeper)) = idle else {
+        return Ok(false);
+    };
+    tracing::info!(key = %keeper.key, "removing an idle live agent to stay within the limit");
+    match keeper.client.stop() {
+        // Агент ушёл сам, пока его снимали: место освободилось и так.
+        Ok(()) | Err(AgentError::LiveAgentGone { .. } | AgentError::KeeperUnreachable { .. }) => {
+            Ok(true)
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -778,7 +1002,7 @@ mod tests {
             });
         });
         bound_rx.recv().unwrap();
-        let client = KeeperClient {
+        let mut client = KeeperClient {
             home,
             channel,
             digest: "digest".to_owned(),
@@ -788,6 +1012,9 @@ mod tests {
                 id: "session".to_owned(),
                 stream: BufReader::new(Box::new(tokio::io::duplex(64).0)),
             }),
+            deferred: None,
+            last_deferral: None,
+            interrupted: false,
             runtime: runtime().unwrap(),
         };
         let cancellation = tokio_util::sync::CancellationToken::new();
