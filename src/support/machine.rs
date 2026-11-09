@@ -240,19 +240,11 @@ pub mod account {
     use std::path::{Path, PathBuf};
 
     /// Overrides the account's state directory: tests give each run its own.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     pub const STATE_DIR_ENV: &str = "V8_RUNNER_STATE_DIR";
 
     /// Identifier of the OS account this process runs as: the SID string on Windows, the
     /// numeric uid on Unix. It never changes while the account exists, unlike its name.
     #[cfg(unix)]
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     pub fn account_id() -> std::io::Result<String> {
         // SAFETY: `getuid` takes nothing and cannot fail.
         Ok(unsafe { libc::getuid() }.to_string())
@@ -261,10 +253,6 @@ pub mod account {
     /// Identifier of the OS account this process runs as: the SID string on Windows, the
     /// numeric uid on Unix. It never changes while the account exists, unlike its name.
     #[cfg(windows)]
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     pub fn account_id() -> std::io::Result<String> {
         windows_token::sid_of(windows_token::Which::User)
     }
@@ -284,10 +272,6 @@ pub mod account {
         #[derive(Clone, Copy)]
         pub(super) enum Which {
             User,
-            #[cfg_attr(
-                not(test),
-                allow(dead_code, reason = "живой агент #577 — следующий этап")
-            )]
             Owner,
         }
 
@@ -377,10 +361,6 @@ pub mod account {
     /// `~/.local/state/v8-runner` on Unix. A relative override is an error: the caller named
     /// a directory and the runner would otherwise keep its state somewhere else. Relative
     /// system values are ignored, as the XDG specification asks.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     pub(super) fn state_dir_location(
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     ) -> std::io::Result<PathBuf> {
@@ -405,10 +385,6 @@ pub mod account {
     }
 
     /// The directory `V8_RUNNER_STATE_DIR` names, if set; a relative one is refused.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     fn state_dir_override(
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     ) -> std::io::Result<Option<PathBuf>> {
@@ -429,10 +405,6 @@ pub mod account {
 
     /// An absolute path from the environment variable `name`; a relative one names no
     /// location and is dropped, not resolved against the current directory.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     fn absolute_env(
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
         name: &str,
@@ -445,10 +417,6 @@ pub mod account {
     /// The state directory of this OS account, created owner-only when missing: records that
     /// outlive a command and do not belong to one working copy. An existing one must belong
     /// to the account; on Unix it is narrowed to 0700.
-    #[expect(
-        dead_code,
-        reason = "живой агент #577 — следующий этап; тесты не трогают каталог своей учётной записи"
-    )]
     pub fn account_state_dir() -> std::io::Result<PathBuf> {
         let dir = state_dir_location(&|name| std::env::var_os(name))?;
         ensure_private_dir(&dir)?;
@@ -459,10 +427,6 @@ pub mod account {
     /// it is a directory of this account, not a link: on Unix its uid is the account's and its
     /// mode is narrowed to 0700 through the opened directory itself; on Windows its owner is
     /// the token's user or the default owner it gives what it creates.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent)?;
@@ -522,10 +486,6 @@ pub mod account {
 
     /// The SID string of the owner of the file or directory at `path`.
     #[cfg(windows)]
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     fn windows_owner_of(path: &Path) -> std::io::Result<String> {
         use std::os::windows::ffi::OsStrExt as _;
         use windows_sys::Win32::Foundation::LocalFree;
@@ -573,10 +533,6 @@ pub mod account {
     /// a caller may hold any: each racer writes its own candidate, one publishes it without
     /// replacing another's, and the rest read what was published. The file is readable by
     /// the account only: the state directory is owner-only, and on Unix the file is 0600.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     pub fn account_salt(state: &Path) -> std::io::Result<[u8; SALT_LEN]> {
         let path = state.join(SALT_FILE);
         if let Some(salt) = read_salt(&path)? {
@@ -599,10 +555,6 @@ pub mod account {
 
     /// The salt in `path`; `None` when there is none yet. A file of another length is not a
     /// salt the runner wrote, and the runner refuses rather than replacing it.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     fn read_salt(path: &Path) -> std::io::Result<Option<[u8; SALT_LEN]>> {
         match std::fs::read(path) {
             Ok(bytes) => <[u8; SALT_LEN]>::try_from(bytes.as_slice())
@@ -628,10 +580,6 @@ pub mod account {
     /// account id and `parts`, as lowercase hex. Each part goes with its length, so no two
     /// different tuples give the same message. The key names a record without holding its
     /// parts: a connection string may carry a password.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     pub fn account_key(state: &Path, parts: &[&str]) -> std::io::Result<String> {
         let salt = account_salt(state)?;
         let account = account_id()?;
@@ -648,10 +596,6 @@ pub mod account {
     }
 
     /// HMAC-SHA256 (RFC 2104) over `sha2`, which the runner already carries.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "живой агент #577 — следующий этап")
-    )]
     pub(super) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         const BLOCK: usize = 64;

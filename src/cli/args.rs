@@ -126,6 +126,30 @@ pub enum Command {
     Status(StatusArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
+    /// The live Designer agent; hidden until it has commands of its own (#577)
+    #[command(hide = true)]
+    Agent(AgentArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// The keeper of one live agent: the runner starts it itself, with the start request on
+    /// stdin
+    #[command(hide = true)]
+    Keeper(AgentKeeperArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentKeeperArgs {
+    /// Key of the live agent: hexadecimal digits
+    #[arg(long, value_name = "HEX")]
+    pub key: String,
 }
 
 #[derive(Args, Debug)]

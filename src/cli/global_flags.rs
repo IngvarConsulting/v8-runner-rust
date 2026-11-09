@@ -324,6 +324,12 @@ const LEAVES: &[Leaf] = &[
         preview: Preview::Absent("the server starts nothing by itself"),
         base: Base::Resolves,
     },
+    // Сторожа запускает сам раннер: он держит агента, которого ему назвали, и базы не выбирает.
+    Leaf {
+        path: "agent keeper",
+        preview: Preview::Absent("the keeper of a live agent is started by the runner itself"),
+        base: Base::Ignores,
+    },
 ];
 
 fn leaf(path: &str) -> Option<&'static Leaf> {

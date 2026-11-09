@@ -98,6 +98,8 @@ fn a_service_starts_only_through_the_process_executor_mode() {
     const SPAWN_SERVICE_OWNERS: &[&str] = &[
         "src/platform/process.rs",
         "src/use_cases/managed_stand/mod.rs",
+        // Сторож живого агента — тоже служба, переживающая команду (#577).
+        "src/platform/agent_keeper/client.rs",
     ];
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for file in collect_rust_files(&repo_path("src")) {

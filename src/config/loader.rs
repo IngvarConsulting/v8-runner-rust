@@ -2984,6 +2984,7 @@ mod tests {
                 explicit: true,
                 bin: std::path::PathBuf::from("ragent"),
                 version: None,
+                agent: None,
             },
         )
         .unwrap();
@@ -3028,6 +3029,7 @@ mod tests {
                 explicit: true,
                 bin: std::path::PathBuf::from("ibsrv"),
                 version: None,
+                agent: None,
             },
         )
         .unwrap();
@@ -3064,6 +3066,7 @@ mod tests {
                 explicit: true,
                 bin: std::path::PathBuf::from("ibsrv"),
                 version: None,
+                agent: None,
             },
         )
         .unwrap();

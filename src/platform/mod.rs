@@ -1,5 +1,6 @@
 /// Designer agent driven through the system `ssh` client.
 pub mod agent;
+pub mod agent_keeper;
 /// Opening a URL in the user's browser.
 pub mod browser;
 pub mod connection;

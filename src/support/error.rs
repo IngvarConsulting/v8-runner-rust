@@ -488,7 +488,9 @@ impl From<AgentError> for AppError {
             | AgentError::Channel { .. }
             | AgentError::Launch(_)
             | AgentError::StartupTimedOut { .. }
-            | AgentError::ExitedBeforeSession { .. } => {
+            | AgentError::ExitedBeforeSession { .. }
+            | AgentError::LiveAgentGone { .. }
+            | AgentError::Keeper { .. } => {
                 Self::EnvironmentUnavailable(error.to_string())
             }
         }

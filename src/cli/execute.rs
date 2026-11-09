@@ -282,6 +282,7 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
+        Command::Agent(_) => unreachable!("agent commands are handled outside cli::execute"),
     }
 }
 
@@ -805,6 +806,7 @@ pub fn command_name(command: &Command) -> CommandName {
         },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
+        Command::Agent(_) => unreachable!("agent commands do not map to CLI command names"),
     }
 }
 

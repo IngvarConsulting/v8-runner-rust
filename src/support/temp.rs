@@ -87,11 +87,6 @@ pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
-    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, GetVolumeInformationW, GetVolumePathNameW,
     };
@@ -138,13 +133,35 @@ pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
         ));
     }
 
-    // Protected DACL: only the owner and LocalSystem can read/write the
-    // directory and its children. No inherited workspace ACL can widen it.
+    with_owner_only_security(|attributes| {
+        if unsafe { CreateDirectoryW(wide.as_ptr(), attributes) } != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    })?
+}
+
+/// Hands `create` security attributes that let only the owner and LocalSystem in: a protected
+/// DACL, so no inherited ACL can widen it. The one place that spells the owner-only descriptor:
+/// private directories and the live agent keeper's named pipe take it from here.
+#[cfg(windows)]
+pub fn with_owner_only_security<R>(
+    create: impl FnOnce(&windows_sys::Win32::Security::SECURITY_ATTRIBUTES) -> R,
+) -> std::io::Result<R> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
     let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is a null-terminated UTF-16 string; on success `descriptor` holds memory
+    // to `LocalFree`, freed below once.
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
@@ -161,14 +178,10 @@ pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    let created = unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } != 0;
-    let result = if created {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    };
+    let result = create(&attributes);
+    // SAFETY: allocated by the conversion above; `attributes` is not used after this.
     unsafe { LocalFree(descriptor) };
-    result
+    Ok(result)
 }
 
 #[cfg(not(any(unix, windows)))]

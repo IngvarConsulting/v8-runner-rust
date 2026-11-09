@@ -112,6 +112,25 @@ pub struct ServiceRecord {
     /// Каталог утилит: `status` и `stop` работают, даже если `tools.postgres.path` уже не объявлен.
     pub bin: PathBuf,
     pub version: Option<String>,
+    /// Живой агент Конфигуратора, которого держит этот процесс-сторож: у служб стенда его нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<LiveAgentFacts>,
+}
+
+/// Что запись сторожа говорит о его агенте: по этому команда находит агента и сверяет, тот ли
+/// он (`INV.PLATFORM.A-LIVE-AGENT-IS-TOLD-APART-BY-ITS-RECORD`). «Занят» здесь нет: это знает
+/// и отвечает по `status` только сторож.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LiveAgentFacts {
+    pub pid: u32,
+    /// Время старта процесса агента в единицах системы ([`ProcessFacts::started`]).
+    pub started: Option<u64>,
+    /// Отпечаток ключа хоста, на котором закреплена сессия сторожа.
+    pub fingerprint: Option<String>,
+    /// Канал сторожа: имя именованного канала Windows или путь сокета Unix.
+    pub channel: String,
+    /// Путь базы в каноническом виде: по нему находят живых агентов одной базы.
+    pub infobase: String,
 }
 
 /// Закреплённые порты живут отдельно от записи о запущенной службе: её снятие и замена их не
@@ -379,6 +398,7 @@ mod tests {
             explicit: true,
             bin: PathBuf::from("bin"),
             version: None,
+            agent: None,
         }
     }
 

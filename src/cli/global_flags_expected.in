@@ -31,6 +31,7 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "diff",
     "mcp serve stdio",
     "mcp serve http",
+    "agent keeper",
 ];
 
 /// Листья, объявившие `Preview::Runs`: ключ превью они исполняют, и поведение каждого
@@ -77,7 +78,7 @@ const LEAVES_WITH_PREVIEW: &[&str] = &[
 
 /// Листья, объявившие `Base::Ignores`: базы они не выбирают и ключ обязаны отвергнуть.
 #[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
-const LEAVES_IGNORING_THE_BASE: &[&str] = &["version", "clone", "make", "convert"];
+const LEAVES_IGNORING_THE_BASE: &[&str] = &["version", "clone", "make", "convert", "agent keeper"];
 
 /// Листья, объявившие `Base::Declares`: базу они объявляют сами, поэтому ключ принимает
 /// строку подключения, а имя отвергает.

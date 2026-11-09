@@ -10,10 +10,6 @@ use crate::support::machine::account::ensure_private_dir;
 
 /// The directory of live Designer agents under the account's state directory `state`,
 /// created owner-only when missing.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "живой агент #577 — следующий этап")
-)]
 pub fn agents_dir(state: &Path) -> std::io::Result<PathBuf> {
     let dir = state.join("agents");
     ensure_private_dir(&dir)?;
@@ -23,10 +19,6 @@ pub fn agents_dir(state: &Path) -> std::io::Result<PathBuf> {
 /// Takes the account's agent registry lock, `<state>/agents/registry.lock`, waiting for
 /// another holder. The lock is not reentrant: callers hold it only to read and write records,
 /// never across a start, and call nothing under it that takes it again.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "живой агент #577 — следующий этап")
-)]
 pub fn lock_agent_registry(state: &Path) -> std::io::Result<AdvisoryLockGuard> {
     acquire_advisory_lock(&agents_dir(state)?.join("registry.lock"))
 }
