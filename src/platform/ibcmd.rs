@@ -654,12 +654,7 @@ impl<'a> IbcmdDsl<'a> {
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
-        // Цель может быть канонической, а `ibcmd` не находит путь с приставкой `\\?\`.
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_file)
-                .display()
-                .to_string(),
-        );
+        args.push(target_file.display().to_string());
         self.run(&args)
     }
 
@@ -1266,7 +1261,19 @@ mod tests {
             _policy: &ProcessExecutionPolicy,
         ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
         {
-            self.requests.borrow_mut().push(request.clone());
+            let mut seen = request.clone();
+            seen.args = crate::support::path::child_line(&request.args, None)
+                .map_err(
+                    |source| crate::platform::process::ProcessError::UnexpressiblePath {
+                        cmd: String::new(),
+                        source,
+                    },
+                )?
+                .args
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect();
+            self.requests.borrow_mut().push(seen);
             if let Some(code) = self.spawn_error {
                 return Err(crate::platform::process::ProcessError::SpawnFailed {
                     cmd: request.args.join(" "),

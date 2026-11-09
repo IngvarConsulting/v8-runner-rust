@@ -135,6 +135,62 @@ fn a_service_starts_only_through_the_process_executor_mode() {
     }
 }
 
+/// Приставку `\\?\` у пути для процесса снимает один запуск, а не адаптер
+/// (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+#[test]
+fn a_process_argument_loses_the_verbatim_prefix_only_at_the_launch() {
+    // Reintroduction guard (#580): приставку `\\?\` у пути для процесса платформы снимал каждый
+    // адаптер сам, и путь, который адаптер забыл, доходил до Конфигуратора с приставкой («Файл не
+    // обнаружен»). Владелец один — `support::path::child_line`, его зовут все три запуска; в
+    // рабочем коде `src/platform/` нет ни снятия приставки, ни её самой — под каким угодно именем.
+    const LAUNCHES: &[&str] = &[
+        "src/platform/process.rs",
+        "src/platform/interactive.rs",
+        "src/platform/service.rs",
+    ];
+    // Поиск утилит хранит найденный путь исполняемого файла без приставки — это место и путь
+    // программы, а не аргумент.
+    const LOCATIONS: &[&str] = &["src/platform/locator.rs", "src/platform/utilities.rs"];
+    let verbatim = ["\\\\?\\", "\\\\\\\\?\\\\"];
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in collect_rust_files(&repo_path("src/platform")) {
+        let relative = file
+            .strip_prefix(repo_root)
+            .expect("relative path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = fs::read_to_string(&file).expect("source");
+        // Только рабочий код: тесты адаптеров передают пути с приставкой нарочно.
+        let production = without_test_modules(&source);
+        let text = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if LOCATIONS.contains(&relative.as_str()) {
+            continue;
+        }
+        for forbidden in [
+            "normalize_windows_verbatim_path",
+            "strip_windows_verbatim_prefix",
+        ]
+        .into_iter()
+        .chain(verbatim)
+        {
+            assert!(
+                !text.contains(forbidden),
+                "{relative} handles the verbatim prefix past the launch: {forbidden}"
+            );
+        }
+        if LAUNCHES.contains(&relative.as_str()) {
+            assert!(
+                text.contains("child_line("),
+                "{relative} launches a process without the verbatim owner"
+            );
+        }
+    }
+}
+
 /// Приставку `\\?\` снимает один проход на выходе: новый писатель в stdout обошёл бы его.
 /// Журнал действий ответом не считается.
 #[test]
@@ -6539,4 +6595,33 @@ fn the_session_stamp_guard_rejects_each_real_entry_without_its_stamp() {
         14,
         "the stamped entry surface changed: {checked:?}"
     );
+}
+
+/// Исходник без тел модулей `mod tests { … }` на любой глубине: тесты нарочно передают пути
+/// с приставкой. Скобки внутри тела считаются попарно, этого хватает для тестового кода.
+fn without_test_modules(source: &str) -> String {
+    let mut kept = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(at) = rest.find("mod tests {") {
+        kept.push_str(&rest[..at]);
+        let body = &rest[at + "mod tests ".len()..];
+        let mut depth = 0usize;
+        let mut end = body.len();
+        for (index, ch) in body.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = index + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &body[end..];
+    }
+    kept.push_str(rest);
+    kept
 }

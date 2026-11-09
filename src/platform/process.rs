@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Read;
 use std::num::NonZeroI32;
 use std::path::PathBuf;
@@ -428,6 +429,15 @@ pub enum ProcessError {
 
     #[error("managed process spawn is not supported for '{cmd}'")]
     ManagedSpawnUnsupported { cmd: String },
+
+    /// Путь аргумента не выразить без приставки `\\?\`: процесс не запускался
+    /// (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+    #[error("refused to start '{cmd}': {source}")]
+    UnexpressiblePath {
+        cmd: String,
+        #[source]
+        source: crate::support::path::UnexpressiblePath,
+    },
 }
 
 /// Boundary for synchronous and detached process execution.
@@ -1041,20 +1051,20 @@ fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<Chil
 }
 
 #[cfg(windows)]
-fn append_args(cmd: &mut Command, request: &ProcessRequest) {
+fn append_args(cmd: &mut Command, args: &[Cow<'_, str>], raw: &[usize]) {
     use std::os::windows::process::CommandExt;
-    for (index, arg) in request.args.iter().enumerate() {
-        if request.windows_verbatim_args.contains(&index) {
-            cmd.raw_arg(arg);
+    for (index, arg) in args.iter().enumerate() {
+        if raw.contains(&index) {
+            cmd.raw_arg(arg.as_ref());
         } else {
-            cmd.arg(arg);
+            cmd.arg(arg.as_ref());
         }
     }
 }
 
 #[cfg(not(windows))]
-fn append_args(cmd: &mut Command, request: &ProcessRequest) {
-    cmd.args(&request.args);
+fn append_args(cmd: &mut Command, args: &[Cow<'_, str>], _raw: &[usize]) {
+    cmd.args(args.iter().map(AsRef::<str>::as_ref));
 }
 
 fn build_command(
@@ -1062,11 +1072,18 @@ fn build_command(
     io_mode: ProcessIoMode,
     rendered_command: &str,
 ) -> Result<Command, ProcessError> {
+    // Процесс получает пути без приставки `\\?\`
+    // (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+    let line = crate::support::path::child_line(&request.args, request.workdir.as_deref())
+        .map_err(|source| ProcessError::UnexpressiblePath {
+            cmd: rendered_command.to_owned(),
+            source,
+        })?;
     let mut cmd = Command::new(&request.program);
     // This private host/runner protocol must never become a child's launch policy.
     cmd.env_remove("V8_RUNNER_CLIENT_OWNER");
-    append_args(&mut cmd, request);
-    if let Some(workdir) = &request.workdir {
+    append_args(&mut cmd, &line.args, &request.windows_verbatim_args);
+    if let Some(workdir) = &line.workdir {
         cmd.current_dir(workdir);
     }
     cmd.stdin(Stdio::null());
@@ -1509,9 +1526,21 @@ fn terminate_windows_process_tree(pid: u32) {
 }
 
 /// Показ команды для отказа и журнала. Секреты маскирует
-/// [`crate::platform::secrets`] — единственный владелец правила.
+/// [`crate::platform::secrets`] — единственный владелец правила. Аргумент показан таким, каким
+/// его получит процесс: без приставки `\\?\` у пути. Аргумент, который процесс не получит,
+/// показан как есть — его называет отказ запуска.
 fn render_command(request: &ProcessRequest) -> String {
-    render_masked_command(&request.program, &request.args)
+    match crate::support::path::child_line(&request.args, None) {
+        Ok(line) => render_masked_command(
+            &request.program,
+            &line
+                .args
+                .into_iter()
+                .map(Cow::into_owned)
+                .collect::<Vec<_>>(),
+        ),
+        Err(_) => render_masked_command(&request.program, &request.args),
+    }
 }
 
 /// Тестовая отметка: раннер отложил прерывание критического процесса. Тест ждёт её, а не
@@ -1769,6 +1798,39 @@ mod tests {
             startup_probe: None,
             windows_verbatim_args: Vec::new(),
         }
+    }
+
+    /// Путь доходит до процесса без приставки `\\?\`, в том числе внутри значения, а путь тома
+    /// без буквы отказывает до запуска
+    /// (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+    #[cfg(windows)]
+    #[test]
+    fn a_process_receives_paths_without_the_verbatim_prefix() {
+        let mut request = plain_request(PathBuf::from("cmd.exe"));
+        request.args = vec![
+            "/d".into(),
+            "/c".into(),
+            "echo".into(),
+            r"\\?\C:\Каталог\конфигурация.cf".into(),
+            r"File=\\?\UNC\srv\share\ib".into(),
+        ];
+        let output = super::build_command(&request, super::ProcessIoMode::Captured, "")
+            .expect("command")
+            .output()
+            .expect("cmd runs");
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(!printed.contains(r"\\?\"), "{printed}");
+        assert!(printed.contains(r"File=\\srv\share\ib"), "{printed}");
+
+        request.args = vec![r"\\?\Volume{0b2c1f4e-1111-2222-3333-444455556666}\x.cf".into()];
+        let refused = super::build_command(&request, super::ProcessIoMode::Captured, "cmd")
+            .err()
+            .expect("a volume path is refused before the start");
+        assert!(
+            matches!(&refused, ProcessError::UnexpressiblePath { source, .. }
+                if source.path.contains("Volume{")),
+            "{refused}"
+        );
     }
 
     /// A verbatim argument reaches the child's command line exactly as encoded:

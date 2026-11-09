@@ -412,7 +412,9 @@ pub(super) fn enterprise_failure(error: EnterpriseError) -> EnterpriseFailure {
             TestErrorKind::EnterpriseStderrLogIo
         }
         AppError::PlatformProcess(
-            ProcessError::SpawnFailed { .. } | ProcessError::ManagedSpawnUnsupported { .. },
+            ProcessError::SpawnFailed { .. }
+            | ProcessError::ManagedSpawnUnsupported { .. }
+            | ProcessError::UnexpressiblePath { .. },
         ) => TestErrorKind::EnterpriseSpawnFailed,
         // Сюда не доходит ничто: отмену разобрали выше, а ошибка прогона — всегда ошибка
         // процесса. Новый вид ошибки процесса должен получить здесь свою строку.

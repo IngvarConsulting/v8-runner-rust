@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::domain::execution::ExecutionStatus;
 use crate::domain::next_step::NextStep;
-use crate::platform::process::WorkGiven;
+use crate::platform::process::{ProcessError, WorkGiven};
 use crate::support::error::{AppError, CancelledAt, CapabilityReason};
 use crate::use_cases::interruption::CANCELLED_ERROR_CODE;
 
@@ -63,7 +63,14 @@ impl UseCaseErrorKind {
             AppError::Cancelled { at, .. } => Self::Cancelled(*at),
             AppError::TimedOut(_) => Self::TimedOut,
             AppError::InvalidOutput(_) => Self::InvalidOutput,
-            AppError::Validation(_)
+            // Путь, который процессу без приставки `\\?\` не передать, — вход команды, а не сбой
+            // платформы: процесс не запускался.
+            AppError::PlatformProcess(ProcessError::UnexpressiblePath { .. })
+            | AppError::PlatformProcessContext {
+                source: ProcessError::UnexpressiblePath { .. },
+                ..
+            }
+            | AppError::Validation(_)
             | AppError::ValidationIbcmd(_)
             | AppError::ValidationIbcmdContext { .. }
             | AppError::Config(_)

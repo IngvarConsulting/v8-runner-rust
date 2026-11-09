@@ -418,6 +418,68 @@ fn names_a_drive(text: &str, backslash: &str) -> bool {
         && text[2..].starts_with(backslash)
 }
 
+/// Путь, который процессу без приставки `\\?\` не передать (`\\?\Volume{…}\`). Называет только
+/// сам путь, а не аргумент целиком: в том же аргументе бывает пароль строки соединения.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the path '{path}' cannot be passed to a process without the \\\\?\\ prefix")]
+pub struct UnexpressiblePath {
+    /// Путь от приставки до `"`, `;` или конца аргумента.
+    pub path: String,
+}
+
+/// Аргументы и рабочий каталог дочернего процесса в том виде, в каком он их получит.
+#[derive(Debug)]
+pub struct ChildLine<'a> {
+    pub args: Vec<Cow<'a, str>>,
+    pub workdir: Option<Cow<'a, Path>>,
+}
+
+/// Единственный владелец правила для всех запусков раннера
+/// (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`): аргументы и рабочий
+/// каталог без приставки `\\?\` у путей в них. Конфигуратор и `ibcmd` путь с приставкой не
+/// находят («Файл не обнаружен»), а канонический путь раннера её несёт. Путь ищется по всему
+/// тексту аргумента, поэтому `File="\\?\E:\ib"` и `--db-path=\\?\E:\ib` тоже очищаются. Путь,
+/// который без приставки не выразить, — отказ: такой процесс не запускают. Вне Windows такая
+/// запись — допустимое имя файла, и строка не меняется. Рабочий каталог не в UTF-8 остаётся как
+/// есть: приставку в нём текстом не распознать.
+pub fn child_line<'a>(
+    args: &'a [String],
+    workdir: Option<&'a Path>,
+) -> Result<ChildLine<'a>, UnexpressiblePath> {
+    let args = args
+        .iter()
+        .map(|arg| child_text(arg))
+        .collect::<Result<Vec<_>, _>>()?;
+    let workdir = match workdir {
+        None => None,
+        Some(dir) => Some(match dir.to_str() {
+            None => Cow::Borrowed(dir),
+            Some(text) => match child_text(text)? {
+                Cow::Borrowed(_) => Cow::Borrowed(dir),
+                Cow::Owned(plain) => Cow::Owned(PathBuf::from(plain)),
+            },
+        }),
+    };
+    Ok(ChildLine { args, workdir })
+}
+
+fn child_text(text: &str) -> Result<Cow<'_, str>, UnexpressiblePath> {
+    if !cfg!(windows) {
+        return Ok(Cow::Borrowed(text));
+    }
+    let plain = without_verbatim_prefixes(text, r"\");
+    match plain.find(VERBATIM_PREFIX) {
+        None => Ok(plain),
+        Some(at) => {
+            let rest = &plain[at..];
+            let end = rest.find(['"', ';']).unwrap_or(rest.len());
+            Err(UnexpressiblePath {
+                path: rest[..end].to_owned(),
+            })
+        }
+    }
+}
+
 /// Путь не в UTF-8 возвращается как есть: через `display()` он потерял бы байты, а
 /// префикс `\\?\` у такого пути не распознать текстом.
 pub fn normalize_windows_verbatim_path(path: &Path) -> PathBuf {
@@ -724,6 +786,51 @@ mod tests {
             resolved(r"E:\proj", r"D:\other\.\va.epf"),
             r"D:\other\va.epf"
         );
+    }
+
+    /// Аргумент процесса теряет приставку у пути и там, где путь — часть значения
+    /// (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+    #[test]
+    #[cfg(windows)]
+    fn a_process_argument_names_a_path_without_the_verbatim_prefix() {
+        let args: Vec<String> = [
+            r"\\?\C:\Каталог с пробелами\конфигурация.cf",
+            r"\\?\UNC\srv\share\база.dt",
+            r#"File="\\?\E:\ib""#,
+            r"--db-path=\\?\E:\ib",
+            r"/DisableStartupDialogs",
+        ]
+        .map(str::to_owned)
+        .into();
+        let line = super::child_line(&args, Some(std::path::Path::new(r"\\?\E:\work")))
+            .expect("expressible");
+        assert_eq!(
+            line.args,
+            [
+                r"C:\Каталог с пробелами\конфигурация.cf",
+                r"\\srv\share\база.dt",
+                r#"File="E:\ib""#,
+                r"--db-path=E:\ib",
+                r"/DisableStartupDialogs",
+            ]
+        );
+        assert_eq!(
+            line.workdir.as_deref(),
+            Some(std::path::Path::new(r"E:\work"))
+        );
+    }
+
+    /// Путь тома без буквы без приставки не выразить: процесс такой аргумент не получает, а отказ
+    /// называет путь, но не пароль из того же аргумента.
+    #[test]
+    #[cfg(windows)]
+    fn a_volume_path_cannot_reach_a_process() {
+        let volume = r"\\?\Volume{0b2c1f4e-1111-2222-3333-444455556666}\ib";
+        let args = vec![format!(r#"File="{volume}";Usr="u";Pwd="secret""#)];
+        let refused = super::child_line(&args, None).expect_err("a volume path is refused");
+        assert_eq!(refused.path, volume);
+        assert!(!refused.to_string().contains("secret"), "{refused}");
+        assert!(super::child_line(&[], Some(std::path::Path::new(volume))).is_err());
     }
 
     #[test]
