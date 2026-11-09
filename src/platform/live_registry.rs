@@ -12,7 +12,7 @@ use crate::support::machine::account::ensure_private_dir;
 /// created owner-only when missing.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "живой агент #577 — следующий этап")
+    allow(dead_code, reason = "живой агент #577 — следующий этап")
 )]
 pub fn agents_dir(state: &Path) -> std::io::Result<PathBuf> {
     let dir = state.join("agents");

@@ -242,7 +242,7 @@ pub mod account {
     /// Overrides the account's state directory: tests give each run its own.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     pub const STATE_DIR_ENV: &str = "V8_RUNNER_STATE_DIR";
 
@@ -251,7 +251,7 @@ pub mod account {
     #[cfg(unix)]
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     pub fn account_id() -> std::io::Result<String> {
         // SAFETY: `getuid` takes nothing and cannot fail.
@@ -263,7 +263,7 @@ pub mod account {
     #[cfg(windows)]
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     pub fn account_id() -> std::io::Result<String> {
         windows_token::sid_of(windows_token::Which::User)
@@ -286,7 +286,7 @@ pub mod account {
             User,
             #[cfg_attr(
                 not(test),
-                expect(dead_code, reason = "живой агент #577 — следующий этап")
+                allow(dead_code, reason = "живой агент #577 — следующий этап")
             )]
             Owner,
         }
@@ -379,7 +379,7 @@ pub mod account {
     /// system values are ignored, as the XDG specification asks.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     pub(super) fn state_dir_location(
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
@@ -407,7 +407,7 @@ pub mod account {
     /// The directory `V8_RUNNER_STATE_DIR` names, if set; a relative one is refused.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     fn state_dir_override(
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
@@ -431,7 +431,7 @@ pub mod account {
     /// location and is dropped, not resolved against the current directory.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     fn absolute_env(
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
@@ -461,7 +461,7 @@ pub mod account {
     /// the token's user or the default owner it gives what it creates.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
         if let Some(parent) = dir.parent() {
@@ -524,7 +524,7 @@ pub mod account {
     #[cfg(windows)]
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     fn windows_owner_of(path: &Path) -> std::io::Result<String> {
         use std::os::windows::ffi::OsStrExt as _;
@@ -575,7 +575,7 @@ pub mod account {
     /// the account only: the state directory is owner-only, and on Unix the file is 0600.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     pub fn account_salt(state: &Path) -> std::io::Result<[u8; SALT_LEN]> {
         let path = state.join(SALT_FILE);
@@ -601,7 +601,7 @@ pub mod account {
     /// salt the runner wrote, and the runner refuses rather than replacing it.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     fn read_salt(path: &Path) -> std::io::Result<Option<[u8; SALT_LEN]>> {
         match std::fs::read(path) {
@@ -650,7 +650,7 @@ pub mod account {
     /// HMAC-SHA256 (RFC 2104) over `sha2`, which the runner already carries.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "живой агент #577 — следующий этап")
+        allow(dead_code, reason = "живой агент #577 — следующий этап")
     )]
     pub(super) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
         use sha2::{Digest, Sha256};
