@@ -904,6 +904,11 @@ mod imp {
                 .and_then(|()| input.write_all(b"\n"));
             if let Err(error) = written {
                 if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    // Без pid в ответе запись о службе не появится, и снять её потом будет
+                    // некому: служба снимается здесь же и не остаётся зомби.
+                    drop(input);
+                    let _ = child.kill();
+                    let _ = child.wait();
                     return Err(error.into());
                 }
             }
@@ -959,8 +964,21 @@ mod imp {
         let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
         Some(ProcessFacts {
             started,
-            image: super::image_name(&exe),
+            image: super::image_name(&without_deleted_mark(exe)),
         })
+    }
+
+    /// Путь образа из `/proc/<pid>/exe` без приписки ` (deleted)`, которую ядро ставит, когда
+    /// файл образа заменён или удалён после старта: процесс остаётся тем же.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn without_deleted_mark(exe: std::path::PathBuf) -> std::path::PathBuf {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        const MARK: &[u8] = b" (deleted)";
+        match exe.as_os_str().as_bytes().strip_suffix(MARK) {
+            Some(kept) => std::ffi::OsString::from_vec(kept.to_vec()).into(),
+            None => exe,
+        }
     }
 
     /// Факты о процессе по `proc_pidinfo`; время старта — микросекунды от эпохи.
@@ -1098,6 +1116,23 @@ mod imp {
             ));
         }
 
+        #[test]
+        fn a_replaced_image_keeps_its_name() {
+            use std::path::PathBuf;
+            assert_eq!(
+                without_deleted_mark(PathBuf::from("/opt/v8-runner/keeper (deleted)")),
+                PathBuf::from("/opt/v8-runner/keeper")
+            );
+            assert_eq!(
+                without_deleted_mark(PathBuf::from("/usr/bin/sleep")),
+                PathBuf::from("/usr/bin/sleep")
+            );
+            assert_eq!(
+                without_deleted_mark(PathBuf::from("/tmp/(deleted)")),
+                PathBuf::from("/tmp/(deleted)")
+            );
+        }
+
         #[cfg(any(target_os = "linux", target_vendor = "apple"))]
         #[test]
         fn a_process_is_known_by_its_start_and_image_and_a_gone_one_is_not() {
@@ -1107,9 +1142,17 @@ mod imp {
             assert!(facts.started > 0, "{facts:?}");
             assert_eq!(process_facts(std::process::id()), Some(facts));
 
-            let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+            // `sleep` бывает ссылкой (на busybox, coreutils): образ — файл, куда она ведёт.
+            let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|dir| dir.join("sleep"))
+                .find(|path| path.is_file())
+                .expect("sleep on PATH");
+            let mut child = Command::new(&sleep).arg("30").spawn().unwrap();
             let child_facts = process_facts(child.id()).unwrap();
-            assert_eq!(child_facts.image, "sleep");
+            assert_eq!(
+                child_facts.image,
+                super::super::image_name(&std::fs::canonicalize(&sleep).unwrap())
+            );
             child.kill().unwrap();
             child.wait().unwrap();
             assert_eq!(process_facts(child.id()), None);

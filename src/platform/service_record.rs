@@ -318,7 +318,8 @@ mod tests {
     /// Защита от повторения: запись о процессе, переживающем команду, одна. Копия носителя
     /// (`ServicePaths`, `ServiceRecord`, отпечаток машины) под стендом уже жила мёртвым файлом
     /// `managed_stand/record.rs` (#577); живой агент берёт этот носитель с другим корнем
-    /// (`ServicePaths::under`), а не заводит свой.
+    /// (`ServicePaths::under`), а не заводит свой. Защита сравнивает по именам: копию под другим
+    /// именем она не увидит, такую ловит ревью.
     #[test]
     fn the_process_record_has_one_owner() {
         let offenders: Vec<String> = source_files()

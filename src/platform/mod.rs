@@ -20,6 +20,8 @@ pub mod ibcmd;
 /// `ibsrv` the runner starts itself.
 pub mod ibsrv;
 pub mod interactive;
+/// The registry of live Designer agents of this OS account.
+pub mod live_registry;
 pub mod locator;
 /// PostgreSQL build for 1C: utility arguments and data directory files.
 pub mod postgres;
