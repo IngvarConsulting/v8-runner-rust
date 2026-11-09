@@ -802,7 +802,7 @@ fn run_dump_selected(
                     set,
                     &config.work_path,
                     watch.as_ref(),
-                    &|| context.interruption().is_some(),
+                    &|| crate::use_cases::interruption::interruption_pending(context),
                     || {
                         if context.external_full_pull().is_some() {
                             None

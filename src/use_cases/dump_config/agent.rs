@@ -341,7 +341,7 @@ fn dump_through(
                 Some(set),
                 &config.work_path,
                 watch.as_ref(),
-                &|| context.interruption().is_some(),
+                &|| crate::use_cases::interruption::interruption_pending(context),
                 || generation_id(handle.session(), extension, wait).ok(),
             );
             merge_optional_messages(
