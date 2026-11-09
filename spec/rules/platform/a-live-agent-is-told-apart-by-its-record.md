@@ -6,7 +6,8 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
 
 # Живой агент свой, только если сошлась его запись
 
-Живого агента раннер находит по записи в `workPath`. Агент считается своим, только если
+Живого агента раннер находит по его записи в каталоге состояния учётной записи ОС
+(`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`). Агент считается своим, только если
 выполнены все условия:
 
 - его процесс свой по записи целиком (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`);

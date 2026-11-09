@@ -12,5 +12,5 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
 Агента, который выполняет команду, он не снимает. Если таких
 нет, `agent hold` отказывает с кодом `agent_limit`, платформу не запускает и называет живых
 агентов с их держателями. Подсчёт идёт под замком учётной записи на машине, так что одновременные `hold` вместе предел не превысят. Коды
-`agent_limit` и `live_agent_off` войдут в таблицу и схему `CTR.WIRE.COMMAND-ENVELOPE` вместе с
+`agent_limit`, `live_agent_off` и `live_agent_job` войдут в таблицу и схему `CTR.WIRE.COMMAND-ENVELOPE` вместе с
 реализацией, со следующей версией формы.
