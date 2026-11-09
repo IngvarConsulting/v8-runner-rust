@@ -44,6 +44,59 @@ impl StorageSnapshot {
     }
 }
 
+/// The rows one commit changes, taken against the memory of the generation it expects (#576).
+#[derive(Debug, Clone, Default)]
+pub struct StorageDelta {
+    /// Files remembered anew or again; a row is written only where the stored one differs.
+    pub upserts: HashMap<String, StoredFileState>,
+    /// Files forgotten.
+    pub removals: Vec<String>,
+}
+
+/// Rows of the file tables read and written by the current thread, so a test can prove which
+/// rows a commit touched (#576). Counted where a row is read or written, never by timing.
+#[cfg(test)]
+pub(crate) mod row_audit {
+    use std::cell::Cell;
+
+    thread_local! {
+        static READ: Cell<u64> = const { Cell::new(0) };
+        static WRITTEN: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Rows read and written since the previous call.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Rows {
+        pub(crate) read: u64,
+        pub(crate) written: u64,
+    }
+
+    pub(super) fn read() {
+        READ.with(|rows| rows.set(rows.get() + 1));
+    }
+
+    pub(super) fn written() {
+        WRITTEN.with(|rows| rows.set(rows.get() + 1));
+    }
+
+    /// The rows counted since the previous call; the count starts again.
+    pub(crate) fn take() -> Rows {
+        Rows {
+            read: READ.with(|rows| rows.replace(0)),
+            written: WRITTEN.with(|rows| rows.replace(0)),
+        }
+    }
+}
+
+#[cfg(not(test))]
+mod row_audit {
+    #[inline(always)]
+    pub(super) fn read() {}
+
+    #[inline(always)]
+    pub(super) fn written() {}
+}
+
 /// What the storage remembers, read without its file rows.
 #[derive(Debug, Clone, Default)]
 pub struct StorageSummary {
@@ -156,7 +209,9 @@ impl HashStorage {
         {
             let (k, mtime) =
                 item.map_err(|e| map_storage_error(&self.path, "read mtime row", e))?;
+            row_audit::read();
             let rel = k.value().to_owned();
+            row_audit::read();
             let hash = hash_tbl
                 .get(rel.as_str())
                 .map_err(|e| map_storage_error(&self.path, "read hash row", e))?
@@ -180,6 +235,7 @@ impl HashStorage {
             .map_err(|e| map_storage_error(&self.path, "iterate hash table", e))?
         {
             let (k, _) = item.map_err(|e| map_storage_error(&self.path, "read hash row", e))?;
+            row_audit::read();
             let rel = k.value().to_owned();
             if !entries.contains_key(&rel) {
                 return Err(StorageError::Recoverable {
@@ -198,12 +254,70 @@ impl HashStorage {
     }
 
     /// Persist a full snapshot if the caller still owns the expected generation.
+    ///
+    /// Every key of both tables is read: an orphan row in either one is removed even when the
+    /// two tables have the same length (#571). Full pulls and full rescans commit this way.
     pub fn commit_snapshot_with_identity(
         &self,
         snapshot: &HashMap<String, StoredFileState>,
         watermark: u64,
         expected_generation: u64,
         identity: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.commit_rows(watermark, expected_generation, identity, |mtime, hash| {
+            sync_file_tables(&self.path, mtime, hash, snapshot)
+        })
+    }
+
+    /// Persist only the rows a delta names if the caller still owns the expected generation:
+    /// after a change of one file the other rows are neither read nor written (#576).
+    ///
+    /// The delta is taken against the memory of `expected_generation`, so with the generation
+    /// unchanged it leaves the same rows a full commit of the whole new snapshot leaves. Tables
+    /// of different length — damage from outside — are reconciled whole first, so an orphan
+    /// row does not outlive the commit (#571). An orphan next to a missing row of the other
+    /// table keeps the lengths equal and is not seen here: the next analysis reads every row,
+    /// reports it as recoverable and falls back to a full load, whose commit repairs it.
+    pub fn commit_delta_with_identity(
+        &self,
+        delta: &StorageDelta,
+        watermark: u64,
+        expected_generation: u64,
+        identity: Option<&str>,
+    ) -> Result<(), StorageError> {
+        use redb::ReadableTableMetadata;
+
+        self.commit_rows(watermark, expected_generation, identity, |mtime, hash| {
+            let mtime_rows = mtime
+                .len()
+                .map_err(|e| map_storage_error(&self.path, "count mtime rows", e))?;
+            let hash_rows = hash
+                .len()
+                .map_err(|e| map_storage_error(&self.path, "count hash rows", e))?;
+            if mtime_rows != hash_rows {
+                remove_orphan_rows(&self.path, mtime, hash)?;
+            }
+            for key in &delta.removals {
+                remove_row(&self.path, mtime, hash, key)?;
+            }
+            for (key, state) in &delta.upserts {
+                write_row(&self.path, mtime, hash, key, state)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// One write transaction: the generation check, the file rows `rows` writes, the identity,
+    /// the watermark and the next generation.
+    fn commit_rows(
+        &self,
+        watermark: u64,
+        expected_generation: u64,
+        identity: Option<&str>,
+        rows: impl FnOnce(
+            &mut redb::Table<&str, u64>,
+            &mut redb::Table<&str, &str>,
+        ) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
         self.ensure_parent_dir()?;
         let db = Database::create(&self.path).map_err(|e| map_database_error(&self.path, e))?;
@@ -234,7 +348,7 @@ impl HashStorage {
             let mut hash = tx
                 .open_table(FILES_HASH)
                 .map_err(|e| map_table_error(&self.path, e))?;
-            sync_file_tables(&self.path, &mut mtime, &mut hash, snapshot)?;
+            rows(&mut mtime, &mut hash)?;
             if let Some(identity) = identity {
                 tx.open_table(IDENTITY)
                     .map_err(|e| map_table_error(&self.path, e))?
@@ -393,55 +507,116 @@ fn sync_file_tables(
 ) -> Result<(), StorageError> {
     // Keys of both tables: an orphan row in either one is removed, so every commit leaves the
     // two tables with the same keys even after outside damage the summary cannot see (#571).
-    let mut keys: HashSet<String> = HashSet::new();
+    let (mtime_keys, hash_keys) = table_keys(path, mtime, hash)?;
+    for key in mtime_keys.union(&hash_keys) {
+        if !snapshot.contains_key(key) {
+            remove_row(path, mtime, hash, key)?;
+        }
+    }
+
+    // Only rows that differ are written: after a change of one file the commit touched every
+    // row of a large set, and a write costs far more than a lookup (#571).
+    for (key, state) in snapshot {
+        write_row(path, mtime, hash, key, state)?;
+    }
+    Ok(())
+}
+
+/// The keys of each file table, every row read.
+fn table_keys(
+    path: &Path,
+    mtime: &redb::Table<&str, u64>,
+    hash: &redb::Table<&str, &str>,
+) -> Result<(HashSet<String>, HashSet<String>), StorageError> {
+    let mut mtime_keys = HashSet::new();
     for row in mtime
         .iter()
         .map_err(|e| map_storage_error(path, "iterate mtime table", e))?
     {
         let (k, _) = row.map_err(|e| map_storage_error(path, "read mtime row", e))?;
-        keys.insert(k.value().to_owned());
+        row_audit::read();
+        mtime_keys.insert(k.value().to_owned());
     }
+    let mut hash_keys = HashSet::new();
     for row in hash
         .iter()
         .map_err(|e| map_storage_error(path, "iterate hash table", e))?
     {
         let (k, _) = row.map_err(|e| map_storage_error(path, "read hash row", e))?;
-        keys.insert(k.value().to_owned());
+        row_audit::read();
+        hash_keys.insert(k.value().to_owned());
     }
+    Ok((mtime_keys, hash_keys))
+}
 
-    let target_keys: HashSet<&str> = snapshot.keys().map(String::as_str).collect();
-    for key in keys {
-        if !target_keys.contains(key.as_str()) {
-            mtime
-                .remove(key.as_str())
-                .map_err(|e| map_storage_error(path, "remove stale mtime key", e))?;
-            hash.remove(key.as_str())
-                .map_err(|e| map_storage_error(path, "remove stale hash key", e))?;
-        }
+/// Removes the rows whose key only one table has, so both tables keep the same keys (#571).
+/// The file such a row describes is no longer remembered and is a change on the next analysis.
+fn remove_orphan_rows(
+    path: &Path,
+    mtime: &mut redb::Table<&str, u64>,
+    hash: &mut redb::Table<&str, &str>,
+) -> Result<(), StorageError> {
+    let (mtime_keys, hash_keys) = table_keys(path, mtime, hash)?;
+    for key in mtime_keys.symmetric_difference(&hash_keys) {
+        remove_row(path, mtime, hash, key)?;
     }
+    Ok(())
+}
 
-    // Only rows that differ are written: after a change of one file the commit touched every
-    // row of a large set, and a write costs far more than a lookup (#571). The comparison runs
-    // inside the same write transaction, after the generation check, so it is against what
-    // is committed now and not against what was read earlier.
-    for (key, state) in snapshot {
-        let stored_mtime = mtime
-            .get(key.as_str())
-            .map_err(|e| map_storage_error(path, "read mtime", e))?
-            .map(|value| value.value());
-        if stored_mtime != Some(state.mtime_ns) {
-            mtime
-                .insert(key.as_str(), state.mtime_ns)
-                .map_err(|e| map_storage_error(path, "insert mtime", e))?;
-        }
-        let hash_matches = hash
-            .get(key.as_str())
-            .map_err(|e| map_storage_error(path, "read hash", e))?
-            .is_some_and(|value| value.value() == state.hash);
-        if !hash_matches {
-            hash.insert(key.as_str(), state.hash.as_str())
-                .map_err(|e| map_storage_error(path, "insert hash", e))?;
-        }
+/// Forgets one file in both tables.
+fn remove_row(
+    path: &Path,
+    mtime: &mut redb::Table<&str, u64>,
+    hash: &mut redb::Table<&str, &str>,
+    key: &str,
+) -> Result<(), StorageError> {
+    if mtime
+        .remove(key)
+        .map_err(|e| map_storage_error(path, "remove stale mtime key", e))?
+        .is_some()
+    {
+        row_audit::written();
+    }
+    if hash
+        .remove(key)
+        .map_err(|e| map_storage_error(path, "remove stale hash key", e))?
+        .is_some()
+    {
+        row_audit::written();
+    }
+    Ok(())
+}
+
+/// Remembers one file, writing a table's row only where it differs. The comparison runs inside
+/// the commit's write transaction, after the generation check, so it is against what is
+/// committed now and not against what was read earlier.
+fn write_row(
+    path: &Path,
+    mtime: &mut redb::Table<&str, u64>,
+    hash: &mut redb::Table<&str, &str>,
+    key: &str,
+    state: &StoredFileState,
+) -> Result<(), StorageError> {
+    row_audit::read();
+    let stored_mtime = mtime
+        .get(key)
+        .map_err(|e| map_storage_error(path, "read mtime", e))?
+        .map(|value| value.value());
+    if stored_mtime != Some(state.mtime_ns) {
+        row_audit::written();
+        mtime
+            .insert(key, state.mtime_ns)
+            .map_err(|e| map_storage_error(path, "insert mtime", e))?;
+    }
+    row_audit::read();
+    let hash_matches = hash
+        .get(key)
+        .map_err(|e| map_storage_error(path, "read hash", e))?
+        .is_some_and(|value| value.value() == state.hash);
+    if !hash_matches {
+        row_audit::written();
+        hash.insert(key, state.hash.as_str())
+            .map_err(|e| map_storage_error(path, "insert hash", e))?;
     }
     Ok(())
 }
@@ -537,7 +712,7 @@ fn map_storage_error(path: &Path, context: &str, err: impl std::fmt::Display) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{HashStorage, StoredFileState, FILES_MTIME};
+    use super::{row_audit, HashStorage, StorageDelta, StorageError, StoredFileState, FILES_MTIME};
     use redb::Database;
     use std::collections::HashMap;
 
@@ -660,6 +835,148 @@ mod tests {
         let mut keys: Vec<_> = snapshot.entries.keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, ["a.xml", "b.xml"]);
+    }
+
+    fn many(files: u64) -> HashMap<String, StoredFileState> {
+        (0..files)
+            .map(|n| (format!("f{n}.xml"), state(n, "same")))
+            .collect()
+    }
+
+    /// After a change of one file and the removal of another the delta commit reads and writes
+    /// only their rows, and leaves what the full commit of the whole new snapshot leaves (#576).
+    #[test]
+    fn a_delta_commit_touches_only_the_rows_of_the_changed_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = HashStorage::new(dir.path().join("memory.redb"));
+        let full = HashStorage::new(dir.path().join("full.redb"));
+        let first = many(200);
+        for memory in [&storage, &full] {
+            memory
+                .commit_snapshot_with_identity(&first, 1, 0, Some("base"))
+                .expect("first");
+        }
+        let mut second = first.clone();
+        second.insert("f7.xml".to_owned(), state(1_000, "edited"));
+        second.remove("f9.xml");
+        let delta = StorageDelta {
+            upserts: HashMap::from([("f7.xml".to_owned(), state(1_000, "edited"))]),
+            removals: vec!["f9.xml".to_owned()],
+        };
+
+        row_audit::take();
+        storage
+            .commit_delta_with_identity(&delta, 2, 1, Some("base"))
+            .expect("delta");
+        let touched = row_audit::take();
+        full.commit_snapshot_with_identity(&second, 2, 1, Some("base"))
+            .expect("full");
+        let whole = row_audit::take();
+
+        // One changed file: its two rows looked up and rewritten; one removed file: two rows.
+        assert_eq!(
+            touched,
+            row_audit::Rows {
+                read: 2,
+                written: 4
+            }
+        );
+        assert!(
+            whole.read >= 2 * 200,
+            "the full commit reads every row: {whole:?}"
+        );
+        let loaded = storage.load_snapshot().expect("loaded");
+        assert_eq!(rows(&loaded.entries), rows(&second));
+        assert_eq!(
+            rows(&loaded.entries),
+            rows(&full.load_snapshot().expect("full").entries)
+        );
+        assert_eq!(loaded.generation, 2);
+        assert_eq!(loaded.watermark, Some(2));
+    }
+
+    /// Tables of different length are reconciled whole by a delta commit: the orphan row goes
+    /// and the rows the delta does not name stay (#571, #576).
+    #[test]
+    fn a_delta_commit_over_tables_of_different_length_reconciles_them_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.redb");
+        let storage = HashStorage::new(path.clone());
+        storage
+            .commit_snapshot_with_identity(
+                &HashMap::from([("a.xml".to_owned(), state(1, "h1"))]),
+                1,
+                0,
+                Some("base"),
+            )
+            .expect("commit");
+        {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            tx.open_table(FILES_MTIME)
+                .expect("mtime")
+                .insert("orphan.xml", 5)
+                .expect("insert");
+            tx.commit().expect("commit orphan");
+        }
+        assert!(storage.load_snapshot().is_err(), "the damage is seen");
+
+        storage
+            .commit_delta_with_identity(
+                &StorageDelta {
+                    upserts: HashMap::from([("b.xml".to_owned(), state(2, "h2"))]),
+                    removals: Vec::new(),
+                },
+                2,
+                1,
+                Some("base"),
+            )
+            .expect("delta over damage");
+
+        let snapshot = storage.load_snapshot().expect("consistent again");
+        assert_eq!(
+            rows(&snapshot.entries),
+            [
+                ("a.xml".to_owned(), 1, "h1".to_owned()),
+                ("b.xml".to_owned(), 2, "h2".to_owned())
+            ]
+        );
+    }
+
+    /// A delta is taken against one generation: it is refused once the memory moved on.
+    #[test]
+    fn a_delta_commit_fails_if_the_memory_moved_since_it_was_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = HashStorage::new(dir.path().join("memory.redb"));
+        storage
+            .commit_snapshot_with_identity(&many(3), 1, 0, Some("base"))
+            .expect("first");
+        storage
+            .commit_snapshot_with_identity(&many(3), 2, 1, Some("base"))
+            .expect("second");
+        let error = storage
+            .commit_delta_with_identity(
+                &StorageDelta {
+                    upserts: HashMap::from([("f0.xml".to_owned(), state(9, "late"))]),
+                    removals: Vec::new(),
+                },
+                3,
+                1,
+                Some("base"),
+            )
+            .expect_err("moved");
+        assert!(matches!(
+            error,
+            StorageError::ConcurrentStateModified {
+                expected: 1,
+                actual: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            storage.load_snapshot().expect("kept").entries["f0.xml"].hash,
+            "same"
+        );
     }
 
     #[test]

@@ -414,7 +414,7 @@ fn plan_partial_or_full_load(
 /// When the prior snapshot has no entries, every current file is new.
 /// A warm snapshot with one added file can still be loaded partially.
 fn nothing_to_compare(changes: &[analyzer::FileChange], prepared: &PreparedStateUpdate) -> bool {
-    changes.len() == prepared.snapshot.len()
+    changes.len() == prepared.files
         && changes
             .iter()
             .all(|change| change.kind == analyzer::ChangeKind::Added)
