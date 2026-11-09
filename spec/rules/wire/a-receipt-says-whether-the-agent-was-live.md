@@ -12,8 +12,7 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
 - `holders`: держатели на момент ответа. Держатель с процессом записан как `pid` и
   `started_at`, держатель со сроком — как `until`. Если держателей нет, список пустой;
 - `kept`: остался ли агент жить после команды;
-- `reason`: если не остался — почему (`live_agent_off`, `limit`, `job`, `interrupted`,
-  `launch_mode`).
+- `reason`: если не остался — почему (`live_agent_off`, `limit`, `job`, `interrupted`).
 
 Поле `live` у всех форм лежит в одном месте: в `endpoint` той квитанции исполнителя
 `provider`, через которую шла работа агента. Это `data.provider`, а у команд из нескольких
