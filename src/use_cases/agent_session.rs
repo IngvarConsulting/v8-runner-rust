@@ -20,7 +20,7 @@ use crate::config::model::{AppConfig, DesignerAgentMode};
 use crate::domain::capability::{Provider, SessionEndpoint, SessionMode};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::agent::{
-    self, free_managed_port, host_key_path_is_readable, one_time_key_dir, AgentEndpoint,
+    self, agent_reads_host_key_at, free_managed_port, host_key_fallback_roots, AgentEndpoint,
     AgentError, AgentLaunch, AgentSession, AgentSessionRequest, EphemeralHostKey,
     HostKeyExpectation, LaunchHostKey, ManagedAgent, WaitPolicy,
 };
@@ -296,10 +296,10 @@ fn open_handle(
 
 /// Ключ хоста управляемого агента. Агент читает его только по пути в ASCII
 /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`): объявленный ключ по другому пути — отказ до запуска,
-/// одноразовый ложится в [`one_time_key_dir`].
+/// одноразовый — [`EphemeralHostKey::create_for`].
 fn launch_host_key(declared: Option<PathBuf>, work_path: &Path) -> Result<LaunchHostKey, AppError> {
     match declared {
-        Some(declared) if !host_key_path_is_readable(&declared) => {
+        Some(declared) if !agent_reads_host_key_at(&declared) => {
             Err(AppError::EnvironmentUnavailable(format!(
                 "tools.designer_agent.host-key '{}' is not an ASCII path: the Designer agent \
                  cannot read its host key there and exits; move the key to an ASCII path",
@@ -307,8 +307,9 @@ fn launch_host_key(declared: Option<PathBuf>, work_path: &Path) -> Result<Launch
             )))
         }
         Some(declared) => Ok(LaunchHostKey::Declared(declared)),
-        None => Ok(LaunchHostKey::OneTime(EphemeralHostKey::create(
-            &one_time_key_dir(work_path)?,
+        None => Ok(LaunchHostKey::OneTime(EphemeralHostKey::create_for(
+            work_path,
+            &host_key_fallback_roots(),
         )?)),
     }
 }
@@ -1268,38 +1269,9 @@ impl GenerationLedger {
 mod tests {
     use super::*;
 
-    /// Одноразовый ключ хоста получает путь в ASCII и при `workPath` с кириллицей: агент
-    /// по такому пути ключ не читает (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
-    #[test]
-    fn a_one_time_host_key_gets_an_ascii_path_from_a_cyrillic_work_path() {
-        let dir = tempfile::tempdir().expect("dir");
-        let ascii = dir.path().join("work");
-        let LaunchHostKey::OneTime(key) = launch_host_key(None, &ascii).expect("ascii key") else {
-            panic!("a one-time key was expected");
-        };
-        assert!(key
-            .path()
-            .starts_with(ascii.join("agent").join("host-keys")));
-        drop(key);
-
-        let cyrillic = dir.path().join("Рабочая папка").join("ws3");
-        let LaunchHostKey::OneTime(key) = launch_host_key(None, &cyrillic).expect("key") else {
-            panic!("a one-time key was expected");
-        };
-        assert!(
-            host_key_path_is_readable(key.path()),
-            "{}",
-            key.path().display()
-        );
-        assert!(!key.path().starts_with(&cyrillic));
-        assert!(key.path().is_file());
-        let path = key.path().to_path_buf();
-        drop(key);
-        assert!(!path.exists(), "the one-time key outlived its owner");
-    }
-
     /// Объявленный ключ хоста по пути не в ASCII — отказ до запуска, называющий путь
     /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    #[cfg(windows)]
     #[test]
     fn a_declared_host_key_outside_ascii_is_refused_before_the_launch() {
         let declared = PathBuf::from("ключи").join("host_ed25519");

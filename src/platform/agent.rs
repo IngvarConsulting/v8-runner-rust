@@ -368,6 +368,16 @@ pub enum AgentError {
     #[error("agent asked a question the runner does not answer: {message}")]
     Question { message: String },
 
+    /// Ни один путь для одноразового ключа хоста агент не прочтёт
+    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    #[error(
+        "the Designer agent reads its host key only from an ASCII path, and none was available \
+         (tried: {}); move the project to an ASCII path or declare tools.designer_agent.host-key \
+         at one",
+        .tried.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    HostKeyPathNotReadable { tried: Vec<PathBuf> },
+
     #[error("failed to prepare the agent workspace '{path}': {source}")]
     Workspace {
         path: PathBuf,
@@ -1770,6 +1780,9 @@ pub fn free_managed_port() -> Result<u16, AgentError> {
 pub struct EphemeralHostKey {
     path: PathBuf,
     fingerprint: Fingerprint,
+    /// Свой каталог этого ключа вне `workPath`: создан только для владельца и уходит вместе с
+    /// ключом (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    private_dir: Option<PathBuf>,
 }
 
 /// Ключ хоста, который получает управляемый агент.
@@ -1853,70 +1866,35 @@ fn remove_orphaned_keys(dir: &Path) {
             continue;
         };
         if !crate::support::machine::is_process_alive(owner) {
-            let _ = std::fs::remove_file(entry.path());
+            // Свой каталог ключа вне `workPath` уходит целиком; чужой не даст удалить его ACL.
+            let path = entry.path();
+            let _ = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
         }
     }
 }
 
-/// Путь, который агент Конфигуратора читает в `/AgentSSHHostKey`: только ASCII. По пути с
-/// кириллицей он отвечает «Фатальная ошибка SSH-сервера: Ошибка установки ключа хоста» и
-/// выходит (замер #582; `INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
-pub fn host_key_path_is_readable(path: &Path) -> bool {
-    path.to_str().is_some_and(str::is_ascii)
+/// Читает ли агент Конфигуратора ключ хоста по этому пути (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+/// На Windows — только по пути в ASCII: с кириллицей он отвечает «Фатальная ошибка SSH-сервера:
+/// Ошибка установки ключа хоста» и выходит (замер #582). Другие ОС не замерены, и путь не
+/// ограничивается.
+pub(crate) fn agent_reads_host_key_at(path: &Path) -> bool {
+    !cfg!(windows) || path.to_str().is_some_and(str::is_ascii)
 }
 
-/// Каталог одноразовых ключей хоста (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`): `workPath`, если
-/// путь к нему в ASCII, иначе каталог учётной записи во временном каталоге ОС, иначе — на
-/// Windows — в `%ProgramData%`. Чужой каталог создаётся доступным только владельцу и назван по
-/// хешу профиля учётной записи, поэтому учётные записи не делят ключи. Ни одного пути в ASCII —
-/// отказ до запуска, называющий причину.
-pub fn one_time_key_dir(work_path: &Path) -> Result<PathBuf, AgentError> {
-    let own = work_path.join("agent").join("host-keys");
-    if host_key_path_is_readable(&own) {
-        return Ok(own);
-    }
-    let profile =
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
-    let account = {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(profile.to_string_lossy().as_bytes());
-        digest[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
-    let name = format!("v8-runner-host-keys-{account}");
+/// Корни, где ложится одноразовый ключ, когда агент не прочтёт его в `workPath`: временный
+/// каталог ОС, на Windows ещё `%ProgramData%\v8-runner`.
+pub(crate) fn host_key_fallback_roots() -> Vec<PathBuf> {
     let mut roots = vec![std::env::temp_dir()];
     if cfg!(windows) {
         if let Some(data) = std::env::var_os("ProgramData") {
             roots.push(PathBuf::from(data).join("v8-runner"));
         }
     }
-    for root in roots {
-        let dir = root.join(&name);
-        if !host_key_path_is_readable(&dir) {
-            continue;
-        }
-        let made = std::fs::create_dir_all(&root).and_then(|()| {
-            match crate::support::temp::create_private_dir(&dir) {
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-                other => other,
-            }
-        });
-        match made {
-            Ok(()) => return Ok(dir),
-            Err(error) => debug!(dir = %dir.display(), %error, "host key directory refused"),
-        }
-    }
-    Err(AgentError::Workspace {
-        path: own,
-        source: std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "the Designer agent reads its host key only from an ASCII path, and neither workPath, \
-             the system temporary directory nor %ProgramData% gives one; move the project to an \
-             ASCII path or declare tools.designer_agent.host-key there",
-        ),
-    })
+    roots
 }
 
 impl EphemeralHostKey {
@@ -1962,7 +1940,52 @@ impl EphemeralHostKey {
         Ok(Self {
             path,
             fingerprint: key.public_key().fingerprint(HashAlg::Sha256),
+            private_dir: None,
         })
+    }
+
+    /// Одноразовый ключ для агента рабочей копии `work_path`
+    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`). Агент читает путь `workPath` — ключ там. Иначе
+    /// ключ ложится в новый каталог со случайным именем под первым корнем из `roots`, путь к
+    /// которому агент прочтёт. Каталог создаётся только для владельца и только этим вызовом, так
+    /// что заранее подложенный чужой каталог не годится. Ни одного такого корня — отказ до
+    /// запуска со всеми испробованными путями.
+    pub fn create_for(work_path: &Path, roots: &[PathBuf]) -> Result<Self, AgentError> {
+        let own = work_path.join("agent").join("host-keys");
+        if agent_reads_host_key_at(&own) {
+            return Self::create(&own);
+        }
+        let mut tried = vec![own];
+        for root in roots {
+            let dir = root.join(format!(
+                "{ONE_TIME_KEY_PREFIX}{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            if !agent_reads_host_key_at(&dir) {
+                tried.push(dir);
+                continue;
+            }
+            remove_orphaned_keys(root);
+            let made = std::fs::create_dir_all(root)
+                .and_then(|()| crate::support::temp::create_private_dir(&dir));
+            if let Err(error) = made {
+                debug!(dir = %dir.display(), %error, "host key directory refused");
+                tried.push(dir);
+                continue;
+            }
+            return match Self::create(&dir) {
+                Ok(mut key) => {
+                    key.private_dir = Some(dir);
+                    Ok(key)
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    Err(error)
+                }
+            };
+        }
+        Err(AgentError::HostKeyPathNotReadable { tried })
     }
 
     pub fn path(&self) -> &Path {
@@ -1978,6 +2001,9 @@ impl EphemeralHostKey {
 impl Drop for EphemeralHostKey {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        if let Some(dir) = &self.private_dir {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
 }
 
@@ -2607,6 +2633,51 @@ mod tests {
         let path = key.path().to_path_buf();
         drop(key);
         assert!(!path.exists(), "the one-time key outlived its owner");
+    }
+
+    /// Агент не читает ключ хоста по пути с кириллицей: при таком `workPath` одноразовый ключ
+    /// ложится в новый каталог под корнем с путём в ASCII, только для владельца, и уходит вместе
+    /// с каталогом; без такого корня — отказ со всеми испробованными путями
+    /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).
+    #[cfg(windows)]
+    #[test]
+    fn a_one_time_host_key_leaves_a_cyrillic_work_path_for_a_private_ascii_directory() {
+        let temp = tempfile::tempdir().expect("dir");
+        let ascii_work = temp.path().join("work");
+        let key = EphemeralHostKey::create_for(&ascii_work, &[]).expect("key in workPath");
+        assert!(key
+            .path()
+            .starts_with(ascii_work.join("agent").join("host-keys")));
+        drop(key);
+
+        let cyrillic_work = temp.path().join("Рабочая папка").join("ws3");
+        let root = temp.path().join("keys");
+        // Каталог, подложенный заранее под похожим именем, ключ не получает.
+        let planted = root.join(format!(
+            "{ONE_TIME_KEY_PREFIX}{}-planted",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&planted).expect("planted");
+        let key = EphemeralHostKey::create_for(&cyrillic_work, &[root.clone()]).expect("key");
+        assert!(
+            agent_reads_host_key_at(key.path()),
+            "{}",
+            key.path().display()
+        );
+        assert!(key.path().starts_with(&root));
+        assert!(!key.path().starts_with(&planted));
+        let dir = key.path().parent().expect("dir").to_path_buf();
+        assert_ne!(dir, root);
+        drop(key);
+        assert!(!dir.exists(), "the key directory outlived the key");
+
+        let refused = EphemeralHostKey::create_for(&cyrillic_work, &[temp.path().join("ключи")])
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&refused, AgentError::HostKeyPathNotReadable { tried } if tried.len() == 2),
+            "{refused}"
+        );
     }
 
     #[test]
