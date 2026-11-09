@@ -67,7 +67,7 @@ pub fn is_process_running(pid: u32) -> bool {
 #[cfg(target_os = "linux")]
 fn has_ended_unreaped(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .is_ok_and(|stat| matches!(process_state(&stat), Some("Z" | "X")))
+        .is_ok_and(|stat| matches!(proc_stat_field(&stat, 3), Some("Z" | "X")))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -75,13 +75,14 @@ fn has_ended_unreaped(_pid: u32) -> bool {
     false
 }
 
-/// The state field of a `/proc/<pid>/stat` line. It follows the process name, which is
-/// enclosed in parentheses and may itself hold parentheses and spaces, so the name ends
-/// at the last `)`.
+/// Field `field` of a `/proc/<pid>/stat` line, numbered as in `proc(5)`: 3 is the state,
+/// 22 the start time in clock ticks after boot. Fields from 3 on follow the process name,
+/// which is enclosed in parentheses and may itself hold parentheses and spaces, so the
+/// name ends at the last `)`. The only reader of that line in the runner.
 #[cfg(any(target_os = "linux", test))]
-fn process_state(stat: &str) -> Option<&str> {
+pub(crate) fn proc_stat_field(stat: &str, field: usize) -> Option<&str> {
     let (_pid_and_name, after_name) = stat.rsplit_once(')')?;
-    after_name.split_whitespace().next()
+    after_name.split_whitespace().nth(field.checked_sub(3)?)
 }
 
 /// Name of this machine, if the system gives one.
@@ -235,7 +236,7 @@ fn system_machine_id() -> Option<String> {
 mod tests {
     use super::{
         host_name, is_process_alive, is_process_running, linux_machine_id, machine_id,
-        process_state,
+        proc_stat_field,
     };
 
     #[test]
@@ -286,9 +287,12 @@ mod tests {
 
     #[test]
     fn the_state_follows_the_last_parenthesis_of_the_name() {
-        assert_eq!(process_state("42 (a) b (c)) Z 1 42"), Some("Z"));
-        assert_eq!(process_state("42 (sleep) S 1 42"), Some("S"));
-        assert_eq!(process_state("42 sleep"), None);
+        assert_eq!(proc_stat_field("42 (a) b (c)) Z 1 42", 3), Some("Z"));
+        assert_eq!(proc_stat_field("42 (sleep) S 1 42", 3), Some("S"));
+        assert_eq!(proc_stat_field("42 (sleep) S 1 42", 5), Some("42"));
+        assert_eq!(proc_stat_field("42 (sleep) S 1 42", 6), None);
+        assert_eq!(proc_stat_field("42 (sleep) S 1 42", 2), None);
+        assert_eq!(proc_stat_field("42 sleep", 3), None);
     }
 
     #[test]

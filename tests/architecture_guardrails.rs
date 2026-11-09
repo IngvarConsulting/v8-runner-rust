@@ -119,6 +119,7 @@ fn a_service_starts_only_through_the_process_executor_mode() {
                 "ShellExecute",
                 "DETACHED_PROCESS",
                 "CREATE_BREAKAWAY_FROM_JOB",
+                "setsid(",
             ] {
                 assert!(
                     !text.contains(forbidden),
