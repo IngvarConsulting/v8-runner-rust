@@ -1,8 +1,10 @@
 //! Канал сторожа, открытый только своей учётной записи ОС
 //! (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`): именованный канал Windows с DACL «только
-//! владелец и LocalSystem» (тот же дескриптор, что у закрытых каталогов,
-//! [`with_owner_only_security`](crate::support::temp::with_owner_only_security)) или сокет Unix
-//! с правами 0600 в каталоге 0700.
+//! пользователь процесса и LocalSystem» или сокет Unix с правами 0600 в каталоге 0700.
+//!
+//! Клиент сверяет и другой конец: на Windows канал должен обслуживать процесс сторожа из записи
+//! (`GetNamedPipeServerProcessId`), на Unix сокет — процесс своей учётной записи (`SO_PEERCRED`,
+//! `getpeereid`). Так чужой процесс, занявший имя канала раньше сторожа, команд не получит.
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -27,12 +29,20 @@ mod imp {
         next: NamedPipeServer,
     }
 
+    /// DACL канала: защищённый, полный доступ только пользователю из маркера процесса и
+    /// LocalSystem. Владелец объекта (`OW`) не годится: у повышенного администратора им
+    /// становится группа «Администраторы».
+    fn pipe_sddl() -> std::io::Result<String> {
+        let user = crate::support::machine::account::account_id()?;
+        Ok(format!("D:P(A;;GA;;;{user})(A;;GA;;;SY)"))
+    }
+
     fn instance(name: &str, first: bool) -> std::io::Result<NamedPipeServer> {
         let mut options = ServerOptions::new();
         options
             .first_pipe_instance(first)
             .reject_remote_clients(true);
-        crate::support::temp::with_owner_only_security(|attributes| {
+        crate::support::temp::with_security(&pipe_sddl()?, |attributes| {
             // SAFETY: `attributes` points to a live SECURITY_ATTRIBUTES whose descriptor stays
             // valid for this call; the call does not keep the pointer.
             unsafe {
@@ -80,12 +90,24 @@ mod imp {
         }
     }
 
-    pub async fn connect(name: &str) -> std::io::Result<Stream> {
+    /// Подключение к каналу, который обслуживает процесс `keeper`.
+    pub async fn connect(name: &str, keeper: u32) -> std::io::Result<Stream> {
         const ERROR_PIPE_BUSY: i32 = 231;
         let started = std::time::Instant::now();
         loop {
             match ClientOptions::new().open(name) {
-                Ok(client) => return Ok(Box::new(client)),
+                Ok(client) => {
+                    let server = server_pid(&client)?;
+                    if server != keeper {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!(
+                                "{name} is served by process {server}, not by the keeper {keeper}"
+                            ),
+                        ));
+                    }
+                    return Ok(Box::new(client));
+                }
                 Err(error)
                     if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
                         && started.elapsed() < BUSY_PATIENCE =>
@@ -95,6 +117,25 @@ mod imp {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// Процесс, который обслуживает канал на том конце.
+    fn server_pid(
+        client: &tokio::net::windows::named_pipe::NamedPipeClient,
+    ) -> std::io::Result<u32> {
+        use std::os::windows::io::AsRawHandle;
+        let mut pid = 0u32;
+        // SAFETY: a live pipe handle owned by `client`; `pid` outlives the call.
+        let ok = unsafe {
+            windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId(
+                client.as_raw_handle().cast(),
+                &mut pid,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(pid)
     }
 }
 
@@ -154,8 +195,20 @@ mod imp {
         }
     }
 
-    pub async fn connect(name: &str) -> std::io::Result<Stream> {
-        Ok(Box::new(UnixStream::connect(name).await?))
+    /// Подключение к сокету, который слушает процесс своей учётной записи. Номер процесса
+    /// сторожа здесь не сверяется: macOS его не называет, а сокет и так лежит в каталоге 0700.
+    pub async fn connect(name: &str, _keeper: u32) -> std::io::Result<Stream> {
+        let stream = UnixStream::connect(name).await?;
+        let peer = stream.peer_cred()?.uid();
+        // SAFETY: `getuid` takes nothing and cannot fail.
+        let own = unsafe { libc::getuid() };
+        if peer != own {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("{name} is served by uid {peer}, not by this account ({own})"),
+            ));
+        }
+        Ok(Box::new(stream))
     }
 }
 
@@ -193,9 +246,11 @@ mod tests {
             {
                 let sddl = pipe_dacl(listener.handle());
                 assert!(sddl.starts_with("D:P"), "protected DACL: {sddl}");
-                for foreign in [";WD)", ";AU)", ";BU)", ";AN)", ";IU)"] {
+                for foreign in [";WD)", ";AU)", ";BU)", ";AN)", ";IU)", ";OW)", ";BA)"] {
                     assert!(!sddl.contains(foreign), "{foreign} in {sddl}");
                 }
+                let user = crate::support::machine::account::account_id().unwrap();
+                assert!(sddl.contains(&format!(";;;{user})")), "{user} in {sddl}");
             }
             #[cfg(unix)]
             {
@@ -210,12 +265,23 @@ mod tests {
                 stream.write_all(&buffer).await.unwrap();
                 listener
             });
-            let mut client = connect(&name).await.unwrap();
+            let mut client = connect(&name, std::process::id()).await.unwrap();
             client.write_all(b"ping").await.unwrap();
             let mut answer = [0u8; 4];
             client.read_exact(&mut answer).await.unwrap();
             assert_eq!(&answer, b"ping");
             let listener = server.await.unwrap();
+            #[cfg(windows)]
+            assert!(
+                matches!(
+                    connect(&name, std::process::id() + 1)
+                        .await
+                        .err()
+                        .map(|error| error.kind()),
+                    Some(std::io::ErrorKind::PermissionDenied)
+                ),
+                "a channel served by another process is refused"
+            );
             // После обмена: на Unix второй сторож пробует сокет подключением, и сервер,
             // принявший бы эту пробу первой, не дождался бы данных.
             assert_eq!(
@@ -262,7 +328,7 @@ mod tests {
                     .build()
                     .unwrap();
                 runtime.block_on(async {
-                    let stream = connect(&client_name).await.unwrap();
+                    let stream = connect(&client_name, std::process::id()).await.unwrap();
                     let (_read, mut write) = tokio::io::split(stream);
                     write.write_all(b"hello\n").await.unwrap();
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;

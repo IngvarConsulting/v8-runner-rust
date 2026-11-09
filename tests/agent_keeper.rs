@@ -296,14 +296,79 @@ impl Keeper {
         self.last(json!({"op": "status"}))
     }
 
-    fn run(&self, command: &str, critical: bool) -> Vec<Value> {
-        self.run_with(command, critical, &digest(&self.state, "", AGENT_PASSWORD))
+    fn credentials(&self) -> String {
+        digest(&self.state, "", AGENT_PASSWORD)
     }
 
-    fn run_with(&self, command: &str, critical: bool, credentials: &str) -> Vec<Value> {
+    /// Открывает сессию команды; её подключение держится, пока сессия не закрыта.
+    fn begin(&self) -> Session {
+        self.try_begin()
+            .unwrap_or_else(|frame| panic!("the session did not begin: {frame}"))
+    }
+
+    fn try_begin(&self) -> Result<Session, Value> {
+        let credentials = self.credentials();
+        self.runtime.block_on(async {
+            let mut stream = BufReader::new(self.connect().await);
+            let request = json!({"op": "begin", "credentials": credentials});
+            stream
+                .get_mut()
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let frame: Value = serde_json::from_str(line.trim_end()).unwrap();
+            if frame["frame"] == "begun" {
+                Ok(Session {
+                    id: frame["session"].as_str().unwrap().to_owned(),
+                    stream,
+                })
+            } else {
+                Err(frame)
+            }
+        })
+    }
+
+    /// Закрывает сессию команды: ответ сторожа.
+    fn end(&self, mut session: Session) -> Value {
+        self.runtime.block_on(async {
+            session
+                .stream
+                .get_mut()
+                .write_all(b"{\"op\":\"end\"}\n")
+                .await
+                .unwrap();
+            let mut line = String::new();
+            session.stream.read_line(&mut line).await.unwrap();
+            serde_json::from_str(line.trim_end()).unwrap()
+        })
+    }
+
+    fn run(&self, session: &str, command: &str, critical: bool) -> Vec<Value> {
+        self.run_with(session, command, critical, &self.credentials())
+    }
+
+    fn run_with(
+        &self,
+        session: &str,
+        command: &str,
+        critical: bool,
+        credentials: &str,
+    ) -> Vec<Value> {
         self.ask(json!({
-            "op": "run", "command": command, "critical": critical, "credentials": credentials,
+            "op": "run", "session": session, "command": command, "critical": critical,
+            "credentials": credentials,
         }))
+    }
+
+    /// Одна команда в своей сессии: `begin`, `run`, `end`.
+    fn once(&self, command: &str) -> Vec<Value> {
+        let session = self.begin();
+        let frames = self.run(&session.id, command, false);
+        let ended = self.end(session);
+        assert_eq!(ended["frame"], "ended", "{ended}");
+        frames
     }
 
     /// Ждёт выхода сторожа.
@@ -330,6 +395,12 @@ impl Drop for Keeper {
         }
         let _ = self.child.wait();
     }
+}
+
+/// Открытая сессия команды: подключение `begin` и номер сессии.
+struct Session {
+    id: String,
+    stream: BufReader<Box<dyn Duplex>>,
 }
 
 trait Duplex: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -498,7 +569,7 @@ fn a_second_client_reuses_the_live_agent_without_a_new_launch() {
         "{status}"
     );
     for _ in 0..2 {
-        let frames = keeper.run("config generation-id", false);
+        let frames = keeper.once("config generation-id");
         assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
         assert!(
             frames.iter().any(|frame| frame["frame"] == "batch"
@@ -509,6 +580,27 @@ fn a_second_client_reuses_the_live_agent_without_a_new_launch() {
     assert_eq!(bench.launches(), 1, "one 1cv8 for both commands");
     let log = fs::read_to_string(&bench.commands_log).unwrap();
     assert_eq!(log.matches("config generation-id").count(), 2, "{log}");
+    // Агент подключён к базе только в сессиях команд: после подъёма и после каждой сессии
+    // сторож его отключает (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`).
+    let session_lines = log
+        .lines()
+        .filter(|line| line.starts_with("common ") || line.starts_with("config "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        session_lines,
+        [
+            "common connect-ib",
+            "common disconnect-ib",
+            "common connect-ib",
+            "config generation-id",
+            "common disconnect-ib",
+            "common connect-ib",
+            "config generation-id",
+            "common disconnect-ib",
+        ],
+        "{log}"
+    );
+    assert_eq!(ready(&keeper)["connected"], false);
     let record: Value = serde_json::from_slice(&fs::read(keeper.record()).unwrap()).unwrap();
     assert_eq!(record["pid"], keeper.child.id(), "{record}");
     assert_eq!(
@@ -527,10 +619,13 @@ fn status_and_hold_answer_during_a_long_run() {
     // Простой короче удержанной команды: сторож обязан её пережить.
     let keeper = Keeper::start(&bench, 1_000);
     ready(&keeper);
+    let session = keeper.begin();
     let channel_keeper = &keeper;
+    let id = session.id.clone();
     std::thread::scope(|scope| {
-        let run = scope
-            .spawn(move || channel_keeper.run("config dump-config-to-files --dir dump", false));
+        let run = scope.spawn(move || {
+            channel_keeper.run(&id, "config dump-config-to-files --dir dump", false)
+        });
         assert!(
             wait_until(Duration::from_secs(30), || hold.started.exists()),
             "the command reached the agent"
@@ -566,6 +661,10 @@ fn status_and_hold_answer_during_a_long_run() {
             "progress arrives as separate batches: {frames:?}"
         );
     });
+    // Между запросами своей сессии агент тоже не простаивает: простой короче этой паузы.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(ready(&keeper)["connected"], true);
+    assert_eq!(keeper.end(session)["frame"], "ended");
 }
 
 /// Агент без держателя закрывается после срока простоя: процесс `1cv8` снят, запись убрана
@@ -576,7 +675,7 @@ fn an_idle_agent_closes_after_its_idle_limit() {
     let mut keeper = Keeper::start(&bench, 1_500);
     ready(&keeper);
     let designer = bench.designer_pid();
-    let frames = keeper.run("config generation-id", false);
+    let frames = keeper.once("config generation-id");
     assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
     assert!(keeper.exited_within(GONE_WITHIN), "the idle keeper left");
     assert!(
@@ -669,6 +768,7 @@ fn other_credentials_remove_the_agent() {
     ready(&keeper);
     let designer = bench.designer_pid();
     let frames = keeper.run_with(
+        "none",
         "config generation-id",
         false,
         &digest(&keeper.state, "", "another password"),
@@ -699,12 +799,14 @@ fn a_client_leaving_in_the_middle_of_a_command_removes_the_agent() {
     let mut keeper = Keeper::start(&bench, 600_000);
     ready(&keeper);
     let designer = bench.designer_pid();
-    let credentials = digest(&keeper.state, "", AGENT_PASSWORD);
+    let credentials = keeper.credentials();
+    let session = keeper.begin();
     keeper.runtime.block_on(async {
         let stream = keeper.connect().await;
         let (_read, mut write) = tokio::io::split(stream);
         let request = json!({
-            "op": "run", "command": "config dump-config-to-files --dir dump",
+            "op": "run", "session": session.id,
+            "command": "config dump-config-to-files --dir dump",
             "critical": false, "credentials": credentials,
         });
         write
@@ -716,9 +818,14 @@ fn a_client_leaving_in_the_middle_of_a_command_removes_the_agent() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(hold.started.exists(), "the command reached the agent");
-        // Подключение уходит, не дождавшись ответа. На Windows канал закрывается, когда
-        // рантайм обработает отмену своего чтения, поэтому рантайм ещё крутится.
+        // Клиент бросает команду строкой `cancel`, а подключение держит: сторож видит уход по
+        // строке, а не по выходу процесса.
+        write.write_all(b"{\"op\":\"cancel\"}\n").await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
         drop((_read, write));
+        // Сессия уходит без `end`. Канал Windows закрывается, когда рантайм обработает отмену
+        // своего чтения, поэтому рантайм ещё крутится.
+        drop(session);
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
     assert!(
@@ -799,4 +906,70 @@ fn a_second_keeper_of_the_same_key_refuses_to_start() {
     );
     assert_eq!(bench.launches(), 1);
     assert_eq!(ready(&keeper)["keeper_pid"], keeper.child.id());
+}
+
+/// Пока сессия команды открыта, простой не истекает, даже без запросов; он считается от её
+/// конца (`INV.PLATFORM.A-LIVE-AGENT-CLOSES-WHEN-NOBODY-HOLDS-IT`).
+#[test]
+fn an_open_session_keeps_the_agent_from_idling_out() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 1_000);
+    ready(&keeper);
+    let session = keeper.begin();
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        matches!(keeper.child.try_wait(), Ok(None)),
+        "the keeper idled out under an open session"
+    );
+    assert_eq!(keeper.end(session)["frame"], "ended");
+    assert!(keeper.exited_within(GONE_WITHIN), "the idle keeper left");
+}
+
+/// Команда, ушедшая без `end`, не оставляет агента подключённым к базе: сторож отключает его
+/// сам, и агент остаётся следующей команде (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`).
+#[test]
+fn a_session_left_without_end_disconnects_the_agent() {
+    let bench = Bench::new(false);
+    let keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let session = keeper.begin();
+    assert_eq!(ready(&keeper)["connected"], true);
+    drop(session);
+    assert!(
+        wait_until(Duration::from_secs(10), || ready(&keeper)["connected"]
+            == false),
+        "the keeper ended the session its client left"
+    );
+    let log = fs::read_to_string(&bench.commands_log).unwrap();
+    assert_eq!(log.matches("common disconnect-ib").count(), 2, "{log}");
+    let frames = keeper.once("config generation-id");
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    assert_eq!(bench.launches(), 1);
+}
+
+/// Процесс, которого уже нет, держателем не становится
+/// (`INV.PLATFORM.AN-AGENT-HOLDER-IS-A-LIVE-PROCESS`).
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn a_dead_process_cannot_hold_the_agent() {
+    let bench = Bench::new(false);
+    let keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let mut holder = if cfg!(windows) {
+        Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .spawn()
+    } else {
+        Command::new("sleep").arg("30").spawn()
+    }
+    .expect("holder process");
+    let pid = holder.id();
+    let started = started_of(pid).expect("holder start time");
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let held = keeper.last(json!({
+        "op": "hold",
+        "holder": {"kind": "process", "pid": pid, "started": started},
+    }));
+    assert_eq!(held["error"]["error"], "holder_gone", "{held}");
 }

@@ -1,14 +1,14 @@
-//! Клиент сторожа: находит живого агента ключа по записи или поднимает сторожа, затем говорит с
-//! ним по каналу. Замок реестра учётной записи берётся только на поиск и на запись «запускается»,
-//! а не на все 6–9 с подъёма агента.
+//! Клиент сторожа: находит живого агента ключа по записи или поднимает сторожа, открывает
+//! сессию команды (`begin` … `end`) и говорит с ним по каналу. Замок реестра учётной записи
+//! берётся только на поиск и на запись «запускается», а не на все 6–9 с подъёма агента.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
 
-use super::channel::connect;
+use super::channel::{connect, Stream};
 use super::protocol::{read_line, write_line, Frame, Holder, KeeperStatus, Request};
 use super::{credentials_digest, KeeperHome};
 use crate::platform::agent::{AgentError, AgentMessage, AgentReply, WaitPolicy};
@@ -80,30 +80,57 @@ impl From<std::io::Error> for KeeperStartError {
 const START_MARGIN: Duration = Duration::from_secs(30);
 /// Шаг ожидания сторожа, который поднимает другой клиент или который закрывается.
 const WAIT_STEP: Duration = Duration::from_millis(100);
+/// Сколько раз клиент поднимает сторожа заново, если поднятый вышел, не ответив: так бывает,
+/// когда канал ещё держит уходящий сторож того же ключа.
+const RESPAWNS: u32 = 3;
+/// Сколько клиент ждёт ответа на `end`: отключение от базы ограничено своим сроком у сторожа.
+const END_PATIENCE: Duration = Duration::from_secs(30);
+
+/// Открытая сессия команды: её подключение держится до `end`.
+struct OpenSession {
+    id: String,
+    stream: BufReader<Stream>,
+}
 
 /// Подключение команды к сторожу ключа.
 pub struct KeeperClient {
     home: KeeperHome,
     channel: String,
     digest: String,
+    /// Процесс сторожа: канал должен обслуживать он.
+    keeper: u32,
     /// Взят ли уже живой агент, а не поднят этим клиентом.
     reused: bool,
+    session: Option<OpenSession>,
     runtime: tokio::runtime::Runtime,
 }
 
 /// Что делать со сторожем ключа по его записи.
 enum Found {
-    Live,
+    Live(u32),
     /// Его поднимает другой клиент.
     Starting,
     /// Его нет: запись «запускается» уже стоит за этим клиентом.
     Absent,
 }
 
+/// Чем кончилось ожидание поднятого сторожа.
+enum Started {
+    Answered,
+    /// Сторож вышел, не ответив: ключ ищется заново.
+    Exited,
+}
+
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
 impl KeeperClient {
-    /// Живой агент ключа `key`: берётся, если его сторож жив, иначе поднимается новый сторож.
-    /// `work` — отметка работы команды: поднятый сторож переживает команду, поэтому его запуск
-    /// — уже её работа.
+    /// Живой агент ключа `key` с открытой сессией команды: берётся, если его сторож жив, иначе
+    /// поднимается новый сторож. `work` — отметка работы команды: поднятый сторож переживает
+    /// команду, поэтому его запуск — уже её работа.
     pub fn connect_or_start(
         key: &str,
         launch: &KeeperLaunch,
@@ -113,29 +140,32 @@ impl KeeperClient {
         let state = crate::support::machine::account::account_state_dir()?;
         let home = KeeperHome::open(&state, key)?;
         let digest = credentials_digest(&state, &credentials.user, &credentials.password)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
         let mut client = Self {
             channel: home.channel(),
             home,
             digest,
+            keeper: 0,
             reused: true,
-            runtime,
+            session: None,
+            runtime: runtime()?,
         };
         let deadline =
             Instant::now() + Duration::from_millis(launch.startup_timeout_ms) + START_MARGIN;
+        let mut respawns = 0;
         loop {
             match client.find()? {
-                Found::Live => match client.status() {
-                    Ok(_) => {
-                        client.check_fingerprint()?;
-                        return Ok(client);
+                Found::Live(keeper) => {
+                    client.keeper = keeper;
+                    match client.take() {
+                        Ok(()) => return Ok(client),
+                        // Сторож закрывается или его канал уже закрыт: ждём, пока он уйдёт,
+                        // и поднимаем нового.
+                        Err(
+                            AgentError::LiveAgentGone { .. } | AgentError::KeeperUnreachable { .. },
+                        ) => {}
+                        Err(error) => return Err(error.into()),
                     }
-                    // Сторож закрывается: ждём, пока он уйдёт, и поднимаем нового.
-                    Err(AgentError::LiveAgentGone { .. }) => {}
-                    Err(error) => return Err(error.into()),
-                },
+                }
                 Found::Starting => {}
                 Found::Absent => {
                     client.reused = false;
@@ -146,9 +176,23 @@ impl KeeperClient {
                             return Err(error);
                         }
                     };
-                    client.await_start(pid, deadline)?;
-                    client.check_fingerprint()?;
-                    return Ok(client);
+                    client.keeper = pid;
+                    match client.await_start(pid, deadline)? {
+                        Started::Answered => {
+                            client.take()?;
+                            return Ok(client);
+                        }
+                        Started::Exited if respawns < RESPAWNS => respawns += 1,
+                        Started::Exited => {
+                            return Err(AgentError::Keeper {
+                                detail: format!(
+                                    "the keeper of the live agent exited before answering; see {}",
+                                    client.home.paths().log().display()
+                                ),
+                            }
+                            .into())
+                        }
+                    }
                 }
             }
             if Instant::now() >= deadline {
@@ -164,6 +208,37 @@ impl KeeperClient {
         }
     }
 
+    /// Живой сторож ключа `key`, если он есть, — без сессии команды и без подъёма нового: для
+    /// `status`, `stop` и снятия.
+    pub fn attach(state: &Path, key: &str) -> Result<Option<Self>, KeeperStartError> {
+        let home = KeeperHome::open(state, key)?;
+        let machine = machine_fingerprint();
+        let observed = {
+            let _registry = lock_agent_registry(state)?;
+            observe_service(
+                home.paths(),
+                machine.as_deref(),
+                &process_facts,
+                &|record| adopt_recorded_pid(record, &process_facts, machine.as_deref()),
+            )
+        };
+        let Observed::Own(record) = observed else {
+            return Ok(None);
+        };
+        let Some(keeper) = record.pid else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            channel: home.channel(),
+            home,
+            digest: String::new(),
+            keeper,
+            reused: true,
+            session: None,
+            runtime: runtime()?,
+        }))
+    }
+
     /// Взят ли уже живой агент.
     pub fn reused(&self) -> bool {
         self.reused
@@ -172,6 +247,13 @@ impl KeeperClient {
     /// `AgentBaseDir` агента.
     pub fn base_dir(&self) -> PathBuf {
         self.home.base_dir()
+    }
+
+    /// Найденный живой сторож годится: отвечает, называет ключ хоста из записи, и сессия
+    /// команды открыта.
+    fn take(&mut self) -> Result<(), AgentError> {
+        self.check_fingerprint()?;
+        self.begin()
     }
 
     /// Ищет сторожа под замком реестра; не нашёл — ставит запись «запускается» за собой.
@@ -183,7 +265,7 @@ impl KeeperClient {
             adopt_recorded_pid(record, &process_facts, machine.as_deref())
         });
         match observed {
-            Observed::Own(_) => Ok(Found::Live),
+            Observed::Own(record) => Ok(record.pid.map_or(Found::Starting, Found::Live)),
             Observed::Starting(_) => Ok(Found::Starting),
             Observed::Nothing | Observed::Stale => {
                 let own = std::process::id();
@@ -257,19 +339,23 @@ impl KeeperClient {
     }
 
     /// Ждёт, пока поднятый сторож поднимет агента и ответит.
-    fn await_start(&self, pid: u32, deadline: Instant) -> Result<(), KeeperStartError> {
+    fn await_start(&self, pid: u32, deadline: Instant) -> Result<Started, KeeperStartError> {
         loop {
             match self.status() {
-                Ok(_) => return Ok(()),
+                Ok(_) => return Ok(Started::Answered),
                 // Канала ещё нет: сторож запускается.
-                Err(AgentError::Keeper { detail }) if detail.starts_with(NO_CHANNEL) => {}
+                Err(AgentError::KeeperUnreachable { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
-            if process_facts(pid).is_none() || Instant::now() >= deadline {
+            if process_facts(pid).is_none() {
+                self.forget_start();
+                return Ok(Started::Exited);
+            }
+            if Instant::now() >= deadline {
                 self.forget_start();
                 return Err(AgentError::Keeper {
                     detail: format!(
-                        "the keeper of the live agent exited or did not answer in time; see {}",
+                        "the keeper of the live agent did not answer in time; see {}",
                         self.home.paths().log().display()
                     ),
                 }
@@ -281,7 +367,7 @@ impl KeeperClient {
 
     /// Отпечаток ключа хоста, который назвал сторож, — тот же, что в его записи
     /// (`INV.PLATFORM.A-LIVE-AGENT-IS-TOLD-APART-BY-ITS-RECORD`).
-    fn check_fingerprint(&self) -> Result<(), KeeperStartError> {
+    fn check_fingerprint(&self) -> Result<(), AgentError> {
         let status = self.status()?;
         let recorded = read_json::<ServiceRecord>(&self.home.paths().record())
             .and_then(|record| record.agent)
@@ -292,15 +378,59 @@ impl KeeperClient {
                     "the live agent answers with host key {:?}, its record names {:?}",
                     status.fingerprint, recorded
                 ),
-            }
-            .into());
+            });
         }
         Ok(())
     }
 
-    /// Команда агенту через сторожа. Кадры ответа отдаются `on_batch` по мере прихода. Отмена
-    /// некритической команды обрывает подключение — сторож бросает команду и снимает агента;
-    /// критическую отмена не прерывает: её доводят до исхода.
+    /// Открывает сессию команды: сторож подключает агента к базе.
+    fn begin(&mut self) -> Result<(), AgentError> {
+        let request = Request::Begin {
+            credentials: self.digest.clone(),
+        };
+        let (channel, keeper) = (self.channel.clone(), self.keeper);
+        let opened = self.runtime.block_on(async {
+            let stream = connect(&channel, keeper)
+                .await
+                .map_err(|source| unreachable_at(&channel, source))?;
+            let mut stream = BufReader::new(stream);
+            write_line(stream.get_mut(), &request)
+                .await
+                .map_err(|source| unreachable_at(&channel, source))?;
+            match read_line::<_, Frame>(&mut stream).await {
+                Ok(Some(Frame::Begun { session })) => Ok(OpenSession {
+                    id: session,
+                    stream,
+                }),
+                Ok(Some(Frame::Error { error })) => Err(error.into_agent()),
+                Ok(Some(other)) => Err(unexpected(&other)),
+                Ok(None) | Err(_) => Err(AgentError::LiveAgentGone {
+                    detail: "the keeper closed the channel before the session began".to_owned(),
+                }),
+            }
+        })?;
+        self.session = Some(opened);
+        Ok(())
+    }
+
+    /// Закрывает сессию команды: сторож отключает агента от базы, а сам агент остаётся жить.
+    /// Ответ не важен: ушедшую сессию сторож закрывает и без него.
+    pub fn end(&mut self) {
+        let Some(mut session) = self.session.take() else {
+            return;
+        };
+        self.runtime.block_on(async {
+            let _ = tokio::time::timeout(END_PATIENCE, async {
+                write_line(session.stream.get_mut(), &Request::End).await?;
+                read_line::<_, Frame>(&mut session.stream).await
+            })
+            .await;
+        });
+    }
+
+    /// Команда агенту через сторожа в открытой сессии. Кадры ответа отдаются `on_batch` по мере
+    /// прихода. Отмена некритической команды пишет сторожу `cancel` и уходит — сторож бросает
+    /// команду и снимает агента; критическую отмена не прерывает: её доводят до исхода.
     pub fn run(
         &self,
         command: &str,
@@ -312,29 +442,35 @@ impl KeeperClient {
                 command: command.to_owned(),
             });
         }
+        let Some(session) = &self.session else {
+            return Err(AgentError::LiveAgentGone {
+                detail: "the command session with the live agent is closed".to_owned(),
+            });
+        };
         let request = Request::Run {
+            session: session.id.clone(),
             command: command.to_owned(),
             critical: policy.is_critical(),
             credentials: self.digest.clone(),
         };
         self.runtime.block_on(async {
-            let stream = connect(&self.channel).await.map_err(lost_channel)?;
+            let stream = connect(&self.channel, self.keeper)
+                .await
+                .map_err(|source| unreachable_at(&self.channel, source))?;
             let (read, mut write) = tokio::io::split(stream);
             let mut reader = BufReader::new(read);
             write_line(&mut write, &request)
                 .await
-                .map_err(lost_channel)?;
+                .map_err(|source| unreachable_at(&self.channel, source))?;
             policy.mark_work_given();
             let mut messages = Vec::new();
             loop {
                 let frame = tokio::select! {
                     frame = read_line::<_, Frame>(&mut reader) => frame,
                     () = policy.cancellation.cancelled(), if !policy.is_critical() => {
-                        // Уход подключения и есть отмена для сторожа. На Windows канал
-                        // закрывается, когда рантайм обработает отмену своего чтения, поэтому
-                        // после сброса он ещё крутится.
-                        drop((reader, write));
-                        tokio::time::sleep(CHANNEL_CLOSE).await;
+                        // Строка `cancel` доходит до сторожа и тогда, когда разрыв канала
+                        // он увидел бы не сразу.
+                        let _ = write_line(&mut write, &Request::Cancel).await;
                         return Err(AgentError::Cancelled {
                             command: command.to_owned(),
                             delivered: true,
@@ -391,12 +527,14 @@ impl KeeperClient {
     /// Запрос с одним итоговым кадром; отказ сторожа — отказом агентского пути.
     fn exchange(&self, request: &Request) -> Result<Frame, AgentError> {
         self.runtime.block_on(async {
-            let stream = connect(&self.channel).await.map_err(lost_channel)?;
+            let stream = connect(&self.channel, self.keeper)
+                .await
+                .map_err(|source| unreachable_at(&self.channel, source))?;
             let (read, mut write) = tokio::io::split(stream);
             let mut reader = BufReader::new(read);
             write_line(&mut write, request)
                 .await
-                .map_err(lost_channel)?;
+                .map_err(|source| unreachable_at(&self.channel, source))?;
             match read_line::<_, Frame>(&mut reader).await {
                 Ok(Some(Frame::Error { error })) => Err(error.into_agent()),
                 Ok(Some(frame)) => Ok(frame),
@@ -408,15 +546,10 @@ impl KeeperClient {
     }
 }
 
-/// Сколько рантайм клиента крутится после сброса подключения: за это время канал закрывается.
-const CHANNEL_CLOSE: Duration = Duration::from_millis(200);
-
-/// Начало отказа «канала сторожа нет».
-const NO_CHANNEL: &str = "no keeper channel";
-
-fn lost_channel(error: std::io::Error) -> AgentError {
-    AgentError::Keeper {
-        detail: format!("{NO_CHANNEL}: {error}"),
+fn unreachable_at(channel: &str, source: std::io::Error) -> AgentError {
+    AgentError::KeeperUnreachable {
+        channel: channel.to_owned(),
+        source,
     }
 }
 
@@ -426,9 +559,15 @@ fn unexpected(frame: &Frame) -> AgentError {
     }
 }
 
+/// Сколько живёт копия раннера, которую никто не держит, и недописанная копия: моложе их не
+/// трогают — их может прямо сейчас класть другой клиент.
+const STALE_COPY: Duration = Duration::from_secs(10 * 60);
+
 /// Копия исполняемого файла раннера, из которой запускается сторож:
 /// `<state>/bin/<версия>/<метка>/<имя>`. Метка — от размера и времени изменения файла, поэтому
 /// пересобранный раннер той же версии получает свою копию, а работающий сторож держит свою.
+/// Прежние копии, из которых не работает ни один сторож, и брошенные недописанные копии
+/// убираются.
 fn keeper_exe(state: &Path) -> std::io::Result<PathBuf> {
     let source = std::env::current_exe()?;
     let name = source
@@ -456,6 +595,7 @@ fn keeper_exe(state: &Path) -> std::io::Result<PathBuf> {
         .join(env!("CARGO_PKG_VERSION"))
         .join(stamp);
     let target = dir.join(&name);
+    sweep_copies(state, &dir);
     if target.is_file() {
         return Ok(target);
     }
@@ -480,16 +620,86 @@ fn keeper_exe(state: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
+/// Убирает копии раннера под `<state>/bin`, кроме `current` и тех, из которых работает живой
+/// сторож, и недописанные копии старше [`STALE_COPY`]. Отказы не мешают: копию, которую держит
+/// процесс, Windows удалить не даст, и её уберёт следующий раз.
+fn sweep_copies(state: &Path, current: &Path) {
+    let in_use = live_keeper_bins(state);
+    let old = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_COPY)
+    };
+    let Ok(versions) = std::fs::read_dir(state.join("bin")) else {
+        return;
+    };
+    for version in versions.flatten() {
+        let Ok(stamps) = std::fs::read_dir(version.path()) else {
+            continue;
+        };
+        for stamp in stamps.flatten() {
+            let path = stamp.path();
+            if path == current {
+                if let Ok(files) = std::fs::read_dir(&path) {
+                    for file in files.flatten() {
+                        let file = file.path();
+                        if file.extension().is_some_and(|extension| extension == "tmp")
+                            && old(&file)
+                        {
+                            let _ = std::fs::remove_file(file);
+                        }
+                    }
+                }
+                continue;
+            }
+            let files_old = std::fs::read_dir(&path)
+                .is_ok_and(|files| files.flatten().all(|file| old(&file.path())));
+            if in_use.iter().any(|bin| bin.starts_with(&path)) || !files_old {
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        let _ = std::fs::remove_dir(version.path());
+    }
+}
+
+/// Исполняемые файлы, из которых работают живые сторожа учётной записи.
+fn live_keeper_bins(state: &Path) -> Vec<PathBuf> {
+    let machine = machine_fingerprint();
+    let Ok(keys) = std::fs::read_dir(state.join("agents")) else {
+        return Vec::new();
+    };
+    keys.flatten()
+        .filter_map(|key| {
+            read_json::<ServiceRecord>(&key.path().join(super::SERVICE).join("record.json"))
+        })
+        .filter(|record| adopt_recorded_pid(record, &process_facts, machine.as_deref()))
+        .map(|record| record.bin)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Сторож запускается из своей копии раннера, а не из файла, который обновляют
     /// (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`); вторая копия той же сборки не
-    /// делается.
+    /// делается, а брошенные копии убираются.
     #[test]
     fn the_keeper_runs_from_its_own_copy_of_the_runner() {
         let state = tempfile::tempdir().unwrap();
+        let stale = state.path().join("bin").join("0.0.1").join("abcdef");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("v8-runner"), "old").unwrap();
+        let old = SystemTime::now() - STALE_COPY - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(stale.join("v8-runner"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         let first = keeper_exe(state.path()).unwrap();
         let second = keeper_exe(state.path()).unwrap();
         assert_eq!(first, second);
@@ -504,10 +714,12 @@ mod tests {
             std::fs::read_dir(first.parent().unwrap()).unwrap().count(),
             1
         );
+        assert!(!stale.exists(), "a copy no keeper runs from is swept");
     }
 
-    /// Клиент отдаёт кадры по мере прихода, а отменённая некритическая команда обрывает
-    /// подключение так, что сторож это видит (`INV.PLATFORM.AN-INTERRUPTED-COMMAND-REMOVES-THE-LIVE-AGENT`).
+    /// Клиент отдаёт кадры по мере прихода, а отменённая некритическая команда пишет сторожу
+    /// `cancel`, и сторож видит уход клиента, пока тот ещё жив
+    /// (`INV.PLATFORM.AN-INTERRUPTED-COMMAND-REMOVES-THE-LIVE-AGENT`).
     #[test]
     fn a_cancelled_run_leaves_the_channel_and_the_keeper_sees_it() {
         use tokio::io::AsyncReadExt;
@@ -530,6 +742,7 @@ mod tests {
         let (seen_tx, seen_rx) = std::sync::mpsc::channel();
         let server_channel = channel.clone();
         let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -549,11 +762,13 @@ mod tests {
                 write_line(&mut write, &Frame::Batch { messages: batch })
                     .await
                     .unwrap();
-                let mut probe = [0u8; 8];
+                let mut probe = [0u8; 64];
                 let left = tokio::time::timeout(Duration::from_secs(5), reader.read(&mut probe))
                     .await
-                    .is_ok_and(|read| matches!(read, Ok(0) | Err(_)));
+                    .is_ok();
                 seen_tx.send((request, left)).unwrap();
+                // Клиент ещё жив: сторож видит строку `cancel`, а не выход процесса.
+                let _ = done_rx.recv_timeout(Duration::from_secs(10));
                 listener.remove();
             });
         });
@@ -562,11 +777,13 @@ mod tests {
             home,
             channel,
             digest: "digest".to_owned(),
+            keeper: std::process::id(),
             reused: true,
-            runtime: tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap(),
+            session: Some(OpenSession {
+                id: "session".to_owned(),
+                stream: BufReader::new(Box::new(tokio::io::duplex(64).0)),
+            }),
+            runtime: runtime().unwrap(),
         };
         let cancellation = tokio_util::sync::CancellationToken::new();
         let policy = WaitPolicy::for_keeper(cancellation.clone(), false);
@@ -587,8 +804,10 @@ mod tests {
         );
         assert_eq!(batches, 1);
         let (request, left) = seen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let _ = done_tx.send(());
         assert!(
-            matches!(request, Request::Run { critical: false, ref credentials, .. } if credentials == "digest"),
+            matches!(request, Request::Run { critical: false, ref credentials, ref session, .. }
+                if credentials == "digest" && session == "session"),
             "{request:?}"
         );
         assert!(

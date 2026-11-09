@@ -149,16 +149,22 @@ pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
 pub fn with_owner_only_security<R>(
     create: impl FnOnce(&windows_sys::Win32::Security::SECURITY_ATTRIBUTES) -> R,
 ) -> std::io::Result<R> {
+    with_security("D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)", create)
+}
+
+/// Hands `create` security attributes built from the descriptor `sddl`.
+#[cfg(windows)]
+pub fn with_security<R>(
+    sddl: &str,
+    create: impl FnOnce(&windows_sys::Win32::Security::SECURITY_ATTRIBUTES) -> R,
+) -> std::io::Result<R> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
-    let sddl: Vec<u16> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: `sddl` is a null-terminated UTF-16 string; on success `descriptor` holds memory
     // to `LocalFree`, freed below once.

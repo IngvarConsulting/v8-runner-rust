@@ -490,7 +490,8 @@ impl From<AgentError> for AppError {
             | AgentError::StartupTimedOut { .. }
             | AgentError::ExitedBeforeSession { .. }
             | AgentError::LiveAgentGone { .. }
-            | AgentError::Keeper { .. } => {
+            | AgentError::Keeper { .. }
+            | AgentError::KeeperUnreachable { .. } => {
                 Self::EnvironmentUnavailable(error.to_string())
             }
         }

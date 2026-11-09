@@ -122,7 +122,8 @@ pub struct ServiceRecord {
 /// и отвечает по `status` только сторож.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveAgentFacts {
-    pub pid: u32,
+    /// Номер процесса агента; `None` — платформа его не назвала.
+    pub pid: Option<u32>,
     /// Время старта процесса агента в единицах системы ([`ProcessFacts::started`]).
     pub started: Option<u64>,
     /// Отпечаток ключа хоста, на котором закреплена сессия сторожа.

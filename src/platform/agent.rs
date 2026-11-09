@@ -440,9 +440,17 @@ pub enum AgentError {
     #[error("{detail}; a new live agent is needed")]
     LiveAgentGone { detail: String },
 
-    /// Отказ сторожа живого агента или его канала.
+    /// Отказ сторожа живого агента.
     #[error("the live agent keeper failed: {detail}")]
     Keeper { detail: String },
+
+    /// Канала сторожа нет или он не принимает подключение: сторож ещё не поднялся или уже ушёл.
+    #[error("the live agent keeper is not reachable at {channel}: {source}")]
+    KeeperUnreachable {
+        channel: String,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("agent base dir '{base_dir}' has no directory for user '{user}': {detail}")]
     UserDirUnknown {
@@ -583,6 +591,12 @@ impl WaitPolicy {
             },
             work: None,
         }
+    }
+
+    /// Ожидание `common disconnect-ib`, которым сторож отключает живого агента от базы после
+    /// сессии команды: тот же короткий срок, что у отпускания своего агента.
+    pub(in crate::platform) fn for_keeper_release() -> Self {
+        Self::release_window(RELEASE_GRACE)
     }
 
     /// Объявлена ли фаза критической: её команду доводят до исхода.
@@ -914,8 +928,31 @@ impl AgentSession {
         // команды они не отмечают.
         let service = policy.without_work();
         session.run(JSON_MODE_COMMAND, &service)?.outcome()?;
-        session.run(CONNECT_COMMAND, &service)?.outcome()?;
+        session.connect_infobase(&service)?;
         Ok(session)
+    }
+
+    /// Подключает агента к базе (`common connect-ib`). Ответ «уже подключён»
+    /// (`DesignerAlreadyConnectedToInfoBase`) — тоже подключение: так отвечает агент, которого
+    /// подключили раньше (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`). Служебная
+    /// команда работы команды не отмечает.
+    pub fn connect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
+        match self.run(CONNECT_COMMAND, &policy.without_work())?.outcome() {
+            Ok(_)
+            | Err(AgentError::Command {
+                error_type: AgentErrorType::DesignerAlreadyConnectedToInfoBase,
+                ..
+            }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Отключает агента от базы (`common disconnect-ib`), не закрывая сессии: так живой агент
+    /// между командами базу не держит. Служебная команда работы команды не отмечает.
+    pub fn disconnect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
+        self.run(DISCONNECT_COMMAND, &policy.without_work())?
+            .outcome()
+            .map(|_| ())
     }
 
     /// Одна команда — последовательность JSON-массивов до первого с итоговым

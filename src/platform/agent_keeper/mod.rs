@@ -18,7 +18,7 @@
 //!   сторож: так живой агент не мешает обновить раннер (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`).
 //!
 //! Скрытая переменная окружения [`IDLE_ENV`] (`V8_RUNNER_AGENT_IDLE_MS`) задаёт сторожу срок
-//! простоя в миллисекундах вместо 15 минут. Она для тестов: переопределять срок в работе незачем.
+//! простоя в миллисекундах, не больше 15 минут. Она для тестов: переопределять срок в работе незачем.
 
 mod channel;
 #[allow(
@@ -43,12 +43,13 @@ const IDLE_LIMIT: Duration = Duration::from_secs(15 * 60);
 /// Скрытая переменная окружения: срок простоя сторожа в миллисекундах вместо [`IDLE_LIMIT`].
 pub const IDLE_ENV: &str = "V8_RUNNER_AGENT_IDLE_MS";
 
-/// Срок простоя этого сторожа: [`IDLE_ENV`] или 15 минут.
+/// Срок простоя этого сторожа: [`IDLE_ENV`] или 15 минут. Переменная срок только укорачивает:
+/// продлить простой сверх 15 минут ею нельзя.
 fn idle_limit() -> Duration {
     std::env::var(IDLE_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .map_or(IDLE_LIMIT, Duration::from_millis)
+        .map_or(IDLE_LIMIT, |ms| Duration::from_millis(ms).min(IDLE_LIMIT))
 }
 
 /// Имя службы сторожа под каталогом ключа.

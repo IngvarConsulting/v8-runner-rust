@@ -1,11 +1,14 @@
 //! Протокол сторожа: построчный JSON по каналу. Запрос — одна строка, ответ — поток кадров, по
 //! строке на кадр. Одно подключение несёт один запрос: так разрыв подключения посреди `run`
-//! однозначно значит «команда ушла».
+//! однозначно значит «команда ушла». Сессия команды (`begin` … `end`) держит своё подключение
+//! открытым всё время сессии: его разрыв значит, что команда ушла, не закрыв сессии.
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::platform::agent::{AgentError, AgentMessage};
+use crate::platform::agent::{AgentError, AgentErrorType, AgentMessage};
 
 /// Держатель живого агента (`INV.PLATFORM.AN-AGENT-HOLDER-IS-A-LIVE-PROCESS`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,13 +43,28 @@ impl Holder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Команда агенту. `critical` — команда меняет базу: разрыв подключения её не прерывает.
-    /// `credentials` — [`credentials_digest`](super::credentials_digest) учётных данных команды.
+    /// Начало сессии команды: сторож подключает агента к базе (`common connect-ib`) и отвечает
+    /// [`Frame::Begun`]. Подключение остаётся открытым, пока сессия идёт: строка
+    /// [`Request::End`] по нему отключает агента от базы (`common disconnect-ib`) и отвечает
+    /// [`Frame::Ended`]; разрыв подключения или любая другая строка значат, что команда ушла, и
+    /// сторож отключает агента сам. `credentials` —
+    /// [`credentials_digest`](super::credentials_digest).
+    Begin {
+        credentials: String,
+    },
+    /// Конец сессии команды: только по подключению, которое открыло её `begin`.
+    End,
+    /// Команда агенту в открытой сессии `session`. `critical` — команда меняет базу: уход
+    /// клиента её не прерывает. Пока ответа нет, любая строка или разрыв от клиента значат,
+    /// что он ушёл (клиент пишет [`Request::Cancel`], прежде чем уйти).
     Run {
+        session: String,
         command: String,
         critical: bool,
         credentials: String,
     },
+    /// Клиент бросает команду, ответа на которую ждёт: строка по подключению `run`.
+    Cancel,
     Hold {
         holder: Holder,
     },
@@ -66,7 +84,29 @@ pub struct KeeperStatus {
     pub fingerprint: Option<String>,
     /// Команда, которую агент выполняет сейчас; «занят» знает только сторож.
     pub busy: Option<String>,
+    /// Агент подключён к базе: идёт сессия команды. Без неё агент базу не держит.
+    #[serde(default)]
+    pub connected: bool,
+    /// Последняя команда открытой сессии: её называет отказ занятой базы между командами.
+    #[serde(default)]
+    pub last: Option<String>,
     pub holders: Vec<Holder>,
+}
+
+#[allow(
+    dead_code,
+    reason = "проверку занятой базы другим режимом запуска встраивает этап 3 #577"
+)]
+impl KeeperStatus {
+    /// Держит ли агент базу: выполняет команду или подключён к ней сессией команды.
+    pub fn holds_the_infobase(&self) -> bool {
+        self.connected || self.busy.is_some()
+    }
+
+    /// Команда, которой агент занят: выполняемая или последняя в открытой сессии.
+    pub fn command(&self) -> Option<&str> {
+        self.busy.as_deref().or(self.last.as_deref())
+    }
 }
 
 /// Кадр ответа.
@@ -89,6 +129,12 @@ pub enum Frame {
     Holders {
         holders: Vec<Holder>,
     },
+    /// Сессия команды открыта: агент подключён к базе.
+    Begun {
+        session: String,
+    },
+    /// Сессия команды закрыта: агент отключён от базы.
+    Ended,
     /// Сторож снял агента и выходит.
     Stopped,
 }
@@ -100,47 +146,280 @@ impl Frame {
     }
 }
 
-/// Отказ сторожа в виде, который переживает канал.
+/// Отказ сторожа в виде, который переживает канал: закрытый перечень, по которому решают.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "error", rename_all = "snake_case")]
 pub enum KeeperError {
-    /// Агент не поднялся: текст отказа запуска.
-    Launch { message: String },
+    /// Агент не поднялся.
+    Launch { failure: AgentFailure },
     /// Учётные данные команды не те, с которыми открыта сессия: сторож снимает агента.
     CredentialsMismatch,
-    /// Сторож снимает агента и новых запросов не берёт.
+    /// Сторож снимает агента и новых сессий не берёт.
     Closing,
-    /// Сессия агента кончилась без ответа.
-    SessionClosed { endpoint: String, stderr: String },
-    /// Ответ агента не читается как массив сообщений.
-    InvalidReply { detail: String, head: String },
-    /// Другой отказ сессии агента: его текст.
-    Agent { message: String },
+    /// Сессии, которую назвал `run`, нет.
+    NoSession,
+    /// Сессию другой команды ещё не закрыли.
+    Busy { command: Option<String> },
+    /// Процесса держателя нет или он не тот: держателем он быть не может.
+    HolderGone,
+    /// Отказ сессии агента.
+    Agent { failure: AgentFailure },
     /// Запрос не читается.
     Protocol { message: String },
 }
 
-impl KeeperError {
-    /// Отказ сессии агента в виде для канала: то, по чему решает команда, остаётся типом.
+/// Отказ агентского пути, перенесённый через канал. Варианты повторяют [`AgentError`] там, где
+/// по ним решают или где от них зависит код ответа: команда получает тот же код, что и с
+/// разовым агентом.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentFailure {
+    PortTaken {
+        port: u16,
+        detail: String,
+    },
+    NoFreePort {
+        detail: String,
+    },
+    Unreachable {
+        endpoint: String,
+        detail: String,
+    },
+    AuthenticationRejected {
+        endpoint: String,
+        user: String,
+    },
+    HostKeyRejected {
+        endpoint: String,
+        expected: String,
+        presented: String,
+    },
+    ForeignAgentOnPort {
+        endpoint: String,
+        expected: String,
+        presented: String,
+    },
+    StartupTimedOut {
+        timeout_ms: u64,
+        last: String,
+    },
+    ExitedBeforeSession {
+        status: String,
+        out: String,
+    },
+    HostKeyPathNotReadable {
+        tried: Vec<PathBuf>,
+    },
+    Workspace {
+        path: PathBuf,
+        detail: String,
+    },
+    SessionClosed {
+        endpoint: String,
+        stderr: String,
+    },
+    InvalidReply {
+        detail: String,
+        head: String,
+    },
+    NoTerminalMessage {
+        count: usize,
+    },
+    TimedOut {
+        command: String,
+        timeout_ms: u64,
+    },
+    Cancelled {
+        command: String,
+        delivered: bool,
+    },
+    Command {
+        error_type: String,
+        message: String,
+    },
+    Canceled {
+        message: String,
+    },
+    Question {
+        message: String,
+    },
+    /// Отказ без своего варианта: решать по нему нечего, код — «среда недоступна».
+    Other {
+        message: String,
+    },
+}
+
+impl AgentFailure {
+    /// Отказ агента в виде для канала.
     pub fn from_agent(error: AgentError) -> Self {
+        let message = error.to_string();
         match error {
+            AgentError::PortTaken { port, detail } => Self::PortTaken { port, detail },
+            AgentError::NoFreePort { source } => Self::NoFreePort {
+                detail: source.to_string(),
+            },
+            AgentError::Unreachable { endpoint, source } => Self::Unreachable {
+                endpoint,
+                detail: source.to_string(),
+            },
+            AgentError::Handshake { endpoint, .. } | AgentError::Channel { endpoint, .. } => {
+                Self::Unreachable {
+                    endpoint,
+                    detail: message,
+                }
+            }
+            // Оборванная отправка — тот же класс, что закрытая сессия: отказ платформы.
+            AgentError::Transport { endpoint, .. } => Self::SessionClosed {
+                endpoint,
+                stderr: message,
+            },
+            AgentError::AuthenticationRejected { endpoint, user } => {
+                Self::AuthenticationRejected { endpoint, user }
+            }
+            AgentError::HostKeyRejected {
+                endpoint,
+                expected,
+                presented,
+            } => Self::HostKeyRejected {
+                endpoint,
+                expected,
+                presented,
+            },
+            AgentError::ForeignAgentOnPort {
+                endpoint,
+                expected,
+                presented,
+            } => Self::ForeignAgentOnPort {
+                endpoint,
+                expected,
+                presented,
+            },
+            AgentError::StartupTimedOut { timeout_ms, last } => {
+                Self::StartupTimedOut { timeout_ms, last }
+            }
+            AgentError::ExitedBeforeSession { status, out } => {
+                Self::ExitedBeforeSession { status, out }
+            }
+            AgentError::HostKeyPathNotReadable { tried } => Self::HostKeyPathNotReadable { tried },
+            AgentError::Workspace { path, source } => Self::Workspace {
+                path,
+                detail: source.to_string(),
+            },
             AgentError::SessionClosed { endpoint, stderr } => {
                 Self::SessionClosed { endpoint, stderr }
             }
             AgentError::InvalidReply { detail, head } => Self::InvalidReply { detail, head },
-            other => Self::Agent {
-                message: other.to_string(),
+            AgentError::NoTerminalMessage { count } => Self::NoTerminalMessage { count },
+            AgentError::TimedOut {
+                command,
+                timeout_ms,
+            } => Self::TimedOut {
+                command,
+                timeout_ms,
             },
+            AgentError::Cancelled { command, delivered } => Self::Cancelled { command, delivered },
+            AgentError::Command {
+                error_type,
+                message,
+            } => Self::Command {
+                error_type: error_type.as_str().to_owned(),
+                message,
+            },
+            AgentError::Canceled { message } => Self::Canceled { message },
+            AgentError::Question { message } => Self::Question { message },
+            AgentError::NotSent { .. }
+            | AgentError::Exchange { .. }
+            | AgentError::UnsafeEntryName { .. }
+            | AgentError::Launch(_)
+            | AgentError::LiveAgentGone { .. }
+            | AgentError::Keeper { .. }
+            | AgentError::KeeperUnreachable { .. }
+            | AgentError::UserDirUnknown { .. } => Self::Other { message },
+        }
+    }
+
+    /// Отказ агента на стороне команды.
+    pub fn into_agent(self) -> AgentError {
+        match self {
+            Self::PortTaken { port, detail } => AgentError::PortTaken { port, detail },
+            Self::NoFreePort { detail } => AgentError::NoFreePort {
+                source: std::io::Error::other(detail),
+            },
+            Self::Unreachable { endpoint, detail } => AgentError::Unreachable {
+                endpoint,
+                source: std::io::Error::other(detail),
+            },
+            Self::AuthenticationRejected { endpoint, user } => {
+                AgentError::AuthenticationRejected { endpoint, user }
+            }
+            Self::HostKeyRejected {
+                endpoint,
+                expected,
+                presented,
+            } => AgentError::HostKeyRejected {
+                endpoint,
+                expected,
+                presented,
+            },
+            Self::ForeignAgentOnPort {
+                endpoint,
+                expected,
+                presented,
+            } => AgentError::ForeignAgentOnPort {
+                endpoint,
+                expected,
+                presented,
+            },
+            Self::StartupTimedOut { timeout_ms, last } => {
+                AgentError::StartupTimedOut { timeout_ms, last }
+            }
+            Self::ExitedBeforeSession { status, out } => {
+                AgentError::ExitedBeforeSession { status, out }
+            }
+            Self::HostKeyPathNotReadable { tried } => AgentError::HostKeyPathNotReadable { tried },
+            Self::Workspace { path, detail } => AgentError::Workspace {
+                path,
+                source: std::io::Error::other(detail),
+            },
+            Self::SessionClosed { endpoint, stderr } => {
+                AgentError::SessionClosed { endpoint, stderr }
+            }
+            Self::InvalidReply { detail, head } => AgentError::InvalidReply { detail, head },
+            Self::NoTerminalMessage { count } => AgentError::NoTerminalMessage { count },
+            Self::TimedOut {
+                command,
+                timeout_ms,
+            } => AgentError::TimedOut {
+                command,
+                timeout_ms,
+            },
+            Self::Cancelled { command, delivered } => AgentError::Cancelled { command, delivered },
+            Self::Command {
+                error_type,
+                message,
+            } => AgentError::Command {
+                error_type: AgentErrorType::parse(&error_type),
+                message,
+            },
+            Self::Canceled { message } => AgentError::Canceled { message },
+            Self::Question { message } => AgentError::Question { message },
+            Self::Other { message } => AgentError::Keeper { detail: message },
+        }
+    }
+}
+
+impl KeeperError {
+    /// Отказ сессии агента в виде для канала.
+    pub fn from_agent(error: AgentError) -> Self {
+        Self::Agent {
+            failure: AgentFailure::from_agent(error),
         }
     }
 
     /// Отказ сторожа отказом агентского пути на стороне команды.
     pub fn into_agent(self) -> AgentError {
         match self {
-            Self::SessionClosed { endpoint, stderr } => {
-                AgentError::SessionClosed { endpoint, stderr }
-            }
-            Self::InvalidReply { detail, head } => AgentError::InvalidReply { detail, head },
+            Self::Launch { failure } | Self::Agent { failure } => failure.into_agent(),
             Self::CredentialsMismatch => AgentError::LiveAgentGone {
                 detail: "the live agent was opened with other credentials and is removed"
                     .to_owned(),
@@ -148,15 +427,25 @@ impl KeeperError {
             Self::Closing => AgentError::LiveAgentGone {
                 detail: "the live agent is being removed".to_owned(),
             },
-            Self::Launch { message } => AgentError::Keeper {
-                detail: format!("the live agent did not start: {message}"),
+            Self::NoSession => AgentError::LiveAgentGone {
+                detail: "the live agent has no session of this command".to_owned(),
             },
-            Self::Agent { message } | Self::Protocol { message } => {
-                AgentError::Keeper { detail: message }
-            }
+            Self::Busy { command } => AgentError::Keeper {
+                detail: format!(
+                    "the live agent still serves another command{}",
+                    command.map_or_else(String::new, |command| format!(": {command}"))
+                ),
+            },
+            Self::HolderGone => AgentError::Keeper {
+                detail: "the holder process is not running".to_owned(),
+            },
+            Self::Protocol { message } => AgentError::Keeper { detail: message },
         }
     }
 }
+
+/// Предел строки протокола: длиннее строк ни сторож, ни клиент не читают.
+pub const LINE_LIMIT: u64 = 1024 * 1024;
 
 /// Пишет значение одной строкой JSON и сбрасывает буфер.
 pub async fn write_line<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
@@ -170,17 +459,27 @@ where
     writer.flush().await
 }
 
-/// Читает одну строку JSON; `None` — канал закрыт до строки.
+/// Читает одну строку JSON не длиннее [`LINE_LIMIT`]; `None` — канал закрыт до строки.
 pub async fn read_line<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
 where
-    R: AsyncBufRead + Unpin + ?Sized,
+    R: AsyncBufRead + Unpin,
     T: for<'de> Deserialize<'de>,
 {
-    let mut line = String::new();
-    if reader.read_line(&mut line).await? == 0 {
+    let mut line = Vec::new();
+    let read = (&mut *reader)
+        .take(LINE_LIMIT)
+        .read_until(b'\n', &mut line)
+        .await?;
+    if read == 0 {
         return Ok(None);
     }
-    serde_json::from_str(line.trim_end())
+    if line.last() != Some(&b'\n') && read as u64 >= LINE_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("a protocol line is longer than {LINE_LIMIT} bytes"),
+        ));
+    }
+    serde_json::from_slice(line.trim_ascii_end())
         .map(Some)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
@@ -192,6 +491,7 @@ mod tests {
     #[test]
     fn a_request_and_a_frame_travel_as_one_line_of_json() {
         let request = Request::Run {
+            session: "s".to_owned(),
             command: "config dump-config-to-files --dir \"a\nb\"".to_owned(),
             critical: true,
             credentials: "00".to_owned(),
@@ -223,5 +523,67 @@ mod tests {
             until_ms: 9
         }));
         assert!(!ttl.same(&process));
+    }
+
+    /// Отказ агента переживает канал тем же видом: код ответа команды не зависит от того,
+    /// живой агент или разовый.
+    #[test]
+    fn an_agent_failure_keeps_its_kind_across_the_channel() {
+        let cases = [
+            AgentError::PortTaken {
+                port: 7,
+                detail: "taken".to_owned(),
+            },
+            AgentError::AuthenticationRejected {
+                endpoint: "127.0.0.1:7".to_owned(),
+                user: "u".to_owned(),
+            },
+            AgentError::StartupTimedOut {
+                timeout_ms: 5,
+                last: "x".to_owned(),
+            },
+            AgentError::HostKeyPathNotReadable {
+                tried: vec![PathBuf::from("a")],
+            },
+            AgentError::ExitedBeforeSession {
+                status: "1".to_owned(),
+                out: "o".to_owned(),
+            },
+            AgentError::InvalidReply {
+                detail: "d".to_owned(),
+                head: "h".to_owned(),
+            },
+            AgentError::Command {
+                error_type: AgentErrorType::InfoBaseNotFound,
+                message: "m".to_owned(),
+            },
+        ];
+        for error in cases {
+            let shown = error.to_string();
+            let kind = std::mem::discriminant(&error);
+            let line = serde_json::to_string(&KeeperError::from_agent(error)).unwrap();
+            let back = serde_json::from_str::<KeeperError>(&line)
+                .unwrap()
+                .into_agent();
+            assert_eq!(std::mem::discriminant(&back), kind, "{line}");
+            assert_eq!(back.to_string(), shown);
+        }
+    }
+
+    /// Строка длиннее предела не читается: сторож не копит её в памяти.
+    #[test]
+    fn a_line_over_the_limit_is_refused() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let long = vec![b'a'; usize::try_from(LINE_LIMIT).unwrap() + 10];
+        let outcome = runtime.block_on(async {
+            let mut reader = tokio::io::BufReader::new(long.as_slice());
+            read_line::<_, serde_json::Value>(&mut reader).await
+        });
+        assert_eq!(
+            outcome.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::InvalidData)
+        );
     }
 }

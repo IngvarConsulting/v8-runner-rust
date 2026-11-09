@@ -3,26 +3,33 @@
 //! Запуск агента и данные для него приходят одной строкой JSON в stdin ([`KeeperStart`]):
 //! учётные данные базы не попадают в командную строку. Сторож сначала занимает канал (второй
 //! сторож того же ключа на нём отказывает), пишет свою запись, затем поднимает агента
-//! ([`ManagedAgent::launch_for_keeper`]) и держит его сессию SSH.
+//! ([`ManagedAgent::launch_for_keeper`]), отключает его от базы и держит его сессию SSH.
 //!
 //! Агентом владеет один долгоживущий поток: он поднимает процесс агента (на Linux сигнал смерти
 //! родителя привязан к потоку, `INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`) и выполняет
-//! команды по одной. Подключения обслуживают задачи `tokio`, каждое своё: `status`, `hold` и
-//! `release` отвечают и во время долгого `run`. Срок простоя считает тикер
+//! работу по одной: подключение к базе в начале сессии команды, команды, отключение в конце.
+//! Подключения обслуживают задачи `tokio`, каждое своё: `status`, `hold` и `release` отвечают и
+//! во время долгого `run`. Срок простоя считает тикер
 //! (`INV.PLATFORM.A-LIVE-AGENT-CLOSES-WHEN-NOBODY-HOLDS-IT`, `…-CLOSES-WITH-ITS-HOLDER`).
+//!
+//! Между сессиями команд агент к базе не подключён (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`):
+//! подключение — часть сессии команды, и сторож закрывает его и тогда, когда команда ушла, не
+//! закрыв сессии.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::channel::{Listener, Stream};
 use super::client::KeeperStart;
-use super::protocol::{read_line, write_line, Frame, Holder, KeeperError, KeeperStatus, Request};
+use super::protocol::{
+    read_line, write_line, AgentFailure, Frame, Holder, KeeperError, KeeperStatus, Request,
+};
 use super::{credentials_digest, idle_limit, KeeperHome};
 use crate::platform::agent::{
     free_managed_port, host_key_fallback_roots, AgentError, AgentLaunch, AgentSessionRequest,
@@ -43,6 +50,8 @@ const TICK: Duration = Duration::from_millis(200);
 const FAILED_GRACE: Duration = Duration::from_secs(3);
 /// Сколько сторож даёт ответам `stop` уйти в канал, прежде чем выйти.
 const STOP_FLUSH: Duration = Duration::from_millis(200);
+/// Сколько сторож ждёт первой строки подключения: молчащее подключение задачу не держит.
+const FIRST_LINE: Duration = Duration::from_secs(10);
 
 /// Точка входа подкоманды: код выхода процесса.
 pub fn run_keeper(key: &str) -> i32 {
@@ -84,9 +93,18 @@ enum Readiness {
     Launching,
     Ready {
         agent_pid: Option<u32>,
+        /// Время старта процесса агента: по pid без него жив ли тот же процесс, не сказать.
+        agent_started: Option<u64>,
         fingerprint: Option<String>,
     },
     Failed(KeeperError),
+}
+
+/// Открытая сессия команды: агент подключён к базе.
+struct Session {
+    id: String,
+    /// Последняя команда сессии.
+    last: Option<String>,
 }
 
 /// Что знает только сторож.
@@ -95,23 +113,36 @@ struct State {
     busy: Option<String>,
     /// Отмена выполняемой команды и её класс: `stop` бросает только некритическую.
     current: Option<(CancellationToken, bool)>,
+    session: Option<Session>,
     holders: Vec<Holder>,
-    /// С какого мгновения агент простаивает.
+    /// С какого мгновения агент простаивает: с подъёма, с конца сессии или с последнего
+    /// `release`.
     idle_since: Instant,
-    /// Агента снимут, как только он освободится.
+    /// Агента снимут, как только кончится сессия команды.
     close_requested: bool,
+    /// `stop`: агента снимут, как только он не выполняет команду, и с открытой сессией тоже.
+    stop_requested: bool,
     /// Когда подъём агента не удался.
     failed_at: Option<Instant>,
 }
 
 /// Работа потоку агента.
 enum Job {
+    Begin {
+        session: String,
+        reply: oneshot::Sender<Result<(), KeeperError>>,
+    },
     Run {
+        session: String,
         command: String,
         critical: bool,
         cancel: CancellationToken,
         started: Arc<AtomicBool>,
         frames: mpsc::UnboundedSender<Frame>,
+    },
+    End {
+        session: String,
+        reply: Option<oneshot::Sender<()>>,
     },
     Close,
 }
@@ -141,10 +172,6 @@ impl Shared {
         state.close_requested = true;
     }
 
-    fn closing(&self) -> bool {
-        self.lock().close_requested || self.shutdown.is_cancelled()
-    }
-
     fn send(&self, job: Job) -> bool {
         self.jobs
             .lock()
@@ -165,16 +192,34 @@ impl Shared {
             Readiness::Ready {
                 agent_pid,
                 fingerprint,
-            } => {
-                if self.closing() {
-                    Err(KeeperError::Closing)
-                } else {
-                    Ok((agent_pid, fingerprint))
-                }
-            }
+                ..
+            } => Ok((agent_pid, fingerprint)),
             Readiness::Failed(error) => Err(error),
             Readiness::Launching => unreachable!("waited past launching"),
         }
+    }
+
+    /// Готов ли сторож взять работу: агент поднят, учётные данные те же, и агента не снимают.
+    /// Команде уже открытой сессии (`within_session`) агент служит и тогда, когда его решили
+    /// снять после сессии; отказывают ей только `stop` и чужие учётные данные.
+    async fn open_for_work(
+        &self,
+        credentials: &str,
+        within_session: bool,
+    ) -> Result<(), KeeperError> {
+        self.ready().await?;
+        if credentials != self.digest {
+            self.request_close("a command came with other credentials");
+            return Err(KeeperError::CredentialsMismatch);
+        }
+        let state = self.lock();
+        if state.stop_requested
+            || self.shutdown.is_cancelled()
+            || (state.close_requested && !within_session)
+        {
+            return Err(KeeperError::Closing);
+        }
+        Ok(())
     }
 }
 
@@ -190,9 +235,11 @@ async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<()
         state: Mutex::new(State {
             busy: None,
             current: None,
+            session: None,
             holders: Vec::new(),
             idle_since: Instant::now(),
             close_requested: false,
+            stop_requested: false,
             failed_at: None,
         }),
         readiness,
@@ -226,19 +273,34 @@ async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<()
         }
     }
 
-    // Новых подключений нет; поток агента снимает агента после команды, которую уже ведёт.
+    // Канал закрывается раньше записи: команда, нашедшая запись, не подключится к сторожу,
+    // который уже уходит, а подождёт его ухода и поднимет нового.
+    listener.remove();
+    drop(listener);
+    // Поток агента снимает агента после команды, которую уже ведёт.
     shared.send(Job::Close);
     let _ = worker_finished.await;
     let _ = worker.join();
     remove_record(&shared.home);
-    listener.remove();
     let _ = shared.stopped.send(true);
     tokio::time::sleep(STOP_FLUSH).await;
     info!("the keeper is done");
     Ok(())
 }
 
-/// Поток агента: поднимает агента и выполняет команды по одной, затем отпускает и снимает его.
+/// Отказ, после которого сессия SSH агента следующей работе не годится.
+fn breaks_the_session(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::SessionClosed { .. }
+            | AgentError::Transport { .. }
+            | AgentError::InvalidReply { .. }
+            | AgentError::Cancelled { .. }
+            | AgentError::TimedOut { .. }
+    )
+}
+
+/// Поток агента: поднимает агента и выполняет работу по одной, затем отпускает и снимает его.
 fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<Job>) {
     let infobase = start.launch.infobase.clone();
     let (mut agent, port) = match launch(&shared.home, start) {
@@ -248,15 +310,23 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
             shared.lock().failed_at = Some(Instant::now());
             shared.request_close("the agent did not start");
             let failure = KeeperError::Launch {
-                message: error.to_string(),
+                failure: AgentFailure::from_agent(error),
             };
             let _ = shared.readiness.send(Readiness::Failed(failure.clone()));
             for job in queue {
                 match job {
+                    Job::Begin { reply, .. } => {
+                        let _ = reply.send(Err(failure.clone()));
+                    }
                     Job::Run { frames, .. } => {
                         let _ = frames.send(Frame::Error {
                             error: failure.clone(),
                         });
+                    }
+                    Job::End { reply, .. } => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(());
+                        }
                     }
                     Job::Close => break,
                 }
@@ -264,14 +334,25 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
             return;
         }
     };
+    // Сессия открылась с подключением к базе; простаивающий агент базу не держит.
+    if let Err(error) = agent
+        .session()
+        .disconnect_infobase(&WaitPolicy::for_keeper_release())
+    {
+        warn!(%error, "the live agent did not confirm common disconnect-ib after its launch");
+        if breaks_the_session(&error) {
+            shared.request_close("the agent session broke off");
+        }
+    }
     let fingerprint = match agent.host_key_expectation() {
         HostKeyExpectation::Pinned(fingerprint) => Some(fingerprint.to_string()),
         HostKeyExpectation::Unpinned => None,
     };
     let agent_pid = agent.pid();
+    let agent_started = agent_pid.and_then(process_facts).map(|facts| facts.started);
     let facts = LiveAgentFacts {
-        pid: agent_pid.unwrap_or_default(),
-        started: agent_pid.and_then(process_facts).map(|facts| facts.started),
+        pid: agent_pid,
+        started: agent_started,
         fingerprint: fingerprint.clone(),
         channel: shared.home.channel(),
         infobase,
@@ -282,73 +363,187 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
     shared.lock().idle_since = Instant::now();
     let _ = shared.readiness.send(Readiness::Ready {
         agent_pid,
+        agent_started,
         fingerprint,
     });
     info!(pid = ?agent_pid, "the live agent is up");
 
     for job in queue {
-        let Job::Run {
-            command,
-            critical,
-            cancel,
-            started,
-            frames,
-        } = job
-        else {
-            break;
-        };
-        {
-            let mut state = shared.lock();
-            if cancel.is_cancelled() {
-                continue;
+        match job {
+            Job::Close => break,
+            Job::Begin { session, reply } => {
+                let _ = reply.send(begin_session(shared, &mut agent, session));
             }
-            if state.close_requested {
-                let _ = frames.send(Frame::Error {
-                    error: KeeperError::Closing,
-                });
-                continue;
-            }
-            started.store(true, Ordering::Release);
-            state.busy = Some(command.clone());
-            state.current = Some((cancel.clone(), critical));
-        }
-        debug!(%command, critical, "running a command for a client");
-        let policy = WaitPolicy::for_keeper(cancel, critical);
-        let result = agent
-            .session()
-            .run_streaming(&command, &policy, &mut |batch| {
-                let _ = frames.send(Frame::Batch {
-                    messages: batch.to_vec(),
-                });
-            });
-        let frame = match result {
-            Ok(_) => Frame::Done,
-            Err(error) => {
-                // Сессия, оборванная посреди ответа, уже не годится следующей команде.
-                if matches!(
-                    error,
-                    AgentError::SessionClosed { .. }
-                        | AgentError::Transport { .. }
-                        | AgentError::InvalidReply { .. }
-                        | AgentError::Cancelled { .. }
-                ) {
-                    shared.request_close("the agent session broke off");
-                }
-                Frame::Error {
-                    error: KeeperError::from_agent(error),
+            Job::Run {
+                session,
+                command,
+                critical,
+                cancel,
+                started,
+                frames,
+            } => {
+                let job = RunJob {
+                    session,
+                    command,
+                    critical,
+                    cancel,
+                    started,
+                };
+                if let Some(frame) = run_command(shared, &mut agent, job, &frames) {
+                    let _ = frames.send(frame);
                 }
             }
-        };
-        {
-            let mut state = shared.lock();
-            state.busy = None;
-            state.current = None;
-            state.idle_since = Instant::now();
+            Job::End { session, reply } => {
+                end_session(shared, &mut agent, &session);
+                if let Some(reply) = reply {
+                    let _ = reply.send(());
+                }
+            }
         }
-        let _ = frames.send(frame);
     }
     agent.release_and_remove();
     info!("the live agent is released and removed");
+}
+
+/// Начало сессии команды: агент подключается к базе.
+fn begin_session(
+    shared: &Shared,
+    agent: &mut ManagedAgent,
+    session: String,
+) -> Result<(), KeeperError> {
+    {
+        let mut state = shared.lock();
+        if state.close_requested || state.stop_requested {
+            return Err(KeeperError::Closing);
+        }
+        if let Some(open) = &state.session {
+            return Err(KeeperError::Busy {
+                command: open.last.clone(),
+            });
+        }
+        // Сессия открыта с этой минуты: простой её не снимет и пока агент подключается.
+        state.session = Some(Session {
+            id: session,
+            last: None,
+        });
+    }
+    let policy = WaitPolicy::for_keeper(CancellationToken::new(), false);
+    match agent.session().connect_infobase(&policy) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            {
+                let mut state = shared.lock();
+                state.session = None;
+                state.idle_since = Instant::now();
+            }
+            if breaks_the_session(&error) {
+                shared.request_close("the agent session broke off");
+            }
+            Err(KeeperError::from_agent(error))
+        }
+    }
+}
+
+/// Конец сессии команды: агент отключается от базы. Агента, которого снимают, не отключают:
+/// его сессия могла оборваться посреди ответа, а снятие само его отпустит.
+fn end_session(shared: &Shared, agent: &mut ManagedAgent, session: &str) {
+    let removing = {
+        let state = shared.lock();
+        if !state
+            .session
+            .as_ref()
+            .is_some_and(|open| open.id == session)
+        {
+            return;
+        }
+        state.close_requested || state.stop_requested
+    };
+    if !removing {
+        if let Err(error) = agent
+            .session()
+            .disconnect_infobase(&WaitPolicy::for_keeper_release())
+        {
+            warn!(%error, "the live agent did not confirm common disconnect-ib");
+            if breaks_the_session(&error) {
+                shared.request_close("the agent session broke off");
+            }
+        }
+    }
+    let mut state = shared.lock();
+    state.session = None;
+    state.idle_since = Instant::now();
+    debug!("the command session is over");
+}
+
+struct RunJob {
+    session: String,
+    command: String,
+    critical: bool,
+    cancel: CancellationToken,
+    started: Arc<AtomicBool>,
+}
+
+/// Команда в сессии: кадры ответа уходят по мере прихода, итоговый возвращается.
+fn run_command(
+    shared: &Shared,
+    agent: &mut ManagedAgent,
+    job: RunJob,
+    frames: &mpsc::UnboundedSender<Frame>,
+) -> Option<Frame> {
+    let RunJob {
+        session,
+        command,
+        critical,
+        cancel,
+        started,
+    } = job;
+    {
+        let mut state = shared.lock();
+        if cancel.is_cancelled() {
+            return None;
+        }
+        if state.stop_requested {
+            return Some(Frame::Error {
+                error: KeeperError::Closing,
+            });
+        }
+        match state.session.as_mut() {
+            Some(open) if open.id == session => open.last = Some(command.clone()),
+            _ => {
+                return Some(Frame::Error {
+                    error: KeeperError::NoSession,
+                })
+            }
+        }
+        started.store(true, Ordering::Release);
+        state.busy = Some(command.clone());
+        state.current = Some((cancel.clone(), critical));
+    }
+    debug!(%command, critical, "running a command for a client");
+    let policy = WaitPolicy::for_keeper(cancel, critical);
+    let result = agent
+        .session()
+        .run_streaming(&command, &policy, &mut |batch| {
+            let _ = frames.send(Frame::Batch {
+                messages: batch.to_vec(),
+            });
+        });
+    let frame = match result {
+        Ok(_) => Frame::Done,
+        Err(error) => {
+            // Сессия, оборванная посреди ответа, уже не годится следующей команде.
+            if breaks_the_session(&error) {
+                shared.request_close("the agent session broke off");
+            }
+            Frame::Error {
+                error: KeeperError::from_agent(error),
+            }
+        }
+    };
+    let mut state = shared.lock();
+    state.busy = None;
+    state.current = None;
+    Some(frame)
 }
 
 /// Поднимает агента ключа и открывает его сессию.
@@ -396,6 +591,12 @@ fn launch(home: &KeeperHome, start: KeeperStart) -> Result<(ManagedAgent, u16), 
     .map(|agent| (agent, port))
 }
 
+/// Жив ли процесс `pid`, стартовавший в `started`: повторно выданный pid тем же процессом
+/// не считается.
+fn alive(pid: u32, started: Option<u64>) -> bool {
+    process_facts(pid).is_some_and(|facts| started.is_none_or(|started| facts.started == started))
+}
+
 /// Сроки: держатели, простой, просьба закрыться.
 async fn tick(shared: Arc<Shared>) {
     let idle = idle_limit();
@@ -409,13 +610,21 @@ async fn tick(shared: Arc<Shared>) {
         if poll {
             polled = Instant::now();
         }
-        let agent_pid = match &*shared.readiness.borrow() {
-            Readiness::Ready { agent_pid, .. } => *agent_pid,
+        let agent = match &*shared.readiness.borrow() {
+            Readiness::Ready {
+                agent_pid,
+                agent_started,
+                ..
+            } => Some((*agent_pid, *agent_started)),
             _ => None,
         };
         // Процесс агента, которого уже нет, никому не служит.
-        if poll && agent_pid.is_some_and(|pid| process_facts(pid).is_none()) {
-            shared.request_close("the agent process is gone");
+        if poll {
+            if let Some((Some(pid), started)) = agent {
+                if !alive(pid, started) {
+                    shared.request_close("the agent process is gone");
+                }
+            }
         }
         let now_ms = now_ms();
         let mut state = shared.lock();
@@ -429,25 +638,30 @@ async fn tick(shared: Arc<Shared>) {
         let before = state.holders.len();
         state.holders.retain(|holder| match holder {
             Holder::Ttl { until_ms, .. } => *until_ms > now_ms,
-            Holder::Process { pid, started } => {
-                !poll || process_facts(*pid).is_some_and(|facts| facts.started == *started)
-            }
+            Holder::Process { pid, started } => !poll || alive(*pid, Some(*started)),
         });
         if before > 0 && state.holders.is_empty() {
             info!("the last holder is gone");
             state.close_requested = true;
         }
-        let idle_over = agent_pid.is_some()
+        // Простой — только время без сессии команды: пока команда держит агента, он занят,
+        // даже между её запросами.
+        let idle_over = agent.is_some()
             && state.holders.is_empty()
             && state.busy.is_none()
+            && state.session.is_none()
             && state.idle_since.elapsed() >= idle;
-        if idle_over {
+        if idle_over && !state.close_requested {
             info!(
                 idle_ms = idle.as_millis() as u64,
                 "the live agent stayed idle"
             );
+            // Запрос, который уже стоит в очереди, получит ясный отказ, а не начнётся и не
+            // оборвётся снятием.
+            state.close_requested = true;
         }
-        if (state.close_requested || idle_over) && state.busy.is_none() {
+        let free = state.busy.is_none() && (state.session.is_none() || state.stop_requested);
+        if free && (state.close_requested || state.stop_requested) {
             drop(state);
             shared.shutdown.cancel();
             return;
@@ -465,10 +679,11 @@ fn now_ms() -> u64 {
 async fn handle(shared: Arc<Shared>, stream: Stream) {
     let (read, mut write) = tokio::io::split(stream);
     let mut reader = BufReader::new(read);
-    let request = match read_line::<_, Request>(&mut reader).await {
-        Ok(Some(request)) => request,
-        Ok(None) => return,
-        Err(error) => {
+    let request = match tokio::time::timeout(FIRST_LINE, read_line::<_, Request>(&mut reader)).await
+    {
+        Ok(Ok(Some(request))) => request,
+        Ok(Ok(None)) | Err(_) => return,
+        Ok(Err(error)) => {
             let _ = write_line(
                 &mut write,
                 &Frame::Error {
@@ -491,27 +706,15 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
                         agent_pid,
                         fingerprint,
                         busy: state.busy.clone(),
+                        connected: state.session.is_some(),
+                        last: state.session.as_ref().and_then(|open| open.last.clone()),
                         holders: state.holders.clone(),
                     },
                 }
             }
             Err(error) => Frame::Error { error },
         },
-        Request::Hold { holder } => match shared.ready().await {
-            Ok(_) => {
-                let mut state = shared.lock();
-                match state.holders.iter_mut().find(|held| held.same(&holder)) {
-                    // Повторный `hold` второй отметки не ставит: срок продлевается, процесс
-                    // остаётся тем же (`INV.CLI.AN-AGENT-HOLD-IS-IDEMPOTENT-PER-HOLDER`).
-                    Some(held) => *held = holder,
-                    None => state.holders.push(holder),
-                }
-                Frame::Holders {
-                    holders: state.holders.clone(),
-                }
-            }
-            Err(error) => Frame::Error { error },
-        },
+        Request::Hold { holder } => hold(&shared, holder).await,
         Request::Release { holder } => {
             let mut state = shared.lock();
             let before = state.holders.len();
@@ -527,6 +730,7 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
         Request::Stop => {
             {
                 let mut state = shared.lock();
+                state.stop_requested = true;
                 state.close_requested = true;
                 if let Some((cancel, false)) = &state.current {
                     cancel.cancel();
@@ -536,50 +740,144 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
             let _ = stopped.wait_for(|stopped| *stopped).await;
             Frame::Stopped
         }
+        Request::Begin { credentials } => {
+            begin(&shared, &mut reader, &mut write, credentials).await;
+            return;
+        }
         Request::Run {
+            session,
             command,
             critical,
             credentials,
         } => {
-            run(
-                &shared,
-                &mut reader,
-                &mut write,
+            let job = RunRequest {
+                session,
                 command,
                 critical,
                 credentials,
-            )
-            .await;
+            };
+            run(&shared, &mut reader, &mut write, job).await;
             return;
         }
+        Request::End | Request::Cancel => Frame::Error {
+            error: KeeperError::Protocol {
+                message: "end and cancel answer only within a begin or a run".to_owned(),
+            },
+        },
     };
     let _ = write_line(&mut write, &answer).await;
+}
+
+/// `hold`: процесс, которого нет, держателем не становится.
+async fn hold(shared: &Shared, holder: Holder) -> Frame {
+    if let Err(error) = shared.ready().await {
+        return Frame::Error { error };
+    }
+    if let Holder::Process { pid, started } = &holder {
+        if !alive(*pid, Some(*started)) {
+            return Frame::Error {
+                error: KeeperError::HolderGone,
+            };
+        }
+    }
+    let mut state = shared.lock();
+    match state.holders.iter_mut().find(|held| held.same(&holder)) {
+        // Повторный `hold` второй отметки не ставит: срок продлевается, процесс
+        // остаётся тем же (`INV.CLI.AN-AGENT-HOLD-IS-IDEMPOTENT-PER-HOLDER`).
+        Some(held) => *held = holder,
+        None => state.holders.push(holder),
+    }
+    Frame::Holders {
+        holders: state.holders.clone(),
+    }
+}
+
+/// `begin`: сессия команды живёт, пока открыто её подключение. `end` по нему закрывает её с
+/// ответом; разрыв или чужая строка закрывают её без ответа — команда ушла.
+async fn begin<R, W>(shared: &Shared, reader: &mut R, write: &mut W, credentials: String)
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    if let Err(error) = shared.open_for_work(&credentials, false).await {
+        let _ = write_line(write, &Frame::Error { error }).await;
+        return;
+    }
+    let session = uuid::Uuid::new_v4().simple().to_string();
+    let (reply, answer) = oneshot::channel();
+    let outcome = if shared.send(Job::Begin {
+        session: session.clone(),
+        reply,
+    }) {
+        answer.await.unwrap_or(Err(KeeperError::Closing))
+    } else {
+        Err(KeeperError::Closing)
+    };
+    if let Err(error) = outcome {
+        let _ = write_line(write, &Frame::Error { error }).await;
+        return;
+    }
+    if write_line(
+        write,
+        &Frame::Begun {
+            session: session.clone(),
+        },
+    )
+    .await
+    .is_err()
+    {
+        shared.send(Job::End {
+            session,
+            reply: None,
+        });
+        return;
+    }
+    let mut stopped = shared.stopped.subscribe();
+    let ended = tokio::select! {
+        line = read_line::<_, Request>(reader) => matches!(line, Ok(Some(Request::End))),
+        _ = stopped.wait_for(|stopped| *stopped) => return,
+    };
+    if ended {
+        let (reply, done) = oneshot::channel();
+        if shared.send(Job::End {
+            session,
+            reply: Some(reply),
+        }) {
+            let _ = done.await;
+        }
+        let _ = write_line(write, &Frame::Ended).await;
+    } else {
+        info!("the client left without ending its session");
+        shared.send(Job::End {
+            session,
+            reply: None,
+        });
+    }
+}
+
+struct RunRequest {
+    session: String,
+    command: String,
+    critical: bool,
+    credentials: String,
 }
 
 /// `run`: команда идёт в очередь потока агента, кадры ответа — клиенту по мере прихода.
 /// Клиент ушёл посреди некритической команды — она брошена, и агента снимают; посреди
 /// критической — её доводят до конца и снимают агента после
 /// (`INV.PLATFORM.AN-INTERRUPTED-COMMAND-REMOVES-THE-LIVE-AGENT`).
-async fn run<R, W>(
-    shared: &Shared,
-    reader: &mut R,
-    write: &mut W,
-    command: String,
-    critical: bool,
-    credentials: String,
-) where
+async fn run<R, W>(shared: &Shared, reader: &mut R, write: &mut W, request: RunRequest)
+where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let refusal = match shared.ready().await {
-        Err(error) => Some(error),
-        Ok(_) if credentials != shared.digest => {
-            shared.request_close("a command came with other credentials");
-            Some(KeeperError::CredentialsMismatch)
-        }
-        Ok(_) => None,
-    };
-    if let Some(error) = refusal {
+    let RunRequest {
+        session,
+        command,
+        critical,
+        credentials,
+    } = request;
+    if let Err(error) = shared.open_for_work(&credentials, true).await {
         let _ = write_line(write, &Frame::Error { error }).await;
         return;
     }
@@ -587,6 +885,7 @@ async fn run<R, W>(
     let cancel = CancellationToken::new();
     let started = Arc::new(AtomicBool::new(false));
     let queued = shared.send(Job::Run {
+        session,
         command,
         critical,
         cancel: cancel.clone(),
@@ -625,11 +924,11 @@ async fn run<R, W>(
                     }
                 }
             },
-            read = reader.read(&mut probe) => {
-                if matches!(read, Ok(0) | Err(_)) {
-                    gone = true;
-                    client_gone(shared, &cancel, &started, critical);
-                }
+            // Пока ответа нет, клиенту писать нечего: строка `cancel`, разрыв или любая
+            // другая строка значат, что он ушёл.
+            _ = reader.read(&mut probe) => {
+                gone = true;
+                client_gone(shared, &cancel, &started, critical);
             }
         }
     }
