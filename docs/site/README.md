@@ -126,8 +126,8 @@ Reintroduction guard: PowerShell превращает обычный `$null` в 
 (`missing` или `available`), `source_sets[]`. Каждый набор содержит `alias` (null
 только при отсутствии набора в проекте), `name`, `states[]` и необязательный
 `changed_files` — число изменённых файлов; отсутствие поля не означает ноль.
-Состояния: `no_memory`, `unchanged`, `changed`, `pending_changes`, `ahead`,
-`untracked`, `dynamic_update`. `no_memory`, `unchanged` и `untracked` используются
+Состояния: `untracked_base`, `unchanged`, `changed`, `pending_changes`, `ahead`,
+`untracked`, `dynamic_update`. `untracked_base`, `unchanged` и `untracked` используются
 отдельно; `changed` допускает `pending_changes`. `memory: missing` отличает
 неизвестное сохранённое состояние базы от известного пустого состава наборов.
 Форма одинакова для обычного status, deep и all. При расширении сочетаний состояний

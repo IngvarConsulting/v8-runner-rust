@@ -254,8 +254,8 @@
           "type": "string"
         },
         {
-          "const": "no_memory",
-          "description": "Пара к роду `no_memory`: памяти о базе нет.",
+          "const": "untracked_base",
+          "description": "Пара к роду `untracked_base`: памяти о базе нет.",
           "type": "string"
         }
       ]
@@ -282,7 +282,7 @@
           "type": "string"
         },
         {
-          "const": "no_memory",
+          "const": "untracked_base",
           "description": "Отправка в базу, о которой у рабочей копии нет памяти.",
           "type": "string"
         }
