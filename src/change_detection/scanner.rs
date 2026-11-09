@@ -206,9 +206,14 @@ pub(super) fn list_in_scope(
             continue;
         }
         let path = entry.path();
-        let meta = std::fs::metadata(path).map_err(|e| ScanError::Meta {
+        // A selected entry is a regular file, never a link, so the walk's own metadata is the
+        // file's. On Windows it comes with the directory listing and opens no file; a
+        // separate `fs::metadata` opened every file of the tree once more (#571).
+        let meta = entry.metadata().map_err(|e| ScanError::Meta {
             path: path.to_path_buf(),
-            source: e,
+            source: e.into_io_error().unwrap_or_else(|| {
+                std::io::Error::other("the walk reported no metadata for a selected file")
+            }),
         })?;
 
         let mtime_ns = mtime_nanos(

@@ -791,46 +791,53 @@ fn run_dump_selected(
                 )),
             };
             let result = result.map(|(platform_result, mut notes)| {
-                let generation_after = if context.external_full_pull().is_some() {
-                    None
-                } else {
-                    generation_before.as_ref().and_then(|_| {
-                        read_dump_generation(
-                            context,
-                            config,
-                            provider,
-                            &binary,
-                            tool_runner,
-                            &resolved,
-                        )
-                    })
-                };
-                let note = context
+                let set = context
                     .external_full_pull()
                     .is_none()
-                    .then(|| {
-                        SourceSetInventory::new(config)
-                            .designer_context(&resolved.source_set_name)
-                            .and_then(|set| {
-                                merge_optional_messages(
-                                    crate::use_cases::exchange_guard::record_after_dump(
-                                        config,
-                                        set,
-                                        provider,
-                                        generation_before.as_deref(),
-                                        generation_after.as_deref(),
-                                    ),
-                                    remember_dump_writes(
-                                        set,
-                                        &config.work_path,
-                                        watch.as_ref(),
-                                        generation_before.as_deref(),
-                                        generation_after.as_deref(),
-                                    ),
+                    .then(|| inventory.designer_context(&resolved.source_set_name))
+                    .flatten();
+                // Обход записанного не ждёт платформу: он идёт, пока она отвечает про
+                // поколение. `watch` есть, только когда поколение до выгрузки прочитано.
+                let (generation_after, observed) = observe_dump_writes_while(
+                    set,
+                    &config.work_path,
+                    watch.as_ref(),
+                    &|| crate::use_cases::interruption::interruption_pending(context),
+                    || {
+                        if context.external_full_pull().is_some() {
+                            None
+                        } else {
+                            generation_before.as_ref().and_then(|_| {
+                                read_dump_generation(
+                                    context,
+                                    config,
+                                    provider,
+                                    &binary,
+                                    tool_runner,
+                                    &resolved,
                                 )
                             })
-                    })
-                    .flatten();
+                        }
+                    },
+                );
+                let note = set.and_then(|set| {
+                    merge_optional_messages(
+                        crate::use_cases::exchange_guard::record_after_dump(
+                            config,
+                            set,
+                            provider,
+                            generation_before.as_deref(),
+                            generation_after.as_deref(),
+                        ),
+                        remember_dump_writes(
+                            set,
+                            &config.work_path,
+                            observed,
+                            generation_before.as_deref(),
+                            generation_after.as_deref(),
+                        ),
+                    )
+                });
                 notes.message = merge_optional_messages(notes.message, note);
                 (platform_result.platform_log_path, notes)
             });

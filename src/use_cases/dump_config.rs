@@ -1,4 +1,6 @@
-use crate::change_detection::analyzer::{record_dump_changes, watch_before_dump, DumpWatch};
+use crate::change_detection::analyzer::{
+    observe_dump_writes, watch_before_dump, ChangeDetectionError, DumpWatch, DumpWrites,
+};
 use crate::domain::source_set::SourceSetContext;
 use crate::use_cases::provider_selection::stamp_session;
 use std::path::{Path, PathBuf};
@@ -155,21 +157,53 @@ fn dump_watch(
     watch_before_dump(set?, &config.work_path)
 }
 
+/// Что выгрузка по изменившемуся записала в каталог, найденное и прохешированное, пока
+/// платформа отвечала про поколение после выгрузки (#571). Обход читает только файлы и
+/// память, платформу не трогает.
+fn observe_dump_writes_while<T>(
+    set: Option<&SourceSetContext>,
+    work_path: &Path,
+    watch: Option<&DumpWatch>,
+    interrupted: &(dyn Fn() -> bool + Sync),
+    platform_step: impl FnOnce() -> T,
+) -> (T, Option<Result<DumpWrites, ChangeDetectionError>>) {
+    let Some((set, watch)) = set.zip(watch) else {
+        return (platform_step(), None);
+    };
+    let observe = move || observe_dump_writes(set, work_path, watch, interrupted);
+    std::thread::scope(|scope| {
+        let span = tracing::Span::current();
+        // Without a thread the walk runs after the platform step: slower, never wrong.
+        let observing = std::thread::Builder::new()
+            .name("dump-observer".to_owned())
+            .spawn_scoped(scope, move || span.in_scope(observe));
+        let answer = platform_step();
+        let observed = match observing {
+            Ok(observing) => observing
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(_) => observe(),
+        };
+        (answer, Some(observed))
+    })
+}
+
 /// Выгрузка по изменившемуся над базой, которую во время неё не правили, записывает в память
 /// хеши того, что легло в каталог (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`). Базу правили
 /// или поколение неизвестно — память не трогается, и следующая отправка грузит изменённое.
 fn remember_dump_writes(
     set: &SourceSetContext,
     work_path: &Path,
-    watch: Option<&DumpWatch>,
+    observed: Option<Result<DumpWrites, ChangeDetectionError>>,
     before: Option<&str>,
     after: Option<&str>,
 ) -> Option<String> {
-    let watch = watch?;
+    let observed = observed?;
     if before.is_none() || before != after {
         return None;
     }
-    record_dump_changes(set, work_path, watch)
+    observed
+        .and_then(|writes| writes.commit(set, work_path))
         .err()
         .map(|error| {
             format!(
@@ -5659,5 +5693,52 @@ exit 0"#,
         .expect_err("missing descriptor");
 
         assert!(matches!(error.0, AppError::Validation(_)));
+    }
+
+    /// The walk of what the dump wrote now runs before the platform answers about the
+    /// generation; a changed generation must still leave the memory as it was
+    /// (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`, #571).
+    #[test]
+    fn writes_observed_during_the_generation_answer_are_remembered_only_for_the_same_generation() {
+        use crate::change_detection::analyzer::{rescan_and_commit_full, watch_before_dump};
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::domain::source_set::SourceSetContext;
+
+        for (after, remembered) in [("g1", true), ("g2", false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path().join("src");
+            let work = dir.path().join("work");
+            fs::create_dir_all(&root).expect("root");
+            fs::write(root.join("Kept.bsl"), "before").expect("kept");
+            let set = SourceSetContext::new("main", root.clone(), "designer-main")
+                .with_infobase_memory("origin", "base-identity".to_owned());
+            rescan_and_commit_full(&set, &work).expect("prime");
+            let storage = HashStorage::new(set.storage_path(&work).expect("memory path"));
+            let primed = storage.current_generation().expect("generation");
+            let watch = watch_before_dump(&set, &work).expect("memory of this base");
+
+            fs::write(root.join("Written.bsl"), "from the base").expect("written");
+            let (answer, observed) = super::observe_dump_writes_while(
+                Some(&set),
+                &work,
+                Some(&watch),
+                &|| false,
+                || after,
+            );
+            let note = super::remember_dump_writes(&set, &work, observed, Some("g1"), Some(answer));
+
+            assert!(note.is_none(), "{note:?}");
+            let snapshot = storage.load_snapshot().expect("snapshot");
+            assert_eq!(
+                snapshot.entries.contains_key("Written.bsl"),
+                remembered,
+                "generation after: {after}"
+            );
+            assert_eq!(
+                snapshot.generation,
+                if remembered { primed + 1 } else { primed },
+                "generation after: {after}"
+            );
+        }
     }
 }
