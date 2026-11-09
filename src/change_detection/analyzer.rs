@@ -560,13 +560,16 @@ pub struct DumpWrites {
 /// since the listing — so an edit saved in the very clock tick the dump began stays a change.
 /// Written files are hashed by content and replace their entries, files that were there before
 /// the dump and are gone are forgotten. Every other entry stays, so a user edit made before
-/// the dump remains a change. An edit made while the dump ran cannot be told from the
-/// platform's writes and is remembered too (#170). `listed` is the tree after the dump
-/// ([`list_after_dump`]).
+/// the dump remains a change. `ended` marks the end of the dump by the same clock: a file
+/// stamped after it was edited after the platform finished and stays a change, and a file
+/// whose time moved while it was hashed stays a change too. An edit made while the dump ran
+/// cannot be told from the platform's writes and is remembered (#170). `listed` is the tree
+/// after the dump ([`list_after_dump`]).
 pub fn observe_dump_writes(
     context: &SourceSetContext,
     work_path: &Path,
     watch: &DumpWatch,
+    ended: Option<DumpStart>,
     listed: DumpListing,
     interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<DumpWrites, ChangeDetectionError> {
@@ -598,6 +601,10 @@ pub fn observe_dump_writes(
         .into_iter()
         .filter(|file| {
             file.mtime_ns >= watch.started_ns
+                // Не позже отметки конца: на Windows время файла идёт тиками системных часов
+                // (~15 мс), и последняя запись платформы ложится в тот же тик, что и отметка.
+                // Правка в этот же тик запоминается как запись — это окно и остаётся за #170.
+                && ended.is_none_or(|end| file.mtime_ns <= end.started_ns)
                 && watch.before.get(&file.rel_path) != Some(&file.mtime_ns)
         })
         .collect();
@@ -607,7 +614,8 @@ pub fn observe_dump_writes(
     for rel_path in removed {
         snapshot.entries.remove(rel_path);
     }
-    for file in scanner::hash_listed(written, &mut || interrupted())
+    // Файл, время которого сдвинулось, пока его читали, в ответ не попадает и остаётся изменением.
+    for file in scanner::hash_listed_unmoved(written, &mut || interrupted())
         .map_err(|error| map_scan_error(context, error))?
     {
         snapshot.entries.insert(
@@ -651,7 +659,8 @@ pub fn record_dump_changes(
     watch: &DumpWatch,
 ) -> Result<(), ChangeDetectionError> {
     let listed = list_after_dump(context, work_path, &|| false)?;
-    observe_dump_writes(context, work_path, watch, listed, &|| false)?.commit(context, work_path)
+    observe_dump_writes(context, work_path, watch, None, listed, &|| false)?
+        .commit(context, work_path)
 }
 
 fn detect_changes(
@@ -1005,6 +1014,51 @@ mod tests {
             Ok(AnalysisOutcome::NoChanges)
         ));
     }
+    /// An edit saved after the dump ended stays a change, not a write of the platform (#170).
+    #[test]
+    fn an_edit_after_the_dump_ended_stays_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for name in ["Written.bsl", "Late.bsl"] {
+            std::fs::write(root.join(name), "before").expect(name);
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+
+        // The platform writes one file, the dump ends, then someone edits another file before
+        // the memory is written (#170).
+        std::fs::write(root.join("Written.bsl"), "from the base").expect("written");
+        let ended = mark_dump_start(&root).expect("dump end");
+        std::fs::write(root.join("Late.bsl"), "edited after the dump").expect("late edit");
+        File::options()
+            .write(true)
+            .open(root.join("Late.bsl"))
+            .expect("open")
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(60))
+            .expect("later mtime");
+
+        let listed = super::list_after_dump(&context, &work, &|| false).expect("listing");
+        super::observe_dump_writes(&context, &work, &watch, Some(ended), listed, &|| false)
+            .expect("observe")
+            .commit(&context, &work)
+            .expect("commit");
+
+        let analysis = analyze_context(&context, &work, &mut || false);
+        let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
+            panic!("{:?}", analysis.outcome);
+        };
+        let names: Vec<_> = changes
+            .iter()
+            .map(|change| change.path.file_name().expect("name").to_owned())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("Late.bsl")]);
+    }
+
     /// What an incremental dump wrote is remembered; a user edit made before it is not (#557).
     #[test]
     fn a_dump_remembers_what_it_wrote_and_keeps_an_earlier_user_edit() {
