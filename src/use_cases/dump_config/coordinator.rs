@@ -602,15 +602,18 @@ fn run_dump_selected(
                 true,
             )
         } else {
-            // Без поколения до выгрузки записанное не запоминается: список дерева не нужен.
+            // Начало выгрузки по изменившемуся отмечается в каталоге, куда она ляжет: по нему
+            // память узнаёт записанное, а Конфигуратор, который прогноза не спрашивает, — свой
+            // режим по факту; `ibcmd` режим называет прогнозом. Без поколения до выгрузки
+            // записанное не запоминается: список дерева до неё не нужен.
             let inventory = SourceSetInventory::new(config);
+            let mark = mark_start(context, &resolved, &plan, partial_objects);
+            let fact_mark = mark.as_ref().filter(|_| provider == Provider::Designer);
             let watch = generation_before.as_ref().and_then(|_| {
                 dump_watch(
-                    context,
                     config,
                     inventory.designer_context(&resolved.source_set_name),
-                    &plan,
-                    partial_objects,
+                    marked_start(mark.as_ref()),
                 )
             });
             let result = match (config.format, &plan, provider, partial_objects, edt_binary) {
@@ -796,11 +799,12 @@ fn run_dump_selected(
                     .is_none()
                     .then(|| inventory.designer_context(&resolved.source_set_name))
                     .flatten();
-                // Обход записанного не ждёт платформу: он идёт, пока она отвечает про
+                // Перечень каталога не ждёт платформу: он идёт, пока она отвечает про
                 // поколение. `watch` есть, только когда поколение до выгрузки прочитано.
                 let (generation_after, observed) = observe_dump_writes_while(
                     set,
                     &config.work_path,
+                    fact_mark,
                     watch.as_ref(),
                     &|| crate::use_cases::interruption::interruption_pending(context),
                     || {
@@ -832,13 +836,14 @@ fn run_dump_selected(
                         remember_dump_writes(
                             set,
                             &config.work_path,
-                            observed,
+                            observed.writes,
                             generation_before.as_deref(),
                             generation_after.as_deref(),
                         ),
                     )
                 });
                 notes.message = merge_optional_messages(notes.message, note);
+                notes.evidence = notes.evidence.or(observed.fact.map(ModeEvidence::Fact));
                 (platform_result.platform_log_path, notes)
             });
             (result, false)
@@ -853,7 +858,7 @@ fn run_dump_selected(
         };
         // Уничтоженное называет вопрос к сторожу при публикации замены.
         let discarded = notes.discarded;
-        let forecast = notes.forecast;
+        let evidence = notes.evidence;
         let message = merge_optional_messages(
             whole_note,
             merge_optional_messages(
@@ -862,13 +867,13 @@ fn run_dump_selected(
             ),
         );
         let losses = discarded.report();
-        (platform_log_path, message, losses, forecast)
+        (platform_log_path, message, losses, evidence)
     });
     drop(lock_guard);
 
     match result {
-        Ok((platform_log_path, cleanup_message, losses, forecast)) => {
-            let (reported, mode_reason) = plan.reported(forecast);
+        Ok((platform_log_path, cleanup_message, losses, evidence)) => {
+            let (reported, mode_reason) = plan.reported(evidence);
             Ok(DumpResult {
                 provider: None,
                 provider_dispatched: false,
@@ -890,7 +895,7 @@ fn run_dump_selected(
         }
         Err(error) => {
             let message = error.to_string();
-            // Отказ называет режим плана и его причину: прогноз до ответа не дошёл.
+            // Отказ называет режим плана и его причину: ни прогноз, ни факт до ответа не дошли.
             let (reported, mode_reason) = plan.reported(None);
             Err(DumpExecutionFailure::with_payload(
                 error,

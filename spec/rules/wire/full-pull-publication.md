@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.FULL-PULL-PUBLICATION
-version: 2
+version: 3
 artifact: docs/schemas/full-pull-publication.schema.json
 check:
   - src/cli/external_pull.rs::generated_publication_schema_is_current
@@ -40,6 +40,11 @@ check:
 неверный ответ или отмена до подтверждения дают `unknown` и `unchanged`.
 Подтверждённая публикация сохраняет `published`, в том числе при ошибке записи
 памяти. Состояние памяти называет результат её локального завершения.
+
+**Что изменила версия 3.** Перечень значений `mode_reason` тот же, что у
+`CTR.WIRE.PULL-DATA` версии 9: добавилось `platform_rewrote_all`. Внешний полный pull —
+полная выгрузка без обновления, перечня по факту не делает и этой причины сам не называет; значение появилось в схеме, потому что перечень
+у форм общий.
 
 **Что изменила версия 2.** Квитанция выбора несёт необязательное `reason` формы
 `CTR.WIRE.PULL-DATA` версии 8: полная выгрузка файловой базы без ключа `providers.pull` называет

@@ -376,9 +376,9 @@ impl<'a> DesignerDsl<'a> {
         Ok(result)
     }
 
-    /// `/DumpConfigToFiles <dir> -update -getChanges <file> [-Extension <name>]`: прогноз
-    /// выгрузки по изменившемуся. Каталог не трогается, список пишется в `list_file`
-    /// (замер #173).
+    /// `/DumpConfigToFiles <dir> -update -getChanges <file> [-Extension <name>]`: что
+    /// выгрузка по изменившемуся выгрузила бы, для `diff`. Каталог не трогается, список
+    /// пишется в `list_file` (замер #173).
     pub fn dump_changes_list(
         &self,
         target_dir: &Path,

@@ -7,6 +7,7 @@ check:
   - tests/cli_pull_memory.rs::a_failed_pull_by_changes_leaves_the_memory
   - src/change_detection/analyzer.rs::a_dump_remembers_what_it_wrote_and_keeps_an_earlier_user_edit
   - src/change_detection/analyzer.rs::a_set_without_memory_of_the_base_is_not_watched
+  - tests/cli_agent_standalone.rs::the_memory_forgets_the_files_an_sftp_dump_removed
 ---
 
 # Выгрузка по изменившемуся запоминает то, что записала
