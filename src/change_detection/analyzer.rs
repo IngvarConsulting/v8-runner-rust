@@ -542,7 +542,7 @@ pub fn files_of_dropped_elements(
         .collect())
 }
 
-// What an incremental dump wrote into the tree, found and hashed but not yet remembered.
+/// What an incremental dump wrote into the tree, found and hashed but not yet remembered.
 ///
 /// Finding it reads only files and the memory, so it can run while the platform answers
 /// whether the base changed during the dump; [`Self::commit`] is the step that waits for

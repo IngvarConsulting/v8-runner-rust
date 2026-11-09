@@ -15,6 +15,7 @@ check:
   - src/platform/dump_format.rs::the_dump_elements_are_read_at_every_depth
   - tests/cli_agent_standalone.rs::an_sftp_dump_removes_the_files_of_removed_elements
   - tests/cli_agent_standalone.rs::an_sftp_dump_keeps_stray_files
+  - tests/cli_agent_standalone.rs::the_memory_forgets_the_files_an_sftp_dump_removed
   - tests/cli_agent_standalone.rs::an_sftp_dump_without_a_readable_prior_description_deletes_nothing
   - tests/cli_agent_standalone.rs::an_sftp_dump_keeps_an_element_renamed_by_letter_case
   - tests/cli_agent_standalone.rs::an_sftp_dump_with_an_empty_new_description_deletes_nothing
@@ -57,9 +58,10 @@ check:
 вложенная подсистема. Файл удаляется, только если его владелец был в описи до выгрузки и ни одно
 имя описи после неё не совпадает с ним без учёта регистра букв, а сам файл выгрузка не
 переписывала (он старше её начала): элемент, переименованный только регистром, на файловой
-системе без учёта регистра лежит под прежним написанием. Посторонние файлы и файлы, чей
-владелец не распознан, остаются; без прежней или новой описи, если какая-то из них не
-разобрана или новая пуста при непустой прежней, не удаляется ничего. Удаление идёт до того,
+системе без учёта регистра лежит под прежним написанием, а на системе с учётом регистра
+прежний файл остаётся рядом с новым. Посторонние файлы и файлы, чей владелец не распознан,
+остаются; без прежней или новой описи, если какая-то из них не разобрана или новая пуста при
+непустой прежней, или если начало выгрузки не отмечено, не удаляется ничего. Удаление идёт до того,
 как раннер запоминает записанное, и не выходит за область обхода набора; файл, который удалить
 не удалось, выгрузка называет отказом.
 
