@@ -449,11 +449,7 @@ fn begin_session(
 fn end_session(shared: &Shared, agent: &mut ManagedAgent, session: &str) {
     let removing = {
         let state = shared.lock();
-        if state
-            .session
-            .as_ref()
-            .is_none_or(|open| open.id != session)
-        {
+        if state.session.as_ref().is_none_or(|open| open.id != session) {
             return;
         }
         state.close_requested || state.stop_requested

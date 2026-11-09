@@ -673,10 +673,15 @@ fn live_keeper_bins(state: &Path) -> Vec<PathBuf> {
     };
     keys.flatten()
         .filter_map(|key| {
-            read_json::<ServiceRecord>(&key.path().join(super::SERVICE).join("record.json"))
+            let paths =
+                crate::platform::service_record::ServicePaths::under(&key.path(), super::SERVICE);
+            match observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
+                adopt_recorded_pid(record, &process_facts, machine.as_deref())
+            }) {
+                Observed::Own(record) => Some(record.bin),
+                Observed::Starting(_) | Observed::Nothing | Observed::Stale => None,
+            }
         })
-        .filter(|record| adopt_recorded_pid(record, &process_facts, machine.as_deref()))
-        .map(|record| record.bin)
         .collect()
 }
 
