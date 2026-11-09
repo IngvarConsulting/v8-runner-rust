@@ -987,9 +987,7 @@ impl<'a> ClusterCreation<'a> {
                     "failed to prepare private CREATEINFOBASE log: {error}"
                 ))
             })?;
-        let log_file = crate::support::path::normalize_windows_verbatim_path(
-            &log_dir.path().join("designer.log"),
-        );
+        let log_file = log_dir.path().join("designer.log");
         let created = DesignerDsl::new(
             binary,
             config.v8_connection(),

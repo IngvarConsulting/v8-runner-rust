@@ -354,7 +354,8 @@ fn process_cancellation(error: &ProcessError) -> Option<CancelledAt> {
         | ProcessError::StdoutLogIo { .. }
         | ProcessError::StderrLogIo { .. }
         | ProcessError::TimedOut { .. }
-        | ProcessError::ManagedSpawnUnsupported { .. } => None,
+        | ProcessError::ManagedSpawnUnsupported { .. }
+        | ProcessError::UnexpressiblePath { .. } => None,
     }
 }
 
