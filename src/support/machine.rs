@@ -1,5 +1,6 @@
-//! What this machine can tell about itself: its identifier, its host name and whether one
-//! of its processes still runs.
+//! What this machine can tell about itself: its identifier, its host name, whether one
+//! of its processes still runs, and the OS account the runner runs as with that account's
+//! state directory.
 
 /// Whether a process with `pid` exists on this machine. A process that exists but may not
 /// be inspected counts as alive; on Unix an unreaped zombie counts as alive too, so a
@@ -232,12 +233,300 @@ fn system_machine_id() -> Option<String> {
     None
 }
 
+/// The OS account the runner runs as and its state directory: where records live that
+/// outlive a command and belong to no single working copy, such as live Designer agents.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "живой агент Конфигуратора (#577) берёт это на следующем этапе"
+    )
+)]
+pub mod account {
+    use std::path::{Path, PathBuf};
+
+    /// Overrides the account's state directory: tests give each run its own.
+    pub const STATE_DIR_ENV: &str = "V8_RUNNER_STATE_DIR";
+
+    /// Identifier of the OS account this process runs as: the SID string on Windows, the
+    /// numeric uid on Unix. It never changes while the account exists, unlike its name.
+    #[cfg(unix)]
+    pub fn account_id() -> std::io::Result<String> {
+        // SAFETY: `getuid` takes nothing and cannot fail.
+        Ok(unsafe { libc::getuid() }.to_string())
+    }
+
+    /// Identifier of the OS account this process runs as: the SID string on Windows, the
+    /// numeric uid on Unix. It never changes while the account exists, unlike its name.
+    #[cfg(windows)]
+    pub fn account_id() -> std::io::Result<String> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
+        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut raw: HANDLE = std::ptr::null_mut();
+        // SAFETY: the pseudo handle of this process needs no closing; `raw` outlives the call.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the call succeeded and handed over this handle; the guard closes it once.
+        let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut size = 0u32;
+        // SAFETY: a null buffer with zero length only asks for the needed length.
+        unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                std::ptr::null_mut(),
+                0,
+                &mut size,
+            )
+        };
+        if size == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // `u64` elements keep the buffer aligned for `TOKEN_USER` and the SID after it.
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        // SAFETY: the buffer holds at least `size` bytes and outlives the call.
+        if unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                size,
+                &mut size,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the call above wrote a `TOKEN_USER` at the start of the aligned buffer.
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        let mut text: windows_sys::core::PWSTR = std::ptr::null_mut();
+        // SAFETY: the SID lives in `buffer`; on success `text` holds a string to `LocalFree`.
+        if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `text` is a null-terminated UTF-16 string allocated by the call above.
+        let sid = unsafe {
+            let length = (0..).take_while(|at| *text.add(*at) != 0).count();
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+            LocalFree(text.cast());
+            sid
+        };
+        Ok(sid)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn account_id() -> std::io::Result<String> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this system names no account",
+        ))
+    }
+
+    /// Where the account's state directory lies, from `V8_RUNNER_STATE_DIR` or else from the
+    /// system: `%LOCALAPPDATA%\v8-runner` on Windows, `$XDG_STATE_HOME/v8-runner` or
+    /// `~/.local/state/v8-runner` on Unix. Relative values are ignored, as the XDG
+    /// specification asks.
+    pub(super) fn state_dir_location(
+        env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Option<PathBuf> {
+        if let Some(dir) = absolute_env(env, STATE_DIR_ENV) {
+            return Some(dir);
+        }
+        if cfg!(windows) {
+            return absolute_env(env, "LOCALAPPDATA").map(|dir| dir.join("v8-runner"));
+        }
+        absolute_env(env, "XDG_STATE_HOME")
+            .or_else(|| absolute_env(env, "HOME").map(|home| home.join(".local").join("state")))
+            .map(|dir| dir.join("v8-runner"))
+    }
+
+    /// An absolute path from the environment variable `name`; a relative one names no
+    /// location and is dropped, not resolved against the current directory.
+    fn absolute_env(
+        env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+        name: &str,
+    ) -> Option<PathBuf> {
+        env(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    }
+
+    /// The state directory of this OS account, created owner-only when missing: records that
+    /// outlive a command and do not belong to one working copy. On Unix an existing one must
+    /// belong to the account and is narrowed to 0700.
+    #[cfg_attr(
+        test,
+        expect(
+            dead_code,
+            reason = "тесты не трогают каталог состояния своей учётной записи"
+        )
+    )]
+    pub fn account_state_dir() -> std::io::Result<PathBuf> {
+        let dir = state_dir_location(&|name| std::env::var_os(name)).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the system names no state directory for this account",
+            )
+        })?;
+        ensure_private_dir(&dir)?;
+        Ok(dir)
+    }
+
+    /// Creates `dir` owner-only, with its parents as usual; leaves an existing one in place.
+    pub(super) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match crate::support::temp::create_private_dir(dir) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let metadata = std::fs::symlink_metadata(dir)?;
+            // SAFETY: `getuid` takes nothing and cannot fail.
+            if !metadata.is_dir() || metadata.uid() != unsafe { libc::getuid() } {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("'{}' is not a directory of this account", dir.display()),
+                ));
+            }
+            if metadata.mode() & 0o777 != 0o700 {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        #[cfg(not(unix))]
+        if !dir.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("'{}' is not a directory", dir.display()),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The directory of live Designer agents under the account's state directory.
+    pub fn agents_dir(state: &Path) -> std::io::Result<PathBuf> {
+        let dir = state.join("agents");
+        ensure_private_dir(&dir)?;
+        Ok(dir)
+    }
+
+    /// Takes the account's agent registry lock, `<state>/agents/registry.lock`, waiting for
+    /// another holder. Callers hold it only to read and write records, never across a start.
+    pub fn lock_agent_registry(
+        state: &Path,
+    ) -> std::io::Result<crate::support::fs::AdvisoryLockGuard> {
+        crate::support::fs::acquire_advisory_lock(&agents_dir(state)?.join("registry.lock"))
+    }
+
+    /// Length of the account's salt in bytes.
+    const SALT_LEN: usize = 32;
+
+    /// The account's salt in `<state>/account-salt`, made on first use under the registry
+    /// lock. The file is readable by the account only: the state directory is owner-only, and
+    /// on Unix the file itself is 0600.
+    pub fn account_salt(state: &Path) -> std::io::Result<[u8; SALT_LEN]> {
+        let path = state.join("account-salt");
+        if let Some(salt) = read_salt(&path)? {
+            return Ok(salt);
+        }
+        let _registry = lock_agent_registry(state)?;
+        if let Some(salt) = read_salt(&path)? {
+            return Ok(salt);
+        }
+        let mut salt = [0u8; SALT_LEN];
+        getrandom::fill(&mut salt).map_err(std::io::Error::other)?;
+        crate::support::fs::write_file_atomically(&path, |file| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            std::io::Write::write_all(file, &salt)
+        })?;
+        Ok(salt)
+    }
+
+    /// The salt in `path`; `None` when there is none yet. A file of another length is not a
+    /// salt the runner wrote, and the runner refuses rather than replacing it.
+    fn read_salt(path: &Path) -> std::io::Result<Option<[u8; SALT_LEN]>> {
+        match std::fs::read(path) {
+            Ok(bytes) => <[u8; SALT_LEN]>::try_from(bytes.as_slice())
+                .map(Some)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("'{}' holds no salt of the runner", path.display()),
+                    )
+                }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Key of a record kept for this account: HMAC-SHA256 with the account's salt over the
+    /// account id and `parts`, as lowercase hex. Each part goes with its length, so no two
+    /// different tuples give the same message. The key names a record without holding its
+    /// parts: a connection string may carry a password.
+    pub fn account_key(state: &Path, parts: &[&str]) -> std::io::Result<String> {
+        let salt = account_salt(state)?;
+        let account = account_id()?;
+        let mut message = Vec::new();
+        for part in std::iter::once(account.as_str()).chain(parts.iter().copied()) {
+            message.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            message.extend_from_slice(part.as_bytes());
+        }
+        Ok(hmac_sha256(&salt, &message)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
+
+    /// HMAC-SHA256 (RFC 2104) over `sha2`, which the runner already carries.
+    pub(super) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        const BLOCK: usize = 64;
+        let mut block = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            block[..32].copy_from_slice(&Sha256::digest(key));
+        } else {
+            block[..key.len()].copy_from_slice(key);
+        }
+        let pad = |byte: u8| block.map(|at| at ^ byte);
+        let inner = Sha256::new()
+            .chain_update(pad(0x36))
+            .chain_update(message)
+            .finalize();
+        Sha256::new()
+            .chain_update(pad(0x5c))
+            .chain_update(inner)
+            .finalize()
+            .into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::account::{
+        account_id, account_key, account_salt, ensure_private_dir, hmac_sha256,
+        lock_agent_registry, state_dir_location, STATE_DIR_ENV,
+    };
     use super::{
         host_name, is_process_alive, is_process_running, linux_machine_id, machine_id,
         proc_stat_field,
     };
+    use std::ffi::OsString;
+    use std::path::PathBuf;
 
     #[test]
     fn this_process_is_alive() {
@@ -325,5 +614,172 @@ mod tests {
     #[test]
     fn this_machine_has_a_name() {
         assert!(host_name().is_some());
+    }
+
+    #[test]
+    fn hmac_matches_the_rfc_4231_vectors() {
+        let hex =
+            |bytes: [u8; 32]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+        assert_eq!(
+            hex(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // A key longer than the block is hashed first (test case 6).
+        assert_eq!(
+            hex(hmac_sha256(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    #[test]
+    fn the_state_directory_comes_from_the_override_then_from_the_system() {
+        let root = std::env::temp_dir();
+        let given = |pairs: Vec<(&'static str, PathBuf)>| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(value))
+            }
+        };
+        let own = root.join("own");
+        assert_eq!(
+            state_dir_location(&given(vec![
+                (STATE_DIR_ENV, own.clone()),
+                ("LOCALAPPDATA", root.join("local")),
+                ("XDG_STATE_HOME", root.join("xdg")),
+            ])),
+            Some(own)
+        );
+        // A relative value is not a location.
+        assert_eq!(
+            state_dir_location(&given(vec![(STATE_DIR_ENV, PathBuf::from("relative"))])),
+            None
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                state_dir_location(&given(vec![("LOCALAPPDATA", root.join("local"))])),
+                Some(root.join("local").join("v8-runner"))
+            );
+        } else {
+            assert_eq!(
+                state_dir_location(&given(vec![
+                    ("XDG_STATE_HOME", root.join("xdg")),
+                    ("HOME", root.join("home")),
+                ])),
+                Some(root.join("xdg").join("v8-runner"))
+            );
+            assert_eq!(
+                state_dir_location(&given(vec![
+                    ("XDG_STATE_HOME", PathBuf::from("relative")),
+                    ("HOME", root.join("home")),
+                ])),
+                Some(
+                    root.join("home")
+                        .join(".local")
+                        .join("state")
+                        .join("v8-runner")
+                )
+            );
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn this_process_runs_as_one_account() {
+        let id = account_id().unwrap();
+        assert_eq!(account_id().unwrap(), id);
+        if cfg!(windows) {
+            assert!(id.starts_with("S-1-"), "{id}");
+        } else {
+            assert!(id.parse::<u32>().is_ok(), "{id}");
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_key_is_the_same_for_the_same_parts_and_tells_every_other_tuple_apart() {
+        let state = tempfile::tempdir().unwrap();
+        let key = account_key(state.path(), &["ib", "8.3.27", "user"]).unwrap();
+        assert_eq!(key.len(), 64);
+        assert_eq!(
+            account_key(state.path(), &["ib", "8.3.27", "user"]).unwrap(),
+            key
+        );
+        assert_ne!(
+            account_key(state.path(), &["ib", "8.3.27", "other"]).unwrap(),
+            key
+        );
+        // The same characters split otherwise are another tuple.
+        assert_ne!(
+            account_key(state.path(), &["ib8", ".3.27", "user"]).unwrap(),
+            key
+        );
+        // Another account's salt gives another key for the same parts.
+        let other = tempfile::tempdir().unwrap();
+        assert_ne!(
+            account_key(other.path(), &["ib", "8.3.27", "user"]).unwrap(),
+            key
+        );
+        assert!(!key.contains("ib"));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_salt_is_made_once_and_only_the_account_reads_it() {
+        let state = tempfile::tempdir().unwrap();
+        let salt = account_salt(state.path()).unwrap();
+        assert_eq!(account_salt(state.path()).unwrap(), salt);
+        assert_ne!(salt, [0u8; 32]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                |path: PathBuf| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(state.path().join("account-salt")), 0o600);
+            assert_eq!(mode(state.path().join("agents")), 0o700);
+        }
+        std::fs::write(state.path().join("account-salt"), b"short").unwrap();
+        assert_eq!(
+            account_salt(state.path()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_registry_lock_is_held_by_one_holder_at_a_time() {
+        let state = tempfile::tempdir().unwrap();
+        let held = lock_agent_registry(state.path()).unwrap();
+        let path = state.path().join("agents").join("registry.lock");
+        assert_eq!(
+            crate::support::fs::try_acquire_advisory_lock(&path)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(held);
+        drop(crate::support::fs::try_acquire_advisory_lock(&path).unwrap());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_state_directory_is_created_for_the_account_only() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("nested").join("v8-runner");
+        ensure_private_dir(&dir).unwrap();
+        ensure_private_dir(&dir).unwrap();
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ensure_private_dir(&dir).unwrap();
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+        }
     }
 }
