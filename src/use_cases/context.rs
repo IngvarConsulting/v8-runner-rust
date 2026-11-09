@@ -240,7 +240,7 @@ pub struct ExecutionContext {
     /// Точка входа сессии агента, которую открыла эта команда; отмечает подключение,
     /// читает квитанция исполнителя. Клоны контекста делят этот слот, как и `work`:
     /// клон для другой команды унаследовал бы отметку.
-    session: std::sync::Arc<std::sync::OnceLock<SessionEndpoint>>,
+    session: std::sync::Arc<std::sync::Mutex<Option<SessionEndpoint>>>,
     /// Глобальные ключи командной строки, которые ведут к той же цели.
     command_line: CommandLineTarget,
     full_pull: Option<std::sync::Arc<super::full_pull_publication::ExternalFullPull>>,
@@ -408,12 +408,26 @@ impl ExecutionContext {
     /// Отмечает точку входа открытой сессии агента. Сессий у команды бывает несколько,
     /// но конфиг у неё один, и точка входа у них общая: первая отметка остаётся.
     pub(crate) fn note_session(&self, endpoint: SessionEndpoint) {
-        let _ = self.session.set(endpoint);
+        self.session_slot().get_or_insert(endpoint);
+    }
+
+    /// Дописывает в отмеченную точку входа, был ли управляемый агент живым: это узнаётся только
+    /// в конце сессии, а слот у команды один.
+    pub(crate) fn note_live(&self, live: crate::domain::capability::LiveAgentReceipt) {
+        if let Some(endpoint) = self.session_slot().as_mut() {
+            endpoint.live = Some(Box::new(live));
+        }
     }
 
     /// Точка входа сессии агента, если команда её открывала.
     pub(crate) fn opened_session(&self) -> Option<SessionEndpoint> {
-        self.session.get().cloned()
+        self.session_slot().clone()
+    }
+
+    fn session_slot(&self) -> std::sync::MutexGuard<'_, Option<SessionEndpoint>> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Returns the pending command-boundary interruption, if any.
@@ -465,11 +479,13 @@ mod tests {
         let first = SessionEndpoint {
             mode: SessionMode::Attached,
             address: "127.0.0.1:1545".into(),
+            live: None,
         };
         clone.note_session(first.clone());
         context.note_session(SessionEndpoint {
             mode: SessionMode::Managed,
             address: "127.0.0.1:1546".into(),
+            live: None,
         });
         assert_eq!(context.opened_session(), Some(first.clone()));
         assert_eq!(clone.opened_session(), Some(first.clone()));
@@ -478,6 +494,36 @@ mod tests {
             ExecutionContext::cli(CommandName::Build).opened_session(),
             None
         );
+    }
+
+    /// Живой ли был агент, узнаётся в конце сессии и дописывается в тот же слот, который делят
+    /// клоны контекста (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+    #[test]
+    fn the_live_agent_receipt_lands_in_the_same_session_slot() {
+        use crate::domain::capability::{
+            LiveAgentReason, LiveAgentReceipt, SessionEndpoint, SessionMode,
+        };
+
+        let context = ExecutionContext::cli(CommandName::Build);
+        let live = LiveAgentReceipt {
+            reused: true,
+            holders: Vec::new(),
+            kept: false,
+            reason: Some(LiveAgentReason::Limit),
+        };
+        context.note_live(live.clone());
+        assert_eq!(
+            context.opened_session(),
+            None,
+            "no session, nothing to note"
+        );
+        context.note_session(SessionEndpoint {
+            mode: SessionMode::Managed,
+            address: "127.0.0.1:1546".into(),
+            live: None,
+        });
+        context.clone().note_live(live.clone());
+        assert_eq!(context.opened_session().unwrap().live, Some(Box::new(live)));
     }
 
     /// Команда называет только те глобальные ключи, что меняют цель, и каждое значение

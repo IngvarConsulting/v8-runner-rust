@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PULL-ALL-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/pull-all.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -24,6 +24,8 @@ check:
 выгрузит, если их расширение в базе есть. `not_declared` — расширения без набора, которым
 набор не объявлен, полями `name` и `reason`. Пустые `not_installed`, `not_declared` и
 `if_installed` не пишутся.
+
+**Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
 
 **Что изменила версия 5.** Каждая запись `sets` несёт форму `CTR.WIRE.PULL-DATA` версии 9:
 у `mode_reason` новое значение `platform_rewrote_all` — выгрузка агента или Конфигуратора

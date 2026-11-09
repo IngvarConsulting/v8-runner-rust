@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PULL-DATA
-version: 9
+version: 10
 artifact: docs/schemas/command-data/pull.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -21,6 +21,8 @@ check:
 
 Размер ответа не растёт с числом файлов в каталоге набора: потери он называет счётом и
 первыми именами, а не каждым путём.
+
+**Что изменила версия 10.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
 
 **Что изменила версия 9.** У `mode_reason` новое значение `platform_rewrote_all`: выгрузка
 агента или Конфигуратора с обновлением переписала каждый файл набора, и случившийся режим —

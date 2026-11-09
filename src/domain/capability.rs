@@ -656,6 +656,52 @@ pub enum SessionMode {
 pub struct SessionEndpoint {
     pub mode: SessionMode,
     pub address: String,
+    /// Был ли управляемый агент живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+    /// Есть только у управляемого агента.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<Box<LiveAgentReceipt>>,
+}
+
+/// Живой ли был управляемый агент команды и остался ли он жить.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LiveAgentReceipt {
+    /// Команда взяла уже живого агента (`true`) или подняла его сама (`false`).
+    pub reused: bool,
+    /// Держатели агента на момент ответа; без держателей — пустой список.
+    pub holders: Vec<LiveAgentHolder>,
+    /// Остался ли агент жить после команды.
+    pub kept: bool,
+    /// Почему агент не остался жить; у оставшегося поля нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<LiveAgentReason>,
+}
+
+/// Держатель живого агента в квитанции.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum LiveAgentHolder {
+    /// Держатель-процесс: номер и время старта (UTC, RFC 3339), если система его назвала.
+    Process {
+        pid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<String>,
+    },
+    /// Держатель со сроком: до какого мгновения (UTC, RFC 3339).
+    Ttl { until: String },
+}
+
+/// Почему управляемый агент не остался жить после команды.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveAgentReason {
+    /// `tools.designer_agent.live: false`.
+    LiveAgentOff,
+    /// Живых агентов уже `tools.designer_agent.live-max`, и снять простаивающего некого.
+    Limit,
+    /// Раннер в Job, из которого сторож не может выйти.
+    Job,
+    /// Команду прервали, пока агент выполнял её запрос.
+    Interrupted,
 }
 
 impl ProviderReceipt {
