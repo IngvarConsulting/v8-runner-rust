@@ -472,7 +472,7 @@ fn test_all_full_json_runs_build_first_and_returns_report() {
     assert_eq!(payload["data"]["retained_paths"], Value::Null);
 }
 
-/// `test` на базе без памяти о ней отказывает так же, как `push`: род `no_memory`, те же
+/// `test` на базе без памяти о ней отказывает так же, как `push`: род `untracked_base`, те же
 /// выходы, платформа не запускается, а шаг сборки называет отказ, а не «build failed».
 #[test]
 fn a_test_on_a_base_without_memory_is_refused_like_a_push() {
@@ -501,7 +501,7 @@ fn a_test_on_a_base_without_memory_is_refused_like_a_push() {
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(output.status.code(), Some(3), "{payload}");
-    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["code"], "untracked_base", "{payload}");
     assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
     let message = payload["error"]["message"].as_str().expect("message");
     assert!(message.contains("push --force`"), "{message}");

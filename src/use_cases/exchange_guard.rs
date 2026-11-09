@@ -14,7 +14,7 @@
 //! - `pull` записывает поколение после выгрузки, если оно до и после одно и то же, иначе —
 //!   поколение до неё, и следующая отправка видит расхождение.
 //!
-//! Отказы `no_memory` и `non_fast_forward` и их следующий шаг строит только этот модуль.
+//! Отказы `untracked_base` и `non_fast_forward` и их следующий шаг строит только этот модуль.
 //! Память о наборе — своя запись журнала поколений или своя хеш-память этой пары «база ↔
 //! каталог», в том числе пустая. Признак нового владельца — взял базу без метки или сменил
 //! ушедшего — лежит в памяти базы под `workPath` и снимается первой удачной отправкой
@@ -329,7 +329,7 @@ enum WayOut {
 }
 
 impl WayOut {
-    /// Следующий шаг отказа. Отказы `no_memory` и `non_fast_forward` строят его только здесь.
+    /// Следующий шаг отказа. Отказы `untracked_base` и `non_fast_forward` строят его только здесь.
     fn step(self, pull_set: &str, push_set: Option<&str>) -> NextStep {
         match self {
             Self::Pull => NextStep::command("pull").for_source_set(pull_set),
@@ -428,7 +428,7 @@ pub(crate) fn require_memory(
     }
     message.push('.');
     message.push_str(&standing.caveats());
-    Err(UseCaseError::new(UseCaseErrorKind::NoMemory, message)
+    Err(UseCaseError::new(UseCaseErrorKind::UntrackedBase, message)
         .with_next(way_out.step(first.name(), selected_set)))
 }
 
@@ -1393,7 +1393,7 @@ mod tests {
         remember_new_owner(&config).expect("new owner mark");
         assert_eq!(
             require(&config).expect_err("no memory yet").kind(),
-            UseCaseErrorKind::NoMemory
+            UseCaseErrorKind::UntrackedBase
         );
 
         assert_eq!(remember_created_base(&config, None), None);

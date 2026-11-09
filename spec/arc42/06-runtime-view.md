@@ -96,7 +96,7 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 [`build_project/`](../../src/use_cases/build_project/):
 
 1. Выбор исполнителя — 6.2. Затем память о базе у каждого набора, который пойдёт в неё
-   ([`exchange_guard.rs`](../../src/use_cases/exchange_guard.rs)): нет — отказ `no_memory` до
+   ([`exchange_guard.rs`](../../src/use_cases/exchange_guard.rs)): нет — отказ `untracked_base` до
    анализа и платформы, и у `--full`, и у превью; у `--force` проверки нет, он грузит наборы
    целиком. Когда в базу пойдут несколько наборов, поколение каждого сверяется сразу, до
    первой загрузки; у EDT в эту сверку входит и набор с пропущенным этапом EDT, чья копия
