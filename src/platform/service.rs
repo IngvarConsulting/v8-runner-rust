@@ -301,11 +301,14 @@ mod listing_tests {
 
 #[cfg(windows)]
 mod imp {
+    use std::borrow::Cow;
     use std::ffi::{OsStr, OsString};
     use std::fs::{File, OpenOptions};
+    use std::io;
     use std::io::Write as _;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::path::Path;
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::{
@@ -407,12 +410,14 @@ mod imp {
         out.push(u16::from(b'"'));
     }
 
-    fn command_line(request: &ServiceRequest) -> Vec<u16> {
+    /// Командная строка службы из аргументов, которые уже прошли
+    /// [`crate::support::path::child_line`].
+    fn command_line(program: &Path, args: &[Cow<'_, str>]) -> Vec<u16> {
         let mut line = Vec::new();
-        quote(request.program.as_os_str(), &mut line);
-        for arg in &request.args {
+        quote(program.as_os_str(), &mut line);
+        for arg in args {
             line.push(u16::from(b' '));
-            quote(OsStr::new(arg), &mut line);
+            quote(OsStr::new(arg.as_ref()), &mut line);
         }
         line.push(0);
         line
@@ -554,10 +559,14 @@ mod imp {
         startup.StartupInfo.hStdError = stdout;
         startup.lpAttributeList = list.raw();
 
+        // Служба получает пути без приставки `\\?\`
+        // (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+        let child = crate::support::path::child_line(&request.args, request.workdir.as_deref())
+            .map_err(|refused| io::Error::new(io::ErrorKind::InvalidInput, refused))?;
         let program = wide(request.program.as_os_str());
-        let mut line = command_line(request);
+        let mut line = command_line(&request.program, &child.args);
         let environment = environment_block();
-        let workdir = request.workdir.as_ref().map(|dir| wide(dir.as_os_str()));
+        let workdir = child.workdir.as_deref().map(|dir| wide(dir.as_os_str()));
         // SAFETY: нулевая структура — допустимое значение этого C-типа.
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: все указатели смотрят на живые буферы с завершающим нулём; `line` изменяем, как
@@ -736,6 +745,56 @@ mod imp {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             panic!("the service did not write to its log");
+        }
+
+        /// Служба получает путь без приставки `\\?\`, а путь тома без буквы до запуска не доходит
+        /// (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+        #[test]
+        fn a_service_receives_paths_without_the_verbatim_prefix() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("service.log");
+            let system = std::env::var_os("ComSpec").expect("ComSpec");
+            let verbatim = format!(r"\\?\{}", dir.path().display());
+            create_hidden(
+                &ServiceRequest {
+                    program: system.clone().into(),
+                    // Одним аргументом, как в соседнем тесте: `cmd /C` с несколькими кавычками
+                    // кавычки не снимает.
+                    args: vec!["/C".to_owned(), r"echo \\?\C:\dir\base.dt".to_owned()],
+                    workdir: Some(verbatim.into()),
+                    log_path: log.clone(),
+                    stdin: None,
+                },
+                0,
+            )
+            .unwrap();
+            let mut text = String::new();
+            for _ in 0..100 {
+                text =
+                    String::from_utf8_lossy(&std::fs::read(&log).unwrap_or_default()).into_owned();
+                if text.contains("base.dt") {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            assert!(
+                text.contains("base.dt"),
+                "the service did not run: {text:?}"
+            );
+            assert!(!text.contains(r"\\?\"), "{text}");
+
+            let refused = create_hidden(
+                &ServiceRequest {
+                    program: system.into(),
+                    args: vec![r"\\?\Volume{0b2c1f4e-1111-2222-3333-444455556666}\x".to_owned()],
+                    workdir: None,
+                    log_path: dir.path().join("refused.log"),
+                    stdin: None,
+                },
+                0,
+            )
+            .expect_err("a volume path is refused before the start");
+            assert!(refused.to_string().contains("Volume{"), "{refused}");
         }
 
         #[test]

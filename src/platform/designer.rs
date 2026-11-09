@@ -264,11 +264,7 @@ impl<'a> DesignerDsl<'a> {
         let mut args = self.compare_args("MainConfiguration", None, configuration_type, name);
         if let DiffAgainst::File(file) = against {
             args.push("-SecondFile".to_owned());
-            args.push(
-                crate::support::path::normalize_windows_verbatim_path(file)
-                    .display()
-                    .to_string(),
-            );
+            args.push(file.display().to_string());
         }
         args.extend(
             [
@@ -280,8 +276,7 @@ impl<'a> DesignerDsl<'a> {
             ]
             .map(str::to_owned),
         );
-        let report_file = crate::support::path::normalize_windows_verbatim_path(report_file);
-        self.run_compare(args, &report_file)
+        self.run_compare(args, report_file)
     }
 
     fn compare_args(
@@ -387,18 +382,10 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpConfigToFiles".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_dir)
-                .display()
-                .to_string(),
-        );
+        args.push(target_dir.display().to_string());
         args.push("-update".to_owned());
         args.push("-getChanges".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(list_file)
-                .display()
-                .to_string(),
-        );
+        args.push(list_file.display().to_string());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -492,11 +479,7 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpCfg".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_file)
-                .display()
-                .to_string(),
-        );
+        args.push(target_file.display().to_string());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -512,11 +495,7 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpDBCfg".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_file)
-                .display()
-                .to_string(),
-        );
+        args.push(target_file.display().to_string());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -540,11 +519,7 @@ impl<'a> DesignerDsl<'a> {
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/DumpIB".to_owned());
-        args.push(
-            crate::support::path::normalize_windows_verbatim_path(target_file)
-                .display()
-                .to_string(),
-        );
+        args.push(target_file.display().to_string());
         // The caller formats the failure with the credentials of the transfer or copy.
         self.run_raw(&args)
     }
@@ -728,7 +703,22 @@ mod tests {
             _policy: &ProcessExecutionPolicy,
         ) -> Result<crate::platform::process::ProcessResult, crate::platform::process::ProcessError>
         {
-            self.0.borrow_mut().push(request.clone());
+            // Записано то, что получит процесс: аргументы после единственного владельца
+            // приставки `\\?\`
+            // (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+            let mut seen = request.clone();
+            seen.args = crate::support::path::child_line(&request.args, None)
+                .map_err(
+                    |source| crate::platform::process::ProcessError::UnexpressiblePath {
+                        cmd: String::new(),
+                        source,
+                    },
+                )?
+                .args
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect();
+            self.0.borrow_mut().push(seen);
             Ok(crate::platform::process::ProcessResult {
                 exit_code: 0,
                 stdout: String::new(),
@@ -830,6 +820,18 @@ mod tests {
         )
         .expect("upload probe");
         let requests = runner.0.borrow();
+        // Вне Windows `\\?\` — допустимая часть имени файла, и путь доходит до процесса как есть.
+        let (package, report) = if cfg!(windows) {
+            (
+                r"C:\Каталог с пробелами\пакет.cf",
+                r"\\server\share\Каталог с пробелами\отчёт.txt",
+            )
+        } else {
+            (
+                r"\\?\C:\Каталог с пробелами\пакет.cf",
+                r"\\?\UNC\server\share\Каталог с пробелами\отчёт.txt",
+            )
+        };
         assert_eq!(
             &requests[0].args[5..],
             [
@@ -839,7 +841,7 @@ mod tests {
                 "-SecondConfigurationType",
                 "File",
                 "-SecondFile",
-                r"C:\Каталог с пробелами\пакет.cf",
+                package,
                 "-ReportType",
                 "Full",
                 "-IncludeChangedObjects",
@@ -848,7 +850,7 @@ mod tests {
                 "-ReportFormat",
                 "txt",
                 "-ReportFile",
-                r"\\server\share\Каталог с пробелами\отчёт.txt",
+                report,
             ]
         );
         assert_eq!(
