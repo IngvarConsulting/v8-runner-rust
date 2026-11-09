@@ -158,7 +158,7 @@ impl RunnerVersionFile {
     pub(crate) fn record(&self) -> Option<String> {
         // Every written file becomes the copy, so its fingerprint is not needed: the copy reads
         // the file once instead of hashing it first (#571).
-        let recorded = match fs::symlink_metadata(&self.in_directory) {
+        let recorded = match fs::metadata(&self.in_directory) {
             Ok(_) => self.write_copy(write_identity),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
             Err(error) => Err(io_error("read", &self.in_directory, &error)),

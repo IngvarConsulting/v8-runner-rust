@@ -450,9 +450,11 @@ fn list_before_dump(context: &SourceSetContext, work_path: &Path) -> Result<Dump
 ///
 /// Finding it reads only files and the memory, so it can run while the platform answers
 /// whether the base changed during the dump; [`Self::commit`] is the step that waits for
-/// that answer (#571).
+/// that answer (#571). Dropping it forgets what the dump wrote.
+#[must_use = "what the dump wrote is remembered only by `DumpWrites::commit`"]
 pub struct DumpWrites {
-    /// `None`: the memory is unreadable and is not repaired here.
+    /// `None`: nothing to remember — no memory for this set, memory unreadable (not repaired
+    /// here), or the dump wrote and removed nothing.
     snapshot: Option<StorageSnapshot>,
     started_ns: u64,
 }
@@ -468,24 +470,25 @@ pub fn observe_dump_writes(
     context: &SourceSetContext,
     work_path: &Path,
     watch: &DumpWatch,
+    interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<DumpWrites, ChangeDetectionError> {
-    let unchanged = |snapshot| DumpWrites {
+    let writes = |snapshot| DumpWrites {
         snapshot,
         started_ns: watch.started_ns,
     };
     let Some(path) = context.storage_path(work_path) else {
-        return Ok(unchanged(None));
+        return Ok(writes(None));
     };
     let storage = HashStorage::new(path);
     // Unreadable memory is not repaired here: the next push falls back to a full load.
     let Some(mut snapshot) = load_bound_snapshot(context, &storage)? else {
-        return Ok(unchanged(None));
+        return Ok(writes(None));
     };
     let excluded = scanner::work_path_inside(context.path(), work_path);
     let listed = scanner::list_in_scope(
         context.path(),
         excluded.as_deref(),
-        &mut || false,
+        &mut || interrupted(),
         scan_scope(context),
     )
     .map_err(|error| map_scan_error(context, error))?;
@@ -509,12 +512,12 @@ pub fn observe_dump_writes(
         })
         .collect();
     if written.is_empty() && removed.is_empty() {
-        return Ok(unchanged(None));
+        return Ok(writes(None));
     }
     for rel_path in removed {
         snapshot.entries.remove(rel_path);
     }
-    for file in scanner::hash_listed(written, &mut || false)
+    for file in scanner::hash_listed(written, &mut || interrupted())
         .map_err(|error| map_scan_error(context, error))?
     {
         snapshot.entries.insert(
@@ -525,7 +528,7 @@ pub fn observe_dump_writes(
             },
         );
     }
-    Ok(unchanged(Some(snapshot)))
+    Ok(writes(Some(snapshot)))
 }
 
 impl DumpWrites {
@@ -557,7 +560,7 @@ pub fn record_dump_changes(
     work_path: &Path,
     watch: &DumpWatch,
 ) -> Result<(), ChangeDetectionError> {
-    observe_dump_writes(context, work_path, watch)?.commit(context, work_path)
+    observe_dump_writes(context, work_path, watch, &|| false)?.commit(context, work_path)
 }
 
 fn detect_changes(

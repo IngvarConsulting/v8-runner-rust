@@ -932,44 +932,72 @@ fn unlink_files_in_parallel(root: &Path, workers: usize) {
         busy: usize,
     }
 
+    /// Hands a directory's subdirectories back and releases the worker even when the walk of
+    /// that directory panics, so the other workers never wait for it forever.
+    struct Taken<'a> {
+        queue: &'a Mutex<Queue>,
+        changed: &'a Condvar,
+        subdirs: Vec<PathBuf>,
+    }
+
+    impl Drop for Taken<'_> {
+        fn drop(&mut self) {
+            let mut state = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+            state.pending.append(&mut self.subdirs);
+            state.busy -= 1;
+            self.changed.notify_all();
+        }
+    }
+
     let queue = Mutex::new(Queue {
         pending: vec![root.to_path_buf()],
         busy: 0,
     });
     let changed = Condvar::new();
+    let work = || loop {
+        let dir = {
+            let mut state = queue.lock().unwrap_or_else(PoisonError::into_inner);
+            loop {
+                if let Some(dir) = state.pending.pop() {
+                    state.busy += 1;
+                    break dir;
+                }
+                if state.busy == 0 {
+                    return;
+                }
+                state = changed.wait(state).unwrap_or_else(PoisonError::into_inner);
+            }
+        };
+        let mut taken = Taken {
+            queue: &queue,
+            changed: &changed,
+            subdirs: Vec::new(),
+        };
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    // A link, a junction included, is not a directory here: it is unlinked,
+                    // or left for the sequential pass, and never entered.
+                    Ok(kind) if kind.is_dir() => taken.subdirs.push(entry.path()),
+                    Ok(_) => {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    };
     thread::scope(|scope| {
         for _ in 0..workers {
-            scope.spawn(|| loop {
-                let dir = {
-                    let mut state = queue.lock().unwrap_or_else(PoisonError::into_inner);
-                    loop {
-                        if let Some(dir) = state.pending.pop() {
-                            state.busy += 1;
-                            break dir;
-                        }
-                        if state.busy == 0 {
-                            return;
-                        }
-                        state = changed.wait(state).unwrap_or_else(PoisonError::into_inner);
-                    }
-                };
-                let mut subdirs = Vec::new();
-                if let Ok(entries) = std::fs::read_dir(&dir) {
-                    for entry in entries.flatten() {
-                        match entry.file_type() {
-                            Ok(kind) if kind.is_dir() => subdirs.push(entry.path()),
-                            Ok(_) => {
-                                let _ = std::fs::remove_file(entry.path());
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                }
-                let mut state = queue.lock().unwrap_or_else(PoisonError::into_inner);
-                state.pending.extend(subdirs);
-                state.busy -= 1;
-                changed.notify_all();
-            });
+            // A thread the system refuses is simply not there; the pre-pass is best effort and
+            // the sequential removal after it does the rest.
+            if thread::Builder::new()
+                .name("tree-removal".to_owned())
+                .spawn_scoped(scope, work)
+                .is_err()
+            {
+                break;
+            }
         }
     });
 }
@@ -1332,6 +1360,27 @@ mod tests {
         assert!(
             outside.join("keep.txt").exists(),
             "the link target is not touched"
+        );
+    }
+
+    /// On Windows a junction is what a dump tree may hold instead of a symlink; the removal
+    /// unlinks it and never empties the directory it points to.
+    #[cfg(windows)]
+    #[test]
+    fn parallel_removal_never_enters_a_junction() {
+        let dir = tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).expect("outside");
+        fs::write(outside.join("keep.txt"), b"x").expect("kept file");
+        let root = dir.path().join("dump");
+        fs::create_dir_all(root.join("sub")).expect("tree");
+        junction::create(&outside, root.join("sub").join("link")).expect("junction");
+
+        remove_tree_in_parallel(&root).expect("removed");
+        assert!(!root.exists());
+        assert!(
+            outside.join("keep.txt").exists(),
+            "the junction target is not touched"
         );
     }
 

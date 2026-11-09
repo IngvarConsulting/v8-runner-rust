@@ -337,10 +337,13 @@ fn dump_through(
                 .is_none() =>
         {
             // Обход записанного идёт, пока агент отвечает про поколение (#571).
-            let (after, observed) =
-                observe_dump_writes_while(Some(set), &config.work_path, watch.as_ref(), || {
-                    generation_id(handle.session(), extension, wait).ok()
-                });
+            let (after, observed) = observe_dump_writes_while(
+                Some(set),
+                &config.work_path,
+                watch.as_ref(),
+                &|| context.interruption().is_some(),
+                || generation_id(handle.session(), extension, wait).ok(),
+            );
             merge_optional_messages(
                 crate::use_cases::exchange_guard::record_after_dump(
                     config,

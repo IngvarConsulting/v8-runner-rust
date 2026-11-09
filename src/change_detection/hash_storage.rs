@@ -124,30 +124,10 @@ impl HashStorage {
         let tx = db
             .begin_read()
             .map_err(|e| map_tx_error(&self.path, e, "begin read"))?;
-
-        let identity = match tx.open_table(IDENTITY) {
-            Ok(table) => table
-                .get(IDENTITY_KEY)
-                .map_err(|e| map_storage_error(&self.path, "read identity", e))?
-                .map(|value| value.value().to_owned()),
-            Err(TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(map_table_error(&self.path, e)),
-        };
-        let mtime_tbl = match tx.open_table(FILES_MTIME) {
-            Ok(t) => Some(t),
-            Err(TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(map_table_error(&self.path, e)),
-        };
-        let hash_tbl = match tx.open_table(FILES_HASH) {
-            Ok(t) => Some(t),
-            Err(TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(map_table_error(&self.path, e)),
-        };
-        let meta_tbl = match tx.open_table(META) {
-            Ok(t) => Some(t),
-            Err(TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(map_table_error(&self.path, e)),
-        };
+        let identity = read_identity(&tx, &self.path)?;
+        let mtime_tbl = optional_table(&tx, FILES_MTIME, &self.path)?;
+        let hash_tbl = optional_table(&tx, FILES_HASH, &self.path)?;
+        let meta_tbl = optional_table(&tx, META, &self.path)?;
 
         let mtime_exists = mtime_tbl.is_some();
         let hash_exists = hash_tbl.is_some();
@@ -292,32 +272,15 @@ impl HashStorage {
         let tx = db
             .begin_read()
             .map_err(|e| map_tx_error(&self.path, e, "begin read"))?;
-        let identity = match tx.open_table(IDENTITY) {
-            Ok(table) => table
-                .get(IDENTITY_KEY)
-                .map_err(|e| map_storage_error(&self.path, "read identity", e))?
-                .map(|value| value.value().to_owned()),
-            Err(TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(map_table_error(&self.path, e)),
-        };
-        let mtime_rows = match tx.open_table(FILES_MTIME) {
-            Ok(table) => Some(
-                table
-                    .len()
-                    .map_err(|e| map_storage_error(&self.path, "count mtime rows", e))?,
-            ),
-            Err(TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(map_table_error(&self.path, e)),
-        };
-        let hash_rows = match tx.open_table(FILES_HASH) {
-            Ok(table) => Some(
-                table
-                    .len()
-                    .map_err(|e| map_storage_error(&self.path, "count hash rows", e))?,
-            ),
-            Err(TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(map_table_error(&self.path, e)),
-        };
+        let identity = read_identity(&tx, &self.path)?;
+        let mtime_rows = optional_table(&tx, FILES_MTIME, &self.path)?
+            .map(|table| table.len())
+            .transpose()
+            .map_err(|e| map_storage_error(&self.path, "count mtime rows", e))?;
+        let hash_rows = optional_table(&tx, FILES_HASH, &self.path)?
+            .map(|table| table.len())
+            .transpose()
+            .map_err(|e| map_storage_error(&self.path, "count hash rows", e))?;
         let files = match (mtime_rows, hash_rows) {
             (None, None) => 0,
             (Some(mtime), Some(hash)) if mtime == hash => mtime,
@@ -328,11 +291,7 @@ impl HashStorage {
                 })
             }
         };
-        let meta_tbl = match tx.open_table(META) {
-            Ok(t) => Some(t),
-            Err(TableError::TableDoesNotExist(_)) => None,
-            Err(e) => return Err(map_table_error(&self.path, e)),
-        };
+        let meta_tbl = optional_table(&tx, META, &self.path)?;
         Ok(StorageSummary {
             identity,
             generation: read_generation(meta_tbl.as_ref(), &self.path)?,
@@ -373,6 +332,29 @@ impl HashStorage {
     }
 }
 
+/// A table that may not exist yet: the one reader both the snapshot and the summary use.
+fn optional_table<K: redb::Key + 'static, V: redb::Value + 'static>(
+    tx: &redb::ReadTransaction,
+    table: redb::TableDefinition<K, V>,
+    path: &Path,
+) -> Result<Option<redb::ReadOnlyTable<K, V>>, StorageError> {
+    match tx.open_table(table) {
+        Ok(table) => Ok(Some(table)),
+        Err(TableError::TableDoesNotExist(_)) => Ok(None),
+        Err(e) => Err(map_table_error(path, e)),
+    }
+}
+
+fn read_identity(tx: &redb::ReadTransaction, path: &Path) -> Result<Option<String>, StorageError> {
+    let Some(table) = optional_table(tx, IDENTITY, path)? else {
+        return Ok(None);
+    };
+    table
+        .get(IDENTITY_KEY)
+        .map_err(|e| map_storage_error(path, "read identity", e))
+        .map(|value| value.map(|value| value.value().to_owned()))
+}
+
 fn read_watermark(
     meta: Option<&redb::ReadOnlyTable<&str, u64>>,
     path: &Path,
@@ -409,14 +391,23 @@ fn sync_file_tables(
     hash: &mut redb::Table<&str, &str>,
     snapshot: &HashMap<String, StoredFileState>,
 ) -> Result<(), StorageError> {
-    let keys: Vec<String> = mtime
+    // Keys of both tables: an orphan row in either one is removed, so every commit leaves the
+    // two tables with the same keys even after outside damage the summary cannot see (#571).
+    let mut keys: HashSet<String> = HashSet::new();
+    for row in mtime
         .iter()
         .map_err(|e| map_storage_error(path, "iterate mtime table", e))?
-        .map(|row| {
-            row.map(|(k, _)| k.value().to_owned())
-                .map_err(|e| map_storage_error(path, "read mtime row", e))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    {
+        let (k, _) = row.map_err(|e| map_storage_error(path, "read mtime row", e))?;
+        keys.insert(k.value().to_owned());
+    }
+    for row in hash
+        .iter()
+        .map_err(|e| map_storage_error(path, "iterate hash table", e))?
+    {
+        let (k, _) = row.map_err(|e| map_storage_error(path, "read hash row", e))?;
+        keys.insert(k.value().to_owned());
+    }
 
     let target_keys: HashSet<&str> = snapshot.keys().map(String::as_str).collect();
     for key in keys {
@@ -623,6 +614,52 @@ mod tests {
         let error = storage.load_summary().expect_err("inconsistent");
         assert!(error.is_recoverable(), "{error}");
         assert!(storage.needs_recovery());
+    }
+
+    /// Tables of equal length with different keys pass the summary; the next commit must still
+    /// leave them with the same keys, so the damage does not outlive one write.
+    #[test]
+    fn a_commit_removes_orphan_rows_of_either_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.redb");
+        let storage = HashStorage::new(path.clone());
+        storage
+            .commit_snapshot_with_identity(
+                &HashMap::from([
+                    ("a.xml".to_owned(), state(1, "h1")),
+                    ("x.xml".to_owned(), state(2, "h2")),
+                ]),
+                1,
+                0,
+                Some("base"),
+            )
+            .expect("commit");
+        {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            {
+                let mut hash = tx.open_table(super::FILES_HASH).expect("hash");
+                hash.remove("x.xml").expect("remove");
+                hash.insert("y.xml", "hy").expect("insert");
+            }
+            tx.commit().expect("commit damage");
+        }
+        let generation = storage.current_generation().expect("summary passes");
+        storage
+            .commit_snapshot_with_identity(
+                &HashMap::from([
+                    ("a.xml".to_owned(), state(1, "h1")),
+                    ("b.xml".to_owned(), state(3, "h3")),
+                ]),
+                2,
+                generation,
+                Some("base"),
+            )
+            .expect("commit over damage");
+        let snapshot = storage.load_snapshot().expect("consistent again");
+        let mut keys: Vec<_> = snapshot.entries.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["a.xml", "b.xml"]);
     }
 
     #[test]

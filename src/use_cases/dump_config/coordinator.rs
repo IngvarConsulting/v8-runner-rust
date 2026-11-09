@@ -798,8 +798,12 @@ fn run_dump_selected(
                     .flatten();
                 // Обход записанного не ждёт платформу: он идёт, пока она отвечает про
                 // поколение. `watch` есть, только когда поколение до выгрузки прочитано.
-                let (generation_after, observed) =
-                    observe_dump_writes_while(set, &config.work_path, watch.as_ref(), || {
+                let (generation_after, observed) = observe_dump_writes_while(
+                    set,
+                    &config.work_path,
+                    watch.as_ref(),
+                    &|| context.interruption().is_some(),
+                    || {
                         if context.external_full_pull().is_some() {
                             None
                         } else {
@@ -814,7 +818,8 @@ fn run_dump_selected(
                                 )
                             })
                         }
-                    });
+                    },
+                );
                 let note = set.and_then(|set| {
                     merge_optional_messages(
                         crate::use_cases::exchange_guard::record_after_dump(
