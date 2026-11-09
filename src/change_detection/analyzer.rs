@@ -601,6 +601,9 @@ pub fn observe_dump_writes(
         .into_iter()
         .filter(|file| {
             file.mtime_ns >= watch.started_ns
+                // Не позже отметки конца: на Windows время файла идёт тиками системных часов
+                // (~15 мс), и последняя запись платформы ложится в тот же тик, что и отметка.
+                // Правка в этот же тик запоминается как запись — это окно и остаётся за #170.
                 && ended.is_none_or(|end| file.mtime_ns <= end.started_ns)
                 && watch.before.get(&file.rel_path) != Some(&file.mtime_ns)
         })
@@ -611,18 +614,10 @@ pub fn observe_dump_writes(
     for rel_path in removed {
         snapshot.entries.remove(rel_path);
     }
-    for file in scanner::hash_listed(written, &mut || interrupted())
+    // Файл, время которого сдвинулось, пока его читали, в ответ не попадает и остаётся изменением.
+    for file in scanner::hash_listed_unmoved(written, &mut || interrupted())
         .map_err(|error| map_scan_error(context, error))?
     {
-        // Правка, сохранённая пока файл хешировался, сдвигает время: хеш мог прочесть уже её,
-        // и такой файл остаётся изменением, а не записью платформы.
-        let still = std::fs::metadata(context.path().join(&file.rel_path))
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| mtime_nanos(modified, context.path()).ok());
-        if still != Some(file.mtime_ns) {
-            continue;
-        }
         snapshot.entries.insert(
             file.rel_path,
             StoredFileState {
@@ -1019,7 +1014,7 @@ mod tests {
             Ok(AnalysisOutcome::NoChanges)
         ));
     }
-    /// What an incremental dump wrote is remembered; a user edit made before it is not (#557).
+    /// An edit saved after the dump ended stays a change, not a write of the platform (#170).
     #[test]
     fn an_edit_after_the_dump_ended_stays_a_change() {
         let dir = tempdir().expect("tempdir");
@@ -1064,6 +1059,7 @@ mod tests {
         assert_eq!(names, [std::ffi::OsString::from("Late.bsl")]);
     }
 
+    /// What an incremental dump wrote is remembered; a user edit made before it is not (#557).
     #[test]
     fn a_dump_remembers_what_it_wrote_and_keeps_an_earlier_user_edit() {
         let dir = tempdir().expect("tempdir");

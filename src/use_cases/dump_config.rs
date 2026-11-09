@@ -245,7 +245,17 @@ fn observe_dump(
 ) -> DumpObservation {
     // Конец выгрузки по часам файловой системы набора, тем же, что отметили её начало: файл,
     // изменённый позже, правили уже после платформы (#170). Не отмечен — граница не ставится.
-    let ended = watch.and_then(|_| mark_dump_start(set.path()).ok());
+    let ended = watch.and_then(|_| {
+        mark_dump_start(set.path())
+            .map_err(|error| {
+                tracing::debug!(
+                    source_set = %set.name(),
+                    %error,
+                    "the dump end was not marked; edits after it are not told from its writes"
+                );
+            })
+            .ok()
+    });
     let listed = list_after_dump(set, work_path, interrupted);
     let fact = fact_mark.and_then(|mark| match (mark, &listed) {
         (Ok(start), Ok(listing)) => Some(listing.fact(*start)),
@@ -4616,6 +4626,60 @@ exit 0"#,
             plan.reported(unmarked),
             (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
         );
+    }
+
+    /// Команда отмечает конец выгрузки перед перечнем: файл, изменённый после выгрузки, память
+    /// не принимает за записанный платформой (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`).
+    #[test]
+    fn the_command_keeps_an_edit_after_the_dump_as_a_change() {
+        use crate::change_detection::analyzer::{mark_dump_start, rescan_and_commit_full};
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::domain::source_set::SourceSetContext;
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        a_tree_before_the_dump(&root, &["A.bsl", "Late.bsl"]);
+        let set = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "base-identity".to_owned());
+        rescan_and_commit_full(&set, &work).expect("prime");
+        let start = mark_dump_start(&root).expect("start");
+        let watch = super::dump_watch(
+            &build_config(dir.path(), &work, &dir.path().join("1cv8")),
+            Some(&set),
+            Some(start),
+        )
+        .expect("memory of this base");
+
+        fs::write(root.join("A.bsl"), "from the base").expect("A");
+        // Правка после выгрузки: её время позже отметки конца, которую ставит команда.
+        fs::write(root.join("Late.bsl"), "edited later").expect("late");
+        fs::File::options()
+            .write(true)
+            .open(root.join("Late.bsl"))
+            .expect("open")
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+            .expect("later mtime");
+        let (answer, observed) = super::observe_dump_writes_while(
+            Some(&set),
+            &work,
+            Some(&Ok(start)),
+            Some(&watch),
+            &|| false,
+            || "g1",
+        );
+        let note =
+            super::remember_dump_writes(&set, &work, observed.writes, Some("g1"), Some(answer));
+        assert!(note.is_none(), "{note:?}");
+        let snapshot = HashStorage::new(set.storage_path(&work).expect("memory path"))
+            .load_snapshot()
+            .expect("snapshot");
+        let hash = |name: &str| {
+            crate::change_detection::scanner::hash_file(&root.join(name), &mut || false)
+                .expect("hash")
+        };
+        assert_eq!(snapshot.entries["A.bsl"].hash, hash("A.bsl"));
+        assert_ne!(snapshot.entries["Late.bsl"].hash, hash("Late.bsl"));
     }
 
     /// Выгрузка, переписавшая каждый файл набора, — полная по факту; тот же перечень
