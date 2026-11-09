@@ -14,6 +14,7 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -33,6 +34,8 @@ struct Harness {
     declared_fingerprint: Option<String>,
     /// Опись, которую напишет выгрузка двойника; `None` — опись без элементов.
     dump_info: Arc<Mutex<Option<String>>>,
+    /// Поколение основной конфигурации двойника.
+    generation: Arc<AtomicU64>,
 }
 
 const GATE_USER: &str = "agent";
@@ -143,6 +146,7 @@ fn harness_holding_sftp(
     gate.sftp_read_only = channel == Channel::SftpReadOnly;
     gate.sftp_hold = sftp_hold;
     let dump_info = Arc::clone(&gate.dump_info);
+    let generation = Arc::clone(&gate.generation);
     let port = start_fake_agent_with_host_key(gate, host_key);
     let harness = Harness {
         config_path: root.join("v8project.yaml"),
@@ -151,6 +155,7 @@ fn harness_holding_sftp(
         port,
         declared_fingerprint,
         dump_info,
+        generation,
         dir,
     };
     let infobase = match channel {
@@ -568,6 +573,103 @@ fn an_sftp_dump_keeps_stray_files() {
     for kept in files.iter().filter(|file| !file.ends_with("Dropped.xml")) {
         assert!(target.join(kept).is_file(), "{kept} is gone: {payload}");
     }
+}
+
+/// Элемент, переименованный только регистром букв, не пропал: на файловой системе без учёта
+/// регистра его файлы лежат под прежним написанием, и удаление их не трогает.
+#[test]
+fn an_sftp_dump_keeps_an_element_renamed_by_letter_case() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = sftp_target(
+        &harness,
+        &dump_info(&["Catalog.Товары", "Catalog.Товары.Form.ФормаЭлемента"]),
+        &["Catalog.ТОВАРЫ", "Catalog.ТОВАРЫ.Form.ФОРМАЭЛЕМЕНТА"],
+        &[
+            "Catalogs/Товары.xml",
+            "Catalogs/Товары/Forms/ФормаЭлемента.xml",
+        ],
+    );
+
+    let (code, payload) = run(&harness, &["dump"]);
+
+    assert_eq!(code, 0, "{payload}");
+    for kept in [
+        "Catalogs/Товары.xml",
+        "Catalogs/Товары/Forms/ФормаЭлемента.xml",
+    ] {
+        assert!(target.join(kept).is_file(), "{kept} is gone: {payload}");
+    }
+}
+
+/// Новая опись без элементов при непустой прежней базу не описывает: удаления не переносятся.
+#[test]
+fn an_sftp_dump_with_an_empty_new_description_deletes_nothing() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = sftp_target(
+        &harness,
+        &dump_info(&["Catalog.Items", "Catalog.Gone"]),
+        &[],
+        &["Catalogs/Gone.xml"],
+    );
+
+    let (code, payload) = run(&harness, &["dump"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(target.join("Catalogs/Gone.xml").is_file(), "{payload}");
+}
+
+/// Новую опись разобрать нельзя — удаления не переносятся.
+#[test]
+fn an_sftp_dump_with_an_unreadable_new_description_deletes_nothing() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = sftp_target(
+        &harness,
+        &dump_info(&["Catalog.Items", "Catalog.Gone"]),
+        &[],
+        &["Catalogs/Gone.xml"],
+    );
+    *harness.dump_info.lock().expect("dump info") = Some(
+        "<ConfigDumpInfo version=\"2.17\"><Metadata name=\"Catalog.Items\"></ConfigDumpInfo>"
+            .to_owned(),
+    );
+
+    let (code, payload) = run(&harness, &["dump"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(target.join("Catalogs/Gone.xml").is_file(), "{payload}");
+}
+
+/// Файлы, которые раннер удалил за выгрузкой по SFTP, память забывает: следующая отправка
+/// без правок человека ничего не грузит
+/// (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`).
+#[test]
+fn the_memory_forgets_the_files_an_sftp_dump_removed() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = sftp_target(
+        &harness,
+        &dump_info(&["Catalog.Items", "Catalog.Gone"]),
+        &["Catalog.Items"],
+        &["Catalogs/Gone.xml", "Catalogs/Gone/Ext/ObjectModule.bsl"],
+    );
+    let (code, payload) = run(&harness, &["push", "main", "--force"]);
+    assert_eq!(code, 0, "{payload}");
+    // База изменилась после загрузки: выгрузку по поколению не пропустить.
+    harness.generation.fetch_add(1, Ordering::SeqCst);
+
+    let (code, payload) = run(&harness, &["dump"]);
+    assert_eq!(code, 0, "{payload}");
+    assert!(!target.join("Catalogs/Gone.xml").exists(), "{payload}");
+    let project = harness.dir.path().join("project");
+    support::commit_sources(&project);
+
+    let (code, payload) = run(&harness, &["push", "main"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let steps = payload["data"]["steps"].as_array().expect("push steps");
+    assert!(
+        !steps.is_empty() && steps.iter().all(|step| step["mode"] == "skipped"),
+        "{payload}"
+    );
 }
 
 /// Прежнюю опись разобрать нельзя — удаления не переносятся: по ней не сказать, что пропало.

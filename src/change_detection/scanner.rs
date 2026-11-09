@@ -46,7 +46,7 @@ const IGNORED_DIRS: &[&str] = &[
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 /// Name prefix of the file an incremental dump writes into the tree to read its clock.
-pub(super) const DUMP_START_PROBE: &str = ".v8-runner-dump-start-";
+pub(crate) const DUMP_START_PROBE: &str = ".v8-runner-dump-start-";
 
 /// An ignored file, or the temporary file of its atomic replacement left by a killed process.
 fn is_ignored_file(name: &str) -> bool {

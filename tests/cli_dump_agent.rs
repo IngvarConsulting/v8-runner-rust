@@ -501,18 +501,35 @@ fn the_agent_asks_no_forecast() {
     let (code, payload) = run_dump(&harness, &[]);
 
     assert_eq!(code, 0, "{payload}");
-    let dumps: Vec<String> = commands(&harness)
-        .into_iter()
-        .filter(|line| line.starts_with("config dump-config-to-files"))
+    // Ровно три команды конфигурации: поколение, выгрузка с `--update`, поколение. Вопрос о
+    // прогнозе в любом виде был бы лишней командой.
+    let lines = commands(&harness);
+    let steps: Vec<&str> = lines
+        .iter()
+        .filter(|line| line.starts_with("config "))
+        .map(|line| {
+            if line.starts_with("config generation-id") {
+                "generation"
+            } else if line.starts_with("config dump-config-to-files --dir=target/")
+                && line.ends_with(" --update")
+            {
+                "dump --update"
+            } else {
+                line.as_str()
+            }
+        })
         .collect();
-    assert_eq!(dumps.len(), 1, "{dumps:?}");
-    assert!(dumps[0].ends_with("--update"), "{dumps:?}");
-    assert!(!dumps[0].contains("--get-changes"), "{dumps:?}");
+    assert_eq!(
+        steps,
+        ["generation", "dump --update", "generation"],
+        "{lines:?}"
+    );
     assert_eq!(payload["data"]["mode"], "INCREMENTAL", "{payload}");
     assert!(payload["data"]["mode_reason"].is_null(), "{payload}");
     let leftovers: Vec<_> = fs::read_dir(&harness.target)
         .expect("target")
         .map(|entry| entry.expect("entry").file_name())
+        // `change_detection::scanner::DUMP_START_PROBE`: the binary exports no library.
         .filter(|name| name.to_string_lossy().starts_with(".v8-runner-dump-start-"))
         .collect();
     assert!(

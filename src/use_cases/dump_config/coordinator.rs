@@ -290,7 +290,7 @@ fn run_dump_selected(
         ) {
             let _ = write!(message, "; {note}");
         }
-        let (reported, mode_reason) = plan.reported(None, None);
+        let (reported, mode_reason) = plan.reported(None);
         let mut preview = empty_result(
             mode,
             started,
@@ -602,18 +602,18 @@ fn run_dump_selected(
                 true,
             )
         } else {
-            // Конфигуратор прогноза не спрашивает: начало выгрузки по изменившемуся отмечается
-            // в каталоге, куда она ляжет, и режим узнаётся по факту. Без поколения до выгрузки
+            // Начало выгрузки по изменившемуся отмечается в каталоге, куда она ляжет: по нему
+            // память узнаёт записанное, а Конфигуратор, который прогноза не спрашивает, — свой
+            // режим по факту; `ibcmd` режим называет прогнозом. Без поколения до выгрузки
             // записанное не запоминается: список дерева до неё не нужен.
             let inventory = SourceSetInventory::new(config);
-            let by_fact = (provider == Provider::Designer)
-                .then(|| mark_start(context, &resolved, &plan, partial_objects))
-                .flatten();
+            let mark = mark_start(context, &resolved, &plan, partial_objects);
+            let fact_mark = mark.as_ref().filter(|_| provider == Provider::Designer);
             let watch = generation_before.as_ref().and_then(|_| {
                 dump_watch(
                     config,
                     inventory.designer_context(&resolved.source_set_name),
-                    by_fact,
+                    marked_start(mark.as_ref()),
                 )
             });
             let result = match (config.format, &plan, provider, partial_objects, edt_binary) {
@@ -804,7 +804,7 @@ fn run_dump_selected(
                 let (generation_after, observed) = observe_dump_writes_while(
                     set,
                     &config.work_path,
-                    by_fact,
+                    fact_mark,
                     watch.as_ref(),
                     &|| crate::use_cases::interruption::interruption_pending(context),
                     || {
@@ -843,7 +843,7 @@ fn run_dump_selected(
                     )
                 });
                 notes.message = merge_optional_messages(notes.message, note);
-                notes.fact = observed.fact;
+                notes.evidence = notes.evidence.or(observed.fact.map(ModeEvidence::Fact));
                 (platform_result.platform_log_path, notes)
             });
             (result, false)
@@ -858,7 +858,7 @@ fn run_dump_selected(
         };
         // Уничтоженное называет вопрос к сторожу при публикации замены.
         let discarded = notes.discarded;
-        let told = (notes.forecast, notes.fact);
+        let evidence = notes.evidence;
         let message = merge_optional_messages(
             whole_note,
             merge_optional_messages(
@@ -867,13 +867,13 @@ fn run_dump_selected(
             ),
         );
         let losses = discarded.report();
-        (platform_log_path, message, losses, told)
+        (platform_log_path, message, losses, evidence)
     });
     drop(lock_guard);
 
     match result {
-        Ok((platform_log_path, cleanup_message, losses, (forecast, fact))) => {
-            let (reported, mode_reason) = plan.reported(forecast, fact);
+        Ok((platform_log_path, cleanup_message, losses, evidence)) => {
+            let (reported, mode_reason) = plan.reported(evidence);
             Ok(DumpResult {
                 provider: None,
                 provider_dispatched: false,
@@ -896,7 +896,7 @@ fn run_dump_selected(
         Err(error) => {
             let message = error.to_string();
             // Отказ называет режим плана и его причину: ни прогноз, ни факт до ответа не дошли.
-            let (reported, mode_reason) = plan.reported(None, None);
+            let (reported, mode_reason) = plan.reported(None);
             Err(DumpExecutionFailure::with_payload(
                 error,
                 DumpResult {

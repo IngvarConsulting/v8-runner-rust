@@ -130,30 +130,42 @@ pub fn read_recorded(path: &Path) -> io::Result<RecordedFormat> {
 }
 
 /// Полные имена элементов, которые описывает файл версий `ConfigDumpInfo.xml` (атрибут `name`
-/// каждого `<Metadata>` на любой глубине): `Catalog.X`, `Catalog.X.Form.F`. `None` — файла нет,
-/// он не читается или не разобран: корень не `ConfigDumpInfo` или XML испорчен. По такой описи
-/// судить, что пропало, нельзя.
-pub fn read_dump_elements(path: &Path) -> Option<HashSet<String>> {
+/// каждого `<Metadata>` на любой глубине): `Catalog.X`, `Catalog.X.Form.F`. Ошибка — файла
+/// нет, он не читается (`NotFound` и прочие ошибки чтения) или не разобран (`InvalidData`:
+/// корень не `ConfigDumpInfo`, у элемента нет имени, XML испорчен). По такой описи судить, что
+/// пропало, нельзя.
+pub fn read_dump_elements(path: &Path) -> io::Result<HashSet<String>> {
     use quick_xml::events::Event;
 
-    let text = std::fs::read_to_string(path).ok()?;
+    let invalid = |what: String| io::Error::new(ErrorKind::InvalidData, what);
+    let text = std::fs::read_to_string(path)?;
     let mut reader = quick_xml::Reader::from_str(text.trim_start_matches('\u{feff}'));
     let mut names = HashSet::new();
     let mut seen_root = false;
     loop {
-        match reader.read_event().ok()? {
+        match reader
+            .read_event()
+            .map_err(|error| invalid(error.to_string()))?
+        {
             Event::Start(tag) | Event::Empty(tag) => {
                 if !seen_root {
                     if tag.local_name().as_ref() != b"ConfigDumpInfo" {
-                        return None;
+                        return Err(invalid("the root is not ConfigDumpInfo".to_owned()));
                     }
                     seen_root = true;
                 } else if tag.local_name().as_ref() == b"Metadata" {
-                    let name = tag.try_get_attribute("name").ok()??;
-                    names.insert(name.unescape_value().ok()?.into_owned());
+                    let name = tag
+                        .try_get_attribute("name")
+                        .map_err(|error| invalid(error.to_string()))?
+                        .ok_or_else(|| invalid("an element without a name".to_owned()))?;
+                    let name = name
+                        .unescape_value()
+                        .map_err(|error| invalid(error.to_string()))?;
+                    names.insert(name.into_owned());
                 }
             }
-            Event::Eof => return seen_root.then_some(names),
+            Event::Eof if seen_root => return Ok(names),
+            Event::Eof => return Err(invalid("no root element".to_owned())),
             _ => {}
         }
     }
@@ -229,25 +241,33 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ConfigDumpInfo.xml");
-        assert_eq!(read_dump_elements(&path), None, "no file");
+        assert_eq!(
+            read_dump_elements(&path).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::NotFound),
+            "no file"
+        );
         std::fs::write(
             &path,
             "\u{feff}<ConfigDumpInfo version=\"2.20\"><ConfigVersions><Metadata name=\"Catalog.A\" id=\"1\"><Metadata name=\"Catalog.A.Form.F\" id=\"2\"/></Metadata></ConfigVersions></ConfigDumpInfo>",
         )
         .expect("write");
         assert_eq!(
-            read_dump_elements(&path),
-            Some(["Catalog.A", "Catalog.A.Form.F"].map(str::to_owned).into())
+            read_dump_elements(&path).expect("read"),
+            ["Catalog.A", "Catalog.A.Form.F"].map(str::to_owned).into()
         );
         std::fs::write(&path, "<ConfigDumpInfo version=\"2.20\"/>").expect("write");
-        assert_eq!(read_dump_elements(&path), Some(Default::default()));
+        assert!(read_dump_elements(&path).expect("read").is_empty());
         for broken in [
             "<Other><Metadata name=\"Catalog.A\"/></Other>",
             "<ConfigDumpInfo><Metadata name=\"Catalog.A\"></ConfigDumpInfo>",
             "<ConfigDumpInfo><Metadata id=\"1\"/></ConfigDumpInfo>",
         ] {
             std::fs::write(&path, broken).expect("write");
-            assert_eq!(read_dump_elements(&path), None, "{broken}");
+            assert_eq!(
+                read_dump_elements(&path).map_err(|error| error.kind()),
+                Err(std::io::ErrorKind::InvalidData),
+                "{broken}"
+            );
         }
     }
 

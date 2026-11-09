@@ -1,6 +1,6 @@
 use crate::change_detection::analyzer::{
     list_after_dump, mark_dump_start, observe_dump_writes, watch_before_dump, ChangeDetectionError,
-    DumpRewrite, DumpStart, DumpWatch, DumpWrites,
+    DumpFact, DumpStart, DumpWatch, DumpWrites,
 };
 use crate::domain::source_set::SourceSetContext;
 use crate::use_cases::provider_selection::stamp_session;
@@ -139,53 +139,40 @@ impl ResolvedDumpTarget {
     }
 }
 
-/// Как выгрузка Конфигуратора или агента с `-update` узнаёт свой режим по факту
+/// Отметка начала выгрузки по изменившемуся: начало по часам файловой системы каталога
+/// выгрузки или ошибка зонда — тогда режим по факту не узнать
 /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ByFact {
-    /// Начало выгрузки отмечено по часам файловой системы каталога выгрузки.
-    Since(DumpStart),
-    /// Начало отметить не удалось: режим не узнать.
-    Unmarked,
-}
-
-/// Что выгрузка с `-update` сделала с каталогом набора.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DumpFact {
-    /// В области обхода есть файлы, и каждый переписан: выгрузка полная.
-    RewroteAll,
-    /// Хоть один файл остался прежним или область пуста: выгрузка по изменившемуся.
-    Partly,
-    /// Каталог не перечислен или начало не отмечено: режим не известен.
-    Unlisted,
-}
+type StartMark = std::io::Result<DumpStart>;
 
 /// Отмечает начало выгрузки по изменившемуся от годного файла версий в каталоге, куда она
-/// ляжет (у EDT — в зеркале Конфигуратора). Зонд убран до запуска платформы. `None` — режим
-/// по факту не спрашивается: выгрузка не по файлу версий, выборка или внешний полный pull.
+/// ляжет (у EDT — в зеркале Конфигуратора). Зонд убран до запуска платформы. `None` —
+/// отмечать нечего: выгрузка не по файлу версий, выборка или внешний полный pull.
 fn mark_start(
     context: &ExecutionContext,
     resolved: &ResolvedDumpTarget,
     plan: &DumpPlan,
     objects: Option<&[PartialDumpSelector]>,
-) -> Option<ByFact> {
+) -> Option<StartMark> {
     let by_version_file = matches!(plan, DumpPlan::OverDirectory(OverDirectory::ByVersionFile))
         && objects.is_none()
         && context.external_full_pull().is_none();
     if !by_version_file {
         return None;
     }
-    Some(match mark_dump_start(&resolved.platform_target_path) {
-        Ok(start) => ByFact::Since(start),
-        Err(error) => {
-            debug!(
-                target = %resolved.platform_target_path.display(),
-                %error,
-                "the dump start was not marked; the dump mode is unknown"
-            );
-            ByFact::Unmarked
-        }
-    })
+    let mark = mark_dump_start(&resolved.platform_target_path);
+    if let Err(error) = &mark {
+        debug!(
+            target = %resolved.platform_target_path.display(),
+            %error,
+            "the dump start was not marked: the dump mode is unknown and nothing is remembered"
+        );
+    }
+    Some(mark)
+}
+
+/// Начало, если отмечено.
+fn marked_start(mark: Option<&StartMark>) -> Option<DumpStart> {
+    mark.and_then(|mark| mark.as_ref().ok()).copied()
 }
 
 /// Выгрузка по изменившемуся пишет прямо в каталог набора: что в нём было, отмечается перед
@@ -193,15 +180,12 @@ fn mark_start(
 fn dump_watch(
     config: &AppConfig,
     set: Option<&SourceSetContext>,
-    by_fact: Option<ByFact>,
+    start: Option<DumpStart>,
 ) -> Option<DumpWatch> {
-    let Some(ByFact::Since(start)) = by_fact else {
-        return None;
-    };
     if config.format != SourceFormat::Designer {
         return None;
     }
-    watch_before_dump(set?, &config.work_path, start)
+    watch_before_dump(set?, &config.work_path, start?)
 }
 
 /// Что выгрузка оставила в каталоге: режим по факту и записанное для памяти.
@@ -212,18 +196,19 @@ struct DumpObservation {
     writes: Option<Result<DumpWrites, ChangeDetectionError>>,
 }
 
-/// Режим по факту и то, что выгрузка по изменившемуся записала в каталог, найденное и
-/// прохешированное, пока платформа отвечала про поколение после выгрузки (#571). Каталог
-/// перечисляется один раз, обход читает только файлы и память, платформу не трогает.
+/// Режим по факту — у выгрузки с отметкой `fact_mark` — и то, что выгрузка по изменившемуся
+/// записала в каталог, найденное и прохешированное, пока платформа отвечала про поколение
+/// после выгрузки (#571). Каталог перечисляется один раз, обход читает только файлы и память,
+/// платформу не трогает.
 fn observe_dump_writes_while<T>(
     set: Option<&SourceSetContext>,
     work_path: &Path,
-    by_fact: Option<ByFact>,
+    fact_mark: Option<&StartMark>,
     watch: Option<&DumpWatch>,
     interrupted: &(dyn Fn() -> bool + Sync),
     platform_step: impl FnOnce() -> T,
 ) -> (T, DumpObservation) {
-    let Some(set) = set.filter(|_| by_fact.is_some() || watch.is_some()) else {
+    let Some(set) = set.filter(|_| fact_mark.is_some() || watch.is_some()) else {
         return (
             platform_step(),
             DumpObservation {
@@ -232,7 +217,7 @@ fn observe_dump_writes_while<T>(
             },
         );
     };
-    let observe = move || observe_dump(set, work_path, by_fact, watch, interrupted);
+    let observe = move || observe_dump(set, work_path, fact_mark, watch, interrupted);
     std::thread::scope(|scope| {
         let span = tracing::Span::current();
         // Without a thread the walk runs after the platform step: slower, never wrong.
@@ -254,19 +239,16 @@ fn observe_dump_writes_while<T>(
 fn observe_dump(
     set: &SourceSetContext,
     work_path: &Path,
-    by_fact: Option<ByFact>,
+    fact_mark: Option<&StartMark>,
     watch: Option<&DumpWatch>,
     interrupted: &(dyn Fn() -> bool + Sync),
 ) -> DumpObservation {
     let listed = list_after_dump(set, work_path, interrupted);
-    let fact = by_fact.and_then(|by_fact| match (by_fact, &listed) {
-        (ByFact::Since(start), Ok(listing)) => Some(match listing.rewrite(start) {
-            DumpRewrite::All => DumpFact::RewroteAll,
-            DumpRewrite::Partly => DumpFact::Partly,
-        }),
+    let fact = fact_mark.and_then(|mark| match (mark, &listed) {
+        (Ok(start), Ok(listing)) => Some(listing.fact(*start)),
         // Отмена во время перечня оставляет режим плана.
-        (_, Err(_)) if interrupted() => None,
-        (ByFact::Unmarked, _) | (ByFact::Since(_), Err(_)) => Some(DumpFact::Unlisted),
+        (Ok(_), Err(_)) if interrupted() => None,
+        (Err(_), _) | (Ok(_), Err(_)) => Some(DumpFact::Unlisted),
     });
     let writes = watch.map(|watch| {
         listed.and_then(|listing| observe_dump_writes(set, work_path, watch, listing, interrupted))
@@ -274,7 +256,7 @@ fn observe_dump(
     DumpObservation { fact, writes }
 }
 
-/// Выгрузка по изменившемуся над базой, которую во время неё не правили, записывает в память
+// Выгрузка по изменившемуся над базой, которую во время неё не правили, записывает в память
 /// хеши того, что легло в каталог (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`). Базу правили
 /// или поколение неизвестно — память не трогается, и следующая отправка грузит изменённое.
 fn remember_dump_writes(
@@ -306,11 +288,18 @@ struct DumpNotes {
     message: Option<String>,
     /// Что публикация уничтожила по согласию.
     discarded: Losses,
-    /// Прогноз `ibcmd` перед выгрузкой по изменившемуся; `None` — прогноза не было.
-    forecast: Option<DumpForecast>,
-    /// Что выгрузка Конфигуратора или агента с `-update` сделала с каталогом; `None` — режим
-    /// по факту не узнавали.
-    fact: Option<DumpFact>,
+    /// Что сказало о случившемся режиме; `None` — ничего: режим плана.
+    evidence: Option<ModeEvidence>,
+}
+
+/// Что говорит о случившемся режиме выгрузки по изменившемуся
+/// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModeEvidence {
+    /// Прогноз `ibcmd` перед выгрузкой.
+    Forecast(DumpForecast),
+    /// Что выгрузка Конфигуратора или агента с `-update` сделала с каталогом.
+    Fact(DumpFact),
 }
 
 impl DumpNotes {
@@ -536,8 +525,7 @@ fn publish_full_dump(
             dump_publication_warning(context.command(), published.deferred_interruption),
         ),
         discarded: published.discarded,
-        forecast: None,
-        fact: None,
+        evidence: None,
     })
 }
 
@@ -635,32 +623,39 @@ impl DumpPlan {
     /// режим плана.
     pub(super) fn reported(
         &self,
-        forecast: Option<DumpForecast>,
-        fact: Option<DumpFact>,
+        evidence: Option<ModeEvidence>,
     ) -> (ReportedDumpMode, Option<DumpModeReason>) {
-        match (self, forecast, fact) {
-            (Self::OverDirectory(OverDirectory::Whole(reason)), _, _) => (
+        match (self, evidence) {
+            (Self::OverDirectory(OverDirectory::Whole(reason)), _) => (
                 ReportedDumpMode::Full,
                 Some(match reason {
                     WholeReason::Missing | WholeReason::Unrecognized => DumpModeReason::VersionFile,
                     WholeReason::Foreign { .. } => DumpModeReason::ForeignFormat,
                 }),
             ),
-            (_, Some(DumpForecast::Full), _) => (
+            (_, Some(ModeEvidence::Forecast(DumpForecast::Full))) => (
                 ReportedDumpMode::Full,
                 Some(DumpModeReason::PlatformForecast),
             ),
-            (_, None, Some(DumpFact::RewroteAll)) => (
+            (_, Some(ModeEvidence::Fact(DumpFact::RewroteAll))) => (
                 ReportedDumpMode::Full,
                 Some(DumpModeReason::PlatformRewroteAll),
             ),
-            (_, Some(DumpForecast::Unknown), _) | (_, None, Some(DumpFact::Unlisted)) => {
-                (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
-            }
-            (_, Some(DumpForecast::Changes), _) | (_, None, Some(DumpFact::Partly)) => {
-                (ReportedDumpMode::Incremental, None)
-            }
-            (plan, None, None) => (plan.mode().into(), None),
+            (
+                _,
+                Some(
+                    ModeEvidence::Forecast(DumpForecast::Unknown)
+                    | ModeEvidence::Fact(DumpFact::Unlisted),
+                ),
+            ) => (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown)),
+            (
+                _,
+                Some(
+                    ModeEvidence::Forecast(DumpForecast::Changes)
+                    | ModeEvidence::Fact(DumpFact::Partly),
+                ),
+            ) => (ReportedDumpMode::Incremental, None),
+            (plan, None) => (plan.mode().into(), None),
         }
     }
 
@@ -879,7 +874,7 @@ fn run_dump_over_directory_ibcmd(
         return Ok((
             dump_result,
             DumpNotes {
-                forecast: Some(forecast),
+                evidence: Some(ModeEvidence::Forecast(forecast)),
                 ..notes
             },
         ));
@@ -895,7 +890,7 @@ fn run_dump_over_directory_ibcmd(
     Ok((
         dump_result,
         DumpNotes {
-            forecast: Some(forecast),
+            evidence: Some(ModeEvidence::Forecast(forecast)),
             ..DumpNotes::default()
         },
     ))
@@ -1180,7 +1175,7 @@ fn run_incremental_dump_edt_ibcmd(
         runner,
         &OverDirectory::ByVersionFile,
     )?;
-    let forecast = dump_notes.forecast;
+    let evidence = dump_notes.evidence;
     finalize_edt_dump(
         context,
         config,
@@ -1191,7 +1186,7 @@ fn run_incremental_dump_edt_ibcmd(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
-    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
+    .map(|(result, notes)| (result, DumpNotes { evidence, ..notes }))
 }
 
 fn run_full_dump_edt_ibcmd(
@@ -1239,7 +1234,7 @@ fn run_partial_dump_edt_ibcmd(
     )?;
     let (dump_result, dump_notes) =
         run_partial_dump_ibcmd(context, config, resolved, binary, runner, objects)?;
-    let forecast = dump_notes.forecast;
+    let evidence = dump_notes.evidence;
     finalize_edt_dump(
         context,
         config,
@@ -1250,7 +1245,7 @@ fn run_partial_dump_edt_ibcmd(
         // Снимок Конфигуратора — каталог раннера: уничтоженного по согласию у него нет.
         merge_optional_messages(bootstrap_message, dump_notes.message),
     )
-    .map(|(result, notes)| (result, DumpNotes { forecast, ..notes }))
+    .map(|(result, notes)| (result, DumpNotes { evidence, ..notes }))
 }
 
 /// Полная выгрузка, переданная как значение: обратная синхронизация EDT сеет снимок
@@ -1359,8 +1354,7 @@ fn finalize_edt_dump(
                 dump_publication_warning(context.command(), publish_phase.deferred_interruption),
             ),
             discarded: publish_phase.discarded,
-            forecast: None,
-            fact: None,
+            evidence: None,
         }
         .after(inherited_message),
     ))
@@ -4333,8 +4327,13 @@ exit 0"#,
     }
 
     /// Конфигуратор: выгрузка переписывает в каталоге файлы `rewrites`, остальное не трогает;
-    /// поколения не называет.
-    fn write_rewriting_designer_script(script: &Path, calls: &Path, rewrites: &[&str]) {
+    /// поколение называет `token`, а без него — не называет.
+    fn write_rewriting_designer_script(
+        script: &Path,
+        calls: &Path,
+        token: Option<&str>,
+        rewrites: &[&str],
+    ) {
         let writes = rewrites
             .iter()
             .map(|file| {
@@ -4346,8 +4345,9 @@ exit 0"#,
         write_script(
             script,
             &format!(
-                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\nprev=\"\"\ntarget=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then : > \"$a\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$a\"; fi\n  prev=\"$a\"\ndone\nif [ -n \"$target\" ]; then\n{writes}  :\nfi\nexit 0",
-                calls.display()
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\nprev=\"\"\ntarget=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then printf '%s' '{token}' > \"$a\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$a\"; fi\n  prev=\"$a\"\ndone\nif [ -n \"$target\" ]; then\n{writes}  :\nfi\nexit 0",
+                calls.display(),
+                token = token.unwrap_or_default(),
             ),
         );
     }
@@ -4357,7 +4357,10 @@ exit 0"#,
         let probes: Vec<_> = fs::read_dir(dir)
             .expect("dir")
             .map(|entry| entry.expect("entry").file_name())
-            .filter(|name| name.to_string_lossy().starts_with(".v8-runner-dump-start-"))
+            .filter(|name| {
+                name.to_string_lossy()
+                    .starts_with(crate::change_detection::scanner::DUMP_START_PROBE)
+            })
             .collect();
         assert!(probes.is_empty(), "{probes:?}");
     }
@@ -4373,21 +4376,37 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         project_with_a_version_file(&base);
-        write_rewriting_designer_script(&script, &calls, &[]);
+        let token = format!("{:040}", 7);
+        write_rewriting_designer_script(&script, &calls, Some(&token), &[]);
         let config = build_config(&base, &dir.path().join("work"), &script);
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
 
         assert_eq!(result.mode, ReportedDumpMode::Incremental);
         assert_eq!(result.mode_reason, None);
+        // Ровно три вызова платформы: поколение, выгрузка с `-update`, поколение. Вопрос о
+        // прогнозе в любом виде был бы лишним вызовом.
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(!calls.contains("-getChanges"), "{calls}");
-        let dumps: Vec<&str> = calls
+        let steps: Vec<&str> = calls
             .lines()
-            .filter(|line| line.contains("/DumpConfigToFiles"))
+            .map(|line| {
+                if line.contains("/GetConfigGenerationID") {
+                    "generation"
+                } else if line.contains("/DumpConfigToFiles")
+                    && line.contains("-update")
+                    && !line.contains("-getChanges")
+                {
+                    "dump -update"
+                } else {
+                    line
+                }
+            })
             .collect();
-        assert_eq!(dumps.len(), 1, "{calls}");
-        assert!(dumps[0].contains("-update"), "{calls}");
+        assert_eq!(
+            steps,
+            ["generation", "dump -update", "generation"],
+            "{calls}"
+        );
         assert_no_clock_probe(&base.join("main"));
     }
 
@@ -4402,7 +4421,12 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         project_with_a_version_file(&base);
-        write_rewriting_designer_script(&script, &calls, &["Catalogs.Items/ObjectModule.bsl"]);
+        write_rewriting_designer_script(
+            &script,
+            &calls,
+            None,
+            &["Catalogs.Items/ObjectModule.bsl"],
+        );
         let config = build_config(&base, &dir.path().join("work"), &script);
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
@@ -4496,14 +4520,14 @@ exit 0"#,
         let ((), observed) = super::observe_dump_writes_while(
             Some(&set),
             &dir.path().join("work"),
-            Some(super::ByFact::Since(start)),
+            Some(&Ok(start)),
             None,
             &|| false,
             || (),
         );
         assert!(observed.writes.is_none());
         super::DumpPlan::OverDirectory(super::OverDirectory::ByVersionFile)
-            .reported(None, observed.fact)
+            .reported(observed.fact.map(super::ModeEvidence::Fact))
     }
 
     /// Выгрузка, переписавшая часть файлов, — по изменившемуся.
@@ -4556,34 +4580,35 @@ exit 0"#,
                 .without_memory();
         let start = crate::change_detection::analyzer::mark_dump_start(&root).expect("start");
         fs::remove_dir(&root).expect("the directory is gone before the listing");
-        let observe = |by_fact, interrupted: bool| {
+        let observe = |mark: super::StartMark, interrupted: bool| {
             super::observe_dump_writes_while(
                 Some(&set),
                 &dir.path().join("work"),
-                Some(by_fact),
+                Some(&mark),
                 None,
                 &|| interrupted,
                 || (),
             )
             .1
             .fact
+            .map(super::ModeEvidence::Fact)
         };
 
-        let unlisted = observe(super::ByFact::Since(start), false);
+        let unlisted = observe(Ok(start), false);
         assert_eq!(
-            plan.reported(None, unlisted),
+            plan.reported(unlisted),
             (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
         );
-        let cancelled = observe(super::ByFact::Since(start), true);
+        let cancelled = observe(Ok(start), true);
         assert_eq!(cancelled, None);
         assert_eq!(
-            plan.reported(None, cancelled),
+            plan.reported(cancelled),
             (ReportedDumpMode::Incremental, None)
         );
         fs::create_dir_all(&root).expect("root again");
-        let unmarked = observe(super::ByFact::Unmarked, false);
+        let unmarked = observe(Err(std::io::Error::other("no probe")), false);
         assert_eq!(
-            plan.reported(None, unmarked),
+            plan.reported(unmarked),
             (ReportedDumpMode::Unknown, Some(DumpModeReason::Unknown))
         );
     }
@@ -4608,7 +4633,7 @@ exit 0"#,
         let watch = super::dump_watch(
             &build_config(dir.path(), &work, &dir.path().join("1cv8")),
             Some(&set),
-            Some(super::ByFact::Since(start)),
+            Some(start),
         )
         .expect("memory of this base");
 
@@ -4617,14 +4642,14 @@ exit 0"#,
         let (answer, observed) = super::observe_dump_writes_while(
             Some(&set),
             &work,
-            Some(super::ByFact::Since(start)),
+            Some(&Ok(start)),
             Some(&watch),
             &|| false,
             || "g1",
         );
         let plan = super::DumpPlan::OverDirectory(super::OverDirectory::ByVersionFile);
         assert_eq!(
-            plan.reported(None, observed.fact),
+            plan.reported(observed.fact.map(super::ModeEvidence::Fact)),
             (
                 ReportedDumpMode::Full,
                 Some(DumpModeReason::PlatformRewroteAll)
@@ -4668,7 +4693,7 @@ exit 0"#,
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
-        write_rewriting_designer_script(&script, &calls, &[]);
+        write_rewriting_designer_script(&script, &calls, None, &[]);
         let config = build_config(&base, &dir.path().join("work"), &script);
 
         let result = run_dump(&config, &incremental_main()).expect("dump");
@@ -5950,7 +5975,7 @@ exit 0"#,
             let (answer, observed) = super::observe_dump_writes_while(
                 Some(&set),
                 &work,
-                Some(super::ByFact::Since(start)),
+                Some(&Ok(start)),
                 Some(&watch),
                 &|| false,
                 || after,

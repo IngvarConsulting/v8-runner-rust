@@ -107,8 +107,8 @@ fn dump_through(
 
     // Агент прогноза не спрашивает: начало выгрузки по изменившемуся отмечается в каталоге,
     // куда она ляжет, и режим узнаётся по факту.
-    let by_fact = mark_start(context, resolved, plan, objects);
-    let watch = dump_watch(config, set, by_fact);
+    let mark = mark_start(context, resolved, plan, objects);
+    let watch = dump_watch(config, set, marked_start(mark.as_ref()));
     let run = run_id();
     let stage = match plan.mode() {
         DumpMode::Full => "dump: full",
@@ -193,9 +193,7 @@ fn dump_through(
                     let dump_info = resolved.platform_target_path.join(VERSION_FILE_NAME);
                     // Прежняя опись читается до того, как выгрузка её перепишет.
                     let elements_before = match how {
-                        OverDirectory::ByVersionFile => {
-                            crate::platform::dump_format::read_dump_elements(&dump_info)
-                        }
+                        OverDirectory::ByVersionFile => dump_elements(&dump_info, "before"),
                         OverDirectory::Whole(_) => None,
                     };
                     if dump_info.is_file() {
@@ -226,8 +224,10 @@ fn dump_through(
                     tidy(handle, &exchange, &target_relative);
                     let transcript = outcome?;
                     collected.transpose()?;
-                    if let Some(before) = &elements_before {
-                        remove_dropped_elements(config, set, &dump_info, before)?;
+                    if let (Some(before), Some(set), Some(start)) =
+                        (&elements_before, set, marked_start(mark.as_ref()))
+                    {
+                        remove_dropped_elements(context, config, set, start, &dump_info, before)?;
                     }
                     (transcript, DumpNotes::default())
                 }
@@ -300,7 +300,7 @@ fn dump_through(
     // Поколение спрашивается и после выгрузки: то же — память записывается, другое — базу
     // правили во время выгрузки, и ответ это называет. Выборка объектов каталог с базой не
     // сводит и поколения не пишет; после отмены поколение не спрашивается.
-    let mut fact = None;
+    let mut evidence = None;
     let changed_note = match (set, plan) {
         (Some(set), DumpPlan::Full | DumpPlan::OverDirectory(_))
             if context.external_full_pull().is_none()
@@ -314,12 +314,12 @@ fn dump_through(
             let (after, observed) = observe_dump_writes_while(
                 Some(set),
                 &config.work_path,
-                by_fact,
+                mark.as_ref(),
                 watch.as_ref(),
                 &|| crate::use_cases::interruption::interruption_pending(context),
                 || generation_id(handle.session(), extension, wait).ok(),
             );
-            fact = observed.fact;
+            evidence = observed.fact.map(ModeEvidence::Fact);
             merge_optional_messages(
                 crate::use_cases::exchange_guard::record_after_dump(
                     config,
@@ -341,32 +341,57 @@ fn dump_through(
     };
     let mut notes = cleanup.after(foreign_note);
     notes.message = merge_optional_messages(notes.message, changed_note);
-    notes.fact = fact;
+    notes.evidence = evidence;
     Ok((transcript, notes, false))
+}
+
+/// Опись элементов файла версий `path` — прежняя (`side` = `before`) или новая; `None`, если
+/// её нет или она не разобрана: по такой описи не сказать, что пропало.
+fn dump_elements(path: &Path, side: &str) -> Option<std::collections::HashSet<String>> {
+    crate::platform::dump_format::read_dump_elements(path)
+        .inspect_err(|error| {
+            debug!(
+                path = %path.display(),
+                side,
+                %error,
+                "the dump description was not read; no removal is carried over"
+            );
+        })
+        .ok()
 }
 
 /// Удаления выгрузки по SFTP (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`):
 /// файл, чей владелец был в прежней описи `before` и пропал из новой в `dump_info`, удаляется
 /// из каталога набора — в его области обхода, без ссылок, до того как раннер запомнит
-/// записанное. Новая опись не разобрана — не удаляется ничего. Неудачное удаление — отказ с
-/// перечнем оставшегося: каталог тогда не равен базе, и молчать об этом нельзя.
+/// записанное; файл, который выгрузка написала (не раньше её начала `start`), не удаляется.
+/// Новой описи нет, она не разобрана или пуста при непустой прежней — не удаляется ничего:
+/// такая опись не описывает базу. Неудачное удаление — отказ с перечнем оставшегося: каталог
+/// тогда не равен базе, и молчать об этом нельзя.
 fn remove_dropped_elements(
+    context: &ExecutionContext,
     config: &AppConfig,
-    set: Option<&SourceSetContext>,
+    set: &SourceSetContext,
+    start: DumpStart,
     dump_info: &Path,
     before: &std::collections::HashSet<String>,
 ) -> Result<(), AppError> {
-    let (Some(set), Some(after)) = (
-        set,
-        crate::platform::dump_format::read_dump_elements(dump_info),
-    ) else {
+    let Some(after) = dump_elements(dump_info, "after") else {
         return Ok(());
     };
+    if after.is_empty() && !before.is_empty() {
+        debug!(
+            path = %dump_info.display(),
+            "the new dump description names no element; no removal is carried over"
+        );
+        return Ok(());
+    }
     let dropped = crate::change_detection::analyzer::files_of_dropped_elements(
         set,
         &config.work_path,
+        start,
         before,
         &after,
+        &|| crate::use_cases::interruption::interruption_pending(context),
     )
     .map_err(|error| {
         AppError::Runtime(format!(
@@ -374,15 +399,20 @@ fn remove_dropped_elements(
             set.name()
         ))
     })?;
+    remove_files(set, &dropped)
+}
+
+/// Удаляет файлы `files` из каталога набора `set` и каталоги, опустевшие от этого; непустой
+/// каталог не удаляется. Что удалить не удалось, называет отказ.
+fn remove_files(set: &SourceSetContext, files: &[PathBuf]) -> Result<(), AppError> {
     let mut left = Vec::new();
-    for file in &dropped {
+    for file in files {
         if let Err(error) = std::fs::remove_file(file) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 left.push(format!("'{}': {error}", file.display()));
             }
             continue;
         }
-        // Каталоги, опустевшие от удалений, уходят вслед; непустой каталог не удаляется.
         let mut dir = file.parent();
         while let Some(current) = dir.filter(|current| *current != set.path()) {
             if std::fs::remove_dir(current).is_err() {
@@ -447,4 +477,43 @@ fn publish_full(
         return Err(publication.cleanup_failure(error));
     }
     publish_full_dump(context, config, resolved, &publication)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_files;
+    use crate::domain::source_set::SourceSetContext;
+
+    /// Удаление, которое не удалось, — отказ, называющий оставшееся; удалённое не мешает
+    /// назвать остальное, а опустевший каталог уходит вслед.
+    #[test]
+    fn a_failed_removal_names_what_is_left() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let gone = root.join("Catalogs").join("Gone.xml");
+        let stuck = root.join("Catalogs").join("Stuck");
+        std::fs::create_dir_all(stuck.join("Ext")).expect("a directory where a file was");
+        std::fs::write(&gone, "gone").expect("file");
+        let empty = root.join("Documents").join("Empty").join("Ext");
+        std::fs::create_dir_all(&empty).expect("dirs");
+        let lone = empty.join("ObjectModule.bsl");
+        std::fs::write(&lone, "lone").expect("file");
+        let set = SourceSetContext::new("main", root.clone(), "designer-main");
+
+        let error = remove_files(&set, &[gone.clone(), stuck.clone(), lone])
+            .expect_err("a directory is not removed as a file");
+
+        let message = error.to_string();
+        assert!(message.contains("1 file(s)"), "{message}");
+        assert!(message.contains(&stuck.display().to_string()), "{message}");
+        assert!(!gone.exists());
+        assert!(
+            !root.join("Documents").exists(),
+            "emptied directories go too"
+        );
+        assert!(
+            root.join("Catalogs").is_dir(),
+            "a directory with files stays"
+        );
+    }
 }

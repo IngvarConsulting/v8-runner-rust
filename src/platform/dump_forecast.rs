@@ -40,10 +40,15 @@ fn forecast(list: Option<ChangeList<'_>>) -> DumpForecast {
     }
 }
 
-/// An empty list produced by Designer consists solely of the UTF-8 signature.
-/// A list of `-getChanges`: a single `FullDump`, or only `New:` and `Modified:` lines.
+/// A list of `-getChanges` that `diff` reads: a single `FullDump`, or only `New:` and
+/// `Modified:` lines. An empty list produced by Designer consists solely of the UTF-8
+/// signature; any other empty text is not a list.
 pub(crate) fn parse_designer_diff(text: &str) -> Option<ChangeList<'_>> {
-    let list = parse_changes_list(text)?;
+    let list = parse(text, "FullDump", |line| match line.split_once(' ')? {
+        ("New:", object) if !object.is_empty() => Some((ChangeKind::Added, object)),
+        ("Modified:", object) if !object.is_empty() => Some((ChangeKind::Modified, object)),
+        _ => None,
+    })?;
     match &list {
         ChangeList::Objects(objects)
             if objects.is_empty() && text.as_bytes() != b"\xEF\xBB\xBF" =>
@@ -52,14 +57,6 @@ pub(crate) fn parse_designer_diff(text: &str) -> Option<ChangeList<'_>> {
         }
         _ => Some(list),
     }
-}
-
-fn parse_changes_list(text: &str) -> Option<ChangeList<'_>> {
-    parse(text, "FullDump", |line| match line.split_once(' ')? {
-        ("New:", object) if !object.is_empty() => Some((ChangeKind::Added, object)),
-        ("Modified:", object) if !object.is_empty() => Some((ChangeKind::Modified, object)),
-        _ => None,
-    })
 }
 
 pub(crate) fn parse_export_status(text: &str) -> Option<ChangeList<'_>> {
@@ -101,6 +98,8 @@ fn parse<'a>(
 mod tests {
     use super::{parse_designer_diff, read_export_status, ChangeList, DumpForecast};
 
+    /// Замеренные ответы Конфигуратора (UTF-8 с BOM, CRLF), которые читает `diff`: пустой
+    /// список — одна сигнатура UTF-8.
     #[test]
     fn only_the_utf8_signature_is_a_valid_empty_designer_diff() {
         assert!(
@@ -109,15 +108,6 @@ mod tests {
         for unexpected in ["", "\r\n", "\u{feff}\r\n"] {
             assert!(parse_designer_diff(unexpected).is_none(), "{unexpected:?}");
         }
-    }
-
-    /// Замеренные ответы Конфигуратора (UTF-8 с BOM, CRLF), которые читает `diff`.
-    #[test]
-    fn the_changes_list_is_read_by_its_measured_keys() {
-        assert!(matches!(
-            parse_designer_diff("\u{feff}"),
-            Some(ChangeList::Objects(objects)) if objects.is_empty()
-        ));
         assert!(matches!(
             parse_designer_diff("\u{feff}FullDump\r\n"),
             Some(ChangeList::FullDump)

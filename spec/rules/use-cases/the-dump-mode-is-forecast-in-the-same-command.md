@@ -16,7 +16,10 @@ check:
   - tests/cli_agent_standalone.rs::an_sftp_dump_removes_the_files_of_removed_elements
   - tests/cli_agent_standalone.rs::an_sftp_dump_keeps_stray_files
   - tests/cli_agent_standalone.rs::an_sftp_dump_without_a_readable_prior_description_deletes_nothing
-  - src/platform/dump_forecast.rs::the_changes_list_is_read_by_its_measured_keys
+  - tests/cli_agent_standalone.rs::an_sftp_dump_keeps_an_element_renamed_by_letter_case
+  - tests/cli_agent_standalone.rs::an_sftp_dump_with_an_empty_new_description_deletes_nothing
+  - tests/cli_agent_standalone.rs::an_sftp_dump_with_an_unreadable_new_description_deletes_nothing
+  - src/use_cases/dump_config/agent.rs::a_failed_removal_names_what_is_left
   - src/platform/dump_forecast.rs::the_export_status_is_read_by_its_measured_keys
   - src/use_cases/dump_config.rs::an_ibcmd_full_forecast_dumps_through_the_stage_without_sync
   - src/use_cases/dump_config.rs::an_ibcmd_partial_dump_follows_a_full_forecast_too
@@ -50,11 +53,15 @@ check:
 Агент по SFTP получает только опись выгрузки и возвращает переписанные файлы, поэтому
 удаления раннер переносит сам. Владелец файла — самый глубокий элемент, который раннер узнаёт по
 пути: объект верхнего уровня (`<Папка типа>/<Имя>.xml` и каталог `<Имя>/`), его форма, макет,
-команда (`Forms/`, `Templates/`, `Commands/`) и вложенная подсистема. Файл удаляется, только
-если его владелец был в описи до выгрузки и пропал из описи после неё. Посторонние файлы и
-файлы, чей владелец не распознан, остаются; без прежней описи или если опись не разобрана, не
-удаляется ничего. Удаление идёт до того, как раннер запоминает записанное, и не выходит за
-область обхода набора.
+команда, перерасчёт регистра расчёта (`Forms/`, `Templates/`, `Commands/`, `Recalculations/`) и
+вложенная подсистема. Файл удаляется, только если его владелец был в описи до выгрузки и ни одно
+имя описи после неё не совпадает с ним без учёта регистра букв, а сам файл выгрузка не
+переписывала (он старше её начала): элемент, переименованный только регистром, на файловой
+системе без учёта регистра лежит под прежним написанием. Посторонние файлы и файлы, чей
+владелец не распознан, остаются; без прежней или новой описи, если какая-то из них не
+разобрана или новая пуста при непустой прежней, не удаляется ничего. Удаление идёт до того,
+как раннер запоминает записанное, и не выходит за область обхода набора; файл, который удалить
+не удалось, выгрузка называет отказом.
 
 `ibcmd` прогноз по-прежнему спрашивает (`config export status`) в той же команде и под тем
 же замком: по нему он выбирает путь. Прогноз «полная» (`modified: all`) отвечает `FULL` с

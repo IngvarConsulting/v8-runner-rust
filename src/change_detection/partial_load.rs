@@ -378,31 +378,53 @@ fn validate_removals(
     Some(())
 }
 
-/// Elements a Designer dump lays out under an object's directory: the folder and the kind the
-/// element's full name carries (`Catalog.X.Form.F`).
-const NESTED_ELEMENTS: &[(&str, &str)] = &[
-    ("Forms", "Form"),
-    ("Templates", "Template"),
-    ("Commands", "Command"),
-    ("Subsystems", "Subsystem"),
+/// Elements a Designer dump lays out under an object's directory: the folder, the kind the
+/// element's full name carries (`Catalog.X.Form.F`) and, when only one kind owns them, that
+/// owner's kind. A nested subsystem lies in the top-level folder of its kind
+/// ([`METADATA_TYPES`]) under a subsystem.
+const NESTED_ELEMENTS: &[(&str, &str, Option<&str>)] = &[
+    ("Forms", "Form", None),
+    ("Templates", "Template", None),
+    ("Commands", "Command", None),
+    (
+        "Recalculations",
+        "Recalculation",
+        Some("CalculationRegister"),
+    ),
 ];
+
+/// The kind of a folder nested under an element of `owner_kind`, if a dump lays one out there.
+fn nested_kind(owner_kind: &str, folder: &str) -> Option<&'static str> {
+    let nested = NESTED_ELEMENTS.iter().find_map(|(directory, kind, owner)| {
+        (directory.eq_ignore_ascii_case(folder) && owner.is_none_or(|owner| owner == owner_kind))
+            .then_some(*kind)
+    });
+    nested.or_else(|| {
+        METADATA_TYPES
+            .iter()
+            .find(|(directory, kind)| {
+                *kind == "Subsystem"
+                    && owner_kind == "Subsystem"
+                    && directory.eq_ignore_ascii_case(folder)
+            })
+            .map(|(_, kind)| *kind)
+    })
+}
 
 /// The deepest element of a Designer dump that owns the file at `path`, relative to the dump
 /// root, named as the version file `ConfigDumpInfo.xml` names it: `Catalog.X` for
 /// `Catalogs/X.xml` and everything under `Catalogs/X/`, `Catalog.X.Form.F` under `Forms/F.xml`
-/// and `Forms/F/`, likewise `Template` (`Templates/`), `Command` (only `Commands/C/`) and a
-/// nested `Subsystem` (`Subsystems/`, at any depth). `None` when the top-level folder is not a
-/// kind of [`METADATA_TYPES`] (`Configuration.xml`, `Ext/`, a stray file).
+/// and `Forms/F/`, likewise `Template` (`Templates/`), `Command` (only `Commands/C/`),
+/// `Recalculation` of a calculation register (`Recalculations/`) and a nested `Subsystem`
+/// (`Subsystems/`, at any depth). `None` when the top-level folder is not a kind of
+/// [`METADATA_TYPES`] (`Configuration.xml`, `Ext/`, a stray file).
 pub(crate) fn dump_element_of(path: &Path) -> Option<String> {
     let (kind, name) = top_level_object(path)?;
     let mut owner = format!("{kind}.{name}");
     let mut owner_kind = kind;
     let mut rest = path.iter().skip(2).peekable();
     while let Some(folder) = rest.next().and_then(|part| part.to_str()) {
-        let Some(&(_, nested)) = NESTED_ELEMENTS.iter().find(|(directory, nested)| {
-            directory.eq_ignore_ascii_case(folder)
-                && (*nested != "Subsystem" || owner_kind == "Subsystem")
-        }) else {
+        let Some(nested) = nested_kind(owner_kind, folder) else {
             break;
         };
         let Some(entry) = rest.next() else {
@@ -610,6 +632,18 @@ mod tests {
                 Some("Subsystem.Sales.Subsystem.Orders.Subsystem.Lines"),
             ),
             ("Catalogs/Items/Subsystems/Other.xml", Some("Catalog.Items")),
+            (
+                "CalculationRegisters/Pay/Recalculations/Again.xml",
+                Some("CalculationRegister.Pay.Recalculation.Again"),
+            ),
+            (
+                "CalculationRegisters/Pay/Recalculations/Again/Ext/RecordSetModule.bsl",
+                Some("CalculationRegister.Pay.Recalculation.Again"),
+            ),
+            (
+                "Catalogs/Items/Recalculations/Again.xml",
+                Some("Catalog.Items"),
+            ),
             ("CommonForms/Form/Ext/Form.xml", Some("CommonForm.Form")),
             ("Configuration.xml", None),
             ("Ext/ParentConfigurations.bin", None),

@@ -397,20 +397,13 @@ pub struct DumpStart {
 /// The dump's files are stamped by the clock of the directory's file system, which can be
 /// coarser than this process's clock or, on a share, apart from it: the start is read from a
 /// file written there, and the file is gone before this returns, so the dump never sees it.
-pub fn mark_dump_start(dir: &Path) -> Result<DumpStart, String> {
+pub fn mark_dump_start(dir: &Path) -> std::io::Result<DumpStart> {
     let probe = tempfile::Builder::new()
         .prefix(scanner::DUMP_START_PROBE)
-        .tempfile_in(dir)
-        .map_err(|error| format!("clock probe: {error}"))?;
-    let modified = probe
-        .as_file()
-        .metadata()
-        .and_then(|meta| meta.modified())
-        .map_err(|error| format!("clock probe: {error}"))?;
-    let started_ns = mtime_nanos(modified, dir).map_err(|error| error.to_string())?;
-    probe
-        .close()
-        .map_err(|error| format!("clock probe: {error}"))?;
+        .tempfile_in(dir)?;
+    let modified = probe.as_file().metadata()?.modified()?;
+    let started_ns = mtime_nanos(modified, dir).map_err(std::io::Error::other)?;
+    probe.close()?;
     Ok(DumpStart { started_ns })
 }
 
@@ -460,19 +453,22 @@ pub fn watch_before_dump(
 
 /// The tree after a dump, listed in the set's walk scope without reading a file.
 ///
-/// One listing answers both what the dump wrote ([`observe_dump_writes`]) and whether it
-/// rewrote everything ([`Self::rewrite`]): the tree is walked once.
+/// One listing answers both what the dump wrote ([`observe_dump_writes`]) and what it did to
+/// the tree ([`Self::fact`]).
 pub struct DumpListing {
     files: Vec<scanner::Candidate>,
 }
 
-/// Whether a dump rewrote every file of the tree.
+/// What a dump by the version file did to the set's tree
+/// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DumpRewrite {
-    /// The tree holds files, and none is older than the dump's start.
-    All,
-    /// A file older than the start stayed, or the tree is empty.
+pub enum DumpFact {
+    /// The tree holds files, and none is older than the dump's start: the dump was full.
+    RewroteAll,
+    /// A file older than the start stayed, or the tree is empty: the dump took the changes.
     Partly,
+    /// The start was not marked or the tree was not listed: the mode is not known.
+    Unlisted,
 }
 
 /// Lists the set's tree after a dump: the set's walk scope, `workPath` and service directories
@@ -497,45 +493,56 @@ pub fn list_after_dump(
 
 impl DumpListing {
     /// A dump that began at `start` rewrote everything when the tree is not empty and every
-    /// file in it is stamped no earlier than the start
-    /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
-    pub fn rewrite(&self, start: DumpStart) -> DumpRewrite {
+    /// file in it is stamped no earlier than the start.
+    pub fn fact(&self, start: DumpStart) -> DumpFact {
         if !self.files.is_empty()
             && self
                 .files
                 .iter()
                 .all(|file| file.mtime_ns >= start.started_ns)
         {
-            DumpRewrite::All
+            DumpFact::RewroteAll
         } else {
-            DumpRewrite::Partly
+            DumpFact::Partly
         }
     }
 }
 
 /// The files of a Designer dump whose element the dump dropped: the deepest element that owns a
 /// file by its path ([`partial_load::dump_element_of`]) was in the description `before` the
-/// dump and is not in the one `after` it. Files without a recognized owner and files of elements
-/// that stayed are not named. Listed in the set's walk scope, links never followed.
+/// dump and no name of the description `after` it matches, letter case aside. A file the dump
+/// wrote (stamped no earlier than `start`) is never named: on a case-insensitive file system an
+/// element renamed only in letter case keeps its files under the old spelling. Files without a
+/// recognized owner and files of elements that stayed are not named either. Listed in the set's
+/// walk scope, links never followed; this listing precedes the one the dump's mode comes from,
+/// because what it names is gone before that one.
 pub fn files_of_dropped_elements(
     context: &SourceSetContext,
     work_path: &Path,
+    start: DumpStart,
     before: &HashSet<String>,
     after: &HashSet<String>,
+    interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<PathBuf>, ChangeDetectionError> {
-    let listing = list_after_dump(context, work_path, &|| false)?;
+    let caseless = |names: &HashSet<String>| -> HashSet<String> {
+        names.iter().map(|name| name.to_lowercase()).collect()
+    };
+    let (before, after) = (caseless(before), caseless(after));
+    let listing = list_after_dump(context, work_path, interrupted)?;
     Ok(listing
         .files
         .into_iter()
+        .filter(|file| file.mtime_ns < start.started_ns)
         .filter(|file| {
             crate::change_detection::partial_load::dump_element_of(Path::new(&file.rel_path))
+                .map(|owner| owner.to_lowercase())
                 .is_some_and(|owner| before.contains(&owner) && !after.contains(&owner))
         })
         .map(|file| file.path)
         .collect())
 }
 
-/// What an incremental dump wrote into the tree, found and hashed but not yet remembered.
+// What an incremental dump wrote into the tree, found and hashed but not yet remembered.
 ///
 /// Finding it reads only files and the memory, so it can run while the platform answers
 /// whether the base changed during the dump; [`Self::commit`] is the step that waits for
@@ -1088,11 +1095,23 @@ mod tests {
             "Catalogs/Gone/.git/keep",
             "Unknowns/Gone.xml",
             "work/Catalogs/Gone.xml",
+            "Documents/Заказ.xml",
+            "Documents/Заказ/Ext/ObjectModule.bsl",
         ] {
             let path = root.join(file);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
             std::fs::write(&path, file).expect("file");
+            File::options()
+                .write(true)
+                .open(&path)
+                .expect("open")
+                .set_modified(SystemTime::now() - std::time::Duration::from_secs(3600))
+                .expect("old mtime");
         }
+        let start = mark_dump_start(&root).expect("dump start");
+        // The dump rewrote a file of an element its description no longer names, as a
+        // case-only rename does on a case-insensitive file system: written files stay.
+        std::fs::write(root.join("Catalogs/Gone/Ext/ObjectModule.bsl"), "written").expect("w");
         let context = SourceSetContext::new("main", root.clone(), "designer-main");
         let names = |names: &[&str]| -> HashSet<String> {
             names.iter().map(|name| (*name).to_owned()).collect()
@@ -1103,32 +1122,34 @@ mod tests {
             "Catalog.Items.Form.Old",
             "Catalog.Gone",
             "Unknown.Gone",
+            "Document.Заказ",
         ]);
-        let after = names(&["Catalog.Items", "Catalog.Items.Form.Kept"]);
+        // A case-only rename: the new description spells the element otherwise.
+        let after = names(&["Catalog.Items", "Catalog.Items.Form.Kept", "Document.ЗАКАЗ"]);
 
-        let mut dropped: Vec<String> = files_of_dropped_elements(&context, &work, &before, &after)
-            .expect("listing")
-            .iter()
-            .map(|path| {
-                path.strip_prefix(&root)
-                    .expect("inside the set")
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
-            .collect();
+        let mut dropped: Vec<String> =
+            files_of_dropped_elements(&context, &work, start, &before, &after, &|| false)
+                .expect("listing")
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&root)
+                        .expect("inside the set")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
         dropped.sort();
 
         assert_eq!(
             dropped,
             [
                 "Catalogs/Gone.xml",
-                "Catalogs/Gone/Ext/ObjectModule.bsl",
                 "Catalogs/Items/Forms/Old.xml",
                 "Catalogs/Items/Forms/Old/Ext/Form/Module.bsl",
             ]
         );
         assert!(
-            files_of_dropped_elements(&context, &work, &HashSet::new(), &after)
+            files_of_dropped_elements(&context, &work, start, &HashSet::new(), &after, &|| false)
                 .expect("listing")
                 .is_empty(),
             "nothing was in the description before"
