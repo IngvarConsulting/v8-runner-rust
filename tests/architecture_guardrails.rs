@@ -161,10 +161,7 @@ fn a_process_argument_loses_the_verbatim_prefix_only_at_the_launch() {
             .replace('\\', "/");
         let source = fs::read_to_string(&file).expect("source");
         // Только рабочий код: тесты адаптеров передают пути с приставкой нарочно.
-        let production = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap_or_default();
+        let production = without_test_modules(&source);
         let text = production
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
@@ -6598,4 +6595,33 @@ fn the_session_stamp_guard_rejects_each_real_entry_without_its_stamp() {
         14,
         "the stamped entry surface changed: {checked:?}"
     );
+}
+
+/// Исходник без тел модулей `mod tests { … }` на любой глубине: тесты нарочно передают пути
+/// с приставкой. Скобки внутри тела считаются попарно, этого хватает для тестового кода.
+fn without_test_modules(source: &str) -> String {
+    let mut kept = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(at) = rest.find("mod tests {") {
+        kept.push_str(&rest[..at]);
+        let body = &rest[at + "mod tests ".len()..];
+        let mut depth = 0usize;
+        let mut end = body.len();
+        for (index, ch) in body.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = index + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &body[end..];
+    }
+    kept.push_str(rest);
+    kept
 }
