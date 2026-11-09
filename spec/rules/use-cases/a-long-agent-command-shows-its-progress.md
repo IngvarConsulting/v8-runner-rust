@@ -1,7 +1,7 @@
 ---
 id: INV.USE-CASES.A-LONG-AGENT-COMMAND-SHOWS-ITS-PROGRESS
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/579
 ---
 
 # Долгая команда агента показывает ход работы
