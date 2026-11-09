@@ -1,4 +1,6 @@
-use crate::change_detection::analyzer::{record_dump_changes, watch_before_dump, DumpWatch};
+use crate::change_detection::analyzer::{
+    observe_dump_writes, watch_before_dump, ChangeDetectionError, DumpWatch, DumpWrites,
+};
 use crate::domain::source_set::SourceSetContext;
 use crate::use_cases::provider_selection::stamp_session;
 use std::path::{Path, PathBuf};
@@ -155,21 +157,46 @@ fn dump_watch(
     watch_before_dump(set?, &config.work_path)
 }
 
+/// Что выгрузка по изменившемуся записала в каталог, найденное и прохешированное, пока
+/// платформа отвечала про поколение после выгрузки (#571). Обход читает только файлы и
+/// память, платформу не трогает.
+fn observe_dump_writes_while<T>(
+    set: Option<&SourceSetContext>,
+    work_path: &Path,
+    watch: Option<&DumpWatch>,
+    platform_step: impl FnOnce() -> T,
+) -> (T, Option<Result<DumpWrites, ChangeDetectionError>>) {
+    let Some((set, watch)) = set.zip(watch) else {
+        return (platform_step(), None);
+    };
+    std::thread::scope(|scope| {
+        let span = tracing::Span::current();
+        let observing =
+            scope.spawn(move || span.in_scope(|| observe_dump_writes(set, work_path, watch)));
+        let answer = platform_step();
+        let observed = observing
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (answer, Some(observed))
+    })
+}
+
 /// Выгрузка по изменившемуся над базой, которую во время неё не правили, записывает в память
 /// хеши того, что легло в каталог (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`). Базу правили
 /// или поколение неизвестно — память не трогается, и следующая отправка грузит изменённое.
 fn remember_dump_writes(
     set: &SourceSetContext,
     work_path: &Path,
-    watch: Option<&DumpWatch>,
+    observed: Option<Result<DumpWrites, ChangeDetectionError>>,
     before: Option<&str>,
     after: Option<&str>,
 ) -> Option<String> {
-    let watch = watch?;
+    let observed = observed?;
     if before.is_none() || before != after {
         return None;
     }
-    record_dump_changes(set, work_path, watch)
+    observed
+        .and_then(|writes| writes.commit(set, work_path))
         .err()
         .map(|error| {
             format!(

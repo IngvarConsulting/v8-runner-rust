@@ -44,6 +44,23 @@ impl StorageSnapshot {
     }
 }
 
+/// What the storage remembers, read without its file rows.
+#[derive(Debug, Clone, Default)]
+pub struct StorageSummary {
+    pub identity: Option<String>,
+    pub generation: u64,
+    pub watermark: Option<u64>,
+    /// Files remembered, as the table header counts them.
+    pub files: u64,
+}
+
+impl StorageSummary {
+    /// The same answer as [`StorageSnapshot::is_blank`] for the same storage.
+    pub fn is_blank(&self) -> bool {
+        self.generation == 0 && self.watermark.is_none() && self.files == 0
+    }
+}
+
 /// Storage-layer failures split into recoverable and hard categories.
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -91,7 +108,8 @@ impl HashStorage {
     /// substring search over an error message. Recoverability is a property of the error, and
     /// the error knows it.
     pub fn needs_recovery(&self) -> bool {
-        match self.current_generation() {
+        // Every row is read: a table damaged inside must be found here, not only a bad header.
+        match self.load_snapshot() {
             Err(error) => error.is_recoverable(),
             Ok(_) => false,
         }
@@ -257,7 +275,70 @@ impl HashStorage {
 
     /// Read the current optimistic-lock generation.
     pub fn current_generation(&self) -> Result<u64, StorageError> {
-        Ok(self.load_snapshot()?.generation)
+        Ok(self.load_summary()?.generation)
+    }
+
+    /// Read the identity, generation, watermark and file count without the file rows: a
+    /// large source set remembers tens of thousands of files, and a question about the
+    /// memory itself read every one of them (#571). Tables of different length are the
+    /// same recoverable problem [`Self::load_snapshot`] reports for them.
+    pub fn load_summary(&self) -> Result<StorageSummary, StorageError> {
+        use redb::ReadableTableMetadata;
+
+        if !self.path.exists() {
+            return Ok(StorageSummary::default());
+        }
+        let db = Database::open(&self.path).map_err(|e| map_database_error(&self.path, e))?;
+        let tx = db
+            .begin_read()
+            .map_err(|e| map_tx_error(&self.path, e, "begin read"))?;
+        let identity = match tx.open_table(IDENTITY) {
+            Ok(table) => table
+                .get(IDENTITY_KEY)
+                .map_err(|e| map_storage_error(&self.path, "read identity", e))?
+                .map(|value| value.value().to_owned()),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(map_table_error(&self.path, e)),
+        };
+        let mtime_rows = match tx.open_table(FILES_MTIME) {
+            Ok(table) => Some(
+                table
+                    .len()
+                    .map_err(|e| map_storage_error(&self.path, "count mtime rows", e))?,
+            ),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(map_table_error(&self.path, e)),
+        };
+        let hash_rows = match tx.open_table(FILES_HASH) {
+            Ok(table) => Some(
+                table
+                    .len()
+                    .map_err(|e| map_storage_error(&self.path, "count hash rows", e))?,
+            ),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(map_table_error(&self.path, e)),
+        };
+        let files = match (mtime_rows, hash_rows) {
+            (None, None) => 0,
+            (Some(mtime), Some(hash)) if mtime == hash => mtime,
+            _ => {
+                return Err(StorageError::Recoverable {
+                    path: self.path.clone(),
+                    reason: "mtime/hash tables are inconsistent".to_owned(),
+                })
+            }
+        };
+        let meta_tbl = match tx.open_table(META) {
+            Ok(t) => Some(t),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(map_table_error(&self.path, e)),
+        };
+        Ok(StorageSummary {
+            identity,
+            generation: read_generation(meta_tbl.as_ref(), &self.path)?,
+            watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
+            files,
+        })
     }
 
     /// Replace a corrupt or missing storage file with a fresh snapshot.
@@ -348,12 +429,28 @@ fn sync_file_tables(
         }
     }
 
+    // Only rows that differ are written: after a change of one file the commit touched every
+    // row of a large set, and a write costs far more than a lookup (#571). The comparison runs
+    // inside the same write transaction, after the generation check, so it is against what
+    // is committed now and not against what was read earlier.
     for (key, state) in snapshot {
-        mtime
-            .insert(key.as_str(), state.mtime_ns)
-            .map_err(|e| map_storage_error(path, "insert mtime", e))?;
-        hash.insert(key.as_str(), state.hash.as_str())
-            .map_err(|e| map_storage_error(path, "insert hash", e))?;
+        let stored_mtime = mtime
+            .get(key.as_str())
+            .map_err(|e| map_storage_error(path, "read mtime", e))?
+            .map(|value| value.value());
+        if stored_mtime != Some(state.mtime_ns) {
+            mtime
+                .insert(key.as_str(), state.mtime_ns)
+                .map_err(|e| map_storage_error(path, "insert mtime", e))?;
+        }
+        let hash_matches = hash
+            .get(key.as_str())
+            .map_err(|e| map_storage_error(path, "read hash", e))?
+            .is_some_and(|value| value.value() == state.hash);
+        if !hash_matches {
+            hash.insert(key.as_str(), state.hash.as_str())
+                .map_err(|e| map_storage_error(path, "insert hash", e))?;
+        }
     }
     Ok(())
 }
@@ -444,5 +541,115 @@ fn map_storage_error(path: &Path, context: &str, err: impl std::fmt::Display) ->
     StorageError::Recoverable {
         path: path.to_path_buf(),
         reason: format!("{context}: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HashStorage, StoredFileState, FILES_MTIME};
+    use redb::Database;
+    use std::collections::HashMap;
+
+    fn state(mtime_ns: u64, hash: &str) -> StoredFileState {
+        StoredFileState {
+            mtime_ns,
+            hash: hash.to_owned(),
+        }
+    }
+
+    fn rows(snapshot: &HashMap<String, StoredFileState>) -> Vec<(String, u64, String)> {
+        let mut rows: Vec<_> = snapshot
+            .iter()
+            .map(|(key, value)| (key.clone(), value.mtime_ns, value.hash.clone()))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn summary_answers_as_the_snapshot_without_its_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = HashStorage::new(dir.path().join("memory.redb"));
+        let missing = storage.load_summary().expect("no file");
+        assert!(missing.is_blank());
+        assert_eq!(missing.generation, 0);
+
+        let snapshot = HashMap::from([
+            ("a.xml".to_owned(), state(1, "h1")),
+            ("b.bsl".to_owned(), state(2, "h2")),
+        ]);
+        storage
+            .commit_snapshot_with_identity(&snapshot, 7, 0, Some("base"))
+            .expect("commit");
+        let summary = storage.load_summary().expect("summary");
+        let full = storage.load_snapshot().expect("snapshot");
+        assert_eq!(summary.identity, full.identity);
+        assert_eq!(summary.generation, full.generation);
+        assert_eq!(summary.watermark, full.watermark);
+        assert_eq!(summary.files, full.entries.len() as u64);
+        assert_eq!(summary.is_blank(), full.is_blank());
+        assert_eq!(storage.current_generation().expect("generation"), 1);
+
+        storage
+            .commit_snapshot_with_identity(&HashMap::new(), 0, 1, Some("base"))
+            .expect("empty commit");
+        let emptied = storage.load_summary().expect("emptied");
+        assert_eq!(emptied.files, 0);
+        assert!(!emptied.is_blank(), "a committed generation is memory");
+    }
+
+    #[test]
+    fn summary_reports_tables_of_different_length_as_recoverable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.redb");
+        let storage = HashStorage::new(path.clone());
+        storage
+            .commit_snapshot_with_identity(
+                &HashMap::from([("a.xml".to_owned(), state(1, "h1"))]),
+                1,
+                0,
+                Some("base"),
+            )
+            .expect("commit");
+        {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            tx.open_table(FILES_MTIME)
+                .expect("mtime")
+                .insert("orphan.xml", 5)
+                .expect("insert");
+            tx.commit().expect("commit orphan");
+        }
+        let error = storage.load_summary().expect_err("inconsistent");
+        assert!(error.is_recoverable(), "{error}");
+        assert!(storage.needs_recovery());
+    }
+
+    #[test]
+    fn a_commit_that_writes_only_differences_leaves_exactly_the_new_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = HashStorage::new(dir.path().join("memory.redb"));
+        let first = HashMap::from([
+            ("kept.xml".to_owned(), state(1, "same")),
+            ("touched.xml".to_owned(), state(2, "same")),
+            ("edited.bsl".to_owned(), state(3, "old")),
+            ("removed.xml".to_owned(), state(4, "gone")),
+        ]);
+        storage
+            .commit_snapshot_with_identity(&first, 1, 0, Some("base"))
+            .expect("first");
+        let second = HashMap::from([
+            ("kept.xml".to_owned(), state(1, "same")),
+            ("touched.xml".to_owned(), state(9, "same")),
+            ("edited.bsl".to_owned(), state(3, "new")),
+            ("added.xml".to_owned(), state(5, "fresh")),
+        ]);
+        storage
+            .commit_snapshot_with_identity(&second, 2, 1, Some("base"))
+            .expect("second");
+        let loaded = storage.load_snapshot().expect("loaded");
+        assert_eq!(rows(&loaded.entries), rows(&second));
+        assert_eq!(loaded.generation, 2);
+        assert_eq!(loaded.watermark, Some(2));
     }
 }

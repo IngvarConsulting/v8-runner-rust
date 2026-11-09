@@ -219,10 +219,14 @@ pub fn snapshot_memory(context: &SourceSetContext, work_path: &Path) -> Snapshot
     if context.storage_identity().is_none() {
         return SnapshotMemory::Nothing;
     }
-    match load_bound_snapshot(context, &HashStorage::new(path)) {
-        Ok(Some(snapshot)) if !snapshot.is_blank() => SnapshotMemory::Own,
-        Ok(_) => SnapshotMemory::Nothing,
-        Err(ChangeDetectionError::ForeignMemory { .. }) => SnapshotMemory::Foreign,
+    // The rows are not needed for this answer; the analysis that uses them reads them itself.
+    match HashStorage::new(path).load_summary() {
+        Ok(summary) if summary.is_blank() => SnapshotMemory::Nothing,
+        Ok(summary) if summary.identity.as_deref() == context.storage_identity() => {
+            SnapshotMemory::Own
+        }
+        Ok(_) => SnapshotMemory::Foreign,
+        Err(error) if error.is_recoverable() => SnapshotMemory::Nothing,
         Err(_) => SnapshotMemory::Unreadable,
     }
 }
@@ -442,25 +446,40 @@ fn list_before_dump(context: &SourceSetContext, work_path: &Path) -> Result<Dump
     })
 }
 
-/// After a successful incremental dump over an unchanged base, remembers what the dump wrote:
-/// a file is written by the dump when its modification time is not before the dump began and
-/// it is new or its time moved since the listing — so an edit saved in the very clock tick the
-/// dump began stays a change. Written files are hashed by content and replace their entries,
-/// files that were there before the dump and are gone are forgotten.
-/// Every other entry stays, so a user edit made before the dump remains a change. An edit made
-/// while the dump ran cannot be told from the platform's writes and is remembered too (#170).
-pub fn record_dump_changes(
+/// What an incremental dump wrote into the tree, found and hashed but not yet remembered.
+///
+/// Finding it reads only files and the memory, so it can run while the platform answers
+/// whether the base changed during the dump; [`Self::commit`] is the step that waits for
+/// that answer (#571).
+pub struct DumpWrites {
+    /// `None`: the memory is unreadable and is not repaired here.
+    snapshot: Option<StorageSnapshot>,
+    started_ns: u64,
+}
+
+/// After a successful incremental dump, finds what it wrote: a file is written by the dump
+/// when its modification time is not before the dump began and it is new or its time moved
+/// since the listing — so an edit saved in the very clock tick the dump began stays a change.
+/// Written files are hashed by content and replace their entries, files that were there before
+/// the dump and are gone are forgotten. Every other entry stays, so a user edit made before
+/// the dump remains a change. An edit made while the dump ran cannot be told from the
+/// platform's writes and is remembered too (#170).
+pub fn observe_dump_writes(
     context: &SourceSetContext,
     work_path: &Path,
     watch: &DumpWatch,
-) -> Result<(), ChangeDetectionError> {
+) -> Result<DumpWrites, ChangeDetectionError> {
+    let unchanged = |snapshot| DumpWrites {
+        snapshot,
+        started_ns: watch.started_ns,
+    };
     let Some(path) = context.storage_path(work_path) else {
-        return Ok(());
+        return Ok(unchanged(None));
     };
     let storage = HashStorage::new(path);
     // Unreadable memory is not repaired here: the next push falls back to a full load.
     let Some(mut snapshot) = load_bound_snapshot(context, &storage)? else {
-        return Ok(());
+        return Ok(unchanged(None));
     };
     let excluded = scanner::work_path_inside(context.path(), work_path);
     let listed = scanner::list_in_scope(
@@ -490,7 +509,7 @@ pub fn record_dump_changes(
         })
         .collect();
     if written.is_empty() && removed.is_empty() {
-        return Ok(());
+        return Ok(unchanged(None));
     }
     for rel_path in removed {
         snapshot.entries.remove(rel_path);
@@ -506,14 +525,39 @@ pub fn record_dump_changes(
             },
         );
     }
-    storage
-        .commit_snapshot_with_identity(
-            &snapshot.entries,
-            snapshot.watermark.unwrap_or(0).max(watch.started_ns),
-            snapshot.generation,
-            context.storage_identity(),
-        )
-        .map_err(|error| map_commit_error(context, storage.path(), error))
+    Ok(unchanged(Some(snapshot)))
+}
+
+impl DumpWrites {
+    /// Remembers what the dump wrote. The commit fails if the memory moved since it was read.
+    pub fn commit(
+        self,
+        context: &SourceSetContext,
+        work_path: &Path,
+    ) -> Result<(), ChangeDetectionError> {
+        let (Some(snapshot), Some(path)) = (self.snapshot, context.storage_path(work_path)) else {
+            return Ok(());
+        };
+        let storage = HashStorage::new(path);
+        storage
+            .commit_snapshot_with_identity(
+                &snapshot.entries,
+                snapshot.watermark.unwrap_or(0).max(self.started_ns),
+                snapshot.generation,
+                context.storage_identity(),
+            )
+            .map_err(|error| map_commit_error(context, storage.path(), error))
+    }
+}
+
+/// [`observe_dump_writes`] and [`DumpWrites::commit`] in one step.
+#[cfg(test)]
+pub fn record_dump_changes(
+    context: &SourceSetContext,
+    work_path: &Path,
+    watch: &DumpWatch,
+) -> Result<(), ChangeDetectionError> {
+    observe_dump_writes(context, work_path, watch)?.commit(context, work_path)
 }
 
 fn detect_changes(

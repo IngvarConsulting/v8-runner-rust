@@ -899,6 +899,81 @@ pub fn move_dir(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::remove_dir_all(source)
 }
 
+/// Threads past this many gave no faster removal on the measured disks, as with reading (#556).
+const MAX_REMOVAL_WORKERS: usize = 8;
+
+/// Remove a directory tree with several threads, links removed and never followed.
+///
+/// A dump holds tens of thousands of files, and removing the replaced one in a single thread
+/// took most of a full pull's publication (#571). The threads only unlink files and drop what
+/// they cannot; the sequential [`remove_path_if_exists`] then removes the emptied directories
+/// and whatever is left, so a failure is reported exactly as a sequential removal reports it.
+pub fn remove_tree_in_parallel(path: &Path) -> std::io::Result<()> {
+    let is_real_dir = std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if is_real_dir {
+        let workers = thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(MAX_REMOVAL_WORKERS);
+        if workers > 1 {
+            unlink_files_in_parallel(path, workers);
+        }
+    }
+    remove_path_if_exists(path)
+}
+
+/// Unlink every file under `root` that can be unlinked, the directories shared between
+/// `workers` threads. Links are unlinked as files or left in place, never entered.
+fn unlink_files_in_parallel(root: &Path, workers: usize) {
+    use std::sync::{Condvar, Mutex, PoisonError};
+
+    struct Queue {
+        pending: Vec<PathBuf>,
+        busy: usize,
+    }
+
+    let queue = Mutex::new(Queue {
+        pending: vec![root.to_path_buf()],
+        busy: 0,
+    });
+    let changed = Condvar::new();
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let dir = {
+                    let mut state = queue.lock().unwrap_or_else(PoisonError::into_inner);
+                    loop {
+                        if let Some(dir) = state.pending.pop() {
+                            state.busy += 1;
+                            break dir;
+                        }
+                        if state.busy == 0 {
+                            return;
+                        }
+                        state = changed.wait(state).unwrap_or_else(PoisonError::into_inner);
+                    }
+                };
+                let mut subdirs = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        match entry.file_type() {
+                            Ok(kind) if kind.is_dir() => subdirs.push(entry.path()),
+                            Ok(_) => {
+                                let _ = std::fs::remove_file(entry.path());
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+                let mut state = queue.lock().unwrap_or_else(PoisonError::into_inner);
+                state.pending.extend(subdirs);
+                state.busy -= 1;
+                changed.notify_all();
+            });
+        }
+    });
+}
+
 pub fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1005,7 +1080,7 @@ pub fn replace_dir_atomically(
             backup_dir.display()
         ));
     }
-    if let Err(error) = remove_path_if_exists(&backup_dir) {
+    if let Err(error) = remove_tree_in_parallel(&backup_dir) {
         warnings.push(format!(
             "failed to remove backup dir '{}': {error}",
             backup_dir.display()
@@ -1193,8 +1268,8 @@ mod tests {
         acquire_advisory_lock, advisory_lock_owner_id, advisory_system_lock_path,
         decode_platform_log, is_system_lock_pending_removal, pending_removal_access_error,
         publish_file_atomically, publish_file_atomically_impl, read_advisory_lock_metadata,
-        remove_path_if_exists, replace_file_atomically, replace_file_rollback_error,
-        system_lock_pending_removal, try_acquire_advisory_lock,
+        remove_path_if_exists, remove_tree_in_parallel, replace_file_atomically,
+        replace_file_rollback_error, system_lock_pending_removal, try_acquire_advisory_lock,
         try_acquire_advisory_lock_with_hook, AdvisoryLockMetadata, ReplaceFileFailureState,
         ReplaceFileTestPoint, CP1251_HIGH, REPLACE_FILE_TEST_HOOK, TEST_SYSTEM_LOCK_OPENED_HOOK,
         TOOL_NAME,
@@ -1211,6 +1286,54 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn parallel_removal_removes_a_deep_tree_and_tolerates_what_is_not_there() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("dump");
+        for top in 0..6 {
+            for nested in 0..4 {
+                let leaf = root
+                    .join(format!("t{top}"))
+                    .join(format!("n{nested}"))
+                    .join("Ext");
+                fs::create_dir_all(&leaf).expect("tree");
+                for file in 0..12 {
+                    fs::write(leaf.join(format!("f{file}.xml")), b"x").expect("file");
+                }
+            }
+            fs::create_dir_all(root.join(format!("t{top}")).join("empty")).expect("empty dir");
+        }
+        fs::write(root.join("ConfigDumpInfo.xml"), b"x").expect("top file");
+
+        remove_tree_in_parallel(&root).expect("removed");
+        assert!(!root.exists());
+        remove_tree_in_parallel(&root).expect("a missing path is not an error");
+
+        let single = dir.path().join("single.txt");
+        fs::write(&single, b"x").expect("file");
+        remove_tree_in_parallel(&single).expect("a file is removed too");
+        assert!(!single.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parallel_removal_never_enters_a_link() {
+        let dir = tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).expect("outside");
+        fs::write(outside.join("keep.txt"), b"x").expect("kept file");
+        let root = dir.path().join("dump");
+        fs::create_dir_all(root.join("sub")).expect("tree");
+        std::os::unix::fs::symlink(&outside, root.join("sub").join("link")).expect("link");
+
+        remove_tree_in_parallel(&root).expect("removed");
+        assert!(!root.exists());
+        assert!(
+            outside.join("keep.txt").exists(),
+            "the link target is not touched"
+        );
+    }
 
     #[test]
     fn try_acquire_advisory_lock_reports_busy() {
