@@ -475,7 +475,8 @@ impl From<AgentError> for AppError {
             // а не отказ платформы: отказом платформа отвечает сообщением `error`.
             AgentError::InvalidReply { .. } => Self::InvalidOutput(error.to_string()),
             AgentError::Workspace { .. } => Self::Runtime(error.to_string()),
-            AgentError::Unreachable { .. }
+            AgentError::HostKeyPathNotReadable { .. }
+            | AgentError::Unreachable { .. }
             | AgentError::Handshake { .. }
             | AgentError::AuthenticationRejected { .. }
             // Тот же класс, что и отвергнутые учётные данные: сервер ответил, но работать
