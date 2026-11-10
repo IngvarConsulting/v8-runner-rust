@@ -76,7 +76,7 @@
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-cluster-start">cluster start</h2>
 <pre data-output-command><code>v8-runner cluster start</code></pre>
-<p>Запускает сервер 1С как приложение той же платформы, что выбирают остальные команды (<code>tools.platform</code>): агент <code>ragent</code> с реестром под <code>workPath</code>, затем сервер администрирования <code>ras</code>, и отдаёт ответ после того, как <code>rac cluster list</code> назвал кластер. Порт агента, <code>regport</code> и диапазон рабочих процессов раннер выбирает свободными вне динамического диапазона и закрепляет при первом запуске: реестр кластера хранит их все. Порт <code>ras</code> выбирается заново при каждом запуске. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Кластер живёт между командами, пока его не остановит <a href="#op-cluster-stop"><code>cluster stop</code></a>. Запись о процессах и портах раннер держит под <code>workPath</code>. На Linux и macOS команда отказывает.</p>
+<p>Запускает сервер 1С как приложение той же платформы, что выбирают остальные команды (<code>tools.platform</code>): агент <code>ragent</code> с реестром под <code>localPath</code>, затем сервер администрирования <code>ras</code>, и отдаёт ответ после того, как <code>rac cluster list</code> назвал кластер. Порт агента, <code>regport</code> и диапазон рабочих процессов раннер выбирает свободными вне динамического диапазона и закрепляет при первом запуске: реестр кластера хранит их все. Порт <code>ras</code> выбирается заново при каждом запуске. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Кластер живёт между командами, пока его не остановит <a href="#op-cluster-stop"><code>cluster stop</code></a>. Запись о процессах и портах раннер держит под <code>localPath</code>: удаление <code>workPath</code> кластер не трогает. На Linux и macOS команда отказывает.</p>
 <p>Если кластер уже запущен раннером этой копии, команда ничего не запускает и называет его; упавший <code>ras</code> поднимает заново. Остатки своего упавшего агента — <code>rmngr</code> и <code>rphost</code> — снимает по их PID и запускает кластер на прежних портах. Если закреплённый порт занят чужим процессом, команда отказывает, называет его и предлагает <a href="#op-cluster-new-regport"><code>--new-regport</code></a>; другой порт сама не берёт. Пока работает свой автономный сервер этой базы, команда отказывает и называет <code>standalone stop</code>: одну БД держит один сервер.</p>
 <pre data-output-command><code>v8-runner cluster start --dry-run</code></pre>
 <p>Показывает состояние, закреплённые адреса и каталог реестра, если кластер уже запускался. Ничего не запускает. Такое же превью есть у <code>cluster stop</code> и <code>cluster restart</code>. Команды <code>cluster</code> принимают только объявленную базу: строка соединения в <code>--infobase</code> — отказ.</p>
@@ -114,8 +114,8 @@
   ras pid  16980
   rac cluster list  answers
   infobase  not created yet: run infobase create
-  registry  build/infobases/origin/managed/cluster/registry-46761
-  log  build/infobases/origin/managed/cluster/cluster.log</code></pre>
+  registry  .local/infobases/origin/managed/cluster/registry-46761
+  log  .local/infobases/origin/managed/cluster/cluster.log</code></pre>
 <h4 id="cluster-status-own">Состояние своего кластера</h4>
 <pre data-output-example="cluster-status-own" data-output-schema="cluster-status"><code>cluster status: origin: cluster 8.5.4.2028, started by this working copy, ragent pid 6312
   connection  Srvr=127.0.0.1:46761;Ref=demo
@@ -125,8 +125,8 @@
   ras pid  16980
   rac cluster list  answers
   infobase  created
-  registry  build/infobases/origin/managed/cluster/registry-46761
-  log  build/infobases/origin/managed/cluster/cluster.log</code></pre>
+  registry  .local/infobases/origin/managed/cluster/registry-46761
+  log  .local/infobases/origin/managed/cluster/cluster.log</code></pre>
 <h4 id="cluster-remnants">Остатки упавшего агента</h4>
 <pre data-output-example="cluster-remnants" data-output-schema="cluster-status"><code>cluster status: origin: the cluster is not running
   connection  Srvr=127.0.0.1:46761;Ref=demo
@@ -148,8 +148,8 @@
   rac cluster list  answers
   infobase  created
   previous regport  46761
-  registry  build/infobases/origin/managed/cluster/registry-46793
-  log  build/infobases/origin/managed/cluster/cluster.log</code></pre>
+  registry  .local/infobases/origin/managed/cluster/registry-46793
+  log  .local/infobases/origin/managed/cluster/cluster.log</code></pre>
 <h4 id="cluster-no-server">Нет серверных компонентов</h4>
 <pre data-output-example="cluster-no-server" data-output-schema="cluster-start"><code>ERROR: environment unavailable: utility 'ragent' was not found: version 8.3.27.2074 is installed (8.3.27.2074) but has no 1C:Enterprise server; no version has 1C:Enterprise server</code></pre>
 </main>
@@ -170,8 +170,8 @@
       "agent": "127.0.0.1:46760",
       "ras": "127.0.0.1:25425",
       "worker_range": "46762:46777",
-      "registry_dir": "build/infobases/origin/managed/cluster/registry-46761",
-      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "registry_dir": ".local/infobases/origin/managed/cluster/registry-46761",
+      "log_path": ".local/infobases/origin/managed/cluster/cluster.log",
       "ready": true,
       "registered": false,
       "duration_ms": 9100
@@ -195,8 +195,8 @@
       "agent": "127.0.0.1:46760",
       "ras": "127.0.0.1:25425",
       "worker_range": "46762:46777",
-      "registry_dir": "build/infobases/origin/managed/cluster/registry-46761",
-      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "registry_dir": ".local/infobases/origin/managed/cluster/registry-46761",
+      "log_path": ".local/infobases/origin/managed/cluster/cluster.log",
       "ready": true,
       "registered": true,
       "duration_ms": 420
@@ -252,7 +252,7 @@
       "state": "foreign",
       "action": "reported",
       "connection": "Srvr=127.0.0.1:46761;Ref=demo",
-      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "log_path": ".local/infobases/origin/managed/cluster/cluster.log",
       "ready": false,
       "registered": true,
       "occupant_pid": 9008,
@@ -282,8 +282,8 @@
       "agent": "127.0.0.1:46792",
       "ras": "127.0.0.1:25425",
       "worker_range": "46794:46809",
-      "registry_dir": "build/infobases/origin/managed/cluster/registry-46793",
-      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "registry_dir": ".local/infobases/origin/managed/cluster/registry-46793",
+      "log_path": ".local/infobases/origin/managed/cluster/cluster.log",
       "ready": true,
       "registered": true,
       "previous_regport": 46761,
@@ -301,7 +301,7 @@
       "infobase": "origin",
       "state": "not_running",
       "action": "reported",
-      "log_path": "build/infobases/origin/managed/cluster/cluster.log",
+      "log_path": ".local/infobases/origin/managed/cluster/cluster.log",
       "ready": false,
       "registered": false,
       "duration_ms": 30

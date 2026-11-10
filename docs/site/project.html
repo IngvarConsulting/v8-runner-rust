@@ -113,8 +113,8 @@ source-set:
 <pre data-config-example="local"><code># v8project.local.yaml
 infobases:                        # базы этой машины
   origin:                         # база по умолчанию
-    connection: "File=.build/ib"  # каталог файловой базы</code></pre>
-<p>Адрес записывает <a href="cli-init.html#op-init"><code>init</code></a>: например, <code>File=.build/ib</code> или значение <code>--infobase</code>. <a href="cli-infobase-create.html"><code>infobase create</code></a> создаёт базу по этому адресу. Команды обмена используют тот же адрес.</p>
+    connection: "File=.local/db"  # каталог файловой базы</code></pre>
+<p>Адрес записывает <a href="cli-init.html#op-init"><code>init</code></a>: по умолчанию <code>File=.local/db</code>, иначе значение <code>--infobase</code>. <a href="cli-infobase-create.html"><code>infobase create</code></a> создаёт базу по этому адресу. Команды обмена используют тот же адрес.</p>
 <h3>Несколько баз и параметры подключения</h3>
 <p>Добавьте базы под другими именами. Для файловой базы задаётся <code>File</code>, для серверной — <code>Srvr</code> и <code>Ref</code>. <code>standalone</code> задаёт подключение к автономному серверу.</p>
 <p>Для кластерной базы учётные данные разделены на три уровня: <code>user/password</code> — пользователь информационной базы; <code>cluster.user/password</code> — администратор кластера; <code>cluster.agent.user/password</code> — администратор центрального сервера. У центрального сервера и кластера отдельные списки администраторов (<a href="platform.html#t59">документация платформы</a>).</p>
@@ -240,7 +240,10 @@ tests:                            # настройки тестовых инст
 <h2 id="overlay">Локальные переопределения</h2>
 <p>Общие настройки хранятся в <code>v8project.yaml</code>, настройки этой машины — в <code>v8project.local.yaml</code> рядом с ним. Раннер сначала читает основной файл, затем локальный.</p>
 <p>Вложенные карты объединяются по ключам: локальное значение заменяет одноимённое основное, остальные значения сохраняются. Значения других типов, включая списки, заменяются целиком.</p>
-<p>Локальный файл может переопределять <code>workPath</code>, <code>providers</code>, <code>tools</code> и <code>tests</code>, а также объявлять <code>infobases</code>. Он не может менять <code>format</code> и <code>source-set</code>: это общие свойства проекта.</p>
+<p>Локальный файл может переопределять <code>workPath</code>, <code>localPath</code>, <code>providers</code>, <code>tools</code> и <code>tests</code>, а также объявлять <code>infobases</code>. Он не может менять <code>format</code> и <code>source-set</code>: это общие свойства проекта.</p>
+<h3 id="local-path">Личное состояние копии</h3>
+<p><code>workPath</code> пересобирается: его можно удалить. Всё, что пересобрать нельзя, лежит в <code>localPath</code> — по умолчанию <code>.local</code> рядом с <code>v8project.yaml</code>: данные стендов, которые поднимает раннер (<code>dbms</code>, <code>cluster</code>, <code>standalone</code>), и файловая база по умолчанию <code>.local/db</code>. Раннер кладёт в каталог <code>.gitignore</code> со строкой <code>*</code>; в <code>.gitignore</code> проекта можно добавить <code>/.local/</code>. <code>localPath</code> не может содержать каталог проекта или набор исходников и не пересекается с <code>workPath</code>.</p>
+<p>После удаления <code>workPath</code> стенды и база целы, но память о базе пропала: следующий <a href="cli-push.html"><code>push</code></a> отказывает с <code>untracked_base</code>, и связь восстанавливает <a href="cli-pull.html"><code>pull --force</code></a>.</p>
 <h3 id="local-push">Исполнитель отправки</h3>
 <p>Режим полной загрузки задаёт аргумент <a href="cli-push.html"><code>push --full</code></a>. В локальном файле можно выбрать исполнителя через <code>providers.push</code>.</p>
 </main>

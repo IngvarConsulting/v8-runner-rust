@@ -1,6 +1,6 @@
 ---
 id: CTR.CONFIG.V8PROJECT-SCHEMA
-version: 15
+version: 16
 artifact: docs/schemas/v8project.schema.json
 check:
   - src/config/schema.rs::generated_schema_artifacts_are_current
@@ -17,6 +17,10 @@ check:
 порождаются из типизированной модели и обязаны совпадать с ней: расхождение
 валит проверку, а не обнаруживается в редакторе пользователя. Артефакт обновляется
 командой `UPDATE_CONFIG_SCHEMAS=1 cargo test generated_schema_artifacts_are_current`.
+
+**Что изменила версия 16.** Ключ верхнего уровня `localPath` — каталог личного состояния
+рабочей копии, по умолчанию `.local` — есть в схеме проектного файла и местного слоя
+(`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`).
 
 **Что изменила версия 15.** Схемы проектного файла и местного слоя больше не содержат
 ключи `providers.syntax` и `providers.publish`. Загрузчик отклоняет их как неизвестные поля.
@@ -46,6 +50,7 @@ check:
 
 ```yaml
 workPath: build
+localPath: .local
 format: DESIGNER
 providers:
   push: ibcmd

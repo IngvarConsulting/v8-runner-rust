@@ -106,7 +106,7 @@
 <tr><td><code>tools.postgres.path</code> больше не объявлен</td><td><code>status</code> и <code>stop</code> работают по пути из записи</td></tr>
 <tr><td>Рабочая команда, которой нужна база, при неподнятой службе</td><td>Отказ до запуска платформы с названием следующей команды</td></tr>
 </tbody></table></div>
-<p>Данные лежат под <code>workPath/infobases/&lt;база&gt;/managed/postgres/</code>: удаление <code>workPath</code> уничтожает базу. Команды удаления данных у раннера нет.</p>
+<p>Данные лежат под <code>localPath/infobases/&lt;база&gt;/managed/postgres/</code> (по умолчанию <code>.local/</code> рядом с <code>v8project.yaml</code>): удаление <code>workPath</code> их не трогает. Команды удаления данных у раннера нет.</p>
 <h3 id="response-classes">Классы ответов</h3>
 <div class="tablewrap"><table class="response-classes">
 <thead><tr><th>Класс</th><th>Когда возникает и что означает</th></tr></thead>
@@ -123,16 +123,16 @@
 <pre data-output-example="dbms-started" data-output-schema="dbms-start"><code>dbms start: started PostgreSQL, pid 40112
   address  127.0.0.1 port=24432
   user  postgres
-  password  build/infobases/origin/managed/postgres/password
-  data  build/infobases/origin/managed/postgres/data
-  log  build/infobases/origin/managed/postgres/postgres.log</code></pre>
+  password  .local/infobases/origin/managed/postgres/password
+  data  .local/infobases/origin/managed/postgres/data
+  log  .local/infobases/origin/managed/postgres/postgres.log</code></pre>
 <h4 id="dbms-status-own">Состояние своего PostgreSQL</h4>
 <pre data-output-example="dbms-status-own" data-output-schema="dbms-status"><code>dbms status: origin: PostgreSQL, started by this working copy, pid 40112
   address  127.0.0.1 port=24432
   user  postgres
-  password  build/infobases/origin/managed/postgres/password
-  data  build/infobases/origin/managed/postgres/data
-  log  build/infobases/origin/managed/postgres/postgres.log</code></pre>
+  password  .local/infobases/origin/managed/postgres/password
+  data  .local/infobases/origin/managed/postgres/data
+  log  .local/infobases/origin/managed/postgres/postgres.log</code></pre>
 <h4 id="dbms-stopped">PostgreSQL остановлен</h4>
 <pre data-output-example="dbms-stopped" data-output-schema="dbms-stop"><code>dbms stop: PostgreSQL pid 40112 stopped</code></pre>
 <h4 id="dbms-server-running">Сервер ещё работает</h4>
@@ -153,9 +153,9 @@
       "version": "17.11",
       "address": "127.0.0.1 port=24432",
       "user": "postgres",
-      "password_file": "build/infobases/origin/managed/postgres/password",
-      "data_dir": "build/infobases/origin/managed/postgres/data",
-      "log_path": "build/infobases/origin/managed/postgres/postgres.log",
+      "password_file": ".local/infobases/origin/managed/postgres/password",
+      "data_dir": ".local/infobases/origin/managed/postgres/data",
+      "log_path": ".local/infobases/origin/managed/postgres/postgres.log",
       "explicit": true,
       "ready": true,
       "action": "started",
@@ -176,9 +176,9 @@
       "version": "17.11",
       "address": "127.0.0.1 port=24432",
       "user": "postgres",
-      "password_file": "build/infobases/origin/managed/postgres/password",
-      "data_dir": "build/infobases/origin/managed/postgres/data",
-      "log_path": "build/infobases/origin/managed/postgres/postgres.log",
+      "password_file": ".local/infobases/origin/managed/postgres/password",
+      "data_dir": ".local/infobases/origin/managed/postgres/data",
+      "log_path": ".local/infobases/origin/managed/postgres/postgres.log",
       "explicit": true,
       "ready": true,
       "action": "reported",
@@ -215,9 +215,9 @@
       "version": "17.11",
       "address": "127.0.0.1 port=24432",
       "user": "postgres",
-      "password_file": "build/infobases/origin/managed/postgres/password",
-      "data_dir": "build/infobases/origin/managed/postgres/data",
-      "log_path": "build/infobases/origin/managed/postgres/postgres.log",
+      "password_file": ".local/infobases/origin/managed/postgres/password",
+      "data_dir": ".local/infobases/origin/managed/postgres/data",
+      "log_path": ".local/infobases/origin/managed/postgres/postgres.log",
       "explicit": true,
       "ready": true,
       "action": "reported",

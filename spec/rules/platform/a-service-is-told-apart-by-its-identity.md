@@ -5,9 +5,15 @@ check:
   - src/platform/service_record.rs::a_machine_without_an_id_makes_every_process_foreign
   - src/use_cases/managed_stand/mod.rs::a_recycled_pid_is_not_taken_for_the_service
   - src/use_cases/managed_stand/mod.rs::a_leftover_pid_file_after_a_reboot_never_names_a_foreign_process
+  - src/platform/service_record.rs::a_record_copied_to_another_place_names_a_foreign_process
+  - src/use_cases/managed_stand/mod.rs::a_copied_local_directory_does_not_adopt_the_foreign_postgres
 ---
 
 # Свой процесс определяется по записи целиком
 
 Процесс считается своим, когда совпали pid, время старта, хеш `machine_id` и имя образа из записи. Нет
 `machine_id` — процесс чужой. Чужой процесс раннер не останавливает, а называет в ответе.
+
+Запись службы стенда хранит ещё канонический путь своего каталога и каталог проекта. Если хоть одно не совпало —
+например, `.local` скопирован в другой проект или каталог, — запись устаревшая, а сервер, который она называет, чужой:
+раннер его не останавливает и его остатки не снимает.
