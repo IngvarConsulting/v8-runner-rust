@@ -570,7 +570,7 @@ fn an_agent_push_without_apply_leaves_the_update_to_apply() {
     assert!(
         !lines
             .iter()
-            .any(|line| line == "config update-db-cfg --dynamic-disable"),
+            .any(|line| line.starts_with("config update-db-cfg")),
         "{lines:?}"
     );
     let before = lines.len();

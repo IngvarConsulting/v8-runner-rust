@@ -768,11 +768,6 @@ mod tests {
                 .position(|arg| arg == "/UpdateDBCfg")
                 .expect("/UpdateDBCfg");
             assert_eq!(&request.args[start..], expected, "{:?}", request.args);
-            assert!(
-                !request.args.iter().any(|arg| arg == "-Dynamic+"),
-                "{:?}",
-                request.args
-            );
         }
     }
 

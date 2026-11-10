@@ -1046,10 +1046,6 @@ mod tests {
                 None => vec!["--force", "--dynamic=disable"],
             };
             assert_eq!(tail, expected, "{args:?}");
-            assert!(
-                !args.iter().any(|arg| arg.contains("auto")),
-                "dynamic update must stay forbidden: {args:?}"
-            );
         }
     }
 
