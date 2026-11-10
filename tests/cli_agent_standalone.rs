@@ -888,7 +888,7 @@ fn build_through_the_gate_loads_from_the_declared_dir() {
         "{lines:?}"
     );
     assert!(
-        lines.contains(&"config update-db-cfg".to_owned()),
+        lines.contains(&"config update-db-cfg --dynamic-disable".to_owned()),
         "{lines:?}"
     );
 }

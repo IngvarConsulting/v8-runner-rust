@@ -164,7 +164,8 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/UpdateDBCfg`
+    /// `/UpdateDBCfg [-Extension <name>] -Dynamic-`: динамическое обновление запрещено
+    /// всегда — без ключа платформа его разрешает (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
     pub fn update_db_cfg(
         &self,
         extension: Option<&str>,
@@ -175,6 +176,7 @@ impl<'a> DesignerDsl<'a> {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
         }
+        args.push("-Dynamic-".to_owned());
         self.run(&args)
     }
 
@@ -734,6 +736,38 @@ mod tests {
         ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
         {
             panic!("Designer exports must run synchronously")
+        }
+    }
+
+    /// Каждое `/UpdateDBCfg` запрещает динамическое обновление — у основной конфигурации и
+    /// у расширения (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
+    #[test]
+    fn update_db_cfg_always_forbids_dynamic_update() {
+        let runner = CapturingRunner::default();
+        let dsl = DesignerDsl::new(
+            "1cv8.exe".into(),
+            V8Connection::from_connection_string("File=C:/ib"),
+            &runner,
+            None,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.update_db_cfg(None).expect("update the configuration");
+        dsl.update_db_cfg(Some("ext"))
+            .expect("update the extension");
+
+        let requests = runner.0.borrow();
+        assert_eq!(requests.len(), 2);
+        for (request, expected) in requests.iter().zip([
+            &["/UpdateDBCfg", "-Dynamic-"][..],
+            &["/UpdateDBCfg", "-Extension", "ext", "-Dynamic-"][..],
+        ]) {
+            let start = request
+                .args
+                .iter()
+                .position(|arg| arg == "/UpdateDBCfg")
+                .expect("/UpdateDBCfg");
+            assert_eq!(&request.args[start..], expected, "{:?}", request.args);
         }
     }
 

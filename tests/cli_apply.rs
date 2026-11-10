@@ -255,8 +255,8 @@ fn an_apply_without_a_set_uses_one_managed_agent_session() {
         apply_commands,
         [
             "config extensions properties get --all-extensions",
-            "config update-db-cfg",
-            "config update-db-cfg --extension=ext",
+            "config update-db-cfg --dynamic-disable",
+            "config update-db-cfg --extension=ext --dynamic-disable",
         ],
     );
     let launches = fs::read_to_string(designer_args_log).expect("Designer invocations");
@@ -543,7 +543,8 @@ fn providers_apply_assigns_the_executor_of_the_apply() {
     let calls = fs::read_to_string(project.root().join("ibcmd.log")).expect("ibcmd calls");
     assert!(calls.contains("config apply"), "{calls}");
     assert!(calls.contains("--force"), "{calls}");
-    assert!(calls.contains("--dynamic auto"), "{calls}");
+    assert!(calls.contains("--force --dynamic=disable"), "{calls}");
+    assert!(!calls.contains("--dynamic auto"), "{calls}");
     assert!(
         !project.calls().contains("/UpdateDBCfg"),
         "{}",
