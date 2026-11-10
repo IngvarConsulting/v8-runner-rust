@@ -1455,6 +1455,61 @@ mod tests {
         assert!(host.hard_stops.borrow().is_empty());
     }
 
+    /// Копия `.local` в другой проект чужую СУБД своей не считает: запись помнит своё место,
+    /// и в копии она устаревшая. `status` называет процесс на порту чужим, `stop` его не
+    /// трогает (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+    #[test]
+    fn a_copied_local_directory_does_not_adopt_the_foreign_postgres() {
+        fn copy_tree(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap().flatten() {
+                let target = to.join(entry.file_name());
+                if entry.path().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+        let setup = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        setup
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let copy = self::setup();
+        copy_tree(&setup.config.local_path, &copy.config.local_path);
+
+        let status = copy
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(status.state, ServiceState::Foreign);
+        assert_eq!(status.occupant_pid, Some(PID));
+        let stop = copy
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert_eq!(stop.action, ServiceAction::NothingToStop);
+        assert!(host.hard_stops.borrow().is_empty());
+        assert!(host.processes.borrow().contains_key(&PID));
+        let refused = copy
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains(&format!("process {PID}")),
+            "{refused}"
+        );
+        assert_eq!(
+            host.spawned.get(),
+            1,
+            "the copy starts nothing over the foreign one"
+        );
+
+        let own = setup
+            .run(ServiceCommand::Status, false, &runner, &host)
+            .unwrap();
+        assert_eq!(own.state, ServiceState::StartedByThisCopy);
+    }
+
     #[test]
     fn a_first_port_taken_by_someone_is_chosen_again() {
         let setup = setup();

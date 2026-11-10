@@ -2032,6 +2032,126 @@ mod tests {
         assert_eq!(config.work_path, canonical(&config_dir).join("cli-work"));
     }
 
+    /// `localPath` по умолчанию — `.local` рядом с проектным файлом; ключ проектного файла
+    /// уступает местному слою, а `--workdir` его не трогает
+    /// (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`).
+    #[test]
+    fn local_path_defaults_beside_the_project_file_and_the_local_layer_wins() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path =
+            write_minimal_project_config(&config_dir, &minimal_config_without_base_path(""));
+        let load_local = |workdir: Option<&str>| {
+            load_config(config_path.to_str(), workdir, &InfobaseSelector::Default)
+                .map(|loaded| loaded.config.local_path)
+                .expect("load config")
+        };
+        assert_eq!(load_local(None), canonical(&config_dir).join(".local"));
+        assert_eq!(
+            load_local(Some("cli-work")),
+            canonical(&config_dir).join(".local")
+        );
+
+        write_minimal_project_config(
+            &config_dir,
+            &minimal_config_without_base_path(
+                "localPath: state
+",
+            ),
+        );
+        assert_eq!(load_local(None), canonical(&config_dir).join("state"));
+
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "localPath: mine
+",
+        )
+        .expect("local overlay");
+        assert_eq!(load_local(None), canonical(&config_dir).join("mine"));
+    }
+
+    /// `localPath` не держит проекта и наборов и не пересекается с `workPath` и каталогом
+    /// обмена: отказ проверки, на диске — ничего, и в превью тоже.
+    #[test]
+    fn a_local_path_over_the_project_a_set_or_the_work_path_is_refused_and_creates_nothing() {
+        for (local_path, workdir, expected) in [
+            (".", None, "holds the project directory"),
+            ("..", None, "holds the project directory"),
+            ("src", None, "holds the root of source-set 'main'"),
+            ("work", None, "overlaps workPath"),
+            ("work/inner", None, "overlaps workPath"),
+            ("personal", Some("personal/work"), "overlaps workPath"),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let config_dir = dir.path().join("project");
+            let config_path = write_minimal_project_config(
+                &config_dir,
+                &minimal_config_without_base_path(&format!(
+                    "localPath: '{local_path}'
+"
+                )),
+            );
+            let before = std::fs::read_dir(&config_dir).expect("dir").count();
+            for preview in [false, true] {
+                let loaded = if preview {
+                    super::load_config_for_preview(
+                        config_path.to_str(),
+                        workdir,
+                        &InfobaseSelector::Default,
+                    )
+                } else {
+                    load_config(config_path.to_str(), workdir, &InfobaseSelector::Default)
+                };
+                let error = loaded.expect_err("refused").to_string();
+                assert!(error.contains(expected), "{local_path}: {error}");
+                assert!(error.contains("localPath"), "{local_path}: {error}");
+            }
+            assert_eq!(
+                std::fs::read_dir(&config_dir).expect("dir").count(),
+                before,
+                "{local_path}: the check writes nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_path_over_the_standalone_exchange_directory_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            "workPath: work
+localPath: shared/personal
+format: DESIGNER
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: src
+",
+        );
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "infobases:
+  origin:
+    connection: 'Srvr=srv:1541;Ref=demo'
+    standalone:
+      gate: srv:1543
+      exchange:
+        dir: shared
+",
+        )
+        .expect("local overlay");
+
+        let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .expect_err("refused")
+            .to_string();
+
+        assert!(
+            error.contains("localPath stays on the runner's side"),
+            "{error}"
+        );
+    }
+
     fn load(
         config_path: &Path,
         selector: &InfobaseSelector,

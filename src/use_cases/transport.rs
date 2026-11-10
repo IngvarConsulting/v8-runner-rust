@@ -364,6 +364,73 @@ mod tests {
         );
     }
 
+    /// Две копии с общим `localPath` не меняют стенд разом: замок `localPath` берётся после
+    /// замка `workPath`, занятый — отказ `WorkspaceBusy`; занятый `workPath` отказывает раньше и
+    /// `localPath` не заводит. Команда, стенда не меняющая, замка `localPath` не берёт.
+    #[test]
+    fn a_stand_command_takes_the_local_lock_after_the_work_path_lock() {
+        let dir = tempdir().expect("tempdir");
+        let first = sample_config(&dir.path().join("first"));
+        let mut second = sample_config(&dir.path().join("second"));
+        second.local_path = first.local_path.clone();
+        fs::create_dir_all(&first.work_path).expect("first work");
+        fs::create_dir_all(&second.work_path).expect("second work");
+
+        // Занятый `workPath` отказывает до замка `localPath`.
+        let canonical_work = fs::canonicalize(&first.work_path).expect("canonical work");
+        let workspace =
+            acquire_advisory_lock(&workspace_lock_path(&canonical_work)).expect("workspace lock");
+        let refusal = dispatch_with_workspace_lock(
+            &first,
+            CommandName::DbmsStart,
+            BaseAccess::Untouched,
+            |_| Ok(()),
+            || (),
+        )
+        .expect_err("busy workspace");
+        assert_eq!(refusal.phase, InfobaseTransferPhase::WorkspaceLock);
+        assert!(!first.local_path.exists(), "the local lock comes later");
+        drop(workspace);
+
+        let refused = dispatch_with_workspace_lock(
+            &first,
+            CommandName::ClusterStart,
+            BaseAccess::Untouched,
+            |_| Ok(()),
+            || {
+                let refusal = dispatch_with_workspace_lock(
+                    &second,
+                    CommandName::DbmsStop,
+                    BaseAccess::Untouched,
+                    |_| Ok(()),
+                    || (),
+                )
+                .expect_err("the stand is being changed");
+                assert_eq!(refusal.error.kind(), UseCaseErrorKind::WorkspaceBusy);
+                assert!(
+                    refusal.error.message().contains("localPath"),
+                    "{}",
+                    refusal.error.message()
+                );
+                // `status` и рабочие команды замка `localPath` не ждут.
+                dispatch_with_workspace_lock(
+                    &second,
+                    CommandName::Build,
+                    BaseAccess::Untouched,
+                    |_| Ok(()),
+                    || (),
+                )
+                .expect("a command that leaves the stand alone");
+            },
+        );
+        refused.expect("the first command holds both locks");
+        assert_eq!(
+            fs::read_to_string(first.local_path.join(".gitignore")).expect("gitignore"),
+            "*
+"
+        );
+    }
+
     #[test]
     fn a_held_base_stops_the_dispatch_after_the_workspace_lock() {
         let dir = tempdir().expect("tempdir");

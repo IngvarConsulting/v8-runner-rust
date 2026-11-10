@@ -2588,6 +2588,48 @@ mod tests {
         assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
     }
 
+    /// Удаление `workPath` стенда не трогает: СУБД, кластер с реестром и признак созданной базы
+    /// лежат под `localPath`. Запись цела, `dbms status` видит свою СУБД, а `cluster start` после
+    /// перезагрузки поднимает тот же кластер над той же базой
+    /// (`INV.USE-CASES.DELETING-THE-WORKPATH-KEEPS-STANDS-AND-BASES`).
+    #[test]
+    fn deleting_the_work_path_keeps_the_stand_and_its_base() {
+        let setup = setup();
+        let host = Host::default();
+        setup.dbms(ServiceCommand::Start, &host);
+        let first = setup.run(ServiceCommand::Start, &host).unwrap();
+        host.registered.borrow_mut().push("demo".to_owned());
+        assert!(matches!(
+            setup.base(&host),
+            Ok(ClusterBase::AlreadyRegistered(_))
+        ));
+        let port = setup.dbms_record().port;
+        std::fs::create_dir_all(setup.config.work_path.join("infobases").join("origin")).unwrap();
+        std::fs::remove_dir_all(&setup.config.work_path).unwrap();
+
+        let status = setup.dbms(ServiceCommand::Status, &host);
+        assert_eq!(status.state, ServiceState::StartedByThisCopy);
+        assert!(setup.pins().registered, "the base is still known created");
+        assert!(setup.agent().own_record().is_some());
+
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        let second = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(second.action, ServiceAction::Started);
+        assert_eq!(second.connection, first.connection, "the same regport");
+        assert!(second.registered, "the same base");
+        assert_eq!(setup.dbms_record().port, port);
+        assert!(setup
+            .config
+            .local_path
+            .join("infobases")
+            .join("origin")
+            .join("managed")
+            .join("postgres")
+            .join("data")
+            .is_dir());
+    }
+
     #[test]
     fn after_a_reboot_the_command_that_raises_the_postgres_decides_whether_it_is_explicit() {
         // Явный до перезагрузки, после неё поднят кластером — шаг кластера.
