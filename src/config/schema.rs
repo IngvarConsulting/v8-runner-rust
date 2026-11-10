@@ -967,7 +967,7 @@ struct PlatformToolSchema {
     /// Enforce `version` for a configured `path`. Without `path`, `version` is applied to normal default-root and PATH discovery.
     #[serde(default)]
     strict: bool,
-    /// Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true.
+    /// Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true. `sources` selects the release that writes the sources format of the main Configuration set (DESIGNER format only) and refuses with `platform_release_missing` when it is not installed, inside `path` too, where `strict: true` keeps its boundary guarantees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
 }

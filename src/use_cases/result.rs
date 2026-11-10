@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::domain::execution::ExecutionStatus;
 use crate::domain::next_step::NextStep;
+use crate::domain::platforms::PlatformReleaseRefusal;
 use crate::platform::process::{ProcessError, WorkGiven};
 use crate::support::error::{AppError, CancelledAt, CapabilityReason};
 use crate::use_cases::interruption::CANCELLED_ERROR_CODE;
@@ -10,12 +11,24 @@ const VALIDATION_EXIT_CODE: i32 = 2;
 const RUNTIME_EXIT_CODE: i32 = 3;
 const PLATFORM_EXIT_CODE: i32 = 4;
 
+/// Почему окружение не готово: причина различает коды внутри рода `environment`, как у
+/// рода `capability`. Код шага в `data.execution.errors[]` от неё не зависит.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvironmentReason {
+    /// Утилиты нет, не та версия или её версию не прочитать.
+    Unavailable,
+    /// `tools.platform.version: sources`, а выпуска формата исходников среди установок нет
+    /// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+    PlatformReleaseMissing,
+}
+
 /// Stable use-case error class used by transport adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseCaseErrorKind {
     /// Операция здесь не выполняется; причина уточняет, почему именно.
     Capability(CapabilityReason),
-    Environment,
+    /// Окружение не готово; причина уточняет, чего не хватает.
+    Environment(EnvironmentReason),
     WorkspaceBusy,
     /// Файловую базу держит другая команда: занято, как `WorkspaceBusy`, можно повторить.
     InfobaseBusy,
@@ -47,7 +60,7 @@ impl UseCaseErrorKind {
     pub const fn exit_code(self) -> i32 {
         match self {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
-            Self::Environment => VALIDATION_EXIT_CODE,
+            Self::Environment(_) => VALIDATION_EXIT_CODE,
             Self::LiveAgentOff | Self::LiveAgentJob | Self::AgentLimit => VALIDATION_EXIT_CODE,
             Self::WorkspaceBusy | Self::InfobaseBusy => RUNTIME_EXIT_CODE,
             Self::NonFastForward | Self::UntrackedBase => RUNTIME_EXIT_CODE,
@@ -64,10 +77,17 @@ impl UseCaseErrorKind {
         match error {
             AppError::CapabilityUnavailable(refusal) => Self::Capability(refusal.reason),
             // Утилиты нет или не та версия — дело окружения, а не сбой платформы: поставьте,
-            // и заработает (`INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE`).
+            // и заработает (`INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE`). Нет выпуска
+            // формата исходников при `sources` — та же среда, но свой код.
             AppError::EnvironmentUnavailable(_)
             | AppError::PlatformLocator(_)
-            | AppError::PlatformLocatorContext { .. } => Self::Environment,
+            | AppError::PlatformLocatorContext { .. } => {
+                Self::Environment(if error.platform_release().is_some() {
+                    EnvironmentReason::PlatformReleaseMissing
+                } else {
+                    EnvironmentReason::Unavailable
+                })
+            }
             AppError::WorkspaceBusy(_) => Self::WorkspaceBusy,
             AppError::InfobaseBusy(_) => Self::InfobaseBusy,
             AppError::Refused(refusal) => refusal.kind(),
@@ -107,7 +127,7 @@ impl UseCaseErrorKind {
     pub(crate) const fn execution_step_code(self) -> &'static str {
         match self {
             Self::Capability(_) => "capability_unavailable",
-            Self::Environment => "environment_unavailable",
+            Self::Environment(_) => "environment_unavailable",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
             Self::NonFastForward => "non_fast_forward",
@@ -132,7 +152,7 @@ impl UseCaseErrorKind {
             Self::TimedOut => ExecutionStatus::TimedOut,
             Self::Cancelled(_) => ExecutionStatus::Cancelled,
             Self::Capability(_)
-            | Self::Environment
+            | Self::Environment(_)
             | Self::WorkspaceBusy
             | Self::InfobaseBusy
             | Self::NonFastForward
@@ -150,7 +170,7 @@ impl UseCaseErrorKind {
     const fn label(self) -> &'static str {
         match self {
             Self::Capability(_) => "capability unavailable",
-            Self::Environment => "environment unavailable",
+            Self::Environment(_) => "environment unavailable",
             Self::WorkspaceBusy => "workspace busy",
             Self::InfobaseBusy => "infobase busy",
             Self::NonFastForward => "non-fast-forward",
@@ -179,6 +199,8 @@ pub struct UseCaseError {
     next: Option<Box<NextStep>>,
     /// Поколения у отказа `non_fast_forward`: базы сейчас и записанное после прошлого обмена.
     generations: Option<Box<Generations>>,
+    /// Формат исходников и опись установок у отказа `platform_release_missing`.
+    platform_release: Option<Box<PlatformReleaseRefusal>>,
 }
 
 /// Оба поколения отказа «база ушла вперёд».
@@ -198,7 +220,13 @@ impl UseCaseError {
             message: message.into(),
             next: None,
             generations: None,
+            platform_release: None,
         }
+    }
+
+    /// Формат исходников и опись установок отказа `platform_release_missing`.
+    pub fn platform_release(&self) -> Option<&PlatformReleaseRefusal> {
+        self.platform_release.as_deref()
     }
 
     /// Оба поколения отказа «база ушла вперёд».
@@ -210,6 +238,13 @@ impl UseCaseError {
     #[must_use]
     pub fn with_generations(mut self, generations: Generations) -> Self {
         self.generations = Some(Box::new(generations));
+        self
+    }
+
+    /// Тот же отказ с другим текстом: род, шаг, поколения и опись выпуска остаются.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = message.into();
         self
     }
 
@@ -294,6 +329,14 @@ impl UseCaseError {
     /// поверх него узнаёт `From`.
     fn classified(value: AppError) -> Self {
         let kind = UseCaseErrorKind::of(&value);
+        let platform_release = value
+            .platform_release()
+            .map(|missing| Box::new(missing.refusal()));
+        debug_assert_eq!(
+            kind == UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing),
+            platform_release.is_some(),
+            "the code platform_release_missing and its inventory come together"
+        );
         let message = match value {
             AppError::CapabilityUnavailable(refusal) => refusal.message,
             AppError::Refused(refusal) => refusal.message,
@@ -324,7 +367,10 @@ impl UseCaseError {
             }
             AppError::ConfigContext { context, source } => format!("{context}; {source}"),
         };
-        Self::new(kind, message)
+        Self {
+            platform_release,
+            ..Self::new(kind, message)
+        }
     }
 }
 
@@ -480,7 +526,10 @@ pub(crate) fn stamp_dispatch<T: CarriesDispatch>(
 
 #[cfg(test)]
 mod tests {
-    use super::{stamp_dispatch, CarriesDispatch, UseCaseError, UseCaseErrorKind, UseCaseFailure};
+    use super::{
+        stamp_dispatch, CarriesDispatch, EnvironmentReason, UseCaseError, UseCaseErrorKind,
+        UseCaseFailure,
+    };
     use crate::config::loader::ConfigLoadError;
     use crate::platform::designer::DesignerError;
     use crate::platform::edt_session::EdtSessionError;
@@ -643,7 +692,10 @@ mod tests {
                 "{reason:?}"
             );
         }
-        assert_eq!(UseCaseErrorKind::Environment.exit_code(), 2);
+        assert_eq!(
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable).exit_code(),
+            2
+        );
         assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InfobaseBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::NonFastForward.exit_code(), 3);
@@ -756,7 +808,11 @@ mod tests {
         ] {
             let error = UseCaseError::from(app_error);
 
-            assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+            assert_eq!(
+                error.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+                "{error}"
+            );
             assert_eq!(error.exit_code(), 2, "{error}");
             assert!(error.message().contains("was not found"), "{error}");
         }
@@ -782,7 +838,11 @@ mod tests {
         ] {
             let error = UseCaseError::from(AppError::from(locator_error));
 
-            assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+            assert_eq!(
+                error.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+                "{error}"
+            );
             assert_eq!(error.exit_code(), 2, "{error}");
             assert!(error.message().contains("required"), "{error}");
         }
@@ -792,7 +852,11 @@ mod tests {
             path: PathBuf::from("/opt/1cv8/8.3.23.1000/1cv8"),
             found: PlatformVersion::parse_strict("8.3.23.1000").expect("version"),
         }));
-        assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+        assert_eq!(
+            error.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+            "{error}"
+        );
         assert_eq!(error.exit_code(), 2, "{error}");
         assert!(error.message().contains("8.3.24"), "{error}");
     }

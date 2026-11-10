@@ -8,6 +8,7 @@ check:
   - src/platform/locator.rs::a_release_of_the_source_format_does_not_borrow_a_component_from_another
   - src/platform/locator.rs::without_the_release_of_the_source_format_the_newest_is_chosen
   - src/platform/locator.rs::an_explicit_version_outranks_the_source_format
+  - src/platform/locator.rs::a_path_alias_of_another_version_is_not_the_release_of_the_format
   - tests/cli_platforms.rs::without_a_version_the_sources_format_chooses_the_release
 ---
 
@@ -24,7 +25,10 @@ check:
 Если формат раннеру не известен или его выпуск не установлен, берётся максимальная
 найденная; о расхождении `platforms` предупреждает в `warnings`, остальные команды — в
 журнале. Выпуск вне таблицы замеров формат не
-выбирает, даже если пишет тот же формат.
+выбирает, даже если пишет тот же формат. Установка из `PATH` числится той версией, куда ведёт
+её утилита, а не каталогом, где лежит ссылка: псевдоним выпуска формата выпуском не считается. Значение `sources` ключа `tools.platform.version`
+выбирает выпуск так же, но без отката на максимальную найденную: нет выпуска — отказ
+(`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
 
 `tools.platform.path` только сужает область поиска. Сценарии путей к двоичным файлам не
 собирают, а найденная установка называется в квитанции.

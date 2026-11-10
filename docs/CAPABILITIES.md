@@ -43,7 +43,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `launch` | Не зависит от `format`; у автономного сервера `thick` и `ordinary` отказывают | Прямой запуск 1C utility по позиционному mode; клиент идёт по `infobase.connection`, а без неё — по `infobase.web.url`; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
 | `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr` |
 | `status` | CLI-only; без `--deep` платформа не нужна | Состояние пары «каталог ↔ база» по памяти под `workPath`. `--all` охватывает каждую объявленную базу. `--deep` спрашивает поколение исполнителем `push`, состав расширений исполнителем `extensions list` и называет копии из метки владельца. Для имён из пакетного Конфигуратора активность имеет значение `null` |
-| `platforms` | CLI-only; платформа не запускается | Установленные платформы с составом (`installations`), `tools.platform` проекта, формат исходников и выбор раннера по каждой утилите — `designer`, `thin_client`, `ibcmd` — с причиной `chosen_by` (`version`, `source_format`, `newest`); расхождение формата с выбранной платформой — в `warnings` ([форма](../spec/rules/wire/platforms-data.md)) |
+| `platforms` | CLI-only; платформа не запускается | Установленные платформы с составом (`installations`), `tools.platform` проекта, формат исходников и выбор раннера по каждой утилите — `designer`, `thin_client`, `ibcmd` — с причиной `chosen_by` (`version`, `source_format`, `newest`); расхождение формата с выбранной платформой, а при `tools.platform.version: sources` отказ выпуска — в `warnings` ([форма](../spec/rules/wire/platforms-data.md)) |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
 
 ### Раскладка выгрузки
@@ -252,7 +252,7 @@ DemoTrd различались цвета диаграмм в девяти фа�
 | Род | Коды | Код выхода |
 | --- | --- | --- |
 | `capability` | `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой цели), `soon` (пока не умеет), `live_agent_off` (`agent hold` при `live: false`) | 2 |
-| `environment` | `environment_unavailable`, `live_agent_job` (`agent hold` в Job без права выхода), `agent_limit` (`agent hold` на пределе `live-max`, все агенты удерживаются) | 2 |
+| `environment` | `environment_unavailable`, `platform_release_missing` (при `tools.platform.version: sources` нет выпуска формата исходников), `live_agent_job` (`agent hold` в Job без права выхода), `agent_limit` (`agent hold` на пределе `live-max`, все агенты удерживаются) | 2 |
 | `validation` | `invalid_argument`, `unsupported_value` (только MCP), `source_set_ignored_by_git` (правило игнорирования git прячет файл набора) | 2 |
 | `workspace` | `workspace_busy`, `infobase_busy` | 3 |
 | `runtime` | `runtime_failure` | 3 |
@@ -283,6 +283,16 @@ DemoTrd различались цвета диаграмм в девяти фа�
 как `runtime_failure`. Код шага в `data.execution.errors[]` у `download`, `infobase dump` и
 `infobase restore` следует за родом: `environment_unavailable`, а не прежний
 `platform_failure`.
+
+При `tools.platform.version: sources` выпуск платформы выбирается по формату исходников
+основного набора без отката на новейшую установку. Нет выпуска, формат вне таблицы замеров или не
+прочитан — любая команда, которая ищет платформу (в том числе `status --deep` и `convert` с
+пакетом; `convert` из Конфигуратора в EDT платформу не ищет), отказывает до её запуска кодом
+`platform_release_missing` (род `environment`, выход 2) с полем `error.platform_release`: формат
+исходников (`source_format`: версия, файл, выпуск) и опись установок (`installations`). Код шага в
+`data.execution.errors[]` остаётся `environment_unavailable`. У MCP отказ приходит как
+`runtime_failure` с тем же полем; `platforms` называет его в `warnings`, а `selected` — `null`
+([правило](../spec/rules/platform/a-missing-release-of-the-sources-format-is-refused.md)).
 
 Ответ агента, который не читается как массив его JSON-сообщений, — род и код `invalid_output`,
 выход 4; прежде он отвечал `platform_failure`. Отказ, который агент сообщил сам (`error`), — по-

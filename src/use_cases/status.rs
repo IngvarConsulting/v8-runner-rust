@@ -236,6 +236,10 @@ fn deepen(
     let asker = Asker::open(context, config);
     let (tool, mut asker) = match asker {
         Ok(asker) => (Some(asker.tool), Ok(asker)),
+        // Нет выпуска формата исходников — отказ команды, а не причина «нет ответа» у каждого
+        // набора: глубокий статус спросил бы платформу, которой нет
+        // (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+        Err((_, error)) if error.platform_release().is_some() => return Err(error),
         Err((tool, error)) => (tool, Err(error)),
     };
     let mut outcome = Ok(());

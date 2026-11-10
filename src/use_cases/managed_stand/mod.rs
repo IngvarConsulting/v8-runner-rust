@@ -26,7 +26,9 @@ use crate::platform::service_record::{
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::interruption_before_safe_point;
-use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{
+    EnvironmentReason, UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult,
+};
 
 /// Сколько ждать готовности и конца процесса.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -129,7 +131,10 @@ fn validation(message: impl Into<String>) -> UseCaseError {
 }
 
 fn environment(message: impl Into<String>) -> UseCaseError {
-    UseCaseError::new(UseCaseErrorKind::Environment, message)
+    UseCaseError::new(
+        UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+        message,
+    )
 }
 
 fn io_failure(what: &str, path: &Path, error: &std::io::Error) -> UseCaseError {
@@ -1038,7 +1043,9 @@ fn locate(
     crate::platform::utilities::PlatformUtilities::from_config(config)
         .locate(utility)
         .map(|location| location.path)
-        .map_err(|error| environment(error.to_string()))
+        // Род и код отказа решает сама ошибка поиска: отказ выпуска формата исходников
+        // остаётся собой, а не пересказом.
+        .map_err(|error| UseCaseError::from(crate::support::error::AppError::from(error)))
 }
 
 /// Какая из команд службы: `dbms`, `standalone` или `cluster`.
@@ -1677,14 +1684,20 @@ mod tests {
         let refused = setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         assert_names_where_to_get_a_build(&refused.to_string());
         let missing = setup.root.path().join("no-such");
         setup.config.tools.postgres.path = Some(missing.clone());
         let refused = setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         assert!(
             refused.to_string().contains(&missing.display().to_string()),
             "{refused}"
@@ -1706,7 +1719,10 @@ mod tests {
         let refused = setup
             .run(ServiceCommand::Restart, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         assert_names_where_to_get_a_build(&refused.to_string());
         let pid = started.pid.unwrap();
         assert!(
@@ -1742,7 +1758,10 @@ mod tests {
         let runner = FakeRunner::new(&host);
         for command in [ServiceCommand::Start, ServiceCommand::Restart] {
             let refused = setup.run(command, false, &runner, &host).unwrap_err();
-            assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+            assert_eq!(
+                refused.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+            );
         }
         assert!(runner.calls.borrow().is_empty());
         assert_eq!(host.spawned.get(), 0);
@@ -1757,7 +1776,10 @@ mod tests {
         let refused = setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         assert!(!setup.paths().record().exists());
     }
 
@@ -1850,7 +1872,10 @@ mod tests {
         let refused = setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         let status = setup
             .run(ServiceCommand::Status, false, &runner, &host)
             .unwrap();
@@ -2092,5 +2117,77 @@ mod tests {
         token.cancel();
         let context = ExecutionContext::cli(CommandName::DbmsStart).with_cancellation(token);
         assert!(!context.cleanup_policy().cancellation.is_cancelled());
+    }
+
+    /// Утилиту управляемой службы (`ragent`, `ibsrv`) ищет тот же поиск: при `sources` без
+    /// выпуска формата отказ `cluster start` и `standalone start` остаётся отказом выпуска с
+    /// описью, а не пересказом в `environment_unavailable`.
+    #[test]
+    fn a_service_utility_answers_the_release_refusal_typed() {
+        use crate::config::model::{
+            PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+            ToolsConfig,
+        };
+        use crate::platform::locator::{PlatformVersionSetting, UtilityType};
+        use crate::use_cases::result::EnvironmentReason;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).expect("src");
+        std::fs::write(
+            src.join("Configuration.xml"),
+            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.21\">\n</MetaDataObject>\n",
+        )
+        .expect("Configuration.xml");
+        let platform = dir.path().join("platform");
+        for utility in [UtilityType::Ragent, UtilityType::Ibsrv] {
+            let path = platform
+                .join("8.5.4.1306")
+                .join("bin")
+                .join(utility.executable_name());
+            std::fs::create_dir_all(path.parent().expect("bin")).expect("bin");
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("utility");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+        }
+        let config = AppConfig {
+            base_path: dir.path().to_path_buf(),
+            work_path: dir.path().join("work"),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
+            working_copy: None,
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: "src".into(),
+            }],
+            tools: ToolsConfig {
+                platform: PlatformToolConfig {
+                    path: Some(platform),
+                    strict: false,
+                    version: Some(PlatformVersionSetting::Sources),
+                },
+                ..ToolsConfig::default()
+            },
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+
+        for utility in [UtilityType::Ragent, UtilityType::Ibsrv] {
+            let refused = locate(&config, utility).expect_err("refused");
+            assert_eq!(
+                refused.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing)
+            );
+            assert!(refused.platform_release().is_some(), "{refused}");
+        }
     }
 }

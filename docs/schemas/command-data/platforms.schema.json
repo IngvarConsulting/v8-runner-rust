@@ -86,7 +86,7 @@
           "type": "boolean"
         },
         "version": {
-          "description": "Маска версии; `null` — не задана.",
+          "description": "Маска версии или `sources` — выпуск по формату исходников; `null` — не задана.",
           "type": [
             "string",
             "null"

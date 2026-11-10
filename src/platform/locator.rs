@@ -230,6 +230,63 @@ pub enum PlatformResolutionPolicy {
     Strict,
 }
 
+/// Значение `tools.platform.version`: маска версии или `sources` — выпуск по формату
+/// исходников без отката на новейшую (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+/// Разбирается только здесь: строку `sources` больше никто не сравнивает.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlatformVersionSetting {
+    /// Маска версии.
+    Mask(PlatformVersionRequirement),
+    /// Выпуск, который пишет формат исходников основного набора; нет его — отказ.
+    Sources,
+}
+
+impl PlatformVersionSetting {
+    /// Значение ключа, которое включает выбор выпуска по формату исходников.
+    pub const SOURCES: &'static str = "sources";
+
+    /// Маска или `sources`; `None` — значение не годится ни для того, ни для другого.
+    pub fn parse(value: &str) -> Option<Self> {
+        if value.trim() == Self::SOURCES {
+            return Some(Self::Sources);
+        }
+        PlatformVersionRequirement::parse(value).map(Self::Mask)
+    }
+}
+
+impl fmt::Display for PlatformVersionSetting {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mask(mask) => mask.fmt(f),
+            Self::Sources => f.write_str(Self::SOURCES),
+        }
+    }
+}
+
+/// Как формат исходников проекта выбирает выпуск платформы.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SourceFormatRelease {
+    /// Не выбирает: версию задали маской или путём, или формата нет.
+    #[default]
+    Unused,
+    /// Версию ничто не задало: выпуски формата, новейшие первыми; ни одного нет среди
+    /// установок — берётся новейшая.
+    Preferred(Vec<PlatformVersionRequirement>),
+    /// `tools.platform.version: sources`: выпуск формата обязателен, без него — отказ.
+    Required(RequiredRelease),
+}
+
+/// Обязательный выпуск формата исходников и то, что о формате известно для отказа.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredRelease {
+    /// Выпуски, которые пишут формат, новейшие первыми; пусто — раннер такого не знает.
+    pub releases: Vec<PlatformVersionRequirement>,
+    /// Формат, файл и выпуск — в форме ответа.
+    pub source_format: SourceFormatInfo,
+    /// Почему файл формата не прочитан, если не прочитан.
+    pub unreadable: Option<String>,
+}
+
 /// Inputs used to construct a locator with OS-default discovery roots.
 #[derive(Debug, Clone, Default)]
 pub struct LocatorOptions {
@@ -243,12 +300,14 @@ pub struct LocatorOptions {
     pub edt_hint: Option<PathBuf>,
     /// Optional EDT discovery version.
     pub edt_version: Option<EdtVersion>,
-    /// Выпуски, которые пишут формат исходников проекта, — масками выпуска, новейшие первыми.
-    /// Действуют, только когда версия не задана ни маской, ни путём к установке.
-    pub format_releases: Vec<PlatformVersionRequirement>,
+    /// Выбор выпуска по формату исходников проекта.
+    pub source_format: SourceFormatRelease,
 }
 
-use crate::domain::platforms::PlatformChoice;
+use crate::domain::platforms::{
+    InstalledComponents, PlatformChoice, PlatformInstallation, PlatformReleaseRefusal,
+    SourceFormatInfo,
+};
 
 /// Typed origin of a resolved executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -349,6 +408,106 @@ pub enum LocatorError {
         path: PathBuf,
         found: PlatformVersion,
     },
+    /// `tools.platform.version: sources`, а выпуска формата исходников среди установок нет.
+    #[error("{0}")]
+    PlatformReleaseMissing(Box<PlatformReleaseMissing>),
+}
+
+impl LocatorError {
+    /// Отказ выпуска формата исходников: он один на все утилиты платформы, и вызывающий
+    /// обязан донести его до ответа как есть, а не пересказом.
+    pub const fn platform_release(&self) -> Option<&PlatformReleaseMissing> {
+        match self {
+            Self::PlatformReleaseMissing(missing) => Some(missing),
+            Self::NotFound { .. }
+            | Self::StrictBoundaryNotFound { .. }
+            | Self::UnknownVersion { .. }
+            | Self::VersionMismatch { .. }
+            | Self::MissingSibling { .. }
+            | Self::BelowMinimumPlatform { .. } => None,
+        }
+    }
+}
+
+/// Выпуска формата исходников нет среди установок, по которым его искали.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformReleaseMissing {
+    pub required: RequiredRelease,
+    /// Установки, среди которых искали, новейшие первыми: по ним решён отказ.
+    pub installations: Vec<InstalledPlatform>,
+}
+
+impl PlatformReleaseMissing {
+    /// Отказ в форме ответа: формат исходников и опись установок.
+    pub fn refusal(&self) -> PlatformReleaseRefusal {
+        PlatformReleaseRefusal {
+            source_format: self.required.source_format.clone(),
+            installations: self
+                .installations
+                .iter()
+                .map(PlatformInstallation::from)
+                .collect(),
+        }
+    }
+}
+
+impl fmt::Display for PlatformReleaseMissing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let format = &self.required.source_format;
+        let file = format.file.display();
+        let installed = if self.installations.is_empty() {
+            "no 1C platform installation was found".to_owned()
+        } else {
+            format!(
+                "installed {}",
+                name_versions(
+                    &self
+                        .installations
+                        .iter()
+                        .map(|installation| &installation.version)
+                        .collect::<Vec<_>>()
+                )
+            )
+        };
+        const MASK: &str = "set tools.platform.version to a mask";
+        match (
+            self.required.unreadable.as_deref(),
+            format.version.as_deref(),
+            self.required.releases.first(),
+        ) {
+            (Some(error), _, _) => write!(
+                f,
+                "the sources format in '{file}' could not be read: {error}; the platform release is not chosen; {installed}; {MASK}"
+            ),
+            (None, None, _) => write!(
+                f,
+                "the sources format in '{file}' is not recognized: its root names no format version; the platform release is not chosen; {installed}; {MASK}"
+            ),
+            (None, Some(version), None) => write!(
+                f,
+                "the sources format {version} in '{file}' is not known to the runner: no measured platform release writes it; {installed}; {MASK}"
+            ),
+            (None, Some(version), Some(release)) => write!(
+                f,
+                "the sources format {version} in '{file}' is written by platform {release}, which is not installed: {installed}; another release does not count, even one writing the same format; install {release} or {MASK}"
+            ),
+        }
+    }
+}
+
+impl From<&InstalledPlatform> for PlatformInstallation {
+    fn from(installed: &InstalledPlatform) -> Self {
+        Self {
+            version: installed.version.to_string(),
+            root: installed.root.clone(),
+            components: InstalledComponents {
+                designer: installed.has(UtilityType::V8),
+                thin_client: installed.has(UtilityType::V8C),
+                ibcmd: installed.has(UtilityType::Ibcmd),
+                web_extension: installed.has(UtilityType::Webinst),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -385,7 +544,7 @@ pub struct Locator {
     platform_policy: PlatformResolutionPolicy,
     edt_hint: Option<PathBuf>,
     edt_version: Option<EdtVersion>,
-    format_releases: Vec<PlatformVersionRequirement>,
+    source_format: SourceFormatRelease,
     /// Выпуск формата, найденный среди установок; считается один раз: выпуск закреплён за
     /// всеми утилитами, а установки за время команды не меняются.
     format_release: Option<Option<PlatformVersionRequirement>>,
@@ -405,7 +564,7 @@ impl Locator {
             platform_policy: options.platform_policy,
             edt_hint: options.edt_hint,
             edt_version: options.edt_version,
-            format_releases: options.format_releases,
+            source_format: options.source_format,
             format_release: None,
             cache: HashMap::new(),
             platform_roots: default_platform_roots(),
@@ -563,7 +722,7 @@ impl Locator {
             platform_policy,
             edt_hint,
             edt_version,
-            format_releases: Vec::new(),
+            source_format: SourceFormatRelease::Unused,
             format_release: None,
             cache: HashMap::new(),
             platform_roots,
@@ -571,6 +730,13 @@ impl Locator {
             path_roots,
             pinned_platform: None,
         }
+    }
+
+    /// Поиск с выбором выпуска по формату исходников: так его строят тесты вне модуля.
+    #[cfg(test)]
+    pub(crate) fn with_source_format(mut self, source_format: SourceFormatRelease) -> Self {
+        self.source_format = source_format;
+        self
     }
 
     fn version_requirement_string(&self, utility: UtilityType) -> Option<String> {
@@ -600,15 +766,27 @@ impl Locator {
 
     fn locate_platform(&mut self, utility: UtilityType) -> Result<UtilityLocation, LocatorError> {
         if self.platform_policy == PlatformResolutionPolicy::Strict {
+            // Закреплённая установка при `sources` — установка выпуска формата: её и называет
+            // причина выбора.
+            let release = match self.source_format {
+                SourceFormatRelease::Required(_) => self.format_release.clone().flatten(),
+                SourceFormatRelease::Unused | SourceFormatRelease::Preferred(_) => None,
+            };
             if let Some(pinned) = self.pinned_platform.as_ref() {
-                let required = self.effective_platform_version_requirement();
+                let required = release
+                    .as_ref()
+                    .or(self.effective_platform_version_requirement());
+                let chosen_by = match release {
+                    Some(_) => PlatformChoice::SourceFormat,
+                    None => chosen_by_requirement(required),
+                };
                 return select_pinned_candidate(
                     utility,
                     pinned_platform_candidates(utility, pinned),
                     required,
                     &pinned.root,
                 )
-                .map(|location| location.chosen(chosen_by_requirement(required)))
+                .map(|location| location.chosen(chosen_by))
                 .ok_or_else(|| LocatorError::MissingSibling {
                     utility,
                     installation_root: pinned.root.clone(),
@@ -654,14 +832,25 @@ impl Locator {
         if self.platform_hint.is_some() {
             let mut explicit_candidates = direct_explicit_candidates;
             explicit_candidates.extend(versioned_explicit_candidates);
-            let required = self.effective_platform_version_requirement();
+            // `sources` и путь: выпуск формата обязателен и под путём, при любом `strict`.
+            let release = match self.source_format {
+                SourceFormatRelease::Required(_) => self.format_release()?,
+                SourceFormatRelease::Unused | SourceFormatRelease::Preferred(_) => None,
+            };
+            let chosen_by = match release {
+                Some(_) => PlatformChoice::SourceFormat,
+                None => chosen_by_requirement(self.effective_platform_version_requirement()),
+            };
+            let required = release
+                .as_ref()
+                .or(self.effective_platform_version_requirement());
             if let Some(location) = select_candidate(
                 utility,
                 explicit_candidates.clone(),
                 required,
                 strict_boundary.as_deref(),
             ) {
-                let location = location.chosen(chosen_by_requirement(required));
+                let location = location.chosen(chosen_by);
                 self.pin_platform(&location);
                 return Ok(location);
             }
@@ -699,8 +888,9 @@ impl Locator {
             Some(required) => (Some(required.clone()), PlatformChoice::Version),
             // Версию ничто не задало: решает формат исходников, если его выпуск установлен.
             // Выпуск закрепляется за всеми утилитами: компонента, которого в нём нет, нет
-            // вовсе — иначе утилита другого выпуска переписала бы формат.
-            None => match self.installed_format_release() {
+            // вовсе — иначе утилита другого выпуска переписала бы формат. При `sources`
+            // выпуска нет — отказ раньше выбора кандидата и проверки минимума.
+            None => match self.format_release()? {
                 Some(release) => (Some(release), PlatformChoice::SourceFormat),
                 None => (None, PlatformChoice::Newest),
             },
@@ -722,35 +912,69 @@ impl Locator {
         Ok(location)
     }
 
-    /// Новейший выпуск формата исходников, у которого есть установка в корнях поиска или в
-    /// `PATH` — любой утилиты платформы. Компонент ищут только в нём.
-    fn installed_format_release(&mut self) -> Option<PlatformVersionRequirement> {
-        if self.format_release.is_none() {
-            let installed: Vec<PlatformVersion> = installed_platforms(&self.platform_roots)
-                .into_iter()
-                // Каталог версии без единого компонента — не установка.
-                .filter(|installed| !installed.components.is_empty())
-                .map(|installed| installed.version)
-                .chain(INVENTORIED_COMPONENTS.into_iter().flat_map(|utility| {
-                    path_candidates(utility, &self.path_roots)
-                        .into_iter()
-                        // Каталог в `PATH` без утилиты — не установка: запись могла пережить
-                        // удалённую платформу.
-                        .filter(|candidate| is_valid_executable(&candidate.path))
-                        .filter_map(|candidate| match candidate.version {
-                            Some(UtilityVersion::Platform(version)) => Some(version),
-                            Some(UtilityVersion::Edt(_)) | None => None,
-                        })
-                }))
-                .collect();
-            self.format_release = Some(
-                self.format_releases
-                    .iter()
-                    .find(|release| installed.iter().any(|version| release.matches(version)))
-                    .cloned(),
-            );
+    /// Новейший выпуск формата исходников, у которого есть установка там, где ищет поиск, —
+    /// любой утилиты платформы. Компонент ищут только в нём. `Ok(None)` — формат выпуск не
+    /// выбирает или, по умолчанию, его выпуска нет; при `sources` отсутствие выпуска —
+    /// отказ с описью тех же установок, по которым он решён
+    /// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+    fn format_release(&mut self) -> Result<Option<PlatformVersionRequirement>, LocatorError> {
+        let releases = match &self.source_format {
+            SourceFormatRelease::Unused => return Ok(None),
+            SourceFormatRelease::Preferred(releases) => releases,
+            SourceFormatRelease::Required(required) => &required.releases,
+        };
+        // Отказ не запоминается: его опись считается заново, а найденный выпуск — нет.
+        if let Some(found) = &self.format_release {
+            return Ok(found.clone());
         }
-        self.format_release.clone().flatten()
+        let installations = self.search_installations();
+        let found = releases
+            .iter()
+            .find(|release| {
+                installations
+                    .iter()
+                    .any(|installation| release.matches(&installation.version))
+            })
+            .cloned();
+        if let (None, SourceFormatRelease::Required(required)) = (&found, &self.source_format) {
+            return Err(LocatorError::PlatformReleaseMissing(Box::new(
+                PlatformReleaseMissing {
+                    required: required.clone(),
+                    installations,
+                },
+            )));
+        }
+        self.format_release = Some(found.clone());
+        Ok(found)
+    }
+
+    /// Установки там, где ищет поиск утилит платформы: опись [`Self::installations`], а без
+    /// указанного пути — и установки утилит из `PATH`, которые поиск тоже берёт. Каталог
+    /// версии без единого компонента — не установка, как и каталог в `PATH` без утилиты:
+    /// запись могла пережить удалённую платформу.
+    fn search_installations(&self) -> Vec<InstalledPlatform> {
+        let mut found = self.installations();
+        if self.platform_hint.is_none() {
+            for utility in INVENTORIED_COMPONENTS {
+                for candidate in path_candidates(utility, &self.path_roots) {
+                    if !is_valid_executable(&candidate.path) {
+                        continue;
+                    }
+                    // Поиск выбирает утилиту по канонической версии: ссылка в `PATH` числится
+                    // установкой той версии, куда ведёт, а не каталога, где лежит.
+                    let Ok(canonical) = std::fs::canonicalize(&candidate.path) else {
+                        continue;
+                    };
+                    let canonical = normalize_windows_verbatim_path(&canonical);
+                    record_installation(&installation_root_for_executable(&canonical), &mut found);
+                }
+            }
+            found = sort_installations(found);
+        }
+        found
+            .into_iter()
+            .filter(|installed| !installed.components.is_empty())
+            .collect()
     }
 
     fn pin_platform(&mut self, location: &UtilityLocation) {
@@ -1616,7 +1840,8 @@ mod tests {
     use super::{
         normalize_path_roots, normalize_windows_verbatim_path, EdtVersion, Locator, LocatorError,
         PlatformChoice, PlatformResolutionPolicy, PlatformVersion, PlatformVersionRequirement,
-        ResolutionSource, UtilityType, UtilityVersion,
+        PlatformVersionSetting, RequiredRelease, ResolutionSource, SourceFormatInfo,
+        SourceFormatRelease, UtilityType, UtilityVersion,
     };
 
     /// Новый тип утилиты без строки в таблице имён на Windows ищется без `.exe` и не находится
@@ -2300,9 +2525,11 @@ mod tests {
     /// Поиск с предпочтением формата: выпуск, который пишет формат исходников.
     fn format_locator(root: &Path, version: Option<&str>, release: &str) -> Locator {
         let mut locator = lenient_locator(None, version, vec![root.to_path_buf()], Vec::new());
-        locator.format_releases = PlatformVersionRequirement::parse(release)
-            .into_iter()
-            .collect();
+        locator.source_format = SourceFormatRelease::Preferred(
+            PlatformVersionRequirement::parse(release)
+                .into_iter()
+                .collect(),
+        );
         locator
     }
 
@@ -2384,9 +2611,11 @@ mod tests {
         let stale = dir.path().join("gone").join("8.3.27.2074").join("bin");
         std::fs::create_dir_all(&stale).expect("stale PATH entry");
         let mut locator = lenient_locator(None, None, vec![root], vec![stale]);
-        locator.format_releases = PlatformVersionRequirement::parse("8.3.27")
-            .into_iter()
-            .collect();
+        locator.source_format = SourceFormatRelease::Preferred(
+            PlatformVersionRequirement::parse("8.3.27")
+                .into_iter()
+                .collect(),
+        );
 
         let location = locator.locate(UtilityType::V8).expect("located");
         assert_eq!(location.chosen_by, PlatformChoice::Newest);
@@ -2426,6 +2655,271 @@ mod tests {
             ))
         );
         assert_eq!(location.chosen_by, PlatformChoice::Version);
+    }
+
+    /// `tools.platform.version: sources` для формата `format`: выпуск обязателен.
+    fn required_release(format: Option<&str>, release: Option<&str>) -> SourceFormatRelease {
+        SourceFormatRelease::Required(RequiredRelease {
+            releases: release
+                .and_then(PlatformVersionRequirement::parse)
+                .into_iter()
+                .collect(),
+            source_format: SourceFormatInfo {
+                version: format.map(str::to_owned),
+                file: PathBuf::from("/project/src/Configuration.xml"),
+                release: release.map(str::to_owned),
+            },
+            unreadable: None,
+        })
+    }
+
+    fn sources_locator(
+        hint: Option<PathBuf>,
+        roots: Vec<PathBuf>,
+        format: Option<&str>,
+        release: Option<&str>,
+    ) -> Locator {
+        let mut locator = lenient_locator(hint, None, roots, Vec::new());
+        locator.source_format = required_release(format, release);
+        locator
+    }
+
+    /// `sources`, формат 2.21, а установлены только 8.3.27 и 8.5.4: отказ до выбора
+    /// кандидата называет формат, файл, выпуск 8.5.1 и опись установок.
+    #[test]
+    fn a_missing_release_of_the_sources_format_is_refused_with_the_inventory() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        for version in ["8.3.27.2074", "8.5.4.1306"] {
+            touch_versioned_platform_executable(&root, version, UtilityType::V8, false);
+        }
+        let mut locator = sources_locator(None, vec![root], Some("2.21"), Some("8.5.1"));
+
+        for utility in [UtilityType::V8, UtilityType::Ibcmd, UtilityType::Ragent] {
+            let error = locator.locate(utility).expect_err("refused");
+            let missing = error.platform_release().expect("release refusal");
+            let refusal = missing.refusal();
+            assert_eq!(refusal.source_format.version.as_deref(), Some("2.21"));
+            assert_eq!(refusal.source_format.release.as_deref(), Some("8.5.1"));
+            let versions: Vec<&str> = refusal
+                .installations
+                .iter()
+                .map(|installation| installation.version.as_str())
+                .collect();
+            assert_eq!(versions, ["8.5.4.1306", "8.3.27.2074"]);
+            let message = error.to_string();
+            for named in [
+                "2.21",
+                "Configuration.xml",
+                "8.5.1",
+                "installed 8.5.4.1306, 8.3.27.2074",
+                "tools.platform.version",
+            ] {
+                assert!(message.contains(named), "{named}: {message}");
+            }
+        }
+    }
+
+    /// `sources`, и выпуск формата установлен: выбран он, как и по умолчанию.
+    #[test]
+    fn the_sources_setting_chooses_the_installed_release() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        for version in ["8.3.27.2074", "8.5.1.1529", "8.5.4.1306"] {
+            touch_versioned_platform_executable(&root, version, UtilityType::V8, false);
+        }
+        let mut locator = sources_locator(None, vec![root], Some("2.21"), Some("8.5.1"));
+
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(
+            location.version,
+            Some(UtilityVersion::Platform(
+                PlatformVersion::parse_strict("8.5.1.1529").expect("version")
+            ))
+        );
+        assert_eq!(location.chosen_by, PlatformChoice::SourceFormat);
+    }
+
+    /// `sources`, а формат не распознан или раннеру не известен: выпуск не выбрать, отказ.
+    #[test]
+    fn an_unknown_sources_format_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("roots");
+        touch_versioned_platform_executable(&root, "8.5.4.1306", UtilityType::V8, false);
+
+        for (format, named) in [(Some("2.99"), "not known"), (None, "not recognized")] {
+            let mut locator = sources_locator(None, vec![root.clone()], format, None);
+            let error = locator.locate(UtilityType::V8).expect_err("refused");
+            assert!(error.platform_release().is_some(), "{error}");
+            assert!(error.to_string().contains(named), "{error}");
+        }
+    }
+
+    /// `sources` и путь: выпуск формата обязателен и под путём, хотя `strict` не задан, а
+    /// опись называет установки под путём.
+    #[test]
+    fn the_sources_release_is_enforced_inside_the_path() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("platform");
+        touch_versioned_platform_executable(&root, "8.5.4.1306", UtilityType::V8, true);
+        let mut locator = sources_locator(Some(root.clone()), vec![], Some("2.21"), Some("8.5.1"));
+
+        let error = locator.locate(UtilityType::V8).expect_err("refused");
+        let refusal = error.platform_release().expect("release refusal").refusal();
+        assert_eq!(refusal.installations.len(), 1, "{error}");
+        assert_eq!(refusal.installations[0].version, "8.5.4.1306");
+
+        let wanted =
+            touch_versioned_platform_executable(&root, "8.5.1.1529", UtilityType::V8, true);
+        let mut locator = sources_locator(Some(root), vec![], Some("2.21"), Some("8.5.1"));
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(location.path, canonical(&wanted));
+        assert_eq!(location.chosen_by, PlatformChoice::SourceFormat);
+    }
+
+    /// `sources` без пути: установка из `PATH` засчитывается и в выборе выпуска, и в описи
+    /// отказа — опись та же, по которой решён отказ.
+    #[test]
+    fn a_path_installation_counts_for_the_sources_release() {
+        let dir = tempdir().expect("tempdir");
+        let wanted = dir.path().join("path").join("8.5.1.1529").join("bin");
+        let other = dir.path().join("other").join("8.5.4.1306").join("bin");
+        touch_executable(&wanted.join(UtilityType::V8.executable_name()));
+        touch_executable(&other.join(UtilityType::V8.executable_name()));
+
+        let mut locator = lenient_locator(None, None, vec![], vec![wanted.clone()]);
+        locator.source_format = required_release(Some("2.21"), Some("8.5.1"));
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(location.chosen_by, PlatformChoice::SourceFormat);
+        assert_eq!(location.source, ResolutionSource::Path);
+
+        let mut locator = lenient_locator(None, None, vec![], vec![other]);
+        locator.source_format = required_release(Some("2.21"), Some("8.5.1"));
+        let error = locator.locate(UtilityType::V8).expect_err("refused");
+        let refusal = error.platform_release().expect("release refusal").refusal();
+        let versions: Vec<&str> = refusal
+            .installations
+            .iter()
+            .map(|installation| installation.version.as_str())
+            .collect();
+        assert_eq!(versions, ["8.5.4.1306"], "{error}");
+    }
+
+    /// `sources`, путь и `strict: true`: гарантии `strict` остаются — выпуск формата выбран
+    /// внутри границы пути, и соседние утилиты берутся из той же закреплённой установки.
+    #[test]
+    fn the_sources_release_keeps_the_strict_path_guarantees() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("platform");
+        for version in ["8.5.1.1529", "8.5.4.1306"] {
+            for utility in [UtilityType::V8, UtilityType::Ibcmd] {
+                touch_versioned_platform_executable(&root, version, utility, true);
+            }
+        }
+        let strict_sources = |root: PathBuf| {
+            let mut locator = Locator::with_search_roots(
+                Some(root),
+                None,
+                PlatformResolutionPolicy::Strict,
+                None,
+                None,
+                vec![],
+                vec![],
+                vec![],
+            );
+            locator.source_format = required_release(Some("2.21"), Some("8.5.1"));
+            locator
+        };
+
+        let mut locator = strict_sources(root.clone());
+        let designer = locator.locate(UtilityType::V8).expect("designer");
+        let ibcmd = locator.locate(UtilityType::Ibcmd).expect("pinned sibling");
+        for location in [&designer, &ibcmd] {
+            assert_eq!(location.chosen_by, PlatformChoice::SourceFormat);
+            assert_eq!(location.installation_root, designer.installation_root);
+            assert_eq!(
+                location.version,
+                Some(UtilityVersion::Platform(
+                    PlatformVersion::parse_strict("8.5.1.1529").expect("version")
+                ))
+            );
+        }
+
+        fs::remove_dir_all(root.join("8.5.1.1529")).expect("remove the release");
+        let error = strict_sources(root)
+            .locate(UtilityType::V8)
+            .expect_err("refused");
+        assert!(error.platform_release().is_some(), "{error}");
+    }
+
+    /// Ссылка в `PATH` на установку вне корней поиска числится установкой той версии, куда
+    /// ведёт: `sources` её выбирает, а отказ называет её в описи.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_link_counts_as_the_installation_it_points_to() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("opt").join("8.5.1.1529").join("bin");
+        touch_executable(&target.join(UtilityType::V8.executable_name()));
+        let links = dir.path().join("links");
+        fs::create_dir_all(&links).expect("links");
+        std::os::unix::fs::symlink(
+            target.join(UtilityType::V8.executable_name()),
+            links.join(UtilityType::V8.executable_name()),
+        )
+        .expect("link");
+
+        let mut locator = lenient_locator(None, None, vec![], vec![links.clone()]);
+        locator.source_format = required_release(Some("2.21"), Some("8.5.1"));
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(location.chosen_by, PlatformChoice::SourceFormat);
+
+        let mut locator = lenient_locator(None, None, vec![], vec![links]);
+        locator.source_format = required_release(Some("2.20"), Some("8.3.27"));
+        let error = locator.locate(UtilityType::V8).expect_err("refused");
+        let refusal = error.platform_release().expect("release refusal").refusal();
+        assert_eq!(refusal.installations.len(), 1, "{error}");
+        assert_eq!(refusal.installations[0].version, "8.5.1.1529");
+    }
+
+    /// Каталог выпуска формата в `PATH`, чья утилита ведёт в другую версию, выпуском не
+    /// считается: поиск выбрал бы утилиту другой версии. По умолчанию берётся новейшая.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_alias_of_another_version_is_not_the_release_of_the_format() {
+        let dir = tempdir().expect("tempdir");
+        let real = dir.path().join("opt").join("8.5.4.1306").join("bin");
+        touch_executable(&real.join(UtilityType::V8.executable_name()));
+        let alias = dir.path().join("alias").join("8.3.27.2074").join("bin");
+        fs::create_dir_all(&alias).expect("alias");
+        std::os::unix::fs::symlink(
+            real.join(UtilityType::V8.executable_name()),
+            alias.join(UtilityType::V8.executable_name()),
+        )
+        .expect("link");
+        let mut locator = lenient_locator(None, None, vec![], vec![alias]);
+        locator.source_format = SourceFormatRelease::Preferred(
+            PlatformVersionRequirement::parse("8.3.27")
+                .into_iter()
+                .collect(),
+        );
+
+        let location = locator.locate(UtilityType::V8).expect("located");
+        assert_eq!(location.chosen_by, PlatformChoice::Newest);
+    }
+
+    /// `sources` разбирается одним местом вместе с маской.
+    #[test]
+    fn the_platform_version_setting_is_a_mask_or_sources() {
+        assert_eq!(
+            PlatformVersionSetting::parse("sources"),
+            Some(PlatformVersionSetting::Sources)
+        );
+        assert_eq!(
+            PlatformVersionSetting::parse("8.3.27"),
+            PlatformVersionRequirement::parse("8.3.27").map(PlatformVersionSetting::Mask)
+        );
+        assert_eq!(PlatformVersionSetting::parse("Sources"), None);
+        assert_eq!(PlatformVersionSetting::parse("8"), None);
     }
 
     #[test]

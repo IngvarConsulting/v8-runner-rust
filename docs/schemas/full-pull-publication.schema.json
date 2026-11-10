@@ -201,6 +201,17 @@
             }
           ],
           "description": "Шаг, которым вызывающий выходит из отказа. Проза остаётся человеку."
+        },
+        "platform_release": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformReleaseRefusal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Формат исходников и опись установок; заполняется отказом `platform_release_missing`."
         }
       },
       "required": [
@@ -241,6 +252,11 @@
         {
           "const": "soon",
           "description": "Пока не умеет.",
+          "type": "string"
+        },
+        {
+          "const": "platform_release_missing",
+          "description": "Пара к роду `environment`: при `tools.platform.version: sources` выпуска, который пишет\nформат исходников, среди установок нет.",
           "type": "string"
         },
         {
@@ -547,6 +563,35 @@
         }
       ]
     },
+    "InstalledComponents": {
+      "additionalProperties": false,
+      "description": "Какие компоненты есть в установке.",
+      "properties": {
+        "designer": {
+          "description": "Конфигуратор и толстый клиент (`1cv8`).",
+          "type": "boolean"
+        },
+        "ibcmd": {
+          "description": "Автономный сервер (`ibcmd`).",
+          "type": "boolean"
+        },
+        "thin_client": {
+          "description": "Тонкий клиент (`1cv8c`).",
+          "type": "boolean"
+        },
+        "web_extension": {
+          "description": "Расширение веб-сервера (`webinst`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "designer",
+        "thin_client",
+        "ibcmd",
+        "web_extension"
+      ],
+      "type": "object"
+    },
     "LiveAgentHolder": {
       "anyOf": [
         {
@@ -714,6 +759,50 @@
           "type": "string"
         }
       ]
+    },
+    "PlatformInstallation": {
+      "additionalProperties": false,
+      "description": "Установка платформы: версия, каталог и состав.",
+      "properties": {
+        "components": {
+          "$ref": "#/$defs/InstalledComponents"
+        },
+        "root": {
+          "description": "Каталог версии.",
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "root",
+        "components"
+      ],
+      "type": "object"
+    },
+    "PlatformReleaseRefusal": {
+      "additionalProperties": false,
+      "description": "Отказ `platform_release_missing`: при `tools.platform.version: sources` выпуска, который\nпишет формат исходников, среди установок нет. Установки — те, по которым решён отказ.",
+      "properties": {
+        "installations": {
+          "description": "Установки, среди которых выпуска не нашлось, новейшие первыми.",
+          "items": {
+            "$ref": "#/$defs/PlatformInstallation"
+          },
+          "type": "array"
+        },
+        "source_format": {
+          "$ref": "#/$defs/SourceFormatInfo",
+          "description": "Формат исходников основного набора и выпуск, который его пишет; `release` — `null`,\nесли раннер такого выпуска не знает, `version` — `null`, если формат не прочитан."
+        }
+      },
+      "required": [
+        "source_format",
+        "installations"
+      ],
+      "type": "object"
     },
     "Provider": {
       "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
@@ -998,6 +1087,34 @@
         "unavailable"
       ],
       "type": "string"
+    },
+    "SourceFormatInfo": {
+      "additionalProperties": false,
+      "description": "Формат исходников проекта.",
+      "properties": {
+        "file": {
+          "description": "Прочитанный `Configuration.xml`.",
+          "type": "string"
+        },
+        "release": {
+          "description": "Выпуск платформы, который пишет этот формат; `null`, если раннер такого не знает.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "Версия формата; `null`, если файл есть, а версии в его корне нет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "type": "object"
     },
     "StepResult": {
       "additionalProperties": false,

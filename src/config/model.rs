@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::domain::capability::{self, Operation, Provider, ProviderPlan, TargetKind};
 use crate::domain::execution::ExecutionTimeouts;
 use crate::platform::connection::V8Connection;
+use crate::platform::locator::PlatformVersionSetting;
 use crate::support::authority::{host_and_port_of_authority, Host};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1367,8 +1368,47 @@ pub struct PlatformToolConfig {
     /// `major.minor.patch.build` format.
     ///
     /// A 2- or 3-part value selects the highest matching version; a 4-part value
-    /// selects an exact build.
-    pub version: Option<String>,
+    /// selects an exact build. `sources` selects the release that writes the format of the
+    /// main Configuration set and refuses when it is not installed.
+    ///
+    /// Разбирается один раз, при загрузке настроек: значение, которое не разбирается, —
+    /// отказ загрузки, и строку дальше никто не читает.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_platform_version",
+        serialize_with = "serialize_platform_version"
+    )]
+    pub version: Option<PlatformVersionSetting>,
+}
+
+fn deserialize_platform_version<'de, D>(
+    deserializer: D,
+) -> Result<Option<PlatformVersionSetting>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| {
+            PlatformVersionSetting::parse(&value).ok_or_else(|| {
+                D::Error::custom(format!(
+                    "platform version must use format major.minor, major.minor.patch or major.minor.patch.build, or be `sources`: {value}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn serialize_platform_version<S>(
+    value: &Option<PlatformVersionSetting>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(setting) => serializer.serialize_some(&setting.to_string()),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

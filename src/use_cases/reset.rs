@@ -219,7 +219,11 @@ fn discard(
                 match executor.read_generation(context, config, record.tool, set, extension) {
                     Ok(Some(token)) => Before::Token(token),
                     Ok(None) => Before::NoAnswer,
-                    Err(error) if error.cancellation().is_some() => return Err(error),
+                    Err(error)
+                        if error.cancellation().is_some() || error.platform_release().is_some() =>
+                    {
+                        return Err(error)
+                    }
                     Err(error) => {
                         tracing::debug!(%error, "the generation before the reset is not known");
                         Before::NoAnswer

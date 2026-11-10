@@ -935,8 +935,11 @@ fn adapter_error_envelope(
 }
 
 fn envelope_error(error: &McpBusinessError) -> EnvelopeError {
-    EnvelopeError::new(error.code.into(), error.kind.into(), error.message.clone())
-        .with_next(error.next.clone())
+    EnvelopeError {
+        platform_release: error.platform_release.clone(),
+        ..EnvelopeError::new(error.code.into(), error.kind.into(), error.message.clone())
+            .with_next(error.next.clone())
+    }
 }
 
 fn invalid_syntax_request(
@@ -968,6 +971,7 @@ fn raw_value_business_error(error: &RawValueError) -> McpBusinessError {
         kind: McpBusinessErrorKind::Validation,
         message: error.message().to_owned(),
         next: None,
+        platform_release: None,
     }
 }
 
