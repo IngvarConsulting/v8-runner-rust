@@ -690,6 +690,30 @@ pub enum LiveAgentHolder {
     Ttl { until: String },
 }
 
+impl std::fmt::Display for LiveAgentHolder {
+    /// Держатель для людей: в тексте `agent` и в отказе занятой базы.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Process { pid, .. } => write!(f, "process {pid}"),
+            Self::Ttl { until } => write!(f, "until {until}"),
+        }
+    }
+}
+
+impl LiveAgentHolder {
+    /// Держатели через запятую; без держателей — `none`.
+    pub fn list_text(holders: &[Self]) -> String {
+        if holders.is_empty() {
+            return "none".to_owned();
+        }
+        holders
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// Почему управляемый агент не остался жить после команды.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]

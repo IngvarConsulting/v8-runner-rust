@@ -75,10 +75,10 @@ pub(crate) struct LiveHandle {
     /// `AgentBaseDir` агента в каталоге состояния учётной записи.
     base_dir: PathBuf,
     endpoint: AgentEndpoint,
-    /// Каталог на томе `workPath`, в котором ложится то, что агент пишет: агенту он выставлен
-    /// ссылкой, и выгрузка не копируется между томами.
-    exchange_root: PathBuf,
     receipt: LiveAgentReceipt,
+    /// Почему агент не останется, если команда его потеряла посреди запроса: квитанция
+    /// называет это, когда сторож после `end` скажет, что агента снимает.
+    failure: Option<LiveAgentReason>,
     /// Журнал разговора пишет команда, а не сторож.
     transcript: Option<std::fs::File>,
     secrets: Vec<String>,
@@ -96,31 +96,77 @@ impl LiveHandle {
                     let _ = writeln!(log, "{}", agent::transcript_line(batch, &secrets));
                 }
             });
-        if self.client.interrupted() {
-            self.receipt.kept = false;
-            self.receipt.reason = Some(LiveAgentReason::Interrupted);
+        if let Err(error) = &outcome {
+            if let Some(reason) = failure_reason(error, self.client.interrupted()) {
+                self.failure.get_or_insert(reason);
+            }
         }
         outcome
     }
 
     /// Закрывает сессию команды; агент остаётся сторожу, если тот не решил его снять.
-    /// Квитанция называет решение сторожа: `kept` — по его `status` после `end`.
+    /// Квитанция называет решение сторожа: `kept` — всегда по его `status` после `end`, а
+    /// причина — по тому, что команда видела ([`failure_reason`]), иначе `removed` у сторожа,
+    /// который снимает агента или ушёл, и `keeper_failed` у сторожа, который не ответил.
     fn finish(mut self, context: &ExecutionContext) {
-        let status = self.client.end();
-        if self.receipt.kept {
-            match status {
-                Some(status) if !status.closing => {
-                    self.receipt.holders = status.holders.iter().map(holder_receipt).collect();
-                }
-                // Сторож снимает агента (его сессия оборвалась, его остановили, ушёл последний
-                // держатель) или уже не отвечает.
-                _ => {
-                    self.receipt.kept = false;
-                    self.receipt.reason = Some(LiveAgentReason::Removed);
-                }
-            }
+        let ended = self.client.end();
+        let client = &self.client;
+        let fallback = ended_reason(&ended, |error| client.gone(error));
+        self.receipt.kept = fallback.is_none();
+        self.receipt.reason = fallback.map(|fallback| self.failure.unwrap_or(fallback));
+        if let Ok(status) = &ended {
+            self.receipt.holders = status.holders.iter().map(holder_receipt).collect();
         }
         context.note_live(self.receipt);
+    }
+}
+
+/// Останется ли агент по ответу сторожа после `end`: `None` — останется; иначе причина, если
+/// команда своей не видела. Сторож, который снимает агента или подтверждённо ушёл (`gone`), —
+/// `removed`; не ответивший, но, может быть, живой — `keeper_failed`.
+fn ended_reason(
+    ended: &Result<crate::platform::agent_keeper::protocol::KeeperStatus, AgentError>,
+    gone: impl FnOnce(&AgentError) -> bool,
+) -> Option<LiveAgentReason> {
+    match ended {
+        Ok(status) if !status.closing => None,
+        Ok(_) => Some(LiveAgentReason::Removed),
+        Err(error) if gone(error) => Some(LiveAgentReason::Removed),
+        Err(_) => Some(LiveAgentReason::KeeperFailed),
+    }
+}
+
+/// Причина работать с разовым агентом, если живого взять нельзя; `None` — отказ команды.
+fn one_shot_reason(error: &KeeperStartError) -> Option<LiveAgentReason> {
+    match error {
+        KeeperStartError::Job => Some(LiveAgentReason::Job),
+        KeeperStartError::Limit { .. } => Some(LiveAgentReason::Limit),
+        // Живого агента взять нельзя, а разовый работает и так: команда не падает.
+        KeeperStartError::Busy { .. } => Some(LiveAgentReason::Busy),
+        KeeperStartError::Unavailable { .. }
+        | KeeperStartError::Agent(
+            AgentError::LiveAgentGone { .. } | AgentError::KeeperUnreachable { .. },
+        ) => Some(LiveAgentReason::KeeperFailed),
+        KeeperStartError::Agent(_) => None,
+    }
+}
+
+/// Причина в квитанции по отказу запроса живому агенту. `interrupted` — только отмена или срок,
+/// при которых сторож снимает агента (`interrupted` у клиента); оборванный ответ или сессия —
+/// `removed`; сторож, ушедший или не ответивший, — `keeper_failed`. Отказ самой команды агента
+/// агента не снимает: причины нет.
+fn failure_reason(error: &AgentError, interrupted: bool) -> Option<LiveAgentReason> {
+    match error {
+        AgentError::InvalidReply { .. } | AgentError::SessionClosed { .. } => {
+            Some(LiveAgentReason::Removed)
+        }
+        AgentError::LiveAgentGone { .. } | AgentError::KeeperUnreachable { .. } => {
+            Some(LiveAgentReason::KeeperFailed)
+        }
+        // Отмену и срок, при которых сторож снимает агента, классифицирует клиент
+        // (`interrupted`): здесь вид отмены не разбирается.
+        _ if interrupted => Some(LiveAgentReason::Interrupted),
+        _ => None,
     }
 }
 
@@ -187,14 +233,6 @@ impl AgentHandle {
             Self::Attached { session, .. } | Self::Gate { session, .. } => {
                 session.last_command_deferral()
             }
-        }
-    }
-
-    /// Каталог тома `workPath`, в котором ложится то, что пишет живой агент.
-    fn exchange_root(&self) -> Option<&Path> {
-        match self {
-            Self::Live(live) => Some(&live.exchange_root),
-            _ => None,
         }
     }
 
@@ -595,27 +633,23 @@ fn open_live(
         &launch,
         &credentials,
         agent.live_limit(),
-        context.work(),
+        &context.cancellation(),
     ) {
         Ok(client) => client,
-        Err(KeeperStartError::Job) => return Ok(Err(LiveAgentReason::Job)),
-        Err(KeeperStartError::Limit { .. }) => return Ok(Err(LiveAgentReason::Limit)),
-        // Живого агента взять нельзя, а разовый работает и так: команда не падает.
-        Err(error @ KeeperStartError::Busy { .. }) => {
-            tracing::warn!(%error, "the command works with a one-shot agent");
-            return Ok(Err(LiveAgentReason::Busy));
+        Err(error) => {
+            return match one_shot_reason(&error) {
+                Some(reason) => {
+                    tracing::warn!(error = %crate::support::error::chain(&error), ?reason, "the command works with a one-shot agent");
+                    Ok(Err(reason))
+                }
+                None => match error {
+                    KeeperStartError::Agent(error) => Err(AppError::from(error)),
+                    other => Err(AppError::EnvironmentUnavailable(
+                        crate::support::error::chain(&other),
+                    )),
+                },
+            }
         }
-        Err(error @ KeeperStartError::Unavailable { .. }) => {
-            tracing::warn!(%error, "the command works with a one-shot agent");
-            return Ok(Err(LiveAgentReason::KeeperFailed));
-        }
-        Err(KeeperStartError::Agent(
-            error @ (AgentError::LiveAgentGone { .. } | AgentError::KeeperUnreachable { .. }),
-        )) => {
-            tracing::warn!(%error, "the command works with a one-shot agent");
-            return Ok(Err(LiveAgentReason::KeeperFailed));
-        }
-        Err(KeeperStartError::Agent(error)) => return Err(AppError::from(error)),
     };
     let port = client.port().ok_or_else(|| {
         AppError::EnvironmentUnavailable("the live agent keeper names no agent port".to_owned())
@@ -639,8 +673,8 @@ fn open_live(
             )),
             port,
         },
-        exchange_root: config.work_path.join("agent").join("exchange"),
         receipt,
+        failure: None,
         transcript,
         secrets: [credentials.user, credentials.password]
             .into_iter()
@@ -1208,46 +1242,11 @@ pub(crate) fn make_output_dir(
     relative: &str,
 ) -> Result<(), AppError> {
     match exchange {
-        Exchange::Dir(user_dir) => match handle.exchange_root() {
-            // Каталог живого агента лежит в каталоге состояния, часто на другом томе: то, что
-            // агент пишет, ложится сразу на том `workPath` через ссылку и потом не копируется
-            // между томами (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`). Где ссылку
-            // создать нельзя, каталог настоящий, как у разового агента.
-            Some(root) => {
-                let real = root.join(relative);
-                std::fs::create_dir_all(&real).map_err(|error| {
-                    AppError::Runtime(format!(
-                        "failed to prepare the agent output dir '{}': {error}",
-                        real.display()
-                    ))
-                })?;
-                if expose_output_dir(user_dir, relative, &real).is_err() {
-                    tidy_run_path(root, relative);
-                    output_dir(user_dir, relative)?;
-                }
-                Ok(())
-            }
-            None => output_dir(user_dir, relative).map(|_| ()),
-        },
+        Exchange::Dir(user_dir) => output_dir(user_dir, relative).map(|_| ()),
         Exchange::Sftp => handle
             .ssh()?
             .sftp_mkdir_all(relative)
             .map_err(AppError::from),
-    }
-}
-
-/// Где на самом деле лежит то, что агент написал под `user_dir/relative`: за ссылкой — каталог
-/// на томе `workPath`, его и переносят.
-fn produced_at(user_dir: &Path, relative: &str) -> PathBuf {
-    let produced = user_dir.join(relative);
-    produced.canonicalize().unwrap_or(produced)
-}
-
-/// Убирает за живым агентом его каталог на томе `workPath` и ссылку на него.
-fn tidy_exchange(handle: &AgentHandle, user_dir: &Path, relative: &str) {
-    if let Some(root) = handle.exchange_root() {
-        tidy_run_path(user_dir, relative);
-        tidy_run_path(root, relative);
     }
 }
 
@@ -1266,11 +1265,11 @@ pub(crate) fn collect_dir(
     }
     match exchange {
         Exchange::Dir(user_dir) => {
-            let produced = produced_at(user_dir, relative);
+            let produced = user_dir.join(relative);
             if !produced.is_dir() {
                 return Err(AppError::Platform(format!(
                     "agent reported success but wrote nothing into '{}'",
-                    user_dir.join(relative).display()
+                    produced.display()
                 )));
             }
             let _ = crate::support::fs::remove_path_if_exists(destination);
@@ -1279,9 +1278,7 @@ pub(crate) fn collect_dir(
                     "failed to collect the agent's dir '{}': {error}",
                     produced.display()
                 ))
-            })?;
-            tidy_exchange(handle, user_dir, relative);
-            Ok(())
+            })
         }
         Exchange::Sftp => {
             let session = handle.ssh()?;
@@ -1308,7 +1305,7 @@ pub(crate) fn collect_into_dir(
 ) -> Result<(), AppError> {
     match exchange {
         Exchange::Dir(user_dir) => {
-            let produced = produced_at(user_dir, relative);
+            let produced = user_dir.join(relative);
             copy_dir_recursively(&produced, existing).map_err(|error| {
                 AppError::Runtime(format!(
                     "failed to collect the agent's dir '{}': {error}",
@@ -1316,7 +1313,6 @@ pub(crate) fn collect_into_dir(
                 ))
             })?;
             tidy_run_path(user_dir, relative);
-            tidy_exchange(handle, user_dir, relative);
             Ok(())
         }
         Exchange::Sftp => {
@@ -1338,11 +1334,11 @@ pub(crate) fn collect_file(
 ) -> Result<(), AppError> {
     match exchange {
         Exchange::Dir(user_dir) => {
-            let produced = produced_at(user_dir, relative);
+            let produced = user_dir.join(relative);
             if !produced.is_file() {
                 return Err(AppError::Platform(format!(
                     "agent reported success but wrote no file at '{}'",
-                    user_dir.join(relative).display()
+                    produced.display()
                 )));
             }
             crate::support::fs::move_file(&produced, destination).map_err(|error| {
@@ -1377,10 +1373,7 @@ pub(crate) fn unstage(handle: &mut AgentHandle, exchange: &Exchange, relative: &
 /// Убирает след прогона со стороны точки входа: путь и опустевшие родители.
 pub(crate) fn tidy(handle: &mut AgentHandle, exchange: &Exchange, relative: &str) {
     match exchange {
-        Exchange::Dir(user_dir) => {
-            tidy_run_path(user_dir, relative);
-            tidy_exchange(handle, user_dir, relative);
-        }
+        Exchange::Dir(user_dir) => tidy_run_path(user_dir, relative),
         Exchange::Sftp => {
             if let Ok(session) = handle.ssh() {
                 let _ = session.sftp_remove_all(relative);
@@ -1687,6 +1680,119 @@ impl GenerationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keeper_status(closing: bool) -> crate::platform::agent_keeper::protocol::KeeperStatus {
+        crate::platform::agent_keeper::protocol::KeeperStatus {
+            keeper_pid: 1,
+            agent_pid: Some(2),
+            fingerprint: None,
+            busy: None,
+            connected: false,
+            last: None,
+            holders: Vec::new(),
+            closing,
+            idle_ms: 0,
+        }
+    }
+
+    fn unreachable(kind: std::io::ErrorKind) -> AgentError {
+        AgentError::KeeperUnreachable {
+            channel: "c".to_owned(),
+            source: std::io::Error::new(kind, "x"),
+        }
+    }
+
+    /// `kept` в квитанции — по ответу сторожа после `end`: агент, которого сторож снимает или
+    /// который ушёл, — `removed`; сторож, не ответивший в срок, — `keeper_failed`, а не
+    /// `removed` (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+    #[test]
+    fn the_receipt_says_removed_only_when_the_keeper_removes_the_agent() {
+        assert_eq!(ended_reason(&Ok(keeper_status(false)), |_| false), None);
+        assert_eq!(
+            ended_reason(&Ok(keeper_status(true)), |_| false),
+            Some(LiveAgentReason::Removed)
+        );
+        assert_eq!(
+            ended_reason(&Err(unreachable(std::io::ErrorKind::NotFound)), |_| true),
+            Some(LiveAgentReason::Removed)
+        );
+        assert_eq!(
+            ended_reason(&Err(unreachable(std::io::ErrorKind::TimedOut)), |_| false),
+            Some(LiveAgentReason::KeeperFailed)
+        );
+    }
+
+    /// Живой агент, занятый сессией другой команды, команду не роняет: она работает с разовым, и
+    /// квитанция говорит `busy`; сторож, который не поднялся, — `keeper_failed`
+    /// (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+    #[test]
+    fn a_busy_live_agent_makes_the_command_one_shot_with_reason_busy() {
+        assert_eq!(
+            one_shot_reason(&KeeperStartError::Busy {
+                command: Some("config dump-cfg".to_owned())
+            }),
+            Some(LiveAgentReason::Busy)
+        );
+        assert_eq!(
+            one_shot_reason(&KeeperStartError::Unavailable {
+                detail: "d".to_owned(),
+                source: None
+            }),
+            Some(LiveAgentReason::KeeperFailed)
+        );
+        assert_eq!(
+            one_shot_reason(&KeeperStartError::Agent(AgentError::LiveAgentGone {
+                detail: "d".to_owned()
+            })),
+            Some(LiveAgentReason::KeeperFailed)
+        );
+        assert_eq!(
+            one_shot_reason(&KeeperStartError::Agent(AgentError::PortTaken {
+                port: 1,
+                detail: "d".to_owned()
+            })),
+            None
+        );
+    }
+
+    /// `interrupted` — только отмена или срок, при которых сторож снимает агента; оборванный
+    /// ответ — `removed`, пропавший сторож — `keeper_failed`; отказ команды агента причины не даёт.
+    #[test]
+    fn a_failed_request_names_its_own_reason() {
+        let timed_out = AgentError::TimedOut {
+            command: "c".to_owned(),
+            timeout_ms: 0,
+        };
+        assert_eq!(
+            failure_reason(&timed_out, true),
+            Some(LiveAgentReason::Interrupted)
+        );
+        assert_eq!(failure_reason(&timed_out, false), None);
+        assert_eq!(
+            failure_reason(
+                &AgentError::InvalidReply {
+                    detail: "d".to_owned(),
+                    head: "h".to_owned()
+                },
+                false
+            ),
+            Some(LiveAgentReason::Removed)
+        );
+        assert_eq!(
+            failure_reason(&unreachable(std::io::ErrorKind::BrokenPipe), true),
+            Some(LiveAgentReason::KeeperFailed)
+        );
+        assert_eq!(
+            failure_reason(
+                &AgentError::Command {
+                    error_type: crate::platform::agent::AgentErrorType::parse("X"),
+                    message: "m".to_owned()
+                },
+                false
+            ),
+            None
+        );
+    }
 
     /// Объявленный ключ хоста по пути не в ASCII — отказ до запуска, называющий путь
     /// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`).

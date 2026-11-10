@@ -34,9 +34,20 @@ pub struct AgentReleaseResult {
 /// `data` команды `agent stop`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct AgentStopResult {
-    /// Снятые живые агенты; пусто — снимать было нечего.
+    /// Снятые живые агенты; пусто — снимать было нечего. Агент с `closing: true` ещё
+    /// выполняет команду: сторож снимет его, как только она кончится.
     pub stopped: Vec<LiveAgentEntry>,
+    /// Агенты, которых `--all` снять не смог: обход идёт дальше, отказ назван здесь.
+    pub refused: Vec<AgentStopRefusal>,
     pub duration_ms: u64,
+}
+
+/// Живой агент, которого `agent stop --all` не снял.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct AgentStopRefusal {
+    pub key: String,
+    /// Почему не снят.
+    pub message: String,
 }
 
 /// `data` команды `agent status`.

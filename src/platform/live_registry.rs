@@ -11,9 +11,15 @@ use crate::support::machine::account::ensure_private_dir;
 /// The directory of live Designer agents under the account's state directory `state`,
 /// created owner-only when missing.
 pub fn agents_dir(state: &Path) -> std::io::Result<PathBuf> {
-    let dir = state.join("agents");
+    let dir = agents_path(state);
     ensure_private_dir(&dir)?;
     Ok(dir)
+}
+
+/// The account's live-agent directory, `<state>/agents`, without creating it: for readers
+/// that must not leave a state behind.
+pub fn agents_path(state: &Path) -> PathBuf {
+    state.join("agents")
 }
 
 /// Takes the account's agent registry lock, `<state>/agents/registry.lock`, waiting for

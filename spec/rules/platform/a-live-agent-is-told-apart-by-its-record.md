@@ -1,7 +1,7 @@
 ---
 id: INV.PLATFORM.A-LIVE-AGENT-IS-TOLD-APART-BY-ITS-RECORD
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/591
 ---
 
 # Живой агент свой, только если сошлась его запись

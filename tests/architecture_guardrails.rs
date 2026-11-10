@@ -328,7 +328,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 40,
+        report.accepted, 39,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -433,7 +433,11 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     ),
     (
         "crate::use_cases::live_agent::status",
-        "спрашивает сторожей живых агентов без замка, чтобы отвечать и пока идёт другая команда",
+        "область — учётная запись ОС: спрашивает сторожей без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::live_agent::stop",
+        "область — учётная запись ОС: снимает живых агентов через их сторожей, `workPath` не трогает",
     ),
     (
         "crate::use_cases::transport::preview_boundary",

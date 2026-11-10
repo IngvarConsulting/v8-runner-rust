@@ -1,7 +1,7 @@
 ---
 id: INV.PLATFORM.A-CLOSED-JOB-KEEPS-THE-AGENT-ONE-SHOT
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/589
 ---
 
 # В Job без права выхода агент остаётся разовым

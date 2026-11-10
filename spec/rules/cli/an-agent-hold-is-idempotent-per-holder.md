@@ -2,6 +2,7 @@
 id: INV.CLI.AN-AGENT-HOLD-IS-IDEMPOTENT-PER-HOLDER
 check:
   - tests/cli_live_agent_portable.rs::agent_hold_is_idempotent_and_release_removes_the_mark
+  - tests/agent_keeper.rs::a_repeated_ttl_hold_keeps_the_later_term
 ---
 
 # Повторное удержание тем же держателем ничего не добавляет

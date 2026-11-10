@@ -6,6 +6,10 @@ check:
   - tests/cli_live_agent.rs::live_off_removes_the_live_agent_and_works_one_shot
   - tests/cli_live_agent.rs::over_the_limit_an_idle_agent_gives_way_and_a_held_one_does_not
   - tests/cli_live_agent.rs::an_interrupted_command_removes_the_live_agent
+  - src/use_cases/agent_session.rs::the_receipt_says_removed_only_when_the_keeper_removes_the_agent
+  - src/use_cases/agent_session.rs::a_busy_live_agent_makes_the_command_one_shot_with_reason_busy
+  - src/use_cases/agent_session.rs::a_failed_request_names_its_own_reason
+  - tests/cli_live_agent_portable.rs::a_receipt_says_removed_when_the_last_holder_left_during_the_command
 ---
 
 # Квитанция говорит, был ли агент живым

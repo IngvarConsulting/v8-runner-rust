@@ -30,7 +30,7 @@ use std::time::Duration;
 
 pub use server::run_keeper;
 
-use crate::platform::live_registry::agents_dir;
+use crate::platform::live_registry::{agents_dir, agents_path};
 use crate::platform::service_record::ServicePaths;
 
 /// Срок простоя живого агента без держателя (`INV.PLATFORM.A-LIVE-AGENT-CLOSES-WHEN-NOBODY-HOLDS-IT`).
@@ -82,7 +82,7 @@ impl KeeperHome {
     /// сторожа этого ключа никогда не поднимали.
     pub fn existing(state: &Path, key: &str) -> std::io::Result<Option<Self>> {
         let key = checked_key(key)?;
-        let paths = ServicePaths::under(&state.join("agents").join(&key), SERVICE);
+        let paths = ServicePaths::under(&agents_path(state).join(&key), SERVICE);
         if !paths.root().is_dir() {
             return Ok(None);
         }
@@ -107,7 +107,7 @@ impl KeeperHome {
 
     /// Каталог ключа: в нём каталог сторожа и одноразовый ключ хоста.
     fn key_dir(&self) -> PathBuf {
-        self.state.join("agents").join(&self.key)
+        agents_path(&self.state).join(&self.key)
     }
 
     /// `AgentBaseDir` агента: каталог пользователя в нём называет карта платформы
@@ -122,8 +122,7 @@ impl KeeperHome {
             format!(r"\\.\pipe\v8-runner-agent-{}", self.key)
         } else {
             let short = &self.key[..self.key.len().min(32)];
-            self.state
-                .join("agents")
+            agents_path(&self.state)
                 .join(format!("{short}.sock"))
                 .display()
                 .to_string()

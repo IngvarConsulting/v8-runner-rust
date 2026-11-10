@@ -20,8 +20,10 @@ mod imp {
 
     use super::Stream;
 
-    /// Сколько клиент ждёт свободного экземпляра канала, прежде чем отказать.
-    const BUSY_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+    /// Сколько клиент ждёт свободного экземпляра канала, прежде чем отказать: заметно меньше
+    /// срока подключения у клиента, чтобы занятый канал кончался своим отказом `TimedOut`, а не
+    /// чужим сроком.
+    const BUSY_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
     /// Слушатель сторожа: следующий экземпляр канала создаётся до того, как отдан принятый.
     pub struct Listener {
@@ -90,7 +92,8 @@ mod imp {
         }
     }
 
-    /// Подключение к каналу, который обслуживает процесс `keeper`.
+    /// Подключение к каналу, который обслуживает процесс `keeper`. Все экземпляры канала заняты
+    /// дольше [`BUSY_PATIENCE`] — отказ `TimedOut`: сторож жив, но не принимает подключений.
     pub async fn connect(name: &str, keeper: u32) -> std::io::Result<Stream> {
         const ERROR_PIPE_BUSY: i32 = 231;
         let started = std::time::Instant::now();
@@ -108,10 +111,16 @@ mod imp {
                     }
                     return Ok(Box::new(client));
                 }
-                Err(error)
-                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
-                        && started.elapsed() < BUSY_PATIENCE =>
-                {
+                Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                    if started.elapsed() >= BUSY_PATIENCE {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                "every instance of {name} stayed busy for {} s",
+                                BUSY_PATIENCE.as_secs()
+                            ),
+                        ));
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
                 Err(error) => return Err(error),

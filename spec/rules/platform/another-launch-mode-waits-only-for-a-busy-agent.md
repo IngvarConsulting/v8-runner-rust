@@ -1,7 +1,7 @@
 ---
 id: INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/590
 ---
 
 # Другой режим запуска ждёт только занятого агента

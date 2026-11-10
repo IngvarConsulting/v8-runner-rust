@@ -1003,3 +1003,88 @@ fn a_conditional_stop_spares_an_agent_in_use() {
     assert_eq!(stopped["frame"], "stopped", "{stopped}");
     assert!(keeper.exited_within(GONE_WITHIN));
 }
+
+/// `hold` с отпечатком других учётных данных агента не держит: сторож отказывает и снимает
+/// агента, как при `begin`, и `agent hold` поднимет нового (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`).
+#[test]
+fn a_hold_with_other_credentials_removes_the_agent() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let refused = keeper.last(json!({
+        "op": "hold",
+        "holder": {"kind": "ttl", "id": "t", "until_ms": now_ms() + 600_000},
+        "credentials": digest(&keeper.state, "", "another password"),
+    }));
+    assert_eq!(
+        refused["error"]["error"], "credentials_mismatch",
+        "{refused}"
+    );
+    assert!(
+        keeper.exited_within(GONE_WITHIN),
+        "the keeper removed the agent"
+    );
+}
+
+/// Агента, которого уже решили снять, отметка не удерживает: `hold` отказывает `closing`, и
+/// клиент ждёт нового сторожа.
+#[test]
+fn a_hold_on_a_closing_agent_is_refused() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let held = keeper.last(json!({
+        "op": "hold",
+        "holder": {"kind": "ttl", "id": "t", "until_ms": now_ms() + 2_000},
+        "credentials": keeper.credentials(),
+    }));
+    assert_eq!(held["frame"], "holders", "{held}");
+    // Открытая сессия держит сторожа, пока ушедший держатель уже решил снять агента.
+    let session = keeper.begin();
+    assert!(
+        wait_until(Duration::from_secs(10), || ready(&keeper)["closing"]
+            == true),
+        "the expired holder closes the agent"
+    );
+    let refused = keeper.last(json!({
+        "op": "hold",
+        "holder": {"kind": "ttl", "id": "t", "until_ms": now_ms() + 600_000},
+        "credentials": keeper.credentials(),
+    }));
+    assert_eq!(refused["error"]["error"], "closing", "{refused}");
+    keeper.end(session);
+    assert!(keeper.exited_within(GONE_WITHIN));
+}
+
+/// Повторный `hold` того же держателя срок не укорачивает: остаётся поздний
+/// (`INV.CLI.AN-AGENT-HOLD-IS-IDEMPOTENT-PER-HOLDER`).
+#[test]
+fn a_repeated_ttl_hold_keeps_the_later_term() {
+    let bench = Bench::new(false);
+    let keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let later = now_ms() + 600_000;
+    for until in [later, now_ms() + 5_000] {
+        let held = keeper.last(json!({
+            "op": "hold",
+            "holder": {"kind": "ttl", "id": "t", "until_ms": until},
+        }));
+        assert_eq!(held["frame"], "holders", "{held}");
+        assert_eq!(
+            held["holders"],
+            json!([{"kind": "ttl", "id": "t", "until_ms": later}]),
+            "{held}"
+        );
+    }
+}
+
+/// Сторож понимает `stop` клиента прежней версии — без условий.
+#[test]
+fn the_former_stop_without_conditions_still_stops() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let stopped = keeper.last(json!({"op": "stop"}));
+    assert_eq!(stopped["frame"], "stopped", "{stopped}");
+    assert!(keeper.exited_within(GONE_WITHIN));
+}

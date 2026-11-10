@@ -12,11 +12,13 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
+use crate::domain::capability::LiveAgentHolder;
 use crate::domain::live_agent::{
-    AgentHoldResult, AgentReleaseResult, AgentStatusResult, AgentStopResult, LiveAgentEntry,
+    AgentHoldResult, AgentReleaseResult, AgentStatusResult, AgentStopRefusal, AgentStopResult,
+    LiveAgentEntry,
 };
 use crate::platform::agent_keeper::client::{
-    live_keepers, KeeperClient, KeeperStartError, LiveKeeper,
+    live_keepers, KeeperClient, KeeperStartError, LiveKeeper, Stopped,
 };
 use crate::platform::agent_keeper::protocol::{Holder, KeeperStatus};
 use crate::platform::locator::UtilityType;
@@ -36,7 +38,7 @@ pub const TTL_HOLDER: &str = "agent-hold";
 /// RFC 3339 вызывающего — до секунды.
 const STARTED_AT_TOLERANCE: Duration = Duration::from_secs(1);
 
-/// Держатель, как его назвала командная строка.
+/// Держатель `agent hold`, как его назвала командная строка.
 #[derive(Debug, Clone)]
 pub enum HolderRequest {
     Process {
@@ -46,6 +48,24 @@ pub enum HolderRequest {
     Ttl {
         seconds: u64,
     },
+}
+
+/// Область `agent stop` и `agent status`: агент цели проекта (из проекта берётся только ключ)
+/// или все живые агенты учётной записи ОС (`--all`, проект не нужен).
+#[derive(Debug, Clone, Copy)]
+pub enum AgentScope<'a> {
+    Project(&'a AppConfig),
+    Account,
+}
+
+/// Чью отметку снимает `agent release`: процесса или держателя `agent hold --ttl`.
+#[derive(Debug, Clone)]
+pub enum ReleaseRequest {
+    Process {
+        pid: u32,
+        started_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    Ttl,
 }
 
 /// `agent hold`.
@@ -66,14 +86,15 @@ pub fn hold(
     let holder = holder(request)?;
     let v8 = locate_v8(config)?;
     let target = live_target(config, &v8, port)?;
-    let client = match KeeperClient::start_or_attach(
+    let (client, holders) = match KeeperClient::start_and_hold(
         &target.key,
         &target.launch,
         &target.credentials,
         agent.live_limit(),
-        context.work(),
+        &context.cancellation(),
+        &holder,
     ) {
-        Ok(client) => client,
+        Ok(taken) => taken,
         Err(KeeperStartError::Job) => {
             return Err(refused(
                 UseCaseErrorKind::LiveAgentJob,
@@ -90,18 +111,16 @@ pub fn hold(
             ))
         }
         Err(error @ (KeeperStartError::Busy { .. } | KeeperStartError::Unavailable { .. })) => {
-            return Err(AppError::EnvironmentUnavailable(error.to_string()))
+            return Err(AppError::EnvironmentUnavailable(crate::support::error::chain(&error)))
         }
         Err(KeeperStartError::Agent(error)) => return Err(AppError::from(error)),
     };
-    let holders = client.hold(holder).map_err(AppError::from)?;
-    let status = client.status().map_err(AppError::from)?;
     Ok(AgentHoldResult {
         key: client.key().to_owned(),
         reused: client.reused(),
         holders: holders.iter().map(holder_receipt).collect(),
-        keeper_pid: status.keeper_pid,
-        agent_pid: status.agent_pid,
+        keeper_pid: client.keeper_pid(),
+        agent_pid: client.agent_pid(),
         duration_ms: elapsed_ms(started),
     })
 }
@@ -111,7 +130,7 @@ pub fn hold(
 pub fn release(
     _context: &ExecutionContext,
     config: &AppConfig,
-    request: &HolderRequest,
+    request: &ReleaseRequest,
 ) -> Result<AgentReleaseResult, AppError> {
     let started = Instant::now();
     let nothing = |key: Option<String>| AgentReleaseResult {
@@ -146,40 +165,49 @@ pub fn release(
 }
 
 /// `agent stop`: снимает живого агента цели проекта, с `all` — всех живых агентов учётной
-/// записи. Агента, который выполняет критическую команду, сторож снимает после неё.
+/// записи. Агента, который выполняет критическую команду, сторож снимает после неё: не дождались
+/// — агент назван с `closing: true`. Отмена команды кончает ожидание, а не сам `stop`. С `all`
+/// отказ одного сторожа не останавливает обход: он назван в `refused`.
 pub fn stop(
-    _context: &ExecutionContext,
-    config: &AppConfig,
-    all: bool,
+    context: &ExecutionContext,
+    scope: AgentScope<'_>,
 ) -> Result<AgentStopResult, AppError> {
     let started = Instant::now();
+    let nothing = |started: Instant| AgentStopResult {
+        stopped: Vec::new(),
+        refused: Vec::new(),
+        duration_ms: elapsed_ms(started),
+    };
     let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
-        return Ok(AgentStopResult {
-            stopped: Vec::new(),
-            duration_ms: elapsed_ms(started),
-        });
+        return Ok(nothing(started));
     };
-    let own = if all {
-        None
-    } else {
-        match own_key(config)? {
+    let all = matches!(scope, AgentScope::Account);
+    let own = match scope {
+        AgentScope::Account => None,
+        AgentScope::Project(config) => match own_key(config)? {
             Some((_, key)) => Some(key),
-            None => {
-                return Ok(AgentStopResult {
-                    stopped: Vec::new(),
-                    duration_ms: elapsed_ms(started),
-                })
-            }
-        }
+            None => return Ok(nothing(started)),
+        },
     };
+    let cancel = context.cancellation();
     let mut stopped = Vec::new();
+    let mut refused = Vec::new();
     for (keeper, record) in live_keepers(&state) {
         if own.as_ref().is_some_and(|own| *own != keeper.key) {
             continue;
         }
         let status = keeper.client.status().ok();
-        match keeper.client.stop() {
-            Ok(()) => stopped.push(entry(&keeper, &record, status.as_ref(), own.as_deref())),
+        let mut found = entry(&keeper, &record, status.as_ref(), own.as_deref());
+        match keeper.client.stop(&cancel) {
+            Ok(Stopped::Removed | Stopped::InUse { .. }) => stopped.push(found),
+            Ok(Stopped::Pending) => {
+                found.closing = true;
+                stopped.push(found);
+            }
+            Err(error) if all => refused.push(AgentStopRefusal {
+                key: keeper.key.clone(),
+                message: error.to_string(),
+            }),
             Err(error) => {
                 return Err(AppError::EnvironmentUnavailable(format!(
                     "the live agent {} was not stopped: {error}",
@@ -190,15 +218,17 @@ pub fn stop(
     }
     Ok(AgentStopResult {
         stopped,
+        refused,
         duration_ms: elapsed_ms(started),
     })
 }
 
-/// `agent status`: живые агенты учётной записи. Замка рабочего каталога не берёт и ничего не
-/// поднимает; сторож, который не ответил, назван без состояния.
+/// `agent status`: живой агент цели проекта или, с `--all`, все живые агенты учётной записи.
+/// Замка рабочего каталога не берёт и ничего не поднимает; сторож, который не ответил, назван
+/// без состояния.
 pub fn status(
     _context: &ExecutionContext,
-    config: &AppConfig,
+    scope: AgentScope<'_>,
 ) -> Result<AgentStatusResult, AppError> {
     let started = Instant::now();
     let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
@@ -207,16 +237,21 @@ pub fn status(
             duration_ms: elapsed_ms(started),
         });
     };
-    // Чей агент — цели проекта: без платформы ключа не сложить, и ответ тогда без отметки.
-    let own = match own_key(config) {
-        Ok(found) => found.map(|(_, key)| key),
-        Err(error) => {
-            tracing::debug!(%error, "the live agent of this project cannot be keyed");
-            None
-        }
+    let own = match scope {
+        AgentScope::Account => None,
+        AgentScope::Project(config) => match own_key(config)? {
+            Some((_, key)) => Some(key),
+            None => {
+                return Ok(AgentStatusResult {
+                    agents: Vec::new(),
+                    duration_ms: elapsed_ms(started),
+                })
+            }
+        },
     };
     let agents = live_keepers(&state)
         .into_iter()
+        .filter(|(keeper, _)| own.as_ref().is_none_or(|own| *own == keeper.key))
         .map(|(keeper, record)| {
             let status = match keeper.client.status() {
                 Ok(status) => Some(status),
@@ -274,8 +309,8 @@ fn own_key(config: &AppConfig) -> Result<Option<(PathBuf, String)>, AppError> {
     Ok(key.map(|key| (state, key)))
 }
 
-/// Держатель из запроса. Процесс должен быть жив, а названное время старта — совпадать с тем,
-/// что называет ОС, с точностью до секунды.
+/// Держатель из запроса. Процесс должен быть жив и своей учётной записи ОС, а названное время
+/// старта — совпадать с тем, что называет ОС, с точностью до секунды.
 fn holder(request: &HolderRequest) -> Result<Holder, AppError> {
     match request {
         HolderRequest::Process {
@@ -287,6 +322,19 @@ fn holder(request: &HolderRequest) -> Result<Holder, AppError> {
                     "process {pid} is not running: it cannot hold the live agent"
                 ))
             })?;
+            match crate::support::machine::account::runs_as_this_account(*pid) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(AppError::Validation(format!(
+                        "process {pid} runs as another OS account: it cannot hold the live agent of this one"
+                    )))
+                }
+                Err(error) => {
+                    return Err(AppError::Validation(format!(
+                        "the OS account of process {pid} is not known: {error}"
+                    )))
+                }
+            }
             if let Some(expected) = expected {
                 let actual = started_at(facts.started).ok_or_else(|| {
                     AppError::Validation(format!(
@@ -320,10 +368,10 @@ fn holder(request: &HolderRequest) -> Result<Holder, AppError> {
 
 /// Отметка держателя из запроса: процесс — по pid и, если названо, по времени старта; срок —
 /// держатель `agent hold --ttl`.
-fn matches(request: &HolderRequest, held: &Holder) -> bool {
+fn matches(request: &ReleaseRequest, held: &Holder) -> bool {
     match (request, held) {
         (
-            HolderRequest::Process {
+            ReleaseRequest::Process {
                 pid,
                 started_at: expected,
             },
@@ -344,7 +392,7 @@ fn matches(request: &HolderRequest, held: &Holder) -> bool {
                     })
                 })
         }
-        (HolderRequest::Ttl { .. }, Holder::Ttl { id, .. }) => id == TTL_HOLDER,
+        (ReleaseRequest::Ttl, Holder::Ttl { id, .. }) => id == TTL_HOLDER,
         _ => false,
     }
 }
@@ -395,12 +443,13 @@ fn describe_live_agents() -> String {
                 Ok(status) => format!(
                     "{} on {infobase} held by {}",
                     keeper.key,
-                    status
-                        .holders
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    LiveAgentHolder::list_text(
+                        &status
+                            .holders
+                            .iter()
+                            .map(holder_receipt)
+                            .collect::<Vec<_>>()
+                    )
                 ),
                 Err(_) => format!("{} on {infobase}, not answering", keeper.key),
             }

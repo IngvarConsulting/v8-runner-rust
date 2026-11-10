@@ -1,5 +1,23 @@
 {
   "$defs": {
+    "AgentStopRefusal": {
+      "additionalProperties": false,
+      "description": "Живой агент, которого `agent stop --all` не снял.",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "message": {
+          "description": "Почему не снят.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "message"
+      ],
+      "type": "object"
+    },
     "LiveAgentEntry": {
       "additionalProperties": false,
       "description": "Живой агент учётной записи, как его называет сторож.",
@@ -120,8 +138,15 @@
       "minimum": 0,
       "type": "integer"
     },
+    "refused": {
+      "description": "Агенты, которых `--all` снять не смог: обход идёт дальше, отказ назван здесь.",
+      "items": {
+        "$ref": "#/$defs/AgentStopRefusal"
+      },
+      "type": "array"
+    },
     "stopped": {
-      "description": "Снятые живые агенты; пусто — снимать было нечего.",
+      "description": "Снятые живые агенты; пусто — снимать было нечего. Агент с `closing: true` ещё\nвыполняет команду: сторож снимет его, как только она кончится.",
       "items": {
         "$ref": "#/$defs/LiveAgentEntry"
       },
@@ -130,6 +155,7 @@
   },
   "required": [
     "stopped",
+    "refused",
     "duration_ms"
   ],
   "title": "AgentStopResult",

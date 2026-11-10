@@ -1,7 +1,11 @@
 ---
 id: INV.PLATFORM.AN-AGENT-HOLDER-IS-A-LIVE-PROCESS
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/agent_keeper.rs::the_agent_closes_when_its_holder_process_exits
+  - tests/agent_keeper.rs::a_dead_process_cannot_hold_the_agent
+  - tests/agent_keeper.rs::a_ttl_holder_expires_and_takes_the_agent_with_it
+  - tests/cli_live_agent_portable.rs::agent_hold_refuses_a_holder_that_is_not_that_live_process
+  - src/support/machine.rs::a_process_of_another_account_is_told_apart
 ---
 
 # Держатель агента — живой процесс или срок

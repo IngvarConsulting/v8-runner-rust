@@ -158,9 +158,15 @@ pub(crate) fn settle_live_agents(
         // Снимается только агент, который и сейчас не подключён к базе: сторож проверяет это
         // под своим замком. Подключённый за это время — отказ занятой базы, а не снятие.
         for (keeper, status) in found {
-            match keeper.client.stop_if(true, false) {
+            match keeper
+                .client
+                .stop_if(true, false, &tokio_util::sync::CancellationToken::new())
+            {
                 Ok(Stopped::Removed) => {
                     tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed")
+                }
+                Ok(Stopped::Pending) => {
+                    tracing::warn!(key = %keeper.key, "the live agent of the recreated infobase did not confirm its removal in time")
                 }
                 Ok(Stopped::InUse { command, holders }) => {
                     let agent_pid = status.ok().and_then(|status| status.agent_pid);
@@ -175,16 +181,16 @@ pub(crate) fn settle_live_agents(
     Ok(())
 }
 
-/// Держатели живого агента для отказа: «no holders» без них.
+/// Держатели живого агента для отказа.
 fn holders_text(holders: &[Holder]) -> String {
-    if holders.is_empty() {
-        return "no holders".to_owned();
-    }
-    holders
+    let holders: Vec<_> = holders
         .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+        .map(crate::use_cases::agent_session::holder_receipt)
+        .collect();
+    format!(
+        "holders: {}",
+        crate::domain::capability::LiveAgentHolder::list_text(&holders)
+    )
 }
 
 /// Файл замка рядом с каталогом базы: `.<имя каталога>.v8-runner.infobase.lock`.

@@ -522,6 +522,19 @@ impl From<DownloadError> for AppError {
     }
 }
 
+/// Отказ с цепочкой причин через `: `: для ошибок, которые держат отказ ОС источником, а не
+/// в своём тексте.
+pub fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AppError, CancelledAt};

@@ -257,6 +257,59 @@ pub mod account {
         windows_token::sid_of(windows_token::Which::User)
     }
 
+    /// Whether process `pid` runs as this OS account. A process the account may not even
+    /// query belongs to another account. `NotFound` — there is no such process.
+    #[cfg(windows)]
+    pub fn runs_as_this_account(pid: u32) -> std::io::Result<bool> {
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        match windows_token::user_sid_of_process(pid) {
+            Ok(sid) => Ok(sid == account_id()?),
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether process `pid` runs as this OS account: by the owner of `/proc/<pid>` on Linux,
+    /// elsewhere by whether this account may signal it. Root may signal any process, so there
+    /// the answer outside Linux is always yes. `NotFound` — there is no such process.
+    #[cfg(unix)]
+    pub fn runs_as_this_account(pid: u32) -> std::io::Result<bool> {
+        // SAFETY: `getuid` takes nothing and cannot fail.
+        let own = unsafe { libc::getuid() };
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let owner = std::fs::metadata(format!("/proc/{pid}"))?.uid();
+            Ok(owner == own)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = own;
+            let pid = libc::pid_t::try_from(pid).map_err(std::io::Error::other)?;
+            // SAFETY: signal 0 only checks that the process exists and may be signalled.
+            if unsafe { libc::kill(pid, 0) } == 0 {
+                return Ok(true);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EPERM) => Ok(false),
+                Some(libc::ESRCH) => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no process {pid}"),
+                )),
+                _ => Err(error),
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn runs_as_this_account(_pid: u32) -> std::io::Result<bool> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this system names no account",
+        ))
+    }
+
     /// The SIDs this process's token names: its user and the default owner of what it creates.
     /// An elevated administrator's token makes the Administrators group that owner.
     #[cfg(windows)]
@@ -267,7 +320,9 @@ pub mod account {
         use windows_sys::Win32::Security::{
             GetTokenInformation, TokenOwner, TokenUser, PSID, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
         };
-        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
 
         #[derive(Clone, Copy)]
         pub(super) enum Which {
@@ -277,14 +332,38 @@ pub mod account {
 
         /// The SID string of the token's user or default owner.
         pub(super) fn sid_of(which: Which) -> std::io::Result<String> {
+            // SAFETY: the pseudo handle of this process needs no closing.
+            sid_of_process(unsafe { GetCurrentProcess() }, which)
+        }
+
+        /// The SID string of the user of process `pid`.
+        pub(super) fn user_sid_of_process(pid: u32) -> std::io::Result<String> {
+            // SAFETY: plain values; the returned handle is checked and owned below.
+            let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if raw.is_null() {
+                let error = std::io::Error::last_os_error();
+                // ERROR_INVALID_PARAMETER: there is no process with this id.
+                return Err(if error.raw_os_error() == Some(87) {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, format!("no process {pid}"))
+                } else {
+                    error
+                });
+            }
+            // SAFETY: the call succeeded and handed over this handle; the guard closes it once.
+            let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+            sid_of_process(process.as_raw_handle(), Which::User)
+        }
+
+        /// The SID string of the user or default owner of the token of `process`, a handle
+        /// that stays open for the call.
+        fn sid_of_process(process: HANDLE, which: Which) -> std::io::Result<String> {
             let class = match which {
                 Which::User => TokenUser,
                 Which::Owner => TokenOwner,
             };
             let mut raw: HANDLE = std::ptr::null_mut();
-            // SAFETY: the pseudo handle of this process needs no closing; `raw` outlives the
-            // call.
-            if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
+            // SAFETY: the caller keeps `process` open; `raw` outlives the call.
+            if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw) } == 0 {
                 return Err(std::io::Error::last_os_error());
             }
             // SAFETY: the call succeeded and handed over this handle; the guard closes it once.
@@ -654,6 +733,25 @@ mod tests {
     #[test]
     fn this_process_is_alive() {
         assert!(is_process_alive(std::process::id()));
+    }
+
+    /// Свой процесс — этой учётной записи, системный — другой: держателем живого агента он
+    /// быть не может (`INV.PLATFORM.AN-AGENT-HOLDER-IS-A-LIVE-PROCESS`).
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_process_of_another_account_is_told_apart() {
+        use super::account::runs_as_this_account;
+        assert!(runs_as_this_account(std::process::id()).unwrap());
+        // SAFETY: `getuid` takes nothing and cannot fail.
+        #[cfg(unix)]
+        if unsafe { libc::getuid() } != 0 {
+            assert!(!runs_as_this_account(1).unwrap(), "init runs as root");
+        }
+        #[cfg(windows)]
+        assert!(
+            !runs_as_this_account(4).unwrap(),
+            "the System process runs as LocalSystem"
+        );
     }
 
     #[cfg(unix)]

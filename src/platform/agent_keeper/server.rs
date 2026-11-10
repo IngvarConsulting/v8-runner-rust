@@ -719,7 +719,10 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
             }
             Err(error) => Frame::Error { error },
         },
-        Request::Hold { holder } => hold(&shared, holder).await,
+        Request::Hold {
+            holder,
+            credentials,
+        } => hold(&shared, holder, credentials.as_deref()).await,
         Request::Release { holder } => {
             let mut state = shared.lock();
             let before = state.holders.len();
@@ -796,10 +799,18 @@ fn stop(shared: &Shared, only_idle: bool, only_unheld: bool) -> Option<Frame> {
     None
 }
 
-/// `hold`: процесс, которого нет, держателем не становится.
-async fn hold(shared: &Shared, holder: Holder) -> Frame {
+/// `hold`: процесс, которого нет, держателем не становится. Учётные данные не те, с которыми
+/// поднят агент, — отказ, и агента снимают, как при `begin`; агента, которого уже снимают,
+/// отметка не удержит — отказ [`KeeperError::Closing`], и клиент ждёт нового сторожа.
+async fn hold(shared: &Shared, holder: Holder, credentials: Option<&str>) -> Frame {
     if let Err(error) = shared.ready().await {
         return Frame::Error { error };
+    }
+    if credentials.is_some_and(|credentials| credentials != shared.digest) {
+        shared.request_close("a hold came with other credentials");
+        return Frame::Error {
+            error: KeeperError::CredentialsMismatch,
+        };
     }
     if let Holder::Process { pid, started } = &holder {
         if !alive(*pid, Some(*started)) {
@@ -809,10 +820,24 @@ async fn hold(shared: &Shared, holder: Holder) -> Frame {
         }
     }
     let mut state = shared.lock();
+    if state.close_requested || state.stop_requested || shared.shutdown.is_cancelled() {
+        return Frame::Error {
+            error: KeeperError::Closing,
+        };
+    }
     match state.holders.iter_mut().find(|held| held.same(&holder)) {
-        // Повторный `hold` второй отметки не ставит: срок продлевается, процесс
-        // остаётся тем же (`INV.CLI.AN-AGENT-HOLD-IS-IDEMPOTENT-PER-HOLDER`).
-        Some(held) => *held = holder,
+        // Повторный `hold` второй отметки не ставит, а срок не укорачивает: остаётся
+        // поздний из двух (`INV.CLI.AN-AGENT-HOLD-IS-IDEMPOTENT-PER-HOLDER`).
+        Some(Holder::Ttl { until_ms, .. }) => {
+            if let Holder::Ttl {
+                until_ms: requested,
+                ..
+            } = holder
+            {
+                *until_ms = (*until_ms).max(requested);
+            }
+        }
+        Some(Holder::Process { .. }) => {}
         None => state.holders.push(holder),
     }
     Frame::Holders {

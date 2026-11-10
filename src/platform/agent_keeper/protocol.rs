@@ -22,16 +22,6 @@ pub enum Holder {
     Ttl { id: String, until_ms: u64 },
 }
 
-impl std::fmt::Display for Holder {
-    /// Держатель для людей: в отказе занятой базы и в ответе `agent status`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Process { pid, .. } => write!(f, "process {pid}"),
-            Self::Ttl { id, .. } => write!(f, "'{id}' with a term"),
-        }
-    }
-}
-
 impl Holder {
     /// Тот же ли это держатель: процесс — по pid и времени старта, срок — по `id`.
     pub fn same(&self, other: &Holder) -> bool {
@@ -75,8 +65,13 @@ pub enum Request {
     },
     /// Клиент бросает команду, ответа на которую ждёт: строка по подключению `run`.
     Cancel,
+    /// Ставит держателя. `credentials` — [`credentials_digest`](super::credentials_digest)
+    /// команды: не тот, с которым поднят агент, — отказ [`KeeperError::CredentialsMismatch`], и
+    /// сторож снимает агента, как при `begin`. Без поля (клиент прежней версии) не сверяется.
     Hold {
         holder: Holder,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credentials: Option<String>,
     },
     Release {
         holder: Holder,
@@ -85,7 +80,8 @@ pub enum Request {
     /// Сторож снимает агента и выходит. `only_idle` — только если агент не выполняет команду и
     /// сессии команды нет, `only_unheld` — только если у него нет держателей. Условие
     /// проверяется под замком состояния сторожа, поэтому между проверкой и снятием команда
-    /// сессию не откроет; не выполнено — отказ [`KeeperError::NotIdle`].
+    /// сессию не откроет; не выполнено — отказ [`KeeperError::NotIdle`]. Прежняя форма без
+    /// полей (`{"op":"stop"}`) — безусловный `stop`.
     Stop {
         #[serde(default)]
         only_idle: bool,
@@ -539,6 +535,31 @@ mod tests {
             line,
             r#"{"frame":"error","error":{"error":"credentials_mismatch"}}"#
         );
+    }
+
+    /// Сторож понимает запросы клиента прежней версии: `stop` без условий и `hold` без
+    /// отпечатка учётных данных.
+    #[test]
+    fn the_former_stop_and_hold_forms_are_read() {
+        let stop: Request = serde_json::from_str(r#"{"op":"stop"}"#).unwrap();
+        assert!(matches!(
+            stop,
+            Request::Stop {
+                only_idle: false,
+                only_unheld: false
+            }
+        ));
+        let hold: Request = serde_json::from_str(
+            r#"{"op":"hold","holder":{"kind":"process","pid":7,"started":1}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            hold,
+            Request::Hold {
+                credentials: None,
+                ..
+            }
+        ));
     }
 
     #[test]

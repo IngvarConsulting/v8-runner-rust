@@ -95,10 +95,9 @@ fn without_preview() -> Vec<(&'static str, Vec<&'static str>, &'static str)> {
         ),
         (
             "agent release",
-            vec!["agent", "release", "--ttl", "60"],
+            vec!["agent", "release", "--ttl"],
             "agent release",
         ),
-        ("agent stop", vec!["agent", "stop"], "agent stop"),
     ]
 }
 

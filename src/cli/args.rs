@@ -159,6 +159,28 @@ pub struct AgentHolderArgs {
     pub ttl: Option<u64>,
 }
 
+/// Whose mark `agent release` removes: a process, or the holder of `agent hold --ttl`.
+#[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentReleaseArgs {
+    /// Process whose mark to remove
+    #[arg(
+        long,
+        value_name = "PID",
+        required_unless_present = "ttl",
+        conflicts_with = "ttl"
+    )]
+    pub holder_pid: Option<u32>,
+
+    /// Start time of the holder process (UTC, RFC 3339): only its mark is removed
+    #[arg(long, value_name = "RFC3339", requires = "holder_pid", value_parser = parse_rfc3339)]
+    pub holder_started_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Remove the mark of agent hold --ttl
+    #[arg(long)]
+    pub ttl: bool,
+}
+
 fn parse_rfc3339(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|at| at.with_timezone(&chrono::Utc))
@@ -168,7 +190,16 @@ fn parse_rfc3339(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
 #[derive(Args, Debug, Clone, Copy)]
 #[command(next_help_heading = "Command options")]
 pub struct AgentStopArgs {
-    /// Stop every live agent of this OS account, not only the one of this project
+    /// Stop every live agent of this OS account, not only the one of this project; needs no
+    /// project
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentStatusArgs {
+    /// List every live agent of this OS account; needs no project
     #[arg(long)]
     pub all: bool,
 }
@@ -178,11 +209,11 @@ pub enum AgentCommand {
     /// Hold the live agent of this project, starting it if there is none
     Hold(AgentHolderArgs),
     /// Remove the holder's mark from the live agent of this project
-    Release(AgentHolderArgs),
+    Release(AgentReleaseArgs),
     /// Stop the live agent of this project, or every one with --all
     Stop(AgentStopArgs),
-    /// List the live agents of this OS account: base, holders, busy or idle
-    Status,
+    /// Show the live agent of this project, or every one of the OS account with --all
+    Status(AgentStatusArgs),
     /// The keeper of one live agent: the runner starts it itself, with the start request on
     /// stdin
     #[command(hide = true)]

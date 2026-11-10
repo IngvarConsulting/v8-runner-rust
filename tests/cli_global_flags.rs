@@ -66,7 +66,7 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["mcp", "serve", "stdio"], "mcp serve stdio"),
     (&["mcp", "serve", "http"], "mcp serve http"),
     (&["agent", "hold", "--ttl", "60"], "agent hold"),
-    (&["agent", "release", "--ttl", "60"], "agent release"),
+    (&["agent", "release", "--ttl"], "agent release"),
     (&["agent", "stop"], "agent stop"),
     (&["agent", "status"], "agent status"),
     (&["agent", "keeper", "--key", "00"], "agent keeper"),

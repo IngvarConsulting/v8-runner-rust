@@ -130,6 +130,17 @@ pub fn run() -> i32 {
         return run_config_command(args, &cli, &presenter);
     }
 
+    // `agent stop --all` и `agent status --all` — область учётной записи ОС: проект им не
+    // нужен, и его отсутствие не отказ.
+    if let Command::Agent(crate::cli::args::AgentArgs { command }) = &cli.command {
+        if execute::agent_needs_no_project(command) {
+            return match execute::execute_agent_account(command, &presenter) {
+                Ok(()) => 0,
+                Err(error) => error.exit_code(),
+            };
+        }
+    }
+
     if let Command::Bootstrap(args) = &cli.command {
         return run_bootstrap(args, &cli, &presenter);
     }
@@ -382,10 +393,12 @@ pub(crate) fn load_cli_config(
     } else if matches!(
         &cli.command,
         Command::Agent(crate::cli::args::AgentArgs {
-            command: crate::cli::args::AgentCommand::Status
+            command: crate::cli::args::AgentCommand::Status(_)
+                | crate::cli::args::AgentCommand::Stop(_)
         })
     ) {
-        // `agent status` только спрашивает сторожей: рабочего каталога он не готовит.
+        // `agent status` и `agent stop` только говорят со сторожами: из проекта им нужен ключ
+        // агента, а рабочего каталога они не готовят.
         crate::config::loader::load_config_for_inspection(config_path, workdir, &selector, true)
     } else if matches!(&cli.command, Command::Platforms) {
         // `platforms` только читает: рабочего каталога он не готовит.

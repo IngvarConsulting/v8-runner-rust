@@ -7,13 +7,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
+use tokio_util::sync::CancellationToken;
 
 use super::channel::{connect, Stream};
 use super::protocol::{read_line, write_line, Frame, Holder, KeeperError, KeeperStatus, Request};
 use super::{credentials_digest, KeeperHome};
 use crate::platform::agent::{AgentError, AgentMessage, AgentReply, WaitPolicy};
 use crate::platform::live_registry::lock_agent_registry;
-use crate::platform::process::{ProcessExecutor, ProcessInterruptionReason, WorkGiven};
+use crate::platform::process::ProcessInterruptionReason;
 use crate::platform::service::{process_facts, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
     adopt_recorded_pid, machine_fingerprint, observe_service, read_json, write_json, Observed,
@@ -71,9 +72,14 @@ pub enum KeeperStartError {
     /// Живой агент этого ключа ещё служит сессии другой команды.
     #[error("the live agent still serves another command{}", .command.as_deref().map(|command| format!(": {command}")).unwrap_or_default())]
     Busy { command: Option<String> },
-    /// Сторож не поднялся или не ответил: путь канала, отказ запуска, срок.
+    /// Сторож не поднялся или не ответил: путь канала, отказ запуска, срок. `source` — отказ
+    /// ОС или запуска, если он был.
     #[error("{detail}")]
-    Unavailable { detail: String },
+    Unavailable {
+        detail: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     #[error(transparent)]
     Agent(#[from] AgentError),
 }
@@ -101,6 +107,9 @@ const QUERY_PATIENCE: Duration = Duration::from_secs(5);
 /// Сколько клиент ждёт ответа на `stop`: сторож отвечает, когда агент снят, а критическую
 /// команду он доводит до исхода.
 const STOP_PATIENCE: Duration = Duration::from_secs(120);
+/// Сколько клиент ждёт ухода процесса сторожа, оборвавшего канал, прежде чем считать сторожа
+/// живым.
+const GONE_PATIENCE: Duration = Duration::from_secs(3);
 
 /// Открытая сессия команды: её подключение держится до `end`.
 struct OpenSession {
@@ -144,16 +153,27 @@ pub struct LiveKeeper {
     pub client: KeeperClient,
 }
 
-/// Чем кончился `stop` с условием.
+/// Чем кончился `stop`.
 #[derive(Debug)]
 pub enum Stopped {
-    /// Агент снят, или сторож ушёл сам, пока его снимали.
+    /// Агент снят: сторож ответил или подтверждённо ушёл.
     Removed,
+    /// Сторож принял `stop`, но не ответил за срок или команду отменили, пока ждали ответа:
+    /// агент снимется, как только кончится команда, которую он выполняет.
+    Pending,
     /// Агент занят или его держат: сторож его не снял.
     InUse {
         command: Option<String>,
         holders: Vec<Holder>,
     },
+}
+
+/// Что сделать со взятым живым агентом.
+enum Take<'a> {
+    /// Открыть сессию команды.
+    Session,
+    /// Поставить держателя.
+    Hold(&'a Holder),
 }
 
 /// Чем кончилось ожидание поднятого сторожа.
@@ -170,7 +190,27 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 fn unavailable(detail: String) -> KeeperStartError {
-    KeeperStartError::Unavailable { detail }
+    KeeperStartError::Unavailable {
+        detail,
+        source: None,
+    }
+}
+
+fn unavailable_by(
+    detail: &str,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> KeeperStartError {
+    KeeperStartError::Unavailable {
+        detail: detail.to_owned(),
+        source: Some(Box::new(source)),
+    }
+}
+
+/// Отмена команды, пока она ждала сторожа: агенту ничего не отправлено.
+fn cancelled_waiting() -> KeeperStartError {
+    KeeperStartError::Agent(AgentError::NotSent {
+        command: "start of the live agent".to_owned(),
+    })
 }
 
 impl KeeperClient {
@@ -192,53 +232,73 @@ impl KeeperClient {
     }
 
     /// Живой агент ключа `key` с открытой сессией команды: берётся, если его сторож жив, иначе
-    /// поднимается новый сторож. `work` — отметка работы команды: поднятый сторож переживает
-    /// команду, поэтому его запуск — уже её работа.
+    /// поднимается новый сторож. Подъём сторожа и агента работой команды не считается. Отмена
+    /// `cancel` прекращает ожидание сторожа.
     pub fn connect_or_start(
         key: &str,
         launch: &KeeperLaunch,
         credentials: &Credentials,
         limit: u8,
-        work: &WorkGiven,
+        cancel: &CancellationToken,
     ) -> Result<Self, KeeperStartError> {
-        Self::obtain(key, launch, credentials, limit, work, true)
+        let mut client = Self::prepare(key, credentials)?;
+        client.obtain(launch, credentials, limit, cancel, &Take::Session)?;
+        Ok(client)
     }
 
-    /// Живой агент ключа `key` без сессии команды: берётся или поднимается, как у
-    /// [`connect_or_start`](Self::connect_or_start), но к базе не подключается. Для `agent hold`.
-    pub fn start_or_attach(
+    /// Живой агент ключа `key` с держателем `holder`: берётся или поднимается, как у
+    /// [`connect_or_start`](Self::connect_or_start), но к базе не подключается. Отметка ставится,
+    /// как только агент взят, а агент, которого снимают, ожидается до ухода и поднимается заново:
+    /// свежего агента ради предела не снимут, пока отметки нет. Ответ — клиент и держатели после
+    /// отметки. Для `agent hold`.
+    pub fn start_and_hold(
         key: &str,
         launch: &KeeperLaunch,
         credentials: &Credentials,
         limit: u8,
-        work: &WorkGiven,
-    ) -> Result<Self, KeeperStartError> {
-        Self::obtain(key, launch, credentials, limit, work, false)
+        cancel: &CancellationToken,
+        holder: &Holder,
+    ) -> Result<(Self, Vec<Holder>), KeeperStartError> {
+        let mut client = Self::prepare(key, credentials)?;
+        let holders = client.obtain(launch, credentials, limit, cancel, &Take::Hold(holder))?;
+        Ok((client, holders))
     }
 
-    fn obtain(
-        key: &str,
-        launch: &KeeperLaunch,
-        credentials: &Credentials,
-        limit: u8,
-        work: &WorkGiven,
-        session: bool,
-    ) -> Result<Self, KeeperStartError> {
+    fn prepare(key: &str, credentials: &Credentials) -> Result<Self, KeeperStartError> {
         let state = crate::support::machine::account::account_state_dir()?;
         let home = KeeperHome::open(&state, key)?;
         let digest = credentials_digest(&state, &credentials.user, &credentials.password)?;
         let mut client = Self::detached(home, 0)?;
         client.digest = digest;
+        Ok(client)
+    }
+
+    /// Берёт или поднимает агента и делает с ним `take`. Сторож, который закрывается, отказал
+    /// учётным данным или ещё не принимает подключений, ожидается до ответа или ухода; ушёл —
+    /// поднимается новый. Ответ — держатели после отметки ([`Take::Hold`]).
+    fn obtain(
+        &mut self,
+        launch: &KeeperLaunch,
+        credentials: &Credentials,
+        limit: u8,
+        cancel: &CancellationToken,
+        take: &Take<'_>,
+    ) -> Result<Vec<Holder>, KeeperStartError> {
+        let client = self;
+        let key = client.home.key().to_owned();
         let deadline =
             Instant::now() + Duration::from_millis(launch.startup_timeout_ms) + START_MARGIN;
         let mut respawns = 0;
         let mut evictions = 0;
         loop {
+            if cancel.is_cancelled() {
+                return Err(cancelled_waiting());
+            }
             match client.find(limit)? {
                 Found::OverLimit => {
                     // Сверх предела снимается свой простаивающий агент без держателей;
                     // занятого раннер не снимает.
-                    if evictions > usize::from(limit) || !evict_idle(client.home.state(), key) {
+                    if evictions > usize::from(limit) || !evict_idle(client.home.state(), &key) {
                         return Err(KeeperStartError::Limit { limit });
                     }
                     evictions += 1;
@@ -246,10 +306,10 @@ impl KeeperClient {
                 }
                 Found::Live(keeper) => {
                     client.keeper = keeper;
-                    match client.take(session) {
-                        Ok(()) => return Ok(client),
-                        // Сторож закрывается, его канал уже закрыт или он ещё поднимает агента:
-                        // ждём, пока он ответит или уйдёт.
+                    match client.take(take) {
+                        Ok(holders) => return Ok(holders),
+                        // Сторож закрывается, отказал учётным данным, его канал уже закрыт или
+                        // он ещё поднимает агента: ждём, пока он ответит или уйдёт.
                         Err(KeeperStartError::Agent(
                             AgentError::LiveAgentGone { .. } | AgentError::KeeperUnreachable { .. },
                         )) => {}
@@ -259,7 +319,7 @@ impl KeeperClient {
                 Found::Starting => {}
                 Found::Absent => {
                     client.reused = false;
-                    let pid = match client.spawn(launch, credentials, work) {
+                    let pid = match client.spawn(launch, credentials) {
                         Ok(pid) => pid,
                         Err(error) => {
                             client.forget_start();
@@ -267,9 +327,9 @@ impl KeeperClient {
                         }
                     };
                     client.keeper = pid;
-                    match client.await_start(pid, deadline)? {
-                        Started::Answered => match client.take(session) {
-                            Ok(()) => return Ok(client),
+                    match client.await_start(pid, deadline, cancel)? {
+                        Started::Answered => match client.take(take) {
+                            Ok(holders) => return Ok(holders),
                             // Поднятого агента сняли, не дав взять (простой, предел): ключ
                             // ищется заново, и при нужде поднимается новый сторож.
                             Err(KeeperStartError::Agent(
@@ -345,14 +405,26 @@ impl KeeperClient {
         self.home.base_dir()
     }
 
-    /// Найденный живой сторож годится: отвечает, называет ключ хоста из записи, и, если
-    /// `session`, сессия команды открыта.
-    fn take(&mut self, session: bool) -> Result<(), KeeperStartError> {
+    /// Найденный живой сторож годится: отвечает, называет ключ хоста из записи, и сессия
+    /// команды открыта или держатель поставлен. Ответ — держатели после отметки.
+    fn take(&mut self, take: &Take<'_>) -> Result<Vec<Holder>, KeeperStartError> {
         self.check_fingerprint()?;
-        if session {
-            self.begin()?;
+        match take {
+            Take::Session => {
+                self.begin()?;
+                Ok(Vec::new())
+            }
+            Take::Hold(holder) => {
+                let request = Request::Hold {
+                    holder: (*holder).clone(),
+                    credentials: Some(self.digest.clone()),
+                };
+                match self.exchange(&request, QUERY_PATIENCE)? {
+                    Frame::Holders { holders } => Ok(holders),
+                    other => Err(unexpected(&other).into()),
+                }
+            }
         }
-        Ok(())
     }
 
     /// Ищет сторожа под замком реестра; не нашёл — ставит запись «запускается» за собой, если
@@ -417,11 +489,9 @@ impl KeeperClient {
         &self,
         launch: &KeeperLaunch,
         credentials: &Credentials,
-        work: &WorkGiven,
     ) -> Result<u32, KeeperStartError> {
-        let program = keeper_exe(self.home.state()).map_err(|error| {
-            unavailable(format!("no copy of the runner for the keeper: {error}"))
-        })?;
+        let program = keeper_exe(self.home.state())
+            .map_err(|error| unavailable_by("no copy of the runner for the keeper", error))?;
         let start = KeeperStart {
             launch: launch.clone(),
             credentials: credentials.clone(),
@@ -438,17 +508,26 @@ impl KeeperClient {
             log_path: self.home.paths().log(),
             stdin: Some(serde_json::to_string(&start).map_err(std::io::Error::other)?),
         };
-        ProcessExecutor
-            .spawn_service(&request, work)
-            .map_err(|error| match error {
-                ServiceSpawnError::WouldNotSurvive => KeeperStartError::Job,
-                other => unavailable(format!("the keeper did not start: {other}")),
-            })
+        // Подъём сторожа — подъём сессии, а не работа команды: признак работы он не ставит
+        // (`INV.WIRE.PROVIDER-DISPATCHED-SAYS-WHETHER-AN-EXECUTOR-GOT-WORK`).
+        crate::platform::service::spawn_hidden(&request).map_err(|error| match error {
+            ServiceSpawnError::WouldNotSurvive => KeeperStartError::Job,
+            other => unavailable_by("the keeper did not start", other),
+        })
     }
 
-    /// Ждёт, пока поднятый сторож поднимет агента и ответит.
-    fn await_start(&self, pid: u32, deadline: Instant) -> Result<Started, KeeperStartError> {
+    /// Ждёт, пока поднятый сторож поднимет агента и ответит. Отмена прекращает ожидание, а
+    /// поднятый сторож остаётся: он переживает команду и уйдёт по простою.
+    fn await_start(
+        &self,
+        pid: u32,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<Started, KeeperStartError> {
         loop {
+            if cancel.is_cancelled() {
+                return Err(cancelled_waiting());
+            }
             match self.status() {
                 Ok(_) => return Ok(Started::Answered),
                 // Канала ещё нет или агент ещё поднимается: сторож запускается.
@@ -521,9 +600,10 @@ impl KeeperClient {
     }
 
     /// Закрывает сессию команды: сторож отключает агента от базы, а сам агент остаётся жить,
-    /// если сторож не решил его снять. Ответ: останется ли агент жить, по `status` после
-    /// `end`; сторож не ответил — `false`.
-    pub fn end(&mut self) -> Option<KeeperStatus> {
+    /// если сторож не решил его снять. Ответ — `status` сторожа после `end`: `closing` в нём
+    /// значит, что агент не останется; отказ — сторож не ответил, и ушёл ли он, говорит
+    /// [`Self::gone`].
+    pub fn end(&mut self) -> Result<KeeperStatus, AgentError> {
         if let Some(mut session) = self.session.take() {
             self.runtime.block_on(async {
                 let _ = tokio::time::timeout(END_PATIENCE, async {
@@ -533,7 +613,46 @@ impl KeeperClient {
                 .await;
             });
         }
-        self.status().ok()
+        self.status()
+    }
+
+    /// Ушёл ли сторож после отказа `error`: канала нет или процесса сторожа подтверждённо нет.
+    /// Отказ иного рода (занятый канал, чужой процесс на нём, срок) — сторож может быть жив.
+    pub fn gone(&self, error: &AgentError) -> bool {
+        let absent = matches!(
+            error,
+            AgentError::KeeperUnreachable { source, .. }
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                )
+        );
+        absent || self.keeper_exited_within(GONE_PATIENCE)
+    }
+
+    fn keeper_exited_within(&self, patience: Duration) -> bool {
+        let deadline = Instant::now() + patience;
+        loop {
+            if self.keeper == 0 || process_facts(self.keeper).is_none() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(WAIT_STEP);
+        }
+    }
+
+    /// Процесс сторожа.
+    pub fn keeper_pid(&self) -> u32 {
+        self.keeper
+    }
+
+    /// Процесс агента из записи сторожа.
+    pub fn agent_pid(&self) -> Option<u32> {
+        read_json::<ServiceRecord>(&self.home.paths().record())
+            .and_then(|record| record.agent)
+            .and_then(|agent| agent.pid)
     }
 
     /// Команда агенту через сторожа в открытой сессии. Кадры ответа отдаются `on_batch` по мере
@@ -547,6 +666,16 @@ impl KeeperClient {
         on_batch: &mut dyn FnMut(&[AgentMessage]),
     ) -> Result<AgentReply, AgentError> {
         self.last_deferral = None;
+        // Срок некритической команды уже истёк: команда агенту не уходит, и агента ей не
+        // прерывают.
+        if let Some(deadline) = policy.deadline.filter(|_| !policy.is_critical()) {
+            if Instant::now() >= deadline {
+                return Err(AgentError::TimedOut {
+                    command: command.to_owned(),
+                    timeout_ms: 0,
+                });
+            }
+        }
         let outcome = self.exchange_run(command, policy, on_batch);
         // Критическую команду ни отмена, ни срок не прерывают: сторож доводит её до исхода, а
         // команда называет отложенное прерывание, как с разовым агентом.
@@ -623,12 +752,17 @@ impl KeeperClient {
         };
         let critical = policy.is_critical();
         // Срок прерывает только некритическую команду; критической он записывается отложенным
-        // после ответа (`run`).
-        let deadline = policy
-            .deadline
-            .filter(|_| !critical)
-            .map(tokio::time::Instant::from_std);
-        let started = Instant::now();
+        // после ответа (`run`). В отказе — срок, который команда получила, а не прошедшее время.
+        let deadline = policy.deadline.filter(|_| !critical);
+        let budget_ms = deadline.map_or(0, |deadline| {
+            u64::try_from(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX)
+        });
+        let deadline = deadline.map(tokio::time::Instant::from_std);
         self.runtime.block_on(async {
             let stream = connect_within(&self.channel, self.keeper, QUERY_PATIENCE).await?;
             let (read, mut write) = tokio::io::split(stream);
@@ -645,9 +779,24 @@ impl KeeperClient {
                 }
             };
             tokio::pin!(expired);
+            let mut deferral_noted = false;
             loop {
+                // Пришедший кадр важнее срока и отмены: ответ, который уже здесь, не бросают.
                 let frame = tokio::select! {
+                    biased;
                     frame = read_line::<_, Frame>(&mut reader) => frame,
+                    // Критическую команду отмена не прерывает: команда пишет, что откладывает
+                    // прерывание, как с разовым агентом, и ждёт исхода.
+                    () = policy.cancellation.cancelled(), if critical && !deferral_noted => {
+                        deferral_noted = true;
+                        tracing::warn!(
+                            %command,
+                            reason = ?ProcessInterruptionReason::Cancelled,
+                            "{}",
+                            crate::platform::process::CRITICAL_INTERRUPTION_DEFERRED
+                        );
+                        continue;
+                    }
                     () = policy.cancellation.cancelled(), if !critical => {
                         // Строка `cancel` доходит до сторожа и тогда, когда разрыв канала
                         // он увидел бы не сразу.
@@ -661,8 +810,7 @@ impl KeeperClient {
                         let _ = write_line(&mut write, &Request::Cancel).await;
                         return Err(AgentError::TimedOut {
                             command: command.to_owned(),
-                            timeout_ms: u64::try_from(started.elapsed().as_millis())
-                                .unwrap_or(u64::MAX),
+                            timeout_ms: budget_ms,
                         });
                     }
                 };
@@ -691,14 +839,6 @@ impl KeeperClient {
         }
     }
 
-    /// Ставит держателя; ответ — держатели после запроса.
-    pub fn hold(&self, holder: Holder) -> Result<Vec<Holder>, AgentError> {
-        match self.exchange(&Request::Hold { holder }, QUERY_PATIENCE)? {
-            Frame::Holders { holders } => Ok(holders),
-            other => Err(unexpected(&other)),
-        }
-    }
-
     /// Снимает держателя; ответ — держатели после запроса.
     pub fn release(&self, holder: Holder) -> Result<Vec<Holder>, AgentError> {
         match self.exchange(&Request::Release { holder }, QUERY_PATIENCE)? {
@@ -707,37 +847,66 @@ impl KeeperClient {
         }
     }
 
-    /// Сторож отпускает и снимает агента и выходит; ответ приходит, когда агент снят.
-    pub fn stop(&self) -> Result<(), AgentError> {
-        match self.stop_if(false, false)? {
-            Stopped::Removed => Ok(()),
+    /// Сторож отпускает и снимает агента и выходит; ответ приходит, когда агент снят. Ждёт
+    /// не дольше [`STOP_PATIENCE`] и до отмены `cancel`: не дождался — [`Stopped::Pending`].
+    pub fn stop(&self, cancel: &CancellationToken) -> Result<Stopped, AgentError> {
+        match self.stop_if(false, false, cancel)? {
             Stopped::InUse { .. } => Err(AgentError::Keeper {
                 detail: "the keeper refused an unconditional stop".to_owned(),
             }),
+            stopped => Ok(stopped),
         }
     }
 
     /// `stop` с условием, которое сторож проверяет под своим замком: `only_idle` — агент не
-    /// выполняет команду и сессии нет, `only_unheld` — держателей нет. Сторож, ушедший сам, —
-    /// тоже снятый агент.
-    pub fn stop_if(&self, only_idle: bool, only_unheld: bool) -> Result<Stopped, AgentError> {
+    /// выполняет команду и сессии нет, `only_unheld` — держателей нет. Снятым агент считается,
+    /// только если сторож ответил `stopped` или подтверждённо ушёл ([`Self::gone`]); иной отказ
+    /// канала — отказ, а не снятие.
+    pub fn stop_if(
+        &self,
+        only_idle: bool,
+        only_unheld: bool,
+        cancel: &CancellationToken,
+    ) -> Result<Stopped, AgentError> {
         let request = Request::Stop {
             only_idle,
             only_unheld,
         };
-        match self.exchange_frame(&request, STOP_PATIENCE) {
-            Ok(Frame::Stopped) => Ok(Stopped::Removed),
-            Ok(Frame::Error {
-                error: KeeperError::NotIdle { command, holders },
-            }) => Ok(Stopped::InUse { command, holders }),
-            Ok(Frame::Error { error }) => Err(error.into_agent()),
-            Ok(other) => Err(unexpected(&other)),
-            Err(AgentError::LiveAgentGone { .. }) => Ok(Stopped::Removed),
-            Err(AgentError::KeeperUnreachable { source, .. })
-                if source.kind() != std::io::ErrorKind::TimedOut =>
-            {
-                Ok(Stopped::Removed)
+        let answer = self.runtime.block_on(async {
+            let stream = connect_within(&self.channel, self.keeper, QUERY_PATIENCE).await?;
+            let (read, mut write) = tokio::io::split(stream);
+            let mut reader = BufReader::new(read);
+            write_line(&mut write, &request)
+                .await
+                .map_err(|source| unreachable_at(&self.channel, source))?;
+            // Запрос уже у сторожа: срок и отмена его не отменяют, а только кончают ожидание.
+            tokio::select! {
+                biased;
+                frame = tokio::time::timeout(STOP_PATIENCE, read_line::<_, Frame>(&mut reader)) => {
+                    Ok(frame.ok())
+                }
+                () = cancel.cancelled() => Ok(None),
             }
+        });
+        match answer {
+            Ok(None) => Ok(Stopped::Pending),
+            Ok(Some(Ok(Some(Frame::Stopped)))) => Ok(Stopped::Removed),
+            Ok(Some(Ok(Some(Frame::Error {
+                error: KeeperError::NotIdle { command, holders },
+            })))) => Ok(Stopped::InUse { command, holders }),
+            Ok(Some(Ok(Some(Frame::Error { error })))) => Err(error.into_agent()),
+            Ok(Some(Ok(Some(other)))) => Err(unexpected(&other)),
+            Ok(Some(Ok(None) | Err(_))) => {
+                let error = AgentError::LiveAgentGone {
+                    detail: "the keeper closed the channel before the answer to stop".to_owned(),
+                };
+                if self.gone(&error) {
+                    Ok(Stopped::Removed)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) if self.gone(&error) => Ok(Stopped::Removed),
             Err(error) => Err(error),
         }
     }
@@ -799,7 +968,7 @@ fn timed_out(channel: &str, patience: Duration) -> AgentError {
 /// ведёт живой раннер. Читается под замком реестра.
 fn live_keys(state: &Path) -> Vec<(String, ServiceRecord)> {
     let machine = machine_fingerprint();
-    let Ok(dirs) = std::fs::read_dir(state.join("agents")) else {
+    let Ok(dirs) = std::fs::read_dir(crate::platform::live_registry::agents_path(state)) else {
         return Vec::new();
     };
     dirs.flatten()
@@ -865,10 +1034,11 @@ pub fn keepers_of(
         .collect()
 }
 
-/// Снимает живого агента ключа `key`, если он есть; ответ — был ли он.
+/// Снимает живого агента ключа `key`, если он есть; ответ — был ли он. Агента, который
+/// выполняет критическую команду, сторож снимает после неё.
 pub fn stop_keeper(state: &Path, key: &str) -> Result<bool, AgentError> {
     match KeeperClient::attach(state, key) {
-        Ok(Some(keeper)) => keeper.stop().map(|()| true),
+        Ok(Some(keeper)) => keeper.stop(&CancellationToken::new()).map(|_| true),
         Ok(None) => Ok(false),
         Err(error) => Err(AgentError::Keeper {
             detail: error.to_string(),
@@ -879,10 +1049,12 @@ pub fn stop_keeper(state: &Path, key: &str) -> Result<bool, AgentError> {
 /// Снимает простаивающего дольше всех живого агента без держателей, кроме своего ключа `own`;
 /// ответ — снят ли кто-то. Условие «простаивает и без держателей» сторож проверяет сам под своим
 /// замком (`stop` с `only_idle` и `only_unheld`): команда, открывшая сессию между вопросом и
-/// снятием, агента сохраняет.
+/// снятием, агента сохраняет. Освобождением считается только подтверждённое снятие. Сторожа
+/// другой версии раннера не трогают: прежний сторож понял бы условный `stop` как безусловный.
 fn evict_idle(state: &Path, own: &str) -> bool {
     let mut idle: Vec<(u64, LiveKeeper)> = live_keepers(state)
         .into_iter()
+        .filter(|(_, record)| record.version.as_deref() == Some(env!("CARGO_PKG_VERSION")))
         .map(|(keeper, _)| keeper)
         .filter(|keeper| keeper.key != own)
         .filter_map(|keeper| match keeper.client.status() {
@@ -896,10 +1068,13 @@ fn evict_idle(state: &Path, own: &str) -> bool {
         .collect();
     idle.sort_by_key(|(idle_ms, _)| std::cmp::Reverse(*idle_ms));
     for (_, keeper) in idle {
-        match keeper.client.stop_if(true, true) {
+        match keeper.client.stop_if(true, true, &CancellationToken::new()) {
             Ok(Stopped::Removed) => {
                 tracing::info!(key = %keeper.key, "an idle live agent is removed to stay within the limit");
                 return true;
+            }
+            Ok(Stopped::Pending) => {
+                tracing::warn!(key = %keeper.key, "an idle live agent did not confirm its removal in time");
             }
             Ok(Stopped::InUse { .. }) => {
                 tracing::debug!(key = %keeper.key, "the live agent got busy before it was removed");
@@ -1034,7 +1209,7 @@ fn sweep_copies(state: &Path, current: &Path) {
 /// Исполняемые файлы, из которых работают живые сторожа учётной записи.
 fn live_keeper_bins(state: &Path) -> Vec<PathBuf> {
     let machine = machine_fingerprint();
-    let Ok(keys) = std::fs::read_dir(state.join("agents")) else {
+    let Ok(keys) = std::fs::read_dir(crate::platform::live_registry::agents_path(state)) else {
         return Vec::new();
     };
     keys.flatten()
@@ -1268,6 +1443,91 @@ mod tests {
             !client.interrupted(),
             "the finished command keeps the agent"
         );
+    }
+
+    /// Срок некритической команды истёк до отправки: команда сторожу не уходит, и агента ей не
+    /// прерывают.
+    #[test]
+    fn a_run_whose_deadline_has_passed_is_not_sent() {
+        let state = tempfile::tempdir().unwrap();
+        let home = KeeperHome::open(state.path(), &"cd".repeat(16)).unwrap();
+        let mut client = KeeperClient::detached(home, std::process::id()).unwrap();
+        // Сторожа на канале нет: отправка была бы отказом подключения, а не сроком.
+        client.channel = format!("{}-absent", client.channel);
+        client.session = Some(OpenSession {
+            id: "session".to_owned(),
+            stream: BufReader::new(Box::new(tokio::io::duplex(64).0)),
+        });
+        let mut policy = WaitPolicy::for_keeper(tokio_util::sync::CancellationToken::new(), false);
+        policy.deadline = Some(Instant::now() - Duration::from_millis(1));
+        let outcome = client.run("config dump-cfg", &policy, &mut |_| {});
+        assert!(
+            matches!(outcome, Err(AgentError::TimedOut { timeout_ms: 0, .. })),
+            "{outcome:?}"
+        );
+        assert!(!client.interrupted(), "nothing was sent, nothing to remove");
+    }
+
+    /// Живой процесс, который не сторож: сторож может быть жив, и его отказ — не снятие.
+    #[cfg(any(windows, target_os = "linux"))]
+    fn a_live_process() -> std::process::Child {
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("ping");
+            command.args(["-n", "60", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60");
+            command
+        };
+        command.stdout(std::process::Stdio::null()).spawn().unwrap()
+    }
+
+    /// `stop` считает агента снятым только по ответу сторожа, по отсутствию канала или по
+    /// ушедшему процессу сторожа. Канал, который обслуживает не сторож из записи, — отказ, а не
+    /// снятие: так предел не засчитывает освобождение, которого не было.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn a_stop_counts_as_a_removal_only_when_the_keeper_is_gone() {
+        let state = if cfg!(unix) {
+            tempfile::tempdir_in("/tmp").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
+        let home = KeeperHome::open(state.path(), &"ef".repeat(16)).unwrap();
+        let channel = if cfg!(windows) {
+            format!(
+                r"\\.\pipe\v8-runner-agent-test-{}",
+                uuid::Uuid::new_v4().simple()
+            )
+        } else {
+            home.channel()
+        };
+        let mut keeper = a_live_process();
+        let mut client = KeeperClient::detached(home, keeper.id()).unwrap();
+        client.channel = channel.clone();
+        let never = CancellationToken::new();
+
+        // Канала нет — сторожа нет.
+        assert!(matches!(
+            client.stop_if(true, true, &never),
+            Ok(Stopped::Removed)
+        ));
+
+        // Канал есть, но обслуживает его этот процесс, а не сторож из записи.
+        let runtime = runtime().unwrap();
+        let listener =
+            runtime.block_on(async { super::super::channel::Listener::bind(&channel).unwrap() });
+        let outcome = client.stop_if(true, true, &never);
+        assert!(
+            matches!(&outcome, Err(AgentError::KeeperUnreachable { source, .. })
+                if source.kind() == std::io::ErrorKind::PermissionDenied),
+            "{outcome:?}"
+        );
+        listener.remove();
+        drop(listener);
+        let _ = keeper.kill();
+        let _ = keeper.wait();
     }
 
     #[test]

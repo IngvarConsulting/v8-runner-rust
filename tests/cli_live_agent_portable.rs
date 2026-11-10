@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use support::fake_agent::{
-    read_or_empty, serve_managed_launches_on_a_reserved_port, FakeAgent, AGENT_PASSWORD,
+    read_or_empty, serve_managed_launches_on_a_reserved_port, FakeAgent, Hold, HoldReply,
+    AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command};
 
@@ -68,16 +69,38 @@ impl Bench {
         } else {
             tempfile::tempdir().expect("state dir")
         };
-        Self::sharing(agent_yaml, std::rc::Rc::new(state))
+        Self::sharing(agent_yaml, std::rc::Rc::new(state), false)
+    }
+
+    /// Стенд, двойник которого держит выгрузку `config dump-cfg`, пока тест не положит
+    /// [`Self::release_held`].
+    fn held(agent_yaml: &str) -> Self {
+        let state = if cfg!(unix) {
+            tempfile::Builder::new()
+                .prefix("v8rp")
+                .tempdir_in("/tmp")
+                .expect("state dir")
+        } else {
+            tempfile::tempdir().expect("state dir")
+        };
+        Self::sharing(agent_yaml, std::rc::Rc::new(state), true)
+    }
+
+    fn held_started(&self) -> PathBuf {
+        self.marks.join("held.started")
+    }
+
+    fn release_held(&self) {
+        fs::write(self.marks.join("held.release"), "go").expect("release the held dump");
     }
 
     /// Стенд другой рабочей копии с тем же каталогом состояния учётной записи: предел живых
     /// агентов у них общий.
     fn beside(&self, agent_yaml: &str) -> Self {
-        Self::sharing(agent_yaml, std::rc::Rc::clone(&self.state))
+        Self::sharing(agent_yaml, std::rc::Rc::clone(&self.state), false)
     }
 
-    fn sharing(agent_yaml: &str, state: std::rc::Rc<tempfile::TempDir>) -> Self {
+    fn sharing(agent_yaml: &str, state: std::rc::Rc<tempfile::TempDir>, held: bool) -> Self {
         let dir = temp_workspace();
         let root = dir.path().to_path_buf();
         let project = root.join("project").join("configuration");
@@ -96,13 +119,19 @@ impl Bench {
         .expect("fake 1cv8");
         let marks = root.join("marks");
         fs::create_dir_all(&marks).expect("marks");
-        let agent = FakeAgent::new(
+        let mut agent = FakeAgent::new(
             true,
             marks.join("agent-commands.log"),
             None,
             marks.join("base-dir.txt"),
             marks.join("designer.pid"),
         );
+        agent.hold = held.then(|| Hold {
+            command: "config dump-cfg".to_owned(),
+            started: marks.join("held.started"),
+            release: marks.join("held.release"),
+            reply: HoldReply::Normal,
+        });
         let port = serve_managed_launches_on_a_reserved_port(agent, None);
         let config_path = root.join("v8project.yaml");
         fs::write(
@@ -151,14 +180,46 @@ impl Bench {
         (output.status.code().unwrap_or(-1), payload)
     }
 
+    /// Команда без проекта: в пустом каталоге, без `--config`, с тем же каталогом состояния.
+    fn run_without_project(&self, arguments: &[&str]) -> (i32, Value) {
+        let empty = tempfile::tempdir().expect("empty dir");
+        let output = v8_runner_command()
+            .current_dir(empty.path())
+            .env("V8_RUNNER_STATE_DIR", self.state.path())
+            .arg("--json-message")
+            .args(arguments)
+            .output()
+            .expect("run command");
+        let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "no json envelope: {error}\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.code().unwrap_or(-1), payload)
+    }
+
     /// `download` рабочей конфигурации через агента.
     fn download(&self) -> (i32, Value) {
+        let output = self.download_command().output().expect("run download");
+        let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "no json envelope: {error}\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.code().unwrap_or(-1), payload)
+    }
+
+    fn download_command(&self) -> Command {
         let output = self
             .dir
             .path()
             .join("dist")
             .join(format!("{}.cf", uuid::Uuid::new_v4().simple()));
-        self.run(&[
+        self.command(&[
             "download",
             "main",
             "--state",
@@ -379,11 +440,11 @@ fn agent_hold_is_idempotent_and_release_removes_the_mark() {
         "{payload}"
     );
 
-    let (code, payload) = bench.run(&["agent", "release", "--ttl", "1"]);
+    let (code, payload) = bench.run(&["agent", "release", "--ttl"]);
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["released"], true, "{payload}");
     assert_eq!(holders(&payload).len(), 1, "{payload}");
-    let (code, payload) = bench.run(&["agent", "release", "--ttl", "1"]);
+    let (code, payload) = bench.run(&["agent", "release", "--ttl"]);
     assert_eq!(code, 0, "a release without a mark is no refusal: {payload}");
     assert_eq!(payload["data"]["released"], false, "{payload}");
     let (code, payload) = bench.run(&["agent", "release", "--holder-pid", &own]);
@@ -459,7 +520,7 @@ fn agent_hold_refuses_with_live_off_and_over_the_limit() {
     assert_eq!(second.launches(), 0, "the refused hold launches nothing");
 
     // Простаивающий агент без держателей место уступает.
-    let (code, payload) = first.run(&["agent", "release", "--ttl", "1"]);
+    let (code, payload) = first.run(&["agent", "release", "--ttl"]);
     assert_eq!(code, 0, "{payload}");
     let (code, payload) = second.run(&["agent", "hold", "--ttl", "600"]);
     assert_eq!(code, 0, "{payload}");
@@ -469,13 +530,17 @@ fn agent_hold_refuses_with_live_off_and_over_the_limit() {
     );
 }
 
-/// `agent status` называет живых агентов учётной записи без замка рабочего каталога, а
-/// `agent stop` снимает агента цели проекта, и с `--all` — всех.
+/// `agent status` называет живого агента цели проекта без замка рабочего каталога, а
+/// `agent stop` снимает его; с `--all` обе команды работают со всеми живыми агентами учётной
+/// записи ОС и проекта не требуют (`INV.CLI.AGENT-STOP-AND-STATUS-ARE-ACCOUNT-WIDE`).
 #[test]
 fn agent_stop_removes_the_live_agent_and_status_lists_it() {
     let bench = Bench::new("");
     let (code, payload) = bench.run(&["agent", "status"]);
     assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["agents"], json!([]), "{payload}");
+    let (code, payload) = bench.run_without_project(&["agent", "status", "--all"]);
+    assert_eq!(code, 0, "status --all needs no project: {payload}");
     assert_eq!(payload["data"]["agents"], json!([]), "{payload}");
     let (code, payload) = bench.download();
     assert_eq!(code, 0, "{payload}");
@@ -526,11 +591,62 @@ fn agent_stop_removes_the_live_agent_and_status_lists_it() {
 
     let (code, payload) = other.download();
     assert_eq!(code, 0, "{payload}");
-    let (code, payload) = bench.run(&["agent", "stop", "--all"]);
+    let (code, payload) = bench.run(&["agent", "status"]);
     assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["agents"],
+        json!([]),
+        "status names only the agent of its project: {payload}"
+    );
+    let (code, payload) = bench.run_without_project(&["agent", "status", "--all"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["agents"].as_array().map(Vec::len),
+        Some(1),
+        "status --all names the agents of every project: {payload}"
+    );
+    let (code, payload) = bench.run_without_project(&["agent", "stop", "--all"]);
+    assert_eq!(code, 0, "stop --all needs no project: {payload}");
     assert_eq!(
         payload["data"]["stopped"].as_array().map(Vec::len),
         Some(1),
         "--all stops the agents of every project: {payload}"
     );
+    assert_eq!(payload["data"]["refused"], json!([]), "{payload}");
+}
+
+/// Держатель ушёл, пока команда работала: сторож снимает агента после её сессии, и квитанция
+/// говорит `kept: false` с причиной `removed` (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`,
+/// `INV.PLATFORM.A-LIVE-AGENT-CLOSES-WITH-ITS-HOLDER`).
+#[test]
+fn a_receipt_says_removed_when_the_last_holder_left_during_the_command() {
+    let bench = Bench::held("");
+    let held_at = Instant::now();
+    let (code, payload) = bench.run(&["agent", "hold", "--ttl", "8"]);
+    if in_a_closed_job(&payload) {
+        return;
+    }
+    assert_eq!(code, 0, "{payload}");
+    let download = bench
+        .download_command()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start download");
+    let started = wait_until(Duration::from_secs(30), || bench.held_started().exists());
+    // Срок держателя кончается, пока выгрузка удержана.
+    let expired = held_at + Duration::from_millis(10_500);
+    std::thread::sleep(expired.saturating_duration_since(Instant::now()));
+    bench.release_held();
+    let output = download.wait_with_output().expect("download output");
+    assert!(started, "the dump reached the agent");
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "no json envelope: {error}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(output.status.code(), Some(0), "{payload}");
+    assert_eq!(live(&payload)["kept"], false, "{payload}");
+    assert_eq!(live(&payload)["reason"], "removed", "{payload}");
 }

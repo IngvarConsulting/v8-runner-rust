@@ -813,15 +813,7 @@ pub fn command_name(command: &Command) -> CommandName {
         },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
-        Command::Agent(args) => match args.command {
-            crate::cli::args::AgentCommand::Hold(_) => CommandName::AgentHold,
-            crate::cli::args::AgentCommand::Release(_) => CommandName::AgentRelease,
-            crate::cli::args::AgentCommand::Stop(_) => CommandName::AgentStop,
-            crate::cli::args::AgentCommand::Status => CommandName::AgentStatus,
-            crate::cli::args::AgentCommand::Keeper(_) => {
-                unreachable!("the keeper is handled before config loading")
-            }
-        },
+        Command::Agent(args) => agent_command_name(&args.command),
     }
 }
 
@@ -1732,8 +1724,22 @@ fn standalone_text(
     lines
 }
 
-/// `agent hold|release|stop|status` (#577). `status` только спрашивает сторожей и замка
-/// рабочего каталога не берёт, как `cluster status`; остальные берут его, базу не трогая.
+/// Имя команды `agent …`: одно место, где подкоманда становится [`CommandName`].
+fn agent_command_name(command: &crate::cli::args::AgentCommand) -> CommandName {
+    use crate::cli::args::AgentCommand;
+    match command {
+        AgentCommand::Hold(_) => CommandName::AgentHold,
+        AgentCommand::Release(_) => CommandName::AgentRelease,
+        AgentCommand::Stop(_) => CommandName::AgentStop,
+        AgentCommand::Status(_) => CommandName::AgentStatus,
+        AgentCommand::Keeper(_) => unreachable!("the keeper is handled before config loading"),
+    }
+}
+
+/// `agent hold|release|stop|status` (#577) с проектом. `hold` и `release` берут замок рабочего
+/// каталога, базу не трогая; `stop` и `status` по цели проекта берут из проекта только ключ
+/// агента и замка не берут: их область — учётная запись ОС. С `--all` они идут без проекта
+/// ([`execute_agent_account`]).
 fn execute_agent(
     config: &AppConfig,
     command: &crate::cli::args::AgentCommand,
@@ -1742,8 +1748,8 @@ fn execute_agent(
     dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    use crate::cli::args::{AgentCommand, AgentHolderArgs};
-    use crate::use_cases::live_agent::{self, HolderRequest};
+    use crate::cli::args::{AgentCommand, AgentHolderArgs, AgentReleaseArgs};
+    use crate::use_cases::live_agent::{self, AgentScope, HolderRequest, ReleaseRequest};
 
     fn holder(args: &AgentHolderArgs) -> HolderRequest {
         match (args.holder_pid, args.ttl) {
@@ -1755,52 +1761,45 @@ fn execute_agent(
             (None, None) => unreachable!("clap requires --holder-pid or --ttl"),
         }
     }
-    fn present<T: Serialize>(
-        presenter: &Presenter,
-        name: CommandName,
-        outcome: Result<T, AppError>,
-        duration_ms: impl FnOnce(&T) -> u64,
-        text: impl FnOnce(&T) -> Vec<String>,
-    ) -> Result<(), UseCaseError> {
-        match outcome {
-            Ok(result) => {
-                if presenter.is_json() {
-                    presenter.print_envelope(&Envelope::ok(
-                        name.as_str(),
-                        duration_ms(&result),
-                        result,
-                    ));
-                } else {
-                    for line in text(&result) {
-                        presenter.print_bare(&line);
-                    }
-                }
-                Ok(())
-            }
-            Err(error) => {
-                let error = UseCaseError::from(error);
-                crate::cli::output::print_command_use_case_error(presenter, name, &error);
-                Err(error)
-            }
+    fn release_of(args: &AgentReleaseArgs) -> ReleaseRequest {
+        match args.holder_pid {
+            Some(pid) => ReleaseRequest::Process {
+                pid,
+                started_at: args.holder_started_at,
+            },
+            None => ReleaseRequest::Ttl,
         }
     }
 
-    let name = match command {
-        AgentCommand::Hold(_) => CommandName::AgentHold,
-        AgentCommand::Release(_) => CommandName::AgentRelease,
-        AgentCommand::Stop(_) => CommandName::AgentStop,
-        AgentCommand::Status => CommandName::AgentStatus,
-        AgentCommand::Keeper(_) => unreachable!("the keeper is handled before config loading"),
-    };
+    let name = agent_command_name(command);
     let context = cli_context(config, name, cancellation);
-    if let AgentCommand::Status = command {
-        return present(
-            presenter,
-            name,
-            live_agent::status(&context, config),
-            |result| result.duration_ms,
-            render_agent_status_text,
-        );
+    let scope = |all: bool| {
+        if all {
+            AgentScope::Account
+        } else {
+            AgentScope::Project(config)
+        }
+    };
+    match command {
+        AgentCommand::Stop(args) => {
+            return present_agent(
+                presenter,
+                name,
+                live_agent::stop(&context, scope(args.all)),
+                |result| result.duration_ms,
+                render_agent_stop_text,
+            )
+        }
+        AgentCommand::Status(args) => {
+            return present_agent(
+                presenter,
+                name,
+                live_agent::status(&context, scope(args.all)),
+                |result| result.duration_ms,
+                render_agent_status_text,
+            )
+        }
+        AgentCommand::Hold(_) | AgentCommand::Release(_) | AgentCommand::Keeper(_) => {}
     }
     with_cli_workspace_lock(
         config,
@@ -1810,7 +1809,7 @@ fn execute_agent(
         clean_before_execution,
         dry_run,
         || match command {
-            AgentCommand::Hold(args) => present(
+            AgentCommand::Hold(args) => present_agent(
                 presenter,
                 name,
                 live_agent::hold(&context, config, &holder(args)),
@@ -1829,10 +1828,10 @@ fn execute_agent(
                     )]
                 },
             ),
-            AgentCommand::Release(args) => present(
+            AgentCommand::Release(args) => present_agent(
                 presenter,
                 name,
-                live_agent::release(&context, config, &holder(args)),
+                live_agent::release(&context, config, &release_of(args)),
                 |result| result.duration_ms,
                 |result| {
                     vec![if result.released {
@@ -1842,41 +1841,110 @@ fn execute_agent(
                     }]
                 },
             ),
-            AgentCommand::Stop(args) => present(
-                presenter,
-                name,
-                live_agent::stop(&context, config, args.all),
-                |result| result.duration_ms,
-                |result| {
-                    if result.stopped.is_empty() {
-                        vec!["nothing to stop".to_owned()]
-                    } else {
-                        result
-                            .stopped
-                            .iter()
-                            .map(|agent| format!("stopped the live agent {}", agent.key))
-                            .collect()
-                    }
-                },
-            ),
-            AgentCommand::Status | AgentCommand::Keeper(_) => unreachable!("handled above"),
+            AgentCommand::Stop(_) | AgentCommand::Status(_) | AgentCommand::Keeper(_) => {
+                unreachable!("handled above")
+            }
         },
     )
 }
 
-fn holders_text(holders: &[crate::domain::capability::LiveAgentHolder]) -> String {
-    use crate::domain::capability::LiveAgentHolder;
-    if holders.is_empty() {
-        return "none".to_owned();
+/// Команда `agent`, которой проект не нужен: `stop --all` и `status --all` — область учётной
+/// записи ОС.
+pub(crate) fn agent_needs_no_project(command: &crate::cli::args::AgentCommand) -> bool {
+    use crate::cli::args::{AgentCommand, AgentStatusArgs, AgentStopArgs};
+    matches!(
+        command,
+        AgentCommand::Stop(AgentStopArgs { all: true })
+            | AgentCommand::Status(AgentStatusArgs { all: true })
+    )
+}
+
+/// `agent stop --all` и `agent status --all`: без проекта и без замка рабочего каталога.
+pub(crate) fn execute_agent_account(
+    command: &crate::cli::args::AgentCommand,
+    presenter: &Presenter,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::AgentCommand;
+    use crate::use_cases::live_agent::{self, AgentScope};
+
+    let cancellation = CancellationToken::new();
+    let _signal_guard = CliSignalGuard::install(cancellation.clone());
+    let name = agent_command_name(command);
+    let context = ExecutionContext::cli(name).with_cancellation(cancellation);
+    match command {
+        AgentCommand::Stop(_) => present_agent(
+            presenter,
+            name,
+            live_agent::stop(&context, AgentScope::Account),
+            |result| result.duration_ms,
+            render_agent_stop_text,
+        ),
+        AgentCommand::Status(_) => present_agent(
+            presenter,
+            name,
+            live_agent::status(&context, AgentScope::Account),
+            |result| result.duration_ms,
+            render_agent_status_text,
+        ),
+        AgentCommand::Hold(_) | AgentCommand::Release(_) | AgentCommand::Keeper(_) => {
+            unreachable!("only stop --all and status --all go without a project")
+        }
     }
-    holders
-        .iter()
-        .map(|holder| match holder {
-            LiveAgentHolder::Process { pid, .. } => format!("process {pid}"),
-            LiveAgentHolder::Ttl { until } => format!("until {until}"),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+}
+
+/// Ответ команды `agent`: конверт или строки текста; отказ — с именем команды.
+fn present_agent<T: Serialize>(
+    presenter: &Presenter,
+    name: CommandName,
+    outcome: Result<T, AppError>,
+    duration_ms: impl FnOnce(&T) -> u64,
+    text: impl FnOnce(&T) -> Vec<String>,
+) -> Result<(), UseCaseError> {
+    match outcome {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    name.as_str(),
+                    duration_ms(&result),
+                    result,
+                ));
+            } else {
+                for line in text(&result) {
+                    presenter.print_bare(&line);
+                }
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let error = UseCaseError::from(error);
+            crate::cli::output::print_command_use_case_error(presenter, name, &error);
+            Err(error)
+        }
+    }
+}
+
+fn render_agent_stop_text(result: &crate::domain::live_agent::AgentStopResult) -> Vec<String> {
+    if result.stopped.is_empty() && result.refused.is_empty() {
+        return vec!["nothing to stop".to_owned()];
+    }
+    let stopped = result.stopped.iter().map(|agent| {
+        if agent.closing {
+            format!("the live agent {} stops after its command", agent.key)
+        } else {
+            format!("stopped the live agent {}", agent.key)
+        }
+    });
+    let refused = result.refused.iter().map(|refusal| {
+        format!(
+            "the live agent {} was not stopped: {}",
+            refusal.key, refusal.message
+        )
+    });
+    stopped.chain(refused).collect()
+}
+
+fn holders_text(holders: &[crate::domain::capability::LiveAgentHolder]) -> String {
+    crate::domain::capability::LiveAgentHolder::list_text(holders)
 }
 
 fn render_agent_status_text(result: &crate::domain::live_agent::AgentStatusResult) -> Vec<String> {
