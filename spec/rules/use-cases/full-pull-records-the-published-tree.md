@@ -12,6 +12,8 @@ check:
   - src/use_cases/dump_config.rs::full_publication_rechecks_that_the_target_does_not_contain_work_path
   - src/change_detection/analyzer.rs::publishing_a_prepared_snapshot_does_not_absorb_a_later_user_edit
   - tests/architecture_guardrails.rs::a_full_pull_records_the_staged_tree_it_publishes
+  - src/use_cases/source_changes.rs::a_full_pull_remembers_the_staged_tree_by_git_ids
+  - src/use_cases/source_changes.rs::a_full_pull_refreshes_the_git_index_of_the_set
 ---
 
 # Полная выгрузка записывает опубликованное дерево
@@ -23,7 +25,12 @@ check:
 `push` без правок пропускает загрузку. Полная выгрузка агента не пропускается по
 журналу поколений: она восстанавливает и дерево, и хеш-память.
 
-Хеши готовятся по staging до публикации, сохраняются после её успеха. Привязка
+Хеши готовятся по staging до публикации, сохраняются после её успеха. У набора в рабочей
+копии git их считает `git hash-object` этой копии, чтобы концы строк считались, как их
+считает git (#575). После успешной публикации раннер обновляет индекс git по корню набора
+(`git status` с необязательной блокировкой): переписанные файлы git перечитывает в этой
+команде, а не в следующей; коммиты, ветки и содержимое индекса не меняются, отказ git
+выгрузку не отменяет. Превью ничего не публикует и индекса не трогает. Привязка
 соответствует получившемуся каталогу, в том числе когда публикация заменяет символическую
 ссылку каталогом; содержимое опубликованного дерева повторно не сканируется. Отказ публикации
 не меняет память. Ошибка обхода staging или записи памяти не отбрасывает успешную

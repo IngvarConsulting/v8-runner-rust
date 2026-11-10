@@ -87,7 +87,7 @@ impl<'v, 'h> GitSource<'v, 'h> {
         (!in_work_path).then_some(below)
     }
 
-    fn from_toplevel(&self, below: &str) -> String {
+    fn in_toplevel(&self, below: &str) -> String {
         if self.root.is_empty() {
             below.to_owned()
         } else {
@@ -126,7 +126,7 @@ impl<'v, 'h> GitSource<'v, 'h> {
         let mut files: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut to_hash: Vec<String> = Vec::new();
         for (below, stages) in &entries {
-            let full = self.from_toplevel(below);
+            let full = self.in_toplevel(below);
             let clean = stages.len() == 1
                 && stages[0].stage == 0
                 && !stages[0].flagged
@@ -184,7 +184,7 @@ impl<'v, 'h> GitSource<'v, 'h> {
         }
         let names: Vec<String> = listed
             .iter()
-            .map(|(below, _)| self.from_toplevel(below))
+            .map(|(below, _)| self.in_toplevel(below))
             .collect();
         let ids = (self.hash_blobs)(&names, interrupted).map_err(|error| match error {
             BlobHashError::Interrupted => ObserveError::Interrupted,

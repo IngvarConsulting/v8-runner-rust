@@ -423,7 +423,7 @@ fn publish_full_dump(
             .designer_context(&resolved.source_set_name)
             .filter(|source| source.persists_snapshot())
             .map(|source| {
-                crate::use_cases::source_changes::prepare_full_pull(
+                crate::use_cases::source_changes::prepare_full_snapshot(
                     source,
                     publication.staging_path(),
                 )

@@ -69,10 +69,7 @@ pub fn execute(
         "executing build use case"
     );
     stamp_dispatch(
-        stamp_detection(
-            stamp_session(run_build_branch(context, config, args), context),
-            context,
-        ),
+        stamp_session(run_build_branch(context, config, args), context),
         context.work(),
     )
 }
@@ -172,7 +169,10 @@ fn run_build_branch(
         )),
     };
     let outcome = forget_new_owner_after_a_push(config, args, outcome);
-    crate::use_cases::provider_selection::attach(outcome, &receipt)
+    stamp_detection(
+        crate::use_cases::provider_selection::attach(outcome, &receipt),
+        context,
+    )
 }
 
 /// Разбор изменений до выбора исполнителя — там, где объём выбирает исполнителя: у исходников
