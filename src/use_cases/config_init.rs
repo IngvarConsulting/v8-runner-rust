@@ -109,9 +109,18 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let output_dir = output_path.parent().unwrap_or(project_dir.as_path());
     let local_path = output_dir.join(LOCAL_CONFIG_FILE_NAME);
     let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
+    // Проектный файл называет `localPath`, только пока остаётся: `--force` пишет его заново.
+    let kept_project_file = (project_declared && !request.force).then_some(output_path.as_path());
+    let default_connection = default_origin_connection(output_dir, &local_path, kept_project_file);
 
     if project_declared && !request.force {
-        let local = plan_local_config(&local_path, requested.as_ref(), conflict, project.as_ref())?;
+        let local = plan_local_config(
+            &local_path,
+            requested.as_ref(),
+            conflict,
+            project.as_ref(),
+            &default_connection,
+        )?;
         write_local_config(&local_path, &local)?;
         gitignore.ensure()?;
         return Ok(ConfigInitResult::Local(LocalLayerInitResult {
@@ -142,7 +151,13 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
     // Отказ местного слоя случается до записи проектного файла: иначе `--force` успел
     // бы переписать проект, а команда ответила бы отказом.
-    let local = plan_local_config(&local_path, requested.as_ref(), conflict, project.as_ref())?;
+    let local = plan_local_config(
+        &local_path,
+        requested.as_ref(),
+        conflict,
+        project.as_ref(),
+        &default_connection,
+    )?;
 
     let write_project_file = || {
         std::fs::write(&output_path, &yaml).map_err(|error| {
@@ -179,9 +194,42 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     }))
 }
 
-/// Адрес базы по умолчанию, когда `--connection` не передан: файловая база внутри
-/// рабочего каталога.
-const DEFAULT_ORIGIN_CONNECTION: &str = "File=build/ib";
+/// Каталог файловой базы по умолчанию внутри `localPath`.
+const DEFAULT_ORIGIN_DIR: &str = "db";
+
+/// Адрес базы по умолчанию, когда `--infobase` не передан: файловая база `<localPath>/db`,
+/// личное состояние рабочей копии, которое удаление `workPath` не задевает. `localPath` берётся
+/// из местного слоя, затем из проектного файла, который остаётся; путь внутри каталога
+/// конфигурации пишется относительным, вне его — абсолютным.
+fn default_origin_connection(
+    config_dir: &Path,
+    local_layer: &Path,
+    project: Option<&Path>,
+) -> String {
+    let declared = |path: &Path| -> Option<PathBuf> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let document: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
+        document
+            .get("localPath")
+            .and_then(serde_yaml::Value::as_str)
+            .map(PathBuf::from)
+    };
+    let local_path = declared(local_layer)
+        .or_else(|| project.and_then(declared))
+        .unwrap_or_else(|| PathBuf::from(crate::config::model::DEFAULT_LOCAL_PATH));
+    use crate::support::path::{lexically_normal_absolute, normalize_windows_verbatim_path};
+    let config_dir = lexically_normal_absolute(&normalize_windows_verbatim_path(config_dir));
+    let base = lexically_normal_absolute(&config_dir.join(local_path)).join(DEFAULT_ORIGIN_DIR);
+    let spelled = match base.strip_prefix(&config_dir) {
+        Ok(relative) => relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => base.display().to_string(),
+    };
+    format!("File={spelled}")
+}
 
 /// Проектный файл объявленного проекта, когда он говорит о базах: прежний ключ
 /// `infobase:` объявляет `origin` и сливается с местным слоем по полям, как у загрузчика,
@@ -247,6 +295,7 @@ fn plan_local_config(
     origin: Option<&DeclaredOrigin>,
     conflict: OriginConflict,
     project: Option<&ProjectLayer>,
+    default_connection: &str,
 ) -> Result<LocalLayerPlan, AppError> {
     let exists = path.exists();
     let existing = if exists {
@@ -259,7 +308,7 @@ fn plan_local_config(
     } else if project.is_some() {
         String::new()
     } else {
-        let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
+        let connection = origin.map_or(default_connection, |origin| &origin.connection);
         return Ok(LocalLayerPlan {
             content: Some(render_local_config_with_origin(connection)),
             origin: OriginDeclaration {
@@ -270,7 +319,14 @@ fn plan_local_config(
             warnings: Vec::new(),
         });
     };
-    let mut plan = local_config_with_origin(&existing, origin, conflict, project, path)?;
+    let mut plan = local_config_with_origin(
+        &existing,
+        origin,
+        conflict,
+        project,
+        path,
+        default_connection,
+    )?;
     // Пустой слой не создаётся: `origin` уже объявлен проектным файлом.
     let nothing_new = if exists {
         existing
@@ -352,6 +408,7 @@ fn local_config_with_origin(
     conflict: OriginConflict,
     project: Option<&ProjectLayer>,
     path: &Path,
+    default_connection: &str,
 ) -> Result<LocalLayerPlan, AppError> {
     let mut content = with_local_schema_modeline(existing);
     let mut document: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|error| {
@@ -385,7 +442,7 @@ fn local_config_with_origin(
         }
     }
     let effective = layered.as_ref().unwrap_or(&document);
-    let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
+    let connection = origin.map_or(default_connection, |origin| &origin.connection);
     let declared = |content: String| LocalLayerPlan {
         content: Some(content),
         origin: OriginDeclaration {
@@ -1804,12 +1861,12 @@ mod tests {
 
         assert_eq!(read(&dir.path().join("v8project.yaml")), "existing");
         assert_eq!(result.origin.change, OriginChange::Declared);
-        assert_eq!(result.origin.connection.as_deref(), Some("File=build/ib"));
+        assert_eq!(result.origin.connection.as_deref(), Some("File=.local/db"));
         assert_eq!(result.origin.replaced, None);
         assert_eq!(
             read(&dir.path().join("v8project.local.yaml")),
             format!(
-                "{}\ninfobases:\n  origin:\n    connection: 'File=build/ib'\n",
+                "{}\ninfobases:\n  origin:\n    connection: 'File=.local/db'\n",
                 super::LOCAL_CONFIG_SCHEMA_MODEL_LINE
             )
         );
@@ -2158,7 +2215,7 @@ mod tests {
         assert_eq!(
             local_config,
             format!(
-                "{}\ninfobases:\n  origin:\n    connection: 'File=build/ib'\n",
+                "{}\ninfobases:\n  origin:\n    connection: 'File=.local/db'\n",
                 super::LOCAL_CONFIG_SCHEMA_MODEL_LINE
             ),
             "the local layer declares origin; the project file names no base"
@@ -2203,7 +2260,7 @@ mod tests {
         assert!(local_config.contains("workPath: local-work"));
         assert!(!local_config.contains("old.example"));
         assert!(
-            local_config.ends_with("infobases:\n  origin:\n    connection: 'File=build/ib'\n"),
+            local_config.ends_with("infobases:\n  origin:\n    connection: 'File=.local/db'\n"),
             "origin is appended to a layer that does not declare it:\n{local_config}"
         );
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
@@ -2297,6 +2354,65 @@ mod tests {
         assert!(local_config.starts_with(super::LOCAL_CONFIG_SCHEMA_MODEL_LINE));
     }
 
+    /// База по умолчанию лежит в `localPath`, который объявил местный слой: внутри каталога
+    /// конфигурации — относительным путём, вне его — абсолютным.
+    #[test]
+    fn the_default_origin_lies_in_the_declared_local_path() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("main xml");
+        std::fs::write(
+            dir.path().join("v8project.local.yaml"),
+            "localPath: personal/state
+",
+        )
+        .expect("local config");
+        let inside = execute(&ConfigInitRequest {
+            project_dir: dir.path().to_path_buf(),
+            output_path: "v8project.yaml".into(),
+            force: false,
+            connection: None,
+            format: ConfigFormatRequest::Designer,
+        })
+        .expect("init config");
+        let ConfigInitResult::Project(inside) = inside else {
+            panic!("a new project is written");
+        };
+        assert_eq!(
+            inside.origin.connection.as_deref(),
+            Some("File=personal/state/db")
+        );
+
+        let other = tempdir().expect("tempdir");
+        let elsewhere = tempdir().expect("tempdir");
+        let outside = elsewhere.path().join("state");
+        std::fs::write(other.path().join("Configuration.xml"), "<Configuration/>")
+            .expect("main xml");
+        std::fs::write(
+            other.path().join("v8project.local.yaml"),
+            format!(
+                "localPath: '{}'
+",
+                outside.display()
+            ),
+        )
+        .expect("local config");
+        let result = execute(&ConfigInitRequest {
+            project_dir: other.path().to_path_buf(),
+            output_path: "v8project.yaml".into(),
+            force: false,
+            connection: None,
+            format: ConfigFormatRequest::Designer,
+        })
+        .expect("init config");
+        let ConfigInitResult::Project(result) = result else {
+            panic!("a new project is written");
+        };
+        assert_eq!(
+            result.origin.connection,
+            Some(format!("File={}", outside.join("db").display()))
+        );
+    }
+
     #[test]
     fn a_null_infobases_key_is_replaced_by_the_map() {
         let dir = tempdir().expect("tempdir");
@@ -2319,7 +2435,7 @@ mod tests {
             serde_yaml::from_str(&local_config).expect("still one document");
         assert_eq!(
             document["infobases"]["origin"]["connection"],
-            "File=build/ib"
+            "File=.local/db"
         );
     }
 

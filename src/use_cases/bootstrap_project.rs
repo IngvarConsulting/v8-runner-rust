@@ -148,7 +148,7 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
     let request = &plan.request;
     let written;
     let LoadedConfig { config, warnings } = if plan.is_preview() {
-        refuse_a_non_empty_project_dir(&plan.paths, &plan.config().work_path, request.force)
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), request.force)
             .map_err(UseCaseFailure::without_payload)?;
         &plan.settings
     } else {
@@ -161,7 +161,7 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
             request.force,
         )
         .map_err(UseCaseFailure::without_payload)?;
-        refuse_a_non_empty_project_dir(&plan.paths, &plan.config().work_path, request.force)
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), request.force)
             .map_err(UseCaseFailure::without_payload)?;
         if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
             context,
@@ -355,13 +355,17 @@ const WORK_PATH_LOGS_DIR: &str = "logs";
 /// кроме `.git`. Проверка идёт после замка, а замок и журнал уже могут лежать в `workPath`
 /// нового проекта. Поэтому `workPath` не в счёт, только пока в нём нет ничего, кроме файлов
 /// замка, каталога журналов `logs/` (его содержимое не проверяется) и признака нового
-/// владельца в памяти о базе; любой другой файл или каталог в нём — «не пуст».
+/// владельца в памяти о базе; любой другой файл или каталог в нём — «не пуст». Так же не в
+/// счёт `localPath`, пока в нём лишь `.gitignore` и файлы замков: его заводит замок прерванного
+/// прежнего клона.
 /// `--force` снимает отказ, как и запрет перезаписи. Каталога ещё нет — он пуст.
 fn refuse_a_non_empty_project_dir(
     paths: &BootstrapPaths,
-    work_path: &Path,
+    config: &AppConfig,
     force: bool,
 ) -> Result<(), AppError> {
+    let work_path = config.work_path.as_path();
+    let local_path = config.local_path.as_path();
     if force {
         return Ok(());
     }
@@ -378,13 +382,19 @@ fn refuse_a_non_empty_project_dir(
             continue;
         }
         let path = entry.path();
-        if path != work_path {
+        let foreign = if path == work_path {
+            directory_entries(work_path)?
+                .into_iter()
+                .find(|inner| !is_lock_file_or_logs_dir(inner))
+        } else if path == local_path {
+            directory_entries(local_path)?.into_iter().find(|inner| {
+                !(inner.path().is_file()
+                    && crate::support::local_dir::is_preparation_file(&inner.file_name()))
+            })
+        } else {
             return Err(refuse(path));
-        }
-        if let Some(foreign) = directory_entries(work_path)?
-            .into_iter()
-            .find(|inner| !is_lock_file_or_logs_dir(inner))
-        {
+        };
+        if let Some(foreign) = foreign {
             return Err(refuse(foreign.path()));
         }
     }
@@ -714,6 +724,27 @@ mod tests {
         );
         assert!(!plan.paths.config_path.exists());
         assert!(!plan.paths.local_config_path.exists());
+    }
+
+    /// Повторный клон не спотыкается о `localPath`, который завёл замок прежнего: в нём лишь
+    /// `.gitignore` и файлы замков. Любой другой файл в нём — непустой каталог.
+    #[test]
+    fn a_local_path_holding_only_its_preparation_does_not_make_the_directory_non_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = written_plan(dir.path());
+        let local = plan.config().local_dir();
+        local.prepare().expect("prepared");
+        for lock in [".lock", ".lock.json", ".db.v8-runner.infobase.lock"] {
+            std::fs::write(local.path().join(lock), "").expect("lock file");
+        }
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect("only the preparation lies there");
+
+        std::fs::create_dir_all(local.path().join("db")).expect("a base");
+        let refused = refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect_err("a base is not a preparation");
+        assert!(refused.to_string().contains("is not empty"), "{refused}");
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), true).expect("forced");
     }
 
     /// Замок взят по настройкам плана, и написанный проект обязан назвать тот же
