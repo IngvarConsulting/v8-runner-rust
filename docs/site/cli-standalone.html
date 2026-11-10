@@ -76,7 +76,7 @@
 <fieldset class="output-format" data-output-format><legend>Вывод</legend><div class="output-format-options"><label><input type="radio" name="output-format" value="cli" checked><span>CLI</span></label><label><input type="radio" name="output-format" value="json"><span>JSON</span></label></div></fieldset>
 <h2 class="command-variant" id="op-standalone-start">standalone start</h2>
 <pre data-output-command><code>v8-runner standalone start</code></pre>
-<p>Поднимает <code>ibsrv</code> той же платформы, что выбирают остальные команды (<code>tools.platform</code>), над файловой базой из <code>standalone.managed.db-path</code> или над базой из секции <code>dbms</code>; база должна быть создана заранее. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Пароль СУБД <code>ibsrv</code> получает ключом <code>-W</code> через stdin, в командной строке его нет. На Linux и macOS команда отказывает. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами, пока его не остановит <a href="#op-standalone-stop"><code>standalone stop</code></a>. Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под <code>workPath</code>.</p>
+<p>Поднимает <code>ibsrv</code> той же платформы, что выбирают остальные команды (<code>tools.platform</code>), над файловой базой из <code>standalone.managed.db-path</code> или над базой из секции <code>dbms</code>; база должна быть создана заранее. При <code>dbms.managed</code> команда первым шагом поднимает PostgreSQL, если он не работает. Пароль СУБД <code>ibsrv</code> получает ключом <code>-W</code> через stdin, в командной строке его нет. На Linux и macOS команда отказывает. Раннер сам выбирает свободные порты прямого шлюза, SSH-шлюза и HTTP, создаёт одноразовый ключ хоста для SSH-шлюза и отдаёт ответ только после того, как прямой шлюз принял соединение: готовность проверяется пробой, а не паузой <span class="ref">(<a href="platform.html#t61">61</a>, <a href="platform.html#t65">65</a>)</span>. Сервер живёт между командами, пока его не остановит <a href="#op-standalone-stop"><code>standalone stop</code></a>. Запись о том, какой процесс поднят, какими портами и с каким ключом, раннер держит под <code>localPath</code>.</p>
 <p>Если сервер этой базы уже поднят раннером этой копии, команда ничего не запускает и называет его. Если базу держит чужой процесс <code>ibsrv</code>, команда отказывает и называет его: второй сервер над той же базой не поднимается.</p>
 <pre data-output-command><code>v8-runner standalone start --dry-run</code></pre>
 <p>Показывает каталог данных, журнал и закреплённые адреса, если сервер уже запускался. Ничего не запускает. Такое же превью есть у <code>standalone stop</code> и <code>standalone restart</code>. Команды <code>standalone</code> принимают только объявленную базу: строка соединения в <code>--infobase</code> — отказ.</p>
@@ -107,28 +107,28 @@
   direct gate  Srvr=127.0.0.1:24641;Ref=demo
   ssh gate  127.0.0.1:24642
   http  http://127.0.0.1:24643/demo
-  data  build/infobases/origin/managed/standalone/data
-  log  build/infobases/origin/managed/standalone/standalone.log</code></pre>
+  data  .local/infobases/origin/managed/standalone/data
+  log  .local/infobases/origin/managed/standalone/standalone.log</code></pre>
 <h4 id="standalone-already">Уже поднят этой копией</h4>
 <pre data-output-example="standalone-already" data-output-schema="standalone-start"><code>standalone start: already running for origin, pid 48213
   direct gate  Srvr=127.0.0.1:24641;Ref=demo
   ssh gate  127.0.0.1:24642
   http  http://127.0.0.1:24643/demo
-  data  build/infobases/origin/managed/standalone/data
-  log  build/infobases/origin/managed/standalone/standalone.log</code></pre>
+  data  .local/infobases/origin/managed/standalone/data
+  log  .local/infobases/origin/managed/standalone/standalone.log</code></pre>
 <h4 id="standalone-status-own">Состояние своего сервера</h4>
 <pre data-output-example="standalone-status-own" data-output-schema="standalone-status"><code>standalone status: origin: standalone server, started by this working copy, pid 48213
   direct gate  Srvr=127.0.0.1:24641;Ref=demo
   ssh gate  127.0.0.1:24642
   http  http://127.0.0.1:24643/demo
-  data  build/infobases/origin/managed/standalone/data
-  log  build/infobases/origin/managed/standalone/standalone.log</code></pre>
+  data  .local/infobases/origin/managed/standalone/data
+  log  .local/infobases/origin/managed/standalone/standalone.log</code></pre>
 <h4 id="standalone-stopped">Сервер остановлен</h4>
 <pre data-output-example="standalone-stopped" data-output-schema="standalone-stop"><code>standalone stop: ibsrv pid 48213 stopped</code></pre>
 <h4 id="standalone-foreign">Чужой сервер не тронут</h4>
 <pre data-output-example="standalone-foreign" data-output-schema="standalone-start"><code>ERROR: workspace busy: the infobase of 'origin' is served by ibsrv pid 30117, which this runner did not start; it is left running</code></pre>
 <h4 id="standalone-not-ready">Сервер не стал готов</h4>
-<pre data-output-example="standalone-not-ready" data-output-schema="standalone-start"><code>ERROR: platform error: ibsrv exited before its direct gate accepted a connection; log: build/infobases/origin/managed/standalone/standalone.log</code></pre>
+<pre data-output-example="standalone-not-ready" data-output-schema="standalone-start"><code>ERROR: platform error: ibsrv exited before its direct gate accepted a connection; log: .local/infobases/origin/managed/standalone/standalone.log</code></pre>
 </main>
 <script type="application/json" id="output-examples">{
   "standalone-started": {
@@ -143,8 +143,8 @@
       "connection": "Srvr=127.0.0.1:24641;Ref=demo",
       "gate": "127.0.0.1:24642",
       "http": "http://127.0.0.1:24643/demo",
-      "data_dir": "build/infobases/origin/managed/standalone/data",
-      "log_path": "build/infobases/origin/managed/standalone/standalone.log",
+      "data_dir": ".local/infobases/origin/managed/standalone/data",
+      "log_path": ".local/infobases/origin/managed/standalone/standalone.log",
       "ready": true,
       "action": "started",
       "duration_ms": 14210
@@ -164,8 +164,8 @@
       "connection": "Srvr=127.0.0.1:24641;Ref=demo",
       "gate": "127.0.0.1:24642",
       "http": "http://127.0.0.1:24643/demo",
-      "data_dir": "build/infobases/origin/managed/standalone/data",
-      "log_path": "build/infobases/origin/managed/standalone/standalone.log",
+      "data_dir": ".local/infobases/origin/managed/standalone/data",
+      "log_path": ".local/infobases/origin/managed/standalone/standalone.log",
       "ready": true,
       "action": "already_running",
       "duration_ms": 40
@@ -185,8 +185,8 @@
       "connection": "Srvr=127.0.0.1:24641;Ref=demo",
       "gate": "127.0.0.1:24642",
       "http": "http://127.0.0.1:24643/demo",
-      "data_dir": "build/infobases/origin/managed/standalone/data",
-      "log_path": "build/infobases/origin/managed/standalone/standalone.log",
+      "data_dir": ".local/infobases/origin/managed/standalone/data",
+      "log_path": ".local/infobases/origin/managed/standalone/standalone.log",
       "ready": true,
       "action": "reported",
       "duration_ms": 35
@@ -240,7 +240,7 @@
       "infobase": "origin",
       "state": "not_running",
       "action": "reported",
-      "log_path": "build/infobases/origin/managed/standalone/standalone.log",
+      "log_path": ".local/infobases/origin/managed/standalone/standalone.log",
       "ready": false,
       "duration_ms": 1320
     },
@@ -249,7 +249,7 @@
     "error": {
       "kind": "platform",
       "code": "platform_failure",
-      "message": "ibsrv exited before its direct gate accepted a connection; log: build/infobases/origin/managed/standalone/standalone.log"
+      "message": "ibsrv exited before its direct gate accepted a connection; log: .local/infobases/origin/managed/standalone/standalone.log"
     }
   }
 }</script>

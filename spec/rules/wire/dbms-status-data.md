@@ -25,7 +25,7 @@ check:
   "version": "17.11",
   "address": "127.0.0.1 port=24432",
   "user": "postgres",
-  "password_file": "build/infobases/origin/managed/postgres/password",
+  "password_file": ".local/infobases/origin/managed/postgres/password",
   "explicit": true,
   "ready": true,
   "duration_ms": 1240

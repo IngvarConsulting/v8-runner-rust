@@ -40,9 +40,10 @@ pub enum ScanError {
     RelativePath { root: PathBuf, path: PathBuf },
 }
 
-/// Directory/file names that are always excluded from scanning.
+/// Directory/file names that are always excluded from scanning. `.local` is the default
+/// `localPath`: a second guard behind [`runner_dirs_inside`](super::runner_dirs::runner_dirs_inside).
 const IGNORED_DIRS: &[&str] = &[
-    ".git", ".gradle", ".build", "build", "target", "temp", "tmp", ".yaxunit",
+    ".git", ".gradle", ".build", "build", "target", "temp", "tmp", ".yaxunit", ".local",
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 /// Name prefix of the file an incremental dump writes into the tree to read its clock.
@@ -129,22 +130,13 @@ pub(super) enum ScanScope {
 /// successful post-publication bookkeeping supplies an always-false predicate.
 #[cfg(test)]
 pub fn scan(root: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<ScanSnapshot, ScanError> {
-    scan_in_scope(root, None, interrupted, ScanScope::Push)
+    scan_in_scope(root, &[], interrupted, ScanScope::Push)
 }
 
-/// `workPath` under a source-set root, named as the walk of that root names it. A set in the
-/// workspace root holds it, and it can have any name.
-pub fn work_path_inside(root: &Path, work_path: &Path) -> Option<PathBuf> {
-    let root_real = root.canonicalize().ok()?;
-    let work_real = work_path.canonicalize().ok()?;
-    let relative = work_real.strip_prefix(&root_real).ok()?;
-    (!relative.as_os_str().is_empty()).then(|| root.join(relative))
-}
-
-/// Hash the files selected by the scan scope, excluding the supplied directory.
+/// Hash the files selected by the scan scope, excluding the supplied directories.
 pub(super) fn scan_in_scope(
     root: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     interrupted: &mut dyn FnMut() -> bool,
     scope: ScanScope,
 ) -> Result<ScanSnapshot, ScanError> {
@@ -153,7 +145,7 @@ pub(super) fn scan_in_scope(
 
 fn scan_with_workers(
     root: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     interrupted: &mut dyn FnMut() -> bool,
     scope: ScanScope,
     workers: usize,
@@ -177,7 +169,7 @@ pub(super) struct Listing {
 /// Walk the tree and select its source files without reading them.
 pub(super) fn list_in_scope(
     root: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     interrupted: &mut dyn FnMut() -> bool,
     scope: ScanScope,
 ) -> Result<Listing, ScanError> {
@@ -495,14 +487,16 @@ pub(crate) fn top_level_source_entries(
 /// The entries of a source tree, without the generated directories and `excluded`.
 pub(super) fn source_entries<'a>(
     root: &Path,
-    excluded: Option<&'a Path>,
+    excluded: &'a [PathBuf],
     scope: ScanScope,
 ) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> + 'a {
     WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_entry(move |entry| {
-            entry.depth() == 0 || !(is_ignored_dir(entry, scope) || excluded == Some(entry.path()))
+            entry.depth() == 0
+                || !(is_ignored_dir(entry, scope)
+                    || excluded.iter().any(|path| path == entry.path()))
         })
 }
 
@@ -527,14 +521,15 @@ fn is_ignored_dir(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
     match scope {
         ScanScope::Push => IGNORED_DIRS.contains(&name),
         // A metadata object can itself be named build, target, temp, or tmp.
-        ScanScope::Build => matches!(name, ".git" | ".gradle" | ".build" | ".yaxunit"),
+        ScanScope::Build => matches!(name, ".git" | ".gradle" | ".build" | ".yaxunit" | ".local"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{scan, scan_in_scope, work_path_inside, ScanScope, ScanSnapshot};
+    use super::{scan, scan_in_scope, ScanScope, ScanSnapshot};
     use crate::change_detection::file_state::mtime_nanos;
+    use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
     use std::fs::{self, File};
     use std::path::Path;
     use std::time::{Duration, SystemTime};
@@ -590,24 +585,42 @@ mod tests {
         assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
     }
 
-    /// `workPath` внутри набора не исходник, как бы он ни назывался.
+    /// `workPath` и `localPath` внутри набора не исходники, как бы они ни назывались.
     #[test]
     fn a_work_path_inside_the_root_is_not_a_source_whatever_its_name() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("root");
         let work = root.join("service-area");
+        let local = root.join("personal");
         fs::create_dir_all(&work).expect("work");
+        fs::create_dir_all(local.join("db")).expect("local");
         fs::write(work.join("log.txt"), "log").expect("service file");
+        fs::write(local.join("db").join("1Cv8.1CD"), "base").expect("personal file");
         fs::write(root.join("Configuration.xml"), "<x/>").expect("source");
 
-        let excluded = work_path_inside(&root, &work);
-        assert_eq!(excluded.as_deref(), Some(work.as_path()));
-        let snapshot = scan_in_scope(&root, excluded.as_deref(), &mut || false, ScanScope::Push)
-            .expect("scan");
+        let excluded = runner_dirs_inside(&root, RunnerDirs::new(&work, Some(&local)));
+        assert_eq!(excluded, [work.clone(), local.clone()]);
+        for scope in [ScanScope::Push, ScanScope::Build] {
+            let snapshot = scan_in_scope(&root, &excluded, &mut || false, scope).expect("scan");
+            assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
+        }
+        assert!(runner_dirs_inside(&root, RunnerDirs::new(dir.path(), None)).is_empty());
+        assert!(runner_dirs_inside(&root, RunnerDirs::new(&root, None)).is_empty());
+    }
 
-        assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
-        assert_eq!(work_path_inside(&root, dir.path()), None);
-        assert_eq!(work_path_inside(&root, &root), None);
+    /// `.local` под корнем набора пропускается по имени и без настроек: вторая защита
+    /// `localPath` по умолчанию.
+    #[test]
+    fn the_default_local_directory_is_skipped_by_its_name() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join(".local").join("db")).expect("local");
+        fs::write(root.join(".local").join("db").join("1Cv8.1CD"), "base").expect("base");
+        fs::write(root.join("Configuration.xml"), "<x/>").expect("source");
+        for scope in [ScanScope::Push, ScanScope::Build] {
+            let snapshot = scan_in_scope(root, &[], &mut || false, scope).expect("scan");
+            assert_eq!(scanned_names(&snapshot), ["Configuration.xml"]);
+        }
     }
 
     fn write_touched(path: &Path, contents: &str, modified: SystemTime) {
@@ -876,7 +889,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         many_files(dir.path(), 300);
         let read = |workers| {
-            super::scan_with_workers(dir.path(), None, &mut || false, ScanScope::Push, workers)
+            super::scan_with_workers(dir.path(), &[], &mut || false, ScanScope::Push, workers)
                 .expect("scan")
         };
         let sequential = read(1);

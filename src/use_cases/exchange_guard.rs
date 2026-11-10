@@ -1313,6 +1313,7 @@ mod tests {
     fn project(root: &Path) -> AppConfig {
         std::fs::create_dir_all(root.join("main")).expect("sources");
         AppConfig {
+            local_path: root.join(".local"),
             base_path: root.to_path_buf(),
             work_path: root.join("work"),
             format: SourceFormat::Designer,

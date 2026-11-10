@@ -65,6 +65,7 @@ fn status_needs_no_build_and_opens_no_base() {
     let (code, answer) = run(dir.path(), &["dbms", "status"]);
     assert_eq!(code, 0, "{answer}");
     assert!(!dir.path().join("work/infobases").exists());
+    assert!(!dir.path().join(".local").exists(), "status writes nothing");
 }
 
 #[test]

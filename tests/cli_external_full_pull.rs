@@ -1575,3 +1575,28 @@ fn cancellation_interrupts_stdin_wait_before_and_after_ready_without_committing_
         assert_eq!(project.baseline(), baseline);
     }
 }
+
+/// Стадия внешней публикации не пересекается с каталогами раннера: стадия внутри `localPath` —
+/// отказ до платформы, стадия и состояние раннера целы
+/// (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
+#[test]
+fn an_external_stage_inside_the_local_path_is_refused_before_the_platform() {
+    let mut project = Project::new("designer", false);
+    let root = project.config.parent().unwrap().to_path_buf();
+    project.stage = root.join(".local").join("stage");
+    fs::create_dir_all(&project.stage).expect("stage under localPath");
+    let session = project.start();
+    let (status, terminal) = session.finish();
+    assert!(!status.success(), "{terminal}");
+    assert_eq!(terminal["publication"], "not_published", "{terminal}");
+    assert_eq!(
+        terminal["result"]["error"]["code"], "invalid_argument",
+        "{terminal}"
+    );
+    assert!(
+        terminal.to_string().contains("localPath"),
+        "the refusal names the runner directory: {terminal}"
+    );
+    assert!(project.calls().is_empty(), "the platform was not started");
+    assert!(snapshot(&project.stage).is_empty());
+}

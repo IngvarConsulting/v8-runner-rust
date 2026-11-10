@@ -429,6 +429,7 @@ mod tests {
 
     fn config_in(base_path: &std::path::Path, source_sets: Vec<SourceSetConfig>) -> AppConfig {
         AppConfig {
+            local_path: base_path.join("base").join(".local"),
             base_path: base_path.join("base"),
             work_path: base_path.join("work"),
             format: SourceFormat::Designer,

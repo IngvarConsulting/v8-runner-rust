@@ -82,7 +82,8 @@ impl<'a> SourceSetsService<'a> {
             &source_set.name,
             path,
             format!("designer-{}", source_set.name),
-        );
+        )
+        .with_local_path(&self.config.local_path);
         if source_set.purpose.is_external() {
             return context;
         }
@@ -107,7 +108,8 @@ impl<'a> SourceSetsService<'a> {
             format!("tool:{extension}"),
             root.clone(),
             format!("tool-{extension}-source"),
-        );
+        )
+        .with_local_path(&self.config.local_path);
         let Some(memory) = self.base_memory() else {
             return context.without_memory();
         };
@@ -151,6 +153,7 @@ impl<'a> SourceSetsService<'a> {
             .iter()
             .map(|ss| {
                 SourceSetContext::new(&ss.name, ss.root_in(&base_path), format!("edt-{}", ss.name))
+                    .with_local_path(&self.config.local_path)
             })
             .collect()
     }
@@ -195,6 +198,7 @@ mod tests {
     /// Проект с одним набором `main` в `src` и рабочим каталогом `work_path`.
     fn single_set_config(format: SourceFormat, work_path: &str) -> AppConfig {
         AppConfig {
+            local_path: PathBuf::from(".").join(".local"),
             base_path: PathBuf::from("."),
             work_path: PathBuf::from(work_path),
             format,

@@ -29,11 +29,12 @@ check:
   - src/use_cases/managed_stand/mod.rs::stop_that_failed_keeps_the_record_and_a_repeat_goes_on
   - src/use_cases/managed_stand/mod.rs::a_foreign_process_on_the_pinned_port_is_named_and_left_alone
   - src/use_cases/managed_stand/mod.rs::status_and_stop_work_from_the_record_when_the_tool_key_is_gone
+  - src/use_cases/managed_stand/mod.rs::a_copied_local_directory_does_not_adopt_the_foreign_postgres
 ---
 
 # Кто поднял СУБД, тот её и гасит
 
-Запись о СУБД помнит, поднята ли она явно, командой `dbms start`, или шагом `cluster start` либо `standalone start`.
+Запись о СУБД лежит под `localPath/infobases/<база>/managed/postgres/` и помнит, поднята ли она явно, командой `dbms start`, или шагом `cluster start` либо `standalone start`.
 
 | Ситуация | Что происходит |
 | --- | --- |
@@ -48,6 +49,7 @@ check:
 | `stop` сорвался на части процессов | Записи живых процессов остаются, ответ их называет, повтор `stop` продолжает |
 | Запись не совпала с процессом, например после перезагрузки | Служба считается остановленной, следующий `start` поднимает её, и явность определяет эта команда |
 | На порту записи работает чужой процесс | `stop` успешен и называет его, `start` отказывает и называет его |
+| Запись скопирована вместе с `.local` в другой каталог | Запись устаревшая, СУБД оригинала чужая: `stop` её не трогает, `start` отказывает и называет её |
 | `tools.postgres.path` больше не объявлен | `status` и `stop` работают по пути из записи |
 
 Снятие и замена записи о запущенной службе не отменяют закреплённых портов: `INV.PLATFORM.MANAGED-PORTS-ARE-PINNED`.

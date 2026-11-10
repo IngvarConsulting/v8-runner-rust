@@ -109,7 +109,7 @@
 <pre data-output-example="infobase-create-variant-1" data-output-schema="infobase-create"><code>Init completed successfully</code></pre>
 <h4 id="create-already-exists" data-response-class="skipped">База уже существует</h4>
 <p>Для <a href="#op-infobase-create">создания файловой базы</a>, которая уже существует, шаг создания пропускается: существующая база не пересоздаётся. Команда успешна; ориентируйтесь на статусы шагов, а не только на <code>provider_dispatched</code>.</p>
-<pre data-output-example="create-already-exists" data-output-schema="infobase-create"><code>○ infobase: create - file infobase already exists: build/ib
+<pre data-output-example="create-already-exists" data-output-schema="infobase-create"><code>○ infobase: create - file infobase already exists: .local/db
 
 Init completed successfully</code></pre>
 <h4 id="infobase-create-example-outcome" data-response-class="preview">План создания подготовлен</h4>
@@ -242,7 +242,7 @@ ERROR: timed out: EDT workspace import timed out</code></pre>
           "action": "create",
           "status": "skipped",
           "duration_ms": 0,
-          "message": "file infobase already exists: build/ib"
+          "message": "file infobase already exists: .local/db"
         },
         {
           "target": "edt_workspace",

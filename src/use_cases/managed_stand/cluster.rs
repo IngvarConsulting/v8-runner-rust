@@ -22,6 +22,7 @@ use crate::platform::service::{first_with_keys, ProcessRow, ServiceSpawnError};
 use crate::platform::service_record::{
     adopt_recorded_pid, observe_service, read_json, record_names_own_process, write_json,
     ClusterPins, Observed, PreviousRegistry, RecordState, ServicePaths, ServiceRecord,
+    StandService,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::interruption_before_safe_point;
@@ -301,7 +302,8 @@ impl Cluster<'_> {
 
     /// pid остатков для отчёта; без перечня процессов — ни одного.
     fn remnant_pids(&self) -> Vec<u32> {
-        read_json::<ServiceRecord>(&self.agent.record())
+        self.agent
+            .own_record()
             .and_then(|record| self.remnants(&record))
             .map(|remnants| remnants.into_iter().map(|(pid, _)| pid).collect())
             .unwrap_or_default()
@@ -410,7 +412,7 @@ impl Cluster<'_> {
 
     /// Устаревшая запись агента: снять остатки по ней, затем её саму.
     fn clear_stale(&self) -> Result<Vec<u32>, UseCaseError> {
-        let remnants = match read_json::<ServiceRecord>(&self.agent.record()) {
+        let remnants = match self.agent.own_record() {
             Some(record) => self.clear_remnants(&record)?,
             None => Vec::new(),
         };
@@ -573,7 +575,7 @@ impl Cluster<'_> {
     /// Свой автономный сервер той же базы: одна БД — один сервер.
     fn standalone_running(&self) -> bool {
         record_names_own_process(
-            &self.agent.sibling_record("standalone"),
+            &self.agent.sibling(StandService::Standalone),
             self.host.machine().as_deref(),
             &|pid| self.host.facts(pid),
         )
@@ -1044,6 +1046,7 @@ impl Cluster<'_> {
             bin: ragent_bin.clone(),
             version: platform_version(&ragent_bin),
             agent: None,
+            location: self.agent.location(),
         };
         write_record(&self.agent, &agent)?;
         let request = ragent::start_agent(&ragent_bin, &registry, pins.ports, &self.agent.log());
@@ -1092,6 +1095,7 @@ impl Cluster<'_> {
             bin: ras_bin.clone(),
             version: agent.version.clone(),
             agent: None,
+            location: self.ras.location(),
         };
         write_record(&self.ras, &ras)?;
         let request = ragent::start_ras(&ras_bin, port, ports, &self.ras.log());
@@ -1212,8 +1216,12 @@ fn cluster<'a>(
     locate: &'a dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> Result<Cluster<'a>, UseCaseError> {
     let declared = declared(config)?;
-    let agent = ServicePaths::new(&config.work_path, &declared.infobase, "cluster");
-    let ras = ServicePaths::new(&config.work_path, &declared.infobase, "ras");
+    let agent = ServicePaths::new(
+        &config.local_dir(),
+        &declared.infobase,
+        StandService::Cluster,
+    );
+    let ras = ServicePaths::new(&config.local_dir(), &declared.infobase, StandService::Ras);
     Ok(Cluster {
         config,
         context,
@@ -1236,6 +1244,7 @@ pub(super) fn run_cluster(
     host: &dyn ServiceHost,
     locate: &dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> UseCaseResult<ClusterResult> {
+    super::refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
     let cluster =
         cluster(config, context, runner, host, locate).map_err(UseCaseFailure::without_payload)?;
     let outcome = match command {
@@ -1264,6 +1273,7 @@ pub(super) fn cluster_base(
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
 ) -> Result<ClusterBase, UseCaseError> {
+    super::refuse_a_stand_of_another_project(config)?;
     let no_locate = || Err(validation("a running cluster names its own utilities"));
     let cluster = cluster(config, context, runner, host, &no_locate)?;
     let not_running = || {
@@ -1344,7 +1354,11 @@ fn mark_registered(cluster: &Cluster<'_>, pins: ClusterPins) -> Result<(), UseCa
 /// После `CREATEINFOBASE`: база создана в текущем реестре.
 pub(super) fn remember_registered(config: &AppConfig) -> Result<(), UseCaseError> {
     let declared = declared(config)?;
-    let paths = ServicePaths::new(&config.work_path, &declared.infobase, "cluster");
+    let paths = ServicePaths::new(
+        &config.local_dir(),
+        &declared.infobase,
+        StandService::Cluster,
+    );
     let pins: ClusterPins = read_json(&paths.pins())
         .ok_or_else(|| validation("the ports of the cluster are not pinned"))?;
     write_json(
@@ -1674,6 +1688,7 @@ mod tests {
             ..Default::default()
         });
         let mut config = AppConfig {
+            local_path: root.path().join(".local"),
             base_path: root.path().to_path_buf(),
             work_path: root.path().join("work"),
             format: crate::config::model::SourceFormat::Designer,
@@ -1697,10 +1712,10 @@ mod tests {
 
     impl Setup {
         fn agent(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.work_path, "origin", "cluster")
+            ServicePaths::new(&self.config.local_dir(), "origin", StandService::Cluster)
         }
         fn ras(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.work_path, "origin", "ras")
+            ServicePaths::new(&self.config.local_dir(), "origin", StandService::Ras)
         }
         fn pins(&self) -> ClusterPins {
             read_json(&self.agent().pins()).expect("pinned")
@@ -1759,8 +1774,11 @@ mod tests {
             .unwrap()
         }
         fn dbms_record(&self) -> ServiceRecord {
-            read_json(&ServicePaths::new(&self.config.work_path, "origin", "postgres").record())
-                .unwrap()
+            read_json(
+                &ServicePaths::new(&self.config.local_dir(), "origin", StandService::Postgres)
+                    .record(),
+            )
+            .unwrap()
         }
         fn base(&self, host: &Host) -> Result<ClusterBase, UseCaseError> {
             cluster_base(
@@ -2345,7 +2363,11 @@ mod tests {
     }
 
     fn own_standalone(setup: &Setup, host: &Host) {
-        let standalone = ServicePaths::new(&setup.config.work_path, "origin", "standalone");
+        let standalone = ServicePaths::new(
+            &setup.config.local_dir(),
+            "origin",
+            StandService::Standalone,
+        );
         standalone.prepare().unwrap();
         host.live(8100, "ibsrv.exe");
         write_json(
@@ -2362,6 +2384,7 @@ mod tests {
                 bin: PathBuf::from("ibsrv.exe"),
                 version: None,
                 agent: None,
+                location: standalone.location(),
             },
         )
         .unwrap();
@@ -2583,6 +2606,48 @@ mod tests {
         assert_eq!(stopped.stopped_dbms_pid, Some(PG_PID));
     }
 
+    /// Удаление `workPath` стенда не трогает: СУБД, кластер с реестром и признак созданной базы
+    /// лежат под `localPath`. Запись цела, `dbms status` видит свою СУБД, а `cluster start` после
+    /// перезагрузки поднимает тот же кластер над той же базой
+    /// (`INV.USE-CASES.DELETING-THE-WORKPATH-KEEPS-STANDS-AND-BASES`).
+    #[test]
+    fn deleting_the_work_path_keeps_the_stand_and_its_base() {
+        let setup = setup();
+        let host = Host::default();
+        setup.dbms(ServiceCommand::Start, &host);
+        let first = setup.run(ServiceCommand::Start, &host).unwrap();
+        host.registered.borrow_mut().push("demo".to_owned());
+        assert!(matches!(
+            setup.base(&host),
+            Ok(ClusterBase::AlreadyRegistered(_))
+        ));
+        let port = setup.dbms_record().port;
+        std::fs::create_dir_all(setup.config.work_path.join("infobases").join("origin")).unwrap();
+        std::fs::remove_dir_all(&setup.config.work_path).unwrap();
+
+        let status = setup.dbms(ServiceCommand::Status, &host);
+        assert_eq!(status.state, ServiceState::StartedByThisCopy);
+        assert!(setup.pins().registered, "the base is still known created");
+        assert!(setup.agent().own_record().is_some());
+
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        let second = setup.run(ServiceCommand::Start, &host).unwrap();
+        assert_eq!(second.action, ServiceAction::Started);
+        assert_eq!(second.connection, first.connection, "the same regport");
+        assert!(second.registered, "the same base");
+        assert_eq!(setup.dbms_record().port, port);
+        assert!(setup
+            .config
+            .local_path
+            .join("infobases")
+            .join("origin")
+            .join("managed")
+            .join("postgres")
+            .join("data")
+            .is_dir());
+    }
+
     #[test]
     fn after_a_reboot_the_command_that_raises_the_postgres_decides_whether_it_is_explicit() {
         // Явный до перезагрузки, после неё поднят кластером — шаг кластера.
@@ -2638,7 +2703,7 @@ mod tests {
 
     /// Работающий свой кластер другой базы.
     fn running_cluster_of(setup: &Setup, host: &Host, infobase: &str) {
-        let paths = ServicePaths::new(&setup.config.work_path, infobase, "cluster");
+        let paths = ServicePaths::new(&setup.config.local_dir(), infobase, StandService::Cluster);
         paths.prepare().unwrap();
         host.live(9200, "ragent.exe");
         write_json(
@@ -2655,6 +2720,7 @@ mod tests {
                 bin: PathBuf::from("ragent.exe"),
                 version: None,
                 agent: None,
+                location: paths.location(),
             },
         )
         .unwrap();
@@ -2813,5 +2879,38 @@ mod tests {
             "{:?}",
             started.connection
         );
+    }
+
+    /// Стенд базы в общем `localPath` принадлежит другому проекту: команды кластера и
+    /// `infobase create` в нём отказывают `workspace_busy`, называя тот проект, и ничего не
+    /// поднимают (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+    #[test]
+    fn the_cluster_and_its_base_refuse_the_stand_of_another_project() {
+        let first = setup();
+        ServicePaths::new(&first.config.local_dir(), "origin", StandService::Cluster)
+            .prepare()
+            .unwrap();
+        let mut second = setup();
+        second.config.local_path = first.config.local_path.clone();
+        let host = Host::default();
+        let project = first.config.base_path.display().to_string();
+        for command in [
+            ServiceCommand::Start,
+            ServiceCommand::Status,
+            ServiceCommand::Stop,
+            ServiceCommand::Restart,
+        ] {
+            let refused = second.run(command, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+            assert!(
+                refused.to_string().contains(&project),
+                "{command:?}: {refused}"
+            );
+        }
+        let refused = second.base(&host).err().unwrap();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+        assert!(refused.to_string().contains(&project), "{refused}");
+        assert!(host.spawned.borrow().is_empty());
+        assert!(!first.agent().pins().exists());
     }
 }

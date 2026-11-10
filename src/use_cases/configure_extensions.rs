@@ -427,6 +427,7 @@ mod tests {
 
     fn sample_config(base: &Path, work: &Path, ibcmd_path: &Path) -> AppConfig {
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
             format: SourceFormat::Edt,

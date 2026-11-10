@@ -1,5 +1,6 @@
 //! The runner-owned file infobase used by both source-to-package commands.
 
+use crate::change_detection::runner_dirs::RunnerDirs;
 use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -192,10 +193,12 @@ fn snapshot(
     key: &str,
     storage_dir: &Path,
     source_identity: &str,
+    local_path: &Path,
 ) -> Result<SourceSetContext, AppError> {
     let storage = child(storage_dir, &format!("{key}.redb"))?;
     Ok(SourceSetContext::new(&set.name, path, key)
-        .with_build_memory(storage, source_identity.to_owned()))
+        .with_build_memory(storage, source_identity.to_owned())
+        .with_local_path(local_path))
 }
 
 fn analyze(
@@ -341,7 +344,7 @@ impl BuildSession {
             let (xml, identity, notes) = sources_in_xml(env, &root, set, translate_again)?;
             warnings.extend(notes);
             let slot = slot_key(extension);
-            let sources = snapshot(set, xml, &slot, &memory, &identity)?;
+            let sources = snapshot(set, xml, &slot, &memory, &identity, &env.config.local_path)?;
             let load = if reset.is_none() && slots.contains(&slot) {
                 match analyze(env.context, &env.config.work_path, &sources)? {
                     AnalysisOutcome::NoChanges => Load::Skip,
@@ -349,7 +352,7 @@ impl BuildSession {
                         match partial_load::decide_build(
                             &changes,
                             sources.path(),
-                            &env.config.work_path,
+                            RunnerDirs::of(env.config),
                         ) {
                             LoadDecision::Partial(paths) => Load::Partial(paths, prepared),
                             LoadDecision::Full => Load::Full,
@@ -647,13 +650,22 @@ fn sources_in_xml(
     let key = format!("{:x}", Sha256::digest(set.name.as_bytes()));
     let target = child(&exports, &key)?;
     let memory = child(root, "exported")?;
-    let edt = snapshot(set, input, &format!("{key}-edt"), &memory, &identity)?;
+    let local_path = &env.config.local_path;
+    let edt = snapshot(
+        set,
+        input,
+        &format!("{key}-edt"),
+        &memory,
+        &identity,
+        local_path,
+    )?;
     let xml = snapshot(
         set,
         target.clone(),
         &format!("{key}-xml"),
         &memory,
         &identity,
+        local_path,
     )?;
     if !force_export
         && target.join("Configuration.xml").is_file()

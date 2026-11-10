@@ -1061,6 +1061,7 @@ fn write_record(
         bin: std::env::current_exe().unwrap_or_default(),
         version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         agent,
+        location: None,
     };
     write_json(&home.paths().record(), &record)
 }
