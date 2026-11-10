@@ -837,7 +837,9 @@ fn assemble_with_designer(
         .map_err(AppError::from)?;
     deferrals.note_result(INFOBASE_CREATE, &loaded);
     ensure_platform_success("load the main configuration", "infobase", &loaded)?;
-    let updated = designer.update_db_cfg(None).map_err(AppError::from)?;
+    let updated = designer
+        .update_db_cfg(None, crate::platform::session_list::SessionTerminate::Keep)
+        .map_err(AppError::from)?;
     deferrals.note_result(INFOBASE_CREATE, &updated);
     ensure_platform_success("update the database configuration", "infobase", &updated)
 }

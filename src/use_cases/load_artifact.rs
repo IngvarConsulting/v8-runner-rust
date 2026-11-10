@@ -449,7 +449,10 @@ fn run_load_selected(
         "[Конфигуратор] updating database configuration",
     );
     let update_result = update_dsl
-        .update_db_cfg(resolved.extension.as_deref())
+        .update_db_cfg(
+            resolved.extension.as_deref(),
+            crate::platform::session_list::SessionTerminate::Keep,
+        )
         .map_err(AppError::from);
 
     let update_result = match update_result {

@@ -10,6 +10,7 @@ use crate::platform::process::{
 };
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::mask_text;
+use crate::platform::session_list::SessionTerminate;
 
 #[derive(Debug, Error)]
 pub enum DesignerError {
@@ -169,6 +170,7 @@ impl<'a> DesignerDsl<'a> {
     pub fn update_db_cfg(
         &self,
         extension: Option<&str>,
+        sessions: SessionTerminate<'_>,
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/UpdateDBCfg".to_owned());
@@ -177,6 +179,10 @@ impl<'a> DesignerDsl<'a> {
             args.push(extension.to_owned());
         }
         args.push("-Dynamic-".to_owned());
+        if let SessionTerminate::Force { .. } = sessions {
+            args.push("-SessionTerminate".to_owned());
+            args.push("force".to_owned());
+        }
         self.run(&args)
     }
 
@@ -691,6 +697,7 @@ mod tests {
     use crate::domain::syntax::SyntaxCheckStatus;
     use crate::platform::connection::V8Connection;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
+    use crate::platform::session_list::SessionTerminate;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -752,15 +759,19 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        dsl.update_db_cfg(None).expect("update the configuration");
-        dsl.update_db_cfg(Some("ext"))
+        dsl.update_db_cfg(None, SessionTerminate::Keep)
+            .expect("update the configuration");
+        dsl.update_db_cfg(Some("ext"), SessionTerminate::Keep)
             .expect("update the extension");
+        dsl.update_db_cfg(None, SessionTerminate::Force { message: "m" })
+            .expect("update with the sessions ended");
 
         let requests = runner.0.borrow();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         for (request, expected) in requests.iter().zip([
             &["/UpdateDBCfg", "-Dynamic-"][..],
             &["/UpdateDBCfg", "-Extension", "ext", "-Dynamic-"][..],
+            &["/UpdateDBCfg", "-Dynamic-", "-SessionTerminate", "force"][..],
         ]) {
             let start = request
                 .args

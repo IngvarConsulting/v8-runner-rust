@@ -14,6 +14,8 @@ pub mod edt;
 pub mod edt_session;
 pub mod enterprise;
 pub mod extension_inventory;
+/// Кто держит файловую базу: сеансы, Конфигуратор, блокировка начала сеансов.
+pub mod file_base_hold;
 /// Ответ платформы о поколении конфигурации.
 pub mod generation;
 pub mod git;
@@ -36,6 +38,8 @@ pub mod secrets;
 pub mod service;
 /// The record of a service: what is running, on which ports, whose it is.
 pub mod service_record;
+/// Список сеансов из текста отказа платформы.
+pub mod session_list;
 pub mod sftp;
 #[cfg(test)]
 pub(crate) mod test_git;
