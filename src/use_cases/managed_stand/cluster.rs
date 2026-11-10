@@ -1374,6 +1374,7 @@ mod tests {
     };
     use crate::platform::service::{ProcessFacts, ProcessRow, ServiceRequest};
     use crate::use_cases::context::CommandName;
+    use crate::use_cases::result::EnvironmentReason;
 
     const AGENT_PID: u32 = 7001;
     const RAS_PID: u32 = 7003;
@@ -2619,7 +2620,10 @@ mod tests {
         let host = Host::default();
         host.unsupported.set(true);
         let refused = setup.run(ServiceCommand::Start, &host).unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
     }
 
     /// Ваша СУБД вместо PostgreSQL раннера.

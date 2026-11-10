@@ -1898,6 +1898,7 @@ mod tests {
                 kind: McpBusinessErrorKind::Runtime,
                 message: path.to_owned(),
                 next: None,
+                platform_release: None,
             },
             json!({"warnings": [format!("held by {path}")]}),
         );

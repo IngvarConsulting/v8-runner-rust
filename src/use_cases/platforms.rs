@@ -8,8 +8,7 @@ use std::time::Instant;
 use crate::config::model::AppConfig;
 use crate::domain::launch::{PlatformResolution, PlatformResolutionSource};
 use crate::domain::platforms::{
-    InstalledComponents, PlatformInstallation, PlatformRequirement, PlatformsResult,
-    SelectedPlatform, SelectedPlatforms, SourceFormatInfo,
+    PlatformInstallation, PlatformRequirement, PlatformsResult, SelectedPlatform, SelectedPlatforms,
 };
 use crate::platform::locator::{
     LocatorError, ResolutionSource, UtilityLocation, UtilityType, UtilityVersion,
@@ -24,17 +23,8 @@ pub fn execute(config: &AppConfig) -> (PlatformsResult, Vec<String>) {
     let mut utilities = PlatformUtilities::from_config(config).without_mismatch_log();
     let installations = utilities
         .installations()
-        .into_iter()
-        .map(|installed| PlatformInstallation {
-            version: installed.version.to_string(),
-            components: InstalledComponents {
-                designer: installed.has(UtilityType::V8),
-                thin_client: installed.has(UtilityType::V8C),
-                ibcmd: installed.has(UtilityType::Ibcmd),
-                web_extension: installed.has(UtilityType::Webinst),
-            },
-            root: installed.root,
-        })
+        .iter()
+        .map(PlatformInstallation::from)
         .collect();
     let mut warnings = Vec::new();
     let mut select = |utility| match utilities.locate(utility) {
@@ -48,9 +38,13 @@ pub fn execute(config: &AppConfig) -> (PlatformsResult, Vec<String>) {
         }
         // Утилиты нет ни в одной подходящей установке: это и значит `null`.
         Err(LocatorError::NotFound { .. }) => None,
-        // Утилита есть, но выбрать её нельзя: причина нужна вызывающему.
+        // Утилита есть, но выбрать её нельзя, или при `sources` нет выпуска формата
+        // исходников: причина нужна вызывающему. Отказ выпуска один на все утилиты.
         Err(error) => {
-            warnings.push(error.to_string());
+            let warning = error.to_string();
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
             None
         }
     };
@@ -62,15 +56,16 @@ pub fn execute(config: &AppConfig) -> (PlatformsResult, Vec<String>) {
     let result = PlatformsResult {
         installations,
         requirement: PlatformRequirement {
-            version: config.tools.platform.version.clone(),
+            version: config
+                .tools
+                .platform
+                .version
+                .as_ref()
+                .map(ToString::to_string),
             path: config.tools.platform.path.clone(),
             strict: config.tools.platform.strict,
         },
-        source_format: sources_format(config).map(|format| SourceFormatInfo {
-            version: format.version.map(|version| version.to_string()),
-            release: format.releases().first().map(ToString::to_string),
-            file: format.file,
-        }),
+        source_format: sources_format(config).map(|format| format.info()),
         selected,
         duration_ms: started.elapsed().as_millis() as u64,
     };

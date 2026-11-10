@@ -1761,7 +1761,7 @@ mod tests {
 
         assert_eq!(
             failure.error.kind(),
-            UseCaseErrorKind::Environment,
+            UseCaseErrorKind::Environment(crate::use_cases::result::EnvironmentReason::Unavailable),
             "{}",
             failure.error
         );
@@ -2409,7 +2409,7 @@ mod tests {
         assert!(!calls.contains("/LoadCfg"), "nothing is loaded: {calls}");
         assert_eq!(
             failure.error.kind(),
-            UseCaseErrorKind::Environment,
+            UseCaseErrorKind::Environment(crate::use_cases::result::EnvironmentReason::Unavailable),
             "{}",
             failure.error
         );

@@ -1006,7 +1006,7 @@ fn select_provider(
     intent: InfobaseTransferIntent,
 ) -> Result<PreparedTransferProvider, (AppError, ProviderReceipt)> {
     use crate::use_cases::provider_selection::{
-        no_adapter, no_executor, nobody_ready, utilities_of, without_a_way,
+        no_adapter, no_executor, nobody_ready, utilities_of, without_a_way, ReleaseRefusal,
     };
 
     // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
@@ -1032,6 +1032,7 @@ fn select_provider(
         ));
     }
     let mut utilities = PlatformUtilities::from_config(config);
+    let mut release = ReleaseRefusal::default();
 
     for provider in plan.candidates() {
         if let Some(error) = pending_interruption_error(context, "during provider selection") {
@@ -1052,7 +1053,14 @@ fn select_provider(
             "a transfer executor needs at most one utility, {provider} needs {needed:?}"
         );
         let utility = needed.first().copied();
-        match readiness(config, &mut utilities, intent, provider, utility) {
+        match readiness(
+            config,
+            &mut utilities,
+            &mut release,
+            intent,
+            provider,
+            utility,
+        ) {
             Ok(executable) => {
                 let receipt = plan.receipt_for(provider, skipped);
                 return Ok(PreparedTransferProvider {
@@ -1066,7 +1074,7 @@ fn select_provider(
         }
     }
 
-    let error = nobody_ready(config, &plan, &skipped);
+    let error = nobody_ready(config, &plan, &skipped, release);
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 
@@ -1140,6 +1148,7 @@ fn database_configuration_plan(
 fn readiness(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    release: &mut crate::use_cases::provider_selection::ReleaseRefusal,
     intent: InfobaseTransferIntent,
     provider: Provider,
     utility: Option<UtilityType>,
@@ -1185,7 +1194,7 @@ fn readiness(
     };
     let location = utilities
         .locate(utility)
-        .map_err(|error| format!("environment is not ready: {error}"))?;
+        .map_err(|error| release.not_ready(error))?;
     if provider == Provider::Agent
         && matches!(intent, InfobaseTransferIntent::SnapshotRestore { .. })
     {
@@ -1737,7 +1746,7 @@ mod tests {
     use crate::platform::process::ProcessError;
     use crate::support::error::AppError;
     use crate::use_cases::context::ExecutionContext;
-    use crate::use_cases::result::UseCaseErrorKind;
+    use crate::use_cases::result::{EnvironmentReason, UseCaseErrorKind};
 
     use super::{
         acquire_target_lock, cleanup_export_orphans, observe_locked_output,
@@ -2202,7 +2211,10 @@ mod tests {
                 InfobaseTransferPhase::ProviderCommand,
             );
 
-            assert_eq!(failure.error.kind(), UseCaseErrorKind::Environment);
+            assert_eq!(
+                failure.error.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+            );
             let data = serde_json::to_value(failure.payload.expect("dump payload"))
                 .expect("serialize dump data");
             assert_eq!(data["execution"]["status"], "failed", "{data}");

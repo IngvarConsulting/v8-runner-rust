@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::domain::execution::StepResult;
 use crate::domain::next_step::NextStep;
+use crate::domain::platforms::PlatformReleaseRefusal;
 use crate::domain::test::{
     RetainedPaths, TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget,
 };
@@ -36,6 +37,9 @@ pub enum ErrorCode {
     /// Пока не умеет.
     Soon,
     EnvironmentUnavailable,
+    /// Пара к роду `environment`: при `tools.platform.version: sources` выпуска, который пишет
+    /// формат исходников, среди установок нет.
+    PlatformReleaseMissing,
     WorkspaceBusy,
     /// Файловую базу держит другая команда; как `workspace_busy`, можно повторить.
     InfobaseBusy,
@@ -103,6 +107,7 @@ impl ErrorCode {
             Self::Target => "target",
             Self::Soon => "soon",
             Self::EnvironmentUnavailable => "environment_unavailable",
+            Self::PlatformReleaseMissing => "platform_release_missing",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
             Self::InvalidOutput => "invalid_output",
@@ -128,6 +133,7 @@ impl ErrorCode {
         Self::Target,
         Self::Soon,
         Self::EnvironmentUnavailable,
+        Self::PlatformReleaseMissing,
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
         Self::InvalidOutput,
@@ -160,6 +166,9 @@ pub struct EnvelopeError {
     /// Поколение, записанное после прошлого обмена; заполняется тем же отказом.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_generation: Option<String>,
+    /// Формат исходников и опись установок; заполняется отказом `platform_release_missing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_release: Option<Box<PlatformReleaseRefusal>>,
 }
 
 impl EnvelopeError {
@@ -171,6 +180,7 @@ impl EnvelopeError {
             next: None,
             base_generation: None,
             local_generation: None,
+            platform_release: None,
         }
     }
 
@@ -363,7 +373,7 @@ mod schema_tests {
         // Соответствие рода отказа паре «код, род» на проводе проверяется целиком и по
         // литералам: иначе можно поменять местами два кода, и набор останется тем же.
         use crate::support::error::{CancelledAt, CapabilityReason};
-        use crate::use_cases::result::UseCaseErrorKind;
+        use crate::use_cases::result::{EnvironmentReason, UseCaseErrorKind};
         let cli: Vec<(UseCaseErrorKind, &str, &str)> = vec![
             (
                 UseCaseErrorKind::Capability(CapabilityReason::Unavailable),
@@ -386,8 +396,13 @@ mod schema_tests {
                 "capability",
             ),
             (
-                UseCaseErrorKind::Environment,
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
                 "environment_unavailable",
+                "environment",
+            ),
+            (
+                UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing),
+                "platform_release_missing",
                 "environment",
             ),
             (
