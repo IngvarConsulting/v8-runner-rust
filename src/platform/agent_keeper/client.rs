@@ -192,6 +192,9 @@ pub struct HeldAgent {
     pub infobase: Option<String>,
     pub work_path: Option<String>,
     pub holders: Vec<Holder>,
+    /// Сторож не отвечает дольше [`SILENCE_LIMIT`]: держит ли кто агента, неизвестно, и ждать
+    /// его не стоит.
+    pub answering: bool,
 }
 
 /// Что сделал или увидел `make_room` на пределе.
@@ -207,6 +210,9 @@ enum Room {
 
 /// Шаг ожидания места на пределе: каждый шаг спрашивает сторожей учётной записи.
 const ROOM_STEP: Duration = Duration::from_millis(500);
+/// Сколько сторож может молчать подряд, пока его ещё ждут на пределе: дольше — его агент
+/// считается неизвестным и ожидания не продлевает.
+const SILENCE_LIMIT: Duration = Duration::from_secs(3 * 5);
 
 /// Что сделать со взятым живым агентом.
 enum Take<'a> {
@@ -345,6 +351,8 @@ impl KeeperClient {
         // работает с разовым агентом.
         let waits = matches!(take, Take::Hold(_));
         let mut waiting_for = String::new();
+        let mut silent: std::collections::HashMap<String, Instant> =
+            std::collections::HashMap::new();
         let mut deadline =
             Instant::now() + Duration::from_millis(launch.startup_timeout_ms) + START_MARGIN;
         let mut respawns = 0;
@@ -357,7 +365,7 @@ impl KeeperClient {
                 Found::OverLimit => {
                     // Сверх предела снимается свой простаивающий агент без держателей;
                     // занятого раннер не снимает.
-                    match make_room(self.home.state(), &key) {
+                    match make_room(self.home.state(), &key, cancel, &mut silent) {
                         Room::Freed if waits || evictions <= usize::from(limit) => {
                             evictions += 1;
                             continue;
@@ -374,8 +382,16 @@ impl KeeperClient {
                                 + START_MARGIN;
                             continue;
                         }
-                        Room::Held(held) => return Err(KeeperStartError::Limit { limit, held }),
-                        Room::Freed | Room::Wait(_) => {
+                        Room::Held(held) if !held.is_empty() => {
+                            return Err(KeeperStartError::Limit { limit, held })
+                        }
+                        // Удерживаемых не видно, а предел занят: запись сменилась между подсчётом
+                        // и обходом — ключ ищется заново.
+                        Room::Held(_) if waits => {
+                            std::thread::sleep(ROOM_STEP);
+                            continue;
+                        }
+                        Room::Freed | Room::Wait(_) | Room::Held(_) => {
                             return Err(KeeperStartError::Limit {
                                 limit,
                                 held: Vec::new(),
@@ -614,6 +630,7 @@ impl KeeperClient {
     ) -> Result<Started, KeeperStartError> {
         loop {
             if cancel.is_cancelled() {
+                self.abandon_start(pid, deadline);
                 return Err(cancelled_waiting());
             }
             match self.status() {
@@ -635,6 +652,22 @@ impl KeeperClient {
             }
             std::thread::sleep(WAIT_STEP);
         }
+    }
+
+    /// Команду отменили, пока поднятый ею сторож поднимал агента: сторожа снимают безусловно,
+    /// чтобы не остался свежий агент, которого никто не возьмёт. Канал появляется, когда агент
+    /// поднят, поэтому сторожа ждут до ответа, ухода или срока подъёма.
+    fn abandon_start(&self, pid: u32, deadline: Instant) {
+        while Instant::now() < deadline && process_facts(pid).is_some() {
+            if self.status().is_ok() {
+                if let Err(error) = self.stop(&CancellationToken::new()) {
+                    tracing::warn!(%error, "the keeper started by a cancelled command was not stopped");
+                }
+                return;
+            }
+            std::thread::sleep(WAIT_STEP);
+        }
+        self.forget_start();
     }
 
     /// Отпечаток ключа хоста, который назвал сторож, — тот же, что в его записи
@@ -1201,39 +1234,77 @@ pub fn stop_keeper(state: &Path, key: &str) -> Result<bool, AgentError> {
 /// Снять некого — ответ говорит, освободится ли кто-то сам (выполняет команду без держателей,
 /// свежий, закрывается, не ответил) или удерживаются все. Сторожа другой версии раннера условным
 /// `stop` не трогают — прежний сторож понял бы его как безусловный, — а ждут его простоя.
-fn make_room(state: &Path, own: &str) -> Room {
+fn make_room(
+    state: &Path,
+    own: &str,
+    cancel: &CancellationToken,
+    silent: &mut std::collections::HashMap<String, Instant>,
+) -> Room {
     let ours = Some(env!("CARGO_PKG_VERSION"));
     let mut idle: Vec<(u64, LiveKeeper, String)> = Vec::new();
     let mut wait: Option<String> = None;
     let mut held = Vec::new();
-    for (keeper, record) in live_keepers(state) {
-        if keeper.key == own {
+    let found = match lock_agent_registry(state) {
+        Ok(_registry) => live_keys(state),
+        Err(error) => {
+            tracing::warn!(%error, "the live agent registry cannot be read");
+            return Room::Wait("the live agent registry to be readable".to_owned());
+        }
+    };
+    for (key, record) in found {
+        if key == own {
             continue;
         }
         let place = place_of(&record);
-        match keeper.client.status() {
+        let infobase = record.agent.as_ref().map(|agent| agent.infobase.clone());
+        let work_path = record
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.work_path.clone());
+        // Запись «запускается» предел уже занимает, а канала у неё ещё нет.
+        let Some(client) = record.pid.and_then(|pid| {
+            let home = KeeperHome::existing(state, &key).ok()??;
+            KeeperClient::detached(home, pid).ok()
+        }) else {
+            wait.get_or_insert_with(|| "a live agent to start".to_owned());
+            continue;
+        };
+        let keeper = LiveKeeper { key, client };
+        let status = keeper.client.status();
+        if status.is_ok() {
+            silent.remove(&keeper.key);
+        }
+        match status {
             Err(error) => {
                 tracing::warn!(key = %keeper.key, %error, "a live agent did not answer its status");
-                wait.get_or_insert_with(|| format!("{place} to answer"));
+                let since = *silent
+                    .entry(keeper.key.clone())
+                    .or_insert_with(Instant::now);
+                if since.elapsed() < SILENCE_LIMIT {
+                    wait.get_or_insert_with(|| format!("{place} to answer"));
+                } else {
+                    held.push(HeldAgent {
+                        key: keeper.key.clone(),
+                        infobase,
+                        work_path,
+                        holders: Vec::new(),
+                        answering: false,
+                    });
+                }
             }
             Ok(status) if status.closing => {
                 wait.get_or_insert_with(|| format!("{place} to close"));
             }
             Ok(status) if !status.holders.is_empty() => held.push(HeldAgent {
                 key: keeper.key.clone(),
-                infobase: record.agent.as_ref().map(|agent| agent.infobase.clone()),
-                work_path: record
-                    .agent
-                    .as_ref()
-                    .and_then(|agent| agent.work_path.clone()),
+                infobase,
+                work_path,
                 holders: status.holders,
+                answering: true,
             }),
             Ok(status) if status.holds_the_infobase() => {
                 wait.get_or_insert_with(|| {
-                    format!(
-                        "{place} to finish '{}'",
-                        status.command().unwrap_or("its command")
-                    )
+                    format!("{place} to finish '{}'", verb(status.command()))
                 });
             }
             Ok(status) if status.fresh => {
@@ -1251,7 +1322,7 @@ fn make_room(state: &Path, own: &str) -> Room {
     }
     idle.sort_by_key(|(idle_ms, _, _)| std::cmp::Reverse(*idle_ms));
     for (_, keeper, place) in idle {
-        match keeper.client.stop_if(true, true, &CancellationToken::new()) {
+        match keeper.client.stop_if(true, true, cancel) {
             Ok(Stopped::Removed) => {
                 tracing::info!(key = %keeper.key, "an idle live agent is removed to stay within the limit");
                 return Room::Freed;
@@ -1263,10 +1334,7 @@ fn make_room(state: &Path, own: &str) -> Room {
                 tracing::debug!(key = %keeper.key, "the live agent got busy before it was removed");
                 if holders.is_empty() {
                     wait.get_or_insert_with(|| {
-                        format!(
-                            "{place} to finish '{}'",
-                            command.as_deref().unwrap_or("its command")
-                        )
+                        format!("{place} to finish '{}'", verb(command.as_deref()))
                     });
                 }
             }
@@ -1279,6 +1347,19 @@ fn make_room(state: &Path, own: &str) -> Room {
     match wait {
         Some(what) => Room::Wait(what),
         None => Room::Held(held),
+    }
+}
+
+/// Глагол команды чужого агента — первые два слова (`config dump-cfg`): её ключи и пути в
+/// строку ожидания не идут.
+fn verb(command: Option<&str>) -> String {
+    match command {
+        Some(command) => command
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => "its command".to_owned(),
     }
 }
 
@@ -1652,6 +1733,44 @@ mod tests {
         assert!(
             !client.interrupted(),
             "the finished command keeps the agent"
+        );
+    }
+
+    /// Запись «запускается» без процесса сторожа предел уже занимает: на пределе её ждут, а не
+    /// отказывают с пустым перечнем удерживаемых.
+    #[test]
+    fn a_starting_record_at_the_limit_is_waited_for() {
+        let state = if cfg!(unix) {
+            tempfile::tempdir_in("/tmp").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
+        let home = KeeperHome::open(state.path(), &"0a".repeat(16)).unwrap();
+        let own = std::process::id();
+        let record = ServiceRecord {
+            state: RecordState::Starting,
+            pid: None,
+            started: None,
+            image: None,
+            machine: machine_fingerprint(),
+            starter: process_facts(own).map(|facts| (own, facts.started)),
+            port: 0,
+            explicit: false,
+            bin: PathBuf::new(),
+            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            agent: None,
+        };
+        write_json(&home.paths().record(), &record).unwrap();
+        let mut silent = std::collections::HashMap::new();
+        let room = make_room(
+            state.path(),
+            &"0b".repeat(16),
+            &CancellationToken::new(),
+            &mut silent,
+        );
+        assert!(
+            matches!(&room, Room::Wait(what) if what == "a live agent to start"),
+            "the starting agent is waited for"
         );
     }
 

@@ -108,7 +108,7 @@ pub fn hold(
             return Err(refused(
                 UseCaseErrorKind::AgentLimit,
                 format!(
-                    "the OS account already keeps {limit} live agents (tools.designer_agent.live-max), and every one of them is held: {}; release one of them, stop it with `agent stop`, or raise live-max",
+                    "the OS account already keeps {limit} live agents (tools.designer_agent.live-max), and every one of them is held or not answering: {}; release one of them, stop it with `agent stop`, or raise live-max",
                     describe_held(&held)
                 ),
             ))
@@ -440,8 +440,13 @@ fn describe_held(held: &[crate::platform::agent_keeper::client::HeldAgent]) -> S
     held.iter()
         .map(|agent| {
             let holders: Vec<LiveAgentHolder> = agent.holders.iter().map(holder_receipt).collect();
+            let state = if agent.answering {
+                format!("held by {}", LiveAgentHolder::list_text(&holders))
+            } else {
+                "not answering".to_owned()
+            };
             format!(
-                "{} on {}{} held by {}",
+                "{} on {}{} {state}",
                 agent.key,
                 agent.infobase.as_deref().unwrap_or("an unknown infobase"),
                 agent
@@ -449,7 +454,6 @@ fn describe_held(held: &[crate::platform::agent_keeper::client::HeldAgent]) -> S
                     .as_deref()
                     .map(|work_path| format!(" (working copy {work_path})"))
                     .unwrap_or_default(),
-                LiveAgentHolder::list_text(&holders)
             )
         })
         .collect::<Vec<_>>()

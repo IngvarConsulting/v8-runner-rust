@@ -364,13 +364,20 @@ fn a_cancelled_hold_over_the_limit_leaves_no_mark() {
         wait_until(Duration::from_secs(60), || started.exists()),
         "the busy command reached the agent"
     );
+    let actions = marks.path().join("hold-actions.log");
     let mut hold = waiting
         .command(&["agent", "hold", "--ttl", "600"])
+        .env("V8TR_ACTION_LOG_FILE", &actions)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn agent hold");
-    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        wait_until(Duration::from_secs(30), || fs::read_to_string(&actions)
+            .is_ok_and(|log| log.contains("waiting for"))),
+        "hold names what it waits for: {}",
+        fs::read_to_string(&actions).unwrap_or_default()
+    );
     assert!(hold.try_wait().expect("hold").is_none(), "hold waits");
     support::send_sigterm(&hold);
     let output = hold.wait_with_output().expect("hold output");
