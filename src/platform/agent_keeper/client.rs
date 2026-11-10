@@ -1791,7 +1791,10 @@ mod tests {
         let started = Instant::now();
         let outcome = client.await_start(keeper.id(), started + Duration::from_secs(60), &cancel);
         assert!(
-            matches!(outcome, Err(KeeperStartError::Agent(AgentError::NotSent { .. }))),
+            matches!(
+                outcome,
+                Err(KeeperStartError::Agent(AgentError::NotSent { .. }))
+            ),
             "{outcome:?}"
         );
         assert!(
