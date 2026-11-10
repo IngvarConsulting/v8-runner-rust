@@ -1598,9 +1598,6 @@ fn excerpt(text: &str, limit: usize) -> String {
     result
 }
 
-/// Protocol values stay intact; only this display copy masks decoded strings and keys.
-/// Строка журнала разговора для одного массива ответа: с маской секретов, как её пишет сессия.
-/// Её же пишет команда, которая говорит с живым агентом через сторожа.
 /// Отладочная строка `agent replied` об одной команде агента: команда с маской секретов, число
 /// сообщений ответа и время от отправки до последнего кадра. Её пишут и разовая сессия, и
 /// живой агент, чтобы трасса показывала, сколько шла загрузка и сколько применение.
@@ -1613,6 +1610,9 @@ pub(crate) fn log_reply(command: &str, secrets: &[&str], reply: &AgentReply, ela
     );
 }
 
+/// Protocol values stay intact; only this display copy masks decoded strings and keys.
+/// Строка журнала разговора для одного массива ответа: с маской секретов, как её пишет сессия.
+/// Её же пишет команда, которая говорит с живым агентом через сторожа.
 pub fn transcript_line(batch: &[AgentMessage], secrets: &[&str]) -> String {
     let mut display = serde_json::to_value(batch).expect("agent messages serialize");
     mask_agent_display(&mut display, secrets);

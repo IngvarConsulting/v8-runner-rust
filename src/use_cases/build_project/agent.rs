@@ -137,6 +137,25 @@ impl SourceSetLoader for AgentLoader {
             let (handle, wait) = self.handle(context, config)?;
             let exchange = handle.exchange(config)?;
             let relative = format!("build/{run}/{step_index:02}-{}", source_set.name);
+            // По SFTP модуль без описаний владельца не замерен: туда список и файлы идут
+            // с описаниями, как раньше
+            // (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+            let with_descriptors;
+            let partial_paths = match (partial_paths, &exchange) {
+                (Some(paths), Exchange::Sftp) => {
+                    with_descriptors =
+                        partial_load::with_module_descriptors(paths, source_context.path())
+                            .ok_or_else(|| {
+                                AppError::SourceLoadNotStarted(format!(
+                                    "descriptors of the partial load for source-set '{}' \
+                                     failed the path check",
+                                    source_set.name
+                                ))
+                            })?;
+                    Some(with_descriptors.as_slice())
+                }
+                (paths, _) => paths,
+            };
             // Недоставленные исходники (канал отверг запись) не оставляют на стороне точки
             // входа и половины каталога.
             let staged = match partial_paths {

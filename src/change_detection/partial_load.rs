@@ -267,8 +267,8 @@ fn expand_files(
                     scope,
                 )?;
             }
-            let alone = change.kind == ChangeKind::Modified && module_loads_alone(relative);
-            push_with_descriptors(&mut paths, path, alone, source_root, &root_real)?;
+            let descriptors = ModuleDescriptors::of(&change.kind, relative);
+            push_with_descriptors(&mut paths, path, descriptors, source_root, &root_real)?;
         }
     }
 
@@ -412,6 +412,16 @@ fn nested_kind(owner_kind: &str, folder: &str) -> Option<&'static str> {
     })
 }
 
+/// The deepest element of a Designer dump that owns a file, as [`dump_element`] finds it.
+struct DumpElement {
+    /// Kind of the deepest element as `ConfigDumpInfo.xml` spells it: `CommonModule`, `Form`.
+    kind: &'static str,
+    /// Full name of the element: `Catalog.X.Form.F`.
+    name: String,
+    /// How many leading path components name the element; the rest lies inside its folder.
+    folders: usize,
+}
+
 /// The deepest element of a Designer dump that owns the file at `path`, relative to the dump
 /// root, named as the version file `ConfigDumpInfo.xml` names it: `Catalog.X` for
 /// `Catalogs/X.xml` and everything under `Catalogs/X/`, `Catalog.X.Form.F` under `Forms/F.xml`
@@ -420,12 +430,20 @@ fn nested_kind(owner_kind: &str, folder: &str) -> Option<&'static str> {
 /// (`Subsystems/`, at any depth). `None` when the top-level folder is not a kind of
 /// [`METADATA_TYPES`] (`Configuration.xml`, `Ext/`, a stray file).
 pub(crate) fn dump_element_of(path: &Path) -> Option<String> {
+    dump_element(path).map(|element| element.name)
+}
+
+/// The one walk over a dump path behind [`dump_element_of`] and [`module_loads_alone`].
+fn dump_element(path: &Path) -> Option<DumpElement> {
     let (kind, name) = top_level_object(path)?;
-    let mut owner = format!("{kind}.{name}");
-    let mut owner_kind = kind;
+    let mut element = DumpElement {
+        kind,
+        name: format!("{kind}.{name}"),
+        folders: 2,
+    };
     let mut rest = path.iter().skip(2).peekable();
     while let Some(folder) = rest.next().and_then(|part| part.to_str()) {
-        let Some(nested) = nested_kind(owner_kind, folder) else {
+        let Some(nested) = nested_kind(element.kind, folder) else {
             break;
         };
         let Some(entry) = rest.next() else {
@@ -445,10 +463,11 @@ pub(crate) fn dump_element_of(path: &Path) -> Option<String> {
         let Some(child) = child else {
             break;
         };
-        owner = format!("{owner}.{nested}.{child}");
-        owner_kind = nested;
+        element.name = format!("{}.{nested}.{child}", element.name);
+        element.kind = nested;
+        element.folders += 2;
     }
-    Some(owner)
+    Some(element)
 }
 
 fn top_level_descriptor(path: &Path) -> Option<(&'static str, &str)> {
@@ -475,6 +494,25 @@ fn top_level_object(path: &Path) -> Option<(&'static str, &str)> {
     Some((kind, name))
 }
 
+/// Whether a changed `.bsl` goes to the list with the descriptors of its owners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleDescriptors {
+    /// The sibling `<module>.xml` and every existing descriptor up the tree go with it.
+    Owners,
+    /// The module goes alone (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+    Omitted,
+}
+
+impl ModuleDescriptors {
+    fn of(change: &ChangeKind, relative: &Path) -> Self {
+        if *change == ChangeKind::Modified && module_loads_alone(relative) {
+            Self::Omitted
+        } else {
+            Self::Owners
+        }
+    }
+}
+
 /// A changed module the platform loads as a separate file, without its owner's descriptors
 /// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`): the module of a common
 /// module (`CommonModules/<M>/Ext/Module.bsl`) and a form module
@@ -482,36 +520,62 @@ fn top_level_object(path: &Path) -> Option<(&'static str, &str)> {
 /// accepts a form module without the form description. Other modules keep their descriptors
 /// until a measurement shows the platform applies them alone.
 fn module_loads_alone(relative: &Path) -> bool {
-    let Some(parts) = relative
+    let Some(element) = dump_element(relative) else {
+        return false;
+    };
+    let Some(inside) = relative
         .iter()
+        .skip(element.folders)
         .map(|part| part.to_str())
         .collect::<Option<Vec<_>>>()
     else {
         return false;
     };
     let is = |part: &str, name: &str| part.eq_ignore_ascii_case(name);
-    match parts.as_slice() {
-        [group, _, ext, module] => {
-            is(group, "CommonModules") && is(ext, "Ext") && is(module, "Module.bsl")
-        }
-        [.., form, ext, folder, module]
-            if is(ext, "Ext") && is(folder, "Form") && is(module, "Module.bsl") =>
-        {
-            // The deepest element owning the file is the form itself, named by its folder.
-            dump_element_of(relative).is_some_and(|element| {
-                element.rsplit_once('.').is_some_and(|(owner, name)| {
-                    name == *form && (owner == "CommonForm" || owner.ends_with(".Form"))
-                })
-            })
+    // The tail is counted inside the deepest element, not along the whole path: a common
+    // module is `CommonModules/<M>` plus `Ext/Module.bsl` (four parts in all), a form is its
+    // own folders plus `Ext/Form/Module.bsl` — five parts for a common form, seven for a form
+    // of an object. Counting from the element keeps `Catalogs/Form/Ext/Form/Module.bsl` (a
+    // catalog named `Form`) and an object command's `Ext/...` out of the form branch.
+    match (element.kind, inside.as_slice()) {
+        ("CommonModule", [ext, module]) => is(ext, "Ext") && is(module, "Module.bsl"),
+        ("CommonForm" | "Form", [ext, folder, module]) => {
+            is(ext, "Ext") && is(folder, "Form") && is(module, "Module.bsl")
         }
         _ => false,
     }
 }
 
+/// `paths` of a decided partial load with the owners' descriptors of every `.bsl` added back:
+/// the list for a channel where a module alone is not measured yet. The SFTP exchange of the
+/// agent loads modules with their descriptors, as before #599, until a live run shows the
+/// platform applies a lone module there too
+/// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`). `None` when a descriptor
+/// fails the path guard.
+pub(crate) fn with_module_descriptors(
+    paths: &[PathBuf],
+    source_root: &Path,
+) -> Option<Vec<PathBuf>> {
+    let root_real = canonicalize_existing(source_root)?;
+    let mut widened = Vec::with_capacity(paths.len());
+    for path in paths {
+        push_with_descriptors(
+            &mut widened,
+            path.clone(),
+            ModuleDescriptors::Owners,
+            source_root,
+            &root_real,
+        )?;
+    }
+    widened.sort_unstable();
+    widened.dedup();
+    Some(widened)
+}
+
 fn push_with_descriptors(
     paths: &mut Vec<PathBuf>,
     path: PathBuf,
-    alone: bool,
+    descriptors: ModuleDescriptors,
     source_root: &Path,
     root_real: &Path,
 ) -> Option<()> {
@@ -519,7 +583,7 @@ fn push_with_descriptors(
     if !path.is_file() {
         return None;
     }
-    if is_bsl(&path) && !alone {
+    if is_bsl(&path) && descriptors == ModuleDescriptors::Owners {
         if let Some(xml) = sibling_xml(&path) {
             push_file_if_safe_if_exists(paths, &xml, source_root, root_real)?;
         }
@@ -991,6 +1055,124 @@ mod tests {
                 module.display()
             );
         }
+    }
+
+    /// Пути, похожие на модуль общего модуля или формы, но принадлежащие другому элементу,
+    /// грузятся с описаниями: модуль общей команды и команды объекта, справочник с именем
+    /// `Form`, форма внутри общего модуля.
+    #[test]
+    fn paths_that_only_look_like_a_lone_module_keep_their_descriptions() {
+        for (module, descriptor) in [
+            (
+                "CommonCommands/Print/Ext/CommandModule.bsl",
+                "CommonCommands/Print.xml",
+            ),
+            (
+                "Catalogs/Items/Commands/Form/Ext/CommandModule.bsl",
+                "Catalogs/Items.xml",
+            ),
+            ("Catalogs/Form/Ext/Form/Module.bsl", "Catalogs/Form.xml"),
+            ("Catalogs/Form/Ext/Module.bsl", "Catalogs/Form.xml"),
+            (
+                "CommonModules/Tools/Ext/Form/Module.bsl",
+                "CommonModules/Tools.xml",
+            ),
+            (
+                "Catalogs/CommonModules/Ext/Module.bsl",
+                "Catalogs/CommonModules.xml",
+            ),
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let descriptor = write_source(root, descriptor, "<xml/>");
+            let module = write_source(root, module, "module");
+
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                sorted(vec![descriptor, module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+    }
+
+    /// Регистр букв в пути на решение не влияет, как и во всём планировщике: общий модуль и
+    /// форма в другом регистре грузятся одни, модуль объекта в другом регистре — с описанием.
+    #[test]
+    fn letter_case_does_not_change_which_module_loads_alone() {
+        for module in [
+            "commonmodules/Tools/EXT/module.BSL",
+            "COMMONFORMS/Main/ext/FORM/Module.bsl",
+            "catalogs/Items/forms/ItemForm/Ext/form/MODULE.bsl",
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let module = write_source(root, module, "module");
+
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                LoadDecision::Partial(vec![module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+        for (module, descriptor) in [
+            ("catalogs/Items/EXT/objectmodule.BSL", "catalogs/Items.xml"),
+            ("CATALOGS/Form/ext/form/module.bsl", "CATALOGS/Form.xml"),
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let root = temp.path();
+            let descriptor = write_source(root, descriptor, "<xml/>");
+            let module = write_source(root, module, "module");
+
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                sorted(vec![descriptor, module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+    }
+
+    /// По SFTP модуль без описаний не замерен: список возвращает описания владельцев каждого
+    /// `.bsl`, как до правила, и не трогает остальные файлы.
+    #[test]
+    fn the_sftp_list_takes_the_module_descriptions_back() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let common = write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+        let object = write_source(root, "Catalogs/Items.xml", "<xml/>");
+        let form = write_source(root, "Catalogs/Items/Forms/ItemForm.xml", "<xml/>");
+        let layout = write_source(root, "Catalogs/Items/Forms/ItemForm/Ext/Form.xml", "<xml/>");
+        let form_module = write_source(
+            root,
+            "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
+            "module",
+        );
+        let lone = decide(
+            &[
+                change(&module, ChangeKind::Modified),
+                change(&form_module, ChangeKind::Modified),
+            ],
+            root,
+        );
+        assert_eq!(lone, sorted(vec![module.clone(), form_module.clone()]));
+        let LoadDecision::Partial(lone) = lone else {
+            unreachable!("asserted above")
+        };
+
+        assert_eq!(
+            super::with_module_descriptors(&lone, root).map(LoadDecision::Partial),
+            Some(sorted(vec![
+                common,
+                module,
+                object,
+                form,
+                layout,
+                form_module
+            ]))
+        );
     }
 
     #[test]
