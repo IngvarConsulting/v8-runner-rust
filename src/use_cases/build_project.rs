@@ -119,7 +119,7 @@ fn run_build_branch(
         args
     };
     if let Err(error) = refuse_hidden_sets_of_a_full_push(config, args) {
-        return Err(BuildExecutionFailure::without_payload(error));
+        return Err(refused_before_work(error));
     }
     let memory = require_memory(context, config, args);
     // Объём отправки выбирает исполнителя (#559), поэтому разбор изменений идёт до выбора, а
@@ -128,7 +128,7 @@ fn run_build_branch(
     let analysis = match &memory {
         Ok(()) => match analysis_before_selection(context, config, args) {
             Ok(analysis) => analysis,
-            Err(error) => return Err(BuildExecutionFailure::without_payload(error)),
+            Err(error) => return Err(refused_before_work(error)),
         },
         Err(_) => None,
     };
@@ -199,6 +199,22 @@ fn analysis_before_selection(
     };
     let contexts = designer_contexts_for_source_sets(&inventory, &source_sets);
     analyze_contexts_by_name(context, &inventory, &contexts, args.dry_run).map(Some)
+}
+
+/// Отказ до работы исполнителя с пустой формой ответа: без формы конверт `--json-message`
+/// не печатается.
+fn refused_before_work(error: AppError) -> BuildExecutionFailure {
+    BuildExecutionFailure::with_payload(
+        error,
+        BuildResult {
+            detection: Default::default(),
+            provider: None,
+            provider_dispatched: false,
+            ok: false,
+            steps: vec![],
+            duration_ms: 0,
+        },
+    )
 }
 
 /// Полная отправка изменений не разбирает, но и она отказывает, если правило игнорирования
