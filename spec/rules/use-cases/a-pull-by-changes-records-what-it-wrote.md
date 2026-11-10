@@ -7,6 +7,7 @@ check:
   - tests/cli_pull_memory.rs::a_failed_pull_by_changes_leaves_the_memory
   - src/change_detection/analyzer.rs::a_dump_remembers_what_it_wrote_and_keeps_an_earlier_user_edit
   - src/change_detection/analyzer.rs::an_edit_after_the_dump_ended_stays_a_change
+  - src/change_detection/analyzer.rs::a_commit_after_one_changed_file_touches_only_its_rows
   - src/change_detection/scanner.rs::a_file_whose_time_moved_while_it_was_read_is_left_out
   - src/use_cases/dump_config.rs::the_command_keeps_an_edit_after_the_dump_as_a_change
   - src/change_detection/analyzer.rs::a_set_without_memory_of_the_base_is_not_watched

@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::change_detection::file_state::mtime_nanos;
 use crate::change_detection::hash_storage::{
-    HashStorage, StorageError, StorageSnapshot, StoredFileState,
+    HashStorage, StorageDelta, StorageError, StorageSnapshot, StorageSummary, StoredFileState,
 };
 use crate::change_detection::scanner::{self, ScanError, ScanScope};
 use crate::domain::source_set::SourceSetContext;
@@ -25,18 +25,13 @@ pub enum ChangeKind {
     Deleted,
 }
 
-/// File state prepared for the next successful storage commit.
-#[derive(Debug, Clone)]
-pub struct PreparedFileState {
-    pub rel_path: String,
-    pub mtime_ns: u64,
-    pub hash: String,
-}
-
-/// Complete storage update payload produced by one analysis pass.
+/// Storage update produced by one analysis pass: the rows that differ from the memory of
+/// `observed_generation`, so a commit after a change of one file writes one file (#576).
 #[derive(Debug, Clone)]
 pub struct PreparedStateUpdate {
-    pub snapshot: Vec<PreparedFileState>,
+    pub delta: StorageDelta,
+    /// Files the scan found.
+    pub scanned_files: usize,
     pub scan_started_at: u64,
     pub observed_generation: u64,
 }
@@ -150,7 +145,7 @@ pub fn analyze_context(
             } else {
                 AnalysisOutcome::Changes {
                     changes,
-                    prepared: build_prepared_state(&scan, snapshot.generation),
+                    prepared: build_prepared_state(&scan, &snapshot),
                 }
             })
         })()
@@ -171,31 +166,74 @@ fn load_bound_snapshot(
     context: &SourceSetContext,
     storage: &HashStorage,
 ) -> Result<Option<StorageSnapshot>, ChangeDetectionError> {
-    let snapshot = match storage.load_snapshot() {
-        Ok(snapshot) => snapshot,
+    let Some(snapshot) = readable(context, storage, storage.load_snapshot())? else {
+        return Ok(None);
+    };
+    check_bound(
+        context,
+        storage,
+        snapshot.is_blank(),
+        snapshot.identity.as_deref(),
+    )?;
+    Ok(Some(snapshot))
+}
+
+/// [`load_bound_snapshot`] without the file rows, for a commit that names only the rows it
+/// changes (#576).
+fn load_bound_summary(
+    context: &SourceSetContext,
+    storage: &HashStorage,
+) -> Result<Option<StorageSummary>, ChangeDetectionError> {
+    let Some(summary) = readable(context, storage, storage.load_summary())? else {
+        return Ok(None);
+    };
+    check_bound(
+        context,
+        storage,
+        summary.is_blank(),
+        summary.identity.as_deref(),
+    )?;
+    Ok(Some(summary))
+}
+
+/// `Ok(None)` for a recoverable storage problem, a refusal for a hard one.
+fn readable<T>(
+    context: &SourceSetContext,
+    storage: &HashStorage,
+    read: Result<T, StorageError>,
+) -> Result<Option<T>, ChangeDetectionError> {
+    match read {
+        Ok(read) => Ok(Some(read)),
         Err(e) if e.is_recoverable() => {
             tracing::warn!(
                 source_set = %context.name(),
                 error = %e,
                 "recoverable storage problem, switching to fallback mode"
             );
-            return Ok(None);
+            Ok(None)
         }
-        Err(e) => return Err(map_storage_hard(context, storage.path(), e)),
-    };
-    if let Some(selected) = context.storage_identity() {
-        if !snapshot.is_blank() && snapshot.identity.as_deref() != Some(selected) {
-            return Err(ChangeDetectionError::ForeignMemory {
+        Err(e) => Err(map_storage_hard(context, storage.path(), e)),
+    }
+}
+
+/// Memory of another base or source directory is refused, blank memory is nobody's.
+fn check_bound(
+    context: &SourceSetContext,
+    storage: &HashStorage,
+    blank: bool,
+    recorded: Option<&str>,
+) -> Result<(), ChangeDetectionError> {
+    match context.storage_identity() {
+        Some(selected) if !blank && recorded != Some(selected) => {
+            Err(ChangeDetectionError::ForeignMemory {
                 source_set: context.name().to_owned(),
                 storage_path: storage.path().to_path_buf(),
-                recorded: snapshot
-                    .identity
-                    .unwrap_or_else(|| "an unidentified infobase".to_owned()),
+                recorded: recorded.unwrap_or("an unidentified infobase").to_owned(),
                 selected: selected.to_owned(),
-            });
+            })
         }
+        _ => Ok(()),
     }
-    Ok(Some(snapshot))
 }
 
 /// Что хеш-память набора помнит о выбранной базе.
@@ -269,10 +307,9 @@ pub fn commit_success(
         return Ok(());
     };
     let storage = HashStorage::new(path);
-    let snapshot = to_storage_snapshot(&prepared.snapshot);
     storage
-        .commit_snapshot_with_identity(
-            &snapshot,
+        .commit_delta_with_identity(
+            &prepared.delta,
             prepared.scan_started_at,
             prepared.observed_generation,
             context.storage_identity(),
@@ -549,9 +586,10 @@ pub fn files_of_dropped_elements(
 /// that answer (#571). Dropping it forgets what the dump wrote.
 #[must_use = "what the dump wrote is remembered only by `DumpWrites::commit`"]
 pub struct DumpWrites {
-    /// `None`: nothing to remember — no memory for this set, memory unreadable (not repaired
-    /// here), or the dump wrote and removed nothing.
-    snapshot: Option<StorageSnapshot>,
+    /// The memory as it was read, without its rows, and the rows the dump changed. `None`:
+    /// nothing to remember — no memory for this set, memory unreadable (not repaired here),
+    /// or the dump wrote and removed nothing.
+    rows: Option<(StorageSummary, StorageDelta)>,
     started_ns: u64,
 }
 
@@ -573,16 +611,21 @@ pub fn observe_dump_writes(
     listed: DumpListing,
     interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<DumpWrites, ChangeDetectionError> {
-    let writes = |snapshot| DumpWrites {
-        snapshot,
+    let writes = |rows| DumpWrites {
+        rows,
         started_ns: watch.started_ns,
     };
     let Some(path) = context.storage_path(work_path) else {
         return Ok(writes(None));
     };
     let storage = HashStorage::new(path);
-    // Unreadable memory is not repaired here: the next push falls back to a full load.
-    let Some(mut snapshot) = load_bound_snapshot(context, &storage)? else {
+    // Only the rows the dump changed are written, so the other rows are not read (#576).
+    // The summary sees tables of different length: such memory is not repaired here, and the
+    // next push falls back to a full load. Damage that keeps the lengths equal — an orphan row
+    // next to a missing row of another key in the other table — passes the summary, and the
+    // delta commit keeps it; the next analysis reads every row, reports it as recoverable and
+    // falls back to a full load, whose commit repairs both tables (#571).
+    let Some(summary) = load_bound_summary(context, &storage)? else {
         return Ok(writes(None));
     };
     let after: HashSet<&str> = listed
@@ -590,11 +633,11 @@ pub fn observe_dump_writes(
         .iter()
         .map(|file| file.rel_path.as_str())
         .collect();
-    let removed: Vec<&str> = watch
+    let removed: Vec<String> = watch
         .before
         .keys()
-        .map(String::as_str)
-        .filter(|rel_path| !after.contains(rel_path))
+        .filter(|rel_path| !after.contains(rel_path.as_str()))
+        .cloned()
         .collect();
     let written: Vec<scanner::Candidate> = listed
         .files
@@ -611,22 +654,27 @@ pub fn observe_dump_writes(
     if written.is_empty() && removed.is_empty() {
         return Ok(writes(None));
     }
-    for rel_path in removed {
-        snapshot.entries.remove(rel_path);
-    }
     // Файл, время которого сдвинулось, пока его читали, в ответ не попадает и остаётся изменением.
-    for file in scanner::hash_listed_unmoved(written, &mut || interrupted())
+    let upserts = scanner::hash_listed_unmoved(written, &mut || interrupted())
         .map_err(|error| map_scan_error(context, error))?
-    {
-        snapshot.entries.insert(
-            file.rel_path,
-            StoredFileState {
-                mtime_ns: file.mtime_ns,
-                hash: file.hash,
-            },
-        );
-    }
-    Ok(writes(Some(snapshot)))
+        .into_iter()
+        .map(|file| {
+            (
+                file.rel_path,
+                StoredFileState {
+                    mtime_ns: file.mtime_ns,
+                    hash: file.hash,
+                },
+            )
+        })
+        .collect();
+    Ok(writes(Some((
+        summary,
+        StorageDelta {
+            upserts,
+            removals: removed,
+        },
+    ))))
 }
 
 impl DumpWrites {
@@ -636,15 +684,16 @@ impl DumpWrites {
         context: &SourceSetContext,
         work_path: &Path,
     ) -> Result<(), ChangeDetectionError> {
-        let (Some(snapshot), Some(path)) = (self.snapshot, context.storage_path(work_path)) else {
+        let (Some((summary, delta)), Some(path)) = (self.rows, context.storage_path(work_path))
+        else {
             return Ok(());
         };
         let storage = HashStorage::new(path);
         storage
-            .commit_snapshot_with_identity(
-                &snapshot.entries,
-                snapshot.watermark.unwrap_or(0).max(self.started_ns),
-                snapshot.generation,
+            .commit_delta_with_identity(
+                &delta,
+                summary.watermark.unwrap_or(0).max(self.started_ns),
+                summary.generation,
                 context.storage_identity(),
             )
             .map_err(|error| map_commit_error(context, storage.path(), error))
@@ -683,43 +732,55 @@ fn detect_changes(
         .collect()
 }
 
+/// The scan as rows that differ from `stored`: a file new or with another time or hash is
+/// written, a remembered file the scan did not find is forgotten. This filter only keeps the
+/// delta small; the commit's `write_row` compares each named row again inside its write
+/// transaction, against what is committed then.
 fn build_prepared_state(
     scan: &scanner::ScanSnapshot,
-    observed_generation: u64,
+    stored: &StorageSnapshot,
 ) -> PreparedStateUpdate {
+    let upserts = scan
+        .files
+        .iter()
+        .filter(|file| {
+            stored
+                .entries
+                .get(&file.rel_path)
+                .is_none_or(|entry| entry.mtime_ns != file.mtime_ns || entry.hash != file.hash)
+        })
+        .map(|file| {
+            (
+                file.rel_path.clone(),
+                StoredFileState {
+                    mtime_ns: file.mtime_ns,
+                    hash: file.hash.clone(),
+                },
+            )
+        })
+        .collect();
+    let scanned: HashSet<&str> = scan
+        .files
+        .iter()
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    let removals = stored
+        .entries
+        .keys()
+        .filter(|rel_path| !scanned.contains(rel_path.as_str()))
+        .cloned()
+        .collect();
     PreparedStateUpdate {
-        snapshot: scan
-            .files
-            .iter()
-            .map(|file| PreparedFileState {
-                rel_path: file.rel_path.clone(),
-                mtime_ns: file.mtime_ns,
-                hash: file.hash.clone(),
-            })
-            .collect(),
+        delta: StorageDelta { upserts, removals },
+        scanned_files: scan.files.len(),
         scan_started_at: scan.scan_started_at,
-        observed_generation,
+        observed_generation: stored.generation,
     }
 }
 
 pub struct FullSnapshot {
     snapshot: HashMap<String, StoredFileState>,
     scan_started_at: u64,
-}
-
-fn to_storage_snapshot(snapshot: &[PreparedFileState]) -> HashMap<String, StoredFileState> {
-    snapshot
-        .iter()
-        .map(|entry| {
-            (
-                entry.rel_path.clone(),
-                StoredFileState {
-                    mtime_ns: entry.mtime_ns,
-                    hash: entry.hash.clone(),
-                },
-            )
-        })
-        .collect()
 }
 
 fn map_storage_hard(
@@ -1208,6 +1269,138 @@ mod tests {
                 .is_empty(),
             "nothing was in the description before"
         );
+    }
+
+    /// After a push and after a pull by changes of one file of a large set, the memory is
+    /// written by that file's rows alone: no other row is read or written (#576).
+    #[test]
+    fn a_commit_after_one_changed_file_touches_only_its_rows() {
+        use crate::change_detection::hash_storage::row_audit;
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for n in 0..100 {
+            std::fs::write(root.join(format!("M{n}.bsl")), "before").expect("module");
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let one_file = row_audit::Rows {
+            read: 2,
+            written: 2,
+        };
+
+        std::fs::write(root.join("M7.bsl"), "pushed").expect("edit");
+        let Ok(AnalysisOutcome::Changes { prepared, .. }) =
+            analyze_context(&context, &work, &mut || false).outcome
+        else {
+            panic!("the edit is a change");
+        };
+        row_audit::take();
+        super::commit_success(&context, &work, &prepared).expect("push commit");
+        assert_eq!(row_audit::take(), one_file, "after push");
+
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+        std::fs::write(root.join("M9.bsl"), "from the base").expect("written");
+        let listed = super::list_after_dump(&context, &work, &|| false).expect("listing");
+        row_audit::take();
+        super::observe_dump_writes(&context, &work, &watch, None, listed, &|| false)
+            .expect("observe")
+            .commit(&context, &work)
+            .expect("pull commit");
+        assert_eq!(row_audit::take(), one_file, "after pull");
+
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    /// Damage that keeps both tables of equal length — an orphan row in one table next to a
+    /// missing row of another key in it — passes the summary a pull by changes reads, and its
+    /// delta commit keeps it. The next analysis reads every row and falls back to a full load,
+    /// and the full commit after it leaves both tables with the same keys (#571, #576).
+    #[test]
+    fn equal_length_damage_after_a_delta_commit_is_repaired_by_a_full_load() {
+        use crate::change_detection::hash_storage::{HashStorage, FILES_HASH, FILES_MTIME};
+        use redb::{Database, ReadableTable};
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for name in ["A.bsl", "B.bsl", "C.bsl"] {
+            std::fs::write(root.join(name), "before").expect(name);
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let path = context.storage_path(&work).expect("memory path");
+        {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            {
+                let mut mtime = tx.open_table(FILES_MTIME).expect("mtime");
+                mtime.remove("B.bsl").expect("missing row");
+                mtime.insert("Orphan.bsl", 1).expect("orphan row");
+            }
+            tx.commit().expect("damage");
+        }
+        let storage = HashStorage::new(path.clone());
+        assert!(
+            storage.load_summary().is_ok(),
+            "equal lengths pass the summary"
+        );
+
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+        std::fs::write(root.join("C.bsl"), "from the base").expect("written");
+        record_dump_changes(&context, &work, &watch).expect("delta commit");
+        assert!(
+            storage
+                .load_snapshot()
+                .is_err_and(|error| error.is_recoverable()),
+            "the delta commit names only its rows and keeps the damage"
+        );
+
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::Fallback)
+        ));
+        rescan_and_commit_full(&context, &work).expect("full load commit");
+
+        let keys = |table: &dyn Fn(&redb::ReadTransaction) -> Vec<String>| {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_read().expect("read");
+            let mut keys = table(&tx);
+            keys.sort();
+            keys
+        };
+        let mtime_keys = keys(&|tx| {
+            tx.open_table(FILES_MTIME)
+                .expect("mtime")
+                .iter()
+                .expect("iter")
+                .map(|row| row.expect("row").0.value().to_owned())
+                .collect()
+        });
+        let hash_keys = keys(&|tx| {
+            tx.open_table(FILES_HASH)
+                .expect("hash")
+                .iter()
+                .expect("iter")
+                .map(|row| row.expect("row").0.value().to_owned())
+                .collect()
+        });
+        assert_eq!(mtime_keys, ["A.bsl", "B.bsl", "C.bsl"]);
+        assert_eq!(hash_keys, mtime_keys);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
     }
 
     #[test]
