@@ -147,7 +147,9 @@ impl ServicePaths {
         &self.root
     }
 
-    /// Запись соседней службы той же базы: сервера над этой СУБД.
+    /// Запись соседней службы той же базы: сервера над этой СУБД. Нужна только тестам: команды
+    /// находят соседей по записям каталога `managed`.
+    #[cfg(test)]
     pub fn sibling_record(&self, service: &str) -> PathBuf {
         self.managed.join(service).join("record.json")
     }
