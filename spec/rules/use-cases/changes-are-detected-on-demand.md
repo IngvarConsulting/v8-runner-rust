@@ -38,7 +38,7 @@ check:
   - src/platform/git.rs::a_cancelled_status_leaves_no_index_lock
   - src/platform/git.rs::the_id_is_the_one_git_add_would_store
   - src/use_cases/source_changes.rs::the_memory_after_a_push_holds_what_git_add_would_store
-  - src/use_cases/source_changes.rs::a_memory_of_the_other_hasher_loads_the_set_whole
+  - src/use_cases/source_changes.rs::a_memory_of_the_bytes_is_compared_by_its_own_hasher_under_git
   - tests/architecture_guardrails.rs::change_detection_has_no_background_watcher
   - tests/architecture_guardrails.rs::change_detection_never_reads_the_executor_choice
 ---
@@ -55,8 +55,10 @@ check:
 Память хранит хеш blob git каждого файла и, один раз на всю память, каким хешером он взят
 (#575): под git — тот хеш, что сохранил бы `git add`, без git — хеш байтов файла, как
 `git hash-object --no-filters`. Изменение — файл, хеш которого отличается от хеша в памяти,
-новый файл и удалённый. Память другого хешера ни с чем не сравнивается: непустая, она даёт
-полную загрузку, а не изменения.
+новый файл и удалённый. Хеши разных хешеров между собой не сравниваются: память хешей байтов
+под git сравнивается своим хешером, чтением файлов (причина `bytes_memory`), пока полная
+выгрузка или отправка не запишет её хешами git; непустая память хешей git без git даёт
+полную загрузку.
 
 **Набор в рабочей копии git.** Набор формата `DESIGNER`, который лежит в рабочей копии git, не
 в подмодуле и не под `workPath`, берёт изменения у git: раннер спрашивает один раз на рабочую

@@ -931,7 +931,8 @@ v8-runner push [<SET>] [--full] [--force] [--no-apply] [--dry-run]
   `git status --porcelain=v2` и один `git ls-files -s` на рабочую копию; хеши изменённых и
   новых файлов git считает во временном индексе — те, что сохранил бы `git add`. Память
   помнит, каким хешером записана: память, записанная под git, при отказе git даёт полную
-  загрузку. Файл, который git по размеру и времени считает
+  загрузку, а память хешей байтов (записанная вне git) под git сравнивается чтением файлов
+  (`bytes_memory`), пока `pull --force` или `push --full` не запишет её хешами git. Файл, который git по размеру и времени считает
   неизменным, раннер не читает; правка только концов строк — не изменение. Fsmonitor и кэш
   неотслеживаемых раннер не включает: с `core.fsmonitor=true` в репозитории `status` отвечает за
   доли секунды, фоновый демон fsmonitor запускает и держит сам git. Раннер разрешает git
@@ -1733,7 +1734,7 @@ v8-runner status [--deep | --all]
   `unbound`), запись журнала поколений `recorded`, `changed_files` — сколько файлов каталога
   изменилось с тех пор, как раннер его читал (`null` — сравнить не с чем), и `detection` — как
   найдены изменения: `{"path": "git"}`, `{"path": "git+fsmonitor"}` или
-  `{"path": "scan", "reason": ...}` (`no_repository`, `submodule`, `nested_repository`, `sha256_repository`,
+  `{"path": "scan", "reason": ...}` (`no_repository`, `submodule`, `nested_repository`, `sha256_repository`, `bytes_memory`,
   `git_failed`, `edt_format`); `null` — не искали. У базы —
   `new_owner_since`, если копия взяла её и ещё не отправляла.
 - `--all` — то же о каждой базе, объявленной в местном слое; выбранная отмечена

@@ -922,16 +922,25 @@ mod tests {
         assert_eq!(changes(&analysis), BTreeMap::new());
     }
 
-    /// Память одного хешера с другим не сравнивается: память хешей байтов при git даёт полную
-    /// загрузку, а не ложные изменения (#575).
+    /// Память одного хешера с другим не сравнивается (#575): память хешей байтов — например,
+    /// записанная до того, как каталог стал рабочей копией git, — под git сравнивается своим
+    /// хешером, чтением файлов, без ложной полной загрузки; полная отправка пишет её хешами git.
     #[test]
-    fn a_memory_of_the_other_hasher_loads_the_set_whole() {
+    fn a_memory_of_the_bytes_is_compared_by_its_own_hasher_under_git() {
         let project = Project::new(&[("Module.bsl", "one")]);
         crate::change_detection::analyzer::rescan_and_commit_full(&project.set(), &project.work())
             .expect("memory of the bytes");
         let analysis = project.analyze();
+        assert_eq!(
+            analysis.detection,
+            Some(ChangeDetection::scan(ScanReason::BytesMemory))
+        );
+        assert_eq!(changes(&analysis), BTreeMap::new());
+
+        project.remember();
+        let analysis = project.analyze();
         assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));
-        assert!(matches!(analysis.outcome, Ok(AnalysisOutcome::Fallback)));
+        assert_eq!(changes(&analysis), BTreeMap::new());
     }
 
     /// Неотслеживаемый `.gitignore` git применяет так же, как отслеживаемый.

@@ -662,6 +662,15 @@ fn status_and_push_name_how_the_changes_were_found() {
     );
 
     under_git(&project, "/work/\n/bin/\n");
+    // Память хешей байтов, записанная вне git, сравнивается своим хешером.
+    let status = succeeded(&project.run(&["status"]));
+    assert_eq!(
+        set(&status["data"]["infobases"][0], "main")["detection"],
+        serde_json::json!({"path": "scan", "reason": "bytes_memory"}),
+        "{status}"
+    );
+    // Полная отправка под git пишет память хешами git.
+    project.remember(FIRST);
     let status = succeeded(&project.run(&["status"]));
     assert_data_matches_its_command_form(&status, "status");
     let main = set(&status["data"]["infobases"][0], "main");

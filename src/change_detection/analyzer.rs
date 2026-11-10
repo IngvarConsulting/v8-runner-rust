@@ -219,12 +219,11 @@ fn analyze_snapshot(
             let detection = ChangeDetection::git(git.view.fsmonitor);
             let spelling = Spelling::new(&snapshot.entries, git.view.ignore_case);
             match observe_by_git(context, snapshot, &spelling, &mut git, interrupted) {
-                Ok(_) if other_kind(HashKind::GitBlob) => {
-                    return Found {
-                        outcome: Ok(AnalysisOutcome::Fallback),
-                        detection: Some(detection),
-                    };
-                }
+                // Память хешей байтов — например, записанная до того, как каталог стал
+                // рабочей копией git, — сравнивается тем же хешером, чтением файлов: полная
+                // загрузка из-за смены хешера была бы ложной. Хешами git её заменит полная
+                // выгрузка или отправка.
+                Ok(_) if other_kind(HashKind::GitBlob) => Some(ScanReason::BytesMemory),
                 Ok(observed) => {
                     let changes = git_changes(context, &observed, snapshot, &spelling);
                     return Found {
