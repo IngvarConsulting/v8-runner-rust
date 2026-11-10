@@ -169,7 +169,9 @@ impl OldDatabase {
         host: &dyn ServiceHost,
     ) -> Result<(), UseCaseError> {
         if let Some(registration) = &self.registration {
-            registration.unregister(context, config, runner)?;
+            // Снятие регистрации отмена не обрывает: оборванный `rac` мог уже снять её, и
+            // база осталась бы без регистрации и без отката.
+            registration.unregister(&uncancelled(context), config, runner)?;
         }
         if !self.database_exists {
             return Ok(());
