@@ -4522,8 +4522,9 @@ UTF-8. У прямых запусков stdout и stderr пусты. В Windows 
 # агент Конфигуратора, каталог обмена на той же машине
 config load-config-from-files --dir=<каталог> --update-config-dump-info --partial --list-file=<список>
 config update-db-cfg
-# ibcmd: те же файлы, частичный импорт
-ibcmd infobase config import files --partial …
+# ibcmd
+ibcmd infobase config import files --data=<d> --db-path=<ib> --base-dir=<dir> --partial CommonModules/<M>/Ext/Module.bsl ...
+ibcmd infobase config apply --data=<d> --db-path=<ib> --force
 ```
 
 Общие модули `ОбщегоНазначения` и `СтроковыеФункцииКлиентСервер`, время загрузки:
@@ -4534,11 +4535,13 @@ ibcmd infobase config import files --partial …
 | пакетный Конфигуратор, новый запуск | 14,4–30,4 с | 52,6–69,5 с |
 | `ibcmd infobase config import files --partial` | 21,5 с | 58,0 с |
 
+- Строки агента — голый агент (сессия SSH к агенту без раннера), не `push`.
 - `--no-check` у агента время не меняет: 1,6 с и 35,7–39,1 с.
 - `--update-config-dump-info` стоит около 1,8 с (7,7 против 9,4 с); ключ остаётся.
 - До правки `push` двух модулей с живым агентом шёл 107–133 с, из них загрузка — 36–42 с.
 
-Другие виды модулей, только `.bsl`, без описаний; все применились, метка вернулась через `pull`:
+Другие виды модулей, только `.bsl`, без описаний, голым агентом Конфигуратора через локальный
+каталог обмена; все применились, метка вернулась через `pull`:
 
 | Модуль | Загрузка |
 |---|---|
@@ -4546,5 +4549,9 @@ ibcmd infobase config import files --partial …
 | модуль объекта `Catalogs/Номенклатура/Ext/ObjectModule.bsl` без `Catalogs/Номенклатура.xml` | 12,8 с |
 
 `push` раннера с правилом `INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`
-пишет `partial_file_count`, равное числу изменённых модулей: по одному файлу на модуль.
+(сборка PR #600, живой агент) пишет `partial_file_count`, равное числу изменённых модулей: по
+одному файлу на модуль, партия 1–3 файла. `load-config-from-files` в трёх таких `push` шёл 14,8,
+22,8 и 20,4 с (`elapsed_ms` в трассе). Голый агент в тот же вечер грузил 2 `.bsl` за 7,7–7,9 с
+против 1,6–1,7 с в первом замере: машина была нагружена. Без описаний загрузка в 2–5 раз
+быстрее, чем с ними (36–42 с), но порог 3 с в `push` не подтверждён.
 Модули менеджера, набора записей, менеджера значения и команды и агент по SFTP не замерялись.
