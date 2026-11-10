@@ -294,6 +294,7 @@ fn a_file_base_open_in_the_designer_refuses_the_load() {
     project.edit();
     project.mark("designer");
     let _designer = project.hold("1Cv8.cgr", true);
+    let _ = fs::remove_file(project.root().join("calls.log"));
 
     let refused = project.run(&["push", "main"]);
     let payload = envelope(&refused);
