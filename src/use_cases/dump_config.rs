@@ -1326,7 +1326,7 @@ fn finalize_edt_dump(
         .import_configuration_files(
             &staging_dir,
             &resolved.platform_target_path,
-            normalize_config_hint(config.tools.platform.version.as_deref()),
+            crate::platform::utilities::edt_import_version(config).as_deref(),
             resolved.edt_base_project_name.as_deref(),
             false,
         )
@@ -1456,10 +1456,6 @@ fn build_edt_dsl<'a>(
         Ok(EdtDsl::new(binary.to_path_buf(), workspace, runner, policy)
             .with_timeout(context.edt_timeout()))
     }
-}
-
-fn normalize_config_hint(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 pub(crate) fn run_external_dump_designer(

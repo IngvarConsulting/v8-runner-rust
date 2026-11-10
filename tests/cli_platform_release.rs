@@ -57,6 +57,9 @@ fn project(format: &str) -> Project {
     )
     .expect("Configuration.xml");
     fs::write(sources.join("Catalogs").join("Items.xml"), "<Catalog/>").expect("catalog");
+    // Файловая база есть: перенос сперва проверяет её, а потом ищет платформу.
+    fs::create_dir_all(root.join("ib")).expect("ib");
+    fs::write(root.join("ib").join("1Cv8.1CD"), "").expect("ib file");
     let platform = root.join("platform");
     let calls = root.join("calls.log");
     install(&platform, "8.3.27.2074", &["1cv8", "ibcmd"], &calls);
@@ -156,9 +159,9 @@ fn assert_release_refusal(code: i32, payload: &Value) {
     }
 }
 
-/// Формат 2.21 пишет 8.5.1, а установлены 8.3.27 и 8.5.4: `pull`, `push`, `make`, `check` и
-/// `launch` отвечают одним кодом `platform_release_missing` с описью, платформу не
-/// запускают и исходников не трогают.
+/// Формат 2.21 пишет 8.5.1, а установлены 8.3.27 и 8.5.4: `pull`, `push`, `make`, `check`,
+/// `launch`, `download`, `infobase dump` и `status --deep` отвечают одним кодом
+/// `platform_release_missing` с описью, платформу не запускают и исходников не трогают.
 #[test]
 fn every_platform_command_refuses_without_the_release_of_the_sources_format() {
     let project = project("2.21");
@@ -171,6 +174,9 @@ fn every_platform_command_refuses_without_the_release_of_the_sources_format() {
         &["check"],
         &["launch", "thin"],
         &["--dry-run", "push"],
+        &["download", "main", "--output", "main.cf"],
+        &["infobase", "dump", "--output", "ib.dt"],
+        &["status", "--deep"],
     ] {
         let (code, payload) = run(&project, arguments);
         assert_release_refusal(code, &payload);

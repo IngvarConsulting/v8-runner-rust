@@ -56,7 +56,12 @@ pub fn execute(config: &AppConfig) -> (PlatformsResult, Vec<String>) {
     let result = PlatformsResult {
         installations,
         requirement: PlatformRequirement {
-            version: config.tools.platform.version.clone(),
+            version: config
+                .tools
+                .platform
+                .version
+                .as_ref()
+                .map(ToString::to_string),
             path: config.tools.platform.path.clone(),
             strict: config.tools.platform.strict,
         },

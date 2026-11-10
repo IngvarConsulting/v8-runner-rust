@@ -3392,8 +3392,8 @@ mod tests {
             .expect("load config");
 
         assert_eq!(
-            config.tools.platform.version.as_deref(),
-            Some("8.3.27.1859")
+            config.tools.platform.version,
+            crate::platform::locator::PlatformVersionSetting::parse("8.3.27.1859")
         );
         assert_eq!(
             config.tools.edt_cli.path.as_deref(),
@@ -3402,6 +3402,46 @@ mod tests {
         assert_eq!(
             config.tools.edt_cli.version.as_deref(),
             Some("1c-edt-2025.2.3")
+        );
+    }
+
+    /// `tools.platform.version` разбирается при загрузке: `sources` становится типом, а
+    /// значение, которое не маска и не `sources`, — отказ загрузки.
+    #[test]
+    fn load_config_parses_the_platform_version_once() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("base").join("src");
+        std::fs::create_dir_all(&src).expect("src dir");
+        let config_path = dir.path().join("v8project.yaml");
+        let write = |version: &str| {
+            std::fs::write(
+                &config_path,
+                format!(
+                    "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\ntools:\n  platform:\n    version: {version}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
+                    dir.path().join("work").display()
+                ),
+            )
+            .expect("write config");
+        };
+
+        write("sources");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
+        assert_eq!(
+            config.tools.platform.version,
+            Some(crate::platform::locator::PlatformVersionSetting::Sources)
+        );
+
+        write("'8'");
+        let Err(error) = load_config(config_path.to_str(), None, &InfobaseSelector::Default) else {
+            panic!("an invalid version is refused");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("platform version must use format"),
+            "{error}"
         );
     }
 

@@ -3,7 +3,6 @@ use std::fmt;
 use crate::domain::execution::ExecutionStatus;
 use crate::domain::next_step::NextStep;
 use crate::domain::platforms::PlatformReleaseRefusal;
-use crate::platform::locator::LocatorError;
 use crate::platform::process::{ProcessError, WorkGiven};
 use crate::support::error::{AppError, CancelledAt, CapabilityReason};
 use crate::use_cases::interruption::CANCELLED_ERROR_CODE;
@@ -69,15 +68,14 @@ impl UseCaseErrorKind {
             // Утилиты нет или не та версия — дело окружения, а не сбой платформы: поставьте,
             // и заработает (`INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE`). Нет выпуска
             // формата исходников при `sources` — та же среда, но свой код.
-            AppError::PlatformLocator(LocatorError::PlatformReleaseMissing(_))
-            | AppError::PlatformLocatorContext {
-                source: LocatorError::PlatformReleaseMissing(_),
-                ..
-            } => Self::Environment(EnvironmentReason::PlatformReleaseMissing),
             AppError::EnvironmentUnavailable(_)
             | AppError::PlatformLocator(_)
             | AppError::PlatformLocatorContext { .. } => {
-                Self::Environment(EnvironmentReason::Unavailable)
+                Self::Environment(if error.platform_release().is_some() {
+                    EnvironmentReason::PlatformReleaseMissing
+                } else {
+                    EnvironmentReason::Unavailable
+                })
             }
             AppError::WorkspaceBusy(_) => Self::WorkspaceBusy,
             AppError::InfobaseBusy(_) => Self::InfobaseBusy,
@@ -311,6 +309,11 @@ impl UseCaseError {
         let platform_release = value
             .platform_release()
             .map(|missing| Box::new(missing.refusal()));
+        debug_assert_eq!(
+            kind == UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing),
+            platform_release.is_some(),
+            "the code platform_release_missing and its inventory come together"
+        );
         let message = match value {
             AppError::CapabilityUnavailable(refusal) => refusal.message,
             AppError::Refused(refusal) => refusal.message,

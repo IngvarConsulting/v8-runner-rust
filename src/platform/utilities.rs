@@ -46,13 +46,12 @@ impl PlatformUtilities {
                     .and_then(|path| path.to_str())
                     .and_then(EdtVersion::parse_lenient)
             });
-        let setting = config.tools.platform.version_setting();
+        let setting = config.tools.platform.version.clone();
         // Формат по умолчанию: версию не задали ни маской, ни путём. С ним расходится выбор
         // новейшей, и расхождение называется предупреждением.
         let sources_format = (setting.is_none() && config.tools.platform.path.is_none())
             .then(|| sources_format(config))
             .flatten();
-        let sources = setting == Some(PlatformVersionSetting::Sources);
         let (platform_version, source_format) = match setting {
             Some(PlatformVersionSetting::Mask(mask)) => (Some(mask), SourceFormatRelease::Unused),
             Some(PlatformVersionSetting::Sources) => (None, required_release(config)),
@@ -68,8 +67,7 @@ impl PlatformUtilities {
             locator: Locator::new(LocatorOptions {
                 platform_hint: config.tools.platform.path.clone(),
                 platform_version,
-                // `strict` при `sources` не действует: выпуск обязателен и без него.
-                platform_policy: if config.tools.platform.strict && !sources {
+                platform_policy: if config.tools.platform.strict {
                     PlatformResolutionPolicy::Strict
                 } else {
                     PlatformResolutionPolicy::Lenient
@@ -202,6 +200,17 @@ pub fn sources_format(config: &AppConfig) -> Option<SourcesFormat> {
     Some(SourcesFormat { file, version })
 }
 
+/// Версия платформы для `--version` импорта EDT: маска как задана, при `sources` — выпуск,
+/// который пишет формат исходников основного набора, если он известен; иначе ничего — EDT
+/// выберет сама. Строку `sources` EDT не понимает и не получает.
+pub fn edt_import_version(config: &AppConfig) -> Option<String> {
+    match config.tools.platform.version.as_ref()? {
+        PlatformVersionSetting::Mask(mask) => Some(mask.to_string()),
+        PlatformVersionSetting::Sources => sources_format(config)
+            .and_then(|format| format.releases().first().map(ToString::to_string)),
+    }
+}
+
 /// Выпуск, обязательный при `tools.platform.version: sources`. `Configuration.xml` основного
 /// набора ещё нет — проект до первой выгрузки, и ограничения нет; формат не прочитан или не
 /// распознан — выпуск не выбрать, и поиск откажет. Формат EDT и проект без основного набора
@@ -307,7 +316,8 @@ mod tests {
                 platform: PlatformToolConfig {
                     path: platform_path,
                     strict: false,
-                    version: platform_version.map(str::to_owned),
+                    version: platform_version
+                        .and_then(crate::platform::locator::PlatformVersionSetting::parse),
                 },
                 ..ToolsConfig::default()
             },

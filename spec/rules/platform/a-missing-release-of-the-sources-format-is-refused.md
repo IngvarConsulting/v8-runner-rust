@@ -6,6 +6,11 @@ check:
   - src/platform/locator.rs::an_unknown_sources_format_is_refused
   - src/platform/locator.rs::the_sources_release_is_enforced_inside_the_path
   - src/platform/locator.rs::a_path_installation_counts_for_the_sources_release
+  - src/platform/locator.rs::a_path_link_counts_as_the_installation_it_points_to
+  - src/platform/locator.rs::the_sources_release_keeps_the_strict_path_guarantees
+  - src/config/loader.rs::load_config_parses_the_platform_version_once
+  - src/use_cases/convert_sources.rs::a_designer_to_edt_import_never_passes_sources_to_the_edt_cli
+  - src/use_cases/managed_stand/mod.rs::a_service_utility_answers_the_release_refusal_typed
   - src/platform/locator.rs::the_platform_version_setting_is_a_mask_or_sources
   - src/config/validate.rs::the_sources_platform_version_needs_a_designer_main_set
   - src/use_cases/provider_selection.rs::a_missing_release_of_the_sources_format_reaches_the_caller_typed
@@ -22,8 +27,10 @@ check:
 таблице замеров, что и выбор по умолчанию (`INV.PLATFORM.PLATFORM-TOOLS-ARE-FOUND-BY-VERSION-MASK`):
 берётся новейшая сборка этого выпуска, и выпуск закреплён за всеми утилитами платформы
 (`1cv8`, `1cv8c`, `ibcmd`, `ragent`, `ibsrv`, `webinst`). В отличие от умолчания отката на
-новейшую установку нет. Значение разбирается одним местом вместе с маской
-(`PlatformVersionSetting`); другой код строку `sources` не сравнивает.
+новейшую установку нет. Значение разбирается один раз, при загрузке настроек, в
+`PlatformVersionSetting` вместе с маской; значение, которое не маска и не `sources`, — отказ
+загрузки. Импорт EDT получает в `--version` выпуск формата исходников (или ничего, если
+формат не прочитан), но никогда строку `sources`.
 
 Отказ — до запуска платформы, в поиске утилиты (`Locator::locate_platform`), раньше выбора
 кандидата и проверки минимума, когда:
@@ -37,10 +44,11 @@ check:
 `data.execution.errors[]` остаётся `environment_unavailable`. Поле `platform_release`
 отказа несёт формат исходников (версия, файл, выпуск) и опись установок — тех самых, по
 которым отказ решён: под `tools.platform.path`, если он задан, иначе в корнях по умолчанию
-и в `PATH`. По MCP отказ приходит кодом `runtime_failure` с тем же полем.
+и в `PATH`; установка из `PATH` числится той версией, куда ведёт её утилита. По MCP отказ приходит кодом `runtime_failure` с тем же полем.
 
-С `tools.platform.path` выпуск обязателен и под путём, при любом `strict`; `strict` при
-`sources` не действует. Выпуск установлен, а нужного компонента в нём нет (например, только
+С `tools.platform.path` выпуск обязателен и под путём, при любом `strict`; `strict: true`
+сохраняет свои гарантии: граница пути, соседние утилиты из канонической установки, один
+закреплённый корень. Выпуск установлен, а нужного компонента в нём нет (например, только
 `1cv8c`) — это не отказ выпуска, а прежний `environment_unavailable` с описью
 (`INV.PLATFORM.A-MISSING-COMPONENT-NAMES-WHAT-IS-INSTALLED`). `Configuration.xml` основного
 набора ещё нет — проект до первой выгрузки, — и выбор ничем не ограничен.
@@ -49,7 +57,9 @@ check:
 проекта без основного набора: проверка ключа идёт во всех путях проверки настроек, где
 команда может искать платформу.
 
-Отказ доходит до ответа как есть, от любого вызывающего: выбор исполнителя, когда не готов
-никто, отвечает им, а не перечнем пропущенных, а сверка поколения инструментом записи не
-превращает его в «инструмент не ответил» и отказ `non_fast_forward`. `platforms` называет
+Отказ доходит до ответа как есть от каждой команды, которая запустила бы платформу, включая
+`status --deep`: выбор исполнителя, когда не готов никто, отвечает им, а не перечнем
+пропущенных; сверка поколения инструментом записи не превращает его в «инструмент не
+ответил» и отказ `non_fast_forward`; `status --deep` отвечает отказом, а не причиной по
+наборам. `platforms` называет
 его в `warnings` и ставит `null` в `selected`.

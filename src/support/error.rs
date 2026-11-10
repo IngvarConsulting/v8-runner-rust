@@ -202,7 +202,9 @@ impl AppError {
 
     /// Отказ выпуска формата исходников, если это он: ему положено дойти до ответа как есть
     /// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
-    pub fn platform_release(&self) -> Option<&crate::platform::locator::PlatformReleaseMissing> {
+    pub const fn platform_release(
+        &self,
+    ) -> Option<&crate::platform::locator::PlatformReleaseMissing> {
         match self {
             Self::PlatformLocator(source) | Self::PlatformLocatorContext { source, .. } => {
                 source.platform_release()
