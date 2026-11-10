@@ -252,6 +252,13 @@ pub struct ExecutionContext {
     /// Глобальные ключи командной строки, которые ведут к той же цели.
     command_line: CommandLineTarget,
     full_pull: Option<std::sync::Arc<super::full_pull_publication::ExternalFullPull>>,
+    /// Каким путём найдены изменения каждого набора; отмечает анализ, читает ответ `push`.
+    /// Клоны контекста делят слот, как и `session`.
+    detections: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<String, crate::domain::git_worktree::ChangeDetection>,
+        >,
+    >,
 }
 
 impl ExecutionContext {
@@ -266,6 +273,7 @@ impl ExecutionContext {
             session: std::sync::Arc::default(),
             command_line: CommandLineTarget::default(),
             full_pull: None,
+            detections: std::sync::Arc::default(),
         }
     }
 
@@ -425,6 +433,28 @@ impl ExecutionContext {
         if let Some(endpoint) = self.session_slot().as_mut() {
             endpoint.live = Some(Box::new(live));
         }
+    }
+
+    /// Отмечает, каким путём найдены изменения набора `source_set`.
+    pub(crate) fn note_detection(
+        &self,
+        source_set: &str,
+        detection: crate::domain::git_worktree::ChangeDetection,
+    ) {
+        self.detections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(source_set.to_owned(), detection);
+    }
+
+    /// Каким путём найдены изменения наборов этой команды.
+    pub(crate) fn detections(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::domain::git_worktree::ChangeDetection> {
+        self.detections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Точка входа сессии агента, если команда её открывала.

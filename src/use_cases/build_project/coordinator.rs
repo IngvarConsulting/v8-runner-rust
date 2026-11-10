@@ -231,7 +231,7 @@ fn analysis_or_analyze(
     }
     match analysis {
         Some(analysis) => Ok(Some(analysis)),
-        None => analyze_contexts_by_name(context, inventory, contexts)
+        None => analyze_contexts_by_name(context, inventory, contexts, args.dry_run)
             .map(Some)
             .map_err(BuildExecutionFailure::without_payload),
     }
@@ -259,6 +259,7 @@ fn run_build_with(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        detection: Default::default(),
                         provider: None,
                         provider_dispatched: false,
                         ok: false,
@@ -606,6 +607,7 @@ fn run_build_with(
     }
 
     Ok(BuildResult {
+        detection: Default::default(),
         provider: None,
         provider_dispatched: false,
         ok: true,
@@ -635,6 +637,7 @@ pub(super) fn run_build_ibcmd(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        detection: Default::default(),
                         provider: None,
                         provider_dispatched: false,
                         ok: false,
@@ -897,6 +900,7 @@ pub(super) fn run_build_ibcmd(
     }
 
     Ok(BuildResult {
+        detection: Default::default(),
         provider: None,
         provider_dispatched: false,
         ok: true,
@@ -1076,6 +1080,7 @@ pub(super) fn run_build_edt(
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: false,
                 ok: false,
@@ -1094,6 +1099,7 @@ pub(super) fn run_build_edt(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        detection: Default::default(),
                         provider: None,
                         provider_dispatched: false,
                         ok: false,
@@ -1109,7 +1115,7 @@ pub(super) fn run_build_edt(
         None
     } else {
         Some(
-            analyze_contexts_by_name(context, &inventory, &selected_edt_contexts)
+            analyze_contexts_by_name(context, &inventory, &selected_edt_contexts, args.dry_run)
                 .map_err(BuildExecutionFailure::without_payload)?,
         )
     };
@@ -1881,6 +1887,7 @@ pub(super) fn run_build_edt(
     }
 
     Ok(BuildResult {
+        detection: Default::default(),
         provider: None,
         provider_dispatched: false,
         ok: true,

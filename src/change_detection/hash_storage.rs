@@ -20,6 +20,32 @@ const IDENTITY_KEY: &str = "target";
 pub const META_KEY_WATERMARK: &str = "watermark";
 /// Metadata key storing optimistic-lock generation.
 pub const META_KEY_GENERATION: &str = "generation";
+/// Metadata key naming how the file hashes were taken ([`HashKind`]); absent in memory written
+/// before #575.
+pub const META_KEY_HASH_KIND: &str = "hash_kind";
+/// [`META_KEY_HASH_KIND`] of a memory of git blob ids: the only kind the runner writes.
+const GIT_BLOB_KIND: u64 = 1;
+
+/// How the hashes of one memory were taken. One memory holds one kind (#575).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HashKind {
+    /// Written before #575: SHA-256 of the bytes, or a kind this runner does not know. The
+    /// runner no longer compares with such memory: it is no memory of the base
+    /// (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
+    #[default]
+    Legacy,
+    /// Git blob ids: as `git add` stores the file under git, of its bytes without git.
+    GitBlob,
+}
+
+impl HashKind {
+    fn from_stored(value: Option<u64>) -> Self {
+        match value {
+            Some(GIT_BLOB_KIND) => Self::GitBlob,
+            _ => Self::Legacy,
+        }
+    }
+}
 
 /// Persisted state for one file entry inside the storage snapshot.
 #[derive(Debug, Clone)]
@@ -35,12 +61,18 @@ pub struct StorageSnapshot {
     pub watermark: Option<u64>,
     pub generation: u64,
     pub identity: Option<String>,
+    pub hash_kind: HashKind,
 }
 
 impl StorageSnapshot {
     /// Nothing has ever been committed: there is no memory to be foreign.
     pub fn is_blank(&self) -> bool {
         self.generation == 0 && self.watermark.is_none() && self.entries.is_empty()
+    }
+
+    /// Committed by a runner before #575: its hashes compare with nothing.
+    pub fn is_legacy(&self) -> bool {
+        !self.is_blank() && self.hash_kind == HashKind::Legacy
     }
 }
 
@@ -105,12 +137,18 @@ pub struct StorageSummary {
     pub watermark: Option<u64>,
     /// Files remembered, as the table header counts them.
     pub files: u64,
+    pub hash_kind: HashKind,
 }
 
 impl StorageSummary {
     /// The same answer as [`StorageSnapshot::is_blank`] for the same storage.
     pub fn is_blank(&self) -> bool {
         self.generation == 0 && self.watermark.is_none() && self.files == 0
+    }
+
+    /// The same answer as [`StorageSnapshot::is_legacy`] for the same storage.
+    pub fn is_legacy(&self) -> bool {
+        !self.is_blank() && self.hash_kind == HashKind::Legacy
     }
 }
 
@@ -191,6 +229,7 @@ impl HashStorage {
                     entries: HashMap::new(),
                     watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
                     generation: read_generation(meta_tbl.as_ref(), &self.path)?,
+                    hash_kind: read_hash_kind(meta_tbl.as_ref(), &self.path)?,
                 });
             }
             return Err(StorageError::Recoverable {
@@ -250,6 +289,7 @@ impl HashStorage {
             entries,
             watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
             generation: read_generation(meta_tbl.as_ref(), &self.path)?,
+            hash_kind: read_hash_kind(meta_tbl.as_ref(), &self.path)?,
         })
     }
 
@@ -264,9 +304,12 @@ impl HashStorage {
         expected_generation: u64,
         identity: Option<&str>,
     ) -> Result<(), StorageError> {
-        self.commit_rows(watermark, expected_generation, identity, |mtime, hash| {
-            sync_file_tables(&self.path, mtime, hash, snapshot)
-        })
+        self.commit_rows(
+            watermark,
+            expected_generation,
+            identity,
+            |mtime, hash, _| sync_file_tables(&self.path, mtime, hash, snapshot),
+        )
     }
 
     /// Persist only the rows a delta names if the caller still owns the expected generation:
@@ -287,24 +330,33 @@ impl HashStorage {
     ) -> Result<(), StorageError> {
         use redb::ReadableTableMetadata;
 
-        self.commit_rows(watermark, expected_generation, identity, |mtime, hash| {
-            let mtime_rows = mtime
-                .len()
-                .map_err(|e| map_storage_error(&self.path, "count mtime rows", e))?;
-            let hash_rows = hash
-                .len()
-                .map_err(|e| map_storage_error(&self.path, "count hash rows", e))?;
-            if mtime_rows != hash_rows {
-                remove_orphan_rows(&self.path, mtime, hash)?;
-            }
-            for key in &delta.removals {
-                remove_row(&self.path, mtime, hash, key)?;
-            }
-            for (key, state) in &delta.upserts {
-                write_row(&self.path, mtime, hash, key, state)?;
-            }
-            Ok(())
-        })
+        self.commit_rows(
+            watermark,
+            expected_generation,
+            identity,
+            |mtime, hash, stored| {
+                if stored == HashKind::Legacy {
+                    // Rows of another kind compare with nothing: the delta is the whole memory.
+                    return sync_file_tables(&self.path, mtime, hash, &delta.upserts);
+                }
+                let mtime_rows = mtime
+                    .len()
+                    .map_err(|e| map_storage_error(&self.path, "count mtime rows", e))?;
+                let hash_rows = hash
+                    .len()
+                    .map_err(|e| map_storage_error(&self.path, "count hash rows", e))?;
+                if mtime_rows != hash_rows {
+                    remove_orphan_rows(&self.path, mtime, hash)?;
+                }
+                for key in &delta.removals {
+                    remove_row(&self.path, mtime, hash, key)?;
+                }
+                for (key, state) in &delta.upserts {
+                    write_row(&self.path, mtime, hash, key, state)?;
+                }
+                Ok(())
+            },
+        )
     }
 
     /// One write transaction: the generation check, the file rows `rows` writes, the identity,
@@ -317,6 +369,7 @@ impl HashStorage {
         rows: impl FnOnce(
             &mut redb::Table<&str, u64>,
             &mut redb::Table<&str, &str>,
+            HashKind,
         ) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
         self.ensure_parent_dir()?;
@@ -342,13 +395,20 @@ impl HashStorage {
                 });
             }
 
+            let stored_kind = HashKind::from_stored(
+                meta.get(META_KEY_HASH_KIND)
+                    .map_err(|e| map_storage_error(&self.path, "read hash kind", e))?
+                    .map(|v| v.value()),
+            );
             let mut mtime = tx
                 .open_table(FILES_MTIME)
                 .map_err(|e| map_table_error(&self.path, e))?;
             let mut hash = tx
                 .open_table(FILES_HASH)
                 .map_err(|e| map_table_error(&self.path, e))?;
-            rows(&mut mtime, &mut hash)?;
+            rows(&mut mtime, &mut hash, stored_kind)?;
+            meta.insert(META_KEY_HASH_KIND, GIT_BLOB_KIND)
+                .map_err(|e| map_storage_error(&self.path, "write hash kind", e))?;
             if let Some(identity) = identity {
                 tx.open_table(IDENTITY)
                     .map_err(|e| map_table_error(&self.path, e))?
@@ -416,6 +476,7 @@ impl HashStorage {
             generation: read_generation(meta_tbl.as_ref(), &self.path)?,
             watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
             files,
+            hash_kind: read_hash_kind(meta_tbl.as_ref(), &self.path)?,
         })
     }
 
@@ -510,6 +571,21 @@ fn read_watermark(
             reason: format!("read watermark: {e}"),
         })
         .map(|opt| opt.map(|v| v.value()))
+}
+
+fn read_hash_kind(
+    meta: Option<&redb::ReadOnlyTable<&str, u64>>,
+    path: &Path,
+) -> Result<HashKind, StorageError> {
+    let Some(meta) = meta else {
+        return Ok(HashKind::Legacy);
+    };
+    meta.get(META_KEY_HASH_KIND)
+        .map_err(|e| StorageError::Recoverable {
+            path: path.to_path_buf(),
+            reason: format!("read hash kind: {e}"),
+        })
+        .map(|value| HashKind::from_stored(value.map(|v| v.value())))
 }
 
 fn read_generation(

@@ -389,6 +389,503 @@ fn is_unrecoverable(index: u8, worktree: u8) -> bool {
     }
 }
 
+/// Почему вопрос к git о рабочей копии не дал ответа.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitQueryError {
+    /// Команду отменили; процесс git завершён.
+    Interrupted,
+    /// Git не запустился, отказал или ответил так, что ответ не разобрать.
+    Failed(String),
+}
+
+impl std::fmt::Display for GitQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Interrupted => f.write_str("git query interrupted"),
+            Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// Где лежит каталог набора относительно git.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placement {
+    /// Вне рабочей копии, или git не нашёлся.
+    Outside(String),
+    /// В подмодуле другого репозитория.
+    Submodule,
+    /// Git внутри рабочей копии отказал.
+    Failed(String),
+    /// В рабочей копии с корнем `toplevel`.
+    Inside {
+        toplevel: PathBuf,
+        /// `.git/info/exclude` этой рабочей копии.
+        info_exclude: PathBuf,
+    },
+}
+
+/// Как часто спрашивается отмена, пока git работает.
+const GIT_INTERRUPTION_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Запускает git и ждёт его, спрашивая отмену: отменённый git завершается, и ответ —
+/// [`GitQueryError::Interrupted`]. Ненулевой выход — [`GitQueryError::Failed`] с первой
+/// строкой stderr; предупреждения при нулевом выходе ответа не отменяют
+/// (`INV.USE-CASES.A-GIT-WARNING-DOES-NOT-CANCEL-ITS-ANSWER`).
+fn run_git_query(
+    mut command: Command,
+    stdin: Option<Vec<u8>>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<u8>, GitQueryError> {
+    use std::io::{Read, Write};
+
+    if interrupted() {
+        return Err(GitQueryError::Interrupted);
+    }
+    let mut child = command
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| GitQueryError::Failed(format!("git failed to run: {error}")))?;
+    let input = child.stdin.take();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || match (input, stdin) {
+            (Some(mut input), Some(bytes)) => input.write_all(&bytes),
+            _ => Ok(()),
+        });
+        let out = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stdout
+                .as_mut()
+                .map(|stream| stream.read_to_end(&mut bytes))
+                .transpose()
+                .map(|_| bytes)
+        });
+        let err = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stderr
+                .as_mut()
+                .map(|stream| stream.read_to_end(&mut bytes))
+                .transpose()
+                .map(|_| bytes)
+        });
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if interrupted() => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(GitQueryError::Interrupted);
+                }
+                Ok(None) => std::thread::sleep(GIT_INTERRUPTION_POLL),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(GitQueryError::Failed(format!("git wait failed: {error}")));
+                }
+            }
+        };
+        let written = writer.join().unwrap_or(Ok(()));
+        let stdout = out.join().unwrap_or_else(|_| Ok(Vec::new()));
+        let stderr = err.join().unwrap_or_else(|_| Ok(Vec::new()));
+        let status = status?;
+        let stderr = String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned();
+        if !status.success() {
+            let exit = match status.code() {
+                Some(code) => format!("git exited with {code}"),
+                None => "git was terminated by a signal".to_owned(),
+            };
+            return Err(GitQueryError::Failed(match first_line(&stderr) {
+                Some(line) => format!("{exit}: {line}"),
+                None => exit,
+            }));
+        }
+        if let Some(warning) = first_line(&stderr) {
+            tracing::debug!(warning, "git warning on a successful query");
+        }
+        written.map_err(|error| GitQueryError::Failed(format!("git input failed: {error}")))?;
+        stdout.map_err(|error| GitQueryError::Failed(format!("git output failed: {error}")))
+    })
+}
+
+/// `git` с каталогом и настройками, которые раннер задаёт каждому вопросу о рабочей копии:
+/// без `GIT_OPTIONAL_LOCKS=0` git обновляет сведения о файлах в индексе, как обычный
+/// `git status`; превью их не обновляет (`INV.CLI.PREVIEW-LEAVES-NO-TRACE`). Fsmonitor и
+/// кэш неотслеживаемых раннер не включает: работает то, что настроено в репозитории.
+fn git_in(dir: &Path, optional_locks: bool) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir);
+    if !optional_locks {
+        command.env("GIT_OPTIONAL_LOCKS", "0");
+    }
+    command
+}
+
+/// Где лежит каталог набора: в рабочей копии, в подмодуле или вне git.
+pub fn placement_of(
+    root: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Placement, GitQueryError> {
+    if !root.is_dir() {
+        return Ok(Placement::Outside(format!(
+            "'{}' is not a directory",
+            root.display()
+        )));
+    }
+    let mut command = git_in(root, false);
+    command.args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "info/exclude",
+        "--show-toplevel",
+        "--show-superproject-working-tree",
+    ]);
+    let stdout = match run_git_query(command, None, interrupted) {
+        Ok(stdout) => stdout,
+        Err(GitQueryError::Interrupted) => return Err(GitQueryError::Interrupted),
+        Err(GitQueryError::Failed(reason)) => {
+            return Ok(if inside_a_worktree(root) {
+                Placement::Failed(reason)
+            } else {
+                Placement::Outside(reason)
+            })
+        }
+    };
+    let text = String::from_utf8_lossy(&stdout);
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let (Some(info_exclude), Some(toplevel)) = (lines.next(), lines.next()) else {
+        // `--show-toplevel` молчит в каталоге `.git` и в голом репозитории.
+        return Ok(Placement::Outside(format!(
+            "'{}' is not in a working tree",
+            root.display()
+        )));
+    };
+    if lines.next().is_some() {
+        return Ok(Placement::Submodule);
+    }
+    Ok(Placement::Inside {
+        toplevel: PathBuf::from(toplevel),
+        info_exclude: PathBuf::from(info_exclude),
+    })
+}
+
+/// Путь от корня рабочей копии как pathspec git: буквально, без шаблонов.
+fn literal_pathspec(relative: &str, exclude: bool) -> String {
+    let magic = if exclude {
+        "top,exclude,literal"
+    } else {
+        "top,literal"
+    };
+    if relative.is_empty() {
+        format!(":({magic}).")
+    } else {
+        format!(":({magic}){relative}")
+    }
+}
+
+/// Настройки и файлы правил игнорирования рабочей копии `toplevel` — без её файлов: что нужно,
+/// чтобы проверить правила игнорирования, не спрашивая `git status`. Два вызова: `config` и
+/// `ls-files` отслеживаемых `.gitignore`.
+pub fn ignore_view(
+    toplevel: &Path,
+    info_exclude: &Path,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<crate::domain::git_worktree::GitWorktree, GitQueryError> {
+    use crate::domain::git_worktree::{GitIgnoreSource, GitWorktree};
+
+    // Ничего не пишут: необязательные блокировки не нужны.
+    let mut config = git_in(toplevel, false);
+    config.args([
+        "config",
+        "-z",
+        "--type=path",
+        "--get-regexp",
+        r"^core\.(fsmonitor|ignorecase|excludesfile)$",
+    ]);
+    // Код 1 — ни одного ключа: настройки по умолчанию.
+    let config = match run_git_query(config, None, interrupted) {
+        Ok(stdout) => stdout,
+        Err(GitQueryError::Failed(reason))
+            if reason == "git exited with 1" || reason.starts_with("git exited with 1:") =>
+        {
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    let (mut fsmonitor, mut ignore_case, mut excludes_file) = (false, false, None);
+    for record in config
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let record = String::from_utf8_lossy(record);
+        let (key, value) = record.split_once('\n').unwrap_or((&record, "true"));
+        match key {
+            "core.fsmonitor" => fsmonitor = !is_false(value),
+            "core.ignorecase" => ignore_case = !is_false(value),
+            "core.excludesfile" => excludes_file = Some(PathBuf::from(value)),
+            _ => {}
+        }
+    }
+
+    let mut ls_files = git_in(toplevel, false);
+    ls_files.args([
+        "ls-files",
+        "-z",
+        "--full-name",
+        "--",
+        ":(top,glob)**/.gitignore",
+    ]);
+    let listed = run_git_query(ls_files, None, interrupted)?;
+    let mut gitignores: Vec<String> = listed
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| String::from_utf8_lossy(record).into_owned())
+        .collect();
+    gitignores.sort_by_key(|path| path.matches('/').count());
+    gitignores.dedup();
+    let mut ignore_sources = Vec::new();
+    if let Some(file) = excludes_file.or_else(default_excludes_file) {
+        ignore_sources.push(GitIgnoreSource {
+            file,
+            base: String::new(),
+        });
+    }
+    ignore_sources.push(GitIgnoreSource {
+        file: info_exclude.to_path_buf(),
+        base: String::new(),
+    });
+    ignore_sources.extend(gitignores.into_iter().map(|path| {
+        GitIgnoreSource {
+            file: toplevel.join(&path),
+            base: path
+                .rsplit_once('/')
+                .map_or(String::new(), |(dir, _)| dir.to_owned()),
+        }
+    }));
+    Ok(GitWorktree {
+        toplevel: toplevel.to_path_buf(),
+        fsmonitor,
+        ignore_case,
+        ignore_sources,
+        ..GitWorktree::default()
+    })
+}
+
+/// Спрашивает git о файлах под `roots` рабочей копии `toplevel`: к [`ignore_view`] добавляются
+/// `ls-files` — хеши и флаги индекса — и `status` — что разошлось с индексом и что вне его.
+/// `excluded` — каталоги под корнями (`workPath`), о которых не спрашивают. Пути — от корня
+/// рабочей копии. `optional_locks` разрешает git обновить сведения о файлах в индексе.
+pub fn worktree_under(
+    toplevel: &Path,
+    info_exclude: &Path,
+    roots: &[String],
+    excluded: &[String],
+    optional_locks: bool,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<crate::domain::git_worktree::GitWorktree, GitQueryError> {
+    let mut view = ignore_view(toplevel, info_exclude, interrupted)?;
+
+    let mut ls_files = git_in(toplevel, optional_locks);
+    ls_files.args(["ls-files", "-s", "-v", "-z", "--full-name", "--"]);
+    ls_files.args(roots.iter().map(|root| literal_pathspec(root, false)));
+    view.index = parse_ls_files(&run_git_query(ls_files, None, interrupted)?)?;
+
+    let mut status = status_command(toplevel, roots, optional_locks);
+    status.args([
+        "--porcelain=v2",
+        "-z",
+        "--untracked-files=all",
+        "--no-renames",
+        "--",
+    ]);
+    status.args(roots.iter().map(|root| literal_pathspec(root, false)));
+    status.args(excluded.iter().map(|path| literal_pathspec(path, true)));
+    (view.worktree_changed, view.untracked) =
+        parse_status_v2(&run_git_query(status, None, interrupted)?)?;
+    Ok(view)
+}
+
+/// `git status` с доверием отметкам времени, как его задаёт раннер (#575): для файла, который
+/// git считает неизменным по размеру и времени, раннер верит git.
+fn status_command(toplevel: &Path, _roots: &[String], optional_locks: bool) -> Command {
+    let mut status = git_in(toplevel, optional_locks);
+    status.args([
+        "-c",
+        "core.checkStat=default",
+        "-c",
+        "core.trustctime=true",
+        "status",
+    ]);
+    status
+}
+
+/// Обновляет сведения о файлах под `roots` в индексе git после полной выгрузки: `git status`
+/// по корням наборов перечитывает переписанные файлы и записывает их время в индекс, и
+/// следующая команда не читает их снова (#575). Коммиты, ветки и содержимое индекса не
+/// меняются.
+pub fn refresh_index(
+    toplevel: &Path,
+    roots: &[String],
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<(), GitQueryError> {
+    let mut status = status_command(toplevel, roots, true);
+    status.args(["--porcelain=v2", "-z", "--untracked-files=no", "--"]);
+    status.args(roots.iter().map(|root| literal_pathspec(root, false)));
+    run_git_query(status, None, interrupted).map(drop)
+}
+
+/// Хеши blob git для файлов `paths` (от корня рабочей копии) в их порядке:
+/// `git hash-object --stdin-paths` с фильтрами и атрибутами пути, как их считает `git add`.
+pub fn hash_objects(
+    toplevel: &Path,
+    paths: &[String],
+    optional_locks: bool,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<String>, GitQueryError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = Vec::new();
+    for path in paths {
+        // Строка, начатая кавычкой, git читает как строку C, а перевод строки делит путь.
+        if path.contains('\n') || path.starts_with('"') {
+            return Err(GitQueryError::Failed(format!(
+                "'{path}' cannot be passed to git hash-object --stdin-paths"
+            )));
+        }
+        input.extend_from_slice(path.as_bytes());
+        input.push(b'\n');
+    }
+    let mut command = git_in(toplevel, optional_locks);
+    command.args(["hash-object", "--stdin-paths"]);
+    let stdout = run_git_query(command, Some(input), interrupted)?;
+    let oids: Vec<String> = String::from_utf8_lossy(&stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if oids.len() != paths.len() {
+        return Err(GitQueryError::Failed(format!(
+            "git hash-object answered {} hashes for {} paths",
+            oids.len(),
+            paths.len()
+        )));
+    }
+    Ok(oids)
+}
+
+fn is_false(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "false" | "no" | "off" | "0" | ""
+    )
+}
+
+/// `core.excludesFile` по умолчанию: `$XDG_CONFIG_HOME/git/ignore`, иначе
+/// `~/.config/git/ignore`.
+fn default_excludes_file() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })?;
+    Some(base.join("git").join("ignore"))
+}
+
+/// Разбирает `git ls-files -s -v -z`: `<метка> <вид> <хеш> <ступень>\t<путь>`.
+fn parse_ls_files(
+    stdout: &[u8],
+) -> Result<Vec<crate::domain::git_worktree::GitIndexEntry>, GitQueryError> {
+    let malformed =
+        |record: &str| GitQueryError::Failed(format!("unexpected git ls-files record '{record}'"));
+    let mut entries = Vec::new();
+    for record in stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let record = std::str::from_utf8(record).map_err(|_| {
+            GitQueryError::Failed("git ls-files named a path that is not UTF-8".to_owned())
+        })?;
+        let (head, path) = record.split_once('\t').ok_or_else(|| malformed(record))?;
+        let mut fields = head.split(' ');
+        let (Some(tag), Some(mode), Some(oid), Some(stage)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(malformed(record));
+        };
+        let tag = tag.chars().next().ok_or_else(|| malformed(record))?;
+        entries.push(crate::domain::git_worktree::GitIndexEntry {
+            path: path.to_owned(),
+            mode: u32::from_str_radix(mode, 8).map_err(|_| malformed(record))?,
+            oid: oid.to_owned(),
+            stage: stage.parse().map_err(|_| malformed(record))?,
+            flagged: tag.is_ascii_lowercase() || tag == 'S',
+        });
+    }
+    Ok(entries)
+}
+
+/// Разбирает `git status --porcelain=v2 -z --no-renames`: пути, у которых рабочее дерево
+/// разошлось с индексом, и файлы вне индекса.
+fn parse_status_v2(
+    stdout: &[u8],
+) -> Result<(std::collections::HashSet<String>, Vec<String>), GitQueryError> {
+    let mut changed = std::collections::HashSet::new();
+    let mut untracked = Vec::new();
+    let mut records = stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        let record = std::str::from_utf8(record).map_err(|_| {
+            GitQueryError::Failed("git status named a path that is not UTF-8".to_owned())
+        })?;
+        let malformed =
+            || GitQueryError::Failed(format!("unexpected git status record '{record}'"));
+        match record.as_bytes()[0] {
+            b'1' => {
+                let fields: Vec<&str> = record.splitn(9, ' ').collect();
+                let (Some(xy), Some(path)) = (fields.get(1), fields.get(8)) else {
+                    return Err(malformed());
+                };
+                if xy.as_bytes().get(1) != Some(&b'.') {
+                    changed.insert((*path).to_owned());
+                }
+            }
+            b'2' => {
+                // Переименований `--no-renames` не даёт; запись разобрана на случай чужой
+                // настройки: за ней идёт отдельным полем прежнее имя.
+                let fields: Vec<&str> = record.splitn(10, ' ').collect();
+                let path = fields.get(9).ok_or_else(malformed)?;
+                changed.insert((*path).to_owned());
+                if let Some(original) = records.next() {
+                    changed.insert(String::from_utf8_lossy(original).into_owned());
+                }
+            }
+            b'u' => {
+                let fields: Vec<&str> = record.splitn(11, ' ').collect();
+                changed.insert((*fields.get(10).ok_or_else(malformed)?).to_owned());
+            }
+            b'?' => untracked.push(record.get(2..).ok_or_else(malformed)?.to_owned()),
+            // Игнорируемых без `--ignored` нет; заголовков без `--branch` тоже.
+            b'!' | b'#' => {}
+            _ => return Err(malformed()),
+        }
+    }
+    Ok((changed, untracked))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -86,6 +86,8 @@ pub mod result;
 /// Test orchestration use case.
 pub mod run_tests;
 pub(crate) mod set_walk;
+/// Где искать изменения набора: у git или чтением файлов.
+pub(crate) mod source_changes;
 /// Read-only source-set runtime indexes shared by orchestrating use cases.
 pub(crate) mod source_inventory;
 /// Shared staged publication mechanics for full-replacement use-case outputs.

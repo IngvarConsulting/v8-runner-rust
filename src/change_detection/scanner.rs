@@ -1,4 +1,4 @@
-use sha2::{Digest, Sha256};
+use sha1::{Digest, Sha1};
 use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -419,28 +419,47 @@ where
         .collect())
 }
 
-/// Compute SHA-256 hex digest of a file's contents.
+/// How many times a file whose length moved while it was read is read again.
+const LENGTH_RETRIES: usize = 2;
+
+/// The git blob id of a file's contents, as `git hash-object --no-filters` computes it: the
+/// SHA-1 of `blob <length> ` and the bytes (#575). Without git the memory holds the ids git
+/// would give the file without filters, so one memory serves a set with and without git.
 pub fn hash_file(path: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<String, ScanError> {
-    check_interruption(interrupted)?;
-    let file = std::fs::File::open(path).map_err(|e| ScanError::Read {
+    let read_error = |source| ScanError::Read {
         path: path.to_path_buf(),
-        source: e,
-    })?;
-    hash_reader(file, path, interrupted)
+        source,
+    };
+    for _ in 0..=LENGTH_RETRIES {
+        check_interruption(interrupted)?;
+        let file = std::fs::File::open(path).map_err(read_error)?;
+        let length = file.metadata().map_err(read_error)?.len();
+        if let Some(id) = hash_reader(file, length, path, interrupted)? {
+            return Ok(id);
+        }
+    }
+    Err(read_error(std::io::Error::other(
+        "the file length kept changing while it was read",
+    )))
 }
 
+/// The blob id of `length` bytes read from `reader`; `None` when the reader gave another number
+/// of bytes — the file changed while it was read.
 fn hash_reader(
     mut reader: impl Read,
+    length: u64,
     path: &Path,
     interrupted: &mut dyn FnMut() -> bool,
-) -> Result<String, ScanError> {
+) -> Result<Option<String>, ScanError> {
     // Working storage, not a maximum file size. Files of any size are streamed.
     let mut buffer = [0u8; 64 * 1024];
-    let mut digest = Sha256::new();
+    let mut digest = Sha1::new();
+    digest.update(format!("blob {length} ").as_bytes());
+    let mut read: u64 = 0;
     loop {
         check_interruption(interrupted)?;
-        let length = match reader.read(&mut buffer) {
-            Ok(length) => length,
+        let got = match reader.read(&mut buffer) {
+            Ok(got) => got,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(source) => {
                 return Err(ScanError::Read {
@@ -450,12 +469,13 @@ fn hash_reader(
             }
         };
         check_interruption(interrupted)?;
-        if length == 0 {
+        if got == 0 {
             break;
         }
-        digest.update(&buffer[..length]);
+        read += got as u64;
+        digest.update(&buffer[..got]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok((read == length).then(|| format!("{:x}", digest.finalize())))
 }
 
 fn check_interruption(interrupted: &mut dyn FnMut() -> bool) -> Result<(), ScanError> {
@@ -518,12 +538,28 @@ pub(super) fn is_source_file(entry: &walkdir::DirEntry, root: &Path, scope: Scan
 }
 
 fn is_ignored_dir(entry: &walkdir::DirEntry, scope: ScanScope) -> bool {
-    if !entry.file_type().is_dir() {
-        return false;
-    }
-    let Some(name) = entry.file_name().to_str() else {
+    entry.file_type().is_dir()
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| is_ignored_dir_name(name, scope))
+}
+
+/// Whether a file below a set root, named by its path from the root with `/`, is one the push
+/// walk selects: the same name predicates as [`source_entries`] and [`is_source_file`], so a
+/// listing that comes from git selects exactly what the walk selects (#575). Every component
+/// but the last names a directory below the root. Links and `workPath` are the caller's.
+pub(super) fn is_push_source_rel_path(rel: &str) -> bool {
+    let mut parts = rel.split('/');
+    let Some(name) = parts.next_back() else {
         return false;
     };
+    !name.is_empty()
+        && !is_ignored_file(name)
+        && !parts.any(|dir| is_ignored_dir_name(dir, ScanScope::Push))
+}
+
+fn is_ignored_dir_name(name: &str, scope: ScanScope) -> bool {
     match scope {
         ScanScope::Push => IGNORED_DIRS.contains(&name),
         // A metadata object can itself be named build, target, temp, or tmp.
@@ -763,10 +799,15 @@ mod tests {
             left: length,
             largest: 0,
         };
-        let hash =
-            super::hash_reader(&mut reader, Path::new("large"), &mut || false).expect("hash");
-        use sha2::{Digest, Sha256};
-        assert_eq!(hash, format!("{:x}", Sha256::digest(vec![17; length])));
+        let hash = super::hash_reader(&mut reader, length as u64, Path::new("large"), &mut || {
+            false
+        })
+        .expect("hash")
+        .expect("all bytes");
+        use sha1::{Digest, Sha1};
+        let mut expected = format!("blob {length} ").into_bytes();
+        expected.extend(vec![17; length]);
+        assert_eq!(hash, format!("{:x}", Sha1::digest(expected)));
         assert_eq!(reader.left, 0);
         assert!(reader.largest <= 64 * 1024);
     }
@@ -804,8 +845,9 @@ mod tests {
                 cancelled: cancelled.clone(),
                 cancel,
             };
-            let error = super::hash_reader(reader, Path::new("partial"), &mut || cancelled.get())
-                .expect_err("no partial hash");
+            let error =
+                super::hash_reader(reader, 3, Path::new("partial"), &mut || cancelled.get())
+                    .expect_err("no partial hash");
             if cancel {
                 assert!(matches!(error, super::ScanError::Interrupted));
                 assert_eq!(reads.get(), 1, "no read after cancellation");
@@ -832,11 +874,38 @@ mod tests {
                 }
             }
         }
-        let digest = super::hash_reader(OnceInterrupted(true), Path::new("empty"), &mut || false)
-            .expect("retry then EOF");
+        let digest =
+            super::hash_reader(OnceInterrupted(true), 0, Path::new("empty"), &mut || false)
+                .expect("retry then EOF");
+        // The id git gives an empty file.
         assert_eq!(
-            digest,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            digest.as_deref(),
+            Some("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+        );
+    }
+
+    /// Without git a file is hashed as `git hash-object --no-filters` hashes it, so one memory
+    /// serves a set with and without git (#575); a file whose length moved while it was read
+    /// gives no id.
+    #[test]
+    fn a_file_is_hashed_as_git_hashes_it_without_filters() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("Module.bsl");
+        fs::write(
+            &file, "line
+",
+        )
+        .expect("file");
+        let id = super::hash_file(&file, &mut || false).expect("id");
+        let git = std::process::Command::new("git")
+            .args(["hash-object", "--no-filters"])
+            .arg(&file)
+            .output()
+            .expect("git");
+        assert_eq!(id, String::from_utf8_lossy(&git.stdout).trim());
+        assert_eq!(
+            super::hash_reader(&b"abc"[..], 4, Path::new("short"), &mut || false).expect("read"),
+            None
         );
     }
 

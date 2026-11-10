@@ -95,6 +95,8 @@ pub fn execute(
             || !args.objects.is_empty())
     {
         Err(UseCaseFailure::without_payload(AppError::Validation("external publication requires one explicit full DESIGNER source set with replacement consent".into())))
+    } else if let Err(error) = refuse_hidden_sets(context, config, args) {
+        Err(UseCaseFailure::without_payload(error))
     } else {
         coordinator::run_dump_with_context(context, config, args)
     };
@@ -102,6 +104,31 @@ pub fn execute(
 }
 
 type DumpExecutionFailure = UseCaseFailure<DumpResult>;
+
+/// Выгрузка — и полная, и по изменившемуся — отказывает, если правило игнорирования git
+/// прячет файл набора, который она пишет: изменения набора берутся у git, и спрятанный файл
+/// следующая отправка не увидела бы (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+fn refuse_hidden_sets(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &DumpArgs,
+) -> Result<(), AppError> {
+    if config.format != SourceFormat::Designer {
+        return Ok(());
+    }
+    let inventory = SourceSetInventory::new(config);
+    let contexts: Vec<SourceSetContext> = inventory
+        .designer_contexts()
+        .iter()
+        .filter(|set| {
+            args.source_set
+                .as_deref()
+                .is_none_or(|name| set.name() == name)
+        })
+        .cloned()
+        .collect();
+    crate::use_cases::source_changes::refuse_hidden_sets(context, &contexts, &config.work_path)
+}
 
 #[derive(Debug, Clone)]
 struct ResolvedDumpTarget {
@@ -265,7 +292,9 @@ fn observe_dump(
     });
     let writes = watch.map(|watch| {
         listed.and_then(|listing| {
-            observe_dump_writes(set, work_path, watch, ended, listing, interrupted)
+            crate::use_cases::source_changes::with_dump_hasher(set, |blobs| {
+                observe_dump_writes(set, work_path, watch, ended, listing, blobs, interrupted)
+            })
         })
     });
     DumpObservation { fact, writes }
@@ -370,7 +399,7 @@ fn publish_full_dump(
     resolved: &ResolvedDumpTarget,
     publication: &StagedPublication,
 ) -> Result<DumpNotes, AppError> {
-    use crate::change_detection::analyzer::{commit_full_snapshot, prepare_full_snapshot};
+    use crate::change_detection::analyzer::prepare_full_snapshot;
 
     validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
     validate_full_dump_work_path(config, resolved)
@@ -461,7 +490,11 @@ fn publish_full_dump(
         if let Some(prepared) = snapshot {
             let result = prepared.and_then(|prepared| {
                 if let Some(source) = published_source {
-                    commit_full_snapshot(source, &config.work_path, &prepared)
+                    crate::use_cases::source_changes::commit_full_pull(
+                        source,
+                        &config.work_path,
+                        &prepared,
+                    )
                 } else {
                     Ok(())
                 }
@@ -527,7 +560,13 @@ fn publish_full_dump(
             ));
         };
         prepared
-            .and_then(|snapshot| commit_full_snapshot(source, &config.work_path, &snapshot))
+            .and_then(|snapshot| {
+                crate::use_cases::source_changes::commit_full_pull(
+                    source,
+                    &config.work_path,
+                    &snapshot,
+                )
+            })
             .err()
             .map(|error| format!(
                 "sources published for '{}', but hash memory was not updated: {error}; repeat a full pull to refresh memory",

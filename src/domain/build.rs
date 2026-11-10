@@ -18,6 +18,11 @@ pub struct BuildResult {
     pub provider_dispatched: bool,
     pub steps: Vec<BuildStep>,
     pub duration_ms: u64,
+    /// Каким путём найдены изменения каждого разобранного набора: у git (`git`,
+    /// `git+fsmonitor`) или чтением файлов (`scan`) с причиной. Нет поля — команда изменений не
+    /// разбирала: полная отправка, превью без разбора, отказ до него.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub detection: std::collections::BTreeMap<String, crate::domain::git_worktree::ChangeDetection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]

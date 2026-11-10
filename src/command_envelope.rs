@@ -56,6 +56,8 @@ pub enum ErrorCode {
     LiveAgentOff,
     /// `agent hold` в Job, из которого сторож не может выйти.
     LiveAgentJob,
+    /// Правило игнорирования git прячет файл набора; род `validation`.
+    SourceSetIgnoredByGit,
 }
 
 impl ErrorKind {
@@ -117,6 +119,7 @@ impl ErrorCode {
             Self::AgentLimit => "agent_limit",
             Self::LiveAgentOff => "live_agent_off",
             Self::LiveAgentJob => "live_agent_job",
+            Self::SourceSetIgnoredByGit => "source_set_ignored_by_git",
         }
     }
 
@@ -142,6 +145,7 @@ impl ErrorCode {
         Self::AgentLimit,
         Self::LiveAgentOff,
         Self::LiveAgentJob,
+        Self::SourceSetIgnoredByGit,
     ];
 }
 
@@ -416,6 +420,11 @@ mod schema_tests {
                 UseCaseErrorKind::LiveAgentJob,
                 "live_agent_job",
                 "environment",
+            ),
+            (
+                UseCaseErrorKind::SourceSetIgnoredByGit,
+                "source_set_ignored_by_git",
+                "validation",
             ),
             (
                 UseCaseErrorKind::InvalidOutput,
