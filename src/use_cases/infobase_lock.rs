@@ -90,12 +90,16 @@ pub(crate) fn acquire_infobase_lock(
                         ErrorKind::WouldBlock | ErrorKind::AlreadyExists
                     ) =>
                 {
-                    return Err(AppError::InfobaseBusy(render_busy_message(
-                        command_name,
-                        &base_dir,
-                        &lock_path,
-                        &error,
-                    )));
+                    let mut message =
+                        render_busy_message(command_name, &base_dir, &lock_path, &error);
+                    // Замок держит команда раннера; если её живой агент сейчас работает с
+                    // базой, отказ называет и его команду с держателями
+                    // (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
+                    if let Some(agents) = busy_live_agents(config) {
+                        message.push_str("; ");
+                        message.push_str(&agents);
+                    }
+                    return Err(AppError::InfobaseBusy(message));
                 }
                 Err(error) => error,
             }
@@ -137,10 +141,8 @@ pub(crate) fn settle_live_agents(
     use crate::platform::agent_keeper::client::Stopped;
     let busy = |agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]| {
         AppError::InfobaseBusy(format!(
-            "cannot start {command_name}: infobase '{infobase}' is in use by the live Designer agent (pid {}) running '{}' ({}); retry when it finishes",
-            agent_pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
-            command.unwrap_or("a command"),
-            holders_text(holders),
+            "cannot start {command_name}: infobase '{infobase}' is in use: {}; retry when it finishes",
+            live_agent_text(agent_pid, command, holders),
         ))
     };
     for (keeper, status) in &found {
@@ -179,6 +181,30 @@ pub(crate) fn settle_live_agents(
         }
     }
     Ok(())
+}
+
+/// Живые агенты базы, которые сейчас с ней работают: их команда и держатели. Каталогов не
+/// создаёт; без живых агентов — `None`.
+fn busy_live_agents(config: &AppConfig) -> Option<String> {
+    let state = crate::support::machine::account::existing_account_state_dir()?;
+    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
+    let busy: Vec<String> = crate::platform::agent_keeper::client::keepers_of(&state, &infobase)
+        .into_iter()
+        .filter_map(|(_, status)| status.ok())
+        .filter(|status| status.holds_the_infobase())
+        .map(|status| live_agent_text(status.agent_pid, status.command(), &status.holders))
+        .collect();
+    (!busy.is_empty()).then(|| busy.join("; "))
+}
+
+/// Живой агент, занятый базой, для отказа: процесс, команда и держатели.
+fn live_agent_text(agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]) -> String {
+    format!(
+        "the live Designer agent (pid {}) is running '{}' ({})",
+        agent_pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
+        command.unwrap_or("a command"),
+        holders_text(holders),
+    )
 }
 
 /// Держатели живого агента для отказа.

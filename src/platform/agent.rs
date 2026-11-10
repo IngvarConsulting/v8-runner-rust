@@ -53,7 +53,8 @@ const CLEANUP_GRACE: Duration = Duration::from_secs(30);
 const RELEASE_GRACE: Duration = Duration::from_secs(5);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
 /// Строка журнала: отмена бросила ответ команды, которую не обязаны дожидаться.
-const AGENT_COMMAND_ABANDONED: &str = "agent command abandoned: the command was cancelled";
+pub(crate) const AGENT_COMMAND_ABANDONED: &str =
+    "agent command abandoned: the command was cancelled";
 
 /// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);

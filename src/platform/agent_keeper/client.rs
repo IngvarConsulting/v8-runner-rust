@@ -804,8 +804,8 @@ impl KeeperClient {
                     // прерывание, как с разовым агентом, и ждёт исхода.
                     () = policy.cancellation.cancelled(), if critical && !deferral_noted => {
                         deferral_noted = true;
+                        // Команду в журнал не пишет: маски учётных данных у клиента нет.
                         tracing::warn!(
-                            %command,
                             reason = ?ProcessInterruptionReason::Cancelled,
                             "{}",
                             crate::platform::process::CRITICAL_INTERRUPTION_DEFERRED
@@ -813,6 +813,8 @@ impl KeeperClient {
                         continue;
                     }
                     () = policy.cancellation.cancelled(), if !critical => {
+                        // Та же строка, что у разового агента: работа команды брошена.
+                        tracing::info!("{}", crate::platform::agent::AGENT_COMMAND_ABANDONED);
                         // Строка `cancel` доходит до сторожа и тогда, когда разрыв канала
                         // он увидел бы не сразу.
                         let _ = write_line(&mut write, &Request::Cancel).await;
