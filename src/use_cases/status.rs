@@ -126,11 +126,7 @@ fn from_memory(
             .filter(|(_, _, memory, _)| *memory != MemoryState::Remembered)
             .map(|(_, context, _, _)| (*context).clone())
             .collect();
-        crate::use_cases::source_changes::refuse_hidden_sets(
-            execution,
-            &unread,
-            &config.work_path,
-        )?;
+        crate::use_cases::source_changes::refuse_hidden_sets(&unread, &config.work_path)?;
     }
     let source_sets = sets
         .into_iter()

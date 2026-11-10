@@ -132,15 +132,18 @@ fn hidden_refusal(error: &ChangeDetectionError) -> AppError {
 
 /// Отказывает, если правило игнорирования git прячет файл одного из наборов `contexts` — у
 /// команд, которые изменений не разбирают, но пишут или читают наборы целиком: полный `pull`,
-/// `push --full`, `make`. `git status` не спрашивается.
+/// `push --full`, `make`. `git status` не спрашивается, только настройки и список `.gitignore`.
+///
+/// Отмену проверка не замечает: она идёт до первой безопасной точки команды, и отмену,
+/// пришедшую раньше, называет эта точка, как и до #575
+/// (`INV.USE-CASES.MAKE-STOPS-AT-THE-SAFE-POINTS-OF-ITS-BUILD`).
 pub(crate) fn refuse_hidden_sets(
-    execution: &ExecutionContext,
     contexts: &[SourceSetContext],
     work_path: &Path,
 ) -> Result<(), AppError> {
-    let mut interrupted = || pending_interruption_error(execution, PLACE).is_some();
-    let lookup = lookup(contexts, work_path, Ask::IgnoreRules, &mut interrupted)
-        .ok_or_else(|| interruption(execution))?;
+    let Some(lookup) = lookup(contexts, work_path, Ask::IgnoreRules, &mut || false) else {
+        return Ok(());
+    };
     for (context, choice) in contexts.iter().zip(&lookup.choices) {
         if let Choice::Git { repo, root, .. } = choice {
             analyzer::hidden_by_git_rules(context, work_path, &lookup.repos[*repo], root).map_err(
@@ -773,8 +776,7 @@ mod tests {
             "{message}"
         );
 
-        let execution = ExecutionContext::cli(CommandName::Build);
-        assert!(refuse_hidden_sets(&execution, &[project.set()], &project.work()).is_err());
+        assert!(refuse_hidden_sets(&[project.set()], &project.work()).is_err());
     }
 
     /// `.gitignore` внутри набора — отказ; правило `ConfigDumpInfo.xml` — нет: этот файл раннер
@@ -788,9 +790,7 @@ mod tests {
             .expect("the version file is not read anyway");
 
         project.write(".gitignore", "*.bsl\n");
-        let execution = ExecutionContext::cli(CommandName::Build);
-        let Err(AppError::Refused(refusal)) =
-            refuse_hidden_sets(&execution, &[project.set()], &project.work())
+        let Err(AppError::Refused(refusal)) = refuse_hidden_sets(&[project.set()], &project.work())
         else {
             panic!("expected a refusal");
         };

@@ -95,7 +95,7 @@ pub fn execute(
             || !args.objects.is_empty())
     {
         Err(UseCaseFailure::without_payload(AppError::Validation("external publication requires one explicit full DESIGNER source set with replacement consent".into())))
-    } else if let Err(error) = refuse_hidden_sets(context, config, args) {
+    } else if let Err(error) = refuse_hidden_sets(config, args) {
         Err(UseCaseFailure::without_payload(error))
     } else {
         coordinator::run_dump_with_context(context, config, args)
@@ -108,11 +108,7 @@ type DumpExecutionFailure = UseCaseFailure<DumpResult>;
 /// Выгрузка — и полная, и по изменившемуся — отказывает, если правило игнорирования git
 /// прячет файл набора, который она пишет: изменения набора берутся у git, и спрятанный файл
 /// следующая отправка не увидела бы (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
-fn refuse_hidden_sets(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    args: &DumpArgs,
-) -> Result<(), AppError> {
+fn refuse_hidden_sets(config: &AppConfig, args: &DumpArgs) -> Result<(), AppError> {
     if config.format != SourceFormat::Designer {
         return Ok(());
     }
@@ -127,7 +123,7 @@ fn refuse_hidden_sets(
         })
         .cloned()
         .collect();
-    crate::use_cases::source_changes::refuse_hidden_sets(context, &contexts, &config.work_path)
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
 }
 
 #[derive(Debug, Clone)]

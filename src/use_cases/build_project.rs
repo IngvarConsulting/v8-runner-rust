@@ -118,7 +118,7 @@ fn run_build_branch(
     } else {
         args
     };
-    if let Err(error) = refuse_hidden_sets_of_a_full_push(context, config, args) {
+    if let Err(error) = refuse_hidden_sets_of_a_full_push(config, args) {
         return Err(BuildExecutionFailure::without_payload(error));
     }
     let memory = require_memory(context, config, args);
@@ -204,11 +204,7 @@ fn analysis_before_selection(
 /// Полная отправка изменений не разбирает, но и она отказывает, если правило игнорирования
 /// git прячет файл набора (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`):
 /// иначе следующая отправка по изменившемуся его не увидит. Разбор изменений проверяет это сам.
-fn refuse_hidden_sets_of_a_full_push(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    args: &BuildArgs,
-) -> Result<(), AppError> {
+fn refuse_hidden_sets_of_a_full_push(config: &AppConfig, args: &BuildArgs) -> Result<(), AppError> {
     if config.format != SourceFormat::Designer || !args.load.is_whole() {
         return Ok(());
     }
@@ -218,7 +214,7 @@ fn refuse_hidden_sets_of_a_full_push(
         return Ok(());
     };
     let contexts = designer_contexts_for_source_sets(&inventory, &source_sets);
-    crate::use_cases::source_changes::refuse_hidden_sets(context, &contexts, &config.work_path)
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
 }
 
 /// Объём отправки (#559): целиком, если каждый набор, который она загрузит, идёт целиком —
