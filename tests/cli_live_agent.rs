@@ -510,7 +510,8 @@ fn two_commands_sharing_the_limit_both_work() {
             let live = live(&payload);
             assert!(
                 live["kept"] == true
-                    || ["limit", "busy", "keeper_failed", "removed"].contains(&live["reason"].as_str().unwrap_or("")),
+                    || ["limit", "busy", "keeper_failed", "removed"]
+                        .contains(&live["reason"].as_str().unwrap_or("")),
                 "{payload}"
             );
         }

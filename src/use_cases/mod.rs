@@ -63,10 +63,10 @@ pub(crate) mod installed_extensions;
 pub(crate) mod interruption;
 /// Launch orchestration use case.
 pub mod launch_app;
-/// `agent hold`, `release`, `stop` и `status`: живой агент Конфигуратора по запросу.
-pub mod live_agent;
 /// Shared launch key policy for Enterprise-backed use cases.
 mod launch_keys;
+/// `agent hold`, `release`, `stop` и `status`: живой агент Конфигуратора по запросу.
+pub mod live_agent;
 /// Load packaged artifacts into infobase.
 pub mod load_artifact;
 /// Managed stand: services the runner starts and stops.

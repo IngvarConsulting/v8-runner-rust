@@ -20,7 +20,7 @@ check:
   "stopped": [
     {
       "key": "5f0c2a9e41d7b3c86a1e0f4d2b7c9a31",
-      "infobase": "file:c:/ib/demo (C:\ib\demo)",
+      "infobase": "file:/srv/ib/demo (/srv/ib/demo)",
       "this_project": true,
       "keeper_pid": 9311,
       "agent_pid": 9340,

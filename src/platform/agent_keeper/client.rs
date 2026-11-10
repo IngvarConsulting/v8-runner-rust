@@ -9,9 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
 
 use super::channel::{connect, Stream};
-use super::protocol::{
-    read_line, write_line, Frame, Holder, KeeperError, KeeperStatus, Request,
-};
+use super::protocol::{read_line, write_line, Frame, Holder, KeeperError, KeeperStatus, Request};
 use super::{credentials_digest, KeeperHome};
 use crate::platform::agent::{AgentError, AgentMessage, AgentReply, WaitPolicy};
 use crate::platform::live_registry::lock_agent_registry;
@@ -421,8 +419,9 @@ impl KeeperClient {
         credentials: &Credentials,
         work: &WorkGiven,
     ) -> Result<u32, KeeperStartError> {
-        let program = keeper_exe(self.home.state())
-            .map_err(|error| unavailable(format!("no copy of the runner for the keeper: {error}")))?;
+        let program = keeper_exe(self.home.state()).map_err(|error| {
+            unavailable(format!("no copy of the runner for the keeper: {error}"))
+        })?;
         let start = KeeperStart {
             launch: launch.clone(),
             credentials: credentials.clone(),
@@ -1098,16 +1097,18 @@ mod tests {
         DoneAfter(u64),
     }
 
-    /// Поддельный сторож на одно подключение `run`: отвечает кадром `batch`, затем `after`.
-    /// Ответ — клиент с открытой сессией и приёмник: запрос и то, что клиент написал после.
-    fn fake_keeper(
-        after: After,
-    ) -> (
+    /// Клиент с открытой сессией, приёмник «запрос и что клиент написал после», отбой
+    /// поддельному сторожу и каталог состояния.
+    type FakeKeeper = (
         KeeperClient,
         std::sync::mpsc::Receiver<(Request, Option<String>)>,
         std::sync::mpsc::Sender<()>,
         tempfile::TempDir,
-    ) {
+    );
+
+    /// Поддельный сторож на одно подключение `run`: отвечает кадром `batch`, затем `after`.
+    /// Ответ — клиент с открытой сессией и приёмник: запрос и то, что клиент написал после.
+    fn fake_keeper(after: After) -> FakeKeeper {
         use tokio::io::AsyncReadExt;
 
         // Путь сокета короток: временный каталог macOS для него слишком длинен.
@@ -1235,7 +1236,9 @@ mod tests {
         let (_, written) = seen.recv_timeout(Duration::from_secs(10)).unwrap();
         let _ = done.send(());
         assert!(
-            written.as_deref().is_some_and(|line| line.contains("cancel")),
+            written
+                .as_deref()
+                .is_some_and(|line| line.contains("cancel")),
             "the keeper gets `cancel`: {written:?}"
         );
         assert!(client.interrupted(), "the timed-out agent is removed");
@@ -1261,7 +1264,10 @@ mod tests {
             client.deferred_interruption(),
             Some(ProcessInterruptionReason::TimedOut)
         );
-        assert!(!client.interrupted(), "the finished command keeps the agent");
+        assert!(
+            !client.interrupted(),
+            "the finished command keeps the agent"
+        );
     }
 
     #[test]

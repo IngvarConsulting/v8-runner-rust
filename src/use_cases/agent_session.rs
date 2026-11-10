@@ -1694,9 +1694,8 @@ mod tests {
     #[test]
     fn a_declared_host_key_outside_ascii_is_refused_before_the_launch() {
         let declared = PathBuf::from("ключи").join("host_ed25519");
-        let refused = launch_host_key(Some(declared), Path::new("work"))
-            .err()
-            .expect("refused");
+        let refused =
+            launch_host_key(Some(declared), Path::new("work")).expect_err("refused");
         assert!(
             matches!(&refused, AppError::EnvironmentUnavailable(message)
                 if message.contains("ключи") && message.contains("ASCII")),

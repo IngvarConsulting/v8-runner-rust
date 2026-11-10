@@ -267,6 +267,18 @@ fn live(payload: &Value) -> &Value {
     &payload["data"]["provider"]["endpoint"]["live"]
 }
 
+/// Раннер здесь в Job, из которого сторож выйти не может (так запускает тесты, например,
+/// оболочка агента разработки на Windows): живого агента не будет, команда работает с разовым,
+/// а `agent hold` отказывает `live_agent_job` (`INV.PLATFORM.A-CLOSED-JOB-KEEPS-THE-AGENT-ONE-SHOT`).
+/// Живой путь тогда проверить нечем.
+fn in_a_closed_job(payload: &Value) -> bool {
+    let closed = live(payload)["reason"] == "job" || payload["error"]["code"] == "live_agent_job";
+    if closed {
+        eprintln!("skipped: the runner runs in a Job its keeper cannot leave: {payload}");
+    }
+    closed
+}
+
 /// Вторая команда берёт живого агента и на Windows: `1cv8` поднят один раз, агент живёт между
 /// командами (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`), квитанция говорит, был ли
 /// он живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
@@ -275,6 +287,9 @@ fn a_second_command_reuses_the_live_agent_on_any_os() {
     let bench = Bench::new("");
     let (code, first) = bench.download();
     assert_eq!(code, 0, "{first}");
+    if in_a_closed_job(&first) {
+        return;
+    }
     assert_eq!(
         live(&first),
         &json!({"reused": false, "holders": [], "kept": true}),
@@ -333,6 +348,9 @@ fn agent_hold_is_idempotent_and_release_removes_the_mark() {
     let own = std::process::id().to_string();
 
     let (code, payload) = bench.run(&["agent", "hold", "--ttl", "600"]);
+    if in_a_closed_job(&payload) {
+        return;
+    }
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["command"], "agent hold", "{payload}");
     assert_eq!(payload["data"]["reused"], false, "{payload}");
@@ -340,7 +358,11 @@ fn agent_hold_is_idempotent_and_release_removes_the_mark() {
     let (code, payload) = bench.run(&["agent", "hold", "--ttl", "600"]);
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["reused"], true, "{payload}");
-    assert_eq!(holders(&payload).len(), 1, "a repeated hold adds no mark: {payload}");
+    assert_eq!(
+        holders(&payload).len(),
+        1,
+        "a repeated hold adds no mark: {payload}"
+    );
     for _ in 0..2 {
         let (code, payload) = bench.run(&["agent", "hold", "--holder-pid", &own]);
         assert_eq!(code, 0, "{payload}");
@@ -368,7 +390,10 @@ fn agent_hold_is_idempotent_and_release_removes_the_mark() {
     assert_eq!(code, 0, "{payload}");
     assert_eq!(payload["data"]["released"], true, "{payload}");
     assert!(holders(&payload).is_empty(), "{payload}");
-    assert!(alive(bench.designer_pid()), "release does not stop the agent");
+    assert!(
+        alive(bench.designer_pid()),
+        "release does not stop the agent"
+    );
 }
 
 /// Держатель — живой процесс: процесса, которого нет, и pid с другим временем старта `hold`
@@ -416,6 +441,9 @@ fn agent_hold_refuses_with_live_off_and_over_the_limit() {
 
     let first = Bench::new("    live-max: 1\n");
     let (code, payload) = first.run(&["agent", "hold", "--ttl", "600"]);
+    if in_a_closed_job(&payload) {
+        return;
+    }
     assert_eq!(code, 0, "{payload}");
     let key = payload["data"]["key"].as_str().expect("key").to_owned();
     let second = first.beside("    live-max: 1\n");
@@ -424,7 +452,10 @@ fn agent_hold_refuses_with_live_off_and_over_the_limit() {
     assert_eq!(payload["error"]["code"], "agent_limit", "{payload}");
     assert_eq!(payload["error"]["kind"], "environment", "{payload}");
     let message = payload["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains(&key), "the refusal names the live agents: {message}");
+    assert!(
+        message.contains(&key),
+        "the refusal names the live agents: {message}"
+    );
     assert_eq!(second.launches(), 0, "the refused hold launches nothing");
 
     // Простаивающий агент без держателей место уступает.
@@ -448,6 +479,9 @@ fn agent_stop_removes_the_live_agent_and_status_lists_it() {
     assert_eq!(payload["data"]["agents"], json!([]), "{payload}");
     let (code, payload) = bench.download();
     assert_eq!(code, 0, "{payload}");
+    if in_a_closed_job(&payload) {
+        return;
+    }
     let agent = bench.designer_pid();
 
     let (code, payload) = bench.run(&["agent", "status"]);

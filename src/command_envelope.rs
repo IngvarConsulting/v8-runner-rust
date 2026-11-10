@@ -407,8 +407,16 @@ mod schema_tests {
                 "untracked_base",
             ),
             (UseCaseErrorKind::AgentLimit, "agent_limit", "environment"),
-            (UseCaseErrorKind::LiveAgentOff, "live_agent_off", "capability"),
-            (UseCaseErrorKind::LiveAgentJob, "live_agent_job", "environment"),
+            (
+                UseCaseErrorKind::LiveAgentOff,
+                "live_agent_off",
+                "capability",
+            ),
+            (
+                UseCaseErrorKind::LiveAgentJob,
+                "live_agent_job",
+                "environment",
+            ),
             (
                 UseCaseErrorKind::InvalidOutput,
                 "invalid_output",

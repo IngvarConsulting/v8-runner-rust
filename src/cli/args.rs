@@ -141,7 +141,12 @@ pub struct AgentArgs {
 #[command(next_help_heading = "Command options")]
 pub struct AgentHolderArgs {
     /// Process that holds the agent while it runs
-    #[arg(long, value_name = "PID", required_unless_present = "ttl", conflicts_with = "ttl")]
+    #[arg(
+        long,
+        value_name = "PID",
+        required_unless_present = "ttl",
+        conflicts_with = "ttl"
+    )]
     pub holder_pid: Option<u32>,
 
     /// Start time of the holder process (UTC, RFC 3339); a pid given to another process is

@@ -413,7 +413,10 @@ fn infobase_restore_removes_the_idle_live_agent_of_its_infobase() {
         .trim()
         .parse()
         .expect("designer pid");
-    assert!(process_is_alive(before), "the live agent outlives the command");
+    assert!(
+        process_is_alive(before),
+        "the live agent outlives the command"
+    );
     let input = harness.dir.path().join("transfer").join("base.dt");
     fs::create_dir_all(input.parent().unwrap()).expect("transfer");
     fs::write(&input, "payload-42").expect("dt");

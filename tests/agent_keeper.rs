@@ -993,7 +993,8 @@ fn a_conditional_stop_spares_an_agent_in_use() {
     assert_eq!(keeper.end(session)["frame"], "ended");
 
     let until = now_ms() + 600_000;
-    let held = keeper.last(json!({"op": "hold", "holder": {"kind": "ttl", "id": "t", "until_ms": until}}));
+    let held =
+        keeper.last(json!({"op": "hold", "holder": {"kind": "ttl", "id": "t", "until_ms": until}}));
     assert_eq!(held["frame"], "holders", "{held}");
     let refused = keeper.last(json!({"op": "stop", "only_idle": true, "only_unheld": true}));
     assert_eq!(refused["error"]["error"], "not_idle", "{refused}");

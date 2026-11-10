@@ -278,7 +278,10 @@ fn own_key(config: &AppConfig) -> Result<Option<(PathBuf, String)>, AppError> {
 /// что называет ОС, с точностью до секунды.
 fn holder(request: &HolderRequest) -> Result<Holder, AppError> {
     match request {
-        HolderRequest::Process { pid, started_at: expected } => {
+        HolderRequest::Process {
+            pid,
+            started_at: expected,
+        } => {
             let facts = process_facts(*pid).ok_or_else(|| {
                 AppError::Validation(format!(
                     "process {pid} is not running: it cannot hold the live agent"
@@ -425,7 +428,9 @@ fn rfc3339(at: SystemTime) -> String {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
