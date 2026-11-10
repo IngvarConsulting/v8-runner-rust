@@ -1,6 +1,6 @@
-use super::{analyze, commit_full_pull, refuse_hidden_sets, rescan_and_commit_full};
+use super::{analyze, prepare_full_pull, refuse_hidden_sets, rescan_and_commit_full};
 use crate::change_detection::analyzer::{
-    analyze_context, prepare_full_snapshot, AnalysisOutcome, ChangeKind, ContextAnalysis,
+    analyze_context, commit_full_snapshot, AnalysisOutcome, ChangeKind, ContextAnalysis,
 };
 use crate::domain::git_worktree::{ChangeDetection, ScanReason};
 use crate::domain::source_set::SourceSetContext;
@@ -378,15 +378,18 @@ fn a_gitignore_inside_the_set_refuses_and_the_version_file_rule_does_not() {
     );
 }
 
-/// Полный pull под git запоминает опубликованное дерево хешами git: при `core.autocrlf` сразу
-/// после него изменений нет, хотя байты на диске с CRLF.
+/// Полный pull под git хеширует дерево выгрузки до публикации git'ом той рабочей копии, куда
+/// оно ляжет: при `core.autocrlf` сразу после публикации изменений нет, хотя байты с CRLF.
 #[test]
-fn a_full_pull_remembers_the_published_tree_by_git_ids() {
+fn a_full_pull_remembers_the_staged_tree_by_git_ids() {
     let project = Project::new(&[("Module.bsl", "one\ntwo\n")]);
     run_git(project.dir.path(), &["config", "core.autocrlf", "true"]);
+    let staging = project.work().join("stage");
+    fs::create_dir_all(&staging).expect("stage");
+    fs::write(staging.join("Module.bsl"), "one\r\ntwo\r\n").expect("dumped");
+    let prepared = prepare_full_pull(&project.set(), &staging).expect("staged");
     project.write("Module.bsl", "one\r\ntwo\r\n");
-    let prepared = prepare_full_snapshot(&project.set(), &project.root()).expect("staged");
-    commit_full_pull(&project.set(), &project.work(), &prepared).expect("memory");
+    commit_full_snapshot(&project.set(), &project.work(), &prepared).expect("memory");
 
     let analysis = project.analyze();
     assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));

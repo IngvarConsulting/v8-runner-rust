@@ -423,7 +423,7 @@ where
 const LENGTH_RETRIES: usize = 2;
 
 /// The git blob id of a file's contents, as `git hash-object --no-filters` computes it: the
-/// SHA-1 of `blob <length> ` and the bytes (#575). Without git the memory holds the ids git
+/// SHA-1 of `blob <length>\0` and the bytes (#575). Without git the memory holds the ids git
 /// would give the file without filters, so one memory serves a set with and without git.
 pub fn hash_file(path: &Path, interrupted: &mut dyn FnMut() -> bool) -> Result<String, ScanError> {
     let read_error = |source| ScanError::Read {
@@ -454,7 +454,7 @@ fn hash_reader(
     // Working storage, not a maximum file size. Files of any size are streamed.
     let mut buffer = [0u8; 64 * 1024];
     let mut digest = Sha1::new();
-    digest.update(format!("blob {length} ").as_bytes());
+    digest.update(format!("blob {length}\0").as_bytes());
     let mut read: u64 = 0;
     loop {
         check_interruption(interrupted)?;
@@ -805,7 +805,7 @@ mod tests {
         .expect("hash")
         .expect("all bytes");
         use sha1::{Digest, Sha1};
-        let mut expected = format!("blob {length} ").into_bytes();
+        let mut expected = format!("blob {length}\0").into_bytes();
         expected.extend(vec![17; length]);
         assert_eq!(hash, format!("{:x}", Sha1::digest(expected)));
         assert_eq!(reader.left, 0);
@@ -891,11 +891,7 @@ mod tests {
     fn a_file_is_hashed_as_git_hashes_it_without_filters() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("Module.bsl");
-        fs::write(
-            &file, "line
-",
-        )
-        .expect("file");
+        fs::write(&file, "line\r\n").expect("file");
         let id = super::hash_file(&file, &mut || false).expect("id");
         let git = std::process::Command::new("git")
             .args(["hash-object", "--no-filters"])

@@ -399,7 +399,7 @@ fn publish_full_dump(
     resolved: &ResolvedDumpTarget,
     publication: &StagedPublication,
 ) -> Result<DumpNotes, AppError> {
-    use crate::change_detection::analyzer::prepare_full_snapshot;
+    use crate::change_detection::analyzer::commit_full_snapshot;
 
     validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
     validate_full_dump_work_path(config, resolved)
@@ -422,7 +422,12 @@ fn publish_full_dump(
         SourceSetInventory::new(config)
             .designer_context(&resolved.source_set_name)
             .filter(|source| source.persists_snapshot())
-            .map(|source| prepare_full_snapshot(source, publication.staging_path()))
+            .map(|source| {
+                crate::use_cases::source_changes::prepare_full_pull(
+                    source,
+                    publication.staging_path(),
+                )
+            })
     } else {
         None
     };
@@ -490,11 +495,7 @@ fn publish_full_dump(
         if let Some(prepared) = snapshot {
             let result = prepared.and_then(|prepared| {
                 if let Some(source) = published_source {
-                    crate::use_cases::source_changes::commit_full_pull(
-                        source,
-                        &config.work_path,
-                        &prepared,
-                    )
+                    commit_full_snapshot(source, &config.work_path, &prepared)
                 } else {
                     Ok(())
                 }
@@ -507,6 +508,7 @@ fn publish_full_dump(
             if let Some(warning) = external.record_generation(config, source) {
                 warnings.push(warning);
             }
+            crate::use_cases::source_changes::refresh_index_after_full_pull(source);
         }
         let published_version = published_source
             .and_then(|source| super::version_file::RunnerVersionFile::of(config, source));
@@ -560,19 +562,21 @@ fn publish_full_dump(
             ));
         };
         prepared
-            .and_then(|snapshot| {
-                crate::use_cases::source_changes::commit_full_pull(
-                    source,
-                    &config.work_path,
-                    &snapshot,
-                )
-            })
+            .and_then(|snapshot| commit_full_snapshot(source, &config.work_path, &snapshot))
             .err()
             .map(|error| format!(
                 "sources published for '{}', but hash memory was not updated: {error}; repeat a full pull to refresh memory",
                 resolved.source_set_name
             ))
     });
+    // Опубликованное дерево git перечитывает здесь, а не следующая команда (#575).
+    if config.format == SourceFormat::Designer {
+        if let Some(source) =
+            SourceSetInventory::new(config).designer_context(&resolved.source_set_name)
+        {
+            crate::use_cases::source_changes::refresh_index_after_full_pull(source);
+        }
+    }
     Ok(DumpNotes {
         message: merge_optional_messages(
             merge_optional_messages(published.cleanup_warning, memory_warning),

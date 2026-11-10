@@ -72,6 +72,50 @@
       ],
       "type": "object"
     },
+    "ChangeDetection": {
+      "additionalProperties": false,
+      "description": "Путь поиска изменений набора и, у чтения файлов, его причина.",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/DetectionPath"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScanReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Причина пути `scan`; у git её нет."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "DetectionPath": {
+      "description": "Каким путём найдены изменения набора (`INV.USE-CASES.CHANGES-ARE-DETECTED-ON-DEMAND`).",
+      "oneOf": [
+        {
+          "const": "git",
+          "description": "Изменения назвал git.",
+          "type": "string"
+        },
+        {
+          "const": "git+fsmonitor",
+          "description": "Изменения назвал git, которому о файлах сообщает демон `core.fsmonitor`.",
+          "type": "string"
+        },
+        {
+          "const": "scan",
+          "description": "Раннер прочёл каждый файл набора сам.",
+          "type": "string"
+        }
+      ]
+    },
     "LiveAgentHolder": {
       "anyOf": [
         {
@@ -322,6 +366,41 @@
       ],
       "type": "object"
     },
+    "ScanReason": {
+      "description": "Почему изменения набора найдены чтением файлов, а не у git.",
+      "oneOf": [
+        {
+          "const": "no_repository",
+          "description": "Набор не лежит в рабочей копии git, или git не найден.",
+          "type": "string"
+        },
+        {
+          "const": "submodule",
+          "description": "Набор лежит в подмодуле.",
+          "type": "string"
+        },
+        {
+          "const": "nested_repository",
+          "description": "Внутри набора вложенный репозиторий или подмодуль: его файлы git не перечисляет.",
+          "type": "string"
+        },
+        {
+          "const": "git_failed",
+          "description": "Git отказал или его ответ неполон.",
+          "type": "string"
+        },
+        {
+          "const": "memory_migration",
+          "description": "Память записана хешами прежнего вида: она переходит на хеши git, для этого раннер один\nраз читает файлы сам.",
+          "type": "string"
+        },
+        {
+          "const": "edt_format",
+          "description": "Исходники формата EDT: набор, который грузится в базу, — копия под `workPath`.",
+          "type": "string"
+        }
+      ]
+    },
     "SessionEndpoint": {
       "additionalProperties": false,
       "description": "Точка входа открытой сессии: режим и `host:port`, к которому раннер подключился.\n\nАдрес строится из разобранных хоста и порта, а не из записи конфига, поэтому\nучётных данных в нём нет: ни `user:pass@`, ни пароля строки соединения.",
@@ -392,6 +471,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "detection": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ChangeDetection"
+      },
+      "description": "Каким путём найдены изменения каждого разобранного набора: у git (`git`,\n`git+fsmonitor`) или чтением файлов (`scan`) с причиной. Нет поля — команда изменений не\nразбирала: полная отправка, превью без разбора, отказ до него.",
+      "type": "object"
+    },
     "duration_ms": {
       "format": "uint64",
       "minimum": 0,

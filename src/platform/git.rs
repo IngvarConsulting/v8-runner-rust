@@ -1197,6 +1197,72 @@ mod tests {
         );
     }
 
+    /// Отмена во время вопроса к git завершает git, и ответ — отмена, а не отказ git, после
+    /// которого раннер читал бы файлы сам (`INV.USE-CASES.CHANGES-ARE-DETECTED-ON-DEMAND`).
+    #[test]
+    fn a_cancelled_git_query_ends_git_and_answers_interrupted() {
+        let repo = repo_with_committed_source();
+        let mut command = git_in(repo.path(), false);
+        command.args(["-c", "alias.wait=!sleep 3", "wait"]);
+        let mut asked = 0;
+        let started = std::time::Instant::now();
+        let answer = run_git_query(command, None, &mut || {
+            asked += 1;
+            asked > 1
+        });
+        assert_eq!(answer, Err(GitQueryError::Interrupted));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the query did not wait for git to finish on its own"
+        );
+    }
+
+    /// Ответ git о рабочей копии: хеш индекса, флаги, правка, файл вне индекса и отслеживаемый
+    /// `.gitignore` как источник правил.
+    #[test]
+    fn the_worktree_answer_is_parsed_from_ls_files_and_status() {
+        let repo = repo_with_committed_source();
+        fs::write(repo.path().join(".gitignore"), "/.work/\n").expect("gitignore");
+        run_git(repo.path(), &["add", ".gitignore"]);
+        run_git(repo.path(), &["commit", "-qm", "rules"]);
+        fs::write(source_dir(&repo).join("Configuration.xml"), "edited\n").expect("edit");
+        fs::write(source_dir(&repo).join("New.xml"), "new\n").expect("new");
+        let (toplevel, info_exclude) = match placement_of(&source_dir(&repo), &mut || false) {
+            Ok(Placement::Inside {
+                toplevel,
+                info_exclude,
+            }) => (toplevel, info_exclude),
+            other => panic!("expected a working tree, got {other:?}"),
+        };
+
+        let view = worktree_under(
+            &toplevel,
+            &info_exclude,
+            &["src/cf".to_owned()],
+            &[],
+            false,
+            &mut || false,
+        )
+        .expect("answer");
+        assert_eq!(view.index.len(), 1);
+        assert_eq!(view.index[0].path, "src/cf/Configuration.xml");
+        assert_eq!(view.index[0].oid.len(), 40);
+        assert!(view.worktree_changed.contains("src/cf/Configuration.xml"));
+        assert_eq!(view.untracked, ["src/cf/New.xml"]);
+        assert!(view
+            .ignore_sources
+            .iter()
+            .any(|source| source.file.ends_with(".gitignore") && source.base.is_empty()));
+        let ids = hash_objects(
+            &toplevel,
+            &["src/cf/New.xml".to_owned()],
+            false,
+            &mut || false,
+        )
+        .expect("ids");
+        assert_eq!(ids.len(), 1);
+    }
+
     #[test]
     fn ignore_coverage_outside_a_worktree_is_unknown() {
         let dir = tempdir().expect("tempdir");

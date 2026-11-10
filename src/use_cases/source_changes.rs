@@ -154,67 +154,51 @@ pub(crate) fn refuse_hidden_sets(
     Ok(())
 }
 
-/// Записывает память набора после полной выгрузки, уже опубликованной в его каталог. Под git
-/// `git status` по корню набора обновляет индекс — переписанные файлы git перечитывает один
-/// раз здесь, а не в следующей команде, — и память берёт хеши git опубликованного дерева
-/// (#575). Вне git, или если git отказал, пишется `prepared` — дерево, снятое до публикации.
-pub(crate) fn commit_full_pull(
-    context: &SourceSetContext,
-    work_path: &Path,
-    prepared: &analyzer::FullSnapshot,
-) -> Result<(), ChangeDetectionError> {
-    let started = std::time::Instant::now();
-    let committed = commit_from_git(context, work_path);
-    tracing::info!(
-        source_set = %context.name(),
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        by_git = committed.as_ref().is_ok_and(|by_git| *by_git),
-        "memory of a full pull recorded"
-    );
-    match committed {
-        Ok(true) => Ok(()),
-        Ok(false) => analyzer::commit_full_snapshot(context, work_path, prepared),
-        Err(error) => Err(error),
+/// Хеши дерева полной выгрузки `staging` до его публикации в каталог набора `set`: под git —
+/// `git hash-object` рабочей копии, куда дерево ляжет, чтобы концы строк считались, как их
+/// считает git; вне git — чтением файлов (#575).
+pub(crate) fn prepare_full_pull(
+    set: &SourceSetContext,
+    staging: &Path,
+) -> Result<analyzer::FullSnapshot, ChangeDetectionError> {
+    match toplevel_of(set.path()) {
+        Some(toplevel) => {
+            let mut hasher = blob_hasher(&toplevel, true);
+            analyzer::prepare_full_snapshot_by_git(set, staging, &mut hasher)
+        }
+        None => analyzer::prepare_full_snapshot(set, staging),
     }
 }
 
-/// Записывает память набора хешами git; `Ok(false)` — набор не в git или git не описал его.
-fn commit_from_git(
-    context: &SourceSetContext,
-    work_path: &Path,
-) -> Result<bool, ChangeDetectionError> {
-    // Публикация уже прошла: память пишется и при отложенной отмене.
-    let lookup = lookup(
-        std::slice::from_ref(context),
-        work_path,
-        Ask::Status {
-            optional_locks: true,
-        },
-        &mut || false,
-    );
-    let Some((
-        lookup,
-        Choice::Git {
-            repo,
-            root,
-            work_path: work,
-        },
-    )) = lookup.as_ref().map(|lookup| (lookup, &lookup.choices[0]))
+/// После опубликованной полной выгрузки обновляет индекс git по корню набора: переписанные
+/// файлы git перечитывает здесь, а не в следующей команде (#575). Коммиты, ветки и содержимое
+/// индекса не меняются; отказ git — только запись в журнал.
+pub(crate) fn refresh_index_after_full_pull(set: &SourceSetContext) {
+    let started = std::time::Instant::now();
+    let Ok(Placement::Inside { toplevel, .. }) = git::placement_of(set.path(), &mut || false)
     else {
-        return Ok(false);
+        return;
     };
-    let view = &lookup.repos[*repo];
-    let mut hasher = blob_hasher(&view.toplevel, true);
-    analyzer::commit_full_from_git(
-        context,
-        work_path,
-        GitSource {
-            view,
-            root: root.clone(),
-            work_path: work.clone(),
-            hash_blobs: &mut hasher,
-        },
-    )
+    let Some(root) = relative_root(set.path(), &toplevel) else {
+        return;
+    };
+    let refreshed = git::refresh_index(&toplevel, &[root], &mut || false);
+    tracing::info!(
+        source_set = %set.name(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        ok = refreshed.is_ok(),
+        "git index refreshed after a full pull"
+    );
+}
+
+/// Корень рабочей копии git, в которой лежит или ляжет `path`: спрашивается ближайший
+/// существующий каталог.
+fn toplevel_of(path: &Path) -> Option<PathBuf> {
+    let existing = path.ancestors().find(|dir| dir.is_dir())?;
+    match git::placement_of(existing, &mut || false) {
+        Ok(Placement::Inside { toplevel, .. }) => Some(toplevel),
+        _ => None,
+    }
 }
 
 /// Записывает память набора после полной загрузки: под git — хешами git, иначе чтением файлов.
@@ -263,12 +247,8 @@ pub(crate) fn with_dump_hasher<T>(
     set: &SourceSetContext,
     f: impl FnOnce(Option<(&str, &mut crate::change_detection::git_tree::BlobHasher<'_>)>) -> T,
 ) -> T {
-    let placed = match git::placement_of(set.path(), &mut || false) {
-        Ok(Placement::Inside { toplevel, .. }) => {
-            relative_root(set.path(), &toplevel).map(|root| (toplevel, root))
-        }
-        _ => None,
-    };
+    let placed = toplevel_of(set.path())
+        .and_then(|toplevel| relative_root(set.path(), &toplevel).map(|root| (toplevel, root)));
     match placed {
         Some((toplevel, root)) => {
             let mut hasher = blob_hasher(&toplevel, true);

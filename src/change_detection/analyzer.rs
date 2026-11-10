@@ -701,6 +701,48 @@ pub fn prepare_full_snapshot(
     prepare_snapshot(context, source_path, None)
 }
 
+/// [`prepare_full_snapshot`] with the ids taken by `hash_blobs` — `git hash-object` of the
+/// working tree the set will be published into, so line endings are converted as git converts
+/// them there (#575). The staged files are named by their full paths.
+pub fn prepare_full_snapshot_by_git(
+    context: &SourceSetContext,
+    source_path: &Path,
+    hash_blobs: &mut BlobHasher<'_>,
+) -> Result<FullSnapshot, ChangeDetectionError> {
+    let listed = scanner::list_in_scope(source_path, None, &mut || false, scan_scope(context))
+        .map_err(|error| map_scan_error(context, error))?;
+    let names: Vec<String> = listed
+        .files
+        .iter()
+        .map(|file| file.path.to_string_lossy().into_owned())
+        .collect();
+    let ids = hash_blobs(&names, &mut || false).map_err(|error| match error {
+        BlobHashError::Interrupted => ChangeDetectionError::Interrupted,
+        BlobHashError::Failed(reason) => ChangeDetectionError::StorageHard {
+            source_set: context.name().to_owned(),
+            storage_path: source_path.to_path_buf(),
+            reason: format!("git hash-object failed: {reason}"),
+        },
+    })?;
+    Ok(FullSnapshot {
+        snapshot: listed
+            .files
+            .into_iter()
+            .zip(ids)
+            .map(|(file, hash)| {
+                (
+                    file.rel_path,
+                    StoredFileState {
+                        mtime_ns: file.mtime_ns,
+                        hash,
+                    },
+                )
+            })
+            .collect(),
+        scan_started_at: listed.scan_started_at,
+    })
+}
+
 fn prepare_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
@@ -1242,6 +1284,52 @@ mod tests {
     use std::fs::File;
     use std::time::SystemTime;
     use tempfile::tempdir;
+
+    /// Память, которую записал раннер до #575 (хеши SHA-256, вида хеша в ней нет), — не память
+    /// о базе: `push` откажет `untracked_base`, анализ грузит набор целиком, а запись новой
+    /// памяти поверх неё — уже память хешами git.
+    #[test]
+    fn memory_written_before_git_ids_is_no_memory_of_the_base() {
+        use super::{snapshot_memory, SnapshotMemory};
+        use crate::change_detection::hash_storage::{HashStorage, META, META_KEY_HASH_KIND};
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(root.join("Module.bsl"), "module").expect("module");
+        let context = SourceSetContext::new("main", root, "designer-main")
+            .with_infobase_memory("ib", "file:/ib; source=src".to_owned());
+        rescan_and_commit_full(&context, &work).expect("memory");
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Own);
+
+        let path = context.storage_path(&work).expect("storage");
+        {
+            let db = redb::Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            tx.open_table(META)
+                .expect("meta")
+                .remove(META_KEY_HASH_KIND)
+                .expect("forget the kind");
+            tx.commit().expect("old memory");
+        }
+        assert!(HashStorage::new(path.clone())
+            .load_summary()
+            .expect("summary")
+            .is_legacy());
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Unreadable);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::Fallback)
+        ));
+
+        rescan_and_commit_full(&context, &work).expect("new memory");
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Own);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
 
     #[test]
     fn partial_load_contract_stays_compatible_with_file_change() {
