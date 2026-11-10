@@ -475,6 +475,7 @@ mod tests {
         AppConfig {
             base_path: dir.to_path_buf(),
             work_path: dir.join("work"),
+            local_path: dir.join(".local"),
             format: crate::config::model::SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
