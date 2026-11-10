@@ -359,7 +359,9 @@ cp "$source/src/Configuration/Module.bsl" "$target/CommonModules/Demo/Ext/Module
     let list =
         fs::read_to_string(project.root.join("platform/partial-list")).expect("partial list");
     assert!(list.contains("CommonModules/Demo/Ext/Module.bsl"), "{list}");
-    assert!(list.contains("CommonModules/Demo.xml"), "{list}");
+    // Описание модуля не менялось: модуль идёт один
+    // (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+    assert!(!list.contains("CommonModules/Demo.xml"), "{list}");
 
     let sentinel = build_base.join("ib/old-build");
     fs::write(&sentinel, "old build").expect("sentinel");

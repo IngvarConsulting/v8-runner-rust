@@ -89,6 +89,7 @@ impl LiveHandle {
         use std::io::Write as _;
         let secrets: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
         let transcript = &mut self.transcript;
+        let started = std::time::Instant::now();
         let outcome = self
             .client
             .run(command, policy, &mut |batch: &[AgentMessage]| {
@@ -96,6 +97,9 @@ impl LiveHandle {
                     let _ = writeln!(log, "{}", agent::transcript_line(batch, &secrets));
                 }
             });
+        if let Ok(reply) = &outcome {
+            agent::log_reply(command, &secrets, reply, started.elapsed());
+        }
         if let Err(error) = &outcome {
             if let Some(reason) = failure_reason(error, self.client.interrupted()) {
                 self.failure.get_or_insert(reason);
