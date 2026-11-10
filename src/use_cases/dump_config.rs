@@ -2,6 +2,7 @@ use crate::change_detection::analyzer::{
     list_after_dump, mark_dump_start, observe_dump_writes, watch_before_dump, ChangeDetectionError,
     DumpFact, DumpStart, DumpWatch, DumpWrites,
 };
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use crate::domain::source_set::SourceSetContext;
 use crate::use_cases::provider_selection::stamp_session;
 use std::path::{Path, PathBuf};
@@ -548,14 +549,24 @@ fn validate_full_dump_work_path(
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
 ) -> Result<(), AppError> {
-    let work = nearest_existing_canonical_path(&config.work_path)
-        .map_err(|error| AppError::Runtime(format!("failed to canonicalize workPath: {error}")))?;
-    if work.starts_with(&resolved.canonical_target_path)
-        || work.starts_with(&resolved.canonical_platform_target_path)
-    {
-        return Err(AppError::Validation(
-            "full pull target must not contain workPath".to_owned(),
-        ));
+    // Полная выгрузка заменяет каталог целиком: каталоги раннера в нём — замок и память
+    // команды, стенды и база — пропали бы вместе с ним
+    // (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
+    let dirs = RunnerDirs::of(config);
+    let is_a_runner_dir = |target: &Path| {
+        [&config.work_path, &config.local_path]
+            .into_iter()
+            .any(|dir| nearest_existing_canonical_path(dir).is_ok_and(|dir| dir == target))
+    };
+    for target in [
+        resolved.canonical_target_path.as_path(),
+        resolved.canonical_platform_target_path.as_path(),
+    ] {
+        if is_a_runner_dir(target) || !runner_dirs_inside(target, dirs).is_empty() {
+            return Err(AppError::Validation(
+                "full pull target must not contain workPath or localPath".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2285,6 +2296,35 @@ mod tests {
         resolve_target(&config, &args).expect("partial allowed");
     }
 
+    /// Полная выгрузка заменила бы каталог вместе с `localPath` внутри: стенды и база
+    /// пропали бы, поэтому она отказывает так же, как над `workPath`.
+    #[test]
+    fn only_full_pull_refuses_a_target_containing_local_path() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = build_config(
+            dir.path(),
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+        );
+        config.local_path = dir.path().join("main").join("personal");
+        fs::create_dir_all(config.local_path.join("db")).expect("local");
+        let mut args = DumpArgs {
+            mode: DumpModeRequest::Full,
+            source_set: Some("main".to_owned()),
+            extension: None,
+            objects: vec![],
+            discard_uncommitted: true,
+            force_way_out: ForceWayOut::PullForce,
+            dry_run: false,
+        };
+        assert!(resolve_target(&config, &args)
+            .expect_err("full refused")
+            .to_string()
+            .contains("localPath"));
+        args.mode = DumpModeRequest::Incremental;
+        resolve_target(&config, &args).expect("incremental allowed");
+    }
+
     #[cfg(unix)]
     #[test]
     fn full_pull_refuses_an_aliased_work_path_but_allows_a_mirror_beneath_work_path() {
@@ -2586,6 +2626,7 @@ exit 0"#,
         >,
     ) -> AppConfig {
         AppConfig {
+            local_path: base_path.join(".local"),
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Designer,

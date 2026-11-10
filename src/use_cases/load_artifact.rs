@@ -1505,6 +1505,7 @@ mod tests {
 
     fn sample_config(root: &Path, binary: &Path) -> AppConfig {
         AppConfig {
+            local_path: root.join(".local"),
             base_path: root.to_path_buf(),
             work_path: root.join("work"),
             format: SourceFormat::Designer,

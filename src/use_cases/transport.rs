@@ -3,13 +3,13 @@ use std::future::Future;
 use crate::config::model::AppConfig;
 use crate::domain::infobase_export::InfobaseTransferPhase;
 use crate::use_cases::command_lock::CommandLockGuard;
-use crate::use_cases::context::CommandName;
+use crate::use_cases::context::{CommandName, StandChange};
 use crate::use_cases::infobase_lock::{acquire_infobase_lock, BaseAccess, InfobaseLock};
 use crate::use_cases::infobase_owner::{check_infobase_owner, OwnerCheck};
 use crate::use_cases::result::UseCaseError;
 #[cfg(test)]
 use crate::use_cases::result::UseCaseFailure;
-use crate::use_cases::workspace_lock::acquire_workspace_lock;
+use crate::use_cases::workspace_lock::{acquire_local_lock, acquire_workspace_lock};
 
 /// Отказ границы команды: шаг и ошибка. Сценарий не запускался.
 ///
@@ -119,6 +119,39 @@ pub fn preview_boundary(
         })
 }
 
+/// Замки каталогов команды: `localPath` снимается раньше `workPath`, порядок полей — порядок
+/// сброса.
+pub(crate) struct CommandLocks {
+    _local: Option<CommandLockGuard>,
+    _workspace: CommandLockGuard,
+}
+
+/// Меняет ли команда стенд под `localPath` (`INV.CLI.THE-LOCAL-LOCK-FOLLOWS-THE-WORKPATH-LOCK`).
+fn changes_the_stand(config: &AppConfig, command: CommandName) -> bool {
+    match command.stand_change() {
+        StandChange::Always => true,
+        StandChange::Never => false,
+        StandChange::WhenManaged => {
+            let infobase = &config.infobase;
+            // Загрузчик помечает базу стенда памятью `managed:<имя>`, даже когда для создания
+            // подставил файловую базу сервера вместо его секции.
+            infobase.managed_memory.is_some()
+                || infobase
+                    .standalone
+                    .as_ref()
+                    .is_some_and(|standalone| standalone.managed.is_some())
+                || infobase
+                    .cluster
+                    .as_ref()
+                    .is_some_and(|cluster| cluster.managed.is_some())
+                || infobase
+                    .dbms
+                    .as_ref()
+                    .is_some_and(|dbms| dbms.managed.is_some())
+        }
+    }
+}
+
 /// Замок `workPath`, затем замок базы и под ним — чья база. Это единственная точка
 /// проверки владельца у команды, которая открывает файловую базу: проверки памяти и
 /// поколения идут позже, в сценарии. Порядок сброса обратный: база отпускается раньше
@@ -127,12 +160,26 @@ fn acquire(
     config: &AppConfig,
     command: CommandName,
     base: BaseAccess,
-) -> Result<(CommandLockGuard, InfobaseLock, Vec<BoundaryNote>), BoundaryRefusal> {
+) -> Result<(CommandLocks, InfobaseLock, Vec<BoundaryNote>), BoundaryRefusal> {
     let workspace_lock =
         acquire_workspace_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
             phase: InfobaseTransferPhase::WorkspaceLock,
             error: error.into(),
         })?;
+    let local_lock = if changes_the_stand(config, command) {
+        Some(
+            acquire_local_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
+                phase: InfobaseTransferPhase::WorkspaceLock,
+                error: error.into(),
+            })?,
+        )
+    } else {
+        None
+    };
+    let workspace_lock = CommandLocks {
+        _local: local_lock,
+        _workspace: workspace_lock,
+    };
     let infobase_lock =
         acquire_infobase_lock(config, command.as_str(), base).map_err(|error| BoundaryRefusal {
             phase: InfobaseTransferPhase::InfobaseLock,
@@ -238,6 +285,7 @@ mod tests {
 
     fn sample_config(work_path: &Path) -> AppConfig {
         AppConfig {
+            local_path: work_path.join("base").join(".local"),
             base_path: work_path.join("base"),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Designer,
@@ -310,6 +358,75 @@ mod tests {
                 .filter(|entry| entry.file_name().to_string_lossy().contains("infobase"))
                 .count(),
             0
+        );
+    }
+
+    /// Два запуска одного проекта с разными `workPath` (`--workdir`) не меняют стенд разом: замок
+    /// `localPath` берётся после
+    /// замка `workPath`, занятый — отказ `WorkspaceBusy`; занятый `workPath` отказывает раньше и
+    /// `localPath` не заводит. Команда, стенда не меняющая, замка `localPath` не берёт.
+    #[test]
+    fn a_stand_command_takes_the_local_lock_after_the_work_path_lock() {
+        let dir = tempdir().expect("tempdir");
+        let first = sample_config(&dir.path().join("first"));
+        let mut second = sample_config(&dir.path().join("second"));
+        second.base_path = first.base_path.clone();
+        second.local_path = first.local_path.clone();
+        fs::create_dir_all(&first.work_path).expect("first work");
+        fs::create_dir_all(&second.work_path).expect("second work");
+
+        // Занятый `workPath` отказывает до замка `localPath`.
+        let canonical_work = fs::canonicalize(&first.work_path).expect("canonical work");
+        let workspace =
+            acquire_advisory_lock(&workspace_lock_path(&canonical_work)).expect("workspace lock");
+        let refusal = dispatch_with_workspace_lock(
+            &first,
+            CommandName::DbmsStart,
+            BaseAccess::Untouched,
+            |_| Ok(()),
+            || (),
+        )
+        .expect_err("busy workspace");
+        assert_eq!(refusal.phase, InfobaseTransferPhase::WorkspaceLock);
+        assert!(!first.local_path.exists(), "the local lock comes later");
+        drop(workspace);
+
+        let refused = dispatch_with_workspace_lock(
+            &first,
+            CommandName::ClusterStart,
+            BaseAccess::Untouched,
+            |_| Ok(()),
+            || {
+                let refusal = dispatch_with_workspace_lock(
+                    &second,
+                    CommandName::DbmsStop,
+                    BaseAccess::Untouched,
+                    |_| Ok(()),
+                    || (),
+                )
+                .expect_err("the stand is being changed");
+                assert_eq!(refusal.error.kind(), UseCaseErrorKind::WorkspaceBusy);
+                assert!(
+                    refusal.error.message().contains("localPath"),
+                    "{}",
+                    refusal.error.message()
+                );
+                // `status` и рабочие команды замка `localPath` не ждут.
+                dispatch_with_workspace_lock(
+                    &second,
+                    CommandName::Build,
+                    BaseAccess::Untouched,
+                    |_| Ok(()),
+                    || (),
+                )
+                .expect("a command that leaves the stand alone");
+            },
+        );
+        refused.expect("the first command holds both locks");
+        assert_eq!(
+            fs::read_to_string(first.local_path.join(".gitignore")).expect("gitignore"),
+            "*
+"
         );
     }
 

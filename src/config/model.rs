@@ -21,6 +21,12 @@ pub struct AppConfig {
     /// Working directory for temp files and hash storages
     pub work_path: PathBuf,
 
+    /// Личное состояние рабочей копии (`localPath`, по умолчанию `.local`): данные стендов и
+    /// файловая база по умолчанию. Удаление `workPath` его не задевает
+    /// (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`).
+    #[serde(default = "default_local_path")]
+    pub local_path: PathBuf,
+
     /// Source format: DESIGNER or EDT
     #[serde(default = "default_format")]
     pub format: SourceFormat,
@@ -784,6 +790,11 @@ impl InfobaseDbmsConfig {
 }
 
 impl AppConfig {
+    /// Каталог личного состояния этой рабочей копии и проект, которому он принадлежит.
+    pub fn local_dir(&self) -> crate::support::local_dir::LocalDir {
+        crate::support::local_dir::LocalDir::new(&self.local_path, &self.base_path)
+    }
+
     /// Builds a platform-ready 1C connection with infobase credentials applied.
     pub fn v8_connection(&self) -> V8Connection {
         let mut conn = V8Connection::from_connection_string(&self.infobase.connection);
@@ -990,6 +1001,13 @@ impl AppConfig {
     pub fn mcp_admission_timeout_duration(&self) -> Duration {
         Duration::from_millis(self.mcp.execution.admission_timeout_ms.max(1))
     }
+}
+
+/// `localPath` по умолчанию: от каталога `v8project.yaml`.
+pub const DEFAULT_LOCAL_PATH: &str = ".local";
+
+fn default_local_path() -> PathBuf {
+    PathBuf::from(DEFAULT_LOCAL_PATH)
 }
 
 fn default_format() -> SourceFormat {
@@ -1652,6 +1670,7 @@ mod tests {
 
     fn project_on(connection: &str) -> super::AppConfig {
         super::AppConfig {
+            local_path: std::path::PathBuf::from("/tmp/base").join(".local"),
             base_path: std::path::PathBuf::from("/tmp/base"),
             work_path: std::path::PathBuf::from("/tmp/work"),
             format: super::SourceFormat::Designer,

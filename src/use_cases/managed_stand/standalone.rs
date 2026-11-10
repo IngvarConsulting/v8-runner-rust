@@ -21,7 +21,7 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::service::ServiceSpawnError;
 use crate::platform::service_record::{
     adopt_recorded_pid, observe_service, read_json, write_json, Observed, RecordState,
-    ServicePaths, ServiceRecord,
+    ServicePaths, ServiceRecord, StandService,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::context::InterruptionSafetyClass;
@@ -315,6 +315,7 @@ impl Server<'_> {
             bin: ibsrv.clone(),
             version: None,
             agent: None,
+            location: self.paths.location(),
         };
         self.write_record(&record)?;
         let request = ibsrv::start_server(
@@ -566,8 +567,13 @@ pub(super) fn run_standalone(
     host: &dyn ServiceHost,
     locate: &dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> UseCaseResult<StandaloneResult> {
+    super::refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
     let declared = declared(config).map_err(UseCaseFailure::without_payload)?;
-    let paths = ServicePaths::new(&config.work_path, &declared.infobase, "standalone");
+    let paths = ServicePaths::new(
+        &config.local_dir(),
+        &declared.infobase,
+        StandService::Standalone,
+    );
     let server = Server {
         config,
         context,
@@ -618,8 +624,13 @@ pub(super) fn create_base(
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
 ) -> Result<String, UseCaseError> {
+    super::refuse_a_stand_of_another_project(config)?;
     let declared = declared(config)?;
-    let paths = ServicePaths::new(&config.work_path, &declared.infobase, "standalone");
+    let paths = ServicePaths::new(
+        &config.local_dir(),
+        &declared.infobase,
+        StandService::Standalone,
+    );
     let database = match &declared.storage {
         Storage::File(_) => {
             return Err(validation("a file infobase is created by its own path"));
@@ -936,6 +947,7 @@ mod tests {
             exchange: None,
         });
         let config = AppConfig {
+            local_path: root.path().join(".local"),
             base_path: root.path().to_path_buf(),
             work_path: root.path().join("work"),
             format: crate::config::model::SourceFormat::Designer,
@@ -958,7 +970,7 @@ mod tests {
 
     impl Setup {
         fn paths(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.work_path, "origin", "standalone")
+            ServicePaths::new(&self.config.local_dir(), "origin", StandService::Standalone)
         }
         fn run(
             &self,
@@ -1288,7 +1300,7 @@ mod tests {
     }
 
     fn dbms_record(setup: &Setup) -> ServiceRecord {
-        let paths = ServicePaths::new(&setup.config.work_path, "origin", "postgres");
+        let paths = ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres);
         read_json(&paths.record()).expect("the record of the PostgreSQL")
     }
 
@@ -1348,9 +1360,10 @@ mod tests {
         )
         .map_err(|failure| failure.error)
         .unwrap();
-        let pins: crate::platform::service_record::PinnedPorts =
-            read_json(&ServicePaths::new(&setup.config.work_path, "origin", "postgres").pins())
-                .unwrap();
+        let pins: crate::platform::service_record::PinnedPorts = read_json(
+            &ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres).pins(),
+        )
+        .unwrap();
         host.foreign.borrow_mut().extend([
             (
                 30118,
@@ -1650,10 +1663,56 @@ mod tests {
         );
         assert!(!setup.paths().root().join("passfile").exists());
         assert!(
-            !ServicePaths::new(&setup.config.work_path, "origin", "postgres")
+            !ServicePaths::new(&setup.config.local_dir(), "origin", StandService::Postgres)
                 .passfile()
                 .exists(),
             "the second copy of the password is gone"
         );
+    }
+
+    /// Стенд базы в общем `localPath` принадлежит другому проекту: команды автономного сервера и
+    /// `infobase create` его базы в СУБД отказывают `workspace_busy`, называя тот проект, и
+    /// ничего не поднимают (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+    #[test]
+    fn the_server_and_its_base_refuse_the_stand_of_another_project() {
+        let first = over_postgres();
+        ServicePaths::new(
+            &first.config.local_dir(),
+            "origin",
+            StandService::Standalone,
+        )
+        .prepare()
+        .unwrap();
+        let mut second = over_postgres();
+        second.config.local_path = first.config.local_path.clone();
+        let host = Host::default();
+        let project = first.config.base_path.display().to_string();
+        for command in [
+            ServiceCommand::Start,
+            ServiceCommand::Status,
+            ServiceCommand::Stop,
+            ServiceCommand::Restart,
+        ] {
+            let refused = second.run(command, false, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+            assert!(
+                refused.to_string().contains(&project),
+                "{command:?}: {refused}"
+            );
+        }
+        let refused = create_base(
+            &ExecutionContext::cli(CommandName::Init),
+            &second.config,
+            PathBuf::from("ibcmd.exe"),
+            false,
+            &Runner { host: &host },
+            &host,
+        )
+        .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+        assert!(refused.to_string().contains(&project), "{refused}");
+        assert_eq!(host.spawned.get(), 0);
+        assert!(host.calls.borrow().is_empty());
+        assert!(!first.paths().pins().exists());
     }
 }

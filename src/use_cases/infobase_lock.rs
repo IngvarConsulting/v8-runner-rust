@@ -76,34 +76,37 @@ pub(crate) fn acquire_infobase_lock(
             ErrorKind::InvalidInput,
             "the infobase directory has no parent to hold its lock",
         ),
-        Some(lock_path) => {
-            match take_command_lock(&lock_path, command_name, &canonical_work_path) {
-                Ok(guard) => {
-                    return Ok(InfobaseLock {
-                        _guard: Some(guard),
-                        warning: None,
-                    })
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::WouldBlock | ErrorKind::AlreadyExists
-                    ) =>
-                {
-                    let mut message =
-                        render_busy_message(command_name, &base_dir, &lock_path, &error);
-                    // Замок держит команда раннера; если её живой агент сейчас работает с
-                    // базой, отказ называет и его команду с держателями
-                    // (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
-                    if let Some(agents) = busy_live_agents(config) {
-                        message.push_str("; ");
-                        message.push_str(&agents);
-                    }
-                    return Err(AppError::InfobaseBusy(message));
-                }
-                Err(error) => error,
+        // Замок базы под `localPath` — первый писатель в нём: каталог заводится со своим
+        // `.gitignore` (`INV.USE-CASES.THE-LOCAL-DIRECTORY-IGNORES-ITSELF`).
+        Some(lock_path) => match config
+            .local_dir()
+            .prepare_for(&lock_path)
+            .and_then(|()| take_command_lock(&lock_path, command_name, &canonical_work_path))
+        {
+            Ok(guard) => {
+                return Ok(InfobaseLock {
+                    _guard: Some(guard),
+                    warning: None,
+                })
             }
-        }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::AlreadyExists
+                ) =>
+            {
+                let mut message = render_busy_message(command_name, &base_dir, &lock_path, &error);
+                // Замок держит команда раннера; если её живой агент сейчас работает с
+                // базой, отказ называет и его команду с держателями
+                // (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
+                if let Some(agents) = busy_live_agents(config) {
+                    message.push_str("; ");
+                    message.push_str(&agents);
+                }
+                return Err(AppError::InfobaseBusy(message));
+            }
+            Err(error) => error,
+        },
     };
     let beside = base_dir.parent().unwrap_or(&base_dir).display().to_string();
     if writes {
@@ -238,14 +241,31 @@ fn holders_text(holders: &[Holder]) -> String {
     )
 }
 
+/// Окончание имени файла замка базы.
+const INFOBASE_LOCK_SUFFIX: &str = ".v8-runner.infobase.lock";
+
 /// Файл замка рядом с каталогом базы: `.<имя каталога>.v8-runner.infobase.lock`.
 fn infobase_lock_path(base_dir: &Path) -> Option<PathBuf> {
     let parent = base_dir.parent()?;
     let name = base_dir.file_name()?;
     let mut lock_name = std::ffi::OsString::from(".");
     lock_name.push(name);
-    lock_name.push(".v8-runner.infobase.lock");
+    lock_name.push(INFOBASE_LOCK_SUFFIX);
     Some(parent.join(lock_name))
+}
+
+/// Файл замка какой-нибудь файловой базы этого каталога — сам замок или его сосед.
+pub(crate) fn is_infobase_lock_file(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let lock = crate::support::local_dir::LOCK_COMPANIONS
+        .iter()
+        .find_map(|companion| name.strip_suffix(companion))
+        .unwrap_or(name);
+    lock.strip_suffix(INFOBASE_LOCK_SUFFIX)
+        .and_then(|base| base.strip_prefix('.'))
+        .is_some_and(|base| !base.is_empty())
 }
 
 /// Отказ занятой базы называет владельца, если запись о нём относится к нынешней
@@ -286,6 +306,7 @@ mod tests {
 
     fn config(work_path: &Path, infobase: InfobaseConfig) -> AppConfig {
         AppConfig {
+            local_path: work_path.join(".local"),
             base_path: work_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Designer,
@@ -466,6 +487,30 @@ mod tests {
     /// Замок, который не взять не из-за другой команды: имя его системного файла занято
     /// каталогом. Команда записи отказывает с каталогом и причиной, команда чтения идёт
     /// дальше с предупреждением.
+    #[test]
+    fn the_lock_files_of_a_base_are_told_by_their_names() {
+        for name in [
+            ".db.v8-runner.infobase.lock",
+            ".db.v8-runner.infobase.lock.json",
+            ".db.v8-runner.infobase.lock.system",
+        ] {
+            assert!(
+                super::is_infobase_lock_file(std::ffi::OsStr::new(name)),
+                "{name}"
+            );
+        }
+        for name in [
+            ".v8-runner.infobase.lock",
+            "db",
+            ".db.v8-runner.infobase.lock.bak",
+        ] {
+            assert!(
+                !super::is_infobase_lock_file(std::ffi::OsStr::new(name)),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn a_base_lock_that_cannot_be_taken_refuses_a_write_and_warns_a_read() {
         let dir = tempdir().expect("tempdir");

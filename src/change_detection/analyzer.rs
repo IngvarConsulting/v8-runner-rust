@@ -1,3 +1,4 @@
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -111,9 +112,8 @@ pub fn analyze_context(
                     Err(error) => return Err(error),
                 },
             };
-            let excluded = scanner::work_path_inside(context.path(), work_path);
-            let scan = match scan_sources(context, context.path(), excluded.as_deref(), interrupted)
-            {
+            let excluded = runner_dirs(context, work_path);
+            let scan = match scan_sources(context, context.path(), &excluded, interrupted) {
                 Ok(scan) => scan,
                 Err(ScanError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
                 Err(error) => {
@@ -334,8 +334,8 @@ pub fn prepare_source_snapshot(
     context: &SourceSetContext,
     work_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
-    let excluded = scanner::work_path_inside(context.path(), work_path);
-    prepare_snapshot(context, context.path(), excluded)
+    let excluded = runner_dirs(context, work_path);
+    prepare_snapshot(context, context.path(), &excluded)
 }
 
 /// Hash an exported tree before publishing it; does not open or mutate storage.
@@ -343,17 +343,17 @@ pub fn prepare_full_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
-    prepare_snapshot(context, source_path, None)
+    prepare_snapshot(context, source_path, &[])
 }
 
 fn prepare_snapshot(
     context: &SourceSetContext,
     source_path: &Path,
-    excluded: Option<std::path::PathBuf>,
+    excluded: &[std::path::PathBuf],
 ) -> Result<FullSnapshot, ChangeDetectionError> {
     // The caller records an already successful load/publication: cancellation must not
     // leave its memory describing the preceding database/tree.
-    let scan = scan_sources(context, source_path, excluded.as_deref(), &mut || false)
+    let scan = scan_sources(context, source_path, excluded, &mut || false)
         .map_err(|error| map_scan_error(context, error))?;
     Ok(FullSnapshot {
         snapshot: scan
@@ -406,10 +406,18 @@ pub fn commit_full_snapshot(
         .map_err(|error| map_commit_error(context, storage.path(), error))
 }
 
+/// Каталоги раннера под корнем набора: `workPath` запуска и `localPath` проекта набора.
+fn runner_dirs(context: &SourceSetContext, work_path: &Path) -> Vec<std::path::PathBuf> {
+    runner_dirs_inside(
+        context.path(),
+        RunnerDirs::new(work_path, context.local_path()),
+    )
+}
+
 fn scan_sources(
     context: &SourceSetContext,
     path: &Path,
-    excluded: Option<&Path>,
+    excluded: &[std::path::PathBuf],
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<scanner::ScanSnapshot, ScanError> {
     scanner::scan_in_scope(path, excluded, interrupted, scan_scope(context))
@@ -463,10 +471,10 @@ pub fn watch_before_dump(
     if !context.persists_snapshot() || snapshot_memory(context, work_path) != SnapshotMemory::Own {
         return None;
     }
-    let excluded = scanner::work_path_inside(context.path(), work_path);
+    let excluded = runner_dirs(context, work_path);
     let listed = scanner::list_in_scope(
         context.path(),
-        excluded.as_deref(),
+        &excluded,
         &mut || false,
         scan_scope(context),
     );
@@ -515,10 +523,10 @@ pub fn list_after_dump(
     work_path: &Path,
     interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<DumpListing, ChangeDetectionError> {
-    let excluded = scanner::work_path_inside(context.path(), work_path);
+    let excluded = runner_dirs(context, work_path);
     scanner::list_in_scope(
         context.path(),
-        excluded.as_deref(),
+        &excluded,
         &mut || interrupted(),
         scan_scope(context),
     )
@@ -871,6 +879,30 @@ mod tests {
         rescan_and_commit_full(&context, &work_path).expect("snapshot");
 
         std::fs::write(work_path.join("state.txt"), "after").expect("state");
+
+        assert!(matches!(
+            analyze_context(&context, &work_path, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    /// Файлы `localPath` внутри набора — стенды и база — тоже не исходники, как бы каталог ни
+    /// назывался.
+    #[test]
+    fn a_personal_file_in_a_local_path_inside_the_set_is_not_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let work_path = dir.path().join("work");
+        let local_path = root.join("personal");
+        std::fs::create_dir_all(local_path.join("db")).expect("local");
+        std::fs::write(root.join("Configuration.xml"), "<xml />").expect("config");
+        std::fs::write(local_path.join("db").join("1Cv8.1CD"), "before").expect("base");
+        let context =
+            SourceSetContext::new("main", root, "designer-main").with_local_path(&local_path);
+        rescan_and_commit_full(&context, &work_path).expect("snapshot");
+
+        std::fs::write(local_path.join("db").join("1Cv8.1CD"), "after").expect("base");
+        std::fs::write(local_path.join("record.json"), "{}").expect("record");
 
         assert!(matches!(
             analyze_context(&context, &work_path, &mut || false).outcome,

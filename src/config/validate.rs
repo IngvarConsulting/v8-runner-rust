@@ -132,6 +132,32 @@ pub enum ConfigValidationError {
     WorkPathOverlapsTargetSideDir { work_path: String, dir: String },
 
     #[error(
+        "localPath '{local_path}' holds the project directory '{project}': the personal state of the checkout lies beside its sources, not around them"
+    )]
+    LocalPathHoldsTheProject { local_path: String, project: String },
+
+    #[error(
+        "localPath '{local_path}' holds the root of source-set '{source_set}': the personal state of the checkout is never a source"
+    )]
+    LocalPathHoldsASourceSet {
+        local_path: String,
+        source_set: String,
+    },
+
+    #[error(
+        "localPath '{local_path}' overlaps workPath '{work_path}': workPath is rebuilt and may be deleted, the personal state of the checkout must outlive it"
+    )]
+    LocalPathOverlapsWorkPath {
+        local_path: String,
+        work_path: String,
+    },
+
+    #[error(
+        "localPath stays on the runner's side: '{local_path}' overlaps the target-side directory infobase.standalone.exchange.dir '{dir}'"
+    )]
+    LocalPathOverlapsTargetSideDir { local_path: String, dir: String },
+
+    #[error(
         "tools.designer_agent.{keys} do not apply to a standalone server: it is reached through its gates and is never started by the runner"
     )]
     DesignerAgentDoesNotApplyToStandalone { keys: String },
@@ -1263,6 +1289,53 @@ fn validate_cluster_address(
     Ok(())
 }
 
+/// `localPath` держит личное состояние копии: он не держит ни проекта, ни набора исходников,
+/// не пересекается с пересобираемым `workPath` и лежит на стороне раннера
+/// (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`). Проверка только сравнивает пути и
+/// ничего не создаёт, превью тоже.
+pub(crate) fn validate_local_path(
+    config: &AppConfig,
+    config_dir: &Path,
+) -> Result<(), ConfigValidationError> {
+    use crate::support::path::compared_path;
+    let local = compared_path(&config.local_path);
+    let shown = || config.local_path.display().to_string();
+    if compared_path(config_dir).starts_with(&local) {
+        return Err(ConfigValidationError::LocalPathHoldsTheProject {
+            local_path: shown(),
+            project: config_dir.display().to_string(),
+        });
+    }
+    if let Some(set) = config
+        .source_sets
+        .iter()
+        .find(|set| compared_path(&set.root_in(&config.base_path)).starts_with(&local))
+    {
+        return Err(ConfigValidationError::LocalPathHoldsASourceSet {
+            local_path: shown(),
+            source_set: set.name.clone(),
+        });
+    }
+    if paths_overlap(&local, &compared_path(&config.work_path)) {
+        return Err(ConfigValidationError::LocalPathOverlapsWorkPath {
+            local_path: shown(),
+            work_path: config.work_path.display().to_string(),
+        });
+    }
+    if let Some(dir) = std::iter::once(&config.infobase)
+        .chain(config.infobases.values())
+        .filter_map(|infobase| infobase.standalone.as_ref())
+        .filter_map(|standalone| standalone.exchange_dir())
+        .find(|dir| paths_overlap(&local, &compared_path(dir)))
+    {
+        return Err(ConfigValidationError::LocalPathOverlapsTargetSideDir {
+            local_path: shown(),
+            dir: dir.display().to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Каталог обмена автономного сервера лежит на той стороне; `workPath` — на этой.
 fn validate_selected_infobase_environment(config: &AppConfig) -> Result<(), ConfigValidationError> {
     if let Some(dir) = config
@@ -1965,6 +2038,7 @@ mod tests {
         path: &Path,
     ) -> AppConfig {
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
             format,
@@ -2070,6 +2144,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2110,6 +2185,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2151,6 +2227,7 @@ mod tests {
         let source_dir = base.path().join("src");
         std::fs::create_dir_all(&source_dir).expect("source dir");
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2215,6 +2292,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2252,6 +2330,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2289,6 +2368,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2322,6 +2402,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2360,6 +2441,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2720,6 +2802,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -2990,6 +3073,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3022,6 +3106,7 @@ mod tests {
         let missing = base.path().join("missing-src");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3055,6 +3140,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3087,6 +3173,7 @@ mod tests {
         let missing = base.path().join("missing-project");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3123,6 +3210,7 @@ mod tests {
         let work = tempdir().expect("work");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3156,6 +3244,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            local_path: shared.path().join(".local"),
             base_path: shared.path().to_path_buf(),
             work_path: shared.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3200,6 +3289,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3245,6 +3335,7 @@ mod tests {
         );
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3297,6 +3388,7 @@ mod tests {
         )
         .expect("marker");
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3357,6 +3449,7 @@ mod tests {
         )
         .expect("marker");
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3437,6 +3530,7 @@ mod tests {
         )
         .expect("marker");
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3891,6 +3985,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -3931,6 +4026,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -3966,6 +4062,7 @@ mod tests {
         let work = tempdir().expect("work");
 
         let config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Edt,
@@ -4000,6 +4097,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4038,6 +4136,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = |allowed: &str| AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4088,6 +4187,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let config = |fingerprint: &str| AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4144,6 +4244,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4463,6 +4564,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).expect("source dir");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4513,6 +4615,7 @@ mod tests {
         std::fs::write(&params, "{}").expect("params");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4559,6 +4662,7 @@ mod tests {
         std::fs::write(&params, "{}").expect("params");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -4612,6 +4716,7 @@ mod tests {
         std::fs::write(&params, "{}").expect("params");
 
         let mut config = AppConfig {
+            local_path: base.path().join(".local"),
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,

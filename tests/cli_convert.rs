@@ -1269,7 +1269,7 @@ fn convert_output_root_rejects_work_path_child_before_workspace_lock() {
     assert!(payload["data"]["message"]
         .as_str()
         .expect("message")
-        .contains("must not be inside workPath"));
+        .contains("must not overlap workPath or localPath"));
 }
 
 #[test]

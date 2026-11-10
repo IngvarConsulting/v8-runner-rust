@@ -328,6 +328,17 @@ where
 struct MainConfigSchema {
     /// Working directory for generated state, logs, temporary files, and hash storages.
     work_path: PathBuf,
+    /// Directory of the personal state of this checkout: data of managed stands and the
+    /// default file infobase. Deleting workPath leaves it intact. Relative to the directory of
+    /// v8project.yaml; `.local` by default. It must not hold that directory or a source set,
+    /// and must not overlap workPath or infobase.standalone.exchange.dir.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PathBuf")]
+    local_path: Option<PathBuf>,
     /// Source format used by project source sets when a nested source does not override it.
     #[serde(
         default,
@@ -429,6 +440,16 @@ struct LocalOverlayConfigSchema {
     )]
     #[schemars(with = "PathBuf")]
     work_path: Option<PathBuf>,
+    /// Machine-local directory of the personal state of this checkout: data of managed stands
+    /// and the default file infobase. Relative to the directory of v8project.yaml.
+    #[serde(
+        rename = "localPath",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PathBuf")]
+    local_path: Option<PathBuf>,
     /// Infobases of this checkout by name, like remotes of a repository; commands work
     /// with `origin` unless `--infobase` names another one. A name is a plain identifier:
     /// it becomes a directory under workPath.

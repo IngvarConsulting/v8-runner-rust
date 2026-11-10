@@ -1835,6 +1835,7 @@ mod tests {
         edt_timeout_ms: u64,
     ) -> AppConfig {
         AppConfig {
+            local_path: PathBuf::from("/tmp/project").join(".local"),
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
             format: SourceFormat::Designer,

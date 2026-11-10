@@ -48,7 +48,59 @@ pub enum CommandName {
     Status,
 }
 
+/// Меняет ли команда стенд под `localPath` и берёт ли поэтому его замок.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandChange {
+    Always,
+    /// Только у базы управляемого стенда: `infobase create`.
+    WhenManaged,
+    Never,
+}
+
 impl CommandName {
+    /// Меняет ли команда стенд. Перечень полный: новая команда решает это явно.
+    pub const fn stand_change(self) -> StandChange {
+        match self {
+            Self::DbmsStart
+            | Self::DbmsStop
+            | Self::DbmsRestart
+            | Self::StandaloneStart
+            | Self::StandaloneStop
+            | Self::StandaloneRestart
+            | Self::ClusterStart
+            | Self::ClusterStop
+            | Self::ClusterRestart => StandChange::Always,
+            Self::Init => StandChange::WhenManaged,
+            Self::Bootstrap
+            | Self::ToolsDownload
+            | Self::Extensions
+            | Self::Build
+            | Self::Apply
+            | Self::Reset
+            | Self::Diff
+            | Self::Load
+            | Self::Test
+            | Self::Dump
+            | Self::InfobaseConfigurationExport
+            | Self::InfobaseDump
+            | Self::InfobaseRestore
+            | Self::Convert
+            | Self::Artifacts
+            | Self::Syntax
+            | Self::Launch
+            | Self::Publish
+            | Self::Platforms
+            | Self::DbmsStatus
+            | Self::StandaloneStatus
+            | Self::ClusterStatus
+            | Self::AgentHold
+            | Self::AgentRelease
+            | Self::AgentStop
+            | Self::AgentStatus
+            | Self::Status => StandChange::Never,
+        }
+    }
+
     /// Returns the stable command label used in logs and CLI envelopes.
     pub const fn as_str(self) -> &'static str {
         match self {

@@ -148,7 +148,7 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
     let request = &plan.request;
     let written;
     let LoadedConfig { config, warnings } = if plan.is_preview() {
-        refuse_a_non_empty_project_dir(&plan.paths, &plan.config().work_path, request.force)
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), request.force)
             .map_err(UseCaseFailure::without_payload)?;
         &plan.settings
     } else {
@@ -161,7 +161,7 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
             request.force,
         )
         .map_err(UseCaseFailure::without_payload)?;
-        refuse_a_non_empty_project_dir(&plan.paths, &plan.config().work_path, request.force)
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), request.force)
             .map_err(UseCaseFailure::without_payload)?;
         if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
             context,
@@ -355,13 +355,17 @@ const WORK_PATH_LOGS_DIR: &str = "logs";
 /// кроме `.git`. Проверка идёт после замка, а замок и журнал уже могут лежать в `workPath`
 /// нового проекта. Поэтому `workPath` не в счёт, только пока в нём нет ничего, кроме файлов
 /// замка, каталога журналов `logs/` (его содержимое не проверяется) и признака нового
-/// владельца в памяти о базе; любой другой файл или каталог в нём — «не пуст».
+/// владельца в памяти о базе; любой другой файл или каталог в нём — «не пуст». Так же не в
+/// счёт `localPath`, пока в нём лишь `.gitignore` и файлы замков: его заводит замок прерванного
+/// прежнего клона.
 /// `--force` снимает отказ, как и запрет перезаписи. Каталога ещё нет — он пуст.
 fn refuse_a_non_empty_project_dir(
     paths: &BootstrapPaths,
-    work_path: &Path,
+    config: &AppConfig,
     force: bool,
 ) -> Result<(), AppError> {
+    let work_path = config.work_path.as_path();
+    let local_path = config.local_path.as_path();
     if force {
         return Ok(());
     }
@@ -378,14 +382,18 @@ fn refuse_a_non_empty_project_dir(
             continue;
         }
         let path = entry.path();
-        if path != work_path {
+        let foreign = if path == work_path {
+            directory_entries(work_path)?
+                .into_iter()
+                .find(|inner| !is_lock_file_or_logs_dir(inner))
+                .map(|inner| inner.path())
+        } else if local_path.starts_with(&path) {
+            foreign_on_the_way_to_local(&path, local_path)?
+        } else {
             return Err(refuse(path));
-        }
-        if let Some(foreign) = directory_entries(work_path)?
-            .into_iter()
-            .find(|inner| !is_lock_file_or_logs_dir(inner))
-        {
-            return Err(refuse(foreign.path()));
+        };
+        if let Some(foreign) = foreign {
+            return Err(refuse(foreign));
         }
     }
     Ok(())
@@ -400,6 +408,36 @@ fn is_lock_file_or_logs_dir(entry: &std::fs::DirEntry) -> bool {
         || (name == WORK_PATH_LOGS_DIR && entry.path().is_dir())
         || (name == "infobases"
             && crate::use_cases::exchange_guard::holds_only_new_owner_marks(&entry.path()))
+}
+
+/// Что лежит на пути к `localPath`, кроме него самого, и в нём, кроме того, что заводит
+/// подготовка каталога: `.gitignore` и файлы замков. Вложенный `localPath` проверяется так же:
+/// каталоги над ним не держат ничего другого.
+fn foreign_on_the_way_to_local(
+    path: &Path,
+    local_path: &Path,
+) -> Result<Option<PathBuf>, AppError> {
+    if !path.is_dir() {
+        return Ok(Some(path.to_path_buf()));
+    }
+    for inner in directory_entries(path)? {
+        let inner_path = inner.path();
+        if path == local_path {
+            let prepared = inner_path.is_file()
+                && (crate::support::local_dir::is_own_file(&inner.file_name())
+                    || crate::use_cases::infobase_lock::is_infobase_lock_file(&inner.file_name()));
+            if !prepared {
+                return Ok(Some(inner_path));
+            }
+        } else if local_path.starts_with(&inner_path) {
+            if let Some(foreign) = foreign_on_the_way_to_local(&inner_path, local_path)? {
+                return Ok(Some(foreign));
+            }
+        } else {
+            return Ok(Some(inner_path));
+        }
+    }
+    Ok(None)
 }
 
 /// Записи каталога; каталога нет — записей нет.
@@ -714,6 +752,48 @@ mod tests {
         );
         assert!(!plan.paths.config_path.exists());
         assert!(!plan.paths.local_config_path.exists());
+    }
+
+    /// Повторный клон не спотыкается о `localPath`, который завёл замок прежнего: в нём лишь
+    /// `.gitignore` и файлы замков. Любой другой файл в нём — непустой каталог.
+    #[test]
+    fn a_local_path_holding_only_its_preparation_does_not_make_the_directory_non_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = written_plan(dir.path());
+        let local = plan.config().local_dir();
+        local.prepare().expect("prepared");
+        for lock in [".lock", ".lock.json", ".db.v8-runner.infobase.lock"] {
+            std::fs::write(local.path().join(lock), "").expect("lock file");
+        }
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect("only the preparation lies there");
+
+        std::fs::create_dir_all(local.path().join("db")).expect("a base");
+        let refused = refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect_err("a base is not a preparation");
+        assert!(refused.to_string().contains("is not empty"), "{refused}");
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), true).expect("forced");
+    }
+
+    /// Вложенный `localPath` тоже не в счёт: каталоги над ним держат только путь к нему.
+    #[test]
+    fn a_nested_local_path_holding_only_its_preparation_does_not_make_the_directory_non_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut plan = written_plan(dir.path());
+        plan.settings.config.local_path = plan.paths.project_dir.join("state").join("personal");
+        let local = plan.config().local_dir();
+        local.prepare().expect("prepared");
+        std::fs::write(local.path().join(".lock"), "").expect("lock file");
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect("only the way to the prepared localPath");
+
+        std::fs::write(local.path().join(".lockdown"), "").expect("not a lock");
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect_err("a file that only looks like a lock");
+        std::fs::remove_file(local.path().join(".lockdown")).expect("removed");
+        std::fs::write(plan.paths.project_dir.join("state").join("notes.txt"), "").expect("beside");
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect_err("a file beside the way to localPath");
     }
 
     /// Замок взят по настройкам плана, и написанный проект обязан назвать тот же

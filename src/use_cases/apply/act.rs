@@ -419,6 +419,7 @@ mod tests {
 
     fn config(dir: &Path) -> AppConfig {
         AppConfig {
+            local_path: dir.join("base").join(".local"),
             base_path: dir.join("base"),
             work_path: dir.join("work"),
             format: SourceFormat::Designer,

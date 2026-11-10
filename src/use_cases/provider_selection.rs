@@ -355,6 +355,7 @@ mod tests {
         }));
         let mut utilities = PlatformUtilities::with_locator(locator);
         let config = AppConfig {
+            local_path: dir.path().join(".local"),
             base_path: dir.path().to_path_buf(),
             work_path: dir.path().join("work"),
             format: SourceFormat::Designer,

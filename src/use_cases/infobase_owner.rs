@@ -311,7 +311,12 @@ fn check_as(
         version: OWNER_MARKER_VERSION,
         owners: kept,
     };
-    write_marker(&marker_path, &marker).map_err(|error| {
+    // Метка базы под `localPath` — тоже первый писатель в нём.
+    config
+        .local_dir()
+        .prepare_for(&marker_path)
+        .and_then(|()| write_marker(&marker_path, &marker))
+        .map_err(|error| {
         UseCaseError::new(
             UseCaseErrorKind::Runtime,
             format!(
@@ -486,7 +491,8 @@ fn unreadable_declarations_reason(error: &ConfigLoadError) -> String {
         | ConfigLoadError::LocalOverlayForbiddenKey(_)
         | ConfigLoadError::LocalOverlayUnsupportedKey(_)
         | ConfigLoadError::LocalOverlayUnsupportedShape(_)
-        | ConfigLoadError::UnsupportedShape(_) => {
+        | ConfigLoadError::UnsupportedShape(_)
+        | ConfigLoadError::StandOfAnotherProject(_) => {
             "its v8project.yaml or v8project.local.yaml cannot be parsed".to_owned()
         }
     }
@@ -749,6 +755,9 @@ mod tests {
         .expect("local layer");
         let infobase = InfobaseConfig::file(format!("File={}", base.display()));
         AppConfig {
+            local_path: fs::canonicalize(root)
+                .expect("canonical project")
+                .join(".local"),
             base_path: fs::canonicalize(root).expect("canonical project"),
             work_path: root.join("work"),
             format: SourceFormat::Designer,

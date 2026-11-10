@@ -302,6 +302,7 @@ mod tests {
 
     fn sample_config(platform_path: Option<PathBuf>, platform_version: Option<&str>) -> AppConfig {
         AppConfig {
+            local_path: PathBuf::from("/tmp/project").join(".local"),
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/project/.work"),
             format: SourceFormat::Designer,

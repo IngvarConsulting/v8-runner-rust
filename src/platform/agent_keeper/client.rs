@@ -567,6 +567,7 @@ impl KeeperClient {
                     bin: PathBuf::new(),
                     version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                     agent: None,
+                    location: None,
                 };
                 write_json(&paths.record(), &record)?;
                 Ok(Found::Absent)
@@ -1832,6 +1833,7 @@ mod tests {
             bin: PathBuf::new(),
             version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             agent: None,
+            location: None,
         };
         write_json(&home.paths().record(), &record).unwrap();
         let mut silent = std::collections::HashMap::new();

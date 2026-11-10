@@ -534,6 +534,21 @@ pub fn lexically_normal_absolute(path: &Path) -> PathBuf {
     normal
 }
 
+/// Путь в том виде, в каком его сравнивают проверки каталогов раннера: ссылки и `..` разрешены
+/// по ближайшему существующему предку (файловая система только читается), префикс `\\?\` снят,
+/// а на Windows регистр не различается — `SRC` и `src` там один каталог.
+pub fn compared_path(path: &Path) -> PathBuf {
+    let normal = lexically_normal_absolute(path);
+    let resolved = normalize_windows_verbatim_path(
+        &nearest_existing_canonical_path(&normal).unwrap_or(normal),
+    );
+    if cfg!(windows) {
+        PathBuf::from(resolved.to_string_lossy().to_lowercase())
+    } else {
+        resolved
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]

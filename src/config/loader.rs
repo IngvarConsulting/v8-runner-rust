@@ -46,6 +46,11 @@ pub enum ConfigLoadError {
 
     #[error("config contains unsupported key or value: {0}")]
     UnsupportedShape(String),
+
+    /// Стенд выбранной базы в общем `localPath` принадлежит другому проекту: рабочая команда
+    /// его не берёт и отказывает `workspace_busy`, а не советует поднять стенд.
+    #[error("{0}")]
+    StandOfAnotherProject(crate::platform::service_record::StandOfAnotherProject),
 }
 
 impl ConfigLoadError {
@@ -398,6 +403,7 @@ fn build_config(
     if let Some(wd) = workdir_override {
         config.work_path = resolve_from(config_dir, Path::new(wd));
     }
+    crate::config::validate::validate_local_path(&config, config_dir)?;
     project_managed_standalone(&mut config, &validation_mode)?;
     project_managed_cluster(&mut config, &validation_mode)?;
 
@@ -1425,8 +1431,8 @@ fn reject_local_overlay_keys(root: &serde_yaml::Value) -> Result<(), ConfigLoadE
         match key {
             "source-set" => return Err(ConfigLoadError::LocalOverlayForbiddenKey("source-set")),
             "format" => return Err(ConfigLoadError::LocalOverlayForbiddenKey("format")),
-            "workPath" | "infobases" | "infobase" | "working-copy" | "tools" | "tests" | "mcp"
-            | "providers" => {}
+            "workPath" | "localPath" | "infobases" | "infobase" | "working-copy" | "tools"
+            | "tests" | "mcp" | "providers" => {}
             unsupported => {
                 return Err(ConfigLoadError::LocalOverlayUnsupportedKey(
                     unsupported.to_owned(),
@@ -1539,8 +1545,9 @@ fn project_managed_standalone(
     else {
         return Ok(());
     };
+    refuse_a_stand_of_another_project(config, &infobase_name, validation_mode)?;
     let running =
-        crate::platform::service_record::running_standalone(&config.work_path, &infobase_name);
+        crate::platform::service_record::running_standalone(&config.local_dir(), &infobase_name);
     config.infobase.managed_memory = Some(format!("managed:{infobase_name}"));
     if let ConfigValidationMode::InfobaseCreate { .. } = validation_mode {
         if running.is_some() {
@@ -1612,9 +1619,10 @@ fn project_managed_cluster(
     if !config.infobase.connection.trim().is_empty() {
         return Ok(());
     }
+    refuse_a_stand_of_another_project(config, &infobase_name, validation_mode)?;
     let name = managed.reference(&infobase_name);
     let running =
-        crate::platform::service_record::running_cluster(&config.work_path, &infobase_name);
+        crate::platform::service_record::running_cluster(&config.local_dir(), &infobase_name);
     let project = |config: &mut AppConfig, connection: String| {
         config.infobase.connection = connection;
         config.infobase.connection_projected = true;
@@ -1645,7 +1653,7 @@ fn project_managed_cluster(
                 .is_some_and(|dbms| dbms.managed.is_some());
             if dbms_managed
                 && !crate::platform::service_record::running_postgres(
-                    &config.work_path,
+                    &config.local_dir(),
                     &infobase_name,
                 )
             {
@@ -1660,9 +1668,31 @@ fn project_managed_cluster(
     Ok(())
 }
 
+/// Стенд базы в общем `localPath` принадлежит другому проекту: рабочая команда и `infobase create`
+/// называют тот проект, а не считают стенд незапущенным
+/// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`). `status` и `platforms` показывают
+/// память и установки и стенда не трогают.
+fn refuse_a_stand_of_another_project(
+    config: &AppConfig,
+    infobase_name: &str,
+    validation_mode: &ConfigValidationMode,
+) -> Result<(), ConfigLoadError> {
+    if matches!(validation_mode, ConfigValidationMode::Inspecting { .. }) {
+        return Ok(());
+    }
+    match crate::platform::service_record::stand_of_another_project(
+        &config.local_dir(),
+        infobase_name,
+    ) {
+        Some(refusal) => Err(ConfigLoadError::StandOfAnotherProject(refusal)),
+        None => Ok(()),
+    }
+}
+
 fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
     config.base_path = resolve_from(config_dir, &config.base_path);
     config.work_path = resolve_from(config_dir, &config.work_path);
+    config.local_path = resolve_from(config_dir, &config.local_path);
     // Местный слой лежит рядом с проектным файлом: путь копии — от того же каталога.
     if let Some(working_copy) = config.working_copy.as_mut() {
         *working_copy = resolve_from(config_dir, working_copy);
@@ -2028,6 +2058,176 @@ mod tests {
         .expect("load config");
 
         assert_eq!(config.work_path, canonical(&config_dir).join("cli-work"));
+    }
+
+    /// `localPath` по умолчанию — `.local` рядом с проектным файлом; ключ проектного файла
+    /// уступает местному слою, а `--workdir` его не трогает
+    /// (`INV.CONFIG.LOCAL-PATH-HOLDS-THE-PERSONAL-STATE`).
+    #[test]
+    fn local_path_defaults_beside_the_project_file_and_the_local_layer_wins() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path =
+            write_minimal_project_config(&config_dir, &minimal_config_without_base_path(""));
+        let load_local = |workdir: Option<&str>| {
+            load_config(config_path.to_str(), workdir, &InfobaseSelector::Default)
+                .map(|loaded| loaded.config.local_path)
+                .expect("load config")
+        };
+        assert_eq!(load_local(None), canonical(&config_dir).join(".local"));
+        assert_eq!(
+            load_local(Some("cli-work")),
+            canonical(&config_dir).join(".local")
+        );
+
+        write_minimal_project_config(
+            &config_dir,
+            &minimal_config_without_base_path(
+                "localPath: state
+",
+            ),
+        );
+        assert_eq!(load_local(None), canonical(&config_dir).join("state"));
+
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "localPath: mine
+",
+        )
+        .expect("local overlay");
+        assert_eq!(load_local(None), canonical(&config_dir).join("mine"));
+    }
+
+    /// `localPath` не держит проекта и наборов и не пересекается с `workPath` и каталогом
+    /// обмена: отказ проверки, на диске — ничего, и в превью тоже.
+    #[test]
+    fn a_local_path_over_the_project_a_set_or_the_work_path_is_refused_and_creates_nothing() {
+        for (local_path, workdir, expected) in [
+            (".", None, "holds the project directory"),
+            ("..", None, "holds the project directory"),
+            ("src", None, "holds the root of source-set 'main'"),
+            ("work", None, "overlaps workPath"),
+            ("work/inner", None, "overlaps workPath"),
+            ("personal", Some("personal/work"), "overlaps workPath"),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let config_dir = dir.path().join("project");
+            let config_path = write_minimal_project_config(
+                &config_dir,
+                &minimal_config_without_base_path(&format!(
+                    "localPath: '{local_path}'
+"
+                )),
+            );
+            let before = std::fs::read_dir(&config_dir).expect("dir").count();
+            for preview in [false, true] {
+                let loaded = if preview {
+                    super::load_config_for_preview(
+                        config_path.to_str(),
+                        workdir,
+                        &InfobaseSelector::Default,
+                    )
+                } else {
+                    load_config(config_path.to_str(), workdir, &InfobaseSelector::Default)
+                };
+                let error = loaded.expect_err("refused").to_string();
+                assert!(error.contains(expected), "{local_path}: {error}");
+                assert!(error.contains("localPath"), "{local_path}: {error}");
+            }
+            assert_eq!(
+                std::fs::read_dir(&config_dir).expect("dir").count(),
+                before,
+                "{local_path}: the check writes nothing"
+            );
+        }
+    }
+
+    /// На Windows регистр пути не различается: `SRC` — тот же каталог, что набор `src`, а `WORK` —
+    /// тот же, что `workPath: work`.
+    #[cfg(windows)]
+    #[test]
+    fn a_local_path_spelled_in_another_case_is_the_same_directory() {
+        for (local_path, expected) in [
+            ("SRC", "holds the root of source-set 'main'"),
+            ("WORK", "overlaps workPath"),
+            ("Work/Inner", "overlaps workPath"),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let config_dir = dir.path().join("project");
+            let config_path = write_minimal_project_config(
+                &config_dir,
+                &minimal_config_without_base_path(&format!(
+                    "localPath: '{local_path}'
+"
+                )),
+            );
+            let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+                .expect_err("refused")
+                .to_string();
+            assert!(error.contains(expected), "{local_path}: {error}");
+        }
+    }
+
+    /// Ссылка на набор — тот же набор: проверка разрешает ссылки, ничего не создавая.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_path_through_a_link_to_a_set_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            &minimal_config_without_base_path(
+                "localPath: personal
+",
+            ),
+        );
+        std::os::unix::fs::symlink(config_dir.join("src"), config_dir.join("personal"))
+            .expect("link");
+        let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            error.contains("holds the root of source-set 'main'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_local_path_over_the_standalone_exchange_directory_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            "workPath: work
+localPath: shared/personal
+format: DESIGNER
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: src
+",
+        );
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "infobases:
+  origin:
+    connection: 'Srvr=srv:1541;Ref=demo'
+    standalone:
+      gate: srv:1543
+      exchange:
+        dir: shared
+",
+        )
+        .expect("local overlay");
+
+        let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .expect_err("refused")
+            .to_string();
+
+        assert!(
+            error.contains("localPath stays on the runner's side"),
+            "{error}"
+        );
     }
 
     fn load(
@@ -3000,7 +3200,11 @@ mod tests {
             name: Some("demo_data".to_owned()),
             ..Default::default()
         });
-        let paths = ServicePaths::new(&config.work_path, "origin", "cluster");
+        let paths = ServicePaths::new(
+            &config.local_dir(),
+            "origin",
+            crate::platform::service_record::StandService::Cluster,
+        );
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         let mut pins = ClusterPins {
@@ -3024,6 +3228,7 @@ mod tests {
                 bin: std::path::PathBuf::from("ragent"),
                 version: None,
                 agent: None,
+                location: paths.location(),
             },
         )
         .unwrap();
@@ -3051,7 +3256,11 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
-        let paths = ServicePaths::new(&config.work_path, "origin", "standalone");
+        let paths = ServicePaths::new(
+            &config.local_dir(),
+            "origin",
+            crate::platform::service_record::StandService::Standalone,
+        );
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         write_json(&paths.pins(), &ServerPorts::from_first(24000)).unwrap();
@@ -3069,6 +3278,7 @@ mod tests {
                 bin: std::path::PathBuf::from("ibsrv"),
                 version: None,
                 agent: None,
+                location: paths.location(),
             },
         )
         .unwrap();
@@ -3088,7 +3298,11 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
-        let paths = ServicePaths::new(&config.work_path, "origin", "standalone");
+        let paths = ServicePaths::new(
+            &config.local_dir(),
+            "origin",
+            crate::platform::service_record::StandService::Standalone,
+        );
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         write_json(&paths.pins(), &ServerPorts::from_first(24000)).unwrap();
@@ -3106,6 +3320,7 @@ mod tests {
                 bin: std::path::PathBuf::from("ibsrv"),
                 version: None,
                 agent: None,
+                location: paths.location(),
             },
         )
         .unwrap();
@@ -3115,6 +3330,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(refused.to_string().contains("standalone stop"), "{refused}");
+    }
+
+    /// Стенд базы в общем `localPath` принадлежит другому проекту — работает он или нет. Рабочая
+    /// команда над ним и `infobase create` файловой базы автономного сервера отказывают
+    /// `workspace_busy`, называя тот проект, а не советуют `cluster start` или
+    /// `standalone start`; `status` по-прежнему показывает память.
+    #[test]
+    fn a_working_command_names_the_project_owning_a_shared_stand() {
+        use crate::platform::service_record::{ServicePaths, StandService};
+        use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+        let dir = tempfile::tempdir().unwrap();
+        let owner = dir.path().join("owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        let mut config = managed_standalone_config(dir.path());
+        let mut owner_local = config.clone();
+        owner_local.base_path = owner.clone();
+        ServicePaths::new(&owner_local.local_dir(), "origin", StandService::Standalone)
+            .prepare()
+            .unwrap();
+        let busy = |error: super::ConfigLoadError| {
+            assert!(
+                matches!(error, super::ConfigLoadError::StandOfAnotherProject(_)),
+                "{error}"
+            );
+            let message = error.to_string();
+            assert!(message.contains(&owner.display().to_string()), "{message}");
+            let error = UseCaseError::from(crate::support::error::AppError::from(error));
+            assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
+        };
+        for mode in [
+            super::ConfigValidationMode::Full,
+            super::ConfigValidationMode::InfobaseCreate { preview: false },
+        ] {
+            busy(super::project_managed_standalone(&mut config.clone(), &mode).unwrap_err());
+        }
+        super::project_managed_standalone(
+            &mut config.clone(),
+            &super::ConfigValidationMode::Inspecting { preview: false },
+        )
+        .unwrap();
+
+        config.infobase.standalone = None;
+        config.infobase.cluster = Some(crate::config::model::InfobaseClusterConfig {
+            managed: Some(crate::config::model::ManagedServerConfig {
+                name: Some("demo".to_owned()),
+                db_path: None,
+            }),
+            ..Default::default()
+        });
+        for mode in [
+            super::ConfigValidationMode::Full,
+            super::ConfigValidationMode::InfobaseCreate { preview: false },
+        ] {
+            busy(super::project_managed_cluster(&mut config.clone(), &mode).unwrap_err());
+        }
     }
 
     fn managed_standalone_config(dir: &Path) -> crate::config::model::AppConfig {
@@ -3134,6 +3404,7 @@ mod tests {
             exchange: None,
         });
         crate::config::model::AppConfig {
+            local_path: dir.join(".local"),
             base_path: dir.to_path_buf(),
             work_path: dir.join("work"),
             format: crate::config::model::SourceFormat::Designer,

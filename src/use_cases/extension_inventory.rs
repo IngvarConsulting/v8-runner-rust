@@ -893,6 +893,7 @@ mod tests {
             AppConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
         };
         AppConfig {
+            local_path: root.join(".local"),
             base_path: root.to_path_buf(),
             work_path: root.to_path_buf(),
             format: SourceFormat::Designer,
