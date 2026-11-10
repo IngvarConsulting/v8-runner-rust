@@ -1043,6 +1043,7 @@ impl Cluster<'_> {
             explicit: true,
             bin: ragent_bin.clone(),
             version: platform_version(&ragent_bin),
+            agent: None,
         };
         write_record(&self.agent, &agent)?;
         let request = ragent::start_agent(&ragent_bin, &registry, pins.ports, &self.agent.log());
@@ -1090,6 +1091,7 @@ impl Cluster<'_> {
             explicit: true,
             bin: ras_bin.clone(),
             version: agent.version.clone(),
+            agent: None,
         };
         write_record(&self.ras, &ras)?;
         let request = ragent::start_ras(&ras_bin, port, ports, &self.ras.log());
@@ -2358,6 +2360,7 @@ mod tests {
                 explicit: true,
                 bin: PathBuf::from("ibsrv.exe"),
                 version: None,
+                agent: None,
             },
         )
         .unwrap();
@@ -2647,6 +2650,7 @@ mod tests {
                 explicit: true,
                 bin: PathBuf::from("ragent.exe"),
                 version: None,
+                agent: None,
             },
         )
         .unwrap();

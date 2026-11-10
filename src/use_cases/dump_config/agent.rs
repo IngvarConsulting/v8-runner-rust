@@ -43,7 +43,7 @@ pub(super) fn run_dump_agent(
         &wait,
     )?;
     let outcome = dump_through(context, config, resolved, plan, objects, &mut handle, &wait);
-    handle.finish(&wait);
+    handle.finish(context, &wait);
     let (reply_transcript, notes, up_to_date) = outcome?;
 
     Ok((
@@ -80,7 +80,7 @@ fn dump_through(
 
     // Поколение спрашивается до выгрузки: сравнение на равенство с записью после
     // последней удачной операции и говорит, есть ли что выгружать.
-    let generation = generation_id(handle.session(), extension, wait)?;
+    let generation = generation_id(handle, extension, wait)?;
     let recorded = ledger
         .as_ref()
         .map_or(Recorded::Nothing, GenerationLedger::read);
@@ -146,7 +146,7 @@ fn dump_through(
             collected.transpose()?;
             if let Some(external) = context.external_full_pull() {
                 external.generation_before(Provider::Agent, Some(generation.clone()));
-                external.generation_after(generation_id(handle.session(), extension, wait).ok());
+                external.generation_after(generation_id(handle, extension, wait).ok());
             }
             let cleanup = publish_full(context, config, resolved, &produced);
             if context.external_full_pull().is_none() {
@@ -317,7 +317,7 @@ fn dump_through(
                 mark.as_ref(),
                 watch.as_ref(),
                 &|| crate::use_cases::interruption::interruption_pending(context),
-                || generation_id(handle.session(), extension, wait).ok(),
+                || generation_id(handle, extension, wait).ok(),
             );
             evidence = observed.fact.map(ModeEvidence::Fact);
             merge_optional_messages(
@@ -444,10 +444,7 @@ fn run_command(
     command: &str,
     wait: &WaitPolicy,
 ) -> Result<String, AppError> {
-    let reply = handle
-        .session()
-        .run(command, wait)
-        .map_err(AppError::from)?;
+    let reply = handle.run(command, wait).map_err(AppError::from)?;
     reply.outcome().map_err(AppError::from)?;
     Ok(reply.transcript())
 }

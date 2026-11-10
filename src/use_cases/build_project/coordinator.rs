@@ -63,7 +63,7 @@ pub(super) trait SourceSetLoader {
     ) -> Result<(), AppError>;
 
     /// Вызывается после последнего набора, и при отказе тоже.
-    fn finish(&mut self) {}
+    fn finish(&mut self, _context: &ExecutionContext) {}
 }
 
 /// Пакетный Конфигуратор: процесс на каждую команду, утилита — `1cv8`.
@@ -213,7 +213,7 @@ pub(super) fn run_build_agent(
 ) -> Result<BuildResult, BuildExecutionFailure> {
     let mut loader = super::agent::AgentLoader::new(config);
     let outcome = run_build_with(context, config, args, analysis, &mut loader);
-    loader.finish();
+    loader.finish(context);
     outcome
 }
 

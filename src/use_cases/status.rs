@@ -233,7 +233,7 @@ fn deepen(
         });
     }
     if let Ok(asker) = asker {
-        asker.close();
+        asker.close(context);
     }
     outcome?;
     interrupted(context, "the extension inventory")?;
@@ -464,9 +464,7 @@ impl Asker {
                 },
                 extension,
             ),
-            How::Agent { handle, wait } => {
-                generation_id(handle.session(), extension, wait).map(Some)
-            }
+            How::Agent { handle, wait } => generation_id(handle, extension, wait).map(Some),
         }
     }
 
@@ -509,9 +507,9 @@ impl Asker {
         }
     }
 
-    fn close(self) {
+    fn close(self, context: &ExecutionContext) {
         if let How::Agent { handle, wait } = self.how {
-            handle.finish(&wait);
+            handle.finish(context, &wait);
         }
     }
 }

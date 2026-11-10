@@ -100,7 +100,7 @@ impl SourceSetLoader for AgentLoader {
         _step_index: usize,
     ) -> Result<Option<String>, AppError> {
         let (handle, wait) = self.handle(context, config)?;
-        generation_id(handle.session(), extension_name(source_set), &wait).map(Some)
+        generation_id(handle, extension_name(source_set), &wait).map(Some)
     }
 
     fn load(
@@ -214,9 +214,9 @@ impl SourceSetLoader for AgentLoader {
         )
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, context: &ExecutionContext) {
         if let Some((handle, wait)) = self.session.take() {
-            handle.finish(&wait);
+            handle.finish(context, &wait);
         }
     }
 }

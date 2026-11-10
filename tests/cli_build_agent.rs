@@ -109,6 +109,13 @@ fn harness_holding_credentials(hold: Option<Hold>, user: &str, password: &str) -
     }
 }
 
+/// Разовый агент, как до живого: тест проверяет его подъём и снятие на каждую команду.
+/// Конфигурация кончается блоком `tools.designer_agent`, и ключ ложится в него.
+fn one_shot(harness: &Harness) {
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(&harness.config_path, format!("{config}    live: false\n")).expect("live off");
+}
+
 fn run(harness: &Harness, arguments: &[&str]) -> (i32, Value) {
     let output = v8_runner_command()
         .args([
@@ -472,6 +479,7 @@ fn agent_diagnostics_keep_the_cause_when_a_password_contains_structural_syntax()
 #[test]
 fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation() {
     let harness = harness();
+    one_shot(&harness);
 
     let (code, payload) = run(&harness, &["build"]);
 
@@ -668,6 +676,72 @@ fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing(
     assert!(
         harness.sources.join("Catalogs").join("Items.xml").is_file(),
         "a skipped dump leaves the sources alone"
+    );
+}
+
+/// Квитанции живого агента в ответе: поле `live` везде, где оно есть.
+fn lives(payload: &Value) -> Vec<Value> {
+    let mut found = Vec::new();
+    let mut stack = vec![payload];
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Object(map) => {
+                for (key, inner) in map {
+                    if key == "live" && inner.is_object() {
+                        found.push(inner.clone());
+                    } else {
+                        stack.push(inner);
+                    }
+                }
+            }
+            Value::Array(items) => stack.extend(items),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Команды одной рабочей копии идут через одного живого агента: `push` его поднимает, а
+/// `status --deep`, полный и инкрементальный `pull` берут его, не поднимая `1cv8` снова
+/// (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`); квитанция каждой команды говорит, что
+/// агент взят и остался жить (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+#[test]
+fn push_status_and_pull_share_one_live_agent() {
+    let harness = harness();
+    let (code, payload) = run(&harness, &["push"]);
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        lives(&payload),
+        [serde_json::json!({"reused": false, "holders": [], "kept": true})],
+        "{payload}"
+    );
+    let project = harness.sources.parent().expect("project dir");
+    fs::write(project.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    support::commit_sources(project);
+
+    for (arguments, opens) in [
+        (&["status", "--deep"][..], false),
+        (&["pull", "--force"][..], true),
+        (&["pull"][..], false),
+    ] {
+        let (code, payload) = run(&harness, arguments);
+        assert_eq!(code, 0, "{arguments:?}: {payload}");
+        // Выгрузка в исходники — правка рабочей копии: следующий `pull` без `--force`
+        // переписывает только то, что есть в истории.
+        support::commit_sources(project);
+        let lives = lives(&payload);
+        assert!(!opens || !lives.is_empty(), "{arguments:?}: {payload}");
+        assert!(
+            lives
+                .iter()
+                .all(|live| live["reused"] == true && live["kept"] == true),
+            "{arguments:?}: {payload}"
+        );
+    }
+    assert_eq!(
+        read_or_empty(&harness.designer_args_log).lines().count(),
+        1,
+        "one 1cv8 for every command of the working copy"
     );
 }
 

@@ -2387,6 +2387,8 @@ mod tests {
         );
         // Поддельный Конфигуратор агентом не станет: короткое ожидание вместо двух минут.
         config.tools.designer_agent.startup_timeout_ms = 200;
+        // Разовый агент: тест о том, что к кластеру не идёт ibcmd, а не о стороже.
+        config.tools.designer_agent.live = Some(false);
         let request = LoadRequest {
             vendor_name: None,
             dry_run: false,

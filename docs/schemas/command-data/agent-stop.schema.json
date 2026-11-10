@@ -1,0 +1,163 @@
+{
+  "$defs": {
+    "AgentStopRefusal": {
+      "additionalProperties": false,
+      "description": "Живой агент, которого `agent stop --all` не снял.",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "message": {
+          "description": "Почему не снят.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "message"
+      ],
+      "type": "object"
+    },
+    "LiveAgentEntry": {
+      "additionalProperties": false,
+      "description": "Живой агент учётной записи, как его называет сторож.",
+      "properties": {
+        "agent_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "busy": {
+          "description": "Команда, которую агент выполняет сейчас или последней в открытой сессии.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "closing": {
+          "description": "Сторож уже решил снять агента.",
+          "type": "boolean"
+        },
+        "connected": {
+          "description": "Подключён ли агент к базе сессией команды.",
+          "type": "boolean"
+        },
+        "holders": {
+          "items": {
+            "$ref": "#/$defs/LiveAgentHolder"
+          },
+          "type": "array"
+        },
+        "idle_ms": {
+          "description": "Сколько агент простаивает, мс; занятый — ноль.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "infobase": {
+          "description": "База агента в каноническом виде: `file:…` или `server:…`; строка подключения иной\nформы — только отпечатком `connection:<sha256>`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keeper_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "this_project": {
+          "description": "Агент цели этого проекта (`--config`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "this_project",
+        "keeper_pid",
+        "holders",
+        "connected",
+        "idle_ms",
+        "closing"
+      ],
+      "type": "object"
+    },
+    "LiveAgentHolder": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Держатель-процесс: номер и время старта (UTC, RFC 3339), если система его назвала.",
+          "properties": {
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Держатель со сроком: до какого мгновения (UTC, RFC 3339).",
+          "properties": {
+            "until": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "until"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Держатель живого агента в квитанции."
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/agent-stop.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`data` команды `agent stop`.",
+  "properties": {
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "refused": {
+      "description": "Агенты, которых `--all` снять не смог: обход идёт дальше, отказ назван здесь.",
+      "items": {
+        "$ref": "#/$defs/AgentStopRefusal"
+      },
+      "type": "array"
+    },
+    "stopped": {
+      "description": "Снятые живые агенты; пусто — снимать было нечего. Агент с `closing: true` ещё\nвыполняет команду: сторож снимет его, как только она кончится.",
+      "items": {
+        "$ref": "#/$defs/LiveAgentEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "stopped",
+    "refused",
+    "duration_ms"
+  ],
+  "title": "AgentStopResult",
+  "type": "object"
+}

@@ -53,7 +53,8 @@ const CLEANUP_GRACE: Duration = Duration::from_secs(30);
 const RELEASE_GRACE: Duration = Duration::from_secs(5);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
 /// Строка журнала: отмена бросила ответ команды, которую не обязаны дожидаться.
-const AGENT_COMMAND_ABANDONED: &str = "agent command abandoned: the command was cancelled";
+pub(crate) const AGENT_COMMAND_ABANDONED: &str =
+    "agent command abandoned: the command was cancelled";
 
 /// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -435,6 +436,23 @@ pub enum AgentError {
     #[error("managed agent exited ({status}) before accepting a session; /Out: {out}")]
     ExitedBeforeSession { status: String, out: String },
 
+    /// Живого агента сторож снял или снимает: команда поднимает нового
+    /// (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`).
+    #[error("{detail}; a new live agent is needed")]
+    LiveAgentGone { detail: String },
+
+    /// Отказ сторожа живого агента.
+    #[error("the live agent keeper failed: {detail}")]
+    Keeper { detail: String },
+
+    /// Канала сторожа нет или он не принимает подключение: сторож ещё не поднялся или уже ушёл.
+    #[error("the live agent keeper is not reachable at {channel}: {source}")]
+    KeeperUnreachable {
+        channel: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("agent base dir '{base_dir}' has no directory for user '{user}': {detail}")]
     UserDirUnknown {
         base_dir: PathBuf,
@@ -557,6 +575,40 @@ impl WaitPolicy {
         Self {
             work: None,
             ..self.clone()
+        }
+    }
+
+    /// Ожидание команды, которую сторож живого агента выполняет по запросу клиента: без срока,
+    /// отменяет его сам сторож, когда клиент ушёл посреди некритической команды. Работы команды
+    /// оно не отмечает: её отмечает клиент в своём процессе.
+    pub(in crate::platform) fn for_keeper(cancellation: CancellationToken, critical: bool) -> Self {
+        Self {
+            deadline: None,
+            cancellation,
+            safety: if critical {
+                ProcessInterruptionSafety::CriticalNonAbortable
+            } else {
+                ProcessInterruptionSafety::Interruptible
+            },
+            work: None,
+        }
+    }
+
+    /// Ожидание `common disconnect-ib`, которым сторож отключает живого агента от базы после
+    /// сессии команды: тот же короткий срок, что у отпускания своего агента.
+    pub(in crate::platform) fn for_keeper_release() -> Self {
+        Self::release_window(RELEASE_GRACE)
+    }
+
+    /// Объявлена ли фаза критической: её команду доводят до исхода.
+    pub fn is_critical(&self) -> bool {
+        matches!(self.safety, ProcessInterruptionSafety::CriticalNonAbortable)
+    }
+
+    /// Отмечает работу команды, если отметка есть: команда ушла агенту через сторожа.
+    pub fn mark_work_given(&self) {
+        if let Some(work) = &self.work {
+            work.mark_work_given();
         }
     }
 
@@ -877,8 +929,44 @@ impl AgentSession {
         // команды они не отмечают.
         let service = policy.without_work();
         session.run(JSON_MODE_COMMAND, &service)?.outcome()?;
-        session.run(CONNECT_COMMAND, &service)?.outcome()?;
+        session.connect_infobase(&service)?;
         Ok(session)
+    }
+
+    /// Подключает агента к базе (`common connect-ib`). Ответ «уже подключён»
+    /// (`DesignerAlreadyConnectedToInfoBase`) — тоже подключение: так отвечает агент, которого
+    /// подключили раньше (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`). Служебная
+    /// команда работы команды не отмечает.
+    pub fn connect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
+        self.connect_infobase_reporting(policy, &mut |_| {})
+    }
+
+    /// То же, что `connect_infobase`, но ответ агента на подключение, уже с маской секретов,
+    /// отдаётся `on_batch`: сторож живого агента передаёт его в журнал команды.
+    pub fn connect_infobase_reporting(
+        &mut self,
+        policy: &WaitPolicy,
+        on_batch: &mut dyn FnMut(&[AgentMessage]),
+    ) -> Result<(), AgentError> {
+        match self
+            .run_streaming(CONNECT_COMMAND, &policy.without_work(), on_batch)?
+            .outcome()
+        {
+            Ok(_)
+            | Err(AgentError::Command {
+                error_type: AgentErrorType::DesignerAlreadyConnectedToInfoBase,
+                ..
+            }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Отключает агента от базы (`common disconnect-ib`), не закрывая сессии: так живой агент
+    /// между командами базу не держит. Служебная команда работы команды не отмечает.
+    pub fn disconnect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
+        self.run(DISCONNECT_COMMAND, &policy.without_work())?
+            .outcome()
+            .map(|_| ())
     }
 
     /// Одна команда — последовательность JSON-массивов до первого с итоговым
@@ -886,6 +974,17 @@ impl AgentSession {
     /// (замер 15.09.2026: `load-config-from-files` — `progress`, `progress`, …, `success`).
     /// Команду запроса после отмены не отправляет: отказ `NotSent`.
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
+        self.run_streaming(command, policy, &mut |_| {})
+    }
+
+    /// То же, что `run`, но каждый массив ответа, уже с маской секретов, сначала отдаётся
+    /// `on_batch`: сторож живого агента передаёт их команде по мере прихода.
+    pub fn run_streaming(
+        &mut self,
+        command: &str,
+        policy: &WaitPolicy,
+        on_batch: &mut dyn FnMut(&[AgentMessage]),
+    ) -> Result<AgentReply, AgentError> {
         self.command_deferral = None;
         // Команду запроса после отмены агенту не отдают, как раннер не запускает процесс:
         // отмена до работы — безопасная точка. Служебные команды — открытие, закрытие —
@@ -916,6 +1015,7 @@ impl AgentSession {
                     *text = crate::platform::secrets::mask_text(text, &secrets);
                 }
             }
+            on_batch(&batch);
             let done = batch.iter().any(AgentMessage::is_terminal);
             messages.extend(batch);
             if done {
@@ -1497,6 +1597,14 @@ fn excerpt(text: &str, limit: usize) -> String {
 }
 
 /// Protocol values stay intact; only this display copy masks decoded strings and keys.
+/// Строка журнала разговора для одного массива ответа: с маской секретов, как её пишет сессия.
+/// Её же пишет команда, которая говорит с живым агентом через сторожа.
+pub fn transcript_line(batch: &[AgentMessage], secrets: &[&str]) -> String {
+    let mut display = serde_json::to_value(batch).expect("agent messages serialize");
+    mask_agent_display(&mut display, secrets);
+    display.to_string()
+}
+
 fn mask_agent_display(value: &mut serde_json::Value, secrets: &[&str]) {
     match value {
         serde_json::Value::String(text) => {
@@ -1591,7 +1699,7 @@ pub struct ManagedAgent {
     session: Option<AgentSession>,
     base_dir: PathBuf,
     /// Ключ хоста этого запуска: одноразовый файл живёт, пока жив агент.
-    _host_key: LaunchHostKey,
+    host_key: LaunchHostKey,
 }
 
 impl ManagedAgent {
@@ -1604,6 +1712,44 @@ impl ManagedAgent {
         session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
+    ) -> Result<Self, AgentError> {
+        Self::launch_in(
+            runner,
+            launch,
+            session,
+            startup_timeout,
+            policy,
+            ManagedSpawnMode::Wait,
+        )
+    }
+
+    /// То же для сторожа живого агента: процесс агента умирает вместе со сторожем
+    /// (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`), поэтому звать это можно только из
+    /// потока, который живёт столько же, сколько сторож ([`ManagedSpawnMode::Tied`]).
+    pub fn launch_for_keeper(
+        runner: &dyn ProcessRunner,
+        launch: AgentLaunch,
+        session: AgentSessionRequest,
+        startup_timeout: Duration,
+        policy: &WaitPolicy,
+    ) -> Result<Self, AgentError> {
+        Self::launch_in(
+            runner,
+            launch,
+            session,
+            startup_timeout,
+            policy,
+            ManagedSpawnMode::Tied,
+        )
+    }
+
+    fn launch_in(
+        runner: &dyn ProcessRunner,
+        launch: AgentLaunch,
+        session: AgentSessionRequest,
+        startup_timeout: Duration,
+        policy: &WaitPolicy,
+        mode: ManagedSpawnMode,
     ) -> Result<Self, AgentError> {
         for dir in [&launch.base_dir, &launch.workdir] {
             std::fs::create_dir_all(dir).map_err(|source| AgentError::Workspace {
@@ -1621,7 +1767,7 @@ impl ManagedAgent {
         let request = launch.request();
         let mut process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
-            .spawn_managed(&request, ManagedSpawnMode::Wait, None)
+            .spawn_managed(&request, mode, None)
             .map_err(|error| match port_taken(launch.port) {
                 Some(detail) => AgentError::PortTaken {
                     port: launch.port,
@@ -1693,12 +1839,16 @@ impl ManagedAgent {
             process: Some(process),
             session: Some(opened),
             base_dir: launch.base_dir,
-            _host_key: launch.host_key,
+            host_key: launch.host_key,
         })
     }
 
     pub fn session(&mut self) -> &mut AgentSession {
         self.session.as_mut().expect("session lives with the agent")
+    }
+
+    pub fn session_ref(&self) -> &AgentSession {
+        self.session.as_ref().expect("session lives with the agent")
     }
 
     /// Точка входа сессии с поднятым агентом.
@@ -1711,6 +1861,16 @@ impl ManagedAgent {
 
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
+    }
+
+    /// Номер процесса агента.
+    pub fn pid(&self) -> Option<u32> {
+        self.process.as_ref().map(|process| process.pid())
+    }
+
+    /// Ожидание ключа хоста, на котором закреплена сессия: отпечаток идёт в запись живого агента.
+    pub fn host_key_expectation(&self) -> HostKeyExpectation {
+        self.host_key.expectation()
     }
 
     /// Закрывает соединение агента с базой (`common disconnect-ib`) и сессию и снимает процесс,

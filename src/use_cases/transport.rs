@@ -138,6 +138,14 @@ fn acquire(
             phase: InfobaseTransferPhase::InfobaseLock,
             error: error.into(),
         })?;
+    if base != BaseAccess::Untouched {
+        let recreates = matches!(command, CommandName::Init | CommandName::InfobaseRestore);
+        crate::use_cases::infobase_lock::settle_live_agents(config, command.as_str(), recreates)
+            .map_err(|error| BoundaryRefusal {
+                phase: InfobaseTransferPhase::InfobaseLock,
+                error: error.into(),
+            })?;
+    }
     let mut notes: Vec<BoundaryNote> = infobase_lock
         .warning()
         .map(|message| BoundaryNote {

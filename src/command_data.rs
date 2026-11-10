@@ -115,6 +115,10 @@ command_data_forms! {
     "cluster status", "cluster-status" => crate::domain::cluster::ClusterResult;
     "cluster stop", "cluster-stop" => crate::domain::cluster::ClusterResult;
     "cluster restart", "cluster-restart" => crate::domain::cluster::ClusterResult;
+    "agent hold", "agent-hold" => crate::domain::live_agent::AgentHoldResult;
+    "agent release", "agent-release" => crate::domain::live_agent::AgentReleaseResult;
+    "agent stop", "agent-stop" => crate::domain::live_agent::AgentStopResult;
+    "agent status", "agent-status" => crate::domain::live_agent::AgentStatusResult;
     "status", "status" => crate::domain::status::StatusResult;
     "*", "refusal" => crate::cli::output::RefusalData;
     "*", "mcp-refusal" => crate::mcp::service::McpRefusalData;

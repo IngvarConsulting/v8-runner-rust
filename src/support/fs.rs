@@ -743,6 +743,37 @@ pub fn write_file_atomically(
     Ok(())
 }
 
+/// Create `path` with what `fill` writes unless it already exists: a reader sees no file or
+/// the whole one, and of two writers racing for the same path only one publishes. Answers
+/// `false` when the path existed and was left as it was. A new file is owner-only (`0o600`)
+/// on Unix and takes its directory's inherited access elsewhere. Takes no lock, so a caller
+/// may hold any.
+pub fn create_file_once(
+    path: &Path,
+    fill: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(std::fs::Permissions::from_mode(0o600))
+    };
+    #[cfg(not(unix))]
+    let permissions = None;
+    let mut candidate = candidate_next_to(path, permissions)?;
+    fill(candidate.as_file_mut())?;
+    candidate.as_file().sync_all()?;
+    match candidate.persist_noclobber(path) {
+        Ok(_) => {
+            if let Some(parent) = parent_dir(path) {
+                let _ = best_effort_fsync_dir(parent);
+            }
+            Ok(true)
+        }
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.error),
+    }
+}
+
 /// The mode `File::create` would give, so the umask applies; other systems keep defaults.
 fn new_file_permissions() -> Option<std::fs::Permissions> {
     #[cfg(unix)]

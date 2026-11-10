@@ -1,5 +1,6 @@
 /// Designer agent driven through the system `ssh` client.
 pub mod agent;
+pub mod agent_keeper;
 /// Opening a URL in the user's browser.
 pub mod browser;
 pub mod connection;
@@ -20,6 +21,8 @@ pub mod ibcmd;
 /// `ibsrv` the runner starts itself.
 pub mod ibsrv;
 pub mod interactive;
+/// The registry of live Designer agents of this OS account.
+pub mod live_registry;
 pub mod locator;
 /// PostgreSQL build for 1C: utility arguments and data directory files.
 pub mod postgres;

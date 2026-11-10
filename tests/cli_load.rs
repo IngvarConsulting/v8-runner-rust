@@ -679,7 +679,7 @@ fn a_cluster_extension_upload_needs_no_dbms_section() {
         config.replace(
             "connection: 'File=ib'",
             "connection: 'Srvr=127.0.0.1:1541;Ref=demo'",
-        ) + "  designer_agent:\n    startup_timeout_ms: 200\n",
+        ) + "  designer_agent:\n    startup_timeout_ms: 200\n    live: false\n",
     )
     .expect("server config");
 

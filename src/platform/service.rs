@@ -4,7 +4,8 @@
 //! Единственный владелец запуска службы — режим `ProcessRunner::spawn_service`; прямой
 //! `CreateProcessW` живёт только здесь (`INV.PLATFORM.A-SERVICE-OUTLIVES-THE-RUNNER`). Команда
 //! `std::process::Command` сюда не подходит: у неё нет `STARTUPINFO` для скрытой консоли и списка
-//! наследуемых дескрипторов, а без консоли службу нельзя остановить мягко (замер #534).
+//! наследуемых дескрипторов, а без консоли службу нельзя остановить мягко (замер #534). На Unix
+//! служба уходит в свой сеанс (`setsid`), и этот вызов тоже живёт только здесь.
 
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
@@ -12,18 +13,14 @@ use std::time::Duration;
 
 /// Что запустить службой.
 #[cfg_attr(
-    not(windows),
-    allow(dead_code, reason = "читает только запуск на Windows")
+    not(any(unix, windows)),
+    allow(dead_code, reason = "запуска службы на этой системе нет")
 )]
 pub struct ServiceRequest {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub workdir: Option<PathBuf>,
     /// Куда идут stdout и stderr службы.
-    #[cfg_attr(
-        not(windows),
-        allow(dead_code, reason = "читает только запуск на Windows")
-    )]
     pub log_path: PathBuf,
     /// Что служба прочитает из stdin: пароль СУБД `ibsrv -W`, чтобы его не было в командной строке.
     pub stdin: Option<String>,
@@ -38,8 +35,8 @@ pub enum ServiceSpawnError {
     )]
     #[error("the runner runs in a Job that kills its processes on close and forbids leaving it: the service would not outlive the command")]
     WouldNotSurvive,
-    #[cfg(not(windows))]
-    #[error("services run on Windows only")]
+    #[cfg(not(any(unix, windows)))]
+    #[error("services run on Windows and Unix only")]
     Unsupported,
     #[error("{0}")]
     Io(#[from] std::io::Error),
@@ -64,6 +61,45 @@ pub struct ProcessFacts {
 }
 
 pub use imp::{listening_pid, process_facts, spawn_hidden};
+
+/// Мгновение старта процесса по [`ProcessFacts::started`]: тики FILETIME на Windows, тики часов
+/// после загрузки на Linux, микросекунды эпохи на macOS. `None` — система мгновения не называет.
+#[cfg(windows)]
+pub fn started_at(started: u64) -> Option<std::time::SystemTime> {
+    /// Секунд между 1601-01-01 и 1970-01-01.
+    const FILETIME_TO_UNIX: u64 = 11_644_473_600;
+    let since_unix = (started / 10).checked_sub(FILETIME_TO_UNIX * 1_000_000)?;
+    std::time::UNIX_EPOCH.checked_add(Duration::from_micros(since_unix))
+}
+
+#[cfg(target_os = "linux")]
+pub fn started_at(started: u64) -> Option<std::time::SystemTime> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let boot: u64 = stat
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    // SAFETY: `sysconf` takes a plain value and cannot fail in a way that harms memory.
+    let ticks = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+        .ok()
+        .filter(|ticks| *ticks > 0)?;
+    let micros = boot
+        .checked_mul(1_000_000)?
+        .checked_add(started.checked_mul(1_000_000)? / ticks)?;
+    std::time::UNIX_EPOCH.checked_add(Duration::from_micros(micros))
+}
+
+#[cfg(target_vendor = "apple")]
+pub fn started_at(started: u64) -> Option<std::time::SystemTime> {
+    std::time::UNIX_EPOCH.checked_add(Duration::from_micros(started))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_vendor = "apple")))]
+pub fn started_at(_started: u64) -> Option<std::time::SystemTime> {
+    None
+}
 
 /// Процесс из перечня системы: кто его родитель и с какой командной строкой он запущен.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -853,7 +889,317 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod imp {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+
+    use super::{ProcessFacts, ServiceRequest, ServiceSpawnError};
+
+    /// Запускает службу в своём сеансе и своей группе процессов (`setsid`): сигнал терминала или
+    /// группы раннера до неё не доходит. Наследует она только журнал на stdout и stderr и stdin;
+    /// остальные дескрипторы закрываются при `exec`. Job на Unix нет, поэтому отказа
+    /// `WouldNotSurvive` здесь не бывает.
+    pub fn spawn_hidden(request: &ServiceRequest) -> Result<u32, ServiceSpawnError> {
+        if let Some(parent) = request.log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&request.log_path)?;
+        let mut command = Command::new(&request.program);
+        command
+            .args(&request.args)
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            .stdin(if request.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
+        if let Some(workdir) = &request.workdir {
+            command.current_dir(workdir);
+        }
+        // SAFETY: между `fork` и `exec` вызываются только безопасные для сигналов `setsid`,
+        // `close_range`, `getdtablesize` и `fcntl`; память не выделяется.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                close_on_exec_beyond_stdio();
+                Ok(())
+            });
+        }
+        let mut child = command.spawn()?;
+        let pid = child.id();
+        if let (Some(text), Some(mut input)) = (&request.stdin, child.stdin.take()) {
+            // Служба могла выйти, не прочитав: это видно по её журналу, а не по записи сюда.
+            let written = input
+                .write_all(text.as_bytes())
+                .and_then(|()| input.write_all(b"\n"));
+            if let Err(error) = written {
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    // Без pid в ответе запись о службе не появится, и снять её потом будет
+                    // некому: служба снимается здесь же и не остаётся зомби.
+                    drop(input);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error.into());
+                }
+            }
+        }
+        // Пока раннер жив, завершённая служба без ожидания остаётся зомби; поток ждёт её и не
+        // держит выход раннера.
+        std::thread::spawn(move || child.wait());
+        Ok(pid)
+    }
+
+    /// Помечает «закрыть при `exec`» все дескрипторы, кроме stdin, stdout и stderr, даже
+    /// открытые чужим кодом без `O_CLOEXEC`. Вызывается между `fork` и `exec`.
+    fn close_on_exec_beyond_stdio() {
+        #[cfg(target_os = "linux")]
+        {
+            const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+            // SAFETY: системный вызов с числовыми аргументами; ядро старее 5.11 отвечает ошибкой,
+            // и тогда дескрипторы помечает цикл ниже.
+            let marked = unsafe {
+                libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC)
+            };
+            if marked == 0 {
+                return;
+            }
+        }
+        // SAFETY: `getdtablesize` и `fcntl` безопасны для сигналов; незанятый номер отвечает
+        // `EBADF` и пропускается.
+        unsafe {
+            let limit = libc::getdtablesize().clamp(3, 65_536);
+            for fd in 3..limit {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+        }
+    }
+
+    /// Факты о процессе по `/proc/<pid>`; `None`, если его нет, он чужой учётной записи или уже
+    /// завершён и ждёт родителя. Время старта — поле 22 `stat`, тики часов после загрузки. Это
+    /// значение у процесса не меняется, а пересчёт в секунды от эпохи через `btime` сдвигается
+    /// вместе с часами системы и дал бы своему процессу другое время. Сравнивается оно только
+    /// на равенство.
+    #[cfg(target_os = "linux")]
+    pub fn process_facts(pid: u32) -> Option<ProcessFacts> {
+        use crate::support::machine::proc_stat_field;
+
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        if matches!(proc_stat_field(&stat, 3), Some("Z" | "X")) {
+            return None;
+        }
+        let started = proc_stat_field(&stat, 22)?.parse().ok()?;
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        Some(ProcessFacts {
+            started,
+            image: super::image_name(&without_deleted_mark(exe)),
+        })
+    }
+
+    /// Путь образа из `/proc/<pid>/exe` без приписки ` (deleted)`, которую ядро ставит, когда
+    /// файл образа заменён или удалён после старта: процесс остаётся тем же.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn without_deleted_mark(exe: std::path::PathBuf) -> std::path::PathBuf {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        const MARK: &[u8] = b" (deleted)";
+        match exe.as_os_str().as_bytes().strip_suffix(MARK) {
+            Some(kept) => std::ffi::OsString::from_vec(kept.to_vec()).into(),
+            None => exe,
+        }
+    }
+
+    /// Факты о процессе по `proc_pidinfo`; время старта — микросекунды от эпохи.
+    #[cfg(target_vendor = "apple")]
+    pub fn process_facts(pid: u32) -> Option<ProcessFacts> {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        /// `SZOMB` из `sys/proc.h`: процесс завершён и ждёт родителя.
+        const SZOMB: u32 = 5;
+        let pid = libc::c_int::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        // SAFETY: нулевая структура — допустимое значение этого C-типа.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+        // SAFETY: буфер — живая структура указанного размера.
+        let written = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
+        };
+        if written != size || info.pbi_status == SZOMB {
+            return None;
+        }
+        let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: размер равен длине буфера, функция пишет не больше него.
+        let length =
+            unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        let length = usize::try_from(length).ok().filter(|length| *length > 0)?;
+        path.truncate(length);
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(path));
+        Some(ProcessFacts {
+            started: info
+                .pbi_start_tvsec
+                .checked_mul(1_000_000)?
+                .checked_add(info.pbi_start_tvusec)?,
+            image: super::image_name(&path),
+        })
+    }
+
+    // TODO(#577): на других Unix раннер не знает, как спросить время старта процесса. Там свой
+    // процесс не опознаётся, и запись о нём считается устаревшей.
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    pub fn process_facts(_pid: u32) -> Option<ProcessFacts> {
+        None
+    }
+
+    /// Владельца порта на Unix раннер не ищет: управляемые службы стенда работают только на
+    /// Windows.
+    pub fn listening_pid(_port: u16) -> Option<u32> {
+        None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::Path;
+        use std::time::Duration;
+
+        fn wait_for(log: &Path, text: &str) -> bool {
+            (0..100).any(|_| {
+                if std::fs::read_to_string(log).is_ok_and(|seen| seen.contains(text)) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                false
+            })
+        }
+
+        fn shell(script: &str, log: &Path, stdin: Option<&str>) -> ServiceRequest {
+            ServiceRequest {
+                program: "/bin/sh".into(),
+                args: vec!["-c".to_owned(), script.to_owned()],
+                workdir: log.parent().map(Path::to_path_buf),
+                log_path: log.to_path_buf(),
+                stdin: stdin.map(str::to_owned),
+            }
+        }
+
+        #[test]
+        fn a_hidden_service_writes_to_its_log_and_gets_a_real_pid() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("sub").join("service.log");
+            let pid = spawn_hidden(&shell("echo hello", &log, None)).unwrap();
+            assert_ne!(pid, 0);
+            assert!(
+                wait_for(&log, "hello"),
+                "the service did not write to its log"
+            );
+        }
+
+        #[test]
+        fn a_service_reads_what_was_given_to_its_stdin_and_the_argument_stays_clean() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("service.log");
+            let request = shell("cat", &log, Some("secret-value"));
+            spawn_hidden(&request).unwrap();
+            assert!(
+                wait_for(&log, "secret-value"),
+                "the service did not read its stdin"
+            );
+            assert!(!request.args.iter().any(|arg| arg.contains("secret-value")));
+        }
+
+        #[test]
+        fn a_service_runs_in_its_own_session_and_keeps_no_descriptor_of_the_runner() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("service.log");
+            // Дескриптор без `O_CLOEXEC`: служба его наследовать не должна.
+            // SAFETY: `dup` возвращает новый дескриптор или -1; он закрывается ниже.
+            let leaked = unsafe { libc::dup(2) };
+            assert!(leaked > 2);
+            let script = format!(
+                "if [ -e /dev/fd/{leaked} ]; then echo leaked; else echo clean; fi; exec sleep 30"
+            );
+            let pid = spawn_hidden(&shell(&script, &log, None));
+            // SAFETY: дескриптор открыт выше и закрывается один раз.
+            unsafe { libc::close(leaked) };
+            let pid = libc::pid_t::try_from(pid.unwrap()).unwrap();
+            let answered = wait_for(&log, "clean") || wait_for(&log, "leaked");
+            // SAFETY: числовые аргументы; процесс — служба этого теста.
+            let (session, group) = unsafe { (libc::getsid(pid), libc::getpgid(pid)) };
+            // SAFETY: снимаем службу этого теста.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            assert!(answered, "the service did not answer");
+            assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "clean");
+            assert_eq!(session, pid);
+            assert_eq!(group, pid);
+        }
+
+        #[test]
+        fn a_missing_program_is_refused_at_the_start() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut request = shell("true", &dir.path().join("service.log"), None);
+            request.program = dir.path().join("no-such-program");
+            assert!(matches!(
+                spawn_hidden(&request),
+                Err(ServiceSpawnError::Io(_))
+            ));
+        }
+
+        #[test]
+        fn a_replaced_image_keeps_its_name() {
+            use std::path::PathBuf;
+            assert_eq!(
+                without_deleted_mark(PathBuf::from("/opt/v8-runner/keeper (deleted)")),
+                PathBuf::from("/opt/v8-runner/keeper")
+            );
+            assert_eq!(
+                without_deleted_mark(PathBuf::from("/usr/bin/sleep")),
+                PathBuf::from("/usr/bin/sleep")
+            );
+            assert_eq!(
+                without_deleted_mark(PathBuf::from("/tmp/(deleted)")),
+                PathBuf::from("/tmp/(deleted)")
+            );
+        }
+
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        #[test]
+        fn a_process_is_known_by_its_start_and_image_and_a_gone_one_is_not() {
+            let facts = process_facts(std::process::id()).unwrap();
+            let image = std::env::current_exe().unwrap();
+            assert_eq!(facts.image, super::super::image_name(&image));
+            assert!(facts.started > 0, "{facts:?}");
+            assert_eq!(process_facts(std::process::id()), Some(facts));
+
+            // `sleep` бывает ссылкой (на busybox, coreutils): образ — файл, куда она ведёт.
+            let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|dir| dir.join("sleep"))
+                .find(|path| path.is_file())
+                .expect("sleep on PATH");
+            let mut child = Command::new(&sleep).arg("30").spawn().unwrap();
+            let child_facts = process_facts(child.id()).unwrap();
+            assert_eq!(
+                child_facts.image,
+                super::super::image_name(&std::fs::canonicalize(&sleep).unwrap())
+            );
+            child.kill().unwrap();
+            child.wait().unwrap();
+            assert_eq!(process_facts(child.id()), None);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod imp {
     use super::{ProcessFacts, ServiceRequest, ServiceSpawnError};
 
