@@ -8,6 +8,6 @@ check:
 
 Команда, меняющая стенд, — `start`, `stop` и `restart` у `dbms`, `cluster` и `standalone`, а
 также `infobase create` базы управляемого стенда — берёт замок `<localPath>/.lock` после замка
-своего `workPath`. Занятый замок — отказ `workspace_busy`: две рабочие копии с общим
+своего `workPath`. Занятый замок — отказ `workspace_busy`: рабочие копии с общим
 `localPath` не меняют один стенд разом. Занятый `workPath` отказывает раньше, и `localPath`
 тогда не заводится. `status` и команды, стенда не меняющие, этого замка не берут.

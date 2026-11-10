@@ -142,10 +142,13 @@ fn changes_the_stand(config: &AppConfig, command: CommandName) -> bool {
         | C::ClusterRestart => true,
         C::Init => {
             let infobase = &config.infobase;
-            infobase
-                .standalone
-                .as_ref()
-                .is_some_and(|standalone| standalone.managed.is_some())
+            // Загрузчик помечает базу стенда памятью `managed:<имя>`, даже когда для создания
+            // подставил файловую базу сервера вместо его секции.
+            infobase.managed_memory.is_some()
+                || infobase
+                    .standalone
+                    .as_ref()
+                    .is_some_and(|standalone| standalone.managed.is_some())
                 || infobase
                     .cluster
                     .as_ref()
