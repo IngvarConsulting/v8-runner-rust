@@ -4,6 +4,8 @@ check:
   - src/config/loader.rs::local_path_defaults_beside_the_project_file_and_the_local_layer_wins
   - src/config/loader.rs::a_local_path_over_the_project_a_set_or_the_work_path_is_refused_and_creates_nothing
   - src/config/loader.rs::a_local_path_over_the_standalone_exchange_directory_is_refused
+  - src/config/loader.rs::a_local_path_spelled_in_another_case_is_the_same_directory
+  - src/use_cases/config_init.rs::a_local_path_over_the_config_directory_gives_no_default_origin
   - src/platform/service_record.rs::a_stand_service_lives_under_the_local_path
   - src/use_cases/config_init.rs::the_default_origin_lies_in_the_declared_local_path
   - src/use_cases/config_init.rs::a_declared_project_keeps_its_project_file_and_declares_the_default_origin
@@ -29,4 +31,5 @@ check:
 - пересекается с `workPath` в любую сторону;
 - пересекается с `standalone.exchange.dir` любой базы.
 
-Проверка только сравнивает пути и ничего не создаёт на диске, в том числе в превью.
+Проверка сравнивает канонические пути — ссылки разрешены по ближайшему существующему предку, на
+Windows регистр не различается — и ничего не создаёт на диске, в том числе в превью.

@@ -1239,6 +1239,7 @@ pub(super) fn run_cluster(
     host: &dyn ServiceHost,
     locate: &dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> UseCaseResult<ClusterResult> {
+    super::refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
     let cluster =
         cluster(config, context, runner, host, locate).map_err(UseCaseFailure::without_payload)?;
     let outcome = match command {
@@ -1267,6 +1268,7 @@ pub(super) fn cluster_base(
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
 ) -> Result<ClusterBase, UseCaseError> {
+    super::refuse_a_stand_of_another_project(config)?;
     let no_locate = || Err(validation("a running cluster names its own utilities"));
     let cluster = cluster(config, context, runner, host, &no_locate)?;
     let not_running = || {

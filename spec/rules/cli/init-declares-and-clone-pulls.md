@@ -9,6 +9,7 @@ check:
   - tests/cli_bootstrap.rs::clone_into_a_directory_holding_only_git_writes_the_project
   - tests/cli_bootstrap.rs::clone_force_writes_the_project_into_a_non_empty_directory
   - src/use_cases/bootstrap_project.rs::a_local_path_holding_only_its_preparation_does_not_make_the_directory_non_empty
+  - src/use_cases/bootstrap_project.rs::a_nested_local_path_holding_only_its_preparation_does_not_make_the_directory_non_empty
   - src/use_cases/config_init.rs::the_default_origin_lies_in_the_declared_local_path
 ---
 

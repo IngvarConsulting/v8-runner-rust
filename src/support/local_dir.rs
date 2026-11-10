@@ -71,13 +71,18 @@ impl LocalDir {
     }
 }
 
-/// Файл, который каталог терпит в себе как пустой: `.gitignore` и файлы замков — замка
-/// `localPath` и замка файловой базы. Повторный `clone` такой каталог пустым и считает.
-pub fn is_preparation_file(name: &std::ffi::OsStr) -> bool {
+/// Расширения соседних файлов замка: файл блокировки ОС и запись о держателе.
+pub const LOCK_COMPANIONS: [&str; 2] = [".system", ".json"];
+
+/// Файл, который заводит сам каталог: его `.gitignore` и файлы замка `<localPath>/.lock` —
+/// сам замок и его соседи.
+pub fn is_own_file(name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|name| {
         name == LOCAL_DIR_GITIGNORE
-            || name.starts_with(LOCAL_LOCK_FILE_NAME)
-            || name.contains(".v8-runner.infobase.lock")
+            || name == LOCAL_LOCK_FILE_NAME
+            || LOCK_COMPANIONS
+                .iter()
+                .any(|companion| name.strip_suffix(companion) == Some(LOCAL_LOCK_FILE_NAME))
     })
 }
 
@@ -124,18 +129,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_gitignore_and_lock_files_count_as_preparation() {
-        for name in [
-            ".gitignore",
-            ".lock",
-            ".lock.json",
-            ".db.v8-runner.infobase.lock",
-            ".db.v8-runner.infobase.lock.json",
-        ] {
-            assert!(is_preparation_file(std::ffi::OsStr::new(name)), "{name}");
+    fn only_the_gitignore_and_the_lock_files_are_its_own() {
+        for name in [".gitignore", ".lock", ".lock.json", ".lock.system"] {
+            assert!(is_own_file(std::ffi::OsStr::new(name)), "{name}");
         }
-        for name in ["db", "infobases", "notes.txt"] {
-            assert!(!is_preparation_file(std::ffi::OsStr::new(name)), "{name}");
+        for name in [".lockdown", ".lock.bak", "db", "infobases", "notes.txt"] {
+            assert!(!is_own_file(std::ffi::OsStr::new(name)), "{name}");
         }
     }
 }

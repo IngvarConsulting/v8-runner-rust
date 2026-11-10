@@ -1084,6 +1084,29 @@ pub fn dbms_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseRes
     )
 }
 
+/// Стенд этой базы в общем `localPath` записал другой проект: его записи живые и не наши. Команда
+/// стенда их не трогает и отказывает, называя тот проект
+/// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+fn refuse_a_stand_of_another_project(config: &AppConfig) -> Result<(), UseCaseError> {
+    let Some(infobase) = config.infobase_name.as_deref() else {
+        return Ok(());
+    };
+    let local = config.local_dir();
+    for service in ["postgres", "standalone", "cluster", "ras"] {
+        let paths = ServicePaths::new(&local, infobase, service);
+        if let Some(project) = paths.another_project() {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::WorkspaceBusy,
+                format!(
+                    "the {service} of '{infobase}' under localPath '{}' was started by the project '{project}': this localPath is shared, and the stand is left alone; give this project its own localPath",
+                    local.path().display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn run_dbms(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -1092,6 +1115,7 @@ fn run_dbms(
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
 ) -> UseCaseResult<DbmsResult> {
+    refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
     let stand =
         Stand::new(config, context, runner, host).map_err(UseCaseFailure::without_payload)?;
     let outcome = match command {
@@ -1508,6 +1532,46 @@ mod tests {
             .run(ServiceCommand::Status, false, &runner, &host)
             .unwrap();
         assert_eq!(own.state, ServiceState::StartedByThisCopy);
+    }
+
+    /// Общий `localPath` у двух проектов: стенд записал первый, и второй его не трогает —
+    /// ни `stop`, ни `start`, ни `status`; отказ называет первый проект, запись первого цела.
+    #[test]
+    fn a_shared_local_directory_leaves_the_stand_of_the_other_project_alone() {
+        let first = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        first
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        let record = std::fs::read(first.paths().record()).unwrap();
+        let mut second = self::setup();
+        second.config.local_path = first.config.local_path.clone();
+
+        for command in [
+            ServiceCommand::Stop,
+            ServiceCommand::Start,
+            ServiceCommand::Restart,
+            ServiceCommand::Status,
+        ] {
+            let refused = second.run(command, false, &runner, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&first.config.base_path.display().to_string()),
+                "{command:?}: {refused}"
+            );
+        }
+        assert_eq!(std::fs::read(first.paths().record()).unwrap(), record);
+        assert!(host.hard_stops.borrow().is_empty());
+        assert_eq!(
+            first
+                .run(ServiceCommand::Status, false, &runner, &host)
+                .unwrap()
+                .state,
+            ServiceState::StartedByThisCopy
+        );
     }
 
     #[test]

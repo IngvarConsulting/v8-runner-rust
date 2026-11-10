@@ -567,6 +567,7 @@ pub(super) fn run_standalone(
     host: &dyn ServiceHost,
     locate: &dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> UseCaseResult<StandaloneResult> {
+    super::refuse_a_stand_of_another_project(config).map_err(UseCaseFailure::without_payload)?;
     let declared = declared(config).map_err(UseCaseFailure::without_payload)?;
     let paths = ServicePaths::new(&config.local_dir(), &declared.infobase, "standalone");
     let server = Server {
@@ -619,6 +620,7 @@ pub(super) fn create_base(
     runner: &dyn ProcessRunner,
     host: &dyn ServiceHost,
 ) -> Result<String, UseCaseError> {
+    super::refuse_a_stand_of_another_project(config)?;
     let declared = declared(config)?;
     let paths = ServicePaths::new(&config.local_dir(), &declared.infobase, "standalone");
     let database = match &declared.storage {

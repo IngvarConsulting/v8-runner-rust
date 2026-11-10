@@ -386,16 +386,14 @@ fn refuse_a_non_empty_project_dir(
             directory_entries(work_path)?
                 .into_iter()
                 .find(|inner| !is_lock_file_or_logs_dir(inner))
-        } else if path == local_path {
-            directory_entries(local_path)?.into_iter().find(|inner| {
-                !(inner.path().is_file()
-                    && crate::support::local_dir::is_preparation_file(&inner.file_name()))
-            })
+                .map(|inner| inner.path())
+        } else if local_path.starts_with(&path) {
+            foreign_on_the_way_to_local(&path, local_path)?
         } else {
             return Err(refuse(path));
         };
         if let Some(foreign) = foreign {
-            return Err(refuse(foreign.path()));
+            return Err(refuse(foreign));
         }
     }
     Ok(())
@@ -410,6 +408,36 @@ fn is_lock_file_or_logs_dir(entry: &std::fs::DirEntry) -> bool {
         || (name == WORK_PATH_LOGS_DIR && entry.path().is_dir())
         || (name == "infobases"
             && crate::use_cases::exchange_guard::holds_only_new_owner_marks(&entry.path()))
+}
+
+/// Что лежит на пути к `localPath`, кроме него самого, и в нём, кроме того, что заводит
+/// подготовка каталога: `.gitignore` и файлы замков. Вложенный `localPath` проверяется так же:
+/// каталоги над ним не держат ничего другого.
+fn foreign_on_the_way_to_local(
+    path: &Path,
+    local_path: &Path,
+) -> Result<Option<PathBuf>, AppError> {
+    if !path.is_dir() {
+        return Ok(Some(path.to_path_buf()));
+    }
+    for inner in directory_entries(path)? {
+        let inner_path = inner.path();
+        if path == local_path {
+            let prepared = inner_path.is_file()
+                && (crate::support::local_dir::is_own_file(&inner.file_name())
+                    || crate::use_cases::infobase_lock::is_infobase_lock_file(&inner.file_name()));
+            if !prepared {
+                return Ok(Some(inner_path));
+            }
+        } else if local_path.starts_with(&inner_path) {
+            if let Some(foreign) = foreign_on_the_way_to_local(&inner_path, local_path)? {
+                return Ok(Some(foreign));
+            }
+        } else {
+            return Ok(Some(inner_path));
+        }
+    }
+    Ok(None)
 }
 
 /// Записи каталога; каталога нет — записей нет.
@@ -745,6 +773,27 @@ mod tests {
             .expect_err("a base is not a preparation");
         assert!(refused.to_string().contains("is not empty"), "{refused}");
         refuse_a_non_empty_project_dir(&plan.paths, plan.config(), true).expect("forced");
+    }
+
+    /// Вложенный `localPath` тоже не в счёт: каталоги над ним держат только путь к нему.
+    #[test]
+    fn a_nested_local_path_holding_only_its_preparation_does_not_make_the_directory_non_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut plan = written_plan(dir.path());
+        plan.settings.config.local_path = plan.paths.project_dir.join("state").join("personal");
+        let local = plan.config().local_dir();
+        local.prepare().expect("prepared");
+        std::fs::write(local.path().join(".lock"), "").expect("lock file");
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect("only the way to the prepared localPath");
+
+        std::fs::write(local.path().join(".lockdown"), "").expect("not a lock");
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect_err("a file that only looks like a lock");
+        std::fs::remove_file(local.path().join(".lockdown")).expect("removed");
+        std::fs::write(plan.paths.project_dir.join("state").join("notes.txt"), "").expect("beside");
+        refuse_a_non_empty_project_dir(&plan.paths, plan.config(), false)
+            .expect_err("a file beside the way to localPath");
     }
 
     /// Замок взят по настройкам плана, и написанный проект обязан назвать тот же

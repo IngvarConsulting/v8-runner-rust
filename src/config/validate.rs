@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::model::{
@@ -1297,46 +1297,60 @@ pub(crate) fn validate_local_path(
     config: &AppConfig,
     config_dir: &Path,
 ) -> Result<(), ConfigValidationError> {
-    use crate::support::path::lexically_normal_absolute as normal;
-    let local = normal(&config.local_path);
+    let local = compared_path(&config.local_path);
     let shown = || config.local_path.display().to_string();
-    let project = normal(config_dir);
-    if project.starts_with(&local) {
+    if compared_path(config_dir).starts_with(&local) {
         return Err(ConfigValidationError::LocalPathHoldsTheProject {
             local_path: shown(),
             project: config_dir.display().to_string(),
         });
     }
-    let base = normal(&config.base_path);
     if let Some(set) = config
         .source_sets
         .iter()
-        .find(|set| normal(&set.root_in(&base)).starts_with(&local))
+        .find(|set| compared_path(&set.root_in(&config.base_path)).starts_with(&local))
     {
         return Err(ConfigValidationError::LocalPathHoldsASourceSet {
             local_path: shown(),
             source_set: set.name.clone(),
         });
     }
-    if paths_overlap(&local, &normal(&config.work_path)) {
+    if paths_overlap(&local, &compared_path(&config.work_path)) {
         return Err(ConfigValidationError::LocalPathOverlapsWorkPath {
             local_path: shown(),
             work_path: config.work_path.display().to_string(),
         });
     }
-    let exchange_dirs = std::iter::once(&config.infobase)
+    if let Some(dir) = std::iter::once(&config.infobase)
         .chain(config.infobases.values())
         .filter_map(|infobase| infobase.standalone.as_ref())
-        .filter_map(|standalone| standalone.exchange_dir());
-    for dir in exchange_dirs {
-        if paths_overlap(&local, &normal(dir)) {
-            return Err(ConfigValidationError::LocalPathOverlapsTargetSideDir {
-                local_path: shown(),
-                dir: dir.display().to_string(),
-            });
-        }
+        .filter_map(|standalone| standalone.exchange_dir())
+        .find(|dir| paths_overlap(&local, &compared_path(dir)))
+    {
+        return Err(ConfigValidationError::LocalPathOverlapsTargetSideDir {
+            local_path: shown(),
+            dir: dir.display().to_string(),
+        });
     }
     Ok(())
+}
+
+/// Путь в том виде, в каком его сравнивает проверка `localPath`: ссылки и `..` разрешены по
+/// ближайшему существующему предку (файловая система только читается), префикс `\\?\` снят, а
+/// на Windows регистр не различается — `SRC` и `src` там один каталог.
+fn compared_path(path: &Path) -> PathBuf {
+    use crate::support::path::{
+        lexically_normal_absolute, nearest_existing_canonical_path, normalize_windows_verbatim_path,
+    };
+    let normal = lexically_normal_absolute(path);
+    let resolved = normalize_windows_verbatim_path(
+        &nearest_existing_canonical_path(&normal).unwrap_or(normal),
+    );
+    if cfg!(windows) {
+        PathBuf::from(resolved.to_string_lossy().to_lowercase())
+    } else {
+        resolved
+    }
 }
 
 /// Каталог обмена автономного сервера лежит на той стороне; `workPath` — на этой.

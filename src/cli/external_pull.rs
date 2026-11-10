@@ -500,16 +500,16 @@ fn execute(
         .root_in(&config.base_path);
     let original = crate::support::path::nearest_existing_canonical_path(&original)
         .map_err(|error| UseCaseError::new(UseCaseErrorKind::Validation, error.to_string()))?;
-    let work = crate::support::path::nearest_existing_canonical_path(&config.work_path)
-        .map_err(|error| UseCaseError::new(UseCaseErrorKind::Validation, error.to_string()))?;
     if stage.starts_with(&original)
         || original.starts_with(&stage)
-        || stage.starts_with(&work)
-        || work.starts_with(&stage)
+        || crate::change_detection::runner_dirs::overlaps_a_runner_dir(
+            &stage,
+            crate::change_detection::runner_dirs::RunnerDirs::of(&config),
+        )
     {
         return Err(UseCaseError::new(
             UseCaseErrorKind::Validation,
-            "external stage must not overlap source set or workPath",
+            "external stage must not overlap source set, workPath or localPath",
         ));
     }
     if !cli.dry_run

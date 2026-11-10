@@ -3,7 +3,7 @@ use std::future::Future;
 use crate::config::model::AppConfig;
 use crate::domain::infobase_export::InfobaseTransferPhase;
 use crate::use_cases::command_lock::CommandLockGuard;
-use crate::use_cases::context::CommandName;
+use crate::use_cases::context::{CommandName, StandChange};
 use crate::use_cases::infobase_lock::{acquire_infobase_lock, BaseAccess, InfobaseLock};
 use crate::use_cases::infobase_owner::{check_infobase_owner, OwnerCheck};
 use crate::use_cases::result::UseCaseError;
@@ -126,21 +126,12 @@ pub(crate) struct CommandLocks {
     _workspace: CommandLockGuard,
 }
 
-/// Меняет ли команда стенд под `localPath`: служебные команды, кроме `status`, и создание
-/// базы управляемого стенда.
+/// Меняет ли команда стенд под `localPath` (`INV.CLI.THE-LOCAL-LOCK-FOLLOWS-THE-WORKPATH-LOCK`).
 fn changes_the_stand(config: &AppConfig, command: CommandName) -> bool {
-    use CommandName as C;
-    match command {
-        C::DbmsStart
-        | C::DbmsStop
-        | C::DbmsRestart
-        | C::StandaloneStart
-        | C::StandaloneStop
-        | C::StandaloneRestart
-        | C::ClusterStart
-        | C::ClusterStop
-        | C::ClusterRestart => true,
-        C::Init => {
+    match command.stand_change() {
+        StandChange::Always => true,
+        StandChange::Never => false,
+        StandChange::WhenManaged => {
             let infobase = &config.infobase;
             // Загрузчик помечает базу стенда памятью `managed:<имя>`, даже когда для создания
             // подставил файловую базу сервера вместо его секции.
@@ -158,7 +149,6 @@ fn changes_the_stand(config: &AppConfig, command: CommandName) -> bool {
                     .as_ref()
                     .is_some_and(|dbms| dbms.managed.is_some())
         }
-        _ => false,
     }
 }
 
@@ -367,7 +357,8 @@ mod tests {
         );
     }
 
-    /// Две копии с общим `localPath` не меняют стенд разом: замок `localPath` берётся после
+    /// Два запуска одного проекта с разными `workPath` (`--workdir`) не меняют стенд разом: замок
+    /// `localPath` берётся после
     /// замка `workPath`, занятый — отказ `WorkspaceBusy`; занятый `workPath` отказывает раньше и
     /// `localPath` не заводит. Команда, стенда не меняющая, замка `localPath` не берёт.
     #[test]
@@ -375,6 +366,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let first = sample_config(&dir.path().join("first"));
         let mut second = sample_config(&dir.path().join("second"));
+        second.base_path = first.base_path.clone();
         second.local_path = first.local_path.clone();
         fs::create_dir_all(&first.work_path).expect("first work");
         fs::create_dir_all(&second.work_path).expect("second work");

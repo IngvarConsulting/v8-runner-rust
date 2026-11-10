@@ -37,8 +37,8 @@ pub(crate) fn acquire_workspace_lock(
     })
 }
 
-/// Замок `<localPath>/.lock` команды, меняющей стенд. Берётся после замка `workPath`: две
-/// рабочие копии с общим `localPath` не меняют один стенд разом
+/// Замок `<localPath>/.lock` команды, меняющей стенд. Берётся после замка `workPath`: запуски
+/// одного проекта с разными `workPath` (`--workdir`) не меняют один стенд разом
 /// (`INV.CLI.THE-LOCAL-LOCK-FOLLOWS-THE-WORKPATH-LOCK`). Замок — первый писатель в
 /// `localPath`: каталог заводит [`LocalDir::prepare`](crate::support::local_dir::LocalDir::prepare).
 pub(crate) fn acquire_local_lock(

@@ -222,14 +222,31 @@ fn holders_text(holders: &[Holder]) -> String {
     )
 }
 
+/// Окончание имени файла замка базы.
+const INFOBASE_LOCK_SUFFIX: &str = ".v8-runner.infobase.lock";
+
 /// Файл замка рядом с каталогом базы: `.<имя каталога>.v8-runner.infobase.lock`.
 fn infobase_lock_path(base_dir: &Path) -> Option<PathBuf> {
     let parent = base_dir.parent()?;
     let name = base_dir.file_name()?;
     let mut lock_name = std::ffi::OsString::from(".");
     lock_name.push(name);
-    lock_name.push(".v8-runner.infobase.lock");
+    lock_name.push(INFOBASE_LOCK_SUFFIX);
     Some(parent.join(lock_name))
+}
+
+/// Файл замка какой-нибудь файловой базы этого каталога — сам замок или его сосед.
+pub(crate) fn is_infobase_lock_file(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let lock = crate::support::local_dir::LOCK_COMPANIONS
+        .iter()
+        .find_map(|companion| name.strip_suffix(companion))
+        .unwrap_or(name);
+    lock.strip_suffix(INFOBASE_LOCK_SUFFIX)
+        .and_then(|base| base.strip_prefix('.'))
+        .is_some_and(|base| !base.is_empty())
 }
 
 /// Отказ занятой базы называет владельца, если запись о нём относится к нынешней
@@ -451,6 +468,30 @@ mod tests {
     /// Замок, который не взять не из-за другой команды: имя его системного файла занято
     /// каталогом. Команда записи отказывает с каталогом и причиной, команда чтения идёт
     /// дальше с предупреждением.
+    #[test]
+    fn the_lock_files_of_a_base_are_told_by_their_names() {
+        for name in [
+            ".db.v8-runner.infobase.lock",
+            ".db.v8-runner.infobase.lock.json",
+            ".db.v8-runner.infobase.lock.system",
+        ] {
+            assert!(
+                super::is_infobase_lock_file(std::ffi::OsStr::new(name)),
+                "{name}"
+            );
+        }
+        for name in [
+            ".v8-runner.infobase.lock",
+            "db",
+            ".db.v8-runner.infobase.lock.bak",
+        ] {
+            assert!(
+                !super::is_infobase_lock_file(std::ffi::OsStr::new(name)),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn a_base_lock_that_cannot_be_taken_refuses_a_write_and_warns_a_read() {
         let dir = tempdir().expect("tempdir");

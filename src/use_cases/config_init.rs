@@ -111,16 +111,16 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
     // Проектный файл называет `localPath`, только пока остаётся: `--force` пишет его заново.
     let kept_project_file = (project_declared && !request.force).then_some(output_path.as_path());
-    let default_connection = default_origin_connection(output_dir, &local_path, kept_project_file);
+    let default_connection = default_origin_connection(output_dir, &local_path, kept_project_file)?;
+    let origin_request = OriginRequest {
+        origin: requested.as_ref(),
+        conflict,
+        project: project.as_ref(),
+        default_connection: &default_connection,
+    };
 
     if project_declared && !request.force {
-        let local = plan_local_config(
-            &local_path,
-            requested.as_ref(),
-            conflict,
-            project.as_ref(),
-            &default_connection,
-        )?;
+        let local = plan_local_config(&local_path, origin_request)?;
         write_local_config(&local_path, &local)?;
         gitignore.ensure()?;
         return Ok(ConfigInitResult::Local(LocalLayerInitResult {
@@ -151,13 +151,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
     // Отказ местного слоя случается до записи проектного файла: иначе `--force` успел
     // бы переписать проект, а команда ответила бы отказом.
-    let local = plan_local_config(
-        &local_path,
-        requested.as_ref(),
-        conflict,
-        project.as_ref(),
-        &default_connection,
-    )?;
+    let local = plan_local_config(&local_path, origin_request)?;
 
     let write_project_file = || {
         std::fs::write(&output_path, &yaml).map_err(|error| {
@@ -201,11 +195,15 @@ const DEFAULT_ORIGIN_DIR: &str = "db";
 /// личное состояние рабочей копии, которое удаление `workPath` не задевает. `localPath` берётся
 /// из местного слоя, затем из проектного файла, который остаётся; путь внутри каталога
 /// конфигурации пишется относительным, вне его — абсолютным.
+///
+/// Слои загрузчика здесь не годятся: `init` идёт до загрузки проекта — проектного файла ещё нет
+/// или он неполон, — поэтому ключ читается из обоих файлов снисходительно, а `localPath`, который
+/// держит каталог конфигурации, отказывает так же, как отказал бы загрузчик.
 fn default_origin_connection(
     config_dir: &Path,
     local_layer: &Path,
     project: Option<&Path>,
-) -> String {
+) -> Result<String, AppError> {
     let declared = |path: &Path| -> Option<PathBuf> {
         let text = std::fs::read_to_string(path).ok()?;
         let document: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
@@ -219,7 +217,15 @@ fn default_origin_connection(
         .unwrap_or_else(|| PathBuf::from(crate::config::model::DEFAULT_LOCAL_PATH));
     use crate::support::path::{lexically_normal_absolute, normalize_windows_verbatim_path};
     let config_dir = lexically_normal_absolute(&normalize_windows_verbatim_path(config_dir));
-    let base = lexically_normal_absolute(&config_dir.join(local_path)).join(DEFAULT_ORIGIN_DIR);
+    let local = lexically_normal_absolute(&config_dir.join(&local_path));
+    if config_dir.starts_with(&local) {
+        return Err(AppError::Validation(format!(
+            "localPath '{}' holds the project directory '{}': the personal state of the checkout lies beside its sources, not around them",
+            local_path.display(),
+            config_dir.display()
+        )));
+    }
+    let base = local.join(DEFAULT_ORIGIN_DIR);
     let spelled = match base.strip_prefix(&config_dir) {
         Ok(relative) => relative
             .components()
@@ -228,7 +234,7 @@ fn default_origin_connection(
             .join("/"),
         Err(_) => base.display().to_string(),
     };
-    format!("File={spelled}")
+    Ok(format!("File={spelled}"))
 }
 
 /// Проектный файл объявленного проекта, когда он говорит о базах: прежний ключ
@@ -286,17 +292,27 @@ struct LocalLayerPlan {
     warnings: Vec<String>,
 }
 
+/// Что `init` просит у местного слоя: названный адрес `origin`, как поступить с другим
+/// объявленным, проектный файл, который говорит о базах, и адрес по умолчанию.
+#[derive(Clone, Copy)]
+struct OriginRequest<'a> {
+    origin: Option<&'a DeclaredOrigin>,
+    conflict: OriginConflict,
+    project: Option<&'a ProjectLayer>,
+    default_connection: &'a str,
+}
+
 /// Местный слой объявляет `origin`: к какой базе подключён каталог, знает эта машина.
 /// Существующий слой не переписывается — `origin` дописывается, если не объявлен; другой
 /// адрес для объявленного решает `conflict`. Файл здесь только читается: записать план —
 /// дело вызывающего, когда все отказы позади.
-fn plan_local_config(
-    path: &Path,
-    origin: Option<&DeclaredOrigin>,
-    conflict: OriginConflict,
-    project: Option<&ProjectLayer>,
-    default_connection: &str,
-) -> Result<LocalLayerPlan, AppError> {
+fn plan_local_config(path: &Path, request: OriginRequest<'_>) -> Result<LocalLayerPlan, AppError> {
+    let OriginRequest {
+        origin,
+        project,
+        default_connection,
+        ..
+    } = request;
     let exists = path.exists();
     let existing = if exists {
         std::fs::read_to_string(path).map_err(|error| {
@@ -319,14 +335,7 @@ fn plan_local_config(
             warnings: Vec::new(),
         });
     };
-    let mut plan = local_config_with_origin(
-        &existing,
-        origin,
-        conflict,
-        project,
-        path,
-        default_connection,
-    )?;
+    let mut plan = local_config_with_origin(&existing, path, request)?;
     // Пустой слой не создаётся: `origin` уже объявлен проектным файлом.
     let nothing_new = if exists {
         existing
@@ -404,12 +413,15 @@ fn render_local_config_with_origin(connection: &str) -> String {
 
 fn local_config_with_origin(
     existing: &str,
-    origin: Option<&DeclaredOrigin>,
-    conflict: OriginConflict,
-    project: Option<&ProjectLayer>,
     path: &Path,
-    default_connection: &str,
+    request: OriginRequest<'_>,
 ) -> Result<LocalLayerPlan, AppError> {
+    let OriginRequest {
+        origin,
+        conflict,
+        project,
+        default_connection,
+    } = request;
     let mut content = with_local_schema_modeline(existing);
     let mut document: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|error| {
         AppError::Validation(format!(
@@ -2413,6 +2425,33 @@ mod tests {
         );
     }
 
+    /// `localPath`, который держит каталог конфигурации, базы по умолчанию не даёт: `File=db`
+    /// легла бы в сами исходники. Отказ тот же, что у загрузчика, и ничего не пишется.
+    #[test]
+    fn a_local_path_over_the_config_directory_gives_no_default_origin() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("main xml");
+        std::fs::write(
+            dir.path().join("v8project.local.yaml"),
+            "localPath: .
+",
+        )
+        .expect("local config");
+        let refused = execute(&ConfigInitRequest {
+            project_dir: dir.path().to_path_buf(),
+            output_path: "v8project.yaml".into(),
+            force: false,
+            connection: None,
+            format: ConfigFormatRequest::Designer,
+        })
+        .expect_err("refused");
+        assert!(
+            refused.to_string().contains("holds the project directory"),
+            "{refused}"
+        );
+        assert!(!dir.path().join("v8project.yaml").exists());
+    }
+
     #[test]
     fn a_null_infobases_key_is_replaced_by_the_map() {
         let dir = tempdir().expect("tempdir");
@@ -3169,7 +3208,10 @@ mod tests {
 
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", canonical(dir.path()).join("build/ib").display())
+            format!(
+                "File={}",
+                canonical(dir.path()).join(".local").join("db").display()
+            )
         );
     }
 

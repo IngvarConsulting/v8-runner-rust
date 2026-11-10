@@ -26,12 +26,16 @@ pub struct ServicePaths {
     local: Option<LocalDir>,
 }
 
-/// Где записана служба стенда: канонический путь её каталога и каталог проекта. Запись,
-/// скопированная в другой `localPath` или проект, называет не своё место, и раннер считает её
-/// устаревшей, а сервер из неё — чужим (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+/// Где записана служба стенда: отпечатки канонического пути её каталога и каталога проекта и
+/// сам каталог проекта, чтобы его назвать (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+///
+/// Другой каталог службы — запись скопирована вместе с `.local`: она устаревшая, а сервер из неё
+/// чужой. Тот же каталог при другом проекте — `localPath` общий у двух проектов: запись живая и
+/// чужая, её не трогают ([`ServicePaths::another_project`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceLocation {
-    pub root: String,
+    pub root_identity: String,
+    pub project_identity: String,
     pub project: String,
 }
 
@@ -78,9 +82,20 @@ impl ServicePaths {
             snapshot_path_identity(&canonical)
         };
         Some(ServiceLocation {
-            root: identity(&self.root),
-            project: identity(local.project()),
+            root_identity: identity(&self.root),
+            project_identity: identity(local.project()),
+            project: local.project().display().to_string(),
         })
+    }
+
+    /// Проект, который записал службу в этот же каталог, если это не наш проект: `localPath`
+    /// общий. `None` — записи нет, она наша или скопирована из другого каталога.
+    pub fn another_project(&self) -> Option<String> {
+        let expected = self.location()?;
+        let written = read_json::<ServiceRecord>(&self.record())?.location?;
+        (written.root_identity == expected.root_identity
+            && written.project_identity != expected.project_identity)
+            .then_some(written.project)
     }
 
     /// Запись о службе, если она записана здесь: по копии из чужого `localPath` или проекта
@@ -92,7 +107,10 @@ impl ServicePaths {
     /// Записана ли запись здесь: у службы стенда место в записи совпало с её местом.
     fn wrote(&self, record: &ServiceRecord) -> bool {
         match self.location() {
-            Some(location) => record.location.as_ref() == Some(&location),
+            Some(location) => record.location.as_ref().is_some_and(|written| {
+                written.root_identity == location.root_identity
+                    && written.project_identity == location.project_identity
+            }),
             None => true,
         }
     }
@@ -170,7 +188,8 @@ pub struct ServiceRecord {
     /// Живой агент Конфигуратора, которого держит этот процесс-сторож: у служб стенда его нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<LiveAgentFacts>,
-    /// Где записана служба стенда ([`ServicePaths::location`]); у сторожа агента его нет.
+    /// Где записана служба стенда ([`ServicePaths::location`]). У записи сторожа агента его нет;
+    /// у записи службы стенда без него место неизвестно, и она считается устаревшей.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<ServiceLocation>,
 }
@@ -592,14 +611,18 @@ mod tests {
         );
         assert!(!record_names_own_process(&copy, Some("m"), &alive));
         assert_eq!(copy.own_record(), None);
+        assert_eq!(copy.another_project(), None, "a copy is stale, not shared");
 
         // Тот же `localPath`, другой проект: общий абсолютный каталог.
         let shared = LocalDir::new(&dir.path().join("a").join(".local"), &dir.path().join("c"));
         let elsewhere = ServicePaths::new(&shared, "origin", "postgres");
+        assert!(!record_names_own_process(&elsewhere, Some("m"), &alive));
         assert_eq!(
-            observe_service(&elsewhere, Some("m"), &alive, &|_| true),
-            Observed::Stale
+            elsewhere.another_project(),
+            Some(dir.path().join("a").display().to_string()),
+            "a shared directory names the project that wrote the record"
         );
+        assert_eq!(own.another_project(), None);
 
         // Запись без места у службы стенда — тоже не своя.
         let mut unplaced = written.clone();

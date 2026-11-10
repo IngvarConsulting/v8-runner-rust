@@ -559,8 +559,8 @@ fn validate_full_dump_work_path(
             .any(|dir| nearest_existing_canonical_path(dir).is_ok_and(|dir| dir == target))
     };
     for target in [
-        &resolved.canonical_target_path,
-        &resolved.canonical_platform_target_path,
+        resolved.canonical_target_path.as_path(),
+        resolved.canonical_platform_target_path.as_path(),
     ] {
         if is_a_runner_dir(target) || !runner_dirs_inside(target, dirs).is_empty() {
             return Err(AppError::Validation(

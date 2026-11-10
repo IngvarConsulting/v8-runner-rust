@@ -954,14 +954,13 @@ fn validate_explicit_convert_target_roots(
         )));
     }
 
-    let canonical_work_path = nearest_existing_canonical_path(&config.work_path)
-        .map_err(|error| AppError::Runtime(format!("failed to canonicalize workPath: {error}")))?;
-    if canonical_target_path == canonical_work_path
-        || canonical_target_path.starts_with(&canonical_work_path)
+    let dirs = crate::change_detection::runner_dirs::RunnerDirs::of(config);
+    if let Some(dir) =
+        crate::change_detection::runner_dirs::runner_dir_holding(canonical_target_path, dirs)
     {
         return Err(AppError::Validation(format!(
-            "convert --output target must not be inside workPath: workPath={}, target={}",
-            config.work_path.display(),
+            "convert --output target must not be inside workPath or localPath: dir={}, target={}",
+            dir.display(),
             target_path.display()
         )));
     }

@@ -2114,6 +2114,56 @@ mod tests {
         }
     }
 
+    /// На Windows регистр пути не различается: `SRC` — тот же каталог, что набор `src`, а `WORK` —
+    /// тот же, что `workPath: work`.
+    #[cfg(windows)]
+    #[test]
+    fn a_local_path_spelled_in_another_case_is_the_same_directory() {
+        for (local_path, expected) in [
+            ("SRC", "holds the root of source-set 'main'"),
+            ("WORK", "overlaps workPath"),
+            ("Work/Inner", "overlaps workPath"),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let config_dir = dir.path().join("project");
+            let config_path = write_minimal_project_config(
+                &config_dir,
+                &minimal_config_without_base_path(&format!(
+                    "localPath: '{local_path}'
+"
+                )),
+            );
+            let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+                .expect_err("refused")
+                .to_string();
+            assert!(error.contains(expected), "{local_path}: {error}");
+        }
+    }
+
+    /// Ссылка на набор — тот же набор: проверка разрешает ссылки, ничего не создавая.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_path_through_a_link_to_a_set_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            &minimal_config_without_base_path(
+                "localPath: personal
+",
+            ),
+        );
+        std::os::unix::fs::symlink(config_dir.join("src"), config_dir.join("personal"))
+            .expect("link");
+        let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            error.contains("holds the root of source-set 'main'"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_local_path_over_the_standalone_exchange_directory_is_refused() {
         let dir = tempdir().expect("tempdir");
