@@ -112,6 +112,9 @@ pub struct KeeperStatus {
     /// Сколько агент простаивает: без команды и без сессии; занятый — ноль.
     #[serde(default)]
     pub idle_ms: u64,
+    /// Агент свежий: его ещё не взяли ни `begin`, ни `hold`, и условный `stop` его не снимает.
+    #[serde(default)]
+    pub fresh: bool,
 }
 
 impl KeeperStatus {

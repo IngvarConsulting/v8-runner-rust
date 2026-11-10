@@ -86,6 +86,12 @@ impl Bench {
         Self::sharing(agent_yaml, std::rc::Rc::new(state), true)
     }
 
+    /// Стенд другой рабочей копии с тем же каталогом состояния, двойник которого держит
+    /// выгрузку.
+    fn held_beside(&self, agent_yaml: &str) -> Self {
+        Self::sharing(agent_yaml, std::rc::Rc::clone(&self.state), true)
+    }
+
     fn held_started(&self) -> PathBuf {
         self.marks.join("held.started")
     }
@@ -488,8 +494,9 @@ fn agent_hold_refuses_a_holder_that_is_not_that_live_process() {
     assert_eq!(bench.launches(), 0, "a refused hold launches nothing");
 }
 
-/// `agent hold` с `live: false` отказывает `live_agent_off`, а сверх предела, когда снять
-/// некого, — `agent_limit`, называя живых агентов; платформу ни один отказ не запускает
+/// `agent hold` с `live: false` отказывает `live_agent_off`, а на пределе, когда все живые
+/// агенты удерживаются, — `agent_limit` рода `environment` с выходом 2, называя агентов и
+/// держателей, у срочного — его срок; платформу ни один отказ не запускает
 /// (`INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF`, `INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`).
 #[test]
 fn agent_hold_refuses_with_live_off_and_over_the_limit() {
@@ -509,13 +516,17 @@ fn agent_hold_refuses_with_live_off_and_over_the_limit() {
     let key = payload["data"]["key"].as_str().expect("key").to_owned();
     let second = first.beside("    live-max: 1\n");
     let (code, payload) = second.run(&["agent", "hold", "--ttl", "600"]);
-    assert_eq!(code, 3, "{payload}");
+    assert_eq!(code, 2, "{payload}");
     assert_eq!(payload["error"]["code"], "agent_limit", "{payload}");
     assert_eq!(payload["error"]["kind"], "environment", "{payload}");
     let message = payload["error"]["message"].as_str().unwrap_or_default();
     assert!(
         message.contains(&key),
         "the refusal names the live agents: {message}"
+    );
+    assert!(
+        message.contains("held by until "),
+        "the refusal names the holder and when its term runs out: {message}"
     );
     assert_eq!(second.launches(), 0, "the refused hold launches nothing");
 
@@ -527,6 +538,51 @@ fn agent_hold_refuses_with_live_off_and_over_the_limit() {
     assert!(
         wait_until(Duration::from_secs(20), || !alive(first.designer_pid())),
         "the idle agent gave way"
+    );
+}
+
+/// На пределе агент, который выполняет команду без держателей, освободится сам: `agent hold`
+/// его дожидается, снимает простаивающим и поднимает своего, а не отказывает
+/// (`INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`).
+#[test]
+fn agent_hold_over_the_limit_waits_for_an_agent_busy_with_a_command() {
+    let busy = Bench::held("");
+    let mut command = busy
+        .download_command()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start the busy command");
+    let reached = wait_until(Duration::from_secs(30), || busy.held_started().exists());
+    let waiting = busy.held_beside(
+        "    live-max: 1
+",
+    );
+    let mut hold = waiting
+        .command(&["agent", "hold", "--ttl", "600"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start agent hold");
+    std::thread::sleep(Duration::from_secs(3));
+    let still_waiting = hold.try_wait().expect("hold state").is_none();
+    busy.release_held();
+    assert!(command.wait().expect("busy command").success());
+    let output = hold.wait_with_output().expect("hold output");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("hold envelope");
+    if in_a_closed_job(&payload) {
+        return;
+    }
+    assert!(reached, "the busy command reached its agent");
+    assert!(
+        still_waiting,
+        "hold waits while the agent runs a command: {payload}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{payload}");
+    assert_eq!(payload["data"]["reused"], false, "{payload}");
+    assert!(
+        wait_until(Duration::from_secs(20), || !alive(busy.designer_pid())),
+        "the agent that finished its command gave way"
     );
 }
 

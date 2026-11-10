@@ -35,6 +35,9 @@ pub struct KeeperLaunch {
     pub startup_timeout_ms: u64,
     /// Путь базы в каноническом виде: он идёт в запись агента.
     pub infobase: String,
+    /// `workPath` рабочей копии: он идёт в запись агента, и его называет ожидание на пределе.
+    #[serde(default)]
+    pub work_path: Option<PathBuf>,
 }
 
 /// Учётные данные базы: сторож открывает ими сессию агента. В командную строку и журнал они не
@@ -67,8 +70,10 @@ pub enum KeeperStartError {
     Job,
     /// Живых агентов учётной записи уже столько, сколько допускает предел, и снять
     /// простаивающего некого (`INV.PLATFORM.A-COMMAND-OVER-THE-LIMIT-USES-A-ONE-SHOT-AGENT`).
+    /// `held` — удерживаемые агенты, когда удерживаются все; у команды, которая не ждёт, может
+    /// быть пуст.
     #[error("the OS account already keeps {limit} live agents, and none of them is idle")]
-    Limit { limit: u8 },
+    Limit { limit: u8, held: Vec<HeldAgent> },
     /// Живой агент этого ключа ещё служит сессии другой команды.
     #[error("the live agent still serves another command{}", .command.as_deref().map(|command| format!(": {command}")).unwrap_or_default())]
     Busy { command: Option<String> },
@@ -180,6 +185,29 @@ pub enum Stopped {
     },
 }
 
+/// Живой агент на пределе, которого держат, — для отказа `agent_limit`.
+#[derive(Debug, Clone)]
+pub struct HeldAgent {
+    pub key: String,
+    pub infobase: Option<String>,
+    pub work_path: Option<String>,
+    pub holders: Vec<Holder>,
+}
+
+/// Что сделал или увидел `make_room` на пределе.
+enum Room {
+    /// Простаивающий агент без держателей снят: место есть.
+    Freed,
+    /// Снять некого, но агент освободится сам: он выполняет команду без держателей, свежий
+    /// или закрывается. Строка называет, чего ждут.
+    Wait(String),
+    /// Все агенты на пределе удерживаются.
+    Held(Vec<HeldAgent>),
+}
+
+/// Шаг ожидания места на пределе: каждый шаг спрашивает сторожей учётной записи.
+const ROOM_STEP: Duration = Duration::from_millis(500);
+
 /// Что сделать со взятым живым агентом.
 enum Take<'a> {
     /// Открыть сессию команды.
@@ -254,7 +282,14 @@ impl KeeperClient {
         cancel: &CancellationToken,
     ) -> Result<Self, KeeperStartError> {
         let mut client = Self::prepare(key, credentials)?;
-        client.obtain(launch, credentials, limit, cancel, &Take::Session)?;
+        client.obtain(
+            launch,
+            credentials,
+            limit,
+            cancel,
+            &Take::Session,
+            &mut |_| {},
+        )?;
         Ok(client)
     }
 
@@ -270,9 +305,17 @@ impl KeeperClient {
         limit: u8,
         cancel: &CancellationToken,
         holder: &Holder,
+        on_wait: &mut dyn FnMut(&str),
     ) -> Result<(Self, Vec<Holder>), KeeperStartError> {
         let mut client = Self::prepare(key, credentials)?;
-        let holders = client.obtain(launch, credentials, limit, cancel, &Take::Hold(holder))?;
+        let holders = client.obtain(
+            launch,
+            credentials,
+            limit,
+            cancel,
+            &Take::Hold(holder),
+            on_wait,
+        )?;
         Ok((client, holders))
     }
 
@@ -295,9 +338,14 @@ impl KeeperClient {
         limit: u8,
         cancel: &CancellationToken,
         take: &Take<'_>,
+        on_wait: &mut dyn FnMut(&str),
     ) -> Result<Vec<Holder>, KeeperStartError> {
         let key = self.home.key().to_owned();
-        let deadline =
+        // `agent hold` на пределе ждёт агентов, которые освободятся сами; команда не ждёт, а
+        // работает с разовым агентом.
+        let waits = matches!(take, Take::Hold(_));
+        let mut waiting_for = String::new();
+        let mut deadline =
             Instant::now() + Duration::from_millis(launch.startup_timeout_ms) + START_MARGIN;
         let mut respawns = 0;
         let mut evictions = 0;
@@ -309,11 +357,31 @@ impl KeeperClient {
                 Found::OverLimit => {
                     // Сверх предела снимается свой простаивающий агент без держателей;
                     // занятого раннер не снимает.
-                    if evictions > usize::from(limit) || !evict_idle(self.home.state(), &key) {
-                        return Err(KeeperStartError::Limit { limit });
+                    match make_room(self.home.state(), &key) {
+                        Room::Freed if waits || evictions <= usize::from(limit) => {
+                            evictions += 1;
+                            continue;
+                        }
+                        Room::Wait(what) if waits => {
+                            if what != waiting_for {
+                                on_wait(&what);
+                                waiting_for = what;
+                            }
+                            std::thread::sleep(ROOM_STEP);
+                            // Ожидание места срок подъёма сторожа не съедает.
+                            deadline = Instant::now()
+                                + Duration::from_millis(launch.startup_timeout_ms)
+                                + START_MARGIN;
+                            continue;
+                        }
+                        Room::Held(held) => return Err(KeeperStartError::Limit { limit, held }),
+                        Room::Freed | Room::Wait(_) => {
+                            return Err(KeeperStartError::Limit {
+                                limit,
+                                held: Vec::new(),
+                            })
+                        }
                     }
-                    evictions += 1;
-                    continue;
                 }
                 Found::Live(keeper) => {
                     self.keeper = keeper;
@@ -1126,45 +1194,106 @@ pub fn stop_keeper(state: &Path, key: &str) -> Result<bool, AgentError> {
     }
 }
 
-/// Снимает простаивающего дольше всех живого агента без держателей, кроме своего ключа `own`;
-/// ответ — снят ли кто-то. Условие «простаивает и без держателей» сторож проверяет сам под своим
-/// замком (`stop` с `only_idle` и `only_unheld`): команда, открывшая сессию между вопросом и
-/// снятием, агента сохраняет. Освобождением считается только подтверждённое снятие. Сторожа
-/// другой версии раннера не трогают: прежний сторож понял бы условный `stop` как безусловный.
-fn evict_idle(state: &Path, own: &str) -> bool {
-    let mut idle: Vec<(u64, LiveKeeper)> = live_keepers(state)
-        .into_iter()
-        .filter(|(_, record)| record.version.as_deref() == Some(env!("CARGO_PKG_VERSION")))
-        .map(|(keeper, _)| keeper)
-        .filter(|keeper| keeper.key != own)
-        .filter_map(|keeper| match keeper.client.status() {
-            Ok(status) => (!status.holds_the_infobase() && status.holders.is_empty())
-                .then_some((status.idle_ms, keeper)),
+/// Освобождает место на пределе: снимает простаивающего дольше всех живого агента без
+/// держателей, кроме своего ключа `own`. Условие «простаивает и без держателей» сторож проверяет
+/// сам под своим замком (`stop` с `only_idle` и `only_unheld`): команда, открывшая сессию между
+/// вопросом и снятием, агента сохраняет. Освобождением считается только подтверждённое снятие.
+/// Снять некого — ответ говорит, освободится ли кто-то сам (выполняет команду без держателей,
+/// свежий, закрывается, не ответил) или удерживаются все. Сторожа другой версии раннера условным
+/// `stop` не трогают — прежний сторож понял бы его как безусловный, — а ждут его простоя.
+fn make_room(state: &Path, own: &str) -> Room {
+    let ours = Some(env!("CARGO_PKG_VERSION"));
+    let mut idle: Vec<(u64, LiveKeeper, String)> = Vec::new();
+    let mut wait: Option<String> = None;
+    let mut held = Vec::new();
+    for (keeper, record) in live_keepers(state) {
+        if keeper.key == own {
+            continue;
+        }
+        let place = place_of(&record);
+        match keeper.client.status() {
             Err(error) => {
                 tracing::warn!(key = %keeper.key, %error, "a live agent did not answer its status");
-                None
+                wait.get_or_insert_with(|| format!("{place} to answer"));
             }
-        })
-        .collect();
-    idle.sort_by_key(|(idle_ms, _)| std::cmp::Reverse(*idle_ms));
-    for (_, keeper) in idle {
+            Ok(status) if status.closing => {
+                wait.get_or_insert_with(|| format!("{place} to close"));
+            }
+            Ok(status) if !status.holders.is_empty() => held.push(HeldAgent {
+                key: keeper.key.clone(),
+                infobase: record.agent.as_ref().map(|agent| agent.infobase.clone()),
+                work_path: record
+                    .agent
+                    .as_ref()
+                    .and_then(|agent| agent.work_path.clone()),
+                holders: status.holders,
+            }),
+            Ok(status) if status.holds_the_infobase() => {
+                wait.get_or_insert_with(|| {
+                    format!(
+                        "{place} to finish '{}'",
+                        status.command().unwrap_or("its command")
+                    )
+                });
+            }
+            Ok(status) if status.fresh => {
+                wait.get_or_insert_with(|| {
+                    format!("{place} to be taken by the command that started it")
+                });
+            }
+            Ok(_) if record.version.as_deref() != ours => {
+                wait.get_or_insert_with(|| {
+                    format!("{place} of another runner version to idle out")
+                });
+            }
+            Ok(status) => idle.push((status.idle_ms, keeper, place)),
+        }
+    }
+    idle.sort_by_key(|(idle_ms, _, _)| std::cmp::Reverse(*idle_ms));
+    for (_, keeper, place) in idle {
         match keeper.client.stop_if(true, true, &CancellationToken::new()) {
             Ok(Stopped::Removed) => {
                 tracing::info!(key = %keeper.key, "an idle live agent is removed to stay within the limit");
-                return true;
+                return Room::Freed;
             }
             Ok(Stopped::Pending) => {
-                tracing::warn!(key = %keeper.key, "an idle live agent did not confirm its removal in time");
+                wait.get_or_insert_with(|| format!("{place} to close"));
             }
-            Ok(Stopped::InUse { .. }) => {
+            Ok(Stopped::InUse { command, holders }) => {
                 tracing::debug!(key = %keeper.key, "the live agent got busy before it was removed");
+                if holders.is_empty() {
+                    wait.get_or_insert_with(|| {
+                        format!(
+                            "{place} to finish '{}'",
+                            command.as_deref().unwrap_or("its command")
+                        )
+                    });
+                }
             }
             Err(error) => {
                 tracing::warn!(key = %keeper.key, %error, "an idle live agent was not removed");
+                wait.get_or_insert_with(|| format!("{place} to answer"));
             }
         }
     }
-    false
+    match wait {
+        Some(what) => Room::Wait(what),
+        None => Room::Held(held),
+    }
+}
+
+/// Живой агент для строки ожидания: база и рабочая копия по его записи.
+fn place_of(record: &ServiceRecord) -> String {
+    let Some(agent) = record.agent.as_ref() else {
+        return "a live agent".to_owned();
+    };
+    match &agent.work_path {
+        Some(work_path) => format!(
+            "the live agent of {} (working copy {work_path})",
+            agent.infobase
+        ),
+        None => format!("the live agent of {}", agent.infobase),
+    }
 }
 
 fn unreachable_at(channel: &str, source: std::io::Error) -> AgentError {
@@ -1670,6 +1799,7 @@ mod tests {
                 host_key: None,
                 startup_timeout_ms: 1,
                 infobase: String::new(),
+                work_path: None,
             },
             credentials: Credentials {
                 user: "Администратор".to_owned(),

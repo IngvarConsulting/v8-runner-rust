@@ -600,6 +600,7 @@ pub(crate) fn live_target(
         host_key,
         startup_timeout_ms: agent.startup_timeout_ms.max(1),
         infobase: canonical_infobase(config),
+        work_path: Some(config.work_path.clone()),
     };
     let credentials = Credentials {
         user: connection.user.clone().unwrap_or_default(),
@@ -1701,6 +1702,7 @@ mod tests {
             holders: Vec::new(),
             closing,
             idle_ms: 0,
+            fresh: false,
         }
     }
 

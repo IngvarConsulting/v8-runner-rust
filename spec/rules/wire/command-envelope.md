@@ -67,8 +67,8 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 
 **Отказы удержания живого агента.** `agent hold` отказывает тремя кодами
 (`INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`): `agent_limit` рода `environment`, код
-выхода 3, — живых агентов учётной записи уже `tools.designer_agent.live-max`, и снять
-простаивающего некого; `live_agent_off` рода `capability`, код выхода 2, — живой агент
+выхода 2, — живых агентов учётной записи уже `tools.designer_agent.live-max`, и все они
+удерживаются; `live_agent_off` рода `capability`, код выхода 2, — живой агент
 выключен `tools.designer_agent.live: false`; `live_agent_job` рода `environment`, код выхода
 2, — раннер в Job, из которого сторож не может выйти. Платформу ни один из них не запускает.
 

@@ -132,6 +132,10 @@ pub struct LiveAgentFacts {
     pub channel: String,
     /// Путь базы в каноническом виде: по нему находят живых агентов одной базы.
     pub infobase: String,
+    /// `workPath` рабочей копии, которая подняла агента: его называет ожидание `agent hold` на
+    /// пределе. У записи прежней версии его нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_path: Option<String>,
 }
 
 /// Закреплённые порты живут отдельно от записи о запущенной службе: её снятие и замена их не

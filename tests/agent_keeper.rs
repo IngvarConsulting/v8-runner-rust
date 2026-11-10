@@ -1097,11 +1097,12 @@ fn the_former_stop_without_conditions_still_stops() {
 fn a_fresh_agent_is_not_evicted_before_it_is_taken() {
     let bench = Bench::new(false);
     let mut keeper = Keeper::start(&bench, 600_000);
-    ready(&keeper);
+    assert_eq!(ready(&keeper)["fresh"], true);
     let refused = keeper.last(json!({"op": "stop", "only_idle": true, "only_unheld": true}));
     assert_eq!(refused["error"]["error"], "not_idle", "{refused}");
     let session = keeper.begin();
     assert_eq!(keeper.end(session)["frame"], "ended");
+    assert_eq!(ready(&keeper)["fresh"], false, "a taken agent is not fresh");
     let stopped = keeper.last(json!({"op": "stop", "only_idle": true, "only_unheld": true}));
     assert_eq!(stopped["frame"], "stopped", "{stopped}");
     assert!(keeper.exited_within(GONE_WITHIN));

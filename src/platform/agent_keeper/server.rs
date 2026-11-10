@@ -312,6 +312,11 @@ fn breaks_the_session(error: &AgentError) -> bool {
 /// Поток агента: поднимает агента и выполняет работу по одной, затем отпускает и снимает его.
 fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<Job>) {
     let infobase = start.launch.infobase.clone();
+    let work_path = start
+        .launch
+        .work_path
+        .as_ref()
+        .map(|path| path.display().to_string());
     let (mut agent, port) = match launch(&shared.home, start) {
         Ok(launched) => launched,
         Err(error) => {
@@ -365,6 +370,7 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
         fingerprint: fingerprint.clone(),
         channel: shared.home.channel(),
         infobase,
+        work_path,
     };
     if let Err(error) = write_record(&shared.home, port, Some(facts)) {
         warn!(%error, "cannot write the live agent record");
@@ -727,6 +733,9 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
                         closing: state.close_requested
                             || state.stop_requested
                             || shared.shutdown.is_cancelled(),
+                        fresh: state
+                            .fresh_until
+                            .is_some_and(|until| Instant::now() < until),
                         idle_ms: if state.busy.is_none() && state.session.is_none() {
                             u64::try_from(state.idle_since.elapsed().as_millis())
                                 .unwrap_or(u64::MAX)

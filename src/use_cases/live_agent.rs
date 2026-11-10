@@ -93,6 +93,9 @@ pub fn hold(
         agent.live_limit(),
         &context.cancellation(),
         &holder,
+        &mut |waiting| {
+            crate::use_cases::progress::log_live_stage("agent hold:", &format!("waiting for {waiting}"))
+        },
     ) {
         Ok(taken) => taken,
         Err(KeeperStartError::Job) => {
@@ -101,12 +104,12 @@ pub fn hold(
                 "the runner runs in a Job that kills its processes on close and forbids leaving it: a live agent would die with the Job, so agent hold starts nothing".to_owned(),
             ))
         }
-        Err(KeeperStartError::Limit { limit }) => {
+        Err(KeeperStartError::Limit { limit, held }) => {
             return Err(refused(
                 UseCaseErrorKind::AgentLimit,
                 format!(
-                    "the OS account already keeps {limit} live agents (tools.designer_agent.live-max), and none of them is idle without holders: {}; release or stop one of them",
-                    describe_live_agents()
+                    "the OS account already keeps {limit} live agents (tools.designer_agent.live-max), and every one of them is held: {}; release one of them, stop it with `agent stop`, or raise live-max",
+                    describe_held(&held)
                 ),
             ))
         }
@@ -428,45 +431,29 @@ fn entry(
     }
 }
 
-/// Живые агенты учётной записи с держателями — для отказа `agent_limit`.
-fn describe_live_agents() -> String {
-    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+/// Удерживаемые агенты на пределе — для отказа `agent_limit`: база, рабочая копия и держатели,
+/// у держателя со сроком — когда срок истекает.
+fn describe_held(held: &[crate::platform::agent_keeper::client::HeldAgent]) -> String {
+    if held.is_empty() {
         return "none answered".to_owned();
-    };
-    let described: Vec<String> = live_keepers(&state)
-        .into_iter()
-        .map(|(keeper, record)| {
-            let infobase = record
-                .agent
-                .as_ref()
-                .map_or("an unknown infobase", |agent| agent.infobase.as_str())
-                .to_owned();
-            match keeper.client.status() {
-                Ok(status) if status.holders.is_empty() => format!(
-                    "{} on {infobase} running '{}'",
-                    keeper.key,
-                    status.command().unwrap_or("nothing")
-                ),
-                Ok(status) => format!(
-                    "{} on {infobase} held by {}",
-                    keeper.key,
-                    LiveAgentHolder::list_text(
-                        &status
-                            .holders
-                            .iter()
-                            .map(holder_receipt)
-                            .collect::<Vec<_>>()
-                    )
-                ),
-                Err(_) => format!("{} on {infobase}, not answering", keeper.key),
-            }
-        })
-        .collect();
-    if described.is_empty() {
-        "none answered".to_owned()
-    } else {
-        described.join("; ")
     }
+    held.iter()
+        .map(|agent| {
+            let holders: Vec<LiveAgentHolder> = agent.holders.iter().map(holder_receipt).collect();
+            format!(
+                "{} on {}{} held by {}",
+                agent.key,
+                agent.infobase.as_deref().unwrap_or("an unknown infobase"),
+                agent
+                    .work_path
+                    .as_deref()
+                    .map(|work_path| format!(" (working copy {work_path})"))
+                    .unwrap_or_default(),
+                LiveAgentHolder::list_text(&holders)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn refused(kind: UseCaseErrorKind, message: String) -> AppError {

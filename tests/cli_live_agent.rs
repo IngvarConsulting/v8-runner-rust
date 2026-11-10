@@ -318,6 +318,77 @@ fn live_off_removes_the_live_agent_and_works_one_shot() {
     );
 }
 
+/// Ctrl-C прерывает ожидание `agent hold` на пределе: команда отвечает отменой, своего агента не
+/// поднимает и отметки не оставляет (`INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`).
+#[test]
+fn a_cancelled_hold_over_the_limit_leaves_no_mark() {
+    let state = State::new();
+    let marks = temp_workspace();
+    let hold = Hold {
+        command: "config dump-cfg".to_owned(),
+        started: marks.path().join("started"),
+        release: marks.path().join("release"),
+        reply: HoldReply::Normal,
+    };
+    let (started, release) = (hold.started.clone(), hold.release.clone());
+    let busy = harness(&state, None, "", Some(hold));
+    let waiting = harness(
+        &state,
+        None,
+        "    live-max: 1
+",
+        None,
+    );
+    let output = busy.dir.path().join("dist").join("main.cf");
+    let mut running = busy
+        .command(&[
+            "download",
+            "main",
+            "--state",
+            "working",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the busy command");
+    struct Release<'a>(&'a Path);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0, "");
+        }
+    }
+    let guard = Release(&release);
+    assert!(
+        wait_until(Duration::from_secs(60), || started.exists()),
+        "the busy command reached the agent"
+    );
+    let mut hold = waiting
+        .command(&["agent", "hold", "--ttl", "600"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn agent hold");
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(hold.try_wait().expect("hold").is_none(), "hold waits");
+    support::send_sigterm(&hold);
+    let output = hold.wait_with_output().expect("hold output");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("hold envelope");
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    assert_eq!(waiting.launches(), 0, "the cancelled hold started nothing");
+    assert_eq!(state.keepers().len(), 1, "only the busy agent lives");
+    drop(guard);
+    assert!(running.wait().expect("busy command").success());
+    let keeper = state.keepers().pop().expect("the busy keeper");
+    let status = ask_keeper(&keeper, &json!({"op": "status"}));
+    assert_eq!(
+        status["status"]["holders"],
+        json!([]),
+        "no mark is left: {status}"
+    );
+}
+
 /// Сверх предела команда сначала снимает простаивающего агента без держателей, а если снять
 /// некого — работает с разовым агентом (`INV.PLATFORM.A-COMMAND-OVER-THE-LIMIT-USES-A-ONE-SHOT-AGENT`).
 #[test]

@@ -45,8 +45,7 @@ impl UseCaseErrorKind {
         match self {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment => VALIDATION_EXIT_CODE,
-            Self::LiveAgentOff | Self::LiveAgentJob => VALIDATION_EXIT_CODE,
-            Self::AgentLimit => RUNTIME_EXIT_CODE,
+            Self::LiveAgentOff | Self::LiveAgentJob | Self::AgentLimit => VALIDATION_EXIT_CODE,
             Self::WorkspaceBusy | Self::InfobaseBusy => RUNTIME_EXIT_CODE,
             Self::NonFastForward | Self::UntrackedBase => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
