@@ -52,6 +52,8 @@ pub mod publish;
 pub mod reset;
 /// Shared runner models.
 pub mod runner;
+/// Чужие сеансы базы у применения конфигурации.
+pub mod sessions;
 /// Source set domain models.
 pub mod source_set;
 /// Ответ команд `standalone`.

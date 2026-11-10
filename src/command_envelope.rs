@@ -3,6 +3,7 @@ use serde::Serialize;
 use crate::domain::execution::StepResult;
 use crate::domain::next_step::NextStep;
 use crate::domain::platforms::PlatformReleaseRefusal;
+use crate::domain::sessions::InfobaseSessions;
 use crate::domain::test::{
     RetainedPaths, TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget,
 };
@@ -43,6 +44,10 @@ pub enum ErrorCode {
     WorkspaceBusy,
     /// Файловую базу держит другая команда; как `workspace_busy`, можно повторить.
     InfobaseBusy,
+    /// Применению нужен монопольный доступ, а базу держат чужие сеансы; кто — в `sessions`.
+    InfobaseSessions,
+    /// Файловую базу держит чужой Конфигуратор; его раннер не закрывает.
+    InfobaseDesignerBusy,
     InvalidOutput,
     Cancelled,
     TimedOut,
@@ -112,6 +117,8 @@ impl ErrorCode {
             Self::PlatformReleaseMissing => "platform_release_missing",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
+            Self::InfobaseSessions => "infobase_sessions",
+            Self::InfobaseDesignerBusy => "infobase_designer_busy",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
@@ -139,6 +146,8 @@ impl ErrorCode {
         Self::PlatformReleaseMissing,
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
+        Self::InfobaseSessions,
+        Self::InfobaseDesignerBusy,
         Self::InvalidOutput,
         Self::Cancelled,
         Self::TimedOut,
@@ -173,6 +182,9 @@ pub struct EnvelopeError {
     /// Формат исходников и опись установок; заполняется отказом `platform_release_missing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform_release: Option<Box<PlatformReleaseRefusal>>,
+    /// Кто держит базу; заполняется отказами `infobase_sessions` и `infobase_designer_busy`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Box<InfobaseSessions>>,
 }
 
 impl EnvelopeError {
@@ -185,6 +197,7 @@ impl EnvelopeError {
             base_generation: None,
             local_generation: None,
             platform_release: None,
+            sessions: None,
         }
     }
 
@@ -415,6 +428,16 @@ mod schema_tests {
                 "workspace",
             ),
             (UseCaseErrorKind::InfobaseBusy, "infobase_busy", "workspace"),
+            (
+                UseCaseErrorKind::InfobaseSessions,
+                "infobase_sessions",
+                "workspace",
+            ),
+            (
+                UseCaseErrorKind::InfobaseDesignerBusy,
+                "infobase_designer_busy",
+                "workspace",
+            ),
             (
                 UseCaseErrorKind::NonFastForward,
                 "non_fast_forward",

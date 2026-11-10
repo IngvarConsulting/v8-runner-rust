@@ -9,6 +9,7 @@ use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::session_list::SessionTerminate;
 
 // Разбор пакета (`export --file`) в несколько потоков отказывает на годных пакетах (#476),
 // поэтому он идёт в один поток. Выгрузка из базы ключа не несёт и идёт в потоках платформы:
@@ -210,20 +211,6 @@ impl IbcmdConnection {
     }
 }
 
-/// Dynamic apply mode supported by `ibcmd config apply`.
-#[derive(Debug, Clone, Copy)]
-pub enum DynamicUpdateMode {
-    Auto,
-}
-
-impl DynamicUpdateMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            DynamicUpdateMode::Auto => "auto",
-        }
-    }
-}
-
 /// Result status returned by `ibcmd infobase create`. `Failed` and `Unconfirmed` are failures
 /// carried inside `Ok`, so the create result — and the interruption it deferred — stays with
 /// them.
@@ -338,7 +325,6 @@ impl<'a> IbcmdDsl<'a> {
     /// base is [`IbcmdError::SnapshotBusy`].
     #[cfg(unix)]
     fn probe_snapshot_access(&self) -> Result<bool, IbcmdError> {
-        use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
 
         let path = self.snapshot_path()?;
@@ -367,26 +353,13 @@ impl<'a> IbcmdDsl<'a> {
                 ),
             });
         }
-        // SAFETY: flock contains only integer fields. Zero means SEEK_SET, offset 0,
-        // length 0 (the whole file), and supplies valid storage for F_GETLK's answer.
-        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-        lock.l_type = libc::F_WRLCK as _;
-        lock.l_whence = libc::SEEK_SET as _;
-        // SAFETY: file owns a live descriptor, and lock is writable for this call.
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } == -1 {
-            return Err(IbcmdError::SnapshotProbe {
-                path,
-                source: std::io::Error::last_os_error(),
-            });
+        match crate::platform::file_base_hold::lock_holder(&file) {
+            Err(source) => Err(IbcmdError::SnapshotProbe { path, source }),
+            Ok(crate::platform::file_base_hold::Hold::Held { pid }) => {
+                Err(IbcmdError::SnapshotBusy { path, pid })
+            }
+            Ok(_) => Ok(true),
         }
-        if lock.l_type != libc::F_UNLCK as libc::c_short {
-            // An open file description lock has no owning process: the kernel reports -1.
-            return Err(IbcmdError::SnapshotBusy {
-                path,
-                pid: (lock.l_pid > 0).then_some(lock.l_pid),
-            });
-        }
-        Ok(true)
     }
 
     /// No session probe is measured off POSIX: the refusal is [`dt_transfer_refusal`]'s.
@@ -595,18 +568,28 @@ impl<'a> IbcmdDsl<'a> {
         }
     }
 
-    /// Applies imported configuration changes to the infobase.
+    /// `config apply [--extension <name>] --force --dynamic=disable`: применяет загруженную
+    /// конфигурацию к базе данных. Динамическое обновление запрещено всегда
+    /// (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`): если обычное невозможно, утилита
+    /// отказывает, и отказ доходит до вызывающего как есть.
     pub fn config_apply(
         &self,
         extension: Option<&str>,
-        dynamic: DynamicUpdateMode,
+        sessions: SessionTerminate<'_>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "apply"]);
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
         args.push("--force".to_owned());
-        push_option_value(&mut args, "--dynamic", dynamic.as_str());
+        args.push("--dynamic=disable".to_owned());
+        match sessions {
+            SessionTerminate::Keep => args.push("--session-terminate=disable".to_owned()),
+            SessionTerminate::Force { message } => {
+                args.push("--session-terminate=force".to_owned());
+                args.push(format!("--session-terminate-message={message}"));
+            }
+        }
         self.run(&args)
     }
 
@@ -845,7 +828,7 @@ fn wipes_the_export_directory(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        wipes_the_export_directory, DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdError,
+        wipes_the_export_directory, IbcmdConnection, IbcmdDsl, IbcmdError,
         IbcmdInfobaseCreateStatus,
     };
     use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
@@ -854,6 +837,7 @@ mod tests {
     #[cfg(unix)]
     use crate::platform::process::ProcessInterruptionSafety;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
+    use crate::platform::session_list::SessionTerminate;
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -1020,13 +1004,89 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        dsl.config_apply(None, DynamicUpdateMode::Auto)
+        dsl.config_apply(None, SessionTerminate::Keep)
             .expect("apply");
 
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("apply"));
         assert!(args.contains("--force"));
-        assert!(args.contains("--dynamic\nauto"));
+        assert!(args.contains("--force\n--dynamic=disable"), "{args}");
+    }
+
+    /// Каждое `config apply` запрещает динамическое обновление — у основной конфигурации и
+    /// у расширения (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
+    #[test]
+    fn config_apply_always_forbids_dynamic_update() {
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.config_apply(None, SessionTerminate::Keep)
+            .expect("apply the configuration");
+        dsl.config_apply(Some("ext"), SessionTerminate::Keep)
+            .expect("apply the extension");
+
+        let requests = runner.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        for (request, extension) in requests.iter().zip([None, Some("ext")]) {
+            let args = &request.args;
+            let apply = args
+                .iter()
+                .position(|arg| arg == "apply")
+                .expect("config apply");
+            assert_eq!(args[apply - 1], "config", "{args:?}");
+            let tail: Vec<&str> = args[apply + 1..].iter().map(String::as_str).collect();
+            let expected: Vec<&str> = match extension {
+                Some(name) => vec![
+                    "--extension",
+                    name,
+                    "--force",
+                    "--dynamic=disable",
+                    "--session-terminate=disable",
+                ],
+                None => vec![
+                    "--force",
+                    "--dynamic=disable",
+                    "--session-terminate=disable",
+                ],
+            };
+            assert_eq!(tail, expected, "{args:?}");
+        }
+    }
+
+    /// Без принуждения `ibcmd` слышит явный запрет завершать сеансы; с ним — ключ завершения
+    /// и всегда сообщение: без него `ibcmd` с 8.3.25 ждёт ввода
+    /// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+    #[test]
+    fn config_apply_names_what_it_does_with_foreign_sessions() {
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.config_apply(None, SessionTerminate::Force { message: "bye" })
+            .expect("apply with the sessions ended");
+
+        let requests = runner.requests.borrow();
+        let args = &requests[0].args;
+        let tail: Vec<&str> = args[args.len() - 4..].iter().map(String::as_str).collect();
+        assert_eq!(
+            tail,
+            [
+                "--force",
+                "--dynamic=disable",
+                "--session-terminate=force",
+                "--session-terminate-message=bye"
+            ],
+            "{args:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1664,7 +1724,7 @@ mod tests {
         );
 
         let result = dsl
-            .config_apply(None, DynamicUpdateMode::Auto)
+            .config_apply(None, SessionTerminate::Keep)
             .expect("apply");
 
         assert_eq!(result.process.exit_code, 7);

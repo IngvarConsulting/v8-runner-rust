@@ -1,5 +1,40 @@
 {
   "$defs": {
+    "ApplicationCode": {
+      "description": "Устойчивый код приложения платформы.",
+      "oneOf": [
+        {
+          "const": "Designer",
+          "description": "Конфигуратор.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8C",
+          "description": "Тонкий клиент.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8",
+          "description": "Толстый клиент.",
+          "type": "string"
+        },
+        {
+          "const": "BackgroundJob",
+          "description": "Фоновое задание.",
+          "type": "string"
+        },
+        {
+          "const": "WebClient",
+          "description": "Веб-клиент.",
+          "type": "string"
+        },
+        {
+          "const": "COMConnection",
+          "description": "Внешнее соединение.",
+          "type": "string"
+        }
+      ]
+    },
     "BuildMode": {
       "oneOf": [
         {
@@ -434,6 +469,100 @@
       ],
       "type": "object"
     },
+    "SessionEntry": {
+      "additionalProperties": false,
+      "description": "Один сеанс из списка платформы.",
+      "properties": {
+        "application": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Устойчивый код приложения; `null` — название не из таблицы известных."
+        },
+        "application_title": {
+          "description": "Название приложения, как его написала платформа.",
+          "type": "string"
+        },
+        "computer": {
+          "description": "Компьютер сеанса.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Номер сеанса у платформы.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started": {
+          "description": "Начало сеанса, местное время базы: `ГГГГ-ММ-ДДTчч:мм:сс`.",
+          "type": "string"
+        },
+        "user": {
+          "description": "Пользователь; текст платформы у файловой базы его не называет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "computer",
+        "application_title",
+        "started"
+      ],
+      "type": "object"
+    },
+    "SessionLock": {
+      "additionalProperties": false,
+      "description": "Блокировка начала сеансов базы.",
+      "properties": {
+        "message": {
+          "description": "Сообщение блокировки, если раннер его знает.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SessionLockState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "SessionLockState": {
+      "description": "Чья блокировка начала сеансов стоит у базы.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Блокировки нет.",
+          "type": "string"
+        },
+        {
+          "const": "own",
+          "description": "Блокировка раннера.",
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Чужая блокировка; раннер её не трогает.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Узнать нельзя.",
+          "type": "string"
+        }
+      ]
+    },
     "SessionMode": {
       "description": "Как раннер добрался до точки входа агента.",
       "oneOf": [
@@ -453,6 +582,35 @@
           "type": "string"
         }
       ]
+    },
+    "SessionsOutcome": {
+      "additionalProperties": false,
+      "description": "Исход `--sessions force` — поле `sessions` формы `push` и `apply`.",
+      "properties": {
+        "lock": {
+          "$ref": "#/$defs/SessionLock",
+          "description": "Блокировка начала сеансов на время применения."
+        },
+        "message_delivered": {
+          "description": "Передал ли раннер платформе сообщение завершаемым сеансам.",
+          "type": "boolean"
+        },
+        "terminated": {
+          "description": "Сеансы, которые завершил ключ платформы, — из списка до завершения; пусто —\nзавершать было некого; `null` — завершение было, а список платформа не дала.",
+          "items": {
+            "$ref": "#/$defs/SessionEntry"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "lock",
+        "message_delivered"
+      ],
+      "type": "object"
     },
     "SkippedProvider": {
       "additionalProperties": false,
@@ -505,6 +663,17 @@
     "provider_dispatched": {
       "description": "Whether an executor got this command's work: a process was started to do it, or the\nrequest's command was handed to a running session. Starting or opening a session and\nits own service commands are not work. `false` whenever the executor got none — a\npreview, a refusal or interruption before any work, a run with nothing to do, or a\nprocess that could not be started.\n\nAlways present. In a preview each step's `mode` is the mode that would be used and\nits message says so.",
       "type": "boolean"
+    },
+    "sessions": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SessionsOutcome"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Исход `--sessions force`: завершённые сеансы, блокировка начала сеансов и сообщение;\nбез `force` поля нет (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`)."
     },
     "steps": {
       "items": {

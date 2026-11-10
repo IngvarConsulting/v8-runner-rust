@@ -5,6 +5,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::cli::args::SessionsMode;
 use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
     DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
@@ -46,6 +47,7 @@ use crate::domain::launch::{LaunchMode, LaunchResult, LaunchVia};
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
+use crate::domain::next_step::NextStep;
 use crate::domain::runner::{
     launch_key_alias_matches, ExecutionPolicy, ExternalEpfWaitOptions, LaunchClientModeRequest,
     LaunchOptions, RunnerKind, RunnerOutputFormat, RunnerProfile,
@@ -62,6 +64,7 @@ use crate::support::error::AppError;
 use crate::support::fs::clean_dir;
 use crate::support::path::is_safe_path_segment;
 use crate::support::temp::platform_logs_dir;
+use crate::use_cases::apply::sessions::{self, SessionsGate, SessionsPolicy};
 use crate::use_cases::artifacts;
 use crate::use_cases::build_project;
 use crate::use_cases::check_syntax;
@@ -1346,9 +1349,12 @@ fn execute_build(
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let request = map_build_request(args, dry_run);
+    let sessions = sessions_gate(&args.sessions, "push", request.source_set.as_deref())
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Build, error))?;
     // Отказ при чужой памяти советует `pull`/`push` с глобальными ключами этого вызова.
     let context = cli_context(config, CommandName::Build, cancellation)
-        .with_command_line(command_line.clone());
+        .with_command_line(command_line.clone())
+        .with_sessions(sessions);
     with_cli_workspace_lock(
         config,
         presenter,
@@ -1407,8 +1413,11 @@ fn execute_apply(
         source_set: args.set.clone(),
         dry_run,
     };
+    let sessions = sessions_gate(&args.sessions, "apply", request.source_set.as_deref())
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Apply, error))?;
     let context = cli_context(config, CommandName::Apply, cancellation)
-        .with_command_line(command_line.clone());
+        .with_command_line(command_line.clone())
+        .with_sessions(sessions);
     with_cli_workspace_lock(
         config,
         presenter,
@@ -4141,6 +4150,34 @@ fn render_pre_dispatch_error(
     error
 }
 
+/// Политика чужих сеансов вызова: `--sessions` и сообщение, а `next` отказа — этот же вызов.
+/// Сообщение без `force` некому отдать — это ошибка вызова, а не молча забытый ключ.
+fn sessions_gate(
+    args: &crate::cli::args::SessionsArgs,
+    command: &str,
+    source_set: Option<&str>,
+) -> Result<SessionsGate, UseCaseError> {
+    let policy = match (args.sessions, &args.sessions_message) {
+        (Some(SessionsMode::Force), message) => SessionsPolicy::Force {
+            message: message
+                .clone()
+                .unwrap_or_else(|| sessions::DEFAULT_MESSAGE.to_owned()),
+        },
+        (_, Some(_)) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--sessions-message is the message to the sessions --sessions force ends; it needs --sessions force",
+            ))
+        }
+        (Some(SessionsMode::Disable) | None, None) => SessionsPolicy::Disable,
+    };
+    let call = match source_set {
+        Some(set) => NextStep::command(command).for_source_set(set),
+        None => NextStep::command(command),
+    };
+    Ok(SessionsGate::new(policy, call))
+}
+
 fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
     BuildRequest {
         dry_run,
@@ -6501,6 +6538,7 @@ mod tests {
                     source_set: SourceSetArg::default(),
                     force: false,
                     no_apply: false,
+                    sessions: Default::default(),
                 },
                 false,
             )
@@ -6953,6 +6991,7 @@ mod tests {
                 source_set: SourceSetArg::default(),
                 force: false,
                 no_apply: false,
+                sessions: Default::default(),
             })),
             CommandName::Build
         );
@@ -7030,6 +7069,7 @@ mod tests {
                 source_set: SourceSetArg::default(),
                 force: false,
                 no_apply: false,
+                sessions: Default::default(),
             }),
             &CommandLineTarget::default(),
             &presenter,
@@ -7233,6 +7273,7 @@ mod tests {
                 source_set: SourceSetArg::default(),
                 force: false,
                 no_apply: false,
+                sessions: Default::default(),
             }),
             &CommandLineTarget::default(),
             &presenter,

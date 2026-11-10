@@ -10,6 +10,7 @@ use crate::platform::process::{
 };
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::secrets::mask_text;
+use crate::platform::session_list::SessionTerminate;
 
 #[derive(Debug, Error)]
 pub enum DesignerError {
@@ -164,16 +165,23 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/UpdateDBCfg`
+    /// `/UpdateDBCfg [-Extension <name>] -Dynamic-`: динамическое обновление запрещено
+    /// всегда — без ключа платформа его разрешает (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
     pub fn update_db_cfg(
         &self,
         extension: Option<&str>,
+        sessions: SessionTerminate<'_>,
     ) -> Result<PlatformCommandResult, DesignerError> {
         let mut args = self.base_args();
         args.push("/UpdateDBCfg".to_owned());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
+        }
+        args.push("-Dynamic-".to_owned());
+        if let SessionTerminate::Force { .. } = sessions {
+            args.push("-SessionTerminate".to_owned());
+            args.push("force".to_owned());
         }
         self.run(&args)
     }
@@ -689,6 +697,7 @@ mod tests {
     use crate::domain::syntax::SyntaxCheckStatus;
     use crate::platform::connection::V8Connection;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
+    use crate::platform::session_list::SessionTerminate;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -734,6 +743,42 @@ mod tests {
         ) -> Result<crate::platform::process::SpawnResult, crate::platform::process::ProcessError>
         {
             panic!("Designer exports must run synchronously")
+        }
+    }
+
+    /// Каждое `/UpdateDBCfg` запрещает динамическое обновление — у основной конфигурации и
+    /// у расширения (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
+    #[test]
+    fn update_db_cfg_always_forbids_dynamic_update() {
+        let runner = CapturingRunner::default();
+        let dsl = DesignerDsl::new(
+            "1cv8.exe".into(),
+            V8Connection::from_connection_string("File=C:/ib"),
+            &runner,
+            None,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.update_db_cfg(None, SessionTerminate::Keep)
+            .expect("update the configuration");
+        dsl.update_db_cfg(Some("ext"), SessionTerminate::Keep)
+            .expect("update the extension");
+        dsl.update_db_cfg(None, SessionTerminate::Force { message: "m" })
+            .expect("update with the sessions ended");
+
+        let requests = runner.0.borrow();
+        assert_eq!(requests.len(), 3);
+        for (request, expected) in requests.iter().zip([
+            &["/UpdateDBCfg", "-Dynamic-"][..],
+            &["/UpdateDBCfg", "-Extension", "ext", "-Dynamic-"][..],
+            &["/UpdateDBCfg", "-Dynamic-", "-SessionTerminate", "force"][..],
+        ]) {
+            let start = request
+                .args
+                .iter()
+                .position(|arg| arg == "/UpdateDBCfg")
+                .expect("/UpdateDBCfg");
+            assert_eq!(&request.args[start..], expected, "{:?}", request.args);
         }
     }
 

@@ -265,6 +265,7 @@ fn run_build_with(
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        sessions: None,
                     },
                 ));
             }
@@ -613,6 +614,7 @@ fn run_build_with(
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        sessions: None,
     })
 }
 
@@ -643,6 +645,7 @@ pub(super) fn run_build_ibcmd(
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        sessions: None,
                     },
                 ));
             }
@@ -906,6 +909,7 @@ pub(super) fn run_build_ibcmd(
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        sessions: None,
     })
 }
 
@@ -1086,6 +1090,7 @@ pub(super) fn run_build_edt(
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             },
         ));
     }
@@ -1105,6 +1110,7 @@ pub(super) fn run_build_edt(
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        sessions: None,
                     },
                 ));
             }
@@ -1893,6 +1899,7 @@ pub(super) fn run_build_edt(
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        sessions: None,
     })
 }
 

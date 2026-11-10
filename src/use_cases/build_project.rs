@@ -69,7 +69,13 @@ pub fn execute(
         "executing build use case"
     );
     stamp_dispatch(
-        stamp_session(run_build_branch(context, config, args), context),
+        stamp_session(
+            crate::use_cases::apply::sessions::stamp_sessions(
+                run_build_branch(context, config, args),
+                context,
+            ),
+            context,
+        ),
         context.work(),
     )
 }
@@ -165,6 +171,7 @@ fn run_build_branch(
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             },
         )),
     };
@@ -213,6 +220,7 @@ fn refused_before_work(error: AppError) -> BuildExecutionFailure {
             ok: false,
             steps: vec![],
             duration_ms: 0,
+            sessions: None,
         },
     )
 }
@@ -353,6 +361,7 @@ fn run_build_selected(
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             },
         ));
     }
@@ -370,6 +379,7 @@ fn run_build_selected(
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             },
         )),
     }
@@ -852,7 +862,9 @@ fn execute_source_set_step(
             })
             .and_then(|result| {
                 deferrals.note_result("load", &result);
-                ensure_platform_success("load", source_set, &result)
+                ensure_platform_success("load", source_set, &result).map_err(|error| {
+                    crate::use_cases::apply::sessions::designer_busy_at_load(context, config, error)
+                })
             });
             if let Err(error) = loaded {
                 let partial_list = preserve_partial_load_list(list_file);
@@ -872,7 +884,9 @@ fn execute_source_set_step(
             .load_config_from_files_full(load_context.path(), extension_name(source_set))
             .map_err(AppError::from)?;
             deferrals.note_result("load", &result);
-            ensure_platform_success("load", source_set, &result)?;
+            ensure_platform_success("load", source_set, &result).map_err(|error| {
+                crate::use_cases::apply::sessions::designer_busy_at_load(context, config, error)
+            })?;
         }
 
         let apply = if apply == ApplyPolicy::Apply {
@@ -1032,7 +1046,9 @@ fn execute_source_set_step_ibcmd(
                 .map_err(map_ibcmd_error)?
         };
         deferrals.note_result("ibcmd_import", &load_result);
-        ensure_platform_success("load", source_set, &load_result)?;
+        ensure_platform_success("load", source_set, &load_result).map_err(|error| {
+            crate::use_cases::apply::sessions::designer_busy_at_load(context, config, error)
+        })?;
 
         let apply = if apply == ApplyPolicy::Apply {
             settle_apply(crate::use_cases::apply::act::apply(
@@ -4486,6 +4502,7 @@ mod tests {
                 },
             ],
             duration_ms: 42,
+            sessions: None,
         };
 
         let json = serde_json::to_value(result).expect("json");

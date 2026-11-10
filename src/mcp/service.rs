@@ -1414,6 +1414,7 @@ mod tests {
                 applied: true,
             }],
             duration_ms: 42,
+            sessions: None,
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -1459,6 +1460,7 @@ mod tests {
                     applied: true,
                 }],
                 duration_ms: 19,
+                sessions: None,
             },
         )));
         let config = sample_config();
@@ -2840,6 +2842,7 @@ mod tests {
                 ok: true,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             })),
         );
 
@@ -2871,6 +2874,7 @@ mod tests {
                 ok: true,
                 steps: vec![],
                 duration_ms: 0,
+                sessions: None,
             })),
         );
 

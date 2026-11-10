@@ -17,6 +17,10 @@ pub struct ApplyResult {
     /// Наборы по порядку: конфигурация, расширения, внешние; за ними — расширение-инструмент.
     pub steps: Vec<ApplyStep>,
     pub duration_ms: u64,
+    /// Исход `--sessions force`: завершённые сеансы, блокировка начала сеансов и сообщение;
+    /// без `force` поля нет (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<crate::domain::sessions::SessionsOutcome>,
 }
 
 /// Один набор исходников (или расширение-инструмент `tool:<имя>`).

@@ -1,5 +1,40 @@
 {
   "$defs": {
+    "ApplicationCode": {
+      "description": "Устойчивый код приложения платформы.",
+      "oneOf": [
+        {
+          "const": "Designer",
+          "description": "Конфигуратор.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8C",
+          "description": "Тонкий клиент.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8",
+          "description": "Толстый клиент.",
+          "type": "string"
+        },
+        {
+          "const": "BackgroundJob",
+          "description": "Фоновое задание.",
+          "type": "string"
+        },
+        {
+          "const": "WebClient",
+          "description": "Веб-клиент.",
+          "type": "string"
+        },
+        {
+          "const": "COMConnection",
+          "description": "Внешнее соединение.",
+          "type": "string"
+        }
+      ]
+    },
     "ArtifactKind": {
       "description": "Stable artifact classification for runner/package outputs.",
       "oneOf": [
@@ -212,6 +247,17 @@
             }
           ],
           "description": "Формат исходников и опись установок; заполняется отказом `platform_release_missing`."
+        },
+        "sessions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseSessions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Кто держит базу; заполняется отказами `infobase_sessions` и `infobase_designer_busy`."
         }
       },
       "required": [
@@ -262,6 +308,16 @@
         {
           "const": "infobase_busy",
           "description": "Файловую базу держит другая команда; как `workspace_busy`, можно повторить.",
+          "type": "string"
+        },
+        {
+          "const": "infobase_sessions",
+          "description": "Применению нужен монопольный доступ, а базу держат чужие сеансы; кто — в `sessions`.",
+          "type": "string"
+        },
+        {
+          "const": "infobase_designer_busy",
+          "description": "Файловую базу держит чужой Конфигуратор; его раннер не закрывает.",
           "type": "string"
         },
         {
@@ -562,6 +618,45 @@
           "type": "object"
         }
       ]
+    },
+    "InfobaseSessions": {
+      "additionalProperties": false,
+      "description": "Кто держит базу — поле `error.sessions` отказов `infobase_sessions` и\n`infobase_designer_busy`.",
+      "properties": {
+        "base": {
+          "description": "Строка соединения базы без учётных данных.",
+          "type": "string"
+        },
+        "from_this_machine": {
+          "description": "Среди сеансов есть сеанс с этой машины.",
+          "type": "boolean"
+        },
+        "list": {
+          "description": "Сеансы, как их назвала платформа; `null` — список не получен или не разобран целиком.",
+          "items": {
+            "$ref": "#/$defs/SessionEntry"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "lock": {
+          "$ref": "#/$defs/SessionLock",
+          "description": "Блокировка начала сеансов, которая уже стоит у базы."
+        },
+        "terminable": {
+          "description": "Может ли раннер завершить сеансы этой базы для этой команды (`--sessions force`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "base",
+        "from_this_machine",
+        "terminable",
+        "lock"
+      ],
+      "type": "object"
     },
     "InstalledComponents": {
       "additionalProperties": false,
@@ -1043,6 +1138,100 @@
         "address"
       ],
       "type": "object"
+    },
+    "SessionEntry": {
+      "additionalProperties": false,
+      "description": "Один сеанс из списка платформы.",
+      "properties": {
+        "application": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Устойчивый код приложения; `null` — название не из таблицы известных."
+        },
+        "application_title": {
+          "description": "Название приложения, как его написала платформа.",
+          "type": "string"
+        },
+        "computer": {
+          "description": "Компьютер сеанса.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Номер сеанса у платформы.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started": {
+          "description": "Начало сеанса, местное время базы: `ГГГГ-ММ-ДДTчч:мм:сс`.",
+          "type": "string"
+        },
+        "user": {
+          "description": "Пользователь; текст платформы у файловой базы его не называет.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "computer",
+        "application_title",
+        "started"
+      ],
+      "type": "object"
+    },
+    "SessionLock": {
+      "additionalProperties": false,
+      "description": "Блокировка начала сеансов базы.",
+      "properties": {
+        "message": {
+          "description": "Сообщение блокировки, если раннер его знает.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SessionLockState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "SessionLockState": {
+      "description": "Чья блокировка начала сеансов стоит у базы.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Блокировки нет.",
+          "type": "string"
+        },
+        {
+          "const": "own",
+          "description": "Блокировка раннера.",
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Чужая блокировка; раннер её не трогает.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Узнать нельзя.",
+          "type": "string"
+        }
+      ]
     },
     "SessionMode": {
       "description": "Как раннер добрался до точки входа агента.",

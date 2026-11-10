@@ -6113,7 +6113,7 @@ fn the_apply_act_has_one_owner() {
             let tokens = production_tokens(file);
             tokens.contains(".update_db_cfg(")
                 || tokens.contains(".config_apply(")
-                || tokens.contains("config update-db-cfg")
+                || tokens.contains("configupdate-db-cfg")
         })
         .map(|file| file.display().to_string())
         .collect::<Vec<_>>();
@@ -6121,6 +6121,133 @@ fn the_apply_act_has_one_owner() {
         offenders.is_empty(),
         "these modules apply the configuration on their own instead of through apply::act:\n{}",
         offenders.join("\n")
+    );
+}
+
+/// Где в токенах [`production_tokens`] называется режим динамического обновления, который
+/// его не запрещает. Пробелы выброшены и внутри строк, поэтому `"--dynamic auto"` видно как
+/// `--dynamicauto`. Допустимы только запреты: `-Dynamic-`, `--dynamic-disable`,
+/// `--dynamic=disable`; всё прочее после `--dynamic` или `-Dynamic` — нарушение, в том числе
+/// значение, подставленное в `format!`.
+fn dynamic_update_allowances(tokens: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (key, forbidding) in [
+        ("--dynamic", &["=disable", "-disable"][..]),
+        ("-Dynamic", &["-"][..]),
+    ] {
+        for (at, _) in tokens.match_indices(key) {
+            let rest = &tokens[at + key.len()..];
+            if !forbidding.iter().any(|tail| rest.starts_with(tail)) {
+                found.push(format!(
+                    "{key}{}",
+                    rest.chars().take(12).collect::<String>()
+                ));
+            }
+        }
+    }
+    found
+}
+
+/// Страж `INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`. Команду обновления конфигурации базы
+/// данных строят три владельца — `platform/designer.rs` (`/UpdateDBCfg`), `platform/ibcmd.rs`
+/// (`config apply`) и `use_cases/apply/act.rs` (`config update-db-cfg` агента); каждый из них
+/// ставит запрет динамического обновления, и ни один производственный модуль не называет
+/// режим, который его разрешает. Корень: без ключа платформа динамическое обновление
+/// разрешает, поэтому новая командная строка обновления в обход владельцев тихо его вернёт.
+#[test]
+fn no_db_update_allows_dynamic_update() {
+    let owners = [
+        (
+            repo_path("src/platform/designer.rs"),
+            "\"/UpdateDBCfg\"",
+            "-Dynamic-",
+        ),
+        (
+            repo_path("src/platform/ibcmd.rs"),
+            "\"config\",\"apply\"",
+            "--dynamic=disable",
+        ),
+        (
+            repo_path("src/use_cases/apply/act.rs"),
+            "\"configupdate-db-cfg",
+            "--dynamic-disable",
+        ),
+    ];
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src")) {
+        let tokens = production_tokens(&file);
+        let allowances = dynamic_update_allowances(&tokens);
+        if !allowances.is_empty() {
+            offenders.push(format!(
+                "{}: allows dynamic update {allowances:?}",
+                file.display()
+            ));
+        }
+        for (owner, command, forbidding) in &owners {
+            if !tokens.contains(command) {
+                continue;
+            }
+            if &file != owner {
+                offenders.push(format!(
+                    "{}: builds {command} outside its owner {}",
+                    file.display(),
+                    owner.display()
+                ));
+            } else if !tokens.contains(forbidding) {
+                offenders.push(format!(
+                    "{}: {command} without {forbidding}",
+                    file.display()
+                ));
+            }
+        }
+    }
+    for (owner, command, _) in &owners {
+        assert!(
+            production_tokens(owner).contains(command),
+            "the owner {} no longer builds {command}: update the guard",
+            owner.display()
+        );
+    }
+    assert!(
+        offenders.is_empty(),
+        "database configuration update must forbid dynamic update:
+{}",
+        offenders.join(
+            "
+"
+        )
+    );
+}
+
+/// Страж динамического обновления видит разрешение под любой записью: подставленное
+/// значение, значение через пробел, ключ отдельным аргументом и `-Dynamic+`; запреты
+/// пропускает.
+#[test]
+fn the_dynamic_update_guard_sees_an_allowance_in_any_spelling() {
+    for sample in [
+        "fn f(m: &str) -> String { format!(\"--dynamic={}\", m) }
+",
+        "fn f() -> &'static str { \"--dynamic auto\" }
+",
+        "fn f(a: &mut Vec<String>) { a.push(\"--dynamic\".into()); a.push(\"auto\".into()); }
+",
+        "fn f() -> &'static str { \"-Dynamic+\" }
+",
+        "fn f() -> &'static str { \"--dynamic-enable\" }
+",
+    ] {
+        assert!(
+            !dynamic_update_allowances(&production_tokens_of(sample)).is_empty(),
+            "{sample}"
+        );
+    }
+    let forbidding = production_tokens_of(
+        "fn f(a: &mut Vec<String>) { a.push(\"-Dynamic-\".into()); a.push(\"--dynamic=disable\".into()); a.push(\" --dynamic-disable\".into()); }
+",
+    );
+    assert!(
+        dynamic_update_allowances(&forbidding).is_empty(),
+        "{forbidding}"
     );
 }
 

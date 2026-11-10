@@ -351,7 +351,7 @@ fn init_designer_creates_infobase_and_skips_edt_workspace() {
         calls[1].ends_with(&format!("/LoadConfigFromFiles {main}")),
         "{calls:?}"
     );
-    assert!(calls[2].ends_with("/UpdateDBCfg"), "{calls:?}");
+    assert!(calls[2].ends_with("/UpdateDBCfg -Dynamic-"), "{calls:?}");
 }
 
 #[test]

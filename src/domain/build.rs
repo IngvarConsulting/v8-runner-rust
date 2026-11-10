@@ -23,6 +23,10 @@ pub struct BuildResult {
     /// разбирала: полная отправка, превью без разбора, отказ до него.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub detection: std::collections::BTreeMap<String, crate::domain::git_worktree::ChangeDetection>,
+    /// Исход `--sessions force`: завершённые сеансы, блокировка начала сеансов и сообщение;
+    /// без `force` поля нет (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<crate::domain::sessions::SessionsOutcome>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
