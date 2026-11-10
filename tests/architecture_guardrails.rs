@@ -6099,6 +6099,39 @@ fn the_purpose_bucket_finder_sees_a_second_order_under_another_name() {
 /// `push` и в расширении-инструменте; страж ловит новую копию под любым именем функции.
 /// Исключения названы в `act.rs`: `upload` применяет в своей грамматике шагов, а
 /// `infobase create` собирает ничью ещё базу.
+/// Страж от возврата динамического обновления (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`):
+/// единственные владельцы ключей — построители команд обновления в `platform/designer.rs`,
+/// `platform/ibcmd.rs` и `use_cases/apply/act.rs`, и все три только запрещают его. Ни один
+/// производственный модуль не называет режим, который его разрешает, и не передаёт `--dynamic`
+/// отдельным ключом с произвольным значением.
+#[test]
+fn no_db_update_allows_dynamic_update() {
+    let enabling = [
+        "Dynamic+",
+        "--dynamic-enable",
+        "--dynamic=auto",
+        "--dynamic=force",
+        "--dynamic=prompt",
+        "\"--dynamic\"",
+    ];
+    let offenders = collect_rust_files(&repo_path("src"))
+        .into_iter()
+        .filter_map(|file| {
+            let tokens = production_tokens(&file);
+            let found: Vec<_> = enabling
+                .iter()
+                .filter(|needle| tokens.contains(*needle))
+                .collect();
+            (!found.is_empty()).then(|| format!("{}: {found:?}", file.display()))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "these modules allow dynamic database configuration update:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn the_apply_act_has_one_owner() {
     let allowed = [

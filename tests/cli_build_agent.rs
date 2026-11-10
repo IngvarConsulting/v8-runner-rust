@@ -514,7 +514,7 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
     );
     assert_eq!(
         lines.get(3).map(String::as_str),
-        Some("config update-db-cfg"),
+        Some("config update-db-cfg --dynamic-disable"),
         "{lines:?}"
     );
     assert_eq!(
@@ -568,7 +568,9 @@ fn an_agent_push_without_apply_leaves_the_update_to_apply() {
         "{lines:?}"
     );
     assert!(
-        !lines.iter().any(|line| line == "config update-db-cfg"),
+        !lines
+            .iter()
+            .any(|line| line == "config update-db-cfg --dynamic-disable"),
         "{lines:?}"
     );
     let before = lines.len();
@@ -592,7 +594,7 @@ fn an_agent_push_without_apply_leaves_the_update_to_apply() {
     assert!(
         lines[before..]
             .iter()
-            .any(|line| line == "config update-db-cfg"),
+            .any(|line| line == "config update-db-cfg --dynamic-disable"),
         "{lines:?}"
     );
 }

@@ -210,20 +210,6 @@ impl IbcmdConnection {
     }
 }
 
-/// Dynamic apply mode supported by `ibcmd config apply`.
-#[derive(Debug, Clone, Copy)]
-pub enum DynamicUpdateMode {
-    Auto,
-}
-
-impl DynamicUpdateMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            DynamicUpdateMode::Auto => "auto",
-        }
-    }
-}
-
 /// Result status returned by `ibcmd infobase create`. `Failed` and `Unconfirmed` are failures
 /// carried inside `Ok`, so the create result — and the interruption it deferred — stays with
 /// them.
@@ -595,18 +581,20 @@ impl<'a> IbcmdDsl<'a> {
         }
     }
 
-    /// Applies imported configuration changes to the infobase.
+    /// `config apply [--extension <name>] --force --dynamic=disable`: применяет загруженную
+    /// конфигурацию к базе данных. Динамическое обновление запрещено всегда
+    /// (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`): если обычное невозможно, утилита
+    /// отказывает, и отказ доходит до вызывающего как есть.
     pub fn config_apply(
         &self,
         extension: Option<&str>,
-        dynamic: DynamicUpdateMode,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "apply"]);
         if let Some(extension) = extension {
             push_option_value(&mut args, "--extension", extension);
         }
         args.push("--force".to_owned());
-        push_option_value(&mut args, "--dynamic", dynamic.as_str());
+        args.push("--dynamic=disable".to_owned());
         self.run(&args)
     }
 
@@ -845,7 +833,7 @@ fn wipes_the_export_directory(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        wipes_the_export_directory, DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdError,
+        wipes_the_export_directory, IbcmdConnection, IbcmdDsl, IbcmdError,
         IbcmdInfobaseCreateStatus,
     };
     use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
@@ -1020,13 +1008,49 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        dsl.config_apply(None, DynamicUpdateMode::Auto)
-            .expect("apply");
+        dsl.config_apply(None).expect("apply");
 
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("apply"));
         assert!(args.contains("--force"));
-        assert!(args.contains("--dynamic\nauto"));
+        assert!(args.contains("--force\n--dynamic=disable"), "{args}");
+    }
+
+    /// Каждое `config apply` запрещает динамическое обновление — у основной конфигурации и
+    /// у расширения (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
+    #[test]
+    fn config_apply_always_forbids_dynamic_update() {
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.config_apply(None).expect("apply the configuration");
+        dsl.config_apply(Some("ext")).expect("apply the extension");
+
+        let requests = runner.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        for (request, extension) in requests.iter().zip([None, Some("ext")]) {
+            let args = &request.args;
+            let apply = args
+                .iter()
+                .position(|arg| arg == "apply")
+                .expect("config apply");
+            assert_eq!(args[apply - 1], "config", "{args:?}");
+            let tail: Vec<&str> = args[apply + 1..].iter().map(String::as_str).collect();
+            let expected: Vec<&str> = match extension {
+                Some(name) => vec!["--extension", name, "--force", "--dynamic=disable"],
+                None => vec!["--force", "--dynamic=disable"],
+            };
+            assert_eq!(tail, expected, "{args:?}");
+            assert!(
+                !args.iter().any(|arg| arg.contains("auto")),
+                "dynamic update must stay forbidden: {args:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1663,9 +1687,7 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        let result = dsl
-            .config_apply(None, DynamicUpdateMode::Auto)
-            .expect("apply");
+        let result = dsl.config_apply(None).expect("apply");
 
         assert_eq!(result.process.exit_code, 7);
         assert_eq!(result.process.stdout.trim(), "out");

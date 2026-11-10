@@ -25,7 +25,6 @@ use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::designer::DesignerDsl;
-use crate::platform::ibcmd::DynamicUpdateMode;
 use crate::platform::process::ProcessRunner;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{argument, run_critical, AgentHandle};
@@ -38,18 +37,18 @@ use crate::use_cases::interruption::{self, Deferrals};
 /// Чем применяется: процесс платформы или команда в открытой сессии агента. Процессы
 /// владелец строит сам — с классом прерывания критической фазы.
 pub(crate) enum Applier<'a> {
-    /// `1cv8 DESIGNER /UpdateDBCfg [-Extension X]`; журнал платформы — `log_file`.
+    /// `1cv8 DESIGNER /UpdateDBCfg [-Extension X] -Dynamic-`; журнал платформы — `log_file`.
     Designer {
         binary: &'a Path,
         runner: &'a dyn ProcessRunner,
         log_file: PathBuf,
     },
-    /// `ibcmd config apply [--extension X] --force --dynamic auto`.
+    /// `ibcmd config apply [--extension X] --force --dynamic=disable`.
     Ibcmd {
         binary: &'a Path,
         runner: &'a dyn ProcessRunner,
     },
-    /// `config update-db-cfg [--extension=X]` в сессии агента.
+    /// `config update-db-cfg [--extension=X] --dynamic-disable` в сессии агента.
     Agent {
         handle: &'a mut AgentHandle,
         wait: &'a WaitPolicy,
@@ -168,20 +167,30 @@ pub(crate) fn apply(
                 runner,
                 InterruptionSafetyClass::CriticalNonAbortable,
             )?
-            .config_apply(subject.extension, DynamicUpdateMode::Auto)
+            .config_apply(subject.extension)
             .map_err(AppError::from)?;
             deferrals.note_result("apply", &result);
             ensure_succeeded("apply", subject.kind.as_str(), subject.name, &result)
         }
         Applier::Agent { handle, wait } => {
-            let mut command = String::from("config update-db-cfg");
-            if let Some(extension) = subject.extension {
-                // Запись в `String` не отказывает.
-                let _ = write!(command, " --extension={}", argument(extension));
-            }
+            let command = agent_update_command(subject.extension);
             run_critical(handle, "update_db_cfg", &command, wait, deferrals).map(|_| ())
         }
     }
+}
+
+/// `config update-db-cfg [--extension=X] --dynamic-disable`. Динамическое обновление
+/// запрещено всегда, как у Конфигуратора (`-Dynamic-`) и `ibcmd` (`--dynamic=disable`):
+/// без ключа платформа его разрешает (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`). Если
+/// обычное обновление невозможно, агент отказывает, и отказ доходит до команды как есть.
+fn agent_update_command(extension: Option<&str>) -> String {
+    let mut command = String::from("config update-db-cfg");
+    if let Some(extension) = extension {
+        // Запись в `String` не отказывает.
+        let _ = write!(command, " --extension={}", argument(extension));
+    }
+    command.push_str(" --dynamic-disable");
+    command
 }
 
 #[cfg(test)]
@@ -191,7 +200,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{apply, Applier, Subject, SubjectKind};
+    use super::{agent_update_command, apply, Applier, Subject, SubjectKind};
     use crate::config::model::{AppConfig, InfobaseConfig, SourceFormat, TestsConfig, ToolsConfig};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessInterruptionSafety, ProcessRequest,
@@ -300,5 +309,19 @@ mod tests {
             "{args:?}"
         );
         assert_eq!(*safety, ProcessInterruptionSafety::CriticalNonAbortable);
+    }
+
+    /// Агент обновляет конфигурацию базы данных только с запретом динамического обновления —
+    /// у основной конфигурации и у расширения (`INV.USE-CASES.A-DB-UPDATE-NEVER-GOES-DYNAMIC`).
+    #[test]
+    fn an_agent_update_always_forbids_dynamic_update() {
+        assert_eq!(
+            agent_update_command(None),
+            "config update-db-cfg --dynamic-disable"
+        );
+        assert_eq!(
+            agent_update_command(Some("ext")),
+            "config update-db-cfg --extension=ext --dynamic-disable"
+        );
     }
 }
