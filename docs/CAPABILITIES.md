@@ -250,8 +250,9 @@ DemoTrd различались цвета диаграмм в девяти фа�
 
 | Род | Коды | Код выхода |
 | --- | --- | --- |
-| `capability` | `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой цели), `soon` (пока не умеет) | 2 |
-| `environment` | `environment_unavailable` | 2 |
+| `capability` | `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой цели), `soon` (пока не умеет), `live_agent_off` (`agent hold` при `live: false`) | 2 |
+| `environment` | `environment_unavailable`, `live_agent_job` (`agent hold` в Job без права выхода) | 2 |
+| `environment` | `agent_limit` (`agent hold` сверх `live-max`) | 3 |
 | `validation` | `invalid_argument`, `unsupported_value` (только MCP) | 2 |
 | `workspace` | `workspace_busy`, `infobase_busy` | 3 |
 | `runtime` | `runtime_failure` | 3 |
@@ -678,6 +679,32 @@ v8-runner cluster restart [--dry-run]
   повтора. `status` работает без замка `workPath`. Пока кластер базы работает, автономный сервер над той же БД не
   поднимается, а другая база над той же вашей БД не создаётся.
 
+
+### `agent`
+
+```text
+v8-runner agent hold (--holder-pid <pid> [--holder-started-at <RFC3339>] | --ttl <seconds>)
+v8-runner agent release (--holder-pid <pid> [--holder-started-at <RFC3339>] | --ttl <seconds>)
+v8-runner agent stop [--all]
+v8-runner agent status
+```
+
+- Управляемый агент Конфигуратора живой (`tools.designer_agent.live`): его процесс и сессию SSH держит сторож, и
+  следующая команда той же рабочей копии берёт его без подъёма `1cv8`. Живой агент занимает сеанс лицензии, пока жив;
+  без держателя он закрывается после 15 минут простоя.
+- `agent hold` ставит держателя на живого агента цели проекта (`--config`, `--infobase`) и поднимает его, если его
+  нет. Держатель — процесс (`--holder-pid`; время старта сверяется с точностью до секунды) или срок (`--ttl`): агент
+  закрывается, когда держатель пропал и простой истёк. Повторный `hold` того же держателя второй отметки не ставит,
+  срок он продлевает. Отказы: `live_agent_off` при `live: false`, `agent_limit` — живых агентов уже `live-max` и
+  снять простаивающего без держателей некого (ответ называет живых агентов), `live_agent_job` — раннер в Job, из
+  которого сторож не может выйти. Ни один отказ платформу не запускает.
+- `agent release` снимает отметку держателя; без отметки или без агента — успех с `released: false`.
+- `agent stop` снимает живого агента цели проекта, `--all` — всех живых агентов учётной записи ОС. Некритическую
+  команду агента стоп бросает, критическую доводит до исхода.
+- `agent status` называет живых агентов учётной записи: базу (без учётных данных), держателей, занят ли агент или
+  простаивает. Работает без замка `workPath` и ничего не поднимает.
+- Подключённого агента (`attach`) и шлюз автономного сервера раннер живыми не держит: `hold` для них — отказ
+  `capability_unavailable`.
 
 ### `tools download`
 

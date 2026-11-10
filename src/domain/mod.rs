@@ -34,6 +34,8 @@ pub mod init;
 pub mod issue;
 /// Launch domain models.
 pub mod launch;
+/// Ответ команд `agent hold`, `release`, `stop` и `status`.
+pub mod live_agent;
 /// Artifact load/import domain models.
 pub mod load;
 /// Следующий шаг, который называет отказ.

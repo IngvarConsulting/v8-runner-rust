@@ -41,6 +41,10 @@ pub enum CommandName {
     ClusterStatus,
     ClusterStop,
     ClusterRestart,
+    AgentHold,
+    AgentRelease,
+    AgentStop,
+    AgentStatus,
     Status,
 }
 
@@ -80,6 +84,10 @@ impl CommandName {
             Self::ClusterStatus => "cluster status",
             Self::ClusterStop => "cluster stop",
             Self::ClusterRestart => "cluster restart",
+            Self::AgentHold => "agent hold",
+            Self::AgentRelease => "agent release",
+            Self::AgentStop => "agent stop",
+            Self::AgentStatus => "agent status",
             Self::Status => "status",
         }
     }

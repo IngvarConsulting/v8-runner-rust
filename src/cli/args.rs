@@ -126,8 +126,7 @@ pub enum Command {
     Status(StatusArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
-    /// The live Designer agent; hidden until it has commands of its own (#577)
-    #[command(hide = true)]
+    /// Hold, release, stop or list the live Designer agent that outlives commands
     Agent(AgentArgs),
 }
 
@@ -137,8 +136,48 @@ pub struct AgentArgs {
     pub command: AgentCommand,
 }
 
+/// Who holds the live agent: a running process, or a term in seconds.
+#[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentHolderArgs {
+    /// Process that holds the agent while it runs
+    #[arg(long, value_name = "PID", required_unless_present = "ttl", conflicts_with = "ttl")]
+    pub holder_pid: Option<u32>,
+
+    /// Start time of the holder process (UTC, RFC 3339); a pid given to another process is
+    /// refused
+    #[arg(long, value_name = "RFC3339", requires = "holder_pid", value_parser = parse_rfc3339)]
+    pub holder_started_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Hold the agent for this many seconds; a repeated hold extends the term
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub ttl: Option<u64>,
+}
+
+fn parse_rfc3339(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .map_err(|error| format!("not an RFC 3339 time: {error}"))
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentStopArgs {
+    /// Stop every live agent of this OS account, not only the one of this project
+    #[arg(long)]
+    pub all: bool,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum AgentCommand {
+    /// Hold the live agent of this project, starting it if there is none
+    Hold(AgentHolderArgs),
+    /// Remove the holder's mark from the live agent of this project
+    Release(AgentHolderArgs),
+    /// Stop the live agent of this project, or every one with --all
+    Stop(AgentStopArgs),
+    /// List the live agents of this OS account: base, holders, busy or idle
+    Status,
     /// The keeper of one live agent: the runner starts it itself, with the start request on
     /// stdin
     #[command(hide = true)]
@@ -1904,7 +1943,7 @@ mod tests {
     }
 
     /// Скрытые служебные подкоманды (путь, имя): сторож живого агента (#577).
-    const INTERNAL_COMMANDS: &[(&[&str], &str)] = &[(&[], "agent"), (&["agent"], "keeper")];
+    const INTERNAL_COMMANDS: &[(&[&str], &str)] = &[(&["agent"], "keeper")];
 
     /// Скрытое имя дерева разбора: где живёт, что скрыто и чьё оно, если это псевдоним.
     type Hidden = (Vec<String>, crate::cli::synonyms::Previous, Option<String>);

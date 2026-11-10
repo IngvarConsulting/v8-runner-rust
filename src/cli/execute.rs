@@ -282,7 +282,14 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
-        Command::Agent(_) => unreachable!("agent commands are handled outside cli::execute"),
+        Command::Agent(args) => execute_agent(
+            config,
+            &args.command,
+            presenter,
+            clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
     }
 }
 
@@ -806,7 +813,15 @@ pub fn command_name(command: &Command) -> CommandName {
         },
         Command::Status(_) => CommandName::Status,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
-        Command::Agent(_) => unreachable!("agent commands do not map to CLI command names"),
+        Command::Agent(args) => match args.command {
+            crate::cli::args::AgentCommand::Hold(_) => CommandName::AgentHold,
+            crate::cli::args::AgentCommand::Release(_) => CommandName::AgentRelease,
+            crate::cli::args::AgentCommand::Stop(_) => CommandName::AgentStop,
+            crate::cli::args::AgentCommand::Status => CommandName::AgentStatus,
+            crate::cli::args::AgentCommand::Keeper(_) => {
+                unreachable!("the keeper is handled before config loading")
+            }
+        },
     }
 }
 
@@ -1715,6 +1730,182 @@ fn standalone_text(
         lines.push("  the recorded process is gone".to_owned());
     }
     lines
+}
+
+/// `agent hold|release|stop|status` (#577). `status` только спрашивает сторожей и замка
+/// рабочего каталога не берёт, как `cluster status`; остальные берут его, базу не трогая.
+fn execute_agent(
+    config: &AppConfig,
+    command: &crate::cli::args::AgentCommand,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::{AgentCommand, AgentHolderArgs};
+    use crate::use_cases::live_agent::{self, HolderRequest};
+
+    fn holder(args: &AgentHolderArgs) -> HolderRequest {
+        match (args.holder_pid, args.ttl) {
+            (Some(pid), _) => HolderRequest::Process {
+                pid,
+                started_at: args.holder_started_at,
+            },
+            (None, Some(seconds)) => HolderRequest::Ttl { seconds },
+            (None, None) => unreachable!("clap requires --holder-pid or --ttl"),
+        }
+    }
+    fn present<T: Serialize>(
+        presenter: &Presenter,
+        name: CommandName,
+        outcome: Result<T, AppError>,
+        duration_ms: impl FnOnce(&T) -> u64,
+        text: impl FnOnce(&T) -> Vec<String>,
+    ) -> Result<(), UseCaseError> {
+        match outcome {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        name.as_str(),
+                        duration_ms(&result),
+                        result,
+                    ));
+                } else {
+                    for line in text(&result) {
+                        presenter.print_bare(&line);
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let error = UseCaseError::from(error);
+                crate::cli::output::print_command_use_case_error(presenter, name, &error);
+                Err(error)
+            }
+        }
+    }
+
+    let name = match command {
+        AgentCommand::Hold(_) => CommandName::AgentHold,
+        AgentCommand::Release(_) => CommandName::AgentRelease,
+        AgentCommand::Stop(_) => CommandName::AgentStop,
+        AgentCommand::Status => CommandName::AgentStatus,
+        AgentCommand::Keeper(_) => unreachable!("the keeper is handled before config loading"),
+    };
+    let context = cli_context(config, name, cancellation);
+    if let AgentCommand::Status = command {
+        return present(
+            presenter,
+            name,
+            live_agent::status(&context, config),
+            |result| result.duration_ms,
+            render_agent_status_text,
+        );
+    }
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        name,
+        BaseAccess::Untouched,
+        clean_before_execution,
+        dry_run,
+        || match command {
+            AgentCommand::Hold(args) => present(
+                presenter,
+                name,
+                live_agent::hold(&context, config, &holder(args)),
+                |result| result.duration_ms,
+                |result| {
+                    vec![format!(
+                        "{} the live agent {} (keeper pid {}), holders: {}",
+                        if result.reused {
+                            "holding"
+                        } else {
+                            "started and holding"
+                        },
+                        result.key,
+                        result.keeper_pid,
+                        holders_text(&result.holders)
+                    )]
+                },
+            ),
+            AgentCommand::Release(args) => present(
+                presenter,
+                name,
+                live_agent::release(&context, config, &holder(args)),
+                |result| result.duration_ms,
+                |result| {
+                    vec![if result.released {
+                        format!("released; holders left: {}", holders_text(&result.holders))
+                    } else {
+                        "nothing to release".to_owned()
+                    }]
+                },
+            ),
+            AgentCommand::Stop(args) => present(
+                presenter,
+                name,
+                live_agent::stop(&context, config, args.all),
+                |result| result.duration_ms,
+                |result| {
+                    if result.stopped.is_empty() {
+                        vec!["nothing to stop".to_owned()]
+                    } else {
+                        result
+                            .stopped
+                            .iter()
+                            .map(|agent| format!("stopped the live agent {}", agent.key))
+                            .collect()
+                    }
+                },
+            ),
+            AgentCommand::Status | AgentCommand::Keeper(_) => unreachable!("handled above"),
+        },
+    )
+}
+
+fn holders_text(holders: &[crate::domain::capability::LiveAgentHolder]) -> String {
+    use crate::domain::capability::LiveAgentHolder;
+    if holders.is_empty() {
+        return "none".to_owned();
+    }
+    holders
+        .iter()
+        .map(|holder| match holder {
+            LiveAgentHolder::Process { pid, .. } => format!("process {pid}"),
+            LiveAgentHolder::Ttl { until } => format!("until {until}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_agent_status_text(result: &crate::domain::live_agent::AgentStatusResult) -> Vec<String> {
+    if result.agents.is_empty() {
+        return vec!["no live agents".to_owned()];
+    }
+    result
+        .agents
+        .iter()
+        .map(|agent| {
+            let state = match (&agent.busy, agent.connected) {
+                (Some(command), _) => format!("busy with '{command}'"),
+                (None, true) => "in a command session".to_owned(),
+                (None, false) => format!("idle {} s", agent.idle_ms / 1000),
+            };
+            format!(
+                "{}{} on {}: {state}, holders: {}{}",
+                agent.key,
+                if agent.this_project {
+                    " (this project)"
+                } else {
+                    ""
+                },
+                agent.infobase.as_deref().unwrap_or("an unknown infobase"),
+                holders_text(&agent.holders),
+                if agent.closing { ", closing" } else { "" }
+            )
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

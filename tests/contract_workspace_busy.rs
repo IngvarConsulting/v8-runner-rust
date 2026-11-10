@@ -40,6 +40,10 @@ const LEAVES_WITHOUT_THE_LOCK: &[(&str, &str)] = &[
         "читает записи и спрашивает rac без замка, чтобы отвечать и пока идёт другая команда",
     ),
     (
+        "agent status",
+        "спрашивает сторожей без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
         "platforms",
         "смотрит установки платформы и ничего не запускает",
     ),
@@ -84,6 +88,17 @@ fn without_preview() -> Vec<(&'static str, Vec<&'static str>, &'static str)> {
         ("test va", vec!["test", "va"], "test"),
         ("status", vec!["status"], "status"),
         ("diff", vec!["diff"], "diff"),
+        (
+            "agent hold",
+            vec!["agent", "hold", "--ttl", "60"],
+            "agent hold",
+        ),
+        (
+            "agent release",
+            vec!["agent", "release", "--ttl", "60"],
+            "agent release",
+        ),
+        ("agent stop", vec!["agent", "stop"], "agent stop"),
     ]
 }
 

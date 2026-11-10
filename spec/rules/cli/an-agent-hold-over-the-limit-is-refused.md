@@ -1,7 +1,8 @@
 ---
 id: INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/cli_live_agent_portable.rs::agent_hold_refuses_with_live_off_and_over_the_limit
+  - tests/agent_keeper.rs::a_conditional_stop_spares_an_agent_in_use
 ---
 
 # Удержание сверх предела отказывает отдельным кодом
@@ -12,5 +13,7 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
 Агента, который выполняет команду, он не снимает. Если таких
 нет, `agent hold` отказывает с кодом `agent_limit`, платформу не запускает и называет живых
 агентов с их держателями. Подсчёт идёт под замком учётной записи на машине, так что одновременные `hold` вместе предел не превысят. Коды
-`agent_limit`, `live_agent_off` и `live_agent_job` войдут в таблицу и схему `CTR.WIRE.COMMAND-ENVELOPE` вместе с
-реализацией, со следующей версией формы.
+`agent_limit`, `live_agent_off` и `live_agent_job` названы в таблице и схеме
+`CTR.WIRE.COMMAND-ENVELOPE` версии 5. Агента, который успел открыть сессию команды между
+вопросом о нём и снятием, раннер тоже не снимает: условие «простаивает и без держателей»
+проверяет сам сторож под своим замком.

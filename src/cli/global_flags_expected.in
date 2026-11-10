@@ -31,6 +31,10 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "diff",
     "mcp serve stdio",
     "mcp serve http",
+    "agent hold",
+    "agent release",
+    "agent stop",
+    "agent status",
     "agent keeper",
 ];
 

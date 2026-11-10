@@ -1,7 +1,11 @@
 ---
 id: INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/cli_live_agent.rs::live_off_removes_the_live_agent_and_works_one_shot
+  - tests/cli_live_agent_portable.rs::live_off_removes_the_live_agent_on_any_os
+  - tests/cli_live_agent_portable.rs::agent_hold_refuses_with_live_off_and_over_the_limit
+  - src/config/loader.rs::live_max_zero_is_refused_and_names_live_false
+  - src/config/loader.rs::live_keys_next_to_attach_are_refused
 ---
 
 # Живой агент включён, пока его не выключили

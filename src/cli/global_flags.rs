@@ -324,6 +324,27 @@ const LEAVES: &[Leaf] = &[
         preview: Preview::Absent("the server starts nothing by itself"),
         base: Base::Resolves,
     },
+    // Живой агент цели проекта: его ключ складывается из базы, поэтому базу выбирают.
+    Leaf {
+        path: "agent hold",
+        preview: Preview::Absent("it holds or starts the live agent: nothing to preview"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "agent release",
+        preview: Preview::Absent("it removes a holder mark and starts nothing"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "agent stop",
+        preview: Preview::Absent("it stops live agents and starts nothing"),
+        base: Base::Resolves,
+    },
+    Leaf {
+        path: "agent status",
+        preview: Preview::Absent("it starts nothing: the answer is the state itself"),
+        base: Base::Resolves,
+    },
     // Сторожа запускает сам раннер: он держит агента, которого ему назвали, и базы не выбирает.
     Leaf {
         path: "agent keeper",

@@ -1,7 +1,7 @@
 ---
 id: INV.CLI.AN-AGENT-HOLD-IS-IDEMPOTENT-PER-HOLDER
-check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/577
+check:
+  - tests/cli_live_agent_portable.rs::agent_hold_is_idempotent_and_release_removes_the_mark
 ---
 
 # Повторное удержание тем же держателем ничего не добавляет

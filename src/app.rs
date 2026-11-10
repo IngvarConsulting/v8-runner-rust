@@ -116,8 +116,11 @@ pub fn run() -> i32 {
         return run_mcp_command(&cli, args);
     }
 
-    if let Command::Agent(args) = &cli.command {
-        return run_agent_command(&cli, args);
+    if let Command::Agent(crate::cli::args::AgentArgs {
+        command: crate::cli::args::AgentCommand::Keeper(keeper),
+    }) = &cli.command
+    {
+        return run_agent_keeper(&cli, keeper);
     }
 
     let color_mode = color_mode(cli.no_color);
@@ -289,6 +292,7 @@ pub fn run() -> i32 {
         | Command::Launch(_)
         | Command::Publish(_)
         | Command::Platforms
+        | Command::Agent(_)
         | Command::Status(_) => execute::execute_command(
             &config,
             &cli.command,
@@ -315,7 +319,6 @@ pub fn run() -> i32 {
             ),
         },
         Command::Mcp(_) => unreachable!("mcp commands are handled before CLI presenter setup"),
-        Command::Agent(_) => unreachable!("agent commands are handled before CLI presenter setup"),
     };
 
     match result {
@@ -376,6 +379,14 @@ pub(crate) fn load_cli_config(
             operation,
             cli.dry_run,
         )
+    } else if matches!(
+        &cli.command,
+        Command::Agent(crate::cli::args::AgentArgs {
+            command: crate::cli::args::AgentCommand::Status
+        })
+    ) {
+        // `agent status` только спрашивает сторожей: рабочего каталога он не готовит.
+        crate::config::loader::load_config_for_inspection(config_path, workdir, &selector, true)
     } else if matches!(&cli.command, Command::Platforms) {
         // `platforms` только читает: рабочего каталога он не готовит.
         crate::config::loader::load_config_for_inspection(config_path, workdir, &selector, true)
@@ -418,7 +429,9 @@ fn command_name(command: &Command) -> &'static str {
         // Сервер отвечает голой строкой в stderr, имени конверта ему не нужно; здесь оно
         // есть, чтобы имя было у всякой команды.
         Command::Mcp(_) => "mcp serve",
-        Command::Agent(_) => "agent keeper",
+        Command::Agent(crate::cli::args::AgentArgs {
+            command: crate::cli::args::AgentCommand::Keeper(_),
+        }) => "agent keeper",
         _ => execute::command_name(command).as_str(),
     }
 }
@@ -871,18 +884,14 @@ pub(crate) fn command_line_target(
 }
 
 /// Сторож живого агента: его вывод уходит в журнал сторожа, ответа команды у него нет.
-fn run_agent_command(cli: &Cli, args: &crate::cli::args::AgentArgs) -> i32 {
+fn run_agent_keeper(cli: &Cli, keeper: &crate::cli::args::AgentKeeperArgs) -> i32 {
     let level = cli.log_level.as_deref().unwrap_or("info");
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .with_env_filter(tracing_subscriber::EnvFilter::new(level))
         .try_init();
-    match &args.command {
-        crate::cli::args::AgentCommand::Keeper(keeper) => {
-            crate::platform::agent_keeper::run_keeper(&keeper.key)
-        }
-    }
+    crate::platform::agent_keeper::run_keeper(&keeper.key)
 }
 
 fn run_mcp_command(cli: &Cli, args: &crate::cli::args::McpArgs) -> i32 {

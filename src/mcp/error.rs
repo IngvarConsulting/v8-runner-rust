@@ -32,7 +32,10 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
             | UseCaseErrorKind::NonFastForward
-            | UseCaseErrorKind::UntrackedBase => Self::Runtime,
+            | UseCaseErrorKind::UntrackedBase
+            | UseCaseErrorKind::AgentLimit
+            | UseCaseErrorKind::LiveAgentOff
+            | UseCaseErrorKind::LiveAgentJob => Self::Runtime,
             UseCaseErrorKind::InvalidOutput
             | UseCaseErrorKind::Cancelled(_)
             | UseCaseErrorKind::TimedOut => Self::Platform,
@@ -65,7 +68,10 @@ impl McpBusinessError {
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
             | UseCaseErrorKind::NonFastForward
-            | UseCaseErrorKind::UntrackedBase => McpErrorCode::RuntimeFailure,
+            | UseCaseErrorKind::UntrackedBase
+            | UseCaseErrorKind::AgentLimit
+            | UseCaseErrorKind::LiveAgentOff
+            | UseCaseErrorKind::LiveAgentJob => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::InvalidOutput
             | UseCaseErrorKind::Cancelled(_)
             | UseCaseErrorKind::TimedOut => McpErrorCode::PlatformFailure,
