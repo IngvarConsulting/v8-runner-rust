@@ -223,6 +223,7 @@ enum Take<'a> {
 }
 
 /// Чем кончилось ожидание поднятого сторожа.
+#[derive(Debug)]
 enum Started {
     Answered,
     /// Сторож вышел, не ответив: ключ ищется заново.
@@ -630,7 +631,7 @@ impl KeeperClient {
     ) -> Result<Started, KeeperStartError> {
         loop {
             if cancel.is_cancelled() {
-                self.abandon_start(pid, deadline);
+                self.abandon_start(pid);
                 return Err(cancelled_waiting());
             }
             match self.status() {
@@ -654,18 +655,13 @@ impl KeeperClient {
         }
     }
 
-    /// Команду отменили, пока поднятый ею сторож поднимал агента: сторожа снимают безусловно,
-    /// чтобы не остался свежий агент, которого никто не возьмёт. Канал появляется, когда агент
-    /// поднят, поэтому сторожа ждут до ответа, ухода или срока подъёма.
-    fn abandon_start(&self, pid: u32, deadline: Instant) {
-        while Instant::now() < deadline && process_facts(pid).is_some() {
-            if self.status().is_ok() {
-                if let Err(error) = self.stop(&CancellationToken::new()) {
-                    tracing::warn!(%error, "the keeper started by a cancelled command was not stopped");
-                }
-                return;
-            }
-            std::thread::sleep(WAIT_STEP);
+    /// Команду отменили, пока поднятый ею сторож поднимал агента: процесс сторожа завершается
+    /// сразу, без ожидания — агент уходит вместе со сторожем
+    /// (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`), и свежего агента, которого никто не
+    /// возьмёт, не остаётся. Его запись уберёт обычная уборка записей.
+    fn abandon_start(&self, pid: u32) {
+        if let Err(error) = terminate_keeper(pid) {
+            tracing::warn!(pid, %error, "the keeper started by a cancelled command was not terminated");
         }
         self.forget_start();
     }
@@ -1120,6 +1116,47 @@ fn note_deferral(reason: ProcessInterruptionReason) {
         "{}",
         crate::platform::process::CRITICAL_INTERRUPTION_DEFERRED
     );
+}
+
+/// Завершает процесс сторожа, которого эта команда сама запустила.
+#[cfg(windows)]
+fn terminate_keeper(pid: u32) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: plain values; the handle is checked and closed once.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let terminated = TerminateProcess(handle, 1);
+        let error = std::io::Error::last_os_error();
+        CloseHandle(handle);
+        if terminated == 0 {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// Завершает процесс сторожа, которого эта команда сама запустила.
+#[cfg(unix)]
+fn terminate_keeper(pid: u32) -> std::io::Result<()> {
+    let pid = libc::pid_t::try_from(pid).map_err(std::io::Error::other)?;
+    // SAFETY: a plain signal to one process id that this command started.
+    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_keeper(_pid: u32) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this system cannot terminate a process",
+    ))
 }
 
 /// Подключение к каналу сторожа не дольше `patience`.
@@ -1734,6 +1771,39 @@ mod tests {
             !client.interrupted(),
             "the finished command keeps the agent"
         );
+    }
+
+    /// Отмена, пока поднятый командой сторож поднимает агента, возвращается сразу и завершает
+    /// его процесс: свежего агента не остаётся, и команда не ждёт подъёма агента.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn a_cancelled_start_returns_at_once_and_terminates_the_keeper() {
+        let state = if cfg!(unix) {
+            tempfile::tempdir_in("/tmp").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        };
+        let home = KeeperHome::open(state.path(), &"0c".repeat(16)).unwrap();
+        let mut keeper = a_live_process();
+        let client = KeeperClient::detached(home, keeper.id()).unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let started = Instant::now();
+        let outcome = client.await_start(keeper.id(), started + Duration::from_secs(60), &cancel);
+        assert!(
+            matches!(outcome, Err(KeeperStartError::Agent(AgentError::NotSent { .. }))),
+            "{outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the cancellation returned at once: {:?}",
+            started.elapsed()
+        );
+        let exited = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            keeper.try_wait().ok().flatten().is_some()
+        });
+        assert!(exited, "the keeper the command started is terminated");
     }
 
     /// Запись «запускается» без процесса сторожа предел уже занимает: на пределе её ждут, а не
