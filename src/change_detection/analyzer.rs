@@ -9,7 +9,8 @@ use crate::change_detection::git_tree::{
     BlobHashError, BlobHasher, GitSource, ObserveError, ObservedFile, Spelling,
 };
 use crate::change_detection::hash_storage::{
-    HashStorage, StorageDelta, StorageError, StorageSnapshot, StorageSummary, StoredFileState,
+    HashKind, HashStorage, StorageDelta, StorageError, StorageSnapshot, StorageSummary,
+    StoredFileState,
 };
 use crate::change_detection::scanner::{self, ScanError, ScanScope};
 use crate::domain::git_worktree::{ChangeDetection, GitWorktree, ScanReason};
@@ -204,6 +205,8 @@ fn analyze_snapshot(
     source: ChangeSource<'_, '_>,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Found {
+    // A memory of another hasher compares with nothing: the set loads whole (#575).
+    let other_kind = |kind: HashKind| !snapshot.entries.is_empty() && snapshot.hash_kind != kind;
     let reason = match source {
         ChangeSource::Scan(reason) => reason,
         ChangeSource::Git(mut git) => {
@@ -213,10 +216,16 @@ fn analyze_snapshot(
                     hidden: Box::new(hidden),
                 }));
             }
-            match observe_by_git(context, snapshot, &mut git, interrupted) {
+            let detection = ChangeDetection::git(git.view.fsmonitor);
+            let spelling = Spelling::new(&snapshot.entries, git.view.ignore_case);
+            match observe_by_git(context, snapshot, &spelling, &mut git, interrupted) {
+                Ok(_) if other_kind(HashKind::GitBlob) => {
+                    return Found {
+                        outcome: Ok(AnalysisOutcome::Fallback),
+                        detection: Some(detection),
+                    };
+                }
                 Ok(observed) => {
-                    let detection = ChangeDetection::git(git.view.fsmonitor);
-                    let spelling = Spelling::new(&snapshot.entries, git.view.ignore_case);
                     let changes = git_changes(context, &observed, snapshot, &spelling);
                     return Found {
                         outcome: Ok(if changes.is_empty() {
@@ -246,6 +255,12 @@ fn analyze_snapshot(
         }
     };
     let detection = reason.map(ChangeDetection::scan);
+    if other_kind(HashKind::RawBlob) {
+        return Found {
+            outcome: Ok(AnalysisOutcome::Fallback),
+            detection,
+        };
+    }
     let mut found = scan_snapshot(context, work_path, snapshot, interrupted);
     found.detection = detection;
     found
@@ -256,9 +271,10 @@ fn analyze_snapshot(
 fn hidden_by_git(view: &GitWorktree, root: &str, snapshot: &StorageSnapshot) -> Option<HiddenBy> {
     let rules = IgnoreRules::read(&view.ignore_sources, view.ignore_case);
     if snapshot.entries.is_empty() {
-        rules.hiding(root, dump_samples())
+        let samples = dump_samples();
+        rules.hiding(root, samples.iter().map(String::as_str))
     } else {
-        let mut remembered: Vec<String> = snapshot.entries.keys().cloned().collect();
+        let mut remembered: Vec<&str> = snapshot.entries.keys().map(String::as_str).collect();
         remembered.sort_unstable();
         rules.hiding(root, remembered)
     }
@@ -297,11 +313,11 @@ pub fn hidden_by_git_rules(
 fn observe_by_git(
     context: &SourceSetContext,
     snapshot: &StorageSnapshot,
+    spelling: &Spelling<'_>,
     git: &mut GitSource<'_, '_>,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Result<Vec<ObservedFile>, ObserveError> {
     let observed = git.observe(context.path(), interrupted)?;
-    let spelling = Spelling::new(&snapshot.entries, git.view.ignore_case);
     let seen: HashSet<&str> = observed
         .iter()
         .map(|file| {
@@ -410,7 +426,11 @@ fn git_prepared_state(
         .cloned()
         .collect();
     PreparedStateUpdate {
-        delta: StorageDelta { upserts, removals },
+        delta: StorageDelta {
+            upserts,
+            removals,
+            hash_kind: HashKind::GitBlob,
+        },
         scanned_files: observed.len(),
         scan_started_at: now_ns(),
         observed_generation: stored.generation,
@@ -590,6 +610,7 @@ pub fn commit_empty_snapshot(
         work_path,
         &FullSnapshot {
             snapshot: HashMap::new(),
+            hash_kind: HashKind::RawBlob,
             scan_started_at: 0,
         },
     )
@@ -679,9 +700,94 @@ pub fn commit_full_from_git(
                 ))
             })
             .collect(),
+        hash_kind: HashKind::GitBlob,
         scan_started_at: now_ns(),
     };
     commit_full_snapshot(context, work_path, &prepared).map(|()| true)
+}
+
+/// The tree a full pull staged and then published into the set, as git would store it (#575).
+/// Git names the ids of the published files; a row of `prepared` keeps only when the published
+/// file still carries the time it had in staging — publication moves files, it does not
+/// rewrite them, — so an edit made after publication stays a change. `None`: git cannot
+/// describe the set, and the caller remembers `prepared` as read.
+pub fn full_snapshot_by_git(
+    context: &SourceSetContext,
+    prepared: &FullSnapshot,
+    mut git: GitSource<'_, '_>,
+) -> Result<Option<FullSnapshot>, ChangeDetectionError> {
+    let observed = match git.observe(context.path(), &mut || false) {
+        Ok(observed) => observed,
+        Err(ObserveError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+        Err(ObserveError::Unusable { reason, detail }) => {
+            tracing::warn!(source_set = %context.name(), reason = ?reason, detail, "git cannot describe the published set; it is remembered as read");
+            return Ok(None);
+        }
+    };
+    let ids: HashMap<String, String> = observed
+        .into_iter()
+        .filter_map(|file| Some((file.rel_path, file.hash?)))
+        .collect();
+    let snapshot = prepared
+        .snapshot
+        .iter()
+        .filter_map(|(rel_path, staged)| {
+            let path = context.path().join(rel_path);
+            let published = std::fs::metadata(&path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| mtime_nanos(modified, &path).ok());
+            (published == Some(staged.mtime_ns)).then_some(())?;
+            Some((
+                rel_path.clone(),
+                StoredFileState {
+                    mtime_ns: staged.mtime_ns,
+                    hash: ids.get(rel_path)?.clone(),
+                },
+            ))
+        })
+        .collect();
+    Ok(Some(FullSnapshot {
+        snapshot,
+        hash_kind: HashKind::GitBlob,
+        scan_started_at: prepared.scan_started_at,
+    }))
+}
+
+/// The tree of the set as `source` names it: under git the ids `git add` would store, else the
+/// ids of the bytes. A file whose id is unknown is not remembered (#575).
+pub fn prepare_source_snapshot_from(
+    context: &SourceSetContext,
+    work_path: &Path,
+    source: ChangeSource<'_, '_>,
+) -> Result<FullSnapshot, ChangeDetectionError> {
+    if let ChangeSource::Git(mut git) = source {
+        match git.observe(context.path(), &mut || false) {
+            Ok(observed) => {
+                return Ok(FullSnapshot {
+                    snapshot: observed
+                        .into_iter()
+                        .filter_map(|file| {
+                            Some((
+                                file.rel_path,
+                                StoredFileState {
+                                    mtime_ns: 0,
+                                    hash: file.hash?,
+                                },
+                            ))
+                        })
+                        .collect(),
+                    hash_kind: HashKind::GitBlob,
+                    scan_started_at: now_ns(),
+                })
+            }
+            Err(ObserveError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+            Err(ObserveError::Unusable { reason, detail }) => {
+                tracing::warn!(source_set = %context.name(), reason = ?reason, detail, "git cannot describe the set; its files are read");
+            }
+        }
+    }
+    prepare_source_snapshot(context, work_path)
 }
 
 /// Hash the source-set directory itself, which can hold `workPath`.
@@ -699,48 +805,6 @@ pub fn prepare_full_snapshot(
     source_path: &Path,
 ) -> Result<FullSnapshot, ChangeDetectionError> {
     prepare_snapshot(context, source_path, None)
-}
-
-/// [`prepare_full_snapshot`] with the ids taken by `hash_blobs` — `git hash-object` of the
-/// working tree the set will be published into, so line endings are converted as git converts
-/// them there (#575). The staged files are named by their full paths.
-pub fn prepare_full_snapshot_by_git(
-    context: &SourceSetContext,
-    source_path: &Path,
-    hash_blobs: &mut BlobHasher<'_>,
-) -> Result<FullSnapshot, ChangeDetectionError> {
-    let listed = scanner::list_in_scope(source_path, None, &mut || false, scan_scope(context))
-        .map_err(|error| map_scan_error(context, error))?;
-    let names: Vec<String> = listed
-        .files
-        .iter()
-        .map(|file| file.path.to_string_lossy().into_owned())
-        .collect();
-    let ids = hash_blobs(&names, &mut || false).map_err(|error| match error {
-        BlobHashError::Interrupted => ChangeDetectionError::Interrupted,
-        BlobHashError::Failed(reason) => ChangeDetectionError::StorageHard {
-            source_set: context.name().to_owned(),
-            storage_path: source_path.to_path_buf(),
-            reason: format!("git hash-object failed: {reason}"),
-        },
-    })?;
-    Ok(FullSnapshot {
-        snapshot: listed
-            .files
-            .into_iter()
-            .zip(ids)
-            .map(|(file, hash)| {
-                (
-                    file.rel_path,
-                    StoredFileState {
-                        mtime_ns: file.mtime_ns,
-                        hash,
-                    },
-                )
-            })
-            .collect(),
-        scan_started_at: listed.scan_started_at,
-    })
 }
 
 fn prepare_snapshot(
@@ -766,6 +830,7 @@ fn prepare_snapshot(
                 )
             })
             .collect(),
+        hash_kind: HashKind::RawBlob,
         scan_started_at: scan.scan_started_at,
     })
 }
@@ -786,6 +851,7 @@ pub fn commit_full_snapshot(
             return storage
                 .recover_and_commit_snapshot_with_identity(
                     &prepared.snapshot,
+                    prepared.hash_kind,
                     prepared.scan_started_at,
                     context.storage_identity(),
                 )
@@ -796,6 +862,7 @@ pub fn commit_full_snapshot(
     storage
         .commit_snapshot_with_identity(
             &prepared.snapshot,
+            prepared.hash_kind,
             prepared.scan_started_at,
             generation,
             context.storage_identity(),
@@ -1057,8 +1124,14 @@ pub fn observe_dump_writes(
         return Ok(writes(None));
     }
     // Файл, время которого сдвинулось, пока его читали, в ответ не попадает и остаётся изменением.
-    let upserts = match blobs {
-        None => scanner::hash_listed_unmoved(written, &mut || interrupted())
+    // Записанное хешируется тем же хешером, что записал память: id двух хешеров в одной
+    // памяти не встречаются (#575). Память хешами git без git ничего не запоминает.
+    let upserts = match (summary.hash_kind, blobs) {
+        (HashKind::GitBlob, None) => return Ok(writes(None)),
+        (HashKind::GitBlob, Some((root, hash_blobs))) => {
+            blob_ids_unmoved(context, root, written, hash_blobs, interrupted)?
+        }
+        _ => scanner::hash_listed_unmoved(written, &mut || interrupted())
             .map_err(|error| map_scan_error(context, error))?
             .into_iter()
             .map(|file| {
@@ -1071,15 +1144,14 @@ pub fn observe_dump_writes(
                 )
             })
             .collect(),
-        Some((root, hash_blobs)) => {
-            blob_ids_unmoved(context, root, written, hash_blobs, interrupted)?
-        }
     };
+    let hash_kind = summary.hash_kind;
     Ok(writes(Some((
         summary,
         StorageDelta {
             upserts,
             removals: removed,
+            hash_kind,
         },
     ))))
 }
@@ -1218,7 +1290,11 @@ fn build_prepared_state(
         .cloned()
         .collect();
     PreparedStateUpdate {
-        delta: StorageDelta { upserts, removals },
+        delta: StorageDelta {
+            upserts,
+            removals,
+            hash_kind: HashKind::RawBlob,
+        },
         scanned_files: scan.files.len(),
         scan_started_at: scan.scan_started_at,
         observed_generation: stored.generation,
@@ -1227,6 +1303,7 @@ fn build_prepared_state(
 
 pub struct FullSnapshot {
     snapshot: HashMap<String, StoredFileState>,
+    hash_kind: HashKind,
     scan_started_at: u64,
 }
 

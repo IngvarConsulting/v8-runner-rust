@@ -491,7 +491,12 @@ fn publish_full_dump(
         if let Some(prepared) = snapshot {
             let result = prepared.and_then(|prepared| {
                 if let Some(source) = published_source {
-                    commit_full_snapshot(source, &config.work_path, &prepared)
+                    crate::use_cases::source_changes::full_pull_memory(
+                        source,
+                        &config.work_path,
+                        prepared,
+                    )
+                    .and_then(|memory| commit_full_snapshot(source, &config.work_path, &memory))
                 } else {
                     Ok(())
                 }
@@ -504,7 +509,6 @@ fn publish_full_dump(
             if let Some(warning) = external.record_generation(config, source) {
                 warnings.push(warning);
             }
-            crate::use_cases::source_changes::refresh_index_after_full_pull(source);
         }
         let published_version = published_source
             .and_then(|source| super::version_file::RunnerVersionFile::of(config, source));
@@ -558,6 +562,13 @@ fn publish_full_dump(
             ));
         };
         prepared
+            .and_then(|snapshot| {
+                crate::use_cases::source_changes::full_pull_memory(
+                    source,
+                    &config.work_path,
+                    snapshot,
+                )
+            })
             .and_then(|snapshot| commit_full_snapshot(source, &config.work_path, &snapshot))
             .err()
             .map(|error| format!(
@@ -565,14 +576,6 @@ fn publish_full_dump(
                 resolved.source_set_name
             ))
     });
-    // Опубликованное дерево git перечитывает здесь, а не следующая команда (#575).
-    if config.format == SourceFormat::Designer {
-        if let Some(source) =
-            SourceSetInventory::new(config).designer_context(&resolved.source_set_name)
-        {
-            crate::use_cases::source_changes::refresh_index_after_full_pull(source);
-        }
-    }
     Ok(DumpNotes {
         message: merge_optional_messages(
             merge_optional_messages(published.cleanup_warning, memory_warning),

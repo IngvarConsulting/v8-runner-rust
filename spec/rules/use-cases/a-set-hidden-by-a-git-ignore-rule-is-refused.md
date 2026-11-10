@@ -12,6 +12,8 @@ check:
   - src/change_detection/git_ignore.rs::the_version_file_rule_hides_nothing_the_runner_reads
   - src/use_cases/source_changes.rs::an_ignore_rule_hiding_a_remembered_file_refuses_the_command
   - src/use_cases/source_changes.rs::a_gitignore_inside_the_set_refuses_and_the_version_file_rule_does_not
+  - src/use_cases/source_changes.rs::an_untracked_gitignore_inside_the_set_counts
+  - src/change_detection/git_ignore.rs::bracket_classes_read_as_git_reads_them
   - tests/cli_status.rs::a_git_ignore_rule_hiding_a_set_file_refuses_the_command
 ---
 
@@ -28,7 +30,10 @@ check:
 EDT не затронуты.
 
 Правила читаются из отслеживаемых `.gitignore` (их называет `git ls-files`), из
-`.git/info/exclude` и из файла `core.excludesFile` и сопоставляются, как их сопоставляет git:
+неотслеживаемых `.gitignore` в каталогах над корнем набора и внутри него, из
+`.git/info/exclude` и из файла `core.excludesFile` (относительный путь — от корня рабочей
+копии) и сопоставляются, как их сопоставляет git, классы POSIX и отрицательный класс
+включительно:
 решает последнее совпавшее правило, отрицание `!` пропускает путь, игнорируемый каталог
 прячет всё под собой, правила `.gitignore` внутри поддерева относятся к своему каталогу.
 Правило без привязки (`*.log`, `build/`) задевает любую глубину; правило с привязкой к пути
@@ -39,4 +44,10 @@ EDT не затронуты.
 выгрузки: файлы расширений `.xml`, `.bsl`, `.bin`, `.txt`, `.html`, `.htm` и картинок в
 каталогах видов метаданных и вложенных элементов из словаря частичной загрузки. Правило,
 которое задевает только то, что раннер и так не читает, — `ConfigDumpInfo.xml`, `workPath`
-внутри корня, служебные и порождённые каталоги, — отказа не даёт.
+внутри корня, служебные и порождённые каталоги, — отказа не даёт. Правило, которое раннер не
+сумел прочесть как шаблон, считается задевающим всё и называется в отказе, а не пропадает.
+
+Остаточный риск: проверка видит пути из памяти и образцы выгрузки. Правило, которое задевает
+только новый путь, ещё не выгруженный платформой и не похожий на образцы, отказа не даёт, и
+такой файл git не назовёт. Неотслеживаемый `.gitignore` внутри набора видит разбор изменений
+(`git status`), а проверка у команд без разбора — только над корнем и в нём самом.

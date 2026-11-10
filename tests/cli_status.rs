@@ -694,7 +694,7 @@ fn status_and_push_name_how_the_changes_were_found() {
 }
 
 /// Правило `.gitignore`, которое прячет файл набора, — отказ `source_set_ignored_by_git` рода
-/// `validation` с кодом выхода 2 у `status` и у полной отправки; правило с привязкой вне корня
+/// `validation` с кодом выхода 2 у `status`, полной отправки, полной выгрузки и `make`; правило с привязкой вне корня
 /// набора отказа не даёт (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
 #[test]
 fn a_git_ignore_rule_hiding_a_set_file_refuses_the_command() {
@@ -704,7 +704,12 @@ fn a_git_ignore_rule_hiding_a_set_file_refuses_the_command() {
     succeeded(&project.run(&["status"]));
 
     fs::write(project.root().join(".gitignore"), "/work/\n/bin/\n*.bsl\n").expect("rules");
-    for args in [&["status"][..], &["push", "--full", "--dry-run"][..]] {
+    for args in [
+        &["status"][..],
+        &["push", "--full", "--dry-run"][..],
+        &["pull", "main", "--force"][..],
+        &["make", "main", "--output", "main.cf"][..],
+    ] {
         let output = project.run(args);
         let answer = envelope(&output);
         assert_eq!(output.status.code(), Some(2), "{args:?}: {answer}");

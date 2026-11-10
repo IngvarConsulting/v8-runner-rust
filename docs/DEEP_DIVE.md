@@ -48,11 +48,15 @@ MCP DTO в одном слое.
   спрашивает `rev-parse`, `config`, `ls-files` и `git -c core.checkStat=default
   -c core.trustctime=true status --porcelain=v2 -z --untracked-files=all --no-renames` по
   корням наборов один раз на рабочую копию, `change_detection::git_tree` берёт хеш индекса
-  у чистого файла и `git hash-object --stdin-paths` у изменённого, нового,
-  `assume-unchanged`/`skip-worktree` и конфликтного, с теми же предикатами обхода, что
-  `scanner`. Иначе — `scanner` читает каждый файл и хеширует его как
-  `git hash-object --no-filters`. Превью спрашивает git с `GIT_OPTIONAL_LOCKS=0`; отмена
-  завершает процесс git. EDT-проекты (копия `designer-<набор>` под `workPath`) всегда идут
+  у чистого файла, а у изменённого, нового, `assume-unchanged`/`skip-worktree` и
+  конфликтного — хеш, который сохранил бы `git add`: `update-index --info-only` во временном
+  индексе (`GIT_INDEX_FILE`) с записями настоящего индекса этих путей, затем `ls-files -s`.
+  Предикаты обхода те же, что у `scanner`. Иначе — `scanner` читает каждый файл и хеширует
+  его как `git hash-object --no-filters`; память хранит хешер (`hash_kind`: git или байты), и
+  память другого хешера даёт полную загрузку. Превью спрашивает git с
+  `GIT_OPTIONAL_LOCKS=0`; отмена завершает процесс git, а `git status` с необязательной
+  блокировкой доводит до конца, чтобы не оставить `.git/index.lock`. Репозиторий SHA-256 и
+  отсутствующий git — чтение файлов. EDT-проекты (копия `designer-<набор>` под `workPath`) всегда идут
   чтением файлов.
 - Правила игнорирования: `change_detection::git_ignore` читает отслеживаемые `.gitignore`,
   `.git/info/exclude` и `core.excludesFile` и проверяет их, как git, на путях из памяти
@@ -198,10 +202,10 @@ runtime snapshot commit только указанным source-set.
 - Для `IBCMD` object-scoped partial деградирует в incremental.
 - Полный `pull` в формате `DESIGNER` сначала считает хеши staging, затем публикует
   дерево и записывает эти хеши. Это общий путь Конфигуратора, `ibcmd` и агента. У набора
-  в git хеши staging считает `git hash-object` той рабочей копии, а после публикации раннер
-  обновляет индекс git по корню набора (`git status`), чтобы следующая команда не
-  перечитывала переписанные файлы; время этого шага пишется в журнал
-  (`git index refreshed after a full pull`).
+  в git после публикации раннер спрашивает `git status` по корню набора: git обновляет индекс
+  — следующая команда не перечитывает переписанные файлы, — и хеши берутся такими, какими их
+  сохранил бы `git add`, у файлов, время которых то же, что в staging. Время шага пишется в
+  журнал (`git index refreshed and the memory of a full pull taken`).
   Отказ до публикации оставляет память прежней; после публикации ошибки хеширования
   или записи памяти становятся предупреждением с предложением повторить полный `pull`.
   Правка опубликованного дерева остаётся изменением.

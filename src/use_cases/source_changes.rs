@@ -3,10 +3,11 @@
 //! Набор в рабочей копии git, не в подмодуле и не под `workPath`, берёт изменения у git:
 //! сценарий спрашивает `platform::git` один раз на рабочую копию и передаёт разобранный ответ
 //! анализу (`change_detection` процессов не запускает). Git отказал или его нет — анализ читает
-//! файлы, как прежде, а память хешами git даёт полную загрузку: отказа нет. Отмена завершает
-//! git, и ответ — отмена, а не запасной путь (`INV.USE-CASES.CHANGES-ARE-DETECTED-ON-DEMAND`).
-//! Правило игнорирования, которое прячет файл набора, — отказ
-//! (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+//! файлы сам: отказа нет. Хеш файла — тот, что сохранил бы `git add`; вне git — хеш байтов, и
+//! память помнит, каким хешером записана. Отмена завершает git — а `git status`, которому
+//! разрешено обновить индекс, доводит до конца, — и ответ — отмена, а не запасной путь
+//! (`INV.USE-CASES.CHANGES-ARE-DETECTED-ON-DEMAND`). Правило игнорирования, которое прячет файл
+//! набора, — отказ (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,9 +15,9 @@ use std::path::{Path, PathBuf};
 use crate::change_detection::analyzer::{
     self, ChangeDetectionError, ChangeSource, ContextAnalysis,
 };
-use crate::change_detection::git_tree::{BlobHashError, GitSource};
+use crate::change_detection::git_tree::{BlobHashError, BlobHasher, GitSource};
 use crate::change_detection::scanner;
-use crate::domain::git_worktree::{GitWorktree, ScanReason};
+use crate::domain::git_worktree::{GitIndexEntry, GitWorktree, ScanReason};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::git::{self, GitQueryError, Placement};
 use crate::support::error::AppError;
@@ -40,6 +41,29 @@ enum Choice {
 struct Lookup {
     repos: Vec<GitWorktree>,
     choices: Vec<Choice>,
+}
+
+impl Lookup {
+    /// Источник изменений набора `index` и хешер для него.
+    fn with_source<T>(&self, index: usize, f: impl FnOnce(ChangeSource<'_, '_>) -> T) -> T {
+        match &self.choices[index] {
+            Choice::Scan(reason) => f(ChangeSource::Scan(Some(*reason))),
+            Choice::Git {
+                repo,
+                root,
+                work_path,
+            } => {
+                let view = &self.repos[*repo];
+                let mut hasher = blob_hasher(&view.toplevel, &view.index);
+                f(ChangeSource::Git(GitSource {
+                    view,
+                    root: root.clone(),
+                    work_path: work_path.clone(),
+                    hash_blobs: &mut hasher,
+                }))
+            }
+        }
+    }
 }
 
 /// Разбирает изменения наборов и отмечает в контексте путь каждого. `designer` — исходники
@@ -77,33 +101,11 @@ pub(crate) fn analyze(
     };
     let analyses: Vec<ContextAnalysis> = contexts
         .iter()
-        .zip(&lookup.choices)
-        .map(|(context, choice)| match choice {
-            Choice::Scan(reason) => analyzer::analyze_context_from(
-                context,
-                work_path,
-                ChangeSource::Scan(Some(*reason)),
-                &mut interrupted,
-            ),
-            Choice::Git {
-                repo,
-                root,
-                work_path: work,
-            } => {
-                let view = &lookup.repos[*repo];
-                let mut hasher = blob_hasher(&view.toplevel, !preview);
-                analyzer::analyze_context_from(
-                    context,
-                    work_path,
-                    ChangeSource::Git(GitSource {
-                        view,
-                        root: root.clone(),
-                        work_path: work.clone(),
-                        hash_blobs: &mut hasher,
-                    }),
-                    &mut interrupted,
-                )
-            }
+        .enumerate()
+        .map(|(index, context)| {
+            lookup.with_source(index, |source| {
+                analyzer::analyze_context_from(context, work_path, source, &mut interrupted)
+            })
         })
         .collect();
     for analysis in &analyses {
@@ -157,51 +159,49 @@ pub(crate) fn refuse_hidden_sets(
     Ok(())
 }
 
-/// Хеши дерева полной выгрузки `staging` до его публикации в каталог набора `set`: под git —
-/// `git hash-object` рабочей копии, куда дерево ляжет, чтобы концы строк считались, как их
-/// считает git; вне git — чтением файлов (#575).
+/// Хеши дерева полной выгрузки `staging` до его публикации: чтением файлов, без git.
 pub(crate) fn prepare_full_snapshot(
     set: &SourceSetContext,
     staging: &Path,
 ) -> Result<analyzer::FullSnapshot, ChangeDetectionError> {
-    match toplevel_of(set.path()) {
-        Some(toplevel) => {
-            let mut hasher = blob_hasher(&toplevel, true);
-            analyzer::prepare_full_snapshot_by_git(set, staging, &mut hasher)
-        }
-        None => analyzer::prepare_full_snapshot(set, staging),
-    }
+    analyzer::prepare_full_snapshot(set, staging)
 }
 
-/// После опубликованной полной выгрузки обновляет индекс git по корню набора: переписанные
-/// файлы git перечитывает здесь, а не в следующей команде (#575). Коммиты, ветки и содержимое
-/// индекса не меняются; отказ git — только запись в журнал.
-pub(crate) fn refresh_index_after_full_pull(set: &SourceSetContext) {
+/// Память полной выгрузки, уже опубликованной в каталог набора `set` (#575). Под git
+/// `git status` по корню набора обновляет индекс — переписанные файлы git перечитывает здесь,
+/// а не в следующей команде, — и хеши опубликованного дерева берутся такими, какими их
+/// сохранил бы `git add`: запоминается файл, время которого то же, что в промежуточной копии,
+/// так что правка после публикации остаётся изменением. Вне git, или если git отказал, —
+/// `prepared`, хеши байтов промежуточной копии. Время шага пишется в журнал.
+pub(crate) fn full_pull_memory(
+    set: &SourceSetContext,
+    work_path: &Path,
+    prepared: analyzer::FullSnapshot,
+) -> Result<analyzer::FullSnapshot, ChangeDetectionError> {
     let started = std::time::Instant::now();
-    let Ok(Placement::Inside { toplevel, .. }) = git::placement_of(set.path(), &mut || false)
-    else {
-        return;
+    // Публикация уже прошла: шаг доводится до конца и при отложенной отмене.
+    let lookup = lookup(
+        std::slice::from_ref(set),
+        work_path,
+        Ask::Status {
+            optional_locks: true,
+        },
+        &mut || false,
+    );
+    let by_git = match &lookup {
+        Some(lookup) => lookup.with_source(0, |source| match source {
+            ChangeSource::Git(git) => analyzer::full_snapshot_by_git(set, &prepared, git),
+            ChangeSource::Scan(_) => Ok(None),
+        })?,
+        None => None,
     };
-    let Some(root) = relative_root(set.path(), &toplevel) else {
-        return;
-    };
-    let refreshed = git::refresh_index(&toplevel, &[root], &mut || false);
     tracing::info!(
         source_set = %set.name(),
         elapsed_ms = started.elapsed().as_millis() as u64,
-        ok = refreshed.is_ok(),
-        "git index refreshed after a full pull"
+        by_git = by_git.is_some(),
+        "git index refreshed and the memory of a full pull taken"
     );
-}
-
-/// Корень рабочей копии git, в которой лежит или ляжет `path`: спрашивается ближайший
-/// существующий каталог.
-fn toplevel_of(path: &Path) -> Option<PathBuf> {
-    let existing = path.ancestors().find(|dir| dir.is_dir())?;
-    match git::placement_of(existing, &mut || false) {
-        Ok(Placement::Inside { toplevel, .. }) => Some(toplevel),
-        _ => None,
-    }
+    Ok(by_git.unwrap_or(prepared))
 }
 
 /// Записывает память набора после полной загрузки: под git — хешами git, иначе чтением файлов.
@@ -210,37 +210,39 @@ pub(crate) fn rescan_and_commit_full(
     work_path: &Path,
 ) -> Result<(), ChangeDetectionError> {
     // Загрузка уже прошла: память пишется и при отложенной отмене.
-    let lookup = lookup(
+    match lookup(
         std::slice::from_ref(context),
         work_path,
         Ask::Status {
             optional_locks: true,
         },
         &mut || false,
-    );
-    match lookup.as_ref().map(|lookup| (lookup, &lookup.choices[0])) {
-        Some((
-            lookup,
-            Choice::Git {
-                repo,
-                root,
-                work_path: work,
-            },
-        )) => {
-            let view = &lookup.repos[*repo];
-            let mut hasher = blob_hasher(&view.toplevel, true);
-            analyzer::rescan_and_commit_full_from(
-                context,
-                work_path,
-                ChangeSource::Git(GitSource {
-                    view,
-                    root: root.clone(),
-                    work_path: work.clone(),
-                    hash_blobs: &mut hasher,
-                }),
-            )
-        }
-        _ => analyzer::rescan_and_commit_full_from(context, work_path, ChangeSource::Scan(None)),
+    ) {
+        Some(lookup) => lookup.with_source(0, |source| {
+            analyzer::rescan_and_commit_full_from(context, work_path, source)
+        }),
+        None => analyzer::rescan_and_commit_full_from(context, work_path, ChangeSource::Scan(None)),
+    }
+}
+
+/// Хеши дерева набора для памяти базы, созданной раннером: под git — какими их сохранил бы
+/// `git add`, иначе хеши байтов. Одна память — один хешер (#575).
+pub(crate) fn prepare_source_snapshot(
+    context: &SourceSetContext,
+    work_path: &Path,
+) -> Result<analyzer::FullSnapshot, ChangeDetectionError> {
+    match lookup(
+        std::slice::from_ref(context),
+        work_path,
+        Ask::Status {
+            optional_locks: true,
+        },
+        &mut || false,
+    ) {
+        Some(lookup) => lookup.with_source(0, |source| {
+            analyzer::prepare_source_snapshot_from(context, work_path, source)
+        }),
+        None => analyzer::prepare_source_snapshot(context, work_path),
     }
 }
 
@@ -248,28 +250,52 @@ pub(crate) fn rescan_and_commit_full(
 /// `f` получает корень набора от корня рабочей копии и сам хешер, или `None` вне git.
 pub(crate) fn with_dump_hasher<T>(
     set: &SourceSetContext,
-    f: impl FnOnce(Option<(&str, &mut crate::change_detection::git_tree::BlobHasher<'_>)>) -> T,
+    f: impl FnOnce(Option<(&str, &mut BlobHasher<'_>)>) -> T,
 ) -> T {
-    let placed = toplevel_of(set.path())
-        .and_then(|toplevel| relative_root(set.path(), &toplevel).map(|root| (toplevel, root)));
+    let placed = toplevel_of(set.path()).and_then(|toplevel| {
+        let root = relative_root(set.path(), &toplevel)?;
+        let index =
+            git::index_entries_under(&toplevel, std::slice::from_ref(&root), &mut || false).ok()?;
+        Some((toplevel, root, index))
+    });
     match placed {
-        Some((toplevel, root)) => {
-            let mut hasher = blob_hasher(&toplevel, true);
+        Some((toplevel, root, index)) => {
+            let mut hasher = blob_hasher(&toplevel, &index);
             f(Some((&root, &mut hasher)))
         }
         None => f(None),
     }
 }
 
-fn blob_hasher(
-    toplevel: &Path,
-    optional_locks: bool,
-) -> impl FnMut(&[String], &mut dyn FnMut() -> bool) -> Result<Vec<String>, BlobHashError> + '_ {
+/// Корень рабочей копии git, в которой лежит `path`, если набор не в подмодуле и в репозитории
+/// хешей SHA-1.
+fn toplevel_of(path: &Path) -> Option<PathBuf> {
+    match git::placement_of(path, &mut || false) {
+        Ok(Placement::Inside { toplevel, .. }) => Some(toplevel),
+        _ => None,
+    }
+}
+
+/// Хешер, который отвечает тем, что сохранил бы `git add`: записи индекса этих путей идут во
+/// временный индекс, и преобразование концов строк видит то, что лежит в индексе.
+fn blob_hasher<'v>(
+    toplevel: &'v Path,
+    index: &'v [GitIndexEntry],
+) -> impl FnMut(&[String], &mut dyn FnMut() -> bool) -> Result<Vec<String>, BlobHashError> + 'v {
+    let mut by_path: HashMap<&str, Vec<&GitIndexEntry>> = HashMap::new();
+    for entry in index {
+        by_path.entry(entry.path.as_str()).or_default().push(entry);
+    }
     move |paths, interrupted| {
-        git::hash_objects(toplevel, paths, optional_locks, interrupted).map_err(|error| match error
-        {
+        let known: Vec<&GitIndexEntry> = paths
+            .iter()
+            .filter_map(|path| by_path.get(path.as_str()))
+            .flatten()
+            .copied()
+            .collect();
+        git::blob_ids_as_added(toplevel, paths, &known, interrupted).map_err(|error| match error {
             GitQueryError::Interrupted => BlobHashError::Interrupted,
-            GitQueryError::Failed(reason) => BlobHashError::Failed(reason),
+            other => BlobHashError::Failed(other.to_string()),
         })
     }
 }
@@ -364,10 +390,12 @@ fn lookup(
     }
 
     let mut views = Vec::with_capacity(repos.len());
-    let mut failed = vec![false; repos.len()];
+    let mut unusable = vec![None; repos.len()];
     for (index, repo) in repos.into_iter().enumerate() {
         let answer = match ask {
-            Ask::IgnoreRules => git::ignore_view(&repo.toplevel, &repo.info_exclude, interrupted),
+            Ask::IgnoreRules => {
+                git::ignore_view(&repo.toplevel, &repo.info_exclude, &repo.roots, interrupted)
+            }
             Ask::Status { optional_locks } => git::worktree_under(
                 &repo.toplevel,
                 &repo.info_exclude,
@@ -378,19 +406,24 @@ fn lookup(
             ),
         };
         match answer {
+            // Хеши SHA-256 раннер не считает: такой репозиторий читается файл за файлом.
+            Ok(view) if view.sha256 => {
+                unusable[index] = Some(ScanReason::Sha256Repository);
+                views.push(view);
+            }
             Ok(view) => views.push(view),
             Err(GitQueryError::Interrupted) => return None,
-            Err(GitQueryError::Failed(reason)) => {
-                tracing::warn!(toplevel = %repo.toplevel.display(), reason, "git status failed; the sets' files are read");
-                failed[index] = true;
+            Err(error) => {
+                tracing::warn!(toplevel = %repo.toplevel.display(), %error, "git failed; the sets' files are read");
+                unusable[index] = Some(ScanReason::GitFailed);
                 views.push(GitWorktree::default());
             }
         }
     }
     for choice in &mut choices {
         if let Choice::Git { repo, .. } = choice {
-            if failed[*repo] {
-                *choice = Choice::Scan(ScanReason::GitFailed);
+            if let Some(reason) = unusable[*repo] {
+                *choice = Choice::Scan(reason);
             }
         }
     }
@@ -647,9 +680,13 @@ mod tests {
     #[test]
     fn a_failing_git_falls_back_to_reading_files() {
         let project = Project::new(&[("Module.bsl", "one")]);
-        project.remember();
+        // Память хешей байтов: её сравнивает чтение файлов.
+        crate::change_detection::analyzer::rescan_and_commit_full(&project.set(), &project.work())
+            .expect("memory of the bytes");
         project.write("Module.bsl", "two");
-        fs::write(project.dir.path().join(".git").join("index"), "broken").expect("break");
+        let index = project.dir.path().join(".git").join("index");
+        let kept = fs::read(&index).expect("index");
+        fs::write(&index, "broken").expect("break");
 
         let analysis = project.analyze();
         assert_eq!(
@@ -660,6 +697,17 @@ mod tests {
             changes(&analysis),
             BTreeMap::from([("Module.bsl".to_owned(), ChangeKind::Modified)])
         );
+
+        // Память хешами git без git ни с чем не сравнить: набор грузится целиком.
+        fs::write(&index, kept).expect("repair");
+        project.remember();
+        fs::write(&index, "broken").expect("break");
+        let analysis = project.analyze();
+        assert_eq!(
+            analysis.detection,
+            Some(ChangeDetection::scan(ScanReason::GitFailed))
+        );
+        assert!(matches!(analysis.outcome, Ok(AnalysisOutcome::Fallback)));
     }
 
     /// Набор в подмодуле читается файл за файлом.
@@ -698,7 +746,8 @@ mod tests {
     #[test]
     fn a_nested_repository_inside_the_set_is_read_file_by_file() {
         let project = Project::new(&[("Module.bsl", "one")]);
-        project.remember();
+        crate::change_detection::analyzer::rescan_and_commit_full(&project.set(), &project.work())
+            .expect("memory of the bytes");
         let nested = project.root().join("Nested");
         fs::create_dir_all(&nested).expect("nested");
         init_git_repo(&nested);
@@ -801,22 +850,108 @@ mod tests {
         );
     }
 
-    /// Полный pull под git хеширует дерево выгрузки до публикации git'ом той рабочей копии, куда
-    /// оно ляжет: при `core.autocrlf` сразу после публикации изменений нет, хотя байты с CRLF.
-    #[test]
-    fn a_full_pull_remembers_the_staged_tree_by_git_ids() {
-        let project = Project::new(&[("Module.bsl", "one\ntwo\n")]);
+    /// Файл, закоммиченный с CRLF до `core.autocrlf=true`: `git add` его не нормализует, и
+    /// хеш памяти — тот, что в индексе, а не тот, что дал бы `git hash-object` (#575).
+    fn crlf_committed_project() -> Project {
+        let project = Project::new(&[("Module.bsl", "a\r\nb\r\n")]);
         run_git(project.dir.path(), &["config", "core.autocrlf", "true"]);
+        project
+    }
+
+    /// Полный pull под git: память — хеши опубликованного дерева, какими их сохранил бы
+    /// `git add`, индекс git обновлён в этой же команде, а правка после публикации остаётся
+    /// изменением.
+    #[test]
+    fn a_full_pull_remembers_the_published_tree_as_git_add_would_store_it() {
+        let project = crlf_committed_project();
+        project.write("Other.bsl", "x\r\n");
         let staging = project.work().join("stage");
         fs::create_dir_all(&staging).expect("stage");
-        fs::write(staging.join("Module.bsl"), "one\r\ntwo\r\n").expect("dumped");
+        fs::write(staging.join("Module.bsl"), "a\r\nb\r\n").expect("dumped");
+        fs::write(staging.join("Other.bsl"), "x\r\n").expect("dumped");
         let prepared = prepare_full_snapshot(&project.set(), &staging).expect("staged");
-        project.write("Module.bsl", "one\r\ntwo\r\n");
-        commit_full_snapshot(&project.set(), &project.work(), &prepared).expect("memory");
+        // Публикация переносит файлы, не переписывая их.
+        for name in ["Module.bsl", "Other.bsl"] {
+            fs::remove_file(project.root().join(name)).expect("old");
+            fs::rename(staging.join(name), project.root().join(name)).expect("publish");
+        }
+        let memory =
+            super::full_pull_memory(&project.set(), &project.work(), prepared).expect("memory");
+        commit_full_snapshot(&project.set(), &project.work(), &memory).expect("commit");
 
         let analysis = project.analyze();
         assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));
         assert_eq!(changes(&analysis), BTreeMap::new());
+    }
+
+    /// Правка, сделанная после публикации полной выгрузки, памятью не становится.
+    #[test]
+    fn an_edit_after_a_full_pull_was_published_stays_a_change() {
+        let project = crlf_committed_project();
+        let staging = project.work().join("stage");
+        fs::create_dir_all(&staging).expect("stage");
+        fs::write(staging.join("Module.bsl"), "a\r\nb\r\n").expect("dumped");
+        let prepared = prepare_full_snapshot(&project.set(), &staging).expect("staged");
+        fs::remove_file(project.root().join("Module.bsl")).expect("old");
+        fs::rename(
+            staging.join("Module.bsl"),
+            project.root().join("Module.bsl"),
+        )
+        .expect("publish");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        project.write("Module.bsl", "a\r\nb\r\nedited\r\n");
+        let memory =
+            super::full_pull_memory(&project.set(), &project.work(), prepared).expect("memory");
+        commit_full_snapshot(&project.set(), &project.work(), &memory).expect("commit");
+
+        assert_eq!(
+            changes(&project.analyze()),
+            BTreeMap::from([("Module.bsl".to_owned(), ChangeKind::Added)])
+        );
+    }
+
+    /// Память после `push` под git: правленый файл, закоммиченный с CRLF, запоминается тем
+    /// хешем, что сохранил бы `git add`, и сразу после этого изменений нет.
+    #[test]
+    fn the_memory_after_a_push_holds_what_git_add_would_store() {
+        let project = crlf_committed_project();
+        project.write("Module.bsl", "a\r\nb\r\nc\r\n");
+        project.remember();
+        let analysis = project.analyze();
+        assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));
+        assert_eq!(changes(&analysis), BTreeMap::new());
+    }
+
+    /// Память одного хешера с другим не сравнивается: память хешей байтов при git даёт полную
+    /// загрузку, а не ложные изменения (#575).
+    #[test]
+    fn a_memory_of_the_other_hasher_loads_the_set_whole() {
+        let project = Project::new(&[("Module.bsl", "one")]);
+        crate::change_detection::analyzer::rescan_and_commit_full(&project.set(), &project.work())
+            .expect("memory of the bytes");
+        let analysis = project.analyze();
+        assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));
+        assert!(matches!(analysis.outcome, Ok(AnalysisOutcome::Fallback)));
+    }
+
+    /// Неотслеживаемый `.gitignore` git применяет так же, как отслеживаемый.
+    #[test]
+    fn an_untracked_gitignore_inside_the_set_counts() {
+        let project = Project::new(&[("Module.bsl", "m")]);
+        project.remember();
+        project.write("Sub/.gitignore", "*.bsl\n");
+        project.write("Sub/Inner.bsl", "i");
+        run_git(project.dir.path(), &["add", "-f", "src/cf/Sub/Inner.bsl"]);
+        run_git(project.dir.path(), &["commit", "-qm", "inner"]);
+        project.remember();
+        let Err(AppError::Refused(refusal)) = project.analyze_with(false) else {
+            panic!("expected a refusal");
+        };
+        assert!(
+            refusal.message().contains("Sub/Inner.bsl"),
+            "{}",
+            refusal.message()
+        );
     }
 
     /// Сторож повторного появления (#575): git и обход выбирают одни и те же файлы набора и дают
@@ -860,6 +995,12 @@ mod tests {
         let by_git = remembered(&set, &work);
         crate::change_detection::analyzer::rescan_and_commit_full(&set, &work).expect("by scan");
         let by_scan = remembered(&set, &work);
+        // Без фильтров хеши git и хеши байтов совпадают; память же помнит своего хешера.
+        assert!(matches!(
+            analyze_context(&set, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        rescan_and_commit_full(&set, &work).expect("by git again");
         assert_eq!(by_git, by_scan);
         assert!(by_git.contains_key("Untracked.bsl"));
         assert!(by_git.contains_key("Catalogs/Items/Ext/ObjectModule.bsl"));
@@ -873,10 +1014,6 @@ mod tests {
             .remove(0);
         assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));
         assert_eq!(changes(&analysis), BTreeMap::new());
-        assert!(matches!(
-            analyze_context(&set, &work, &mut || false).outcome,
-            Ok(AnalysisOutcome::NoChanges)
-        ));
     }
 
     /// Выгрузка по изменившемуся под git запоминает записанное хешами git: при `core.autocrlf`
@@ -888,8 +1025,8 @@ mod tests {
             list_after_dump, mark_dump_start, observe_dump_writes, watch_before_dump,
         };
 
-        let project = Project::new(&[("Module.bsl", "one\ntwo\n")]);
-        run_git(project.dir.path(), &["config", "core.autocrlf", "true"]);
+        // Закоммичен с CRLF до `core.autocrlf=true`: `git add` его не нормализует.
+        let project = crlf_committed_project();
         let set = project
             .set()
             .with_infobase_memory("ib", "file:/ib; source=src/cf".to_owned());
@@ -915,19 +1052,5 @@ mod tests {
             .remove(0);
         assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));
         assert_eq!(changes(&analysis), BTreeMap::new());
-    }
-
-    /// После опубликованной полной выгрузки раннер обновляет индекс git по корню набора: файлы с
-    /// новым временем git перечитывает здесь, и индекс записан заново.
-    #[test]
-    fn a_full_pull_refreshes_the_git_index_of_the_set() {
-        let project = Project::new(&[("Module.bsl", "one")]);
-        let index = project.dir.path().join(".git").join("index");
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        project.write("Module.bsl", "one");
-        let before = fs::read(&index).expect("index");
-
-        super::refresh_index_after_full_pull(&project.set());
-        assert_ne!(fs::read(&index).expect("index"), before);
     }
 }

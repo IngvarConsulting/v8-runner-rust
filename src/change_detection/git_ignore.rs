@@ -9,9 +9,9 @@
 //! `core.excludesFile` are the weakest.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use regex::Regex;
+use regex::{Regex, RegexSet};
 
 use crate::domain::git_worktree::GitIgnoreSource;
 
@@ -32,18 +32,32 @@ struct Rule {
     file: PathBuf,
     /// Line number from 1.
     line: usize,
-    /// Directory the rule counts from, from the root of the working tree; empty — the root.
-    base: String,
     negated: bool,
-    dir_only: bool,
-    /// Matched against the path below `base` when it holds a slash, else against the name.
-    anchored: bool,
-    pattern: Regex,
 }
+
+/// Rules matched the same way — from one directory, against the path below it or against
+/// the name, for any entry or for directories only — in one [`RegexSet`], so a path is tried
+/// against all of them in one pass.
+struct Group {
+    base: String,
+    anchored: bool,
+    dir_only: bool,
+    set: RegexSet,
+    /// Index of each pattern of `set` in [`IgnoreRules::rules`].
+    rules: Vec<usize>,
+}
+
+/// What rules of one [`Group`] share: their directory, whether they hold a slash, whether
+/// they match directories only.
+type GroupKey = (String, bool, bool);
 
 /// The rules of every ignore file in force, weakest first.
 pub(crate) struct IgnoreRules {
     rules: Vec<Rule>,
+    groups: Vec<Group>,
+    /// Rules whose pattern could not be built: they are taken to match every path, so such a
+    /// rule is named in the refusal instead of silently dropped.
+    broken: Vec<usize>,
     ignore_case: bool,
 }
 
@@ -64,29 +78,64 @@ impl IgnoreRules {
     /// Reads every source; a file that is absent or unreadable holds no rules, as for git.
     pub(crate) fn read(sources: &[GitIgnoreSource], ignore_case: bool) -> Self {
         let mut rules = Vec::new();
+        let mut grouped: Vec<(GroupKey, Vec<(String, usize)>)> = Vec::new();
+        let mut broken = Vec::new();
         for source in sources {
             let Ok(bytes) = std::fs::read(&source.file) else {
                 continue;
             };
             let text = String::from_utf8_lossy(&bytes);
             for (index, line) in text.split('\n').enumerate() {
-                if let Some(rule) =
-                    Rule::parse(line, &source.file, index + 1, &source.base, ignore_case)
-                {
-                    rules.push(rule);
+                let Some(parsed) = parse(line, ignore_case) else {
+                    continue;
+                };
+                let at = rules.len();
+                let compiled = Regex::new(&parsed.regex).is_ok();
+                if compiled {
+                    let key = (source.base.clone(), parsed.anchored, parsed.dir_only);
+                    match grouped.iter_mut().find(|(group, _)| *group == key) {
+                        Some((_, patterns)) => patterns.push((parsed.regex.clone(), at)),
+                        None => grouped.push((key, vec![(parsed.regex.clone(), at)])),
+                    }
+                } else {
+                    broken.push(at);
                 }
+                rules.push(Rule {
+                    text: parsed.text,
+                    file: source.file.clone(),
+                    line: index + 1,
+                    negated: parsed.negated,
+                });
             }
         }
-        Self { rules, ignore_case }
+        let mut groups = Vec::new();
+        for ((base, anchored, dir_only), patterns) in grouped {
+            match RegexSet::new(patterns.iter().map(|(regex, _)| regex)) {
+                Ok(set) => groups.push(Group {
+                    base,
+                    anchored,
+                    dir_only,
+                    set,
+                    rules: patterns.into_iter().map(|(_, at)| at).collect(),
+                }),
+                Err(_) => broken.extend(patterns.into_iter().map(|(_, at)| at)),
+            }
+        }
+        Self {
+            rules,
+            groups,
+            broken,
+            ignore_case,
+        }
     }
 
     /// The rule that hides the first of `candidates` (paths below the set root at `root`,
     /// from the root of the working tree) or the root itself, with up to [`NAMED_PATHS`] of
     /// the paths it hides. `None`: no rule hides any of them.
-    pub(crate) fn hiding(
+    pub(crate) fn hiding<'c>(
         &self,
         root: &str,
-        candidates: impl IntoIterator<Item = String>,
+        candidates: impl IntoIterator<Item = &'c str>,
     ) -> Option<HiddenBy> {
         let mut directories = HashMap::new();
         if !root.is_empty() {
@@ -95,19 +144,21 @@ impl IgnoreRules {
             }
         }
         let mut found: Option<(usize, Vec<String>)> = None;
+        let mut path = String::new();
         for candidate in candidates {
-            let path = if root.is_empty() {
-                candidate.clone()
-            } else {
-                format!("{root}/{candidate}")
-            };
+            path.clear();
+            if !root.is_empty() {
+                path.push_str(root);
+                path.push('/');
+            }
+            path.push_str(candidate);
             let Some(rule) = self.verdict(&path, false, &mut directories) else {
                 continue;
             };
             match &mut found {
-                None => found = Some((rule, vec![candidate])),
+                None => found = Some((rule, vec![candidate.to_owned()])),
                 Some((first, paths)) if *first == rule => {
-                    paths.push(candidate);
+                    paths.push(candidate.to_owned());
                     if paths.len() >= NAMED_PATHS {
                         break;
                     }
@@ -129,7 +180,8 @@ impl IgnoreRules {
     }
 
     /// The rule that ignores `path`: a parent directory that is ignored first, then the last
-    /// rule that matches the path itself, unless that one is a negation.
+    /// rule that matches the path itself, unless that one is a negation. Every directory is
+    /// decided once.
     fn verdict(
         &self,
         path: &str,
@@ -149,74 +201,74 @@ impl IgnoreRules {
                 return parent_verdict;
             }
         }
-        let last = self
-            .rules
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, rule)| rule.matches(path, is_dir, self.ignore_case))?;
-        (!last.1.negated).then_some(last.0)
+        let mut last = self.broken.iter().copied().max();
+        for group in &self.groups {
+            if group.dir_only && !is_dir {
+                continue;
+            }
+            let below = if group.base.is_empty() {
+                path
+            } else {
+                match strip_dir_prefix(path, &group.base, self.ignore_case) {
+                    Some(below) => below,
+                    None => continue,
+                }
+            };
+            let subject = if group.anchored {
+                below
+            } else {
+                below.rsplit('/').next().unwrap_or(below)
+            };
+            if let Some(matched) = group.set.matches(subject).iter().next_back() {
+                let rule = group.rules[matched];
+                last = Some(last.map_or(rule, |current| current.max(rule)));
+            }
+        }
+        let last = last?;
+        (!self.rules[last].negated).then_some(last)
     }
 }
 
-impl Rule {
-    fn parse(raw: &str, file: &Path, line: usize, base: &str, ignore_case: bool) -> Option<Self> {
-        let text = raw.strip_suffix('\r').unwrap_or(raw);
-        if text.is_empty() || text.starts_with('#') {
-            return None;
-        }
-        let mut pattern = trim_unescaped_trailing_spaces(text);
-        let negated = pattern.starts_with('!');
-        if negated {
-            pattern = &pattern[1..];
-        }
-        let dir_only = pattern.ends_with('/') && !pattern.ends_with("\\/");
-        let pattern = pattern
-            .strip_suffix('/')
-            .filter(|_| dir_only)
-            .unwrap_or(pattern);
-        if pattern.is_empty() {
-            return None;
-        }
-        let anchored = pattern.contains('/');
-        let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
-        let regex = Regex::new(&format!(
+/// One rule line, parsed.
+struct Parsed {
+    text: String,
+    negated: bool,
+    dir_only: bool,
+    anchored: bool,
+    regex: String,
+}
+
+fn parse(raw: &str, ignore_case: bool) -> Option<Parsed> {
+    let text = raw.strip_suffix('\r').unwrap_or(raw);
+    if text.is_empty() || text.starts_with('#') {
+        return None;
+    }
+    let mut pattern = trim_unescaped_trailing_spaces(text);
+    let negated = pattern.starts_with('!');
+    if negated {
+        pattern = &pattern[1..];
+    }
+    let dir_only = pattern.ends_with('/') && !pattern.ends_with("\\/");
+    let pattern = pattern
+        .strip_suffix('/')
+        .filter(|_| dir_only)
+        .unwrap_or(pattern);
+    if pattern.is_empty() {
+        return None;
+    }
+    let anchored = pattern.contains('/');
+    let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+    Some(Parsed {
+        text: text.to_owned(),
+        negated,
+        dir_only,
+        anchored,
+        regex: format!(
             "{}^{}$",
             if ignore_case { "(?i)" } else { "" },
             glob_to_regex(pattern)
-        ))
-        .ok()?;
-        Some(Self {
-            text: text.to_owned(),
-            file: file.to_path_buf(),
-            line,
-            base: base.to_owned(),
-            negated,
-            dir_only,
-            anchored,
-            pattern: regex,
-        })
-    }
-
-    fn matches(&self, path: &str, is_dir: bool, ignore_case: bool) -> bool {
-        if self.dir_only && !is_dir {
-            return false;
-        }
-        let below = if self.base.is_empty() {
-            path
-        } else {
-            match strip_dir_prefix(path, &self.base, ignore_case) {
-                Some(below) => below,
-                None => return false,
-            }
-        };
-        if self.anchored {
-            self.pattern.is_match(below)
-        } else {
-            self.pattern
-                .is_match(below.rsplit('/').next().unwrap_or(below))
-        }
-    }
+        ),
+    })
 }
 
 /// `path` below the directory `dir`, both from the root of the working tree.
@@ -240,6 +292,53 @@ fn trim_unescaped_trailing_spaces(text: &str) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// The index of the `]` that closes the class opened at `open`: a `]` right after `[`, `[!` or
+/// `[^` is a member, and a POSIX class `[:name:]` inside is skipped whole. `None`: the bracket
+/// is a literal.
+fn class_end(chars: &[char], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    if matches!(chars.get(i), Some('!' | '^')) {
+        i += 1;
+    }
+    if chars.get(i) == Some(&']') {
+        i += 1;
+    }
+    while i < chars.len() {
+        match chars[i] {
+            ']' => return Some(i),
+            '[' if chars.get(i + 1) == Some(&':') => {
+                let close = (i + 2..chars.len().saturating_sub(1))
+                    .find(|&at| chars[at] == ':' && chars[at + 1] == ']')?;
+                i = close + 2;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The inside of a bracket class: POSIX classes such as `[:alpha:]` pass as they are, other
+/// characters the regular expression syntax treats specially are escaped.
+fn class_to_regex(class: &str) -> String {
+    let mut out = String::new();
+    let mut rest = class;
+    while let Some(c) = rest.chars().next() {
+        if let Some(inner) = rest.strip_prefix("[:") {
+            if let Some(end) = inner.find(":]") {
+                out.push_str(&rest[..end + 4]);
+                rest = &rest[end + 4..];
+                continue;
+            }
+        }
+        if matches!(c, '\\' | '[' | ']' | '&' | '~') {
+            out.push('\\');
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
 }
 
 /// A git wildcard pattern as a regular expression over a `/`-separated path: `*` and `?` stay
@@ -275,41 +374,23 @@ fn glob_to_regex(pattern: &str) -> String {
                 regex.push_str("[^/]");
                 i += 1;
             }
-            '[' => match chars[i + 1..].iter().position(|c| *c == ']') {
-                // `[]` as the first character of a class is a literal bracket.
-                Some(close) if close > 0 || chars.get(i + 2).is_some() => {
-                    let close = if close == 0 {
-                        chars[i + 2..].iter().position(|c| *c == ']').map(|p| p + 1)
-                    } else {
-                        Some(close)
+            '[' => match class_end(&chars, i) {
+                Some(close) => {
+                    let class: String = chars[i + 1..close].iter().collect();
+                    regex.push('[');
+                    let class = match class.strip_prefix(['!', '^']) {
+                        Some(rest) => {
+                            // A negated class never matches the separator.
+                            regex.push_str("^/");
+                            rest.to_owned()
+                        }
+                        None => class,
                     };
-                    match close {
-                        Some(close) => {
-                            let class: String = chars[i + 1..i + 1 + close].iter().collect();
-                            regex.push('[');
-                            let class = match class.strip_prefix(['!', '^']) {
-                                Some(rest) => {
-                                    regex.push('^');
-                                    rest.to_owned()
-                                }
-                                None => class,
-                            };
-                            for c in class.chars() {
-                                if matches!(c, '\\' | '[' | ']' | '&' | '~') {
-                                    regex.push('\\');
-                                }
-                                regex.push(c);
-                            }
-                            regex.push(']');
-                            i += close + 2;
-                        }
-                        None => {
-                            regex.push_str("\\[");
-                            i += 1;
-                        }
-                    }
+                    regex.push_str(&class_to_regex(&class));
+                    regex.push(']');
+                    i = close + 1;
                 }
-                _ => {
+                None => {
                     regex.push_str("\\[");
                     i += 1;
                 }
@@ -376,14 +457,17 @@ mod tests {
         (dir, rules)
     }
 
-    fn memory(paths: &[&str]) -> Vec<String> {
-        paths.iter().map(|path| (*path).to_owned()).collect()
+    fn memory<'a>(paths: &[&'a str]) -> Vec<&'a str> {
+        paths.to_vec()
     }
 
     #[test]
     fn a_rule_that_meets_no_dumped_file_hides_nothing() {
         let (_dir, rules) = rules(&[("", "*.log\n")]);
-        assert_eq!(rules.hiding("src/cf", dump_samples()), None);
+        assert_eq!(
+            rules.hiding("src/cf", dump_samples().iter().map(String::as_str)),
+            None
+        );
         assert_eq!(
             rules.hiding(
                 "src/cf",
@@ -414,21 +498,31 @@ mod tests {
             .hiding("src/cf", memory(&["CommonModules/Common/Ext/Module.bsl"]))
             .expect("hidden");
         assert_eq!((hidden.rule.as_str(), hidden.line), ("CommonModules/", 3));
-        assert!(rules.hiding("src/cf", dump_samples()).is_some());
+        assert!(rules
+            .hiding("src/cf", dump_samples().iter().map(String::as_str))
+            .is_some());
     }
 
     #[test]
     fn without_memory_the_rule_is_tried_on_the_files_a_dump_writes() {
         let (_dir, bsl) = rules(&[("", "*.bsl\n")]);
-        assert!(bsl.hiding("src/cf", dump_samples()).is_some());
+        assert!(bsl
+            .hiding("src/cf", dump_samples().iter().map(String::as_str))
+            .is_some());
         let (_dir, log) = rules(&[("", "*.log\n")]);
-        assert_eq!(log.hiding("src/cf", dump_samples()), None);
+        assert_eq!(
+            log.hiding("src/cf", dump_samples().iter().map(String::as_str)),
+            None
+        );
     }
 
     #[test]
     fn a_rule_anchored_outside_the_root_hides_nothing() {
         let (_dir, rules) = rules(&[("", "/build/\n/docs/*.xml\n")]);
-        assert_eq!(rules.hiding("src/cf", dump_samples()), None);
+        assert_eq!(
+            rules.hiding("src/cf", dump_samples().iter().map(String::as_str)),
+            None
+        );
     }
 
     #[test]
@@ -443,7 +537,10 @@ mod tests {
     #[test]
     fn a_negation_lets_the_set_through() {
         let (_dir, rules) = rules(&[("", "/*\n!/src/\n*.bsl\n!*.bsl\n")]);
-        assert_eq!(rules.hiding("src/cf", dump_samples()), None);
+        assert_eq!(
+            rules.hiding("src/cf", dump_samples().iter().map(String::as_str)),
+            None
+        );
     }
 
     #[test]
@@ -464,8 +561,23 @@ mod tests {
     #[test]
     fn the_version_file_rule_hides_nothing_the_runner_reads() {
         let (_dir, rules) = rules(&[("", "ConfigDumpInfo.xml\n")]);
-        assert_eq!(rules.hiding("src/cf", dump_samples()), None);
+        assert_eq!(
+            rules.hiding("src/cf", dump_samples().iter().map(String::as_str)),
+            None
+        );
         assert_eq!(rules.hiding("src/cf", memory(&["Configuration.xml"])), None);
+    }
+
+    /// Класс POSIX и отрицательный класс читаются, как у git: отрицательный класс не
+    /// совпадает с разделителем каталогов.
+    #[test]
+    fn bracket_classes_read_as_git_reads_them() {
+        let (_dir, posix) = rules(&[("", "[[:digit:]]*.bsl\n")]);
+        assert!(posix.hiding("src/cf", memory(&["1Module.bsl"])).is_some());
+        assert!(posix.hiding("src/cf", memory(&["Module.bsl"])).is_none());
+        let (_dir, negated) = rules(&[("", "/src/cf[!x]Module.bsl\n")]);
+        assert!(negated.hiding("src", memory(&["cf/Module.bsl"])).is_none());
+        assert!(negated.hiding("src", memory(&["cfyModule.bsl"])).is_some());
     }
 
     #[test]

@@ -48,6 +48,8 @@ pub struct GitWorktree {
     pub fsmonitor: bool,
     /// `core.ignorecase`: имена путей сравниваются без учёта регистра.
     pub ignore_case: bool,
+    /// Репозиторий хранит объекты хешами SHA-256 (`extensions.objectFormat`).
+    pub sha256: bool,
     /// Записи индекса под корнями наборов.
     pub index: Vec<GitIndexEntry>,
     /// Пути, у которых рабочее дерево разошлось с индексом: правка, удаление, смена вида,
@@ -86,9 +88,8 @@ pub enum ScanReason {
     NestedRepository,
     /// Git отказал или его ответ неполон.
     GitFailed,
-    /// Память записана хешами прежнего вида: она переходит на хеши git, для этого раннер один
-    /// раз читает файлы сам.
-    MemoryMigration,
+    /// Репозиторий хранит объекты хешами SHA-256, а раннер считает хеши git только SHA-1.
+    Sha256Repository,
     /// Исходники формата EDT: набор, который грузится в базу, — копия под `workPath`.
     EdtFormat,
 }
