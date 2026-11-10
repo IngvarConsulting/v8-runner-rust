@@ -18,6 +18,10 @@ pub struct BuildResult {
     pub provider_dispatched: bool,
     pub steps: Vec<BuildStep>,
     pub duration_ms: u64,
+    /// Исход `--sessions force`: завершённые сеансы, блокировка начала сеансов и сообщение;
+    /// без `force` поля нет (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<crate::domain::sessions::SessionsOutcome>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]

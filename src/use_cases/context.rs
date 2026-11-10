@@ -252,6 +252,8 @@ pub struct ExecutionContext {
     /// Глобальные ключи командной строки, которые ведут к той же цели.
     command_line: CommandLineTarget,
     full_pull: Option<std::sync::Arc<super::full_pull_publication::ExternalFullPull>>,
+    /// Политика чужих сеансов у применения (`--sessions`) и её исход; без ключа — `disable`.
+    sessions: super::apply::sessions::SessionsGate,
 }
 
 impl ExecutionContext {
@@ -266,6 +268,7 @@ impl ExecutionContext {
             session: std::sync::Arc::default(),
             command_line: CommandLineTarget::default(),
             full_pull: None,
+            sessions: super::apply::sessions::SessionsGate::default(),
         }
     }
 
@@ -320,6 +323,17 @@ impl ExecutionContext {
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    /// Политика чужих сеансов этого вызова (`push`/`apply --sessions`).
+    pub fn with_sessions(mut self, sessions: super::apply::sessions::SessionsGate) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
+    /// Политика чужих сеансов и её исход.
+    pub(crate) const fn sessions(&self) -> &super::apply::sessions::SessionsGate {
+        &self.sessions
     }
 
     /// Attaches the global keys a command line needs to reach the same target.

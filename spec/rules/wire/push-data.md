@@ -8,6 +8,7 @@ check:
   - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
   - tests/cli_apply.rs::a_push_without_apply_loads_and_apply_applies_it
   - tests/contract_receipt.rs::a_file_base_picks_the_executor_by_the_size_of_the_operation
+  - tests/cli_apply_sessions.rs::force_on_a_cluster_ends_the_sessions_and_names_them
 ---
 
 # `data` команды `push`
@@ -19,7 +20,7 @@ check:
 Инструмент MCP `build_project` отвечает этой же формой: поверхность MCP не повторяет CLI,
 но предмет команды у них один.
 
-**Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
+**Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)). В той же версии — необязательное поле `sessions`: исход `--sessions force` — завершённые сеансы `terminated` из списка до завершения, блокировка начала сеансов `lock` и `message_delivered`; без `force` поля нет ([правило](../cli/apply-sessions-governs-foreign-sessions.md)).
 
 **Что изменила версия 5.** Квитанция `provider` получила необязательное поле `reason` — почему
 цепочка умолчаний стоит в этом порядке: `whole` — каждый набор команды идёт целиком, и первым

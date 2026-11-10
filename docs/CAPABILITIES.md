@@ -254,7 +254,7 @@ DemoTrd различались цвета диаграмм в девяти фа�
 | `capability` | `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой цели), `soon` (пока не умеет), `live_agent_off` (`agent hold` при `live: false`) | 2 |
 | `environment` | `environment_unavailable`, `platform_release_missing` (при `tools.platform.version: sources` нет выпуска формата исходников), `live_agent_job` (`agent hold` в Job без права выхода), `agent_limit` (`agent hold` на пределе `live-max`, все агенты удерживаются) | 2 |
 | `validation` | `invalid_argument`, `unsupported_value` (только MCP) | 2 |
-| `workspace` | `workspace_busy`, `infobase_busy` | 3 |
+| `workspace` | `workspace_busy`, `infobase_busy`, `infobase_sessions` (базу держат чужие сеансы), `infobase_designer_busy` (файловую базу держит чужой Конфигуратор) | 3 |
 | `runtime` | `runtime_failure` | 3 |
 | `platform` | `platform_failure` | 4 |
 | `invalid_output` | `invalid_output` | 4 |
@@ -844,7 +844,7 @@ v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
 ### `push`
 
 ```bash
-v8-runner push [<SET>] [--full] [--force] [--no-apply] [--dry-run]
+v8-runner push [<SET>] [--full] [--force] [--no-apply] [--sessions disable|force] [--sessions-message <TEXT>] [--dry-run]
 ```
 
 - `push` делает два акта платформы: загрузку в основную конфигурацию и применение к
@@ -864,6 +864,9 @@ v8-runner push [<SET>] [--full] [--force] [--no-apply] [--dry-run]
   от записи или запись сделал другой инструмент, она не применяет, а называет непринятое и
   `apply <SET>`. Ограничение: у расширения Конфигуратор читает поколение применённого
   расширения, поэтому чужое непринятое расширение другой копии по поколению не видно.
+- Применение, которое не пустили сеансы, — отказ `infobase_sessions` с их списком, загрузка
+  сохраняется, `next` — та же отправка; чужие сеансы и `--sessions` — как у
+  [`apply`](#apply).
 
 - Перед обменом — по порядку: чья база (граница команды), есть ли о ней память, не ушла ли
   она вперёд. Память о наборе — своя запись `workPath/infobases/<база>/generation.json` или
@@ -985,7 +988,7 @@ v8-runner push [<SET>] [--full] [--force] [--no-apply] [--dry-run]
 ### `apply`
 
 ```bash
-v8-runner apply [<SET>] [--dry-run]
+v8-runner apply [<SET>] [--sessions disable|force] [--sessions-message <TEXT>] [--dry-run]
 ```
 
 - Приводит конфигурацию базы данных к основной: вторая половина `push`, после
@@ -1008,9 +1011,30 @@ v8-runner apply [<SET>] [--dry-run]
   расширения). Пришедшая отмена отвечает отменой. Отказов `untracked_base` у `apply` нет.
 - Команда записи: замок `workPath`, затем замок файловой базы; на базе другой копии идёт с
   предупреждением. Превью называет план и ничего не запускает. Инструмента MCP нет.
-- Чужие сеансы не завершаются: применение при открытом сеансе отказывает отказом платформы
-  до `--sessions` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).
-  Замер 8.3.27.2074: поколение основной конфигурации меняет загрузка, а применение — нет; у
+- Чужие сеансы (`--sessions disable|force`, `--sessions-message <текст>`; без ключа —
+  `disable`; [правило](../spec/rules/cli/apply-sessions-governs-foreign-sessions.md)). Что
+  базу держат, раннер решает по состоянию: `error-type` агента
+  `InfoBaseExclusiveLockRequired`, у файловой базы — блокировка `1Cv8.1CD` (сеанс) и
+  `1Cv8.cgr` (Конфигуратор). Отказ `infobase_sessions` (род `workspace`, выход 3) несёт
+  `error.sessions`: `base` без пароля, `list` — компьютер, `application` (`1CV8C`, `1CV8`,
+  `Designer`, `BackgroundJob`, `WebClient`, `COMConnection` или `null`),
+  `application_title`, `started`, `user`, `id`; `null`, если текст платформы не разобран
+  целиком, — `from_this_machine`, `terminable` и `lock: {state: none|own|foreign|unknown,
+  message}`. `next` — тот же вызов, с `--sessions force`, если сеансы можно завершить.
+  Чужой Конфигуратор файловой базы — отдельный отказ `infobase_designer_busy` (`push`
+  отказывает уже на загрузке; `list: null`, `terminable: false`, `next` — тот же вызов).
+  **Файловая база:** сеансы не завершает ни один ключ платформы (замер #211), раннер
+  процессы не снимает — `terminable: false`, `--sessions force` отказывает так же, выход —
+  закрыть сеансы и повторить. **Автономный сервер и кластер:** `--sessions force` после
+  отказа повторяет применение ключом исполнителя (`-SessionTerminate force`,
+  `ibcmd --session-terminate=force --session-terminate-message`, агент
+  `--session-terminate=force`) без блокировки начала сеансов, `lock.state: unknown`; у
+  Конфигуратора и `ibcmd` сервера признака «держат сеансы» нет, поэтому без `force` там
+  остаётся отказ платформы. Ответ после `force` — `data.sessions: {terminated, lock,
+  message_delivered}`, завершённые — из списка первого отказа. Без `force` `ibcmd config
+  apply` получает `--session-terminate=disable`. `make` и `push --no-apply` ключа не
+  принимают; у MCP его нет, отказ там — `runtime_failure`.
+- Замер 8.3.27.2074: поколение основной конфигурации меняет загрузка, а применение — нет; у
   расширения Конфигуратор читает применённое, и его поколение меняет применение, а `ibcmd` —
   загруженное. Непринятое по поколению не видно — его помнит `applied: false`; запись после
   применения переносится по ответу инструмента записи при любом из этих исходов.
@@ -1934,7 +1958,6 @@ v8-runner mcp serve http
 - `convert` через `designer`.
 - `convert` через `ibcmd-rs`: пакет ↔ XML без платформы ([#413](https://github.com/IngvarConsulting/v8-runner-rust/issues/413)).
 - `convert` файла пакета в `edt` и внешних наборов в пакет.
-- `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).
 - Переименование расширения на месте по совпавшему внутреннему идентификатору и
   `push --delete` с отключением перед удалением ([#218](https://github.com/IngvarConsulting/v8-runner-rust/issues/218)).
 - Отдельная пользовательская настройка EDT `working-directory`.
