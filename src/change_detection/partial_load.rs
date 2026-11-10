@@ -267,7 +267,8 @@ fn expand_files(
                     scope,
                 )?;
             }
-            push_with_descriptors(&mut paths, path, source_root, &root_real)?;
+            let alone = change.kind == ChangeKind::Modified && module_loads_alone(relative);
+            push_with_descriptors(&mut paths, path, alone, source_root, &root_real)?;
         }
     }
 
@@ -474,9 +475,43 @@ fn top_level_object(path: &Path) -> Option<(&'static str, &str)> {
     Some((kind, name))
 }
 
+/// A changed module the platform loads as a separate file, without its owner's descriptors
+/// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`): the module of a common
+/// module (`CommonModules/<M>/Ext/Module.bsl`) and a form module
+/// (`.../Forms/<F>/Ext/Form/Module.bsl`, `CommonForms/<F>/Ext/Form/Module.bsl`). `-partial`
+/// accepts a form module without the form description. Other modules keep their descriptors
+/// until a measurement shows the platform applies them alone.
+fn module_loads_alone(relative: &Path) -> bool {
+    let Some(parts) = relative
+        .iter()
+        .map(|part| part.to_str())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let is = |part: &str, name: &str| part.eq_ignore_ascii_case(name);
+    match parts.as_slice() {
+        [group, _, ext, module] => {
+            is(group, "CommonModules") && is(ext, "Ext") && is(module, "Module.bsl")
+        }
+        [.., form, ext, folder, module]
+            if is(ext, "Ext") && is(folder, "Form") && is(module, "Module.bsl") =>
+        {
+            // The deepest element owning the file is the form itself, named by its folder.
+            dump_element_of(relative).is_some_and(|element| {
+                element.rsplit_once('.').is_some_and(|(owner, name)| {
+                    name == *form && (owner == "CommonForm" || owner.ends_with(".Form"))
+                })
+            })
+        }
+        _ => false,
+    }
+}
+
 fn push_with_descriptors(
     paths: &mut Vec<PathBuf>,
     path: PathBuf,
+    alone: bool,
     source_root: &Path,
     root_real: &Path,
 ) -> Option<()> {
@@ -484,7 +519,7 @@ fn push_with_descriptors(
     if !path.is_file() {
         return None;
     }
-    if is_bsl(&path) {
+    if is_bsl(&path) && !alone {
         if let Some(xml) = sibling_xml(&path) {
             push_file_if_safe_if_exists(paths, &xml, source_root, root_real)?;
         }
@@ -785,42 +820,177 @@ mod tests {
         assert_eq!(decision, LoadDecision::Partial(vec![module, xml]));
     }
 
-    #[test]
-    fn decide_expands_nested_bsl_to_ancestor_xml_files_without_directories() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path();
-        let module = root.join("Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl");
-        let form_xml = root.join("Catalogs/Items/Forms/ItemForm.xml");
-        let form_ext_xml = root.join("Catalogs/Items/Forms/ItemForm/Ext/Form.xml");
-        let object_xml = root.join("Catalogs/Items.xml");
-
-        std::fs::create_dir_all(module.parent().expect("module parent")).expect("module dir");
-        std::fs::write(&module, "module").expect("write module");
-        std::fs::write(&form_xml, "<form />").expect("write form xml");
-        std::fs::write(&form_ext_xml, "<form ext />").expect("write form ext xml");
-        std::fs::write(&object_xml, "<object />").expect("write object xml");
-
-        let decision = decide(
-            &[FileChange {
-                path: module.clone(),
-                kind: ChangeKind::Modified,
-            }],
-            root,
-        );
-
-        let LoadDecision::Partial(paths) = decision else {
-            panic!("expected partial decision");
-        };
-
-        assert_eq!(paths, vec![module, form_ext_xml, form_xml, object_xml]);
-        assert!(paths.iter().all(|path| path.is_file()));
-    }
-
     fn write_source(root: &std::path::Path, name: &str, content: &str) -> PathBuf {
         let path = root.join(name);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         std::fs::write(&path, content).expect("write source");
         path
+    }
+
+    fn change(path: &std::path::Path, kind: ChangeKind) -> FileChange {
+        FileChange {
+            path: path.to_path_buf(),
+            kind,
+        }
+    }
+
+    fn sorted(mut paths: Vec<PathBuf>) -> LoadDecision {
+        paths.sort();
+        LoadDecision::Partial(paths)
+    }
+
+    /// Правка одного общего модуля грузит один `.bsl`: описание модуля не менялось
+    /// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+    #[test]
+    fn a_changed_common_module_loads_without_its_description() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        write_source(root, "Configuration.xml", "<xml/>");
+        write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+
+        let decision = decide(&[change(&module, ChangeKind::Modified)], root);
+
+        assert_eq!(decision, LoadDecision::Partial(vec![module]));
+    }
+
+    /// Правка модуля формы грузит только `.bsl` формы — без `Form.xml`, описания формы и
+    /// описания владельца; у общей формы так же.
+    #[test]
+    fn a_changed_form_module_loads_without_the_form_description() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        for (module, descriptors) in [
+            (
+                "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
+                &[
+                    "Catalogs/Items/Forms/ItemForm/Ext/Form.xml",
+                    "Catalogs/Items/Forms/ItemForm.xml",
+                    "Catalogs/Items.xml",
+                ][..],
+            ),
+            (
+                "CommonForms/Main/Ext/Form/Module.bsl",
+                &["CommonForms/Main/Ext/Form.xml", "CommonForms/Main.xml"][..],
+            ),
+        ] {
+            for descriptor in descriptors {
+                write_source(root, descriptor, "<xml/>");
+            }
+            let module = write_source(root, module, "module");
+
+            let decision = decide(&[change(&module, ChangeKind::Modified)], root);
+
+            assert_eq!(decision, LoadDecision::Partial(vec![module]));
+        }
+    }
+
+    /// Изменённое описание входит в список рядом с модулем: оно изменилось само.
+    #[test]
+    fn a_changed_module_and_its_changed_description_load_together() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let descriptor = write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+        let form = write_source(
+            root,
+            "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
+            "module",
+        );
+        let form_layout =
+            write_source(root, "Catalogs/Items/Forms/ItemForm/Ext/Form.xml", "<xml/>");
+        write_source(root, "Catalogs/Items/Forms/ItemForm.xml", "<xml/>");
+        write_source(root, "Catalogs/Items.xml", "<xml/>");
+
+        let decision = decide(
+            &[
+                change(&descriptor, ChangeKind::Modified),
+                change(&module, ChangeKind::Modified),
+                change(&form, ChangeKind::Modified),
+                change(&form_layout, ChangeKind::Modified),
+            ],
+            root,
+        );
+
+        assert_eq!(
+            decision,
+            sorted(vec![descriptor, module, form, form_layout])
+        );
+    }
+
+    /// Новый общий модуль грузится с описанием и корнем, как любой новый объект.
+    #[test]
+    fn an_added_common_module_loads_with_its_description_and_the_root() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let configuration = write_source(root, "Configuration.xml", "<xml/>");
+        let descriptor = write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+
+        let decision = decide(
+            &[
+                change(&configuration, ChangeKind::Modified),
+                change(&descriptor, ChangeKind::Added),
+                change(&module, ChangeKind::Added),
+            ],
+            root,
+        );
+
+        assert_eq!(decision, sorted(vec![configuration, descriptor, module]));
+    }
+
+    /// Модуль, которого у существующего объекта не было, грузится с описаниями объекта и
+    /// формы: без описаний платформа его не приняла бы — это не замерено.
+    #[test]
+    fn a_module_added_to_an_existing_object_loads_with_its_descriptions() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let object = write_source(root, "Catalogs/Items.xml", "<xml/>");
+        let form = write_source(root, "Catalogs/Items/Forms/ItemForm.xml", "<xml/>");
+        let layout = write_source(root, "Catalogs/Items/Forms/ItemForm/Ext/Form.xml", "<xml/>");
+        let object_module = write_source(root, "Catalogs/Items/Ext/ObjectModule.bsl", "module");
+        let form_module = write_source(
+            root,
+            "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
+            "module",
+        );
+        let common = write_source(root, "CommonModules/Tools.xml", "<xml/>");
+        let common_module = write_source(root, "CommonModules/Tools/Ext/Module.bsl", "module");
+
+        assert_eq!(
+            decide(&[change(&object_module, ChangeKind::Added)], root),
+            sorted(vec![object.clone(), object_module])
+        );
+        assert_eq!(
+            decide(&[change(&form_module, ChangeKind::Added)], root),
+            sorted(vec![object, form, layout, form_module])
+        );
+        assert_eq!(
+            decide(&[change(&common_module, ChangeKind::Added)], root),
+            sorted(vec![common, common_module])
+        );
+    }
+
+    /// Модуль объекта, менеджера, набора записей и команды объекта пока грузится с описаниями
+    /// владельцев: что платформа применяет их одних, не замерено.
+    #[test]
+    fn a_changed_object_module_still_loads_with_its_descriptions() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let object = write_source(root, "Documents/Order.xml", "<xml/>");
+        for module in [
+            "Documents/Order/Ext/ObjectModule.bsl",
+            "Documents/Order/Ext/ManagerModule.bsl",
+            "Documents/Order/Commands/Print/Ext/CommandModule.bsl",
+        ] {
+            let module = write_source(root, module, "module");
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                sorted(vec![object.clone(), module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
     }
 
     #[test]
