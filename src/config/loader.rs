@@ -46,6 +46,11 @@ pub enum ConfigLoadError {
 
     #[error("config contains unsupported key or value: {0}")]
     UnsupportedShape(String),
+
+    /// Стенд выбранной базы в общем `localPath` принадлежит другому проекту: рабочая команда
+    /// его не берёт и отказывает `workspace_busy`, а не советует поднять стенд.
+    #[error("{0}")]
+    StandOfAnotherProject(crate::platform::service_record::StandOfAnotherProject),
 }
 
 impl ConfigLoadError {
@@ -1540,6 +1545,7 @@ fn project_managed_standalone(
     else {
         return Ok(());
     };
+    refuse_a_stand_of_another_project(config, &infobase_name, validation_mode)?;
     let running =
         crate::platform::service_record::running_standalone(&config.local_dir(), &infobase_name);
     config.infobase.managed_memory = Some(format!("managed:{infobase_name}"));
@@ -1613,6 +1619,7 @@ fn project_managed_cluster(
     if !config.infobase.connection.trim().is_empty() {
         return Ok(());
     }
+    refuse_a_stand_of_another_project(config, &infobase_name, validation_mode)?;
     let name = managed.reference(&infobase_name);
     let running =
         crate::platform::service_record::running_cluster(&config.local_dir(), &infobase_name);
@@ -1659,6 +1666,27 @@ fn project_managed_cluster(
         }
     }
     Ok(())
+}
+
+/// Стенд базы в общем `localPath` принадлежит другому проекту: рабочая команда и `infobase create`
+/// называют тот проект, а не считают стенд незапущенным
+/// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`). `status` и `platforms` показывают
+/// память и установки и стенда не трогают.
+fn refuse_a_stand_of_another_project(
+    config: &AppConfig,
+    infobase_name: &str,
+    validation_mode: &ConfigValidationMode,
+) -> Result<(), ConfigLoadError> {
+    if matches!(validation_mode, ConfigValidationMode::Inspecting { .. }) {
+        return Ok(());
+    }
+    match crate::platform::service_record::stand_of_another_project(
+        &config.local_dir(),
+        infobase_name,
+    ) {
+        Some(refusal) => Err(ConfigLoadError::StandOfAnotherProject(refusal)),
+        None => Ok(()),
+    }
 }
 
 fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
@@ -3172,7 +3200,11 @@ source-set:
             name: Some("demo_data".to_owned()),
             ..Default::default()
         });
-        let paths = ServicePaths::new(&config.local_dir(), "origin", "cluster");
+        let paths = ServicePaths::new(
+            &config.local_dir(),
+            "origin",
+            crate::platform::service_record::StandService::Cluster,
+        );
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         let mut pins = ClusterPins {
@@ -3224,7 +3256,11 @@ source-set:
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
-        let paths = ServicePaths::new(&config.local_dir(), "origin", "standalone");
+        let paths = ServicePaths::new(
+            &config.local_dir(),
+            "origin",
+            crate::platform::service_record::StandService::Standalone,
+        );
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         write_json(&paths.pins(), &ServerPorts::from_first(24000)).unwrap();
@@ -3262,7 +3298,11 @@ source-set:
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
-        let paths = ServicePaths::new(&config.local_dir(), "origin", "standalone");
+        let paths = ServicePaths::new(
+            &config.local_dir(),
+            "origin",
+            crate::platform::service_record::StandService::Standalone,
+        );
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         write_json(&paths.pins(), &ServerPorts::from_first(24000)).unwrap();
@@ -3290,6 +3330,61 @@ source-set:
         )
         .unwrap_err();
         assert!(refused.to_string().contains("standalone stop"), "{refused}");
+    }
+
+    /// Стенд базы в общем `localPath` принадлежит другому проекту — работает он или нет. Рабочая
+    /// команда над ним и `infobase create` файловой базы автономного сервера отказывают
+    /// `workspace_busy`, называя тот проект, а не советуют `cluster start` или
+    /// `standalone start`; `status` по-прежнему показывает память.
+    #[test]
+    fn a_working_command_names_the_project_owning_a_shared_stand() {
+        use crate::platform::service_record::{ServicePaths, StandService};
+        use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+        let dir = tempfile::tempdir().unwrap();
+        let owner = dir.path().join("owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        let mut config = managed_standalone_config(dir.path());
+        let mut owner_local = config.clone();
+        owner_local.base_path = owner.clone();
+        ServicePaths::new(&owner_local.local_dir(), "origin", StandService::Standalone)
+            .prepare()
+            .unwrap();
+        let busy = |error: super::ConfigLoadError| {
+            assert!(
+                matches!(error, super::ConfigLoadError::StandOfAnotherProject(_)),
+                "{error}"
+            );
+            let message = error.to_string();
+            assert!(message.contains(&owner.display().to_string()), "{message}");
+            let error = UseCaseError::from(crate::support::error::AppError::from(error));
+            assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
+        };
+        for mode in [
+            super::ConfigValidationMode::Full,
+            super::ConfigValidationMode::InfobaseCreate { preview: false },
+        ] {
+            busy(super::project_managed_standalone(&mut config.clone(), &mode).unwrap_err());
+        }
+        super::project_managed_standalone(
+            &mut config.clone(),
+            &super::ConfigValidationMode::Inspecting { preview: false },
+        )
+        .unwrap();
+
+        config.infobase.standalone = None;
+        config.infobase.cluster = Some(crate::config::model::InfobaseClusterConfig {
+            managed: Some(crate::config::model::ManagedServerConfig {
+                name: Some("demo".to_owned()),
+                db_path: None,
+            }),
+            ..Default::default()
+        });
+        for mode in [
+            super::ConfigValidationMode::Full,
+            super::ConfigValidationMode::InfobaseCreate { preview: false },
+        ] {
+            busy(super::project_managed_cluster(&mut config.clone(), &mode).unwrap_err());
+        }
     }
 
     fn managed_standalone_config(dir: &Path) -> crate::config::model::AppConfig {

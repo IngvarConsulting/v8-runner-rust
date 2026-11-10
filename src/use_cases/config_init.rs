@@ -215,15 +215,20 @@ fn default_origin_connection(
     let local_path = declared(local_layer)
         .or_else(|| project.and_then(declared))
         .unwrap_or_else(|| PathBuf::from(crate::config::model::DEFAULT_LOCAL_PATH));
-    use crate::support::path::{lexically_normal_absolute, normalize_windows_verbatim_path};
+    use crate::support::path::{
+        compared_path, lexically_normal_absolute, normalize_windows_verbatim_path,
+    };
     let config_dir = lexically_normal_absolute(&normalize_windows_verbatim_path(config_dir));
     let local = lexically_normal_absolute(&config_dir.join(&local_path));
-    if config_dir.starts_with(&local) {
-        return Err(AppError::Validation(format!(
-            "localPath '{}' holds the project directory '{}': the personal state of the checkout lies beside its sources, not around them",
-            local_path.display(),
-            config_dir.display()
-        )));
+    // Сравнение и текст отказа — у проверки настроек: ссылки, `..` и регистр Windows здесь те же.
+    if compared_path(&config_dir).starts_with(compared_path(&local)) {
+        return Err(AppError::Validation(
+            crate::config::validate::ConfigValidationError::LocalPathHoldsTheProject {
+                local_path: local_path.display().to_string(),
+                project: config_dir.display().to_string(),
+            }
+            .to_string(),
+        ));
     }
     let base = local.join(DEFAULT_ORIGIN_DIR);
     let spelled = match base.strip_prefix(&config_dir) {
@@ -2450,6 +2455,58 @@ mod tests {
             "{refused}"
         );
         assert!(!dir.path().join("v8project.yaml").exists());
+    }
+
+    /// `localPath`, написанный другим регистром, — на Windows тот же каталог: базы по умолчанию
+    /// он не даёт, как и у загрузчика.
+    #[cfg(windows)]
+    #[test]
+    fn a_local_path_over_the_config_directory_in_another_case_gives_no_default_origin() {
+        let parent = tempdir().expect("tempdir");
+        let dir = parent.path().join("project");
+        std::fs::create_dir_all(&dir).expect("project");
+        std::fs::write(dir.join("Configuration.xml"), "<Configuration/>").expect("main xml");
+        std::fs::write(dir.join("v8project.local.yaml"), "localPath: ../PROJECT\n")
+            .expect("local config");
+        let refused = execute(&ConfigInitRequest {
+            project_dir: dir.clone(),
+            output_path: "v8project.yaml".into(),
+            force: false,
+            connection: None,
+            format: ConfigFormatRequest::Designer,
+        })
+        .expect_err("refused");
+        assert!(
+            refused.to_string().contains("holds the project directory"),
+            "{refused}"
+        );
+        assert!(!dir.join("v8project.yaml").exists());
+    }
+
+    /// Ссылка на каталог конфигурации — тот же каталог.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_path_through_a_link_to_the_config_directory_gives_no_default_origin() {
+        let parent = tempdir().expect("tempdir");
+        let dir = parent.path().join("project");
+        std::fs::create_dir_all(&dir).expect("project");
+        std::os::unix::fs::symlink(&dir, parent.path().join("link")).expect("link");
+        std::fs::write(dir.join("Configuration.xml"), "<Configuration/>").expect("main xml");
+        std::fs::write(dir.join("v8project.local.yaml"), "localPath: ../link\n")
+            .expect("local config");
+        let refused = execute(&ConfigInitRequest {
+            project_dir: dir.clone(),
+            output_path: "v8project.yaml".into(),
+            force: false,
+            connection: None,
+            format: ConfigFormatRequest::Designer,
+        })
+        .expect_err("refused");
+        assert!(
+            refused.to_string().contains("holds the project directory"),
+            "{refused}"
+        );
+        assert!(!dir.join("v8project.yaml").exists());
     }
 
     #[test]

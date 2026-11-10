@@ -491,7 +491,8 @@ fn unreadable_declarations_reason(error: &ConfigLoadError) -> String {
         | ConfigLoadError::LocalOverlayForbiddenKey(_)
         | ConfigLoadError::LocalOverlayUnsupportedKey(_)
         | ConfigLoadError::LocalOverlayUnsupportedShape(_)
-        | ConfigLoadError::UnsupportedShape(_) => {
+        | ConfigLoadError::UnsupportedShape(_)
+        | ConfigLoadError::StandOfAnotherProject(_) => {
             "its v8project.yaml or v8project.local.yaml cannot be parsed".to_owned()
         }
     }

@@ -8,6 +8,12 @@ check:
   - src/platform/service_record.rs::a_record_copied_to_another_place_names_a_foreign_process
   - src/use_cases/managed_stand/mod.rs::a_copied_local_directory_does_not_adopt_the_foreign_postgres
   - src/use_cases/managed_stand/mod.rs::a_shared_local_directory_leaves_the_stand_of_the_other_project_alone
+  - src/use_cases/managed_stand/mod.rs::a_stopped_stand_of_another_project_is_refused_and_its_data_is_kept
+  - src/use_cases/managed_stand/mod.rs::after_a_reboot_the_stand_of_another_project_is_still_refused
+  - src/platform/service_record.rs::the_owner_of_a_stand_outlives_its_record
+  - src/use_cases/managed_stand/cluster.rs::the_cluster_and_its_base_refuse_the_stand_of_another_project
+  - src/use_cases/managed_stand/standalone.rs::the_server_and_its_base_refuse_the_stand_of_another_project
+  - src/config/loader.rs::a_working_command_names_the_project_owning_a_shared_stand
 ---
 
 # Свой процесс определяется по записи целиком
@@ -17,5 +23,12 @@ check:
 
 Запись службы стенда хранит ещё отпечатки канонического пути своего каталога и каталога проекта и сам каталог
 проекта. Другой каталог — `.local` скопирован: запись устаревшая, а сервер, который она называет, чужой; раннер его не
-останавливает и его остатки не снимает. Тот же каталог при другом проекте — `localPath` общий у нескольких проектов: запись
-живая и чужая, команды стенда её не трогают и отказывают `workspace_busy`, называя проект, который её записал.
+останавливает и его остатки не снимает.
+
+Стенд базы принадлежит проекту, который первым завёл каталог его служб: метка
+`<localPath>/infobases/<база>/managed/owner.json` хранит те же отпечатки и сам проект и, в отличие от записи о процессе,
+переживает `stop` и перезагрузку. Метка того же каталога при другом проекте — `localPath` общий у нескольких проектов:
+стенд чужой, работает он или остановлен. Команды стенда (`dbms`, `cluster`, `standalone`, `infobase create` базы стенда)
+и рабочие команды над ним его не трогают и отказывают `workspace_busy`, называя проект-владелец; `status` и `platforms`
+верхнего уровня показывают память, не трогая стенд. Метка из другого каталога — копия: она ничего не значит, и первая служба
+стенда заменяет её своей.

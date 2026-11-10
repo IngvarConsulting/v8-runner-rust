@@ -954,13 +954,16 @@ fn validate_explicit_convert_target_roots(
         )));
     }
 
-    let dirs = crate::change_detection::runner_dirs::RunnerDirs::of(config);
-    if let Some(dir) =
-        crate::change_detection::runner_dirs::runner_dir_holding(canonical_target_path, dirs)
-    {
+    // Выход не пересекается с каталогами раннера ни в какую сторону: внутри них он лёг бы в
+    // состояние раннера, а над ними — заменил бы его (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
+    if crate::change_detection::runner_dirs::overlaps_a_runner_dir(
+        canonical_target_path,
+        crate::change_detection::runner_dirs::RunnerDirs::of(config),
+    ) {
         return Err(AppError::Validation(format!(
-            "convert --output target must not be inside workPath or localPath: dir={}, target={}",
-            dir.display(),
+            "convert --output target must not overlap workPath or localPath: workPath={}, localPath={}, target={}",
+            config.work_path.display(),
+            config.local_path.display(),
             target_path.display()
         )));
     }
@@ -1824,6 +1827,42 @@ mod tests {
 
         config.tools.platform.version = PlatformVersionSetting::parse("8.3.27");
         assert_eq!(import(&config).as_deref(), Some("8.3.27"));
+    }
+
+    /// Выход `convert --output` не пересекается с `localPath` ни в какую сторону: ни внутри него,
+    /// ни над ним (`INV.CHANGE-DETECTION.RUNNER-DIRECTORIES-ARE-NOT-SOURCES`).
+    #[test]
+    fn a_convert_output_overlapping_the_local_path_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = sample_config();
+        config.base_path = dir.path().join("project");
+        config.work_path = dir.path().join("work");
+        config.local_path = dir.path().join("out").join("personal");
+        std::fs::create_dir_all(&config.base_path).expect("project");
+        std::fs::create_dir_all(&config.local_path).expect("localPath");
+        for target in [
+            config.local_path.join("converted"),
+            config.local_path.clone(),
+            dir.path().join("out"),
+        ] {
+            let refused =
+                super::validate_convert_target(&config, &target, "source-set 'main'", true)
+                    .expect_err("overlapping output refused");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("must not overlap workPath or localPath"),
+                "{}: {refused}",
+                target.display()
+            );
+        }
+        super::validate_convert_target(
+            &config,
+            &dir.path().join("elsewhere"),
+            "source-set 'main'",
+            true,
+        )
+        .expect("an output beside the runner directories");
     }
 
     #[test]

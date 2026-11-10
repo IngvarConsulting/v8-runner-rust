@@ -22,7 +22,7 @@ use crate::platform::process::{
 use crate::platform::service::{self, ProcessFacts, ProcessRow, ServiceRequest, ServiceSpawnError};
 use crate::platform::service_record::{
     machine_fingerprint, observe_service, read_json, record_names_own_process, write_json,
-    Observed, PinnedPorts, RecordState, ServicePaths, ServiceRecord,
+    Observed, PinnedPorts, RecordState, ServicePaths, ServiceRecord, StandService,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::interruption_before_safe_point;
@@ -43,9 +43,9 @@ const PORT_TRIES: u32 = 64;
 const PORT_STEP: u32 = 32;
 const PASSWORD_LENGTH: usize = 24;
 /// Службы сервера над этой СУБД: их запись делает `dbms stop` отказом.
-const SERVERS: [(&str, &str); 2] = [
-    ("cluster", "cluster stop"),
-    ("standalone", "standalone stop"),
+const SERVERS: [(StandService, &str); 2] = [
+    (StandService::Cluster, "cluster stop"),
+    (StandService::Standalone, "standalone stop"),
 ];
 
 /// Что о машине и её процессах нужно сценарию. Подменяется в тестах.
@@ -297,7 +297,7 @@ fn cluster_over(config: &AppConfig, host: &dyn ServiceHost, database: &Database)
 }
 
 fn cluster_runs(config: &AppConfig, host: &dyn ServiceHost, infobase: &str) -> bool {
-    let paths = ServicePaths::new(&config.local_dir(), infobase, "cluster");
+    let paths = ServicePaths::new(&config.local_dir(), infobase, StandService::Cluster);
     record_names_own_process(&paths, host.machine().as_deref(), &|pid| host.facts(pid))
 }
 
@@ -374,7 +374,7 @@ impl<'a> Stand<'a> {
         host: &'a dyn ServiceHost,
     ) -> Result<Self, UseCaseError> {
         let infobase = declared_base(config)?;
-        let paths = ServicePaths::new(&config.local_dir(), &infobase, "postgres");
+        let paths = ServicePaths::new(&config.local_dir(), &infobase, StandService::Postgres);
         Ok(Self {
             config,
             context,
@@ -790,10 +790,10 @@ impl<'a> Stand<'a> {
     }
 
     /// Свой сервер над этой СУБД: пока он работает, её не останавливают.
-    fn running_server(&self) -> Option<(&'static str, &'static str)> {
+    fn running_server(&self) -> Option<(StandService, &'static str)> {
         let machine = self.host.machine();
         SERVERS.into_iter().find(|(service, _)| {
-            record_names_own_process(&self.paths.sibling(service), machine.as_deref(), &|pid| {
+            record_names_own_process(&self.paths.sibling(*service), machine.as_deref(), &|pid| {
                 self.host.facts(pid)
             })
         })
@@ -1084,27 +1084,20 @@ pub fn dbms_status(context: &ExecutionContext, config: &AppConfig) -> UseCaseRes
     )
 }
 
-/// Стенд этой базы в общем `localPath` записал другой проект: его записи живые и не наши. Команда
-/// стенда их не трогает и отказывает, называя тот проект
+/// Стенд этой базы в общем `localPath` принадлежит другому проекту — работает он или остановлен.
+/// Команда стенда его не трогает и отказывает, называя тот проект
 /// (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
 fn refuse_a_stand_of_another_project(config: &AppConfig) -> Result<(), UseCaseError> {
     let Some(infobase) = config.infobase_name.as_deref() else {
         return Ok(());
     };
-    let local = config.local_dir();
-    for service in ["postgres", "standalone", "cluster", "ras"] {
-        let paths = ServicePaths::new(&local, infobase, service);
-        if let Some(project) = paths.another_project() {
-            return Err(UseCaseError::new(
-                UseCaseErrorKind::WorkspaceBusy,
-                format!(
-                    "the {service} of '{infobase}' under localPath '{}' was started by the project '{project}': this localPath is shared, and the stand is left alone; give this project its own localPath",
-                    local.path().display()
-                ),
-            ));
-        }
+    match crate::platform::service_record::stand_of_another_project(&config.local_dir(), infobase) {
+        Some(refusal) => Err(UseCaseError::new(
+            UseCaseErrorKind::WorkspaceBusy,
+            refusal.to_string(),
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn run_dbms(
@@ -1350,7 +1343,7 @@ mod tests {
 
     impl Setup {
         fn paths(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.local_dir(), "origin", "postgres")
+            ServicePaths::new(&self.config.local_dir(), "origin", StandService::Postgres)
         }
 
         fn run(
@@ -1574,6 +1567,88 @@ mod tests {
         );
     }
 
+    /// Проект A остановил свой стенд — запись о процессе снята, но стенд остаётся его: проект B
+    /// с тем же `localPath` его не поднимает и не переписывает закреплённое, а отказ не говорит о
+    /// процессе, которого нет.
+    #[test]
+    fn a_stopped_stand_of_another_project_is_refused_and_its_data_is_kept() {
+        let first = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        first
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        first
+            .run(ServiceCommand::Stop, false, &runner, &host)
+            .unwrap();
+        assert!(!first.paths().record().exists(), "stop forgets the record");
+        let pins = std::fs::read(first.paths().pins()).unwrap();
+        let version = std::fs::read(first.paths().data().join("PG_VERSION")).unwrap();
+        let mut second = self::setup();
+        second.config.local_path = first.config.local_path.clone();
+
+        for command in [
+            ServiceCommand::Start,
+            ServiceCommand::Restart,
+            ServiceCommand::Stop,
+            ServiceCommand::Status,
+        ] {
+            let refused = second.run(command, false, &runner, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+            let message = refused.to_string();
+            assert!(
+                message.contains(&first.config.base_path.display().to_string()),
+                "{command:?}: {message}"
+            );
+            assert!(message.contains("belongs to the project"), "{message}");
+            assert!(!message.contains("started"), "{message}");
+        }
+        assert_eq!(host.spawned.get(), 1, "the second project starts nothing");
+        assert_eq!(std::fs::read(first.paths().pins()).unwrap(), pins);
+        assert_eq!(
+            std::fs::read(first.paths().data().join("PG_VERSION")).unwrap(),
+            version
+        );
+        assert!(!first.paths().record().exists());
+
+        let restarted = first
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        assert_eq!(restarted.action, ServiceAction::Started);
+    }
+
+    /// После перезагрузки запись о процессе A осталась, а процесса нет: стенд всё равно
+    /// принадлежит A, и B отказывает тем же текстом.
+    #[test]
+    fn after_a_reboot_the_stand_of_another_project_is_still_refused() {
+        let first = setup();
+        let host = FakeHost::default();
+        let runner = FakeRunner::new(&host);
+        first
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap();
+        host.processes.borrow_mut().clear();
+        host.listeners.borrow_mut().clear();
+        let record = std::fs::read(first.paths().record()).unwrap();
+        let pins = std::fs::read(first.paths().pins()).unwrap();
+        let mut second = self::setup();
+        second.config.local_path = first.config.local_path.clone();
+
+        let refused = second
+            .run(ServiceCommand::Start, false, &runner, &host)
+            .unwrap_err();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy);
+        let message = refused.to_string();
+        assert!(
+            message.contains(&first.config.base_path.display().to_string()),
+            "{message}"
+        );
+        assert!(!message.contains("started"), "{message}");
+        assert_eq!(host.spawned.get(), 1);
+        assert_eq!(std::fs::read(first.paths().record()).unwrap(), record);
+        assert_eq!(std::fs::read(first.paths().pins()).unwrap(), pins);
+    }
+
     #[test]
     fn a_first_port_taken_by_someone_is_chosen_again() {
         let setup = setup();
@@ -1701,10 +1776,7 @@ mod tests {
                 image: "postgres.exe".to_owned(),
             },
         );
-        for (service, next) in [
-            ("cluster", "cluster stop"),
-            ("standalone", "standalone stop"),
-        ] {
+        for (service, next) in SERVERS {
             let mut server = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
             server.pid = Some(777);
             let sibling = setup.paths().sibling(service);
@@ -1732,7 +1804,11 @@ mod tests {
             .unwrap();
         let mut server = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
         server.pid = Some(777);
-        write_json(&setup.paths().sibling_record("standalone"), &server).unwrap();
+        write_json(
+            &setup.paths().sibling_record(StandService::Standalone),
+            &server,
+        )
+        .unwrap();
         assert_eq!(
             setup
                 .run(ServiceCommand::Stop, false, &runner, &host)

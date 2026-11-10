@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use thiserror::Error;
 
 use crate::config::model::{
@@ -1297,6 +1297,7 @@ pub(crate) fn validate_local_path(
     config: &AppConfig,
     config_dir: &Path,
 ) -> Result<(), ConfigValidationError> {
+    use crate::support::path::compared_path;
     let local = compared_path(&config.local_path);
     let shown = || config.local_path.display().to_string();
     if compared_path(config_dir).starts_with(&local) {
@@ -1333,24 +1334,6 @@ pub(crate) fn validate_local_path(
         });
     }
     Ok(())
-}
-
-/// Путь в том виде, в каком его сравнивает проверка `localPath`: ссылки и `..` разрешены по
-/// ближайшему существующему предку (файловая система только читается), префикс `\\?\` снят, а
-/// на Windows регистр не различается — `SRC` и `src` там один каталог.
-fn compared_path(path: &Path) -> PathBuf {
-    use crate::support::path::{
-        lexically_normal_absolute, nearest_existing_canonical_path, normalize_windows_verbatim_path,
-    };
-    let normal = lexically_normal_absolute(path);
-    let resolved = normalize_windows_verbatim_path(
-        &nearest_existing_canonical_path(&normal).unwrap_or(normal),
-    );
-    if cfg!(windows) {
-        PathBuf::from(resolved.to_string_lossy().to_lowercase())
-    } else {
-        resolved
-    }
 }
 
 /// Каталог обмена автономного сервера лежит на той стороне; `workPath` — на этой.

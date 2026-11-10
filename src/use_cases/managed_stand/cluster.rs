@@ -22,6 +22,7 @@ use crate::platform::service::{first_with_keys, ProcessRow, ServiceSpawnError};
 use crate::platform::service_record::{
     adopt_recorded_pid, observe_service, read_json, record_names_own_process, write_json,
     ClusterPins, Observed, PreviousRegistry, RecordState, ServicePaths, ServiceRecord,
+    StandService,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::interruption_before_safe_point;
@@ -574,7 +575,7 @@ impl Cluster<'_> {
     /// Свой автономный сервер той же базы: одна БД — один сервер.
     fn standalone_running(&self) -> bool {
         record_names_own_process(
-            &self.agent.sibling("standalone"),
+            &self.agent.sibling(StandService::Standalone),
             self.host.machine().as_deref(),
             &|pid| self.host.facts(pid),
         )
@@ -1215,8 +1216,12 @@ fn cluster<'a>(
     locate: &'a dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> Result<Cluster<'a>, UseCaseError> {
     let declared = declared(config)?;
-    let agent = ServicePaths::new(&config.local_dir(), &declared.infobase, "cluster");
-    let ras = ServicePaths::new(&config.local_dir(), &declared.infobase, "ras");
+    let agent = ServicePaths::new(
+        &config.local_dir(),
+        &declared.infobase,
+        StandService::Cluster,
+    );
+    let ras = ServicePaths::new(&config.local_dir(), &declared.infobase, StandService::Ras);
     Ok(Cluster {
         config,
         context,
@@ -1349,7 +1354,11 @@ fn mark_registered(cluster: &Cluster<'_>, pins: ClusterPins) -> Result<(), UseCa
 /// После `CREATEINFOBASE`: база создана в текущем реестре.
 pub(super) fn remember_registered(config: &AppConfig) -> Result<(), UseCaseError> {
     let declared = declared(config)?;
-    let paths = ServicePaths::new(&config.local_dir(), &declared.infobase, "cluster");
+    let paths = ServicePaths::new(
+        &config.local_dir(),
+        &declared.infobase,
+        StandService::Cluster,
+    );
     let pins: ClusterPins = read_json(&paths.pins())
         .ok_or_else(|| validation("the ports of the cluster are not pinned"))?;
     write_json(
@@ -1703,10 +1712,10 @@ mod tests {
 
     impl Setup {
         fn agent(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.local_dir(), "origin", "cluster")
+            ServicePaths::new(&self.config.local_dir(), "origin", StandService::Cluster)
         }
         fn ras(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.local_dir(), "origin", "ras")
+            ServicePaths::new(&self.config.local_dir(), "origin", StandService::Ras)
         }
         fn pins(&self) -> ClusterPins {
             read_json(&self.agent().pins()).expect("pinned")
@@ -1765,8 +1774,11 @@ mod tests {
             .unwrap()
         }
         fn dbms_record(&self) -> ServiceRecord {
-            read_json(&ServicePaths::new(&self.config.local_dir(), "origin", "postgres").record())
-                .unwrap()
+            read_json(
+                &ServicePaths::new(&self.config.local_dir(), "origin", StandService::Postgres)
+                    .record(),
+            )
+            .unwrap()
         }
         fn base(&self, host: &Host) -> Result<ClusterBase, UseCaseError> {
             cluster_base(
@@ -2351,7 +2363,11 @@ mod tests {
     }
 
     fn own_standalone(setup: &Setup, host: &Host) {
-        let standalone = ServicePaths::new(&setup.config.local_dir(), "origin", "standalone");
+        let standalone = ServicePaths::new(
+            &setup.config.local_dir(),
+            "origin",
+            StandService::Standalone,
+        );
         standalone.prepare().unwrap();
         host.live(8100, "ibsrv.exe");
         write_json(
@@ -2687,7 +2703,7 @@ mod tests {
 
     /// Работающий свой кластер другой базы.
     fn running_cluster_of(setup: &Setup, host: &Host, infobase: &str) {
-        let paths = ServicePaths::new(&setup.config.local_dir(), infobase, "cluster");
+        let paths = ServicePaths::new(&setup.config.local_dir(), infobase, StandService::Cluster);
         paths.prepare().unwrap();
         host.live(9200, "ragent.exe");
         write_json(
@@ -2863,5 +2879,38 @@ mod tests {
             "{:?}",
             started.connection
         );
+    }
+
+    /// Стенд базы в общем `localPath` принадлежит другому проекту: команды кластера и
+    /// `infobase create` в нём отказывают `workspace_busy`, называя тот проект, и ничего не
+    /// поднимают (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+    #[test]
+    fn the_cluster_and_its_base_refuse_the_stand_of_another_project() {
+        let first = setup();
+        ServicePaths::new(&first.config.local_dir(), "origin", StandService::Cluster)
+            .prepare()
+            .unwrap();
+        let mut second = setup();
+        second.config.local_path = first.config.local_path.clone();
+        let host = Host::default();
+        let project = first.config.base_path.display().to_string();
+        for command in [
+            ServiceCommand::Start,
+            ServiceCommand::Status,
+            ServiceCommand::Stop,
+            ServiceCommand::Restart,
+        ] {
+            let refused = second.run(command, &host).unwrap_err();
+            assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+            assert!(
+                refused.to_string().contains(&project),
+                "{command:?}: {refused}"
+            );
+        }
+        let refused = second.base(&host).err().unwrap();
+        assert_eq!(refused.kind(), UseCaseErrorKind::WorkspaceBusy, "{refused}");
+        assert!(refused.to_string().contains(&project), "{refused}");
+        assert!(host.spawned.borrow().is_empty());
+        assert!(!first.agent().pins().exists());
     }
 }
