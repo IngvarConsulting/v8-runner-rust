@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use crate::config::model::AppConfig;
 use crate::domain::capability::TargetKind;
 use crate::domain::init::{RemovedEntry, RemovedKind, RemovedState};
-use crate::domain::sessions::{InfobaseSessions, SessionLock, SessionLockState};
-use crate::platform::file_infobase::{is_held, platform_entries, probe_sessions, FileSessions};
+use crate::platform::file_base_hold::{
+    is_sharing_violation, platform_entries, sessions_hold, Hold,
+};
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::exchange_guard::forget_base_memory;
 use crate::use_cases::infobase_lock::{idle_live_agents, settle_live_agents};
@@ -23,8 +24,6 @@ use crate::use_cases::infobase_owner::holders;
 use crate::use_cases::managed_stand::{old_database, OldDatabase};
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
-/// Файл блокировки начала сеансов файловой базы (замер #468).
-const SESSION_LOCK_FILE: &str = "1Cv8.cdn";
 /// Прежняя база, проверенная и готовая к откладыванию.
 pub(super) struct Recreation {
     old: OldBase,
@@ -127,12 +126,13 @@ fn file_base(config: &AppConfig) -> Result<FileBase, UseCaseError> {
             ),
         ));
     }
-    match probe_sessions(&dir) {
-        Ok(FileSessions::Absent | FileSessions::Free) => {}
-        Ok(FileSessions::Held { pid, .. }) => return Err(file_sessions_refusal(config, &dir, pid)),
+    match sessions_hold(&dir) {
+        Ok(Hold::Absent | Hold::Free) => {}
+        Ok(Hold::Held { pid }) => return Err(file_sessions_refusal(config, &dir, pid)),
         Err(error) => {
             return Err(runtime(format!(
-                "{error}; infobase create --recreate removes nothing it cannot check"
+                "cannot probe the file infobase '{}': {error}; infobase create --recreate removes nothing it cannot check",
+                dir.display()
             )))
         }
     }
@@ -164,42 +164,21 @@ pub(super) fn leftover_of(dir: &Path) -> Option<PathBuf> {
     aside_dir(dir).filter(|aside| aside.exists())
 }
 
-/// Отказ `infobase_sessions` файловой базы. Перечня сеансов у файловой базы раннер не
-/// получает (`list: null`), завершать их не берётся; блокировка начала сеансов — файл
-/// `1Cv8.cdn`, и раннер его не ставил.
+/// Отказ `infobase_sessions` файловой базы. Форму `error.sessions` строит владелец из
+/// применения: перечня у файловой базы нет (`list: null`), завершать сеансы раннер не берётся,
+/// блокировка начала сеансов — по файлу `1Cv8.cdn`.
 fn file_sessions_refusal(config: &AppConfig, dir: &Path, pid: Option<i32>) -> UseCaseError {
     let holder = pid.map_or_else(String::new, |pid| format!(" (process {pid})"));
-    UseCaseError::sessions_refusal(
+    UseCaseError::new(
+        UseCaseErrorKind::InfobaseSessions,
         format!(
             "infobase create --recreate removes nothing: the file infobase '{}' is open{holder}; close its sessions (clients, Designer, a standalone server) and repeat",
             dir.display()
         ),
-        InfobaseSessions {
-            base: config.v8_connection().describe_target(),
-            list: None,
-            from_this_machine: false,
-            terminable: false,
-            lock: file_session_lock(dir),
-        },
     )
-}
-
-/// Блокировка начала сеансов файловой базы по файлу `1Cv8.cdn`: своей раннер здесь не ставит.
-fn file_session_lock(dir: &Path) -> SessionLock {
-    match std::fs::read(dir.join(SESSION_LOCK_FILE)) {
-        Ok(bytes) => SessionLock {
-            state: SessionLockState::Foreign,
-            message: String::from_utf8_lossy(&bytes)
-                .split('"')
-                .nth(1)
-                .map(str::to_owned),
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SessionLock {
-            state: SessionLockState::None,
-            message: None,
-        },
-        Err(_) => SessionLock::unknown(),
-    }
+    .with_sessions(crate::use_cases::apply::sessions::infobase_sessions(
+        config, None, false,
+    ))
 }
 
 fn runtime(message: String) -> UseCaseError {
@@ -312,7 +291,7 @@ impl FileBase {
         }
         // Сеанс мог войти после проверки; на POSIX перенос открытого файла не отказывает,
         // поэтому база спрашивается ещё раз прямо перед ним.
-        if let Ok(FileSessions::Held { pid, .. }) = probe_sessions(&self.dir) {
+        if let Ok(Hold::Held { pid }) = sessions_hold(&self.dir) {
             return Err(file_sessions_refusal(config, &self.dir, pid));
         }
         std::fs::create_dir(&self.aside).map_err(|error| {
@@ -331,7 +310,7 @@ impl FileBase {
                 if back.is_empty() {
                     let _ = std::fs::remove_dir(&self.aside);
                 }
-                let refusal = if is_held(&error) {
+                let refusal = if is_sharing_violation(&error) {
                     file_sessions_refusal(config, &self.dir, None)
                 } else {
                     runtime(format!(

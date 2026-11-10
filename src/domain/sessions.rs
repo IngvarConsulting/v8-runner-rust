@@ -1,67 +1,110 @@
-//! Отказ `infobase_sessions`: базу держат сеансы платформы.
-//!
-//! Форма общая у всех команд, которые так отказывают (`push`, `apply` по #211 и
-//! `infobase create --recreate` по #597): что за база, какие сеансы, может ли раннер их
-//! завершить и стоит ли блокировка начала сеансов.
+//! Чужие сеансы базы у применения конфигурации: отказ `infobase_sessions` и
+//! `infobase_designer_busy` (`error.sessions`) и исход `--sessions force` (`data.sessions`
+//! у `push` и `apply`), `INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`.
 
 use serde::{Deserialize, Serialize};
 
-/// Поле `error.sessions` отказа `infobase_sessions`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+/// Кто держит базу — поле `error.sessions` отказов `infobase_sessions` и
+/// `infobase_designer_busy`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InfobaseSessions {
-    /// База: строка соединения без учётных данных.
+    /// Строка соединения базы без учётных данных.
     pub base: String,
-    /// Сеансы базы. `null` — признак занятости есть, а перечня раннер не получил.
+    /// Сеансы, как их назвала платформа; `null` — список не получен или не разобран целиком.
     pub list: Option<Vec<SessionEntry>>,
     /// Среди сеансов есть сеанс с этой машины.
     pub from_this_machine: bool,
-    /// Может ли раннер завершить сеансы для этой базы и команды.
+    /// Может ли раннер завершить сеансы этой базы для этой команды (`--sessions force`).
     pub terminable: bool,
-    /// Блокировка начала сеансов, уже стоящая на базе.
+    /// Блокировка начала сеансов, которая уже стоит у базы.
     pub lock: SessionLock,
 }
 
-/// Один сеанс базы.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+/// Один сеанс из списка платформы.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionEntry {
+    /// Компьютер сеанса.
     pub computer: String,
-    /// Устойчивый код приложения платформы (`Designer`, `1CV8C`, `BackgroundJob`…); `null` —
-    /// название не распознано.
-    pub application: Option<String>,
+    /// Устойчивый код приложения; `null` — название не из таблицы известных.
+    pub application: Option<ApplicationCode>,
     /// Название приложения, как его написала платформа.
     pub application_title: String,
+    /// Начало сеанса, местное время базы: `ГГГГ-ММ-ДДTчч:мм:сс`.
     pub started: String,
+    /// Пользователь; текст платформы у файловой базы его не называет.
     pub user: Option<String>,
+    /// Номер сеанса у платформы.
     pub id: Option<String>,
 }
 
-/// Блокировка начала сеансов.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+/// Устойчивый код приложения платформы.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub enum ApplicationCode {
+    /// Конфигуратор.
+    Designer,
+    /// Тонкий клиент.
+    #[serde(rename = "1CV8C")]
+    ThinClient,
+    /// Толстый клиент.
+    #[serde(rename = "1CV8")]
+    ThickClient,
+    /// Фоновое задание.
+    BackgroundJob,
+    /// Веб-клиент.
+    WebClient,
+    /// Внешнее соединение.
+    #[serde(rename = "COMConnection")]
+    ComConnection,
+}
+
+/// Блокировка начала сеансов базы.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionLock {
     pub state: SessionLockState,
-    /// Сообщение блокировки, если она стоит и раннер его прочёл.
+    /// Сообщение блокировки, если раннер его знает.
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionLockState {
-    /// Блокировки нет.
-    None,
-    /// Блокировку поставил этот раннер.
-    Own,
-    /// Блокировку поставил кто-то другой.
-    Foreign,
-    /// Раннер не может узнать, стоит ли блокировка.
-    Unknown,
-}
-
 impl SessionLock {
-    /// Раннер не может узнать, стоит ли блокировка.
+    /// Блокировки нет.
+    pub const fn none() -> Self {
+        Self {
+            state: SessionLockState::None,
+            message: None,
+        }
+    }
+
+    /// Раннер не может узнать, стоит ли блокировка: автономный сервер и кластер без `rac`.
     pub const fn unknown() -> Self {
         Self {
             state: SessionLockState::Unknown,
             message: None,
         }
     }
+}
+
+/// Чья блокировка начала сеансов стоит у базы.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLockState {
+    /// Блокировки нет.
+    None,
+    /// Блокировка раннера.
+    Own,
+    /// Чужая блокировка; раннер её не трогает.
+    Foreign,
+    /// Узнать нельзя.
+    Unknown,
+}
+
+/// Исход `--sessions force` — поле `sessions` формы `push` и `apply`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionsOutcome {
+    /// Сеансы, которые завершил ключ платформы, — из списка до завершения; пусто —
+    /// завершать было некого; `null` — завершение было, а список платформа не дала.
+    pub terminated: Option<Vec<SessionEntry>>,
+    /// Блокировка начала сеансов на время применения.
+    pub lock: SessionLock,
+    /// Передал ли раннер платформе сообщение завершаемым сеансам.
+    pub message_delivered: bool,
 }

@@ -1482,8 +1482,9 @@ impl Registered {
                     .into_iter()
                     .map(|session| crate::domain::sessions::SessionEntry {
                         computer: session.host,
-                        application: (!session.application.is_empty())
-                            .then(|| session.application.clone()),
+                        application: crate::platform::session_list::application_of_rac(
+                            &session.application,
+                        ),
                         application_title: session.application,
                         started: session.started,
                         user: (!session.user.is_empty()).then_some(session.user),

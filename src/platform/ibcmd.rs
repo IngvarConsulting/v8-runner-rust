@@ -9,6 +9,7 @@ use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::session_list::SessionTerminate;
 
 // Разбор пакета (`export --file`) в несколько потоков отказывает на годных пакетах (#476),
 // поэтому он идёт в один поток. Выгрузка из базы ключа не несёт и идёт в потоках платформы:
@@ -321,21 +322,43 @@ impl<'a> IbcmdDsl<'a> {
 
     /// Queries another process's lock without acquiring one that would also block ibcmd.
     /// `Ok(true)` is a present base no session holds, `Ok(false)` an absent one; a held
-    /// base is [`IbcmdError::SnapshotBusy`]. The probe itself is the single owner in
-    /// [`crate::platform::file_infobase`].
+    /// base is [`IbcmdError::SnapshotBusy`].
     #[cfg(unix)]
     fn probe_snapshot_access(&self) -> Result<bool, IbcmdError> {
-        use crate::platform::file_infobase::{probe_sessions, FileSessions};
+        use std::os::unix::fs::OpenOptionsExt;
+
         let path = self.snapshot_path()?;
-        let dir = path.parent().unwrap_or(&path);
-        match probe_sessions(dir) {
-            Ok(FileSessions::Absent) => Ok(false),
-            Ok(FileSessions::Free) => Ok(true),
-            Ok(FileSessions::Held { path, pid }) => Err(IbcmdError::SnapshotBusy { path, pid }),
-            Err(error) => Err(IbcmdError::SnapshotProbe {
-                path: error.path,
-                source: error.source,
-            }),
+        // A malformed target such as a FIFO must fail the metadata check without blocking.
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(IbcmdError::SnapshotProbe { path, source }),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|source| IbcmdError::SnapshotProbe {
+                path: path.clone(),
+                source,
+            })?;
+        if !metadata.is_file() {
+            return Err(IbcmdError::SnapshotProbe {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "expected a regular 1Cv8.1CD file",
+                ),
+            });
+        }
+        match crate::platform::file_base_hold::lock_holder(&file) {
+            Err(source) => Err(IbcmdError::SnapshotProbe { path, source }),
+            Ok(crate::platform::file_base_hold::Hold::Held { pid }) => {
+                Err(IbcmdError::SnapshotBusy { path, pid })
+            }
+            Ok(_) => Ok(true),
         }
     }
 
@@ -552,6 +575,7 @@ impl<'a> IbcmdDsl<'a> {
     pub fn config_apply(
         &self,
         extension: Option<&str>,
+        sessions: SessionTerminate<'_>,
     ) -> Result<PlatformCommandResult, IbcmdError> {
         let mut args = self.authenticated_infobase_args(&["config", "apply"]);
         if let Some(extension) = extension {
@@ -559,6 +583,13 @@ impl<'a> IbcmdDsl<'a> {
         }
         args.push("--force".to_owned());
         args.push("--dynamic=disable".to_owned());
+        match sessions {
+            SessionTerminate::Keep => args.push("--session-terminate=disable".to_owned()),
+            SessionTerminate::Force { message } => {
+                args.push("--session-terminate=force".to_owned());
+                args.push(format!("--session-terminate-message={message}"));
+            }
+        }
         self.run(&args)
     }
 
@@ -806,6 +837,7 @@ mod tests {
     #[cfg(unix)]
     use crate::platform::process::ProcessInterruptionSafety;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
+    use crate::platform::session_list::SessionTerminate;
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -972,7 +1004,8 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        dsl.config_apply(None).expect("apply");
+        dsl.config_apply(None, SessionTerminate::Keep)
+            .expect("apply");
 
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("apply"));
@@ -992,8 +1025,10 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        dsl.config_apply(None).expect("apply the configuration");
-        dsl.config_apply(Some("ext")).expect("apply the extension");
+        dsl.config_apply(None, SessionTerminate::Keep)
+            .expect("apply the configuration");
+        dsl.config_apply(Some("ext"), SessionTerminate::Keep)
+            .expect("apply the extension");
 
         let requests = runner.requests.borrow();
         assert_eq!(requests.len(), 2);
@@ -1006,11 +1041,52 @@ mod tests {
             assert_eq!(args[apply - 1], "config", "{args:?}");
             let tail: Vec<&str> = args[apply + 1..].iter().map(String::as_str).collect();
             let expected: Vec<&str> = match extension {
-                Some(name) => vec!["--extension", name, "--force", "--dynamic=disable"],
-                None => vec!["--force", "--dynamic=disable"],
+                Some(name) => vec![
+                    "--extension",
+                    name,
+                    "--force",
+                    "--dynamic=disable",
+                    "--session-terminate=disable",
+                ],
+                None => vec![
+                    "--force",
+                    "--dynamic=disable",
+                    "--session-terminate=disable",
+                ],
             };
             assert_eq!(tail, expected, "{args:?}");
         }
+    }
+
+    /// Без принуждения `ibcmd` слышит явный запрет завершать сеансы; с ним — ключ завершения
+    /// и всегда сообщение: без него `ibcmd` с 8.3.25 ждёт ввода
+    /// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+    #[test]
+    fn config_apply_names_what_it_does_with_foreign_sessions() {
+        let runner = CapturingRunner::default();
+        let dsl = IbcmdDsl::new(
+            "ibcmd".into(),
+            file_connection("File=./ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.config_apply(None, SessionTerminate::Force { message: "bye" })
+            .expect("apply with the sessions ended");
+
+        let requests = runner.requests.borrow();
+        let args = &requests[0].args;
+        let tail: Vec<&str> = args[args.len() - 4..].iter().map(String::as_str).collect();
+        assert_eq!(
+            tail,
+            [
+                "--force",
+                "--dynamic=disable",
+                "--session-terminate=force",
+                "--session-terminate-message=bye"
+            ],
+            "{args:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1647,7 +1723,9 @@ mod tests {
             ProcessExecutionPolicy::default(),
         );
 
-        let result = dsl.config_apply(None).expect("apply");
+        let result = dsl
+            .config_apply(None, SessionTerminate::Keep)
+            .expect("apply");
 
         assert_eq!(result.process.exit_code, 7);
         assert_eq!(result.process.stdout.trim(), "out");

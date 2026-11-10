@@ -3,7 +3,7 @@ id: INV.USE-CASES.RECREATE-REMOVES-ONLY-THE-PLATFORM-FILES-OF-THE-BASE
 check:
   - tests/cli_infobase_recreate.rs::a_recreated_file_base_is_new_and_keeps_a_foreign_file
   - tests/cli_infobase_recreate.rs::a_recreate_preview_names_what_it_would_remove_and_touches_nothing
-  - src/platform/file_infobase.rs::only_top_level_1cv8_names_are_platform_entries
+  - src/platform/file_base_hold.rs::only_top_level_1cv8_names_are_platform_entries
 ---
 
 # Пересоздание файловой базы убирает только записи платформы

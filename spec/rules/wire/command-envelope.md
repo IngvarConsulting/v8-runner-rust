@@ -8,7 +8,7 @@ check:
   - tests/cli_infobase_lock.rs::an_mcp_tool_on_a_held_base_is_refused_at_once
   - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_runs_with_a_warning_and_names_the_owner
   - tests/cli_platform_release.rs::every_platform_command_refuses_without_the_release_of_the_sources_format
-  - tests/cli_infobase_recreate.rs::a_recreate_of_a_held_base_is_refused_with_its_sessions_and_removes_nothing
+  - tests/cli_apply_sessions.rs::a_file_base_held_by_a_session_is_refused_with_the_session_list
 ---
 
 # Конверт ответа команды
@@ -17,7 +17,7 @@ check:
 `docs/schemas/command-envelope.schema.json`: `ok`, `command`, `duration_ms`, `data`,
 `warnings`, `steps` и необязательная `error`. Отказ несёт `code`, `kind`, `message`, при
 нужде `next` — следующий шаг структурой, — два поля поколений у отказа
-`non_fast_forward` и поле `platform_release` у отказа `platform_release_missing`. Список полей конверта, шага и отказа закрыт: новое поле у любого из
+`non_fast_forward`, поле `platform_release` у отказа `platform_release_missing` и поле `sessions` у отказов `infobase_sessions` и `infobase_designer_busy`. Список полей конверта, шага и отказа закрыт: новое поле у любого из
 них валит проверку.
 
 Рода и коды — закрытые перечисления, а не строки. Рода: `capability`, `environment`,
@@ -32,11 +32,11 @@ check:
 `platforms`, — и `installations`, опись установок, по которой решён отказ. У `workspace` — чужая работа
 с тем же местом, с кодом выхода 3: занятость, которая проходит, если повторить, —
 `workspace_busy` (рабочий каталог держит другая команда), `infobase_busy` (файловую базу
-держит другая команда) и `infobase_sessions` (базу держат сеансы платформы). Только
-`infobase_sessions` заполняет поле `sessions`: `base` — база без учётных данных, `list` —
-сеансы `{computer, application, application_title, started, user, id}` или `null`, если
-перечня нет, `from_this_machine`, `terminable` и `lock` — `{state: none|own|foreign|unknown,
-message}`. База другой рабочей копии отказом не служит: команда идёт, а
+держит другая команда), `infobase_sessions` (обновлению конфигурации базы данных нужен
+монопольный доступ, а базу держат чужие сеансы) и `infobase_designer_busy` (файловую базу
+держит чужой Конфигуратор). Поле `sessions` у отказов «базу держат» называет базу, сеансы, можно ли их
+завершить и блокировку начала сеансов
+(`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). База другой рабочей копии отказом не служит: команда идёт, а
 `warnings` несёт предупреждение
 (`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`).
 
@@ -83,7 +83,7 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 выключен `tools.designer_agent.live: false`; `live_agent_job` рода `environment`, код выхода
 2, — раннер в Job, из которого сторож не может выйти. Платформу ни один из них не запускает.
 
-**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он. У рода `workspace` появился код `infobase_sessions` с необязательным полем `sessions`; его первым производителем стал `infobase create --recreate` (`INV.USE-CASES.RECREATE-REFUSES-A-BUSY-BASE-BEFORE-REMOVING`).
+**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он. Рода `workspace` прибавили коды `infobase_sessions` и `infobase_designer_busy`, а у отказа — необязательное поле `sessions`, которое заполняют только они.
 
 **Что изменила версия 4.** Коды рода `workspace` — `workspace_busy` и `infobase_busy`: запись в
 базу другой рабочей копии не отказывает, а предупреждает в `warnings`.

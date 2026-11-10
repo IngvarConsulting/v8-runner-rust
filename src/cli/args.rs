@@ -479,11 +479,36 @@ pub struct BuildArgs {
 
     /// Load into the main configuration only and leave the database configuration as it is,
     /// so open sessions keep working; apply it later with `apply`
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["sessions", "sessions_message"])]
     pub no_apply: bool,
 
     #[command(flatten)]
     pub source_set: SourceSetArg,
+
+    #[command(flatten)]
+    pub sessions: SessionsArgs,
+}
+
+/// `--sessions` и `--sessions-message` у `push` и `apply`
+/// (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`).
+#[derive(Args, Debug, Default)]
+pub struct SessionsArgs {
+    /// Other sessions of the infobase when the database configuration needs exclusive access:
+    /// disable (default) refuses and names them; force ends them by the executor's own key —
+    /// on a standalone server or in a cluster; a file infobase is refused either way
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub sessions: Option<SessionsMode>,
+
+    /// Message to the sessions --sessions force ends
+    #[arg(long, value_name = "TEXT")]
+    pub sessions_message: Option<String>,
+}
+
+/// Значение `--sessions`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionsMode {
+    Disable,
+    Force,
 }
 
 #[derive(Args, Debug)]
@@ -494,6 +519,9 @@ pub struct ApplyArgs {
     /// client MCP tool extension
     #[arg(value_name = "SET")]
     pub set: Option<String>,
+
+    #[command(flatten)]
+    pub sessions: SessionsArgs,
 }
 
 #[derive(Args, Debug)]

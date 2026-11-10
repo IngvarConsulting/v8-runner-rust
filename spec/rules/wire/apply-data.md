@@ -7,6 +7,7 @@ check:
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_apply.rs::a_push_without_apply_loads_and_apply_applies_it
   - tests/cli_apply.rs::an_apply_into_a_base_that_moved_keeps_the_record
+  - tests/cli_apply_sessions.rs::force_on_a_cluster_ends_the_sessions_and_names_them
 ---
 
 # `data` команды `apply`
@@ -30,7 +31,7 @@ check:
 `GenerationRecordFate` вместо `ApplyGeneration`: тот же набор значений делит форма `reset`
 (`CTR.WIRE.RESET-DATA`). Значения и поля не изменились.
 
-**Что изменила версия 3.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
+**Что изменила версия 3.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)). В той же версии — необязательное поле `sessions`: исход `--sessions force` — завершённые сеансы `terminated` из списка до завершения, блокировка начала сеансов `lock` и `message_delivered`; без `force` поля нет ([правило](../cli/apply-sessions-governs-foreign-sessions.md)).
 
 **Что изменила версия 2.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 

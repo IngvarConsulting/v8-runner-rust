@@ -1,5 +1,40 @@
 {
   "$defs": {
+    "ApplicationCode": {
+      "description": "Устойчивый код приложения платформы.",
+      "oneOf": [
+        {
+          "const": "Designer",
+          "description": "Конфигуратор.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8C",
+          "description": "Тонкий клиент.",
+          "type": "string"
+        },
+        {
+          "const": "1CV8",
+          "description": "Толстый клиент.",
+          "type": "string"
+        },
+        {
+          "const": "BackgroundJob",
+          "description": "Фоновое задание.",
+          "type": "string"
+        },
+        {
+          "const": "WebClient",
+          "description": "Веб-клиент.",
+          "type": "string"
+        },
+        {
+          "const": "COMConnection",
+          "description": "Внешнее соединение.",
+          "type": "string"
+        }
+      ]
+    },
     "ArtifactKind": {
       "description": "Stable artifact classification for runner/package outputs.",
       "oneOf": [
@@ -222,7 +257,7 @@
               "type": "null"
             }
           ],
-          "description": "Сеансы, которые держат базу; заполняется отказом `infobase_sessions`."
+          "description": "Кто держит базу; заполняется отказами `infobase_sessions` и `infobase_designer_busy`."
         }
       },
       "required": [
@@ -277,7 +312,12 @@
         },
         {
           "const": "infobase_sessions",
-          "description": "Базу держат сеансы платформы; перечень — в `error.sessions`.",
+          "description": "Применению нужен монопольный доступ, а базу держат чужие сеансы; кто — в `sessions`.",
+          "type": "string"
+        },
+        {
+          "const": "infobase_designer_busy",
+          "description": "Файловую базу держит чужой Конфигуратор; его раннер не закрывает.",
           "type": "string"
         },
         {
@@ -576,10 +616,10 @@
     },
     "InfobaseSessions": {
       "additionalProperties": false,
-      "description": "Поле `error.sessions` отказа `infobase_sessions`.",
+      "description": "Кто держит базу — поле `error.sessions` отказов `infobase_sessions` и\n`infobase_designer_busy`.",
       "properties": {
         "base": {
-          "description": "База: строка соединения без учётных данных.",
+          "description": "Строка соединения базы без учётных данных.",
           "type": "string"
         },
         "from_this_machine": {
@@ -587,7 +627,7 @@
           "type": "boolean"
         },
         "list": {
-          "description": "Сеансы базы. `null` — признак занятости есть, а перечня раннер не получил.",
+          "description": "Сеансы, как их назвала платформа; `null` — список не получен или не разобран целиком.",
           "items": {
             "$ref": "#/$defs/SessionEntry"
           },
@@ -598,10 +638,10 @@
         },
         "lock": {
           "$ref": "#/$defs/SessionLock",
-          "description": "Блокировка начала сеансов, уже стоящая на базе."
+          "description": "Блокировка начала сеансов, которая уже стоит у базы."
         },
         "terminable": {
-          "description": "Может ли раннер завершить сеансы для этой базы и команды.",
+          "description": "Может ли раннер завершить сеансы этой базы для этой команды (`--sessions force`).",
           "type": "boolean"
         }
       },
@@ -1096,32 +1136,40 @@
     },
     "SessionEntry": {
       "additionalProperties": false,
-      "description": "Один сеанс базы.",
+      "description": "Один сеанс из списка платформы.",
       "properties": {
         "application": {
-          "description": "Устойчивый код приложения платформы (`Designer`, `1CV8C`, `BackgroundJob`…); `null` —\nназвание не распознано.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Устойчивый код приложения; `null` — название не из таблицы известных."
         },
         "application_title": {
           "description": "Название приложения, как его написала платформа.",
           "type": "string"
         },
         "computer": {
+          "description": "Компьютер сеанса.",
           "type": "string"
         },
         "id": {
+          "description": "Номер сеанса у платформы.",
           "type": [
             "string",
             "null"
           ]
         },
         "started": {
+          "description": "Начало сеанса, местное время базы: `ГГГГ-ММ-ДДTчч:мм:сс`.",
           "type": "string"
         },
         "user": {
+          "description": "Пользователь; текст платформы у файловой базы его не называет.",
           "type": [
             "string",
             "null"
@@ -1137,10 +1185,10 @@
     },
     "SessionLock": {
       "additionalProperties": false,
-      "description": "Блокировка начала сеансов.",
+      "description": "Блокировка начала сеансов базы.",
       "properties": {
         "message": {
-          "description": "Сообщение блокировки, если она стоит и раннер его прочёл.",
+          "description": "Сообщение блокировки, если раннер его знает.",
           "type": [
             "string",
             "null"
@@ -1156,6 +1204,7 @@
       "type": "object"
     },
     "SessionLockState": {
+      "description": "Чья блокировка начала сеансов стоит у базы.",
       "oneOf": [
         {
           "const": "none",
@@ -1164,17 +1213,17 @@
         },
         {
           "const": "own",
-          "description": "Блокировку поставил этот раннер.",
+          "description": "Блокировка раннера.",
           "type": "string"
         },
         {
           "const": "foreign",
-          "description": "Блокировку поставил кто-то другой.",
+          "description": "Чужая блокировка; раннер её не трогает.",
           "type": "string"
         },
         {
           "const": "unknown",
-          "description": "Раннер не может узнать, стоит ли блокировка.",
+          "description": "Узнать нельзя.",
           "type": "string"
         }
       ]

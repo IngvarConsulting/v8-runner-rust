@@ -33,6 +33,7 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
             | UseCaseErrorKind::InfobaseSessions
+            | UseCaseErrorKind::InfobaseDesignerBusy
             | UseCaseErrorKind::NonFastForward
             | UseCaseErrorKind::UntrackedBase
             | UseCaseErrorKind::AgentLimit
@@ -74,6 +75,7 @@ impl McpBusinessError {
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
             | UseCaseErrorKind::InfobaseSessions
+            | UseCaseErrorKind::InfobaseDesignerBusy
             | UseCaseErrorKind::NonFastForward
             | UseCaseErrorKind::UntrackedBase
             | UseCaseErrorKind::AgentLimit

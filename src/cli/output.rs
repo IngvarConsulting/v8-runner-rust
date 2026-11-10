@@ -92,6 +92,9 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
         UseCaseErrorKind::WorkspaceBusy => (ErrorCode::WorkspaceBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InfobaseBusy => (ErrorCode::InfobaseBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InfobaseSessions => (ErrorCode::InfobaseSessions, ErrorKind::Workspace),
+        UseCaseErrorKind::InfobaseDesignerBusy => {
+            (ErrorCode::InfobaseDesignerBusy, ErrorKind::Workspace)
+        }
         UseCaseErrorKind::NonFastForward => (ErrorCode::NonFastForward, ErrorKind::NonFastForward),
         UseCaseErrorKind::UntrackedBase => (ErrorCode::UntrackedBase, ErrorKind::UntrackedBase),
         UseCaseErrorKind::AgentLimit => (ErrorCode::AgentLimit, ErrorKind::Environment),

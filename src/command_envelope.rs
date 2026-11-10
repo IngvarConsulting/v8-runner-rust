@@ -44,8 +44,10 @@ pub enum ErrorCode {
     WorkspaceBusy,
     /// Файловую базу держит другая команда; как `workspace_busy`, можно повторить.
     InfobaseBusy,
-    /// Базу держат сеансы платформы; перечень — в `error.sessions`.
+    /// Применению нужен монопольный доступ, а базу держат чужие сеансы; кто — в `sessions`.
     InfobaseSessions,
+    /// Файловую базу держит чужой Конфигуратор; его раннер не закрывает.
+    InfobaseDesignerBusy,
     InvalidOutput,
     Cancelled,
     TimedOut,
@@ -114,6 +116,7 @@ impl ErrorCode {
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
             Self::InfobaseSessions => "infobase_sessions",
+            Self::InfobaseDesignerBusy => "infobase_designer_busy",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
@@ -141,6 +144,7 @@ impl ErrorCode {
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
         Self::InfobaseSessions,
+        Self::InfobaseDesignerBusy,
         Self::InvalidOutput,
         Self::Cancelled,
         Self::TimedOut,
@@ -174,7 +178,7 @@ pub struct EnvelopeError {
     /// Формат исходников и опись установок; заполняется отказом `platform_release_missing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform_release: Option<Box<PlatformReleaseRefusal>>,
-    /// Сеансы, которые держат базу; заполняется отказом `infobase_sessions`.
+    /// Кто держит базу; заполняется отказами `infobase_sessions` и `infobase_designer_busy`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sessions: Option<Box<InfobaseSessions>>,
 }
@@ -423,6 +427,11 @@ mod schema_tests {
             (
                 UseCaseErrorKind::InfobaseSessions,
                 "infobase_sessions",
+                "workspace",
+            ),
+            (
+                UseCaseErrorKind::InfobaseDesignerBusy,
+                "infobase_designer_busy",
                 "workspace",
             ),
             (
