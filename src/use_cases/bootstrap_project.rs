@@ -13,7 +13,7 @@ use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config;
 use crate::use_cases::ignored_files::{ProjectGitignore, LOCAL_CONFIG_FILE_NAME};
 use crate::use_cases::request::{DumpModeRequest, DumpRequest, ForceWayOut};
-use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::workspace_lock::is_workspace_lock_file;
 
 const CONFIG_FILE_NAME: &str = "v8project.yaml";
@@ -212,7 +212,7 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
         Err(failure) => {
             let error = failure.error;
             let message = redact_message(error.message(), request);
-            let redacted_error = UseCaseError::new(error.kind(), message.clone());
+            let redacted_error = error.with_message(message.clone());
             let payload_message = failure
                 .payload
                 .as_ref()

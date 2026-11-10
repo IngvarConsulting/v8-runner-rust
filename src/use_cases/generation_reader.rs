@@ -130,6 +130,8 @@ pub(crate) fn read_by_record_tool(
     } else {
         match utilities.locate(utility) {
             Ok(location) => location.path,
+            // Нет выпуска формата исходников — отказ команды, а не молчание инструмента.
+            Err(error) if error.platform_release().is_some() => return Err(error.into()),
             Err(error) => {
                 tracing::debug!(%error, %tool, "the tool of the generation record is not found");
                 return Ok(None);
@@ -209,6 +211,7 @@ pub(crate) fn read_with_record_tool(
             let v8 = if needs_v8 {
                 match utilities.locate(UtilityType::V8) {
                     Ok(location) => Some(location.path),
+                    Err(error) if error.platform_release().is_some() => return Err(error.into()),
                     Err(error) => {
                         return Ok(RecordToolAnswer::NoAnswer(format!(
                             "the agent cannot start: {error}"
@@ -258,6 +261,9 @@ pub(crate) fn read_with_record_tool(
     };
     let binary = match utilities.locate(process) {
         Ok(location) => location.path,
+        // Нет выпуска формата исходников — отказ команды: «инструмент не ответил» стало бы
+        // отказом сверки `non_fast_forward` и спрятало бы настоящую причину.
+        Err(error) if error.platform_release().is_some() => return Err(error.into()),
         Err(error) => {
             return Ok(RecordToolAnswer::NoAnswer(format!(
                 "{tool} is not found: {error}"

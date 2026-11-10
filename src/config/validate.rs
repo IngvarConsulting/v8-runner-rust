@@ -9,7 +9,7 @@ use crate::config::model::{
 };
 use crate::domain::capability::Operation;
 use crate::platform::connection::V8Connection;
-use crate::platform::locator::PlatformVersionRequirement;
+use crate::platform::locator::PlatformVersionSetting;
 use crate::support::authority::{host_and_port_of_authority, host_of_authority};
 use crate::support::edt_project::{self, EdtProjectKind};
 use crate::support::path::is_safe_path_segment;
@@ -273,8 +273,10 @@ pub enum ConfigValidationError {
         generated_path: String,
     },
 
-    #[error("platform version must use format major.minor, major.minor.patch or major.minor.patch.build: {0}")]
-    InvalidPlatformVersion(String),
+    #[error(
+        "tools.platform.version: sources chooses the platform release by the sources format of the main Configuration set, {0}: set tools.platform.version to a mask"
+    )]
+    PlatformVersionSourcesNotApplicable(SourcesNotApplicable),
 
     #[error(
         "{section}.partialLoadThreshold is not supported: there is no partial-load threshold any more — delete the line; a full load on demand is `push <SET> --full`"
@@ -572,6 +574,7 @@ pub fn validate_managed_cluster(config: &AppConfig) -> Result<(), ConfigValidati
     validate_base_path(&config.base_path)?;
     validate_planned_work_path(config)?;
     validate_managed_declarations(&config.infobase)?;
+    validate_platform_version(config)?;
     if ManagedServer::of(&config.infobase) != Some(ManagedServer::Cluster) {
         return Err(ConfigValidationError::ClusterNotManaged);
     }
@@ -583,6 +586,7 @@ pub fn validate_managed_standalone(config: &AppConfig) -> Result<(), ConfigValid
     validate_base_path(&config.base_path)?;
     validate_planned_work_path(config)?;
     validate_managed_declarations(&config.infobase)?;
+    validate_platform_version(config)?;
     if ManagedServer::of(&config.infobase) != Some(ManagedServer::Standalone) {
         return Err(ConfigValidationError::StandaloneNotManaged);
     }
@@ -1505,15 +1509,48 @@ fn validate_providers(
     Ok(())
 }
 
-fn validate_platform_version(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    if let Some(version) = config.tools.platform.version.as_deref() {
-        if PlatformVersionRequirement::parse(version).is_none() {
-            return Err(ConfigValidationError::InvalidPlatformVersion(
-                version.to_owned(),
-            ));
-        }
-    }
+/// Почему `tools.platform.version: sources` к проекту не применим.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcesNotApplicable {
+    /// Формат проекта EDT: у его исходников нет версии формата выпуска.
+    EdtFormat,
+    /// Основного набора нет: формат читать не из чего.
+    NoMainSet,
+}
 
+impl std::fmt::Display for SourcesNotApplicable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::EdtFormat => {
+                "and the project format is EDT: its sources carry no format version of a release"
+            }
+            Self::NoMainSet => "and the project declares no main Configuration set",
+        })
+    }
+}
+
+/// `tools.platform.version: sources` применим только к проекту Конфигуратора с основным
+/// набором. Само значение разобрано при загрузке; проверка идёт во всех путях проверки
+/// настроек, где команда может искать платформу
+/// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+fn validate_platform_version(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    if config.tools.platform.version != Some(PlatformVersionSetting::Sources) {
+        return Ok(());
+    }
+    if config.format == SourceFormat::Edt {
+        return Err(ConfigValidationError::PlatformVersionSourcesNotApplicable(
+            SourcesNotApplicable::EdtFormat,
+        ));
+    }
+    if !config
+        .source_sets
+        .iter()
+        .any(|set| set.purpose == SourceSetPurpose::Configuration)
+    {
+        return Err(ConfigValidationError::PlatformVersionSourcesNotApplicable(
+            SourcesNotApplicable::NoMainSet,
+        ));
+    }
     Ok(())
 }
 
@@ -1897,12 +1934,15 @@ fn validate_tool_extension_edt_runtime_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate, ConfigValidationError, ProviderScope};
+    use super::{
+        validate, validate_launch, ConfigValidationError, ProviderScope, SourcesNotApplicable,
+    };
     use crate::config::model::{
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
         TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig, ToolExtensionInput,
         ToolExtensionSourceConfig, ToolsConfig, VanessaProfileConfig,
     };
+    use crate::platform::locator::PlatformVersionSetting;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
@@ -2051,7 +2091,7 @@ mod tests {
                 platform: PlatformToolConfig {
                     path: None,
                     strict: false,
-                    version: Some("8.3.25".to_owned()),
+                    version: PlatformVersionSetting::parse("8.3.25"),
                 },
                 ..ToolsConfig::default()
             },
@@ -2091,7 +2131,7 @@ mod tests {
                 platform: PlatformToolConfig {
                     path: None,
                     strict: false,
-                    version: Some("8.3".to_owned()),
+                    version: PlatformVersionSetting::parse("8.3"),
                 },
                 ..ToolsConfig::default()
             },
@@ -2102,14 +2142,15 @@ mod tests {
         validate(&config).expect("expected valid minor version prefix");
     }
 
+    /// `tools.platform.version: sources` принят у проекта Конфигуратора с основным набором и
+    /// отвергнут до команды у формата EDT и у проекта без основного набора.
     #[test]
-    fn rejects_platform_versions_with_too_few_parts() {
+    fn the_sources_platform_version_needs_a_designer_main_set() {
         let base = tempdir().expect("base");
         let work = tempdir().expect("work");
         let source_dir = base.path().join("src");
         std::fs::create_dir_all(&source_dir).expect("source dir");
-
-        let config = AppConfig {
+        let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
             format: SourceFormat::Designer,
@@ -2122,28 +2163,48 @@ mod tests {
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
-                path: source_dir
-                    .strip_prefix(base.path())
-                    .expect("relative")
-                    .to_path_buf(),
+                path: "src".into(),
             }],
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: None,
                     strict: false,
-                    version: Some("8".to_owned()),
+                    version: Some(PlatformVersionSetting::Sources),
                 },
                 ..ToolsConfig::default()
             },
             mcp: Default::default(),
             tests: TestsConfig::default(),
         };
+        validate(&config).expect("sources is accepted");
 
-        let err = validate(&config).expect_err("expected invalid version");
-        assert!(matches!(
-            err,
-            ConfigValidationError::InvalidPlatformVersion(_)
-        ));
+        config.format = SourceFormat::Edt;
+        let error = validate_launch(&config).expect_err("EDT has no release by format");
+        assert!(
+            matches!(
+                error,
+                ConfigValidationError::PlatformVersionSourcesNotApplicable(
+                    SourcesNotApplicable::EdtFormat
+                )
+            ),
+            "{error}"
+        );
+
+        config.format = SourceFormat::Designer;
+        config.source_sets[0].purpose = SourceSetPurpose::Extension;
+        let error = validate_launch(&config).expect_err("no main set");
+        assert!(
+            matches!(
+                error,
+                ConfigValidationError::PlatformVersionSourcesNotApplicable(
+                    SourcesNotApplicable::NoMainSet
+                )
+            ),
+            "{error}"
+        );
+
+        config.tools.platform.version = PlatformVersionSetting::parse("8.3.27");
+        validate_launch(&config).expect("a mask needs no main set");
     }
 
     #[test]

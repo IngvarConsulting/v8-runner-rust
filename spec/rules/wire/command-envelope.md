@@ -7,6 +7,7 @@ check:
   - src/command_envelope.rs::every_error_kind_and_code_is_named_by_the_schema_and_by_a_table
   - tests/cli_infobase_lock.rs::an_mcp_tool_on_a_held_base_is_refused_at_once
   - tests/cli_infobase_owner.rs::a_write_on_a_base_of_another_copy_runs_with_a_warning_and_names_the_owner
+  - tests/cli_platform_release.rs::every_platform_command_refuses_without_the_release_of_the_sources_format
 ---
 
 # Конверт ответа команды
@@ -14,15 +15,20 @@ check:
 Структурный ответ любой команды имеет одну оболочку, закреплённую схемой
 `docs/schemas/command-envelope.schema.json`: `ok`, `command`, `duration_ms`, `data`,
 `warnings`, `steps` и необязательная `error`. Отказ несёт `code`, `kind`, `message`, при
-нужде `next` — следующий шаг структурой, — и два поля поколений у отказа
-`non_fast_forward`. Список полей конверта, шага и отказа закрыт: новое поле у любого из
+нужде `next` — следующий шаг структурой, — два поля поколений у отказа
+`non_fast_forward` и поле `platform_release` у отказа `platform_release_missing`. Список полей конверта, шага и отказа закрыт: новое поле у любого из
 них валит проверку.
 
 Рода и коды — закрытые перечисления, а не строки. Рода: `capability`, `environment`,
 `workspace`, `invalid_output`, `interruption`, `validation`, `runtime`, `platform`,
 `non_fast_forward`, `untracked_base`. Коды подробнее рода: у `capability` их четыре —
 `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой
-цели) и `soon` (пока не умеет), и все отвечают кодом выхода 2. У `workspace` — чужая работа
+цели) и `soon` (пока не умеет), и все отвечают кодом выхода 2. Коды рода `environment` тоже отвечают
+кодом выхода 2: `environment_unavailable` (утилиты нет или она не та) и
+`platform_release_missing` (при `tools.platform.version: sources` нет выпуска, который пишет
+формат исходников; `INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`). Его
+поле `platform_release` несёт `source_format` — версию формата, файл и выпуск, как в ответе
+`platforms`, — и `installations`, опись установок, по которой решён отказ. У `workspace` — чужая работа
 с тем же местом, с кодом выхода 3: занятость, которая проходит, если повторить, —
 `workspace_busy` (рабочий каталог держит другая команда) и `infobase_busy` (файловую базу
 держит другая команда). База другой рабочей копии отказом не служит: команда идёт, а
@@ -72,7 +78,7 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 выключен `tools.designer_agent.live: false`; `live_agent_job` рода `environment`, код выхода
 2, — раннер в Job, из которого сторож не может выйти. Платформу ни один из них не запускает.
 
-**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние.
+**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он.
 
 **Что изменила версия 4.** Коды рода `workspace` — `workspace_busy` и `infobase_busy`: запись в
 базу другой рабочей копии не отказывает, а предупреждает в `warnings`.

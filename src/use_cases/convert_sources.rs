@@ -832,7 +832,7 @@ fn infer_import_options(
     }
 
     Ok(ConvertImportOptions {
-        version: normalize_config_hint(config.tools.platform.version.as_deref()),
+        version: crate::platform::utilities::edt_import_version(config),
         base_project_name: match source_set.purpose {
             SourceSetPurpose::Configuration => None,
             SourceSetPurpose::Extension => None,
@@ -853,13 +853,6 @@ fn infer_import_options(
         },
         build: false,
     })
-}
-
-fn normalize_config_hint(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn validate_selected_source(
@@ -1794,6 +1787,43 @@ mod tests {
             .expect_err("an interrupted preview refuses");
         let payload = failure.payload.expect("the refusal carries the form");
         assert!(!payload.provider_dispatched, "{payload:?}");
+    }
+
+    /// `tools.platform.version: sources` — настройка раннера, а не версия для EDT: импорт
+    /// получает выпуск формата исходников, а без файла формата — ничего, но не `sources`.
+    #[test]
+    fn a_designer_to_edt_import_never_passes_sources_to_the_edt_cli() {
+        use crate::config::model::{SourceSetConfig, SourceSetPurpose};
+        use crate::platform::locator::PlatformVersionSetting;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = sample_config();
+        config.base_path = dir.path().to_path_buf();
+        config.tools.platform.version = Some(PlatformVersionSetting::Sources);
+        let main = SourceSetConfig {
+            name: "main".to_owned(),
+            purpose: SourceSetPurpose::Configuration,
+            path: "src".into(),
+        };
+        config.source_sets = vec![main.clone()];
+        let import = |config: &AppConfig| {
+            super::infer_import_options(config, &main, super::ConvertDirection::DesignerToEdt, None)
+                .expect("options")
+                .version
+        };
+
+        assert_eq!(import(&config), None, "no format file, no version");
+
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::write(
+            dir.path().join("src").join("Configuration.xml"),
+            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.21\">\n</MetaDataObject>\n",
+        )
+        .expect("Configuration.xml");
+        assert_eq!(import(&config).as_deref(), Some("8.5.1"));
+
+        config.tools.platform.version = PlatformVersionSetting::parse("8.3.27");
+        assert_eq!(import(&config).as_deref(), Some("8.3.27"));
     }
 
     #[test]

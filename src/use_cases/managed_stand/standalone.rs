@@ -726,6 +726,7 @@ mod tests {
     };
     use crate::platform::service::{ProcessFacts, ServiceRequest};
     use crate::use_cases::context::CommandName;
+    use crate::use_cases::result::EnvironmentReason;
 
     const PID: u32 = 7001;
     const PG_PID: u32 = 7002;
@@ -1165,7 +1166,10 @@ mod tests {
         let host = Host::default();
         host.unsupported.set(true);
         let refused = setup.run(ServiceCommand::Start, false, &host).unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         for command in [
             ServiceCommand::Start,
             ServiceCommand::Stop,
