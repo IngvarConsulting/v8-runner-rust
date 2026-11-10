@@ -612,6 +612,7 @@ impl<'a> Stand<'a> {
             explicit: self.explicit,
             bin: build.bin().to_path_buf(),
             version,
+            agent: None,
         };
         self.write_record(&record)?;
         let request = build.start(&self.paths.data(), &self.paths.log(), port);
@@ -1911,6 +1912,7 @@ mod tests {
                 explicit: true,
                 bin: PathBuf::from("bin"),
                 version: None,
+                agent: None,
             },
         )
         .unwrap();

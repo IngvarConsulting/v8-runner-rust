@@ -656,6 +656,85 @@ pub enum SessionMode {
 pub struct SessionEndpoint {
     pub mode: SessionMode,
     pub address: String,
+    /// Был ли управляемый агент живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
+    /// Есть только у управляемого агента.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<Box<LiveAgentReceipt>>,
+}
+
+/// Живой ли был управляемый агент команды и остался ли он жить.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LiveAgentReceipt {
+    /// Команда взяла уже живого агента (`true`) или подняла его сама (`false`).
+    pub reused: bool,
+    /// Держатели агента на момент ответа; без держателей — пустой список.
+    pub holders: Vec<LiveAgentHolder>,
+    /// Остался ли агент жить после команды.
+    pub kept: bool,
+    /// Почему агент не остался жить; у оставшегося поля нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<LiveAgentReason>,
+}
+
+/// Держатель живого агента в квитанции.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum LiveAgentHolder {
+    /// Держатель-процесс: номер и время старта (UTC, RFC 3339), если система его назвала.
+    Process {
+        pid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<String>,
+    },
+    /// Держатель со сроком: до какого мгновения (UTC, RFC 3339).
+    Ttl { until: String },
+}
+
+impl std::fmt::Display for LiveAgentHolder {
+    /// Держатель для людей: в тексте `agent` и в отказе занятой базы.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Process { pid, .. } => write!(f, "process {pid}"),
+            Self::Ttl { until } => write!(f, "until {until}"),
+        }
+    }
+}
+
+impl LiveAgentHolder {
+    /// Держатели через запятую; без держателей — `none`.
+    pub fn list_text(holders: &[Self]) -> String {
+        if holders.is_empty() {
+            return "none".to_owned();
+        }
+        holders
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Почему управляемый агент не остался жить после команды.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveAgentReason {
+    /// `tools.designer_agent.live: false`.
+    LiveAgentOff,
+    /// Живых агентов уже `tools.designer_agent.live-max`, и снять простаивающего некого.
+    Limit,
+    /// Раннер в Job, из которого сторож не может выйти.
+    Job,
+    /// Команду прервали, пока агент выполнял её запрос.
+    Interrupted,
+    /// Живой агент этой рабочей копии ещё служит сессии другой команды: команда работала с
+    /// разовым.
+    Busy,
+    /// Сторож живого агента не поднялся или не ответил (путь канала, отказ запуска, срок):
+    /// команда работала с разовым агентом.
+    KeeperFailed,
+    /// Сторож снял агента после команды: его сессия оборвалась, его остановили или ушёл
+    /// последний держатель.
+    Removed,
 }
 
 impl ProviderReceipt {

@@ -126,6 +126,105 @@ pub enum Command {
     Status(StatusArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
+    /// Hold, release, stop or list the live Designer agent that outlives commands
+    Agent(AgentArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+/// Who holds the live agent: a running process, or a term in seconds.
+#[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentHolderArgs {
+    /// Process that holds the agent while it runs
+    #[arg(
+        long,
+        value_name = "PID",
+        required_unless_present = "ttl",
+        conflicts_with = "ttl"
+    )]
+    pub holder_pid: Option<u32>,
+
+    /// Start time of the holder process (UTC, RFC 3339); a pid given to another process is
+    /// refused
+    #[arg(long, value_name = "RFC3339", requires = "holder_pid", value_parser = parse_rfc3339)]
+    pub holder_started_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Hold the agent for this many seconds; a repeated hold extends the term
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub ttl: Option<u64>,
+}
+
+/// Whose mark `agent release` removes: a process, or the holder of `agent hold --ttl`.
+#[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentReleaseArgs {
+    /// Process whose mark to remove
+    #[arg(
+        long,
+        value_name = "PID",
+        required_unless_present = "ttl",
+        conflicts_with = "ttl"
+    )]
+    pub holder_pid: Option<u32>,
+
+    /// Start time of the holder process (UTC, RFC 3339): only its mark is removed
+    #[arg(long, value_name = "RFC3339", requires = "holder_pid", value_parser = parse_rfc3339)]
+    pub holder_started_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Remove the mark of agent hold --ttl
+    #[arg(long)]
+    pub ttl: bool,
+}
+
+fn parse_rfc3339(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .map_err(|error| format!("not an RFC 3339 time: {error}"))
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentStopArgs {
+    /// Stop every live agent of this OS account, not only the one of this project; needs no
+    /// project
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+#[command(next_help_heading = "Command options")]
+pub struct AgentStatusArgs {
+    /// List every live agent of this OS account; needs no project
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// Hold the live agent of this project, starting it if there is none
+    Hold(AgentHolderArgs),
+    /// Remove the holder's mark from the live agent of this project
+    Release(AgentReleaseArgs),
+    /// Stop the live agent of this project, or every one with --all
+    Stop(AgentStopArgs),
+    /// Show the live agent of this project, or every one of the OS account with --all
+    Status(AgentStatusArgs),
+    /// The keeper of one live agent: the runner starts it itself, with the start request on
+    /// stdin
+    #[command(hide = true)]
+    Keeper(AgentKeeperArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentKeeperArgs {
+    /// Key of the live agent: hexadecimal digits
+    #[arg(long, value_name = "HEX")]
+    pub key: String,
 }
 
 #[derive(Args, Debug)]
@@ -1879,6 +1978,9 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Скрытые служебные подкоманды (путь, имя): сторож живого агента (#577).
+    const INTERNAL_COMMANDS: &[(&[&str], &str)] = &[(&["agent"], "keeper")];
+
     /// Скрытое имя дерева разбора: где живёт, что скрыто и чьё оно, если это псевдоним.
     type Hidden = (Vec<String>, crate::cli::synonyms::Previous, Option<String>);
 
@@ -1923,6 +2025,14 @@ mod tests {
         }
         for subcommand in command.get_subcommands() {
             let name = subcommand.get_name();
+            // Служебные подкоманды раннер зовёт сам: это не прежние имена, и перечня
+            // синонимов они не касаются.
+            if INTERNAL_COMMANDS
+                .iter()
+                .any(|(at, internal)| *at == path && *internal == name)
+            {
+                continue;
+            }
             if subcommand.is_hide_set() {
                 hidden.push((path.to_vec(), Previous::Command(name), None));
                 continue;

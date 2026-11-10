@@ -54,6 +54,12 @@ pub enum ErrorCode {
     NonFastForward,
     /// Пара к роду `untracked_base`: памяти о базе нет.
     UntrackedBase,
+    /// `agent hold`: живых агентов уже `live-max`, и снять некого.
+    AgentLimit,
+    /// `agent hold` при `tools.designer_agent.live: false`.
+    LiveAgentOff,
+    /// `agent hold` в Job, из которого сторож не может выйти.
+    LiveAgentJob,
 }
 
 impl ErrorKind {
@@ -113,6 +119,9 @@ impl ErrorCode {
             Self::PlatformFailure => "platform_failure",
             Self::NonFastForward => "non_fast_forward",
             Self::UntrackedBase => "untracked_base",
+            Self::AgentLimit => "agent_limit",
+            Self::LiveAgentOff => "live_agent_off",
+            Self::LiveAgentJob => "live_agent_job",
         }
     }
 
@@ -136,6 +145,9 @@ impl ErrorCode {
         Self::PlatformFailure,
         Self::NonFastForward,
         Self::UntrackedBase,
+        Self::AgentLimit,
+        Self::LiveAgentOff,
+        Self::LiveAgentJob,
     ];
 }
 
@@ -408,6 +420,17 @@ mod schema_tests {
                 UseCaseErrorKind::UntrackedBase,
                 "untracked_base",
                 "untracked_base",
+            ),
+            (UseCaseErrorKind::AgentLimit, "agent_limit", "environment"),
+            (
+                UseCaseErrorKind::LiveAgentOff,
+                "live_agent_off",
+                "capability",
+            ),
+            (
+                UseCaseErrorKind::LiveAgentJob,
+                "live_agent_job",
+                "environment",
             ),
             (
                 UseCaseErrorKind::InvalidOutput,

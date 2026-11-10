@@ -126,7 +126,7 @@ fn read_with_selected_tool(
         (Provider::Agent, binary) => {
             let mut agent = ExtensionAgent::open(context, config, binary)?;
             let inventory = agent.inventory(None);
-            agent.close();
+            agent.close(context);
             inventory.map(extension_names)
         }
         // Без утилиты исполнитель списка не прочтёт, а прочие исполнители выгрузку не

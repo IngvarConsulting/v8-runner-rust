@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.PUSH-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/push.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -18,6 +18,8 @@ check:
 
 Инструмент MCP `build_project` отвечает этой же формой: поверхность MCP не повторяет CLI,
 но предмет команды у них один.
+
+**Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
 
 **Что изменила версия 5.** Квитанция `provider` получила необязательное поле `reason` — почему
 цепочка умолчаний стоит в этом порядке: `whole` — каждый набор команды идёт целиком, и первым

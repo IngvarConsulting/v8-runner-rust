@@ -1,4 +1,7 @@
-//! Запись о службе стенда под `workPath/infobases/<база>/managed/<служба>/`.
+//! Запись о процессе раннера, который переживает команду: служба стенда под
+//! `workPath/infobases/<база>/managed/<служба>/` или процесс в другом каталоге-корне, например
+//! в каталоге состояния учётной записи ОС. Единственный носитель такой записи: её вид, чтение,
+//! атомарная замена и опознание своего процесса.
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +14,7 @@ use crate::platform::service::{process_facts, ProcessFacts};
 use crate::support::fs::write_file_atomically;
 use crate::support::machine::{machine_hash, machine_id};
 
-/// Где живёт служба объявленной базы.
+/// Где живёт служба: каталог `<корень>/<служба>/` с записью, журналом и данными.
 #[derive(Debug, Clone)]
 pub struct ServicePaths {
     managed: PathBuf,
@@ -20,12 +23,20 @@ pub struct ServicePaths {
 }
 
 impl ServicePaths {
+    /// Служба объявленной базы под `workPath/infobases/<база>/managed/`.
     pub fn new(work_path: &Path, infobase: &str, service: &str) -> Self {
-        let managed = work_path.join("infobases").join(infobase).join("managed");
-        let root = managed.join(service);
+        Self::under(
+            &work_path.join("infobases").join(infobase).join("managed"),
+            service,
+        )
+    }
+
+    /// Служба под другим корнем: каталог службы — `<managed>/<service>/`, соседние службы
+    /// лежат рядом с ним.
+    pub fn under(managed: &Path, service: &str) -> Self {
         Self {
-            managed,
-            root,
+            managed: managed.to_path_buf(),
+            root: managed.join(service),
             service: service.to_owned(),
         }
     }
@@ -101,6 +112,30 @@ pub struct ServiceRecord {
     /// Каталог утилит: `status` и `stop` работают, даже если `tools.postgres.path` уже не объявлен.
     pub bin: PathBuf,
     pub version: Option<String>,
+    /// Живой агент Конфигуратора, которого держит этот процесс-сторож: у служб стенда его нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<LiveAgentFacts>,
+}
+
+/// Что запись сторожа говорит о его агенте: по этому команда находит агента и сверяет, тот ли
+/// он (`INV.PLATFORM.A-LIVE-AGENT-IS-TOLD-APART-BY-ITS-RECORD`). «Занят» здесь нет: это знает
+/// и отвечает по `status` только сторож.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LiveAgentFacts {
+    /// Номер процесса агента; `None` — платформа его не назвала.
+    pub pid: Option<u32>,
+    /// Время старта процесса агента в единицах системы ([`ProcessFacts::started`]).
+    pub started: Option<u64>,
+    /// Отпечаток ключа хоста, на котором закреплена сессия сторожа.
+    pub fingerprint: Option<String>,
+    /// Канал сторожа: имя именованного канала Windows или путь сокета Unix.
+    pub channel: String,
+    /// Путь базы в каноническом виде: по нему находят живых агентов одной базы.
+    pub infobase: String,
+    /// `workPath` рабочей копии, которая подняла агента: его называет ожидание `agent hold` на
+    /// пределе. У записи прежней версии его нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_path: Option<String>,
 }
 
 /// Закреплённые порты живут отдельно от записи о запущенной службе: её снятие и замена их не
@@ -284,21 +319,55 @@ mod tests {
     /// Защита от повторения: «работает ли своя служба» решают `observe_service` и
     /// `record_names_own_process`. `is_own` закрыт в этом модуле, а `adopt_recorded_pid` вне его
     /// живёт только как `adopt` для `observe_service`, рядом с ним (ревью #538).
-    #[test]
-    fn only_this_module_tells_an_own_process_by_its_record() {
-        fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
-            for entry in std::fs::read_dir(dir).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    sources(&path, found);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    found.push(path);
-                }
+    fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                sources(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
             }
         }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    }
+
+    fn source_files() -> Vec<PathBuf> {
         let mut files = Vec::new();
-        sources(&root, &mut files);
+        sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        files
+    }
+
+    /// Защита от повторения: запись о процессе, переживающем команду, одна. Копия носителя
+    /// (`ServicePaths`, `ServiceRecord`, отпечаток машины) под стендом уже жила мёртвым файлом
+    /// `managed_stand/record.rs` (#577); живой агент берёт этот носитель с другим корнем
+    /// (`ServicePaths::under`), а не заводит свой. Защита сравнивает по именам: копию под другим
+    /// именем она не увидит, такую ловит ревью.
+    #[test]
+    fn the_process_record_has_one_owner() {
+        let offenders: Vec<String> = source_files()
+            .iter()
+            .filter(|path| !path.ends_with("platform/service_record.rs"))
+            .filter(|path| {
+                let text = std::fs::read_to_string(path).unwrap();
+                [
+                    "struct ServicePaths",
+                    "struct ServiceRecord",
+                    "enum RecordState",
+                    "fn machine_fingerprint(",
+                ]
+                .iter()
+                .any(|shape| text.contains(shape))
+            })
+            .map(|path| path.display().to_string())
+            .collect();
+        assert!(offenders.is_empty(), "{offenders:?}");
+    }
+
+    #[test]
+    fn only_this_module_tells_an_own_process_by_its_record() {
+        let files = source_files();
         let offenders: Vec<String> = files
             .iter()
             .filter(|path| !path.ends_with("platform/service_record.rs"))
@@ -334,6 +403,7 @@ mod tests {
             explicit: true,
             bin: PathBuf::from("bin"),
             version: None,
+            agent: None,
         }
     }
 
@@ -372,6 +442,25 @@ mod tests {
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
             1
         );
+    }
+
+    #[test]
+    fn a_service_under_another_root_keeps_the_same_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let declared = ServicePaths::new(dir.path(), "origin", "postgres");
+        let under = ServicePaths::under(declared.managed(), "postgres");
+        assert_eq!(under.record(), declared.record());
+        assert_eq!(under.log(), declared.log());
+        assert_eq!(
+            under.sibling_record("cluster"),
+            declared.sibling_record("cluster")
+        );
+
+        let state = dir.path().join("agents");
+        let agent = ServicePaths::under(&state, "0f1e");
+        assert_eq!(agent.record(), state.join("0f1e").join("record.json"));
+        assert_eq!(agent.host_key(), state.join("0f1e").join("host-key"));
+        assert_eq!(agent.log(), state.join("0f1e").join("0f1e.log"));
     }
 
     #[test]

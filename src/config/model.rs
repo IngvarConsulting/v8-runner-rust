@@ -1509,7 +1509,19 @@ pub struct DesignerAgentConfig {
         rename = "startup_timeout_ms"
     )]
     pub startup_timeout_ms: u64,
+
+    /// Whether the managed agent outlives the command (`live`). Absent: it does; `false`:
+    /// every command removes its own agent, as before the live agent.
+    #[serde(default)]
+    pub live: Option<bool>,
+
+    /// How many live agents one OS account keeps at most (`live-max`). Absent: 2.
+    #[serde(default)]
+    pub live_max: Option<u8>,
 }
+
+/// Live agents one OS account keeps when `live-max` is not declared.
+pub const DEFAULT_LIVE_AGENTS: u8 = 2;
 
 impl Default for DesignerAgentConfig {
     fn default() -> Self {
@@ -1520,6 +1532,8 @@ impl Default for DesignerAgentConfig {
             host_key: None,
             host_fingerprint: None,
             startup_timeout_ms: default_designer_agent_startup_timeout_ms(),
+            live: None,
+            live_max: None,
         }
     }
 }
@@ -1544,7 +1558,24 @@ impl DesignerAgentConfig {
         if self.host_key.is_some() {
             keys.push("host-key");
         }
+        if self.live.is_some() {
+            keys.push("live");
+        }
+        if self.live_max.is_some() {
+            keys.push("live-max");
+        }
         keys
+    }
+
+    /// Whether the managed agent outlives the command: unless `live: false`
+    /// (`INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF`).
+    pub fn live_enabled(&self) -> bool {
+        self.live != Some(false)
+    }
+
+    /// How many live agents the OS account keeps at most.
+    pub fn live_limit(&self) -> u8 {
+        self.live_max.unwrap_or(DEFAULT_LIVE_AGENTS)
     }
 
     /// Keys that only make sense for an attached agent.

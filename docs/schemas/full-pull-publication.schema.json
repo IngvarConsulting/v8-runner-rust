@@ -273,6 +273,21 @@
           "const": "untracked_base",
           "description": "Пара к роду `untracked_base`: памяти о базе нет.",
           "type": "string"
+        },
+        {
+          "const": "agent_limit",
+          "description": "`agent hold`: живых агентов уже `live-max`, и снять некого.",
+          "type": "string"
+        },
+        {
+          "const": "live_agent_off",
+          "description": "`agent hold` при `tools.designer_agent.live: false`.",
+          "type": "string"
+        },
+        {
+          "const": "live_agent_job",
+          "description": "`agent hold` в Job, из которого сторож не может выйти.",
+          "type": "string"
         }
       ]
     },
@@ -569,6 +584,123 @@
         "thin_client",
         "ibcmd",
         "web_extension"
+      ],
+      "type": "object"
+    },
+    "LiveAgentHolder": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Держатель-процесс: номер и время старта (UTC, RFC 3339), если система его назвала.",
+          "properties": {
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Держатель со сроком: до какого мгновения (UTC, RFC 3339).",
+          "properties": {
+            "until": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "until"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Держатель живого агента в квитанции."
+    },
+    "LiveAgentReason": {
+      "description": "Почему управляемый агент не остался жить после команды.",
+      "oneOf": [
+        {
+          "const": "live_agent_off",
+          "description": "`tools.designer_agent.live: false`.",
+          "type": "string"
+        },
+        {
+          "const": "limit",
+          "description": "Живых агентов уже `tools.designer_agent.live-max`, и снять простаивающего некого.",
+          "type": "string"
+        },
+        {
+          "const": "job",
+          "description": "Раннер в Job, из которого сторож не может выйти.",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "description": "Команду прервали, пока агент выполнял её запрос.",
+          "type": "string"
+        },
+        {
+          "const": "busy",
+          "description": "Живой агент этой рабочей копии ещё служит сессии другой команды: команда работала с\nразовым.",
+          "type": "string"
+        },
+        {
+          "const": "keeper_failed",
+          "description": "Сторож живого агента не поднялся или не ответил (путь канала, отказ запуска, срок):\nкоманда работала с разовым агентом.",
+          "type": "string"
+        },
+        {
+          "const": "removed",
+          "description": "Сторож снял агента после команды: его сессия оборвалась, его остановили или ушёл\nпоследний держатель.",
+          "type": "string"
+        }
+      ]
+    },
+    "LiveAgentReceipt": {
+      "additionalProperties": false,
+      "description": "Живой ли был управляемый агент команды и остался ли он жить.",
+      "properties": {
+        "holders": {
+          "description": "Держатели агента на момент ответа; без держателей — пустой список.",
+          "items": {
+            "$ref": "#/$defs/LiveAgentHolder"
+          },
+          "type": "array"
+        },
+        "kept": {
+          "description": "Остался ли агент жить после команды.",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveAgentReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Почему агент не остался жить; у оставшегося поля нет."
+        },
+        "reused": {
+          "description": "Команда взяла уже живого агента (`true`) или подняла его сама (`false`).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reused",
+        "holders",
+        "kept"
       ],
       "type": "object"
     },
@@ -885,6 +1017,17 @@
       "properties": {
         "address": {
           "type": "string"
+        },
+        "live": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveAgentReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Был ли управляемый агент живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).\nЕсть только у управляемого агента."
         },
         "mode": {
           "$ref": "#/$defs/SessionMode"

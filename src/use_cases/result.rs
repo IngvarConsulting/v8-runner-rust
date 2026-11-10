@@ -36,6 +36,13 @@ pub enum UseCaseErrorKind {
     NonFastForward,
     /// Памяти о базе у рабочей копии нет: сперва `pull` или перезапись `push --force`.
     UntrackedBase,
+    /// `agent hold`: живых агентов учётной записи уже `live-max`, и снять простаивающего
+    /// некого (`INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`).
+    AgentLimit,
+    /// `agent hold` при `tools.designer_agent.live: false`.
+    LiveAgentOff,
+    /// `agent hold` в Job, из которого сторож не может выйти.
+    LiveAgentJob,
     InvalidOutput,
     /// Отмена оператором; место остановки говорит, оборвана ли работа исполнителя.
     Cancelled(CancelledAt),
@@ -51,6 +58,7 @@ impl UseCaseErrorKind {
         match self {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment(_) => VALIDATION_EXIT_CODE,
+            Self::LiveAgentOff | Self::LiveAgentJob | Self::AgentLimit => VALIDATION_EXIT_CODE,
             Self::WorkspaceBusy | Self::InfobaseBusy => RUNTIME_EXIT_CODE,
             Self::NonFastForward | Self::UntrackedBase => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
@@ -121,6 +129,9 @@ impl UseCaseErrorKind {
             Self::InfobaseBusy => "infobase_busy",
             Self::NonFastForward => "non_fast_forward",
             Self::UntrackedBase => "untracked_base",
+            Self::AgentLimit => "agent_limit",
+            Self::LiveAgentOff => "live_agent_off",
+            Self::LiveAgentJob => "live_agent_job",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled(_) => CANCELLED_ERROR_CODE,
             Self::TimedOut => "timed_out",
@@ -142,6 +153,9 @@ impl UseCaseErrorKind {
             | Self::InfobaseBusy
             | Self::NonFastForward
             | Self::UntrackedBase
+            | Self::AgentLimit
+            | Self::LiveAgentOff
+            | Self::LiveAgentJob
             | Self::Validation
             | Self::Runtime
             | Self::Platform => ExecutionStatus::Failed,
@@ -156,6 +170,9 @@ impl UseCaseErrorKind {
             Self::InfobaseBusy => "infobase busy",
             Self::NonFastForward => "non-fast-forward",
             Self::UntrackedBase => "the infobase is not tracked by this working copy",
+            Self::AgentLimit => "live agent limit",
+            Self::LiveAgentOff => "live agent off",
+            Self::LiveAgentJob => "live agent impossible in this job",
             Self::InvalidOutput => "invalid output",
             Self::Cancelled(_) => "cancelled",
             Self::TimedOut => "timed out",

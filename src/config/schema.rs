@@ -1068,6 +1068,22 @@ struct DesignerAgentSchema {
     )]
     #[schemars(with = "u64")]
     startup_timeout_ms: Option<u64>,
+    /// Whether the runner-launched agent outlives the command and serves the next one (managed mode). Absent: it does; `false`: every command removes its own agent.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "bool")]
+    live: Option<bool>,
+    /// How many live agents one OS account keeps at most (managed mode), from 1. Absent: 2.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "u8", range(min = 1))]
+    live_max: Option<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

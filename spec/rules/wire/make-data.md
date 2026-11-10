@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.MAKE-DATA
-version: 8
+version: 9
 artifact: docs/schemas/command-data/make.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -31,6 +31,8 @@ check:
 Квитанция `provider` внешнего набора (`.epf`, `.erf`) называет `designer` с
 `origin: default` и тогда, когда `providers.make` назначен: внешние наборы собирает только
 Конфигуратор, и ключ их не касается.
+
+**Что изменила версия 9.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
 
 **Что изменила версия 8.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 

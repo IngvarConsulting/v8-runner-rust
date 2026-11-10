@@ -40,6 +40,14 @@ const LEAVES_WITHOUT_THE_LOCK: &[(&str, &str)] = &[
         "читает записи и спрашивает rac без замка, чтобы отвечать и пока идёт другая команда",
     ),
     (
+        "agent status",
+        "спрашивает сторожей без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "agent stop",
+        "снимает агентов учётной записи без замка: агента зависшей команды можно снять из её же каталога",
+    ),
+    (
         "platforms",
         "смотрит установки платформы и ничего не запускает",
     ),
@@ -50,6 +58,10 @@ const LEAVES_WITHOUT_THE_LOCK: &[(&str, &str)] = &[
     (
         "mcp serve http",
         "сервер; замок берёт каждый вызов инструмента, а не процесс",
+    ),
+    (
+        "agent keeper",
+        "сторож живого агента; рабочего каталога у него нет, замок берёт команда",
     ),
 ];
 
@@ -80,6 +92,16 @@ fn without_preview() -> Vec<(&'static str, Vec<&'static str>, &'static str)> {
         ("test va", vec!["test", "va"], "test"),
         ("status", vec!["status"], "status"),
         ("diff", vec!["diff"], "diff"),
+        (
+            "agent hold",
+            vec!["agent", "hold", "--ttl", "60"],
+            "agent hold",
+        ),
+        (
+            "agent release",
+            vec!["agent", "release", "--ttl"],
+            "agent release",
+        ),
     ]
 }
 

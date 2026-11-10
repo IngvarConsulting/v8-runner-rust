@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "LiveAgentHolder": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Держатель-процесс: номер и время старта (UTC, RFC 3339), если система его назвала.",
+          "properties": {
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Держатель со сроком: до какого мгновения (UTC, RFC 3339).",
+          "properties": {
+            "until": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "until"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Держатель живого агента в квитанции."
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/agent-hold.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`data` команды `agent hold`.",
+  "properties": {
+    "agent_pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "holders": {
+      "description": "Держатели после `hold`, этот среди них.",
+      "items": {
+        "$ref": "#/$defs/LiveAgentHolder"
+      },
+      "type": "array"
+    },
+    "keeper_pid": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "key": {
+      "description": "Ключ живого агента цели проекта: шестнадцатеричная строка без частей, из которых он\nсложен.",
+      "type": "string"
+    },
+    "reused": {
+      "description": "Взят ли уже живой агент (`true`) или `hold` поднял его сам (`false`).",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "key",
+    "reused",
+    "holders",
+    "keeper_pid",
+    "duration_ms"
+  ],
+  "title": "AgentHoldResult",
+  "type": "object"
+}

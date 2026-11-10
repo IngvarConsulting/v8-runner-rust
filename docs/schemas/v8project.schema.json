@@ -69,6 +69,17 @@
             "null"
           ]
         },
+        "live": {
+          "description": "Whether the runner-launched agent outlives the command and serves the next one (managed mode). Absent: it does; `false`: every command removes its own agent.",
+          "type": "boolean"
+        },
+        "live-max": {
+          "description": "How many live agents one OS account keeps at most (managed mode), from 1. Absent: 2.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 1,
+          "type": "integer"
+        },
         "port": {
           "description": "Port the runner-launched agent listens on (managed mode). Absent: a free loopback port for each launch.",
           "format": "uint16",

@@ -98,6 +98,8 @@ fn a_service_starts_only_through_the_process_executor_mode() {
     const SPAWN_SERVICE_OWNERS: &[&str] = &[
         "src/platform/process.rs",
         "src/use_cases/managed_stand/mod.rs",
+        // Сторож живого агента — тоже служба, переживающая команду (#577).
+        "src/platform/agent_keeper/client.rs",
     ];
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for file in collect_rust_files(&repo_path("src")) {
@@ -119,6 +121,7 @@ fn a_service_starts_only_through_the_process_executor_mode() {
                 "ShellExecute",
                 "DETACHED_PROCESS",
                 "CREATE_BREAKAWAY_FROM_JOB",
+                "setsid(",
             ] {
                 assert!(
                     !text.contains(forbidden),
@@ -325,7 +328,7 @@ fn every_scenario_is_dispatched_under_the_workspace_lock() {
         "an exemption names a scenario no adapter reaches any more: {unused:?}"
     );
     assert_eq!(
-        report.accepted, 37,
+        report.accepted, 39,
         "the number of locked dispatches changed: update it when a command is added or removed, \
          or find the dispatch that moved out of the guard's sight"
     );
@@ -427,6 +430,14 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
     (
         "crate::use_cases::managed_stand::cluster_status",
         "читает записи и спрашивает rac без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::live_agent::status",
+        "область — учётная запись ОС: спрашивает сторожей без замка, чтобы отвечать и пока идёт другая команда",
+    ),
+    (
+        "crate::use_cases::live_agent::stop",
+        "область — учётная запись ОС: снимает живых агентов через их сторожей, `workPath` не трогает",
     ),
     (
         "crate::use_cases::transport::preview_boundary",

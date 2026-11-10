@@ -186,6 +186,21 @@
           "const": "untracked_base",
           "description": "Пара к роду `untracked_base`: памяти о базе нет.",
           "type": "string"
+        },
+        {
+          "const": "agent_limit",
+          "description": "`agent hold`: живых агентов уже `live-max`, и снять некого.",
+          "type": "string"
+        },
+        {
+          "const": "live_agent_off",
+          "description": "`agent hold` при `tools.designer_agent.live: false`.",
+          "type": "string"
+        },
+        {
+          "const": "live_agent_job",
+          "description": "`agent hold` в Job, из которого сторож не может выйти.",
+          "type": "string"
         }
       ]
     },

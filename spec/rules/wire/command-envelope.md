@@ -71,7 +71,14 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 `non_fast_forward` и `untracked_base` и шаг `next` с `source_set` и `keys`; код чужих изменений
 войдёт в неё же, когда появится его производитель.
 
-**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. У рода `environment` появился второй код, `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он.
+**Отказы удержания живого агента.** `agent hold` отказывает тремя кодами
+(`INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`): `agent_limit` рода `environment`, код
+выхода 2, — живых агентов учётной записи уже `tools.designer_agent.live-max`, и все они
+удерживаются; `live_agent_off` рода `capability`, код выхода 2, — живой агент
+выключен `tools.designer_agent.live: false`; `live_agent_job` рода `environment`, код выхода
+2, — раннер в Job, из которого сторож не может выйти. Платформу ни один из них не запускает.
+
+**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он.
 
 **Что изменила версия 4.** Коды рода `workspace` — `workspace_busy` и `infobase_busy`: запись в
 базу другой рабочей копии не отказывает, а предупреждает в `warnings`.
