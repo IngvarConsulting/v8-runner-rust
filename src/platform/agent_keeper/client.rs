@@ -573,6 +573,9 @@ impl KeeperClient {
             credentials: self.digest.clone(),
         };
         let (channel, keeper) = (self.channel.clone(), self.keeper);
+        // Журнал команды называет сессию, как у разового агента: учётные данные уходят
+        // входом в сессию через сторожа, а не ключами запуска.
+        tracing::debug!(keeper, "opening agent session");
         let opened = self.runtime.block_on(async {
             let stream = connect_within(&channel, keeper, QUERY_PATIENCE).await?;
             let mut stream = BufReader::new(stream);
