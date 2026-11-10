@@ -6,4 +6,6 @@ check:
 
 # База автономного сервера не создаётся под работающим сервером
 
-При работающем своём `ibsrv` этой базы `infobase create` отказывает и называет `standalone stop`.
+При работающем своём `ibsrv` этой базы `infobase create`, и с `--recreate` тоже, отказывает до
+любых изменений и называет `standalone stop` полем `next`: `ibsrv` держит подключения к своей
+БД и файлы своей файловой базы (замер [#597](../../../references/1c/confirmed-runtime-measurements.md)).

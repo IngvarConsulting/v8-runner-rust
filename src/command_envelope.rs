@@ -3,6 +3,7 @@ use serde::Serialize;
 use crate::domain::execution::StepResult;
 use crate::domain::next_step::NextStep;
 use crate::domain::platforms::PlatformReleaseRefusal;
+use crate::domain::sessions::InfobaseSessions;
 use crate::domain::test::{
     RetainedPaths, TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget,
 };
@@ -43,6 +44,8 @@ pub enum ErrorCode {
     WorkspaceBusy,
     /// Файловую базу держит другая команда; как `workspace_busy`, можно повторить.
     InfobaseBusy,
+    /// Базу держат сеансы платформы; перечень — в `error.sessions`.
+    InfobaseSessions,
     InvalidOutput,
     Cancelled,
     TimedOut,
@@ -110,6 +113,7 @@ impl ErrorCode {
             Self::PlatformReleaseMissing => "platform_release_missing",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
+            Self::InfobaseSessions => "infobase_sessions",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
@@ -136,6 +140,7 @@ impl ErrorCode {
         Self::PlatformReleaseMissing,
         Self::WorkspaceBusy,
         Self::InfobaseBusy,
+        Self::InfobaseSessions,
         Self::InvalidOutput,
         Self::Cancelled,
         Self::TimedOut,
@@ -169,6 +174,9 @@ pub struct EnvelopeError {
     /// Формат исходников и опись установок; заполняется отказом `platform_release_missing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform_release: Option<Box<PlatformReleaseRefusal>>,
+    /// Сеансы, которые держат базу; заполняется отказом `infobase_sessions`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Box<InfobaseSessions>>,
 }
 
 impl EnvelopeError {
@@ -181,6 +189,7 @@ impl EnvelopeError {
             base_generation: None,
             local_generation: None,
             platform_release: None,
+            sessions: None,
         }
     }
 
@@ -411,6 +420,11 @@ mod schema_tests {
                 "workspace",
             ),
             (UseCaseErrorKind::InfobaseBusy, "infobase_busy", "workspace"),
+            (
+                UseCaseErrorKind::InfobaseSessions,
+                "infobase_sessions",
+                "workspace",
+            ),
             (
                 UseCaseErrorKind::NonFastForward,
                 "non_fast_forward",

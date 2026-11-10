@@ -321,58 +321,22 @@ impl<'a> IbcmdDsl<'a> {
 
     /// Queries another process's lock without acquiring one that would also block ibcmd.
     /// `Ok(true)` is a present base no session holds, `Ok(false)` an absent one; a held
-    /// base is [`IbcmdError::SnapshotBusy`].
+    /// base is [`IbcmdError::SnapshotBusy`]. The probe itself is the single owner in
+    /// [`crate::platform::file_infobase`].
     #[cfg(unix)]
     fn probe_snapshot_access(&self) -> Result<bool, IbcmdError> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
-
+        use crate::platform::file_infobase::{probe_sessions, FileSessions};
         let path = self.snapshot_path()?;
-        // A malformed target such as a FIFO must fail the metadata check without blocking.
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(source) => return Err(IbcmdError::SnapshotProbe { path, source }),
-        };
-        let metadata = file
-            .metadata()
-            .map_err(|source| IbcmdError::SnapshotProbe {
-                path: path.clone(),
-                source,
-            })?;
-        if !metadata.is_file() {
-            return Err(IbcmdError::SnapshotProbe {
-                path,
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "expected a regular 1Cv8.1CD file",
-                ),
-            });
+        let dir = path.parent().unwrap_or(&path);
+        match probe_sessions(dir) {
+            Ok(FileSessions::Absent) => Ok(false),
+            Ok(FileSessions::Free) => Ok(true),
+            Ok(FileSessions::Held { path, pid }) => Err(IbcmdError::SnapshotBusy { path, pid }),
+            Err(error) => Err(IbcmdError::SnapshotProbe {
+                path: error.path,
+                source: error.source,
+            }),
         }
-        // SAFETY: flock contains only integer fields. Zero means SEEK_SET, offset 0,
-        // length 0 (the whole file), and supplies valid storage for F_GETLK's answer.
-        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-        lock.l_type = libc::F_WRLCK as _;
-        lock.l_whence = libc::SEEK_SET as _;
-        // SAFETY: file owns a live descriptor, and lock is writable for this call.
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } == -1 {
-            return Err(IbcmdError::SnapshotProbe {
-                path,
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        if lock.l_type != libc::F_UNLCK as libc::c_short {
-            // An open file description lock has no owning process: the kernel reports -1.
-            return Err(IbcmdError::SnapshotBusy {
-                path,
-                pid: (lock.l_pid > 0).then_some(lock.l_pid),
-            });
-        }
-        Ok(true)
     }
 
     /// No session probe is measured off POSIX: the refusal is [`dt_transfer_refusal`]'s.

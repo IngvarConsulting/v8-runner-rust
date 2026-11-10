@@ -14,6 +14,8 @@ pub mod edt;
 pub mod edt_session;
 pub mod enterprise;
 pub mod extension_inventory;
+/// Файлы файловой базы: признак сеансов и записи платформы в каталоге.
+pub mod file_infobase;
 /// Ответ платформы о поколении конфигурации.
 pub mod generation;
 pub mod git;

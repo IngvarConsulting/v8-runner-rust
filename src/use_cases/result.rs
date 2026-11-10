@@ -3,6 +3,7 @@ use std::fmt;
 use crate::domain::execution::ExecutionStatus;
 use crate::domain::next_step::NextStep;
 use crate::domain::platforms::PlatformReleaseRefusal;
+use crate::domain::sessions::InfobaseSessions;
 use crate::platform::process::{ProcessError, WorkGiven};
 use crate::support::error::{AppError, CancelledAt, CapabilityReason};
 use crate::use_cases::interruption::CANCELLED_ERROR_CODE;
@@ -32,6 +33,8 @@ pub enum UseCaseErrorKind {
     WorkspaceBusy,
     /// Файловую базу держит другая команда: занято, как `WorkspaceBusy`, можно повторить.
     InfobaseBusy,
+    /// Базу держат сеансы платформы; отказ несёт их перечень (`error.sessions`).
+    InfobaseSessions,
     /// База ушла вперёд записанного поколения: сперва `pull` или перезапись `push --force`.
     NonFastForward,
     /// Памяти о базе у рабочей копии нет: сперва `pull` или перезапись `push --force`.
@@ -59,7 +62,7 @@ impl UseCaseErrorKind {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment(_) => VALIDATION_EXIT_CODE,
             Self::LiveAgentOff | Self::LiveAgentJob | Self::AgentLimit => VALIDATION_EXIT_CODE,
-            Self::WorkspaceBusy | Self::InfobaseBusy => RUNTIME_EXIT_CODE,
+            Self::WorkspaceBusy | Self::InfobaseBusy | Self::InfobaseSessions => RUNTIME_EXIT_CODE,
             Self::NonFastForward | Self::UntrackedBase => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
@@ -127,6 +130,7 @@ impl UseCaseErrorKind {
             Self::Environment(_) => "environment_unavailable",
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
+            Self::InfobaseSessions => "infobase_sessions",
             Self::NonFastForward => "non_fast_forward",
             Self::UntrackedBase => "untracked_base",
             Self::AgentLimit => "agent_limit",
@@ -151,6 +155,7 @@ impl UseCaseErrorKind {
             | Self::Environment(_)
             | Self::WorkspaceBusy
             | Self::InfobaseBusy
+            | Self::InfobaseSessions
             | Self::NonFastForward
             | Self::UntrackedBase
             | Self::AgentLimit
@@ -168,6 +173,7 @@ impl UseCaseErrorKind {
             Self::Environment(_) => "environment unavailable",
             Self::WorkspaceBusy => "workspace busy",
             Self::InfobaseBusy => "infobase busy",
+            Self::InfobaseSessions => "infobase sessions",
             Self::NonFastForward => "non-fast-forward",
             Self::UntrackedBase => "the infobase is not tracked by this working copy",
             Self::AgentLimit => "live agent limit",
@@ -191,10 +197,18 @@ pub struct UseCaseError {
     /// Шаг, которым вызывающий выходит из отказа. Живёт здесь и только здесь: конверт его
     /// печатает, а транспорт не выдумывает.
     next: Option<Box<NextStep>>,
-    /// Поколения у отказа `non_fast_forward`: базы сейчас и записанное после прошлого обмена.
-    generations: Option<Box<Generations>>,
-    /// Формат исходников и опись установок у отказа `platform_release_missing`.
-    platform_release: Option<Box<PlatformReleaseRefusal>>,
+    /// Машинная часть отказа, которую несёт только его код: поколения `non_fast_forward`,
+    /// опись `platform_release_missing`, сеансы `infobase_sessions`. Одно поле на все: отказ
+    /// несёт не больше одной, а `Result` с отказом остаётся маленьким.
+    payload: Option<Box<RefusalPayload>>,
+}
+
+/// Машинная часть отказа сверх кода и текста.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefusalPayload {
+    Generations(Generations),
+    PlatformRelease(PlatformReleaseRefusal),
+    Sessions(InfobaseSessions),
 }
 
 /// Оба поколения отказа «база ушла вперёд».
@@ -213,25 +227,46 @@ impl UseCaseError {
             kind,
             message: message.into(),
             next: None,
-            generations: None,
-            platform_release: None,
+            payload: None,
+        }
+    }
+
+    /// Отказ `infobase_sessions`: базу держат сеансы платформы.
+    pub fn sessions_refusal(message: impl Into<String>, sessions: InfobaseSessions) -> Self {
+        Self {
+            payload: Some(Box::new(RefusalPayload::Sessions(sessions))),
+            ..Self::new(UseCaseErrorKind::InfobaseSessions, message)
+        }
+    }
+
+    /// Сеансы отказа `infobase_sessions`.
+    pub fn sessions(&self) -> Option<&InfobaseSessions> {
+        match self.payload.as_deref() {
+            Some(RefusalPayload::Sessions(sessions)) => Some(sessions),
+            _ => None,
         }
     }
 
     /// Формат исходников и опись установок отказа `platform_release_missing`.
     pub fn platform_release(&self) -> Option<&PlatformReleaseRefusal> {
-        self.platform_release.as_deref()
+        match self.payload.as_deref() {
+            Some(RefusalPayload::PlatformRelease(refusal)) => Some(refusal),
+            _ => None,
+        }
     }
 
     /// Оба поколения отказа «база ушла вперёд».
     pub fn generations(&self) -> Option<&Generations> {
-        self.generations.as_deref()
+        match self.payload.as_deref() {
+            Some(RefusalPayload::Generations(generations)) => Some(generations),
+            _ => None,
+        }
     }
 
     /// Называет оба поколения отказа «база ушла вперёд».
     #[must_use]
     pub fn with_generations(mut self, generations: Generations) -> Self {
-        self.generations = Some(Box::new(generations));
+        self.payload = Some(Box::new(RefusalPayload::Generations(generations)));
         self
     }
 
@@ -325,7 +360,7 @@ impl UseCaseError {
         let kind = UseCaseErrorKind::of(&value);
         let platform_release = value
             .platform_release()
-            .map(|missing| Box::new(missing.refusal()));
+            .map(|missing| Box::new(RefusalPayload::PlatformRelease(missing.refusal())));
         debug_assert_eq!(
             kind == UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing),
             platform_release.is_some(),
@@ -362,7 +397,7 @@ impl UseCaseError {
             AppError::ConfigContext { context, source } => format!("{context}; {source}"),
         };
         Self {
-            platform_release,
+            payload: platform_release,
             ..Self::new(kind, message)
         }
     }

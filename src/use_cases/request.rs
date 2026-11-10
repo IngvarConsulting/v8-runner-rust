@@ -883,6 +883,9 @@ pub struct InitRequest {
     /// `--from <база>`: имя объявленной базы, копией которой становится база этой рабочей
     /// копии (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).
     pub from: Option<String>,
+    /// `--recreate`: существующая база этой копии откладывается и создаётся заново, неудача
+    /// возвращает её (`INV.USE-CASES.RECREATE-ROLLS-BACK-A-FAILED-CREATION`).
+    pub recreate: bool,
 }
 
 /// Transport-neutral request for extension property updates.

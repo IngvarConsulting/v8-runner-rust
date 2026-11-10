@@ -65,6 +65,7 @@ fn cli_envelope_error(error: &UseCaseError) -> EnvelopeError {
         envelope.local_generation = Some(generations.local.clone());
     }
     envelope.platform_release = error.platform_release().cloned().map(Box::new);
+    envelope.sessions = error.sessions().cloned().map(Box::new);
     envelope
 }
 
@@ -90,6 +91,7 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
         ),
         UseCaseErrorKind::WorkspaceBusy => (ErrorCode::WorkspaceBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InfobaseBusy => (ErrorCode::InfobaseBusy, ErrorKind::Workspace),
+        UseCaseErrorKind::InfobaseSessions => (ErrorCode::InfobaseSessions, ErrorKind::Workspace),
         UseCaseErrorKind::NonFastForward => (ErrorCode::NonFastForward, ErrorKind::NonFastForward),
         UseCaseErrorKind::UntrackedBase => (ErrorCode::UntrackedBase, ErrorKind::UntrackedBase),
         UseCaseErrorKind::AgentLimit => (ErrorCode::AgentLimit, ErrorKind::Environment),

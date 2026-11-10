@@ -15,6 +15,8 @@ check:
   - tests/cli_push_generation.rs::a_base_created_by_the_runner_takes_the_first_push
   - tests/cli_infobase_owner.rs::infobase_create_records_the_created_base_for_this_copy
   - src/use_cases/init_project.rs::a_cancellation_deferred_by_the_creation_leaves_an_empty_remembered_base
+  - tests/cli_infobase_recreate.rs::create_refuses_an_existing_base_with_the_recreate_advice_and_recreate_creates_a_missing_one
+  - tests/cli_infobase_recreate.rs::a_recreate_preview_names_what_it_would_remove_and_touches_nothing
 ---
 
 # Базу создаёт `infobase create`, и делает это по виду цели
@@ -36,7 +38,16 @@ check:
 у базы в кластере, которую Конфигуратор создаёт пустой, и у файловой, чью сборку остановили
 после создания, — только то, что база есть, и первая отправка полная. Созданную файловую
 базу команда записывает в метку за своей копией. Существующая файловая база — отказ на тех
-же правах, что у подъёма из снимка с созданием. Неудачное создание, после которого файл базы
+же правах, что у подъёма из снимка с созданием, и отказ советует `--recreate`.
+
+`infobase create --recreate [--from X]` заменяет существующую базу этой копии: откладывает
+прежнюю, создаёт новую обычным порядком и удаляет отложенное, а при неудаче возвращает его.
+Ответ начинается шагом `infobase recreate` и несёт поле `removed`. Превью называет, чья база,
+что было бы удалено и каких живых агентов раннер снял бы, и ничего не пишет. Что убирается и
+когда команда отказывает, говорят `INV.USE-CASES.RECREATE-REMOVES-ONLY-THE-PLATFORM-FILES-OF-THE-BASE`,
+`INV.USE-CASES.RECREATE-REFUSES-A-BUSY-BASE-BEFORE-REMOVING`,
+`INV.USE-CASES.RECREATE-ROLLS-BACK-A-FAILED-CREATION` и
+`INV.USE-CASES.A-MANAGED-RECREATE-DROPS-ONLY-ITS-OWN-DATABASE`. Через MCP ключа нет. Неудачное создание, после которого файл базы
 всё же появился, называет оставленный каталог и выходы: удалить его и создать базу заново или
 загрузить исходники поверх `push --force`. Копию другой базы делает `--from`
 (`INV.CLI.INFOBASE-CREATE-FROM-COPIES-A-BASE`).

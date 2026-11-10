@@ -144,6 +144,28 @@ impl PostgresBuild {
         )
     }
 
+    /// Одна команда SQL к служебной БД `postgres` с остановкой на первой ошибке: переименование и
+    /// удаление БД у `infobase create --recreate`. Пароль — файлом, как у [`Self::database_exists`].
+    pub fn statement(&self, port: u16, passfile: &Path, sql: &str) -> ProcessRequest {
+        self.request(
+            "psql",
+            vec![
+                "-w".to_owned(),
+                format!(
+                    "host=127.0.0.1 port={port} user={SUPERUSER} dbname=postgres passfile='{}'",
+                    conninfo_value(passfile)
+                ),
+                "-v".to_owned(),
+                "ON_ERROR_STOP=1".to_owned(),
+                // Код SQLSTATE в тексте отказа: по нему, а не по прозе, узнаётся занятая БД.
+                "-v".to_owned(),
+                "VERBOSITY=verbose".to_owned(),
+                "-Atc".to_owned(),
+                sql.to_owned(),
+            ],
+        )
+    }
+
     pub fn is_ready(&self, port: u16) -> ProcessRequest {
         self.request(
             "pg_isready",
@@ -169,6 +191,34 @@ fn conninfo_value(path: &Path) -> String {
         .to_string()
         .replace(BACKSLASH, "/")
         .replace(QUOTE, ESCAPED_QUOTE)
+}
+
+/// Имя БД как идентификатор SQL: в двойных кавычках, кавычка внутри удвоена.
+pub fn quoted_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// `ALTER DATABASE … RENAME TO …`.
+pub fn rename_database(from: &str, to: &str) -> String {
+    format!(
+        "ALTER DATABASE {} RENAME TO {}",
+        quoted_identifier(from),
+        quoted_identifier(to)
+    )
+}
+
+/// `DROP DATABASE …`: отказывает, пока к БД есть подключения.
+pub fn drop_database(name: &str) -> String {
+    format!("DROP DATABASE {}", quoted_identifier(name))
+}
+
+/// Отказ PostgreSQL, потому что к БД подключены другие: SQLSTATE `55006` (`object_in_use`),
+/// который `psql` при `VERBOSITY=verbose` печатает после уровня — `ERROR:  55006: …` и в
+/// переводе сообщений тоже (замер #597). Решает код, а не текст.
+pub fn refused_as_in_use(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some("55006:"))
 }
 
 /// Строка файла `passfile` для этого порта.
@@ -208,6 +258,23 @@ pub fn parse_version(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Отказ из-за подключений узнаётся по SQLSTATE в любом переводе; другой код — нет.
+    #[test]
+    fn a_database_in_use_is_told_by_its_sqlstate() {
+        assert!(refused_as_in_use(
+            "ОШИБКА:  55006: база данных \"demo\" занята другими пользователями\nDETAIL:  …"
+        ));
+        assert!(refused_as_in_use("ERROR:  55006: database \"demo\" …"));
+        assert!(!refused_as_in_use(
+            "ERROR:  3D000: database \"demo\" does not exist"
+        ));
+        assert!(!refused_as_in_use("DETAIL:  port 55006: …"));
+        assert_eq!(
+            rename_database("a\"b", "c"),
+            "ALTER DATABASE \"a\"\"b\" RENAME TO \"c\""
+        );
+    }
 
     #[test]
     fn the_address_uses_the_platform_form_and_the_settings_stay_on_the_loopback() {

@@ -820,12 +820,15 @@ pub enum InfobaseCommand {
 #[derive(Args, Debug, Clone, Default)]
 #[command(
     next_help_heading = "Command options",
-    after_help = "Without --from: a new infobase with the configuration of this project's sources. With --from <INFOBASE>: a copy of another infobase declared in v8project.local.yaml, with its data and configuration — the source is snapshotted to a DT image under workPath (it must be free: the runner ends no sessions), and the new infobase is made from that image; the first push after it loads every set in full. A source or a target on a standalone server is refused with a recipe."
+    after_help = "Without --from: a new infobase with the configuration of this project's sources. With --from <INFOBASE>: a copy of another infobase declared in v8project.local.yaml, with its data and configuration — the source is snapshotted to a DT image under workPath (it must be free: the runner ends no sessions), and the new infobase is made from that image; the first push after it loads every set in full. A source or a target on a standalone server is refused with a recipe. An existing infobase is refused; --recreate replaces it: a file infobase loses only its top-level 1Cv8* entries, a runner-managed stand over its own PostgreSQL loses its database and its registration; a busy infobase is refused before anything is removed, and a failed creation puts the old infobase back."
 )]
 pub struct InfobaseCreateArgs {
     /// Declared infobase to copy, with its data and configuration
     #[arg(long, value_name = "INFOBASE")]
     pub from: Option<String>,
+    /// Replace the existing infobase of this working copy: remove it, then create it anew
+    #[arg(long)]
+    pub recreate: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1234,7 +1237,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Infobase(InfobaseArgs {
-                command: InfobaseCommand::Create(InfobaseCreateArgs { from: None }),
+                command: InfobaseCommand::Create(InfobaseCreateArgs {
+                    from: None,
+                    recreate: false
+                }),
             })
         ));
 
@@ -1243,7 +1249,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Infobase(InfobaseArgs {
-                command: InfobaseCommand::Create(InfobaseCreateArgs { from: Some(ref name) }),
+                command: InfobaseCommand::Create(InfobaseCreateArgs {
+                    from: Some(ref name),
+                    ..
+                }),
             }) if name == "upstream"
         ));
     }

@@ -212,6 +212,17 @@
             }
           ],
           "description": "Формат исходников и опись установок; заполняется отказом `platform_release_missing`."
+        },
+        "sessions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseSessions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Сеансы, которые держат базу; заполняется отказом `infobase_sessions`."
         }
       },
       "required": [
@@ -262,6 +273,11 @@
         {
           "const": "infobase_busy",
           "description": "Файловую базу держит другая команда; как `workspace_busy`, можно повторить.",
+          "type": "string"
+        },
+        {
+          "const": "infobase_sessions",
+          "description": "Базу держат сеансы платформы; перечень — в `error.sessions`.",
           "type": "string"
         },
         {
@@ -557,6 +573,45 @@
           "type": "object"
         }
       ]
+    },
+    "InfobaseSessions": {
+      "additionalProperties": false,
+      "description": "Поле `error.sessions` отказа `infobase_sessions`.",
+      "properties": {
+        "base": {
+          "description": "База: строка соединения без учётных данных.",
+          "type": "string"
+        },
+        "from_this_machine": {
+          "description": "Среди сеансов есть сеанс с этой машины.",
+          "type": "boolean"
+        },
+        "list": {
+          "description": "Сеансы базы. `null` — признак занятости есть, а перечня раннер не получил.",
+          "items": {
+            "$ref": "#/$defs/SessionEntry"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "lock": {
+          "$ref": "#/$defs/SessionLock",
+          "description": "Блокировка начала сеансов, уже стоящая на базе."
+        },
+        "terminable": {
+          "description": "Может ли раннер завершить сеансы для этой базы и команды.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "base",
+        "from_this_machine",
+        "terminable",
+        "lock"
+      ],
+      "type": "object"
     },
     "InstalledComponents": {
       "additionalProperties": false,
@@ -1038,6 +1093,91 @@
         "address"
       ],
       "type": "object"
+    },
+    "SessionEntry": {
+      "additionalProperties": false,
+      "description": "Один сеанс базы.",
+      "properties": {
+        "application": {
+          "description": "Устойчивый код приложения платформы (`Designer`, `1CV8C`, `BackgroundJob`…); `null` —\nназвание не распознано.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "application_title": {
+          "description": "Название приложения, как его написала платформа.",
+          "type": "string"
+        },
+        "computer": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started": {
+          "type": "string"
+        },
+        "user": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "computer",
+        "application_title",
+        "started"
+      ],
+      "type": "object"
+    },
+    "SessionLock": {
+      "additionalProperties": false,
+      "description": "Блокировка начала сеансов.",
+      "properties": {
+        "message": {
+          "description": "Сообщение блокировки, если она стоит и раннер его прочёл.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SessionLockState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "SessionLockState": {
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Блокировки нет.",
+          "type": "string"
+        },
+        {
+          "const": "own",
+          "description": "Блокировку поставил этот раннер.",
+          "type": "string"
+        },
+        {
+          "const": "foreign",
+          "description": "Блокировку поставил кто-то другой.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Раннер не может узнать, стоит ли блокировка.",
+          "type": "string"
+        }
+      ]
     },
     "SessionMode": {
       "description": "Как раннер добрался до точки входа агента.",

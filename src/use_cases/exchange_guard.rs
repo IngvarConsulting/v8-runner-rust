@@ -181,21 +181,7 @@ pub(crate) fn remember_copied_base(config: &AppConfig, copied: &CopiedFrom) -> O
         );
     };
     let file = copy_mark_in(&dir);
-    let mut failures: Vec<String> = PREVIOUS_MEMORY
-        .iter()
-        .filter_map(|name| {
-            let entry = dir.join(name);
-            let removed = match std::fs::symlink_metadata(&entry) {
-                Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&entry),
-                Ok(_) => std::fs::remove_file(&entry),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
-            };
-            removed
-                .err()
-                .map(|error| format!("'{}': {error}", entry.display()))
-        })
-        .collect();
+    let mut failures = erase_previous_memory(&dir);
     let written = serde_json::to_vec_pretty(copied)
         .map_err(|error| error.to_string())
         .and_then(|text| {
@@ -211,6 +197,44 @@ pub(crate) fn remember_copied_base(config: &AppConfig, copied: &CopiedFrom) -> O
     (!failures.is_empty()).then(|| {
         format!(
             "the memory of the copied infobase was not written ({}); the first push names the ways out",
+            failures.join("; ")
+        )
+    })
+}
+
+/// Стирает записи прежнего содержимого базы в каталоге её памяти; возвращает несостоявшиеся.
+fn erase_previous_memory(dir: &Path) -> Vec<String> {
+    PREVIOUS_MEMORY
+        .iter()
+        .filter_map(|name| {
+            let entry = dir.join(name);
+            let removed = match std::fs::symlink_metadata(&entry) {
+                Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&entry),
+                Ok(_) => std::fs::remove_file(&entry),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+            removed
+                .err()
+                .map(|error| format!("'{}': {error}", entry.display()))
+        })
+        .collect()
+}
+
+/// Память о базе, которую `infobase create --recreate` откладывает или вернул после неудачи:
+/// хеш-память, файлы версий, журнал поколений, признаки нового владельца и копии стираются.
+/// Отложенная или возвращённая база — не та, которую помнил каталог, и первая отправка в неё
+/// без `pull --force` откажет (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`). Сбой —
+/// строка для ответа.
+pub(crate) fn forget_base_memory(config: &AppConfig) -> Option<String> {
+    let dir = SourceSetsService::new(config).base_memory_dir()?;
+    let mut failures = erase_previous_memory(&dir);
+    if let Some(failure) = forget_copied_base(config) {
+        failures.push(failure);
+    }
+    (!failures.is_empty()).then(|| {
+        format!(
+            "the memory of the old infobase was not erased ({})",
             failures.join("; ")
         )
     })

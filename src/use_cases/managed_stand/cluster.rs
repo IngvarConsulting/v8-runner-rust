@@ -1309,7 +1309,7 @@ pub(super) fn cluster_base(
         let (port, bin) = stand.running_record()?;
         if !dry_run && stand.database_exists(port, &bin, name)? {
             return Err(validation(format!(
-                "the database '{name}' already exists in the PostgreSQL of this infobase: name another with infobase.dbms.name, or drop it with PostgreSQL tools using the password file `dbms status` names"
+                "the database '{name}' already exists in the PostgreSQL of this infobase: name another with infobase.dbms.name, run infobase create --recreate to replace the infobase, or drop it with PostgreSQL tools using the password file `dbms status` names"
             )));
         }
     }
@@ -1355,6 +1355,245 @@ pub(super) fn remember_registered(config: &AppConfig) -> Result<(), UseCaseError
         },
     )
     .map_err(|error| io_failure("cannot write", &paths.pins(), &error))
+}
+
+/// Регистрация базы в кластере раннера, которую `infobase create --recreate` снимает и, при
+/// неудаче, ставит обратно.
+pub(super) struct Registered {
+    rac: PathBuf,
+    ras: String,
+    cluster: String,
+    /// Идентификатор базы в кластере; `None` — кластер базу не знает.
+    pub(super) infobase: Option<String>,
+    pub(super) name: String,
+    /// Пользователь базы для `rac infobase drop`: у базы с пользователями без него `rac`
+    /// откажет.
+    user: Option<String>,
+    password: Option<String>,
+}
+
+/// Регистрация базы у работающего кластера раннера и проверка её сеансов: сеанс — отказ
+/// `infobase_sessions` с их перечнем до любых изменений
+/// (`INV.USE-CASES.RECREATE-REFUSES-A-BUSY-BASE-BEFORE-REMOVING`).
+pub(super) fn registration_for_recreate(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Result<Registered, UseCaseError> {
+    let no_locate = || Err(validation("a running cluster names its own utilities"));
+    let cluster = cluster(config, context, runner, host, &no_locate)?;
+    let not_running = || {
+        validation(format!(
+            "the cluster of '{}' is not running: run `cluster start`",
+            cluster.declared.infobase
+        ))
+        .with_next(crate::domain::next_step::NextStep::command("cluster start"))
+    };
+    let Observed::Own(agent) = cluster.observe(&cluster.agent) else {
+        return Err(not_running());
+    };
+    cluster
+        .pins()
+        .filter(|pins| pins.previous.is_none())
+        .ok_or_else(not_running)?;
+    let ras = cluster
+        .own_ras()
+        .ok_or_else(|| platform("ras of the cluster is not running: run `cluster restart`"))?;
+    let id = cluster
+        .probe(&agent.bin, ras.port)
+        .ok_or_else(|| platform("the cluster did not name itself to rac cluster list"))?;
+    let rac_bin = sibling(&agent.bin, "rac");
+    let address = ras_address(ras.port);
+    let summary = cluster
+        .runner
+        .run_with_policy(
+            &rac::infobase_list(&rac_bin, &address, &id),
+            &cluster.probe_policy(),
+        )
+        .map_err(|error| platform(format!("rac did not run: {error}")))?;
+    if summary.outcome().is_err() {
+        return Err(platform(format!(
+            "rac could not list the infobases of the cluster: {}",
+            summary.stderr.trim()
+        )));
+    }
+    let registered = Registered {
+        infobase: rac::infobase_id(&summary.stdout, &cluster.declared.name),
+        rac: rac_bin,
+        ras: address,
+        cluster: id,
+        name: cluster.declared.name.clone(),
+        user: crate::config::model::declared_name(config.infobase.user.as_deref())
+            .map(str::to_owned),
+        password: config
+            .infobase
+            .password
+            .clone()
+            .filter(|password| !password.is_empty()),
+    };
+    if let Some(sessions) = registered.open_sessions(context, runner)? {
+        return Err(registered.sessions_refusal(config, sessions));
+    }
+    Ok(registered)
+}
+
+impl Registered {
+    /// Сеансы базы по `rac session list`; `None` — их нет или база не зарегистрирована.
+    fn open_sessions(
+        &self,
+        context: &ExecutionContext,
+        runner: &dyn ProcessRunner,
+    ) -> Result<Option<Vec<rac::Session>>, UseCaseError> {
+        let Some(infobase) = self.infobase.as_deref() else {
+            return Ok(None);
+        };
+        let answer = runner
+            .run_with_policy(
+                &rac::session_list(&self.rac, &self.ras, &self.cluster, infobase),
+                &context.process_policy(
+                    InterruptionSafetyClass::GracefulThenKill,
+                    Some(PROBE_TIMEOUT),
+                ),
+            )
+            .map_err(|error| platform(format!("rac did not run: {error}")))?;
+        if answer.outcome().is_err() {
+            return Err(platform(format!(
+                "rac could not list the sessions of '{}': {}; infobase create --recreate removes nothing it cannot check",
+                self.name,
+                answer.stderr.trim()
+            )));
+        }
+        let sessions = rac::sessions(&answer.stdout);
+        Ok((!sessions.is_empty()).then_some(sessions))
+    }
+
+    /// Отказ `infobase_sessions` с перечнем сеансов из `rac`.
+    fn sessions_refusal(&self, config: &AppConfig, sessions: Vec<rac::Session>) -> UseCaseError {
+        super::sessions_refusal(
+            config,
+            format!(
+                "infobase create --recreate removes nothing: {} session(s) of '{}' are open in the cluster; close them and repeat",
+                sessions.len(),
+                self.name
+            ),
+            Some(
+                sessions
+                    .into_iter()
+                    .map(|session| crate::domain::sessions::SessionEntry {
+                        computer: session.host,
+                        application: (!session.application.is_empty())
+                            .then(|| session.application.clone()),
+                        application_title: session.application,
+                        started: session.started,
+                        user: (!session.user.is_empty()).then_some(session.user),
+                        id: Some(session.id),
+                    })
+                    .collect(),
+            ),
+        )
+    }
+
+    /// `rac infobase drop` без `--drop-database`: БД остаётся. Кластер отказывает, пока у базы
+    /// есть соединения (замер #597): если отказ пришёл из-за сеанса, вошедшего после проверки,
+    /// ответ — отказ `infobase_sessions`.
+    pub(super) fn unregister(
+        &self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        runner: &dyn ProcessRunner,
+    ) -> Result<(), UseCaseError> {
+        let Some(infobase) = self.infobase.as_deref() else {
+            return Ok(());
+        };
+        let dropped = self.drop_registration(context, runner, infobase);
+        if dropped.is_err() {
+            if let Ok(Some(sessions)) = self.open_sessions(context, runner) {
+                return Err(self.sessions_refusal(config, sessions));
+            }
+        }
+        dropped
+    }
+
+    fn drop_registration(
+        &self,
+        context: &ExecutionContext,
+        runner: &dyn ProcessRunner,
+        infobase: &str,
+    ) -> Result<(), UseCaseError> {
+        let answer = runner
+            .run_with_policy(
+                &rac::unregister_infobase(
+                    &self.rac,
+                    &self.ras,
+                    &self.cluster,
+                    infobase,
+                    self.user.as_deref(),
+                    self.password.as_deref(),
+                ),
+                &context.process_policy(
+                    InterruptionSafetyClass::GracefulThenKill,
+                    Some(PROBE_TIMEOUT),
+                ),
+            )
+            .map_err(|error| platform(format!("rac did not run: {error}")))?;
+        if answer.outcome().is_err() {
+            let secrets: Vec<&str> = self.password.as_deref().into_iter().collect();
+            return Err(platform(format!(
+                "rac could not drop the registration of '{}': {}",
+                self.name,
+                mask_text(answer.stderr.trim(), &secrets)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Регистрация с этим именем, которую оставило неудачное создание: снимается без БД.
+    pub(super) fn drop_new(
+        &self,
+        context: &ExecutionContext,
+        runner: &dyn ProcessRunner,
+    ) -> Result<(), UseCaseError> {
+        let answer = runner
+            .run_with_policy(
+                &rac::infobase_list(&self.rac, &self.ras, &self.cluster),
+                &context.cleanup_policy(),
+            )
+            .map_err(|error| platform(format!("rac did not run: {error}")))?;
+        if answer.outcome().is_err() {
+            return Err(platform(format!(
+                "rac could not list the infobases of the cluster: {}",
+                answer.stderr.trim()
+            )));
+        }
+        match rac::infobase_id(&answer.stdout, &self.name) {
+            Some(id) => self.drop_registration(context, runner, &id),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Регистрация прежней базы над её вернувшейся БД после неудачного пересоздания.
+pub(super) fn register_again(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    runner: &dyn ProcessRunner,
+    host: &dyn ServiceHost,
+) -> Result<(), UseCaseError> {
+    let no_locate = || Err(validation("a running cluster names its own utilities"));
+    let cluster = cluster(config, context, runner, host, &no_locate)?;
+    let Observed::Own(agent) = cluster.observe(&cluster.agent) else {
+        return Err(validation("the cluster is not running"));
+    };
+    let database = cluster
+        .database()?
+        .ok_or_else(|| validation("infobase.dbms is not declared"))?;
+    let stand = cluster.stand();
+    cluster.register(&agent, &database, stand.as_ref())?;
+    let pins = cluster
+        .pins()
+        .ok_or_else(|| validation("the ports of the cluster are not pinned"))?;
+    mark_registered(&cluster, pins)
 }
 
 /// Сценарий `cluster` с подделкой утилит и машины: файлы настоящие, процессы нет.
@@ -1404,8 +1643,42 @@ mod tests {
                 .to_string_lossy()
                 .to_string();
             let mut stdout = String::new();
+            let mut stderr = String::new();
             let mut exit_code = 0;
+            let databases = &host.databases;
             match tool.as_str() {
+                // БД по именам: вопрос о БД и команды SQL пересоздания.
+                "psql" if databases.borrow().is_some() => {
+                    let sql = request.args.last().unwrap().clone();
+                    host.statements.borrow_mut().push(sql.clone());
+                    let mut known = databases.borrow_mut();
+                    let known = known.as_mut().unwrap();
+                    let quoted = |text: &str| -> Vec<String> {
+                        text.split('"')
+                            .skip(1)
+                            .step_by(2)
+                            .map(str::to_owned)
+                            .collect()
+                    };
+                    if let Some(name) =
+                        sql.strip_prefix("select 1 from pg_database where datname = '")
+                    {
+                        if known.contains(name.trim_end_matches('\'')) {
+                            stdout = "1".to_owned();
+                        }
+                    } else if sql.starts_with("ALTER DATABASE") {
+                        let names = quoted(&sql);
+                        if host.connected.get() {
+                            exit_code = 1;
+                            stderr = format!("ERROR:  55006: database \"{}\" is in use", names[0]);
+                        } else {
+                            known.remove(&names[0]);
+                            known.insert(names[1].clone());
+                        }
+                    } else if sql.starts_with("DROP DATABASE") {
+                        known.remove(&quoted(&sql)[0]);
+                    }
+                }
                 "initdb" => {
                     let data = PathBuf::from(&request.args[1]);
                     std::fs::create_dir_all(&data).unwrap();
@@ -1437,6 +1710,15 @@ mod tests {
                         } else {
                             host.registered.borrow_mut().push("demo".to_owned());
                         }
+                    } else if request.args[..2] == ["infobase", "drop"] {
+                        host.registered.borrow_mut().clear();
+                    } else if request.args[..2] == ["session", "list"] {
+                        stdout = host
+                            .sessions
+                            .borrow()
+                            .iter()
+                            .map(|id| format!("session : {id}\napp-id  : 1CV8C\nhost    : PC\n\n"))
+                            .collect();
                     }
                 }
                 _ => {}
@@ -1444,7 +1726,7 @@ mod tests {
             Ok(ProcessResult {
                 exit_code,
                 stdout,
-                stderr: String::new(),
+                stderr,
                 interruption: None,
             })
         }
@@ -1482,6 +1764,14 @@ mod tests {
         registration_fails: Cell<bool>,
         rac_calls: RefCell<Vec<Vec<String>>>,
         pg_stops: Cell<u32>,
+        /// БД своего PostgreSQL по именам; `None` — ответ `database_exists` на любое имя.
+        databases: RefCell<Option<HashSet<String>>>,
+        /// Команды SQL, которые получил `psql`.
+        statements: RefCell<Vec<String>>,
+        /// К БД подключены: переименование отказывает кодом `55006`.
+        connected: Cell<bool>,
+        /// Сеансы базы в кластере.
+        sessions: RefCell<Vec<String>>,
     }
 
     impl Host {
@@ -2813,5 +3103,202 @@ mod tests {
             "{:?}",
             started.connection
         );
+    }
+
+    /// Кластер работает, база зарегистрирована, своя БД есть.
+    fn recreate_setup(host: &Host) -> Setup {
+        let setup = setup();
+        setup.run(ServiceCommand::Start, host).unwrap();
+        host.registered.borrow_mut().push("demo".to_owned());
+        host.databases
+            .replace(Some(HashSet::from(["demo_data".to_owned()])));
+        setup
+    }
+
+    fn recreate_context() -> ExecutionContext {
+        ExecutionContext::cli(CommandName::Init)
+    }
+
+    fn databases(host: &Host) -> Vec<String> {
+        let mut names: Vec<String> = host
+            .databases
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Пересоздание кластерной базы: регистрация снимается без БД, БД откладывается под
+    /// временное имя; после удачного создания удаляется только отложенная.
+    #[test]
+    fn a_managed_recreate_sets_the_database_aside_and_drops_only_it() {
+        use super::super::recreate::old_database_with;
+        let host = Host::default();
+        let setup = recreate_setup(&host);
+        let context = recreate_context();
+        let runner = Runner { host: &host };
+
+        let old = old_database_with(&context, &setup.config, &runner, &host).unwrap();
+        assert_eq!(old.parts().len(), 2, "the registration and the database");
+        old.set_aside_with(&context, &setup.config, &runner, &host)
+            .unwrap();
+        assert!(host.registered.borrow().is_empty());
+        assert_eq!(databases(&host), ["demo_data_v8r_recreate"]);
+        let drop = host
+            .rac_calls
+            .borrow()
+            .iter()
+            .find(|args| args[..2] == ["infobase", "drop"])
+            .cloned()
+            .unwrap();
+        assert!(
+            !drop.iter().any(|arg| arg.contains("drop-database")),
+            "{drop:?}"
+        );
+
+        // Создание завело новую БД с прежним именем.
+        host.databases
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .insert("demo_data".to_owned());
+        assert!(old
+            .discard_with(&context, &setup.config, &runner, &host)
+            .is_none());
+        assert_eq!(databases(&host), ["demo_data"]);
+    }
+
+    /// Неудачное создание: новая регистрация и новая БД снимаются, прежняя БД получает своё
+    /// имя и регистрацию.
+    #[test]
+    fn a_failed_managed_recreation_puts_the_database_and_the_registration_back() {
+        use super::super::recreate::old_database_with;
+        let host = Host::default();
+        let setup = recreate_setup(&host);
+        let context = recreate_context();
+        let runner = Runner { host: &host };
+        let old = old_database_with(&context, &setup.config, &runner, &host).unwrap();
+        old.set_aside_with(&context, &setup.config, &runner, &host)
+            .unwrap();
+        host.databases
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .insert("demo_data".to_owned());
+        host.registered.borrow_mut().push("demo".to_owned());
+
+        let left = old.restore_with(&context, &setup.config, &runner, &host);
+
+        assert!(left.is_empty(), "{left:?}");
+        assert_eq!(databases(&host), ["demo_data"]);
+        assert_eq!(*host.registered.borrow(), ["demo"]);
+        let statements = host.statements.borrow();
+        let dropped = statements
+            .iter()
+            .position(|sql| sql == "DROP DATABASE \"demo_data\"")
+            .expect("the new database is dropped");
+        let renamed = statements
+            .iter()
+            .position(|sql| {
+                sql == "ALTER DATABASE \"demo_data_v8r_recreate\" RENAME TO \"demo_data\""
+            })
+            .expect("the old database is renamed back");
+        assert!(dropped < renamed, "{statements:?}");
+    }
+
+    /// Сеансы базы в кластере — отказ `infobase_sessions` с их перечнем до любых изменений.
+    #[test]
+    fn a_managed_recreate_with_sessions_in_the_cluster_is_refused_before_any_change() {
+        use super::super::recreate::old_database_with;
+        let host = Host::default();
+        let setup = recreate_setup(&host);
+        host.sessions.borrow_mut().push("s1".to_owned());
+
+        let refused = old_database_with(
+            &recreate_context(),
+            &setup.config,
+            &Runner { host: &host },
+            &host,
+        )
+        .err()
+        .unwrap();
+
+        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseSessions);
+        let sessions = refused.sessions().unwrap();
+        assert_eq!(sessions.list.as_ref().unwrap().len(), 1);
+        assert!(!sessions.terminable);
+        assert_eq!(*host.registered.borrow(), ["demo"]);
+        assert!(host
+            .statements
+            .borrow()
+            .iter()
+            .all(|sql| sql.starts_with("select")));
+    }
+
+    /// PostgreSQL отказал в переименовании из-за подключений: отказ `infobase_sessions`, и
+    /// снятая регистрация возвращается.
+    #[test]
+    fn a_connected_database_refuses_the_recreate_and_keeps_the_registration() {
+        use super::super::recreate::old_database_with;
+        let host = Host::default();
+        let setup = recreate_setup(&host);
+        let context = recreate_context();
+        let runner = Runner { host: &host };
+        let old = old_database_with(&context, &setup.config, &runner, &host).unwrap();
+        host.connected.set(true);
+
+        let refused = old
+            .set_aside_with(&context, &setup.config, &runner, &host)
+            .unwrap_err();
+
+        assert_eq!(refused.kind(), UseCaseErrorKind::InfobaseSessions);
+        assert!(refused.sessions().unwrap().list.is_none());
+        assert_eq!(databases(&host), ["demo_data"]);
+        assert_eq!(*host.registered.borrow(), ["demo"]);
+    }
+
+    /// БД не своего PostgreSQL и остаток прошлого пересоздания — отказ до изменений.
+    #[test]
+    fn a_foreign_dbms_and_a_leftover_database_are_refused() {
+        use super::super::recreate::old_database_with;
+        let host = Host::default();
+        let mut setup = recreate_setup(&host);
+        host.databases
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .insert("demo_data_v8r_recreate".to_owned());
+        let leftover = old_database_with(
+            &recreate_context(),
+            &setup.config,
+            &Runner { host: &host },
+            &host,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            leftover.message().contains("demo_data_v8r_recreate"),
+            "{leftover}"
+        );
+
+        setup.config.infobase.dbms.as_mut().unwrap().managed = None;
+        let foreign = old_database_with(
+            &recreate_context(),
+            &setup.config,
+            &Runner { host: &host },
+            &host,
+        )
+        .err()
+        .unwrap();
+        assert!(foreign.message().contains("did not start"), "{foreign}");
+        assert!(host
+            .statements
+            .borrow()
+            .iter()
+            .all(|sql| sql.starts_with("select")));
     }
 }

@@ -24,7 +24,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `clone` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
 | `init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
 | `tools download <tool>` | CLI-only загрузка выпусков (по умолчанию latest; у vanessa есть `--prerelease`) | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
-| `infobase create` | файловая база — цепочка `ibcmd` → `designer`; база в кластере — только `designer` (`providers.infobase.create` у кластера — ошибка настроек); автономный сервер — отказ `capability`/`target` с рецептом | Файловую ИБ `ibcmd` создаёт сразу с основной конфигурацией (`--import --apply --force`; исходники EDT сперва переводятся в XML), Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles`, `/UpdateDBCfg`; в кластере Конфигуратор `CREATEINFOBASE` с клиент-серверной строкой регистрирует базу и создаёт базу данных (нужны `infobase.dbms` с `locale`); существующая файловая база — отказ; при `format=EDT` дополнительно импортирует EDT workspace |
+| `infobase create` | файловая база — цепочка `ibcmd` → `designer`; база в кластере — только `designer` (`providers.infobase.create` у кластера — ошибка настроек); автономный сервер — отказ `capability`/`target` с рецептом | Файловую ИБ `ibcmd` создаёт сразу с основной конфигурацией (`--import --apply --force`; исходники EDT сперва переводятся в XML), Конфигуратор — `CREATEINFOBASE`, `/LoadConfigFromFiles`, `/UpdateDBCfg`; в кластере Конфигуратор `CREATEINFOBASE` с клиент-серверной строкой регистрирует базу и создаёт базу данных (нужны `infobase.dbms` с `locale`); существующая файловая база — отказ с советом `--recreate`; `--recreate` заменяет базу этой копии (файловую или стенда раннера над своим PostgreSQL); при `format=EDT` дополнительно импортирует EDT workspace |
 | `extensions` | `format=DESIGNER` или `format=EDT`; у файловой базы цепочка `ibcmd` → `agent`, у кластера `agent` → `designer` для `list`, у автономного сервера только `agent` | Читает и меняет состав и свойства расширений ИБ. Пакетный Конфигуратор возвращает только имена. Агент читает свойства из структурного ответа `properties get`, синоним при `create` передаёт в форме `NStr()` |
 | `push` | у файловой базы цепочка `agent` → `designer` → `ibcmd`, а без ключа `providers.push` у отправки, где каждый набор грузится целиком (`--force`, `--full`, набор без памяти исходников), — `ibcmd` → `agent` → `designer` (квитанция: `reason: whole`); у кластера `agent` → `designer`; при `format=EDT` и при объявленном `tools.client_mcp.extension` агент в цепочку файловой базы и кластера не входит; у автономного сервера (`infobase.standalone`) — `designer` по прямому шлюзу (строка `Srvr=…;Ref=…` в `connection`) → `agent` через SSH-шлюз сервера; агенту платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
 | `apply` | та же строка матрицы, что у `push`, без сужения формой проекта; ключ `providers.apply` | Применяет основную конфигурацию к конфигурации базы данных после `push --no-apply`; без набора — конфигурация, установленные расширения и расширение-инструмент; запись поколения переносится по ответу инструмента записи |
@@ -254,7 +254,7 @@ DemoTrd различались цвета диаграмм в девяти фа�
 | `capability` | `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой цели), `soon` (пока не умеет), `live_agent_off` (`agent hold` при `live: false`) | 2 |
 | `environment` | `environment_unavailable`, `platform_release_missing` (при `tools.platform.version: sources` нет выпуска формата исходников), `live_agent_job` (`agent hold` в Job без права выхода), `agent_limit` (`agent hold` на пределе `live-max`, все агенты удерживаются) | 2 |
 | `validation` | `invalid_argument`, `unsupported_value` (только MCP) | 2 |
-| `workspace` | `workspace_busy`, `infobase_busy` | 3 |
+| `workspace` | `workspace_busy`, `infobase_busy`, `infobase_sessions` (базу держат сеансы платформы; поле `error.sessions`) | 3 |
 | `runtime` | `runtime_failure` | 3 |
 | `platform` | `platform_failure` | 4 |
 | `invalid_output` | `invalid_output` | 4 |
@@ -536,8 +536,40 @@ v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir 
 ### `infobase create`
 
 ```bash
-v8-runner infobase create [--from <INFOBASE>] [--dry-run]
+v8-runner infobase create [--from <INFOBASE>] [--recreate] [--dry-run]
 ```
+
+- `--recreate` заменяет существующую базу этой копии; без базы просто создаёт её, и
+  `data.removed` пуст. Через MCP ключа нет. Порядок: замок `workPath`, замок базы (другая
+  команда раннера или её занятый живой агент — `infobase_busy`), проверки, снятие
+  простаивающих живых агентов этой базы, затем прежняя база откладывается и стирается память
+  о ней, создание идёт обычным порядком, и отложенное удаляется. Неудача или отмена создания
+  возвращает отложенное; память о вернувшейся базе стёрта — дальше `pull <SET> --force` или
+  `push --force`. Ответ начинается шагом `infobase recreate`, `data.removed` называет каждую
+  часть: `kind` (`file`, `database`, `registration`, `live_agent`), `name`, `state`
+  (`planned`, `removed`, `restored`, `left`).
+  - Файловая база: откладываются только записи верхнего уровня на `1Cv8` (база, спутники,
+    `1Cv8Log`, `1Cv8FTxt`, `1Cv8.cdn`) — в каталог `.<имя>.v8-runner.recreate` рядом; прочие
+    файлы каталога, замок и метка владельца остаются. Открытая база (клиент, Конфигуратор,
+    подключённый агент, `ibsrv`) — отказ `infobase_sessions` до изменений: на Windows файл
+    `1Cv8.1CD` не открыть без разделения доступа, на POSIX на нём чужая блокировка; перечня
+    сеансов у файловой базы нет (`sessions.list: null`).
+  - Стенд раннера над своим PostgreSQL (`cluster.managed` или `standalone.managed` с
+    `dbms.managed`): у кластера `rac session list` базы — сеансы дают отказ
+    `infobase_sessions` с перечнем; регистрация снимается `rac infobase drop` без
+    `--drop-database`, БД переименовывается в `<dbms.name>_v8r_recreate`, после создания
+    удаляется только она. PostgreSQL, отказавший переименовать БД из-за подключений
+    (`55006`), — тот же отказ. Работающий свой `ibsrv` — отказ с `next: standalone stop`.
+    Кластер или сервер без `managed` и стенд над вашей СУБД — отказ: такую базу удаляют
+    своими средствами.
+  - База другой рабочей копии заменяется с предупреждением, как любая запись; база без метки
+    — своя. Превью ничего не пишет и называет, чья база, что было бы удалено и каких агентов
+    раннер снял бы.
+  - Остаток пересоздания, оборванного аварийным выходом раннера (отложенный каталог или БД
+    `…_v8r_recreate`), называют и `infobase create`, и `--recreate`: отказ до изменений с
+    выходом — вернуть остаток или удалить.
+  - Сеансы раннер для пересоздания не завершает: `terminable: false`. Сеанс убитого клиента
+    кластер держит в `rac session list` десятки минут; его снимает `rac session terminate` (замер #597).
 
 - Всегда разделяет шаг подготовки ИБ и шаг EDT workspace; отказ шага базы рабочую область
   не останавливает. У проекта формата DESIGNER с расширением-инструментом EDT повтор

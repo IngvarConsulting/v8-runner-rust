@@ -1254,6 +1254,7 @@ fn execute_init(
     let request = InitRequest {
         dry_run,
         from: args.from.clone(),
+        recreate: args.recreate,
     };
     let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(

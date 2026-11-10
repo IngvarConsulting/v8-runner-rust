@@ -50,6 +50,8 @@ pub mod publish;
 pub mod reset;
 /// Shared runner models.
 pub mod runner;
+/// Сеансы, которые держат базу, в отказе `infobase_sessions`.
+pub mod sessions;
 /// Source set domain models.
 pub mod source_set;
 /// Ответ команд `standalone`.

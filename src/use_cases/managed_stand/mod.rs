@@ -2,10 +2,12 @@
 //! подъёма и отмены. Команды `dbms` здесь; `cluster` и `standalone` лягут на тот же механизм.
 
 mod cluster;
+mod recreate;
 mod standalone;
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
+pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -141,6 +143,34 @@ fn io_failure(what: &str, path: &Path, error: &std::io::Error) -> UseCaseError {
     UseCaseError::new(
         UseCaseErrorKind::Runtime,
         format!("{what} '{}': {error}", path.display()),
+    )
+}
+
+/// Отказ `infobase_sessions` управляемой базы: раннер сеансы не завершает, блокировку начала
+/// сеансов сервера не видит (`lock.state: unknown`). `list: None` — признак занятости есть, а
+/// перечня нет.
+fn sessions_refusal(
+    config: &AppConfig,
+    message: String,
+    list: Option<Vec<crate::domain::sessions::SessionEntry>>,
+) -> UseCaseError {
+    let machine = crate::support::machine::host_name();
+    let from_this_machine = list.as_ref().is_some_and(|list| {
+        list.iter().any(|session| {
+            machine
+                .as_deref()
+                .is_some_and(|machine| session.computer.eq_ignore_ascii_case(machine))
+        })
+    });
+    UseCaseError::sessions_refusal(
+        message,
+        crate::domain::sessions::InfobaseSessions {
+            base: config.v8_connection().describe_target(),
+            list,
+            from_this_machine,
+            terminable: false,
+            lock: crate::domain::sessions::SessionLock::unknown(),
+        },
     )
 }
 
