@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.COMMAND-ENVELOPE
-version: 4
+version: 5
 artifact: docs/schemas/command-envelope.schema.json
 check:
   - tests/contract_envelope.rs::a_successful_command_answers_in_the_pinned_envelope_form
@@ -20,7 +20,7 @@ check:
 
 Рода и коды — закрытые перечисления, а не строки. Рода: `capability`, `environment`,
 `workspace`, `invalid_output`, `interruption`, `validation`, `runtime`, `platform`,
-`non_fast_forward`, `no_memory`. Коды подробнее рода: у `capability` их четыре —
+`non_fast_forward`, `untracked_base`. Коды подробнее рода: у `capability` их четыре —
 `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой
 цели) и `soon` (пока не умеет), и все отвечают кодом выхода 2. У `workspace` — чужая работа
 с тем же местом, с кодом выхода 3: занятость, которая проходит, если повторить, —
@@ -33,7 +33,7 @@ check:
 generated_envelope_schema_is_current`. Руками её не правят — иначе закрытый набор
 держится на внимательности.
 
-**Отказы обмена с базой.** Род и код `no_memory` — `push` в базу, о которой у рабочей копии нет
+**Отказы обмена с базой.** Род и код `untracked_base` — `push` в базу, о которой у рабочей копии нет
 памяти; `non_fast_forward` — `push` в базу, ушедшую вперёд записанного поколения, и только у
 него заполнены поля `base_generation` (поколение базы сейчас) и `local_generation` (записанное
 после прошлого обмена). Тем же кодом, но без этих полей отвечают отказы, в которых уход вперёд
@@ -62,8 +62,10 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 `infobase lock`, когда файловую базу держит другая команда, и `infobase_held` — отказ на шаге
 `infobase owner`, когда её держит другая рабочая копия (убран в версии 4); его `next` — своя чистая база,
 `infobase create`. Рода не изменились. В эту же версию вошли производители кодов
-`non_fast_forward` и `no_memory` и шаг `next` с `source_set` и `keys`; код чужих изменений
+`non_fast_forward` и `untracked_base` и шаг `next` с `source_set` и `keys`; код чужих изменений
 войдёт в неё же, когда появится его производитель.
+
+**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же.
 
 **Что изменила версия 4.** Коды рода `workspace` — `workspace_busy` и `infobase_busy`: запись в
 базу другой рабочей копии не отказывает, а предупреждает в `warnings`.

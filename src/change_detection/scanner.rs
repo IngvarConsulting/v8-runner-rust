@@ -46,7 +46,7 @@ const IGNORED_DIRS: &[&str] = &[
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 /// Name prefix of the file an incremental dump writes into the tree to read its clock.
-pub(super) const DUMP_START_PROBE: &str = ".v8-runner-dump-start-";
+pub(crate) const DUMP_START_PROBE: &str = ".v8-runner-dump-start-";
 
 /// An ignored file, or the temporary file of its atomic replacement left by a killed process.
 fn is_ignored_file(name: &str) -> bool {
@@ -206,9 +206,14 @@ pub(super) fn list_in_scope(
             continue;
         }
         let path = entry.path();
-        let meta = std::fs::metadata(path).map_err(|e| ScanError::Meta {
+        // A selected entry is a regular file, never a link, so the walk's own metadata is the
+        // file's. On Windows it comes with the directory listing and opens no file; a
+        // separate `fs::metadata` opened every file of the tree once more (#571).
+        let meta = entry.metadata().map_err(|e| ScanError::Meta {
             path: path.to_path_buf(),
-            source: e,
+            source: e.into_io_error().unwrap_or_else(|| {
+                std::io::Error::other("the walk reported no metadata for a selected file")
+            }),
         })?;
 
         let mtime_ns = mtime_nanos(
@@ -233,14 +238,6 @@ pub(super) fn list_in_scope(
     })
 }
 
-/// Hash listed files by content, in the order they were listed.
-pub(super) fn hash_listed(
-    files: Vec<Candidate>,
-    interrupted: &mut dyn FnMut() -> bool,
-) -> Result<Vec<HashedFile>, ScanError> {
-    hash_listed_with(files, hash_workers(), interrupted)
-}
-
 fn hash_listed_with(
     files: Vec<Candidate>,
     workers: usize,
@@ -252,6 +249,37 @@ fn hash_listed_with(
         .into_iter()
         .zip(hashes)
         .map(|(candidate, hash)| HashedFile {
+            path: candidate.path,
+            rel_path: candidate.rel_path,
+            mtime_ns: candidate.mtime_ns,
+            hash,
+        })
+        .collect())
+}
+
+/// Hash listed files by content and keep only those whose modification time stayed put while
+/// they were read: an edit saved during the read may already be in the digest, and such a file
+/// is left out, so it stays a change (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`). The
+/// second look at the time happens in the reading worker, right after the read.
+pub(super) fn hash_listed_unmoved(
+    files: Vec<Candidate>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<HashedFile>, ScanError> {
+    let read = |path: &Path, stop: &mut dyn FnMut() -> bool| {
+        let hash = hash_file(path, stop)?;
+        let after = std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| mtime_nanos(modified, path).ok());
+        Ok((hash, after))
+    };
+    let hashes = hash_candidates(&files, hash_workers(), interrupted, &read)?;
+    check_interruption(interrupted)?;
+    Ok(files
+        .into_iter()
+        .zip(hashes)
+        .filter(|(candidate, (_, after))| *after == Some(candidate.mtime_ns))
+        .map(|(candidate, (hash, _))| HashedFile {
             path: candidate.path,
             rel_path: candidate.rel_path,
             mtime_ns: candidate.mtime_ns,
@@ -301,14 +329,15 @@ impl Drop for StopOnPanic<'_> {
 /// each block. A read failure stops the workers on later candidates only, so the earliest
 /// failing candidate is reported, as a sequential read reports it. No digest is returned
 /// after a cancellation or a failure.
-fn hash_candidates<H>(
+fn hash_candidates<H, T>(
     candidates: &[Candidate],
     workers: usize,
     interrupted: &mut dyn FnMut() -> bool,
     hash: &H,
-) -> Result<Vec<String>, ScanError>
+) -> Result<Vec<T>, ScanError>
 where
-    H: Fn(&Path, &mut dyn FnMut() -> bool) -> Result<String, ScanError> + Sync,
+    H: Fn(&Path, &mut dyn FnMut() -> bool) -> Result<T, ScanError> + Sync,
+    T: Send + Sync,
 {
     let workers = workers.min(candidates.len());
     if workers <= 1 || candidates.len() < PARALLEL_HASH_FROM {
@@ -321,7 +350,7 @@ where
     let next = AtomicUsize::new(0);
     let cancel = AtomicBool::new(false);
     let first_failure = AtomicUsize::new(NO_FAILURE);
-    let digests: Vec<OnceLock<String>> = candidates.iter().map(|_| OnceLock::new()).collect();
+    let digests: Vec<OnceLock<T>> = candidates.iter().map(|_| OnceLock::new()).collect();
     let failure: Mutex<Option<(usize, ScanError)>> = Mutex::new(None);
     let mut cancelled = false;
 
@@ -510,6 +539,34 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
     use tempfile::tempdir;
+
+    /// Файл, время которого не то, что было в перечне, — его правили, пока его читали, — из
+    /// ответа уходит; нетронутый остаётся с хешем (`INV.USE-CASES.A-PULL-BY-CHANGES-RECORDS-WHAT-IT-WROTE`).
+    #[test]
+    fn a_file_whose_time_moved_while_it_was_read_is_left_out() {
+        let dir = tempdir().expect("dir");
+        let candidate = |name: &str, shift: u64| {
+            let path = dir.path().join(name);
+            fs::write(&path, name).expect("file");
+            let mtime_ns = mtime_nanos(
+                fs::metadata(&path)
+                    .expect("meta")
+                    .modified()
+                    .expect("mtime"),
+                &path,
+            )
+            .expect("ns");
+            super::Candidate {
+                path,
+                rel_path: name.to_owned(),
+                mtime_ns: mtime_ns - shift,
+            }
+        };
+        let files = vec![candidate("Kept.bsl", 0), candidate("Moved.bsl", 1)];
+        let hashed = super::hash_listed_unmoved(files, &mut || false).expect("hashed");
+        let names: Vec<_> = hashed.iter().map(|file| file.rel_path.as_str()).collect();
+        assert_eq!(names, ["Kept.bsl"]);
+    }
 
     fn scanned_names(snapshot: &ScanSnapshot) -> Vec<&str> {
         snapshot

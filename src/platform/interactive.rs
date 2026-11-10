@@ -1016,22 +1016,27 @@ fn spawn_command(
     rendered_command: &str,
 ) -> Result<Child, InteractiveProcessError> {
     spawn_with_executable_busy_retry(rendered_command, || {
-        let mut command = build_command(request);
+        let mut command = build_command(request)?;
         command.spawn()
     })
 }
 
-fn build_command(request: &InteractiveProcessRequest) -> Command {
+/// Аргументы и рабочий каталог уходят без приставки `\\?\`
+/// (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`); путь, который без
+/// неё не выразить, — отказ до запуска.
+fn build_command(request: &InteractiveProcessRequest) -> std::io::Result<Command> {
+    let line = crate::support::path::child_line(&request.args, request.workdir.as_deref())
+        .map_err(|refused| std::io::Error::new(std::io::ErrorKind::InvalidInput, refused))?;
     let mut command = Command::new(&request.program);
-    command.args(&request.args);
+    command.args(line.args.iter().map(AsRef::<str>::as_ref));
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    if let Some(workdir) = &request.workdir {
+    if let Some(workdir) = &line.workdir {
         command.current_dir(workdir);
     }
     configure_process_group(&mut command);
-    command
+    Ok(command)
 }
 
 fn is_executable_busy(error: &std::io::Error) -> bool {
@@ -1162,6 +1167,34 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    /// Интерактивный процесс получает путь без приставки `\\?\`, а путь тома без буквы до запуска
+    /// не доходит (`INV.PLATFORM.A-PROCESS-ARGUMENT-NAMES-A-PATH-WITHOUT-THE-VERBATIM-PREFIX`).
+    #[cfg(windows)]
+    #[test]
+    fn an_interactive_process_receives_paths_without_the_verbatim_prefix() {
+        let mut request = InteractiveProcessRequest::new("1cedtcli.exe".into());
+        request.args = vec![
+            "-data".to_owned(),
+            r"\\?\E:\workspace".to_owned(),
+            r"--path=\\?\UNC\srv\share\x".to_owned(),
+        ];
+        request.workdir = Some(r"\\?\C:\Windows".into());
+        let command = super::build_command(&request).expect("expressible");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["-data", r"E:\workspace", r"--path=\\srv\share\x"]);
+        assert_eq!(command.get_current_dir(), Some(Path::new(r"C:\Windows")));
+
+        request.args = vec![r"\\?\Volume{0b2c1f4e-1111-2222-3333-444455556666}\ws".to_owned()];
+        let refused = super::build_command(&request)
+            .err()
+            .expect("a volume path is refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(refused.to_string().contains("Volume{"), "{refused}");
+    }
 
     const TEST_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
     const TEST_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);

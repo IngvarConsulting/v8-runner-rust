@@ -21,7 +21,7 @@ pub enum ErrorKind {
     /// Отправка в базу, ушедшую вперёд записанного поколения.
     NonFastForward,
     /// Отправка в базу, о которой у рабочей копии нет памяти.
-    NoMemory,
+    UntrackedBase,
 }
 
 /// Код отказа — та же причина подробнее. Набор закрыт вместе с родом.
@@ -48,8 +48,8 @@ pub enum ErrorCode {
     PlatformFailure,
     /// Пара к роду `non_fast_forward`: база ушла вперёд записанного поколения.
     NonFastForward,
-    /// Пара к роду `no_memory`: памяти о базе нет.
-    NoMemory,
+    /// Пара к роду `untracked_base`: памяти о базе нет.
+    UntrackedBase,
 }
 
 impl ErrorKind {
@@ -66,7 +66,7 @@ impl ErrorKind {
             Self::Runtime => "runtime",
             Self::Platform => "platform",
             Self::NonFastForward => "non_fast_forward",
-            Self::NoMemory => "no_memory",
+            Self::UntrackedBase => "untracked_base",
         }
     }
 
@@ -82,7 +82,7 @@ impl ErrorKind {
         Self::Runtime,
         Self::Platform,
         Self::NonFastForward,
-        Self::NoMemory,
+        Self::UntrackedBase,
     ];
 }
 
@@ -107,7 +107,7 @@ impl ErrorCode {
             Self::RuntimeFailure => "runtime_failure",
             Self::PlatformFailure => "platform_failure",
             Self::NonFastForward => "non_fast_forward",
-            Self::NoMemory => "no_memory",
+            Self::UntrackedBase => "untracked_base",
         }
     }
 
@@ -129,7 +129,7 @@ impl ErrorCode {
         Self::RuntimeFailure,
         Self::PlatformFailure,
         Self::NonFastForward,
-        Self::NoMemory,
+        Self::UntrackedBase,
     ];
 }
 
@@ -389,7 +389,11 @@ mod schema_tests {
                 "non_fast_forward",
                 "non_fast_forward",
             ),
-            (UseCaseErrorKind::NoMemory, "no_memory", "no_memory"),
+            (
+                UseCaseErrorKind::UntrackedBase,
+                "untracked_base",
+                "untracked_base",
+            ),
             (
                 UseCaseErrorKind::InvalidOutput,
                 "invalid_output",

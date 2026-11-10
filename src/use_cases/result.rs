@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::domain::execution::ExecutionStatus;
 use crate::domain::next_step::NextStep;
-use crate::platform::process::WorkGiven;
+use crate::platform::process::{ProcessError, WorkGiven};
 use crate::support::error::{AppError, CancelledAt, CapabilityReason};
 use crate::use_cases::interruption::CANCELLED_ERROR_CODE;
 
@@ -22,7 +22,7 @@ pub enum UseCaseErrorKind {
     /// База ушла вперёд записанного поколения: сперва `pull` или перезапись `push --force`.
     NonFastForward,
     /// Памяти о базе у рабочей копии нет: сперва `pull` или перезапись `push --force`.
-    NoMemory,
+    UntrackedBase,
     InvalidOutput,
     /// Отмена оператором; место остановки говорит, оборвана ли работа исполнителя.
     Cancelled(CancelledAt),
@@ -39,7 +39,7 @@ impl UseCaseErrorKind {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment => VALIDATION_EXIT_CODE,
             Self::WorkspaceBusy | Self::InfobaseBusy => RUNTIME_EXIT_CODE,
-            Self::NonFastForward | Self::NoMemory => RUNTIME_EXIT_CODE,
+            Self::NonFastForward | Self::UntrackedBase => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
@@ -63,7 +63,14 @@ impl UseCaseErrorKind {
             AppError::Cancelled { at, .. } => Self::Cancelled(*at),
             AppError::TimedOut(_) => Self::TimedOut,
             AppError::InvalidOutput(_) => Self::InvalidOutput,
-            AppError::Validation(_)
+            // Путь, который процессу без приставки `\\?\` не передать, — вход команды, а не сбой
+            // платформы: процесс не запускался.
+            AppError::PlatformProcess(ProcessError::UnexpressiblePath { .. })
+            | AppError::PlatformProcessContext {
+                source: ProcessError::UnexpressiblePath { .. },
+                ..
+            }
+            | AppError::Validation(_)
             | AppError::ValidationIbcmd(_)
             | AppError::ValidationIbcmdContext { .. }
             | AppError::Config(_)
@@ -93,7 +100,7 @@ impl UseCaseErrorKind {
             Self::WorkspaceBusy => "workspace_busy",
             Self::InfobaseBusy => "infobase_busy",
             Self::NonFastForward => "non_fast_forward",
-            Self::NoMemory => "no_memory",
+            Self::UntrackedBase => "untracked_base",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled(_) => CANCELLED_ERROR_CODE,
             Self::TimedOut => "timed_out",
@@ -114,7 +121,7 @@ impl UseCaseErrorKind {
             | Self::WorkspaceBusy
             | Self::InfobaseBusy
             | Self::NonFastForward
-            | Self::NoMemory
+            | Self::UntrackedBase
             | Self::Validation
             | Self::Runtime
             | Self::Platform => ExecutionStatus::Failed,
@@ -128,7 +135,7 @@ impl UseCaseErrorKind {
             Self::WorkspaceBusy => "workspace busy",
             Self::InfobaseBusy => "infobase busy",
             Self::NonFastForward => "non-fast-forward",
-            Self::NoMemory => "no memory of the infobase",
+            Self::UntrackedBase => "the infobase is not tracked by this working copy",
             Self::InvalidOutput => "invalid output",
             Self::Cancelled(_) => "cancelled",
             Self::TimedOut => "timed out",
@@ -617,7 +624,7 @@ mod tests {
         assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InfobaseBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::NonFastForward.exit_code(), 3);
-        assert_eq!(UseCaseErrorKind::NoMemory.exit_code(), 3);
+        assert_eq!(UseCaseErrorKind::UntrackedBase.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InvalidOutput.exit_code(), 4);
         for at in [CancelledAt::Boundary, CancelledAt::Work] {
             assert_eq!(UseCaseErrorKind::Cancelled(at).exit_code(), 4, "{at:?}");

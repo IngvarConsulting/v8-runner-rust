@@ -219,10 +219,14 @@ pub fn snapshot_memory(context: &SourceSetContext, work_path: &Path) -> Snapshot
     if context.storage_identity().is_none() {
         return SnapshotMemory::Nothing;
     }
-    match load_bound_snapshot(context, &HashStorage::new(path)) {
-        Ok(Some(snapshot)) if !snapshot.is_blank() => SnapshotMemory::Own,
-        Ok(_) => SnapshotMemory::Nothing,
-        Err(ChangeDetectionError::ForeignMemory { .. }) => SnapshotMemory::Foreign,
+    // The rows are not needed for this answer; the analysis that uses them reads them itself.
+    match HashStorage::new(path).load_summary() {
+        Ok(summary) if summary.is_blank() => SnapshotMemory::Nothing,
+        Ok(summary) if summary.identity.as_deref() == context.storage_identity() => {
+            SnapshotMemory::Own
+        }
+        Ok(_) => SnapshotMemory::Foreign,
+        Err(error) if error.is_recoverable() => SnapshotMemory::Nothing,
         Err(_) => SnapshotMemory::Unreadable,
     }
 }
@@ -382,6 +386,27 @@ fn scan_scope(context: &SourceSetContext) -> ScanScope {
     }
 }
 
+/// When a dump into a directory began, read by the clock of that directory's file system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DumpStart {
+    started_ns: u64,
+}
+
+/// Marks the start of a dump into `dir`: the one owner of the clock probe (#557, #571).
+///
+/// The dump's files are stamped by the clock of the directory's file system, which can be
+/// coarser than this process's clock or, on a share, apart from it: the start is read from a
+/// file written there, and the file is gone before this returns, so the dump never sees it.
+pub fn mark_dump_start(dir: &Path) -> std::io::Result<DumpStart> {
+    let probe = tempfile::Builder::new()
+        .prefix(scanner::DUMP_START_PROBE)
+        .tempfile_in(dir)?;
+    let modified = probe.as_file().metadata()?.modified()?;
+    let started_ns = mtime_nanos(modified, dir).map_err(std::io::Error::other)?;
+    probe.close()?;
+    Ok(DumpStart { started_ns })
+}
+
 /// The source tree as an incremental dump found it: which files it held and when the dump
 /// began. Taken before the platform starts writing into the tree.
 pub struct DumpWatch {
@@ -390,51 +415,35 @@ pub struct DumpWatch {
     before: HashMap<String, u64>,
 }
 
-/// Lists the tree before an incremental dump, without reading files. `None` when the set keeps
-/// no memory of this base or the tree cannot be listed: the dump then records nothing and the
-/// next push loads what the dump wrote, as before (#557).
-pub fn watch_before_dump(context: &SourceSetContext, work_path: &Path) -> Option<DumpWatch> {
+/// Lists the tree before an incremental dump that began at `start`, without reading files.
+/// `None` when the set keeps no memory of this base or the tree cannot be listed: the dump then
+/// records nothing and the next push loads what the dump wrote, as before (#557).
+pub fn watch_before_dump(
+    context: &SourceSetContext,
+    work_path: &Path,
+    start: DumpStart,
+) -> Option<DumpWatch> {
     if !context.persists_snapshot() || snapshot_memory(context, work_path) != SnapshotMemory::Own {
         return None;
     }
-    let watch = list_before_dump(context, work_path);
-    if let Err(error) = &watch {
-        tracing::debug!(
-            source_set = %context.name(),
-            %error,
-            "the tree was not listed before the dump; what the dump writes is not remembered"
-        );
-    }
-    watch.ok()
-}
-
-fn list_before_dump(context: &SourceSetContext, work_path: &Path) -> Result<DumpWatch, String> {
-    // The dump's files are stamped by the clock of the tree's file system, which can be coarser
-    // than this process's clock or, on a share, apart from it: the start is read from a file
-    // written there, and the file is gone before the tree is listed.
-    let started_ns = {
-        let probe = tempfile::Builder::new()
-            .prefix(scanner::DUMP_START_PROBE)
-            .tempfile_in(context.path())
-            .map_err(|error| format!("clock probe: {error}"))?;
-        let modified = probe
-            .as_file()
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .map_err(|error| format!("clock probe: {error}"))?;
-        mtime_nanos(modified, context.path()).map_err(|error| error.to_string())?
-    };
     let excluded = scanner::work_path_inside(context.path(), work_path);
     let listed = scanner::list_in_scope(
         context.path(),
         excluded.as_deref(),
         &mut || false,
         scan_scope(context),
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(DumpWatch {
-        started_ns,
+    );
+    if let Err(error) = &listed {
+        tracing::debug!(
+            source_set = %context.name(),
+            %error,
+            "the tree was not listed before the dump; what the dump writes is not remembered"
+        );
+    }
+    Some(DumpWatch {
+        started_ns: start.started_ns,
         before: listed
+            .ok()?
             .files
             .into_iter()
             .map(|file| (file.rel_path, file.mtime_ns))
@@ -442,34 +451,140 @@ fn list_before_dump(context: &SourceSetContext, work_path: &Path) -> Result<Dump
     })
 }
 
-/// After a successful incremental dump over an unchanged base, remembers what the dump wrote:
-/// a file is written by the dump when its modification time is not before the dump began and
-/// it is new or its time moved since the listing — so an edit saved in the very clock tick the
-/// dump began stays a change. Written files are hashed by content and replace their entries,
-/// files that were there before the dump and are gone are forgotten.
-/// Every other entry stays, so a user edit made before the dump remains a change. An edit made
-/// while the dump ran cannot be told from the platform's writes and is remembered too (#170).
-pub fn record_dump_changes(
+/// The tree after a dump, listed in the set's walk scope without reading a file.
+///
+/// One listing answers both what the dump wrote ([`observe_dump_writes`]) and what it did to
+/// the tree ([`Self::fact`]).
+pub struct DumpListing {
+    files: Vec<scanner::Candidate>,
+}
+
+/// What a dump by the version file did to the set's tree
+/// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DumpFact {
+    /// The tree holds files, and none is older than the dump's start: the dump was full.
+    RewroteAll,
+    /// A file older than the start stayed, or the tree is empty: the dump took the changes.
+    Partly,
+    /// The start was not marked or the tree was not listed: the mode is not known.
+    Unlisted,
+}
+
+/// Lists the set's tree after a dump: the set's walk scope, `workPath` and service directories
+/// excluded, links never followed. `ConfigDumpInfo.xml` is out of the scope.
+pub fn list_after_dump(
+    context: &SourceSetContext,
+    work_path: &Path,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<DumpListing, ChangeDetectionError> {
+    let excluded = scanner::work_path_inside(context.path(), work_path);
+    scanner::list_in_scope(
+        context.path(),
+        excluded.as_deref(),
+        &mut || interrupted(),
+        scan_scope(context),
+    )
+    .map(|listed| DumpListing {
+        files: listed.files,
+    })
+    .map_err(|error| map_scan_error(context, error))
+}
+
+impl DumpListing {
+    /// A dump that began at `start` rewrote everything when the tree is not empty and every
+    /// file in it is stamped no earlier than the start.
+    pub fn fact(&self, start: DumpStart) -> DumpFact {
+        if !self.files.is_empty()
+            && self
+                .files
+                .iter()
+                .all(|file| file.mtime_ns >= start.started_ns)
+        {
+            DumpFact::RewroteAll
+        } else {
+            DumpFact::Partly
+        }
+    }
+}
+
+/// The files of a Designer dump whose element the dump dropped: the deepest element that owns a
+/// file by its path ([`partial_load::dump_element_of`]) was in the description `before` the
+/// dump and no name of the description `after` it matches, letter case aside. A file the dump
+/// wrote (stamped no earlier than `start`) is never named: on a case-insensitive file system an
+/// element renamed only in letter case keeps its files under the old spelling. Files without a
+/// recognized owner and files of elements that stayed are not named either. Listed in the set's
+/// walk scope, links never followed; this listing precedes the one the dump's mode comes from,
+/// because what it names is gone before that one.
+pub fn files_of_dropped_elements(
+    context: &SourceSetContext,
+    work_path: &Path,
+    start: DumpStart,
+    before: &HashSet<String>,
+    after: &HashSet<String>,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<PathBuf>, ChangeDetectionError> {
+    let caseless = |names: &HashSet<String>| -> HashSet<String> {
+        names.iter().map(|name| name.to_lowercase()).collect()
+    };
+    let (before, after) = (caseless(before), caseless(after));
+    let listing = list_after_dump(context, work_path, interrupted)?;
+    Ok(listing
+        .files
+        .into_iter()
+        .filter(|file| file.mtime_ns < start.started_ns)
+        .filter(|file| {
+            crate::change_detection::partial_load::dump_element_of(Path::new(&file.rel_path))
+                .map(|owner| owner.to_lowercase())
+                .is_some_and(|owner| before.contains(&owner) && !after.contains(&owner))
+        })
+        .map(|file| file.path)
+        .collect())
+}
+
+/// What an incremental dump wrote into the tree, found and hashed but not yet remembered.
+///
+/// Finding it reads only files and the memory, so it can run while the platform answers
+/// whether the base changed during the dump; [`Self::commit`] is the step that waits for
+/// that answer (#571). Dropping it forgets what the dump wrote.
+#[must_use = "what the dump wrote is remembered only by `DumpWrites::commit`"]
+pub struct DumpWrites {
+    /// `None`: nothing to remember — no memory for this set, memory unreadable (not repaired
+    /// here), or the dump wrote and removed nothing.
+    snapshot: Option<StorageSnapshot>,
+    started_ns: u64,
+}
+
+/// After a successful incremental dump, finds what it wrote: a file is written by the dump
+/// when its modification time is not before the dump began and it is new or its time moved
+/// since the listing — so an edit saved in the very clock tick the dump began stays a change.
+/// Written files are hashed by content and replace their entries, files that were there before
+/// the dump and are gone are forgotten. Every other entry stays, so a user edit made before
+/// the dump remains a change. `ended` marks the end of the dump by the same clock: a file
+/// stamped after it was edited after the platform finished and stays a change, and a file
+/// whose time moved while it was hashed stays a change too. An edit made while the dump ran
+/// cannot be told from the platform's writes and is remembered (#170). `listed` is the tree
+/// after the dump ([`list_after_dump`]).
+pub fn observe_dump_writes(
     context: &SourceSetContext,
     work_path: &Path,
     watch: &DumpWatch,
-) -> Result<(), ChangeDetectionError> {
+    ended: Option<DumpStart>,
+    listed: DumpListing,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<DumpWrites, ChangeDetectionError> {
+    let writes = |snapshot| DumpWrites {
+        snapshot,
+        started_ns: watch.started_ns,
+    };
     let Some(path) = context.storage_path(work_path) else {
-        return Ok(());
+        return Ok(writes(None));
     };
     let storage = HashStorage::new(path);
     // Unreadable memory is not repaired here: the next push falls back to a full load.
     let Some(mut snapshot) = load_bound_snapshot(context, &storage)? else {
-        return Ok(());
+        return Ok(writes(None));
     };
-    let excluded = scanner::work_path_inside(context.path(), work_path);
-    let listed = scanner::list_in_scope(
-        context.path(),
-        excluded.as_deref(),
-        &mut || false,
-        scan_scope(context),
-    )
-    .map_err(|error| map_scan_error(context, error))?;
     let after: HashSet<&str> = listed
         .files
         .iter()
@@ -486,16 +601,21 @@ pub fn record_dump_changes(
         .into_iter()
         .filter(|file| {
             file.mtime_ns >= watch.started_ns
+                // Не позже отметки конца: на Windows время файла идёт тиками системных часов
+                // (~15 мс), и последняя запись платформы ложится в тот же тик, что и отметка.
+                // Правка в этот же тик запоминается как запись — это окно и остаётся за #170.
+                && ended.is_none_or(|end| file.mtime_ns <= end.started_ns)
                 && watch.before.get(&file.rel_path) != Some(&file.mtime_ns)
         })
         .collect();
     if written.is_empty() && removed.is_empty() {
-        return Ok(());
+        return Ok(writes(None));
     }
     for rel_path in removed {
         snapshot.entries.remove(rel_path);
     }
-    for file in scanner::hash_listed(written, &mut || false)
+    // Файл, время которого сдвинулось, пока его читали, в ответ не попадает и остаётся изменением.
+    for file in scanner::hash_listed_unmoved(written, &mut || interrupted())
         .map_err(|error| map_scan_error(context, error))?
     {
         snapshot.entries.insert(
@@ -506,14 +626,41 @@ pub fn record_dump_changes(
             },
         );
     }
-    storage
-        .commit_snapshot_with_identity(
-            &snapshot.entries,
-            snapshot.watermark.unwrap_or(0).max(watch.started_ns),
-            snapshot.generation,
-            context.storage_identity(),
-        )
-        .map_err(|error| map_commit_error(context, storage.path(), error))
+    Ok(writes(Some(snapshot)))
+}
+
+impl DumpWrites {
+    /// Remembers what the dump wrote. The commit fails if the memory moved since it was read.
+    pub fn commit(
+        self,
+        context: &SourceSetContext,
+        work_path: &Path,
+    ) -> Result<(), ChangeDetectionError> {
+        let (Some(snapshot), Some(path)) = (self.snapshot, context.storage_path(work_path)) else {
+            return Ok(());
+        };
+        let storage = HashStorage::new(path);
+        storage
+            .commit_snapshot_with_identity(
+                &snapshot.entries,
+                snapshot.watermark.unwrap_or(0).max(self.started_ns),
+                snapshot.generation,
+                context.storage_identity(),
+            )
+            .map_err(|error| map_commit_error(context, storage.path(), error))
+    }
+}
+
+/// [`observe_dump_writes`] and [`DumpWrites::commit`] in one step.
+#[cfg(test)]
+pub fn record_dump_changes(
+    context: &SourceSetContext,
+    work_path: &Path,
+    watch: &DumpWatch,
+) -> Result<(), ChangeDetectionError> {
+    let listed = list_after_dump(context, work_path, &|| false)?;
+    observe_dump_writes(context, work_path, watch, None, listed, &|| false)?
+        .commit(context, work_path)
 }
 
 fn detect_changes(
@@ -619,11 +766,13 @@ fn map_scan_error(context: &SourceSetContext, err: ScanError) -> ChangeDetection
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_context, record_dump_changes, rescan_and_commit_full, watch_before_dump,
-        AnalysisOutcome, ChangeDetectionError, ChangeKind, FileChange,
+        analyze_context, files_of_dropped_elements, mark_dump_start, record_dump_changes,
+        rescan_and_commit_full, watch_before_dump, AnalysisOutcome, ChangeDetectionError,
+        ChangeKind, FileChange,
     };
     use crate::change_detection::partial_load::decide;
     use crate::domain::source_set::SourceSetContext;
+    use std::collections::HashSet;
     use std::fs::File;
     use std::time::SystemTime;
     use tempfile::tempdir;
@@ -865,6 +1014,51 @@ mod tests {
             Ok(AnalysisOutcome::NoChanges)
         ));
     }
+    /// An edit saved after the dump ended stays a change, not a write of the platform (#170).
+    #[test]
+    fn an_edit_after_the_dump_ended_stays_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for name in ["Written.bsl", "Late.bsl"] {
+            std::fs::write(root.join(name), "before").expect(name);
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+
+        // The platform writes one file, the dump ends, then someone edits another file before
+        // the memory is written (#170).
+        std::fs::write(root.join("Written.bsl"), "from the base").expect("written");
+        let ended = mark_dump_start(&root).expect("dump end");
+        std::fs::write(root.join("Late.bsl"), "edited after the dump").expect("late edit");
+        File::options()
+            .write(true)
+            .open(root.join("Late.bsl"))
+            .expect("open")
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(60))
+            .expect("later mtime");
+
+        let listed = super::list_after_dump(&context, &work, &|| false).expect("listing");
+        super::observe_dump_writes(&context, &work, &watch, Some(ended), listed, &|| false)
+            .expect("observe")
+            .commit(&context, &work)
+            .expect("commit");
+
+        let analysis = analyze_context(&context, &work, &mut || false);
+        let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
+            panic!("{:?}", analysis.outcome);
+        };
+        let names: Vec<_> = changes
+            .iter()
+            .map(|change| change.path.file_name().expect("name").to_owned())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("Late.bsl")]);
+    }
+
     /// What an incremental dump wrote is remembered; a user edit made before it is not (#557).
     #[test]
     fn a_dump_remembers_what_it_wrote_and_keeps_an_earlier_user_edit() {
@@ -901,7 +1095,8 @@ mod tests {
             .expect("open")
             .set_modified(SystemTime::now() + std::time::Duration::from_secs(3600))
             .expect("late mtime");
-        let watch = watch_before_dump(&context, &work).expect("memory of this base");
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
 
         // The dump rewrites one file, adds one and removes one.
         std::fs::write(root.join("Written.bsl"), "from the base").expect("written");
@@ -933,15 +1128,98 @@ mod tests {
         );
     }
 
+    /// Удалению по SFTP достаются только файлы элементов, пропавших из описи: удалённый
+    /// объект и удалённая форма уходят, посторонний файл в каталоге оставшегося объекта,
+    /// неизвестный вид и файлы вне области обхода остаются
+    /// (`INV.USE-CASES.THE-DUMP-MODE-IS-FORECAST-IN-THE-SAME-COMMAND`).
+    #[test]
+    fn only_the_files_of_dropped_elements_are_named() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = root.join("work");
+        for file in [
+            "Configuration.xml",
+            "Catalogs/Items.xml",
+            "Catalogs/Items/Stray.txt",
+            "Catalogs/Items/Forms/Kept.xml",
+            "Catalogs/Items/Forms/Old.xml",
+            "Catalogs/Items/Forms/Old/Ext/Form/Module.bsl",
+            "Catalogs/Gone.xml",
+            "Catalogs/Gone/Ext/ObjectModule.bsl",
+            "Catalogs/Gone/.git/keep",
+            "Unknowns/Gone.xml",
+            "work/Catalogs/Gone.xml",
+            "Documents/Заказ.xml",
+            "Documents/Заказ/Ext/ObjectModule.bsl",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, file).expect("file");
+            File::options()
+                .write(true)
+                .open(&path)
+                .expect("open")
+                .set_modified(SystemTime::now() - std::time::Duration::from_secs(3600))
+                .expect("old mtime");
+        }
+        let start = mark_dump_start(&root).expect("dump start");
+        // The dump rewrote a file of an element its description no longer names, as a
+        // case-only rename does on a case-insensitive file system: written files stay.
+        std::fs::write(root.join("Catalogs/Gone/Ext/ObjectModule.bsl"), "written").expect("w");
+        let context = SourceSetContext::new("main", root.clone(), "designer-main");
+        let names = |names: &[&str]| -> HashSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let before = names(&[
+            "Catalog.Items",
+            "Catalog.Items.Form.Kept",
+            "Catalog.Items.Form.Old",
+            "Catalog.Gone",
+            "Unknown.Gone",
+            "Document.Заказ",
+        ]);
+        // A case-only rename: the new description spells the element otherwise.
+        let after = names(&["Catalog.Items", "Catalog.Items.Form.Kept", "Document.ЗАКАЗ"]);
+
+        let mut dropped: Vec<String> =
+            files_of_dropped_elements(&context, &work, start, &before, &after, &|| false)
+                .expect("listing")
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&root)
+                        .expect("inside the set")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+        dropped.sort();
+
+        assert_eq!(
+            dropped,
+            [
+                "Catalogs/Gone.xml",
+                "Catalogs/Items/Forms/Old.xml",
+                "Catalogs/Items/Forms/Old/Ext/Form/Module.bsl",
+            ]
+        );
+        assert!(
+            files_of_dropped_elements(&context, &work, start, &HashSet::new(), &after, &|| false)
+                .expect("listing")
+                .is_empty(),
+            "nothing was in the description before"
+        );
+    }
+
     #[test]
     fn a_set_without_memory_of_the_base_is_not_watched() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("src");
         std::fs::create_dir(&root).expect("root");
         std::fs::write(root.join("A.bsl"), "a").expect("A");
+        let start = mark_dump_start(&root).expect("dump start");
         let context = SourceSetContext::new("main", root, "designer-main")
             .with_infobase_memory("origin", "safe-base-identity".to_owned());
-        assert!(watch_before_dump(&context, &dir.path().join("work")).is_none());
+        assert!(watch_before_dump(&context, &dir.path().join("work"), start).is_none());
     }
 
     /// Cancellation is distinct from a full-load fallback and leaves committed memory alone.

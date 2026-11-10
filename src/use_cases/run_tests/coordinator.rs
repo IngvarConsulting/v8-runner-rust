@@ -118,7 +118,7 @@ pub(super) fn run_tests(
                     // Отказ обмена с базой шаг называет сам, как отказала бы отправка: это не
                     // сбой сборки, а остановка до неё.
                     let summary = match failure.error.kind() {
-                        crate::use_cases::result::UseCaseErrorKind::NoMemory
+                        crate::use_cases::result::UseCaseErrorKind::UntrackedBase
                         | crate::use_cases::result::UseCaseErrorKind::NonFastForward => {
                             failure.error.message().to_owned()
                         }

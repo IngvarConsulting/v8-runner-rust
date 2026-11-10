@@ -5,8 +5,10 @@
 //! разработчика», 2.17.2). Версия записана в корне `ConfigDumpInfo.xml` атрибутом `version`,
 //! и её видно до запуска платформы. Тот же атрибут несёт корень `Configuration.xml` — версию
 //! формата самих исходников, которую проверяет загрузка. Файлы раннер не разбирает: читается
-//! только этот атрибут корневого элемента.
+//! только этот атрибут корневого элемента. Исключение — опись элементов файла версий
+//! ([`read_dump_elements`]): по ней раннер переносит удаления выгрузки агента по SFTP.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
@@ -127,6 +129,48 @@ pub fn read_recorded(path: &Path) -> io::Result<RecordedFormat> {
     read_root_version(path, "ConfigDumpInfo")
 }
 
+/// Полные имена элементов, которые описывает файл версий `ConfigDumpInfo.xml` (атрибут `name`
+/// каждого `<Metadata>` на любой глубине): `Catalog.X`, `Catalog.X.Form.F`. Ошибка — файла
+/// нет, он не читается (`NotFound` и прочие ошибки чтения) или не разобран (`InvalidData`:
+/// корень не `ConfigDumpInfo`, у элемента нет имени, XML испорчен). По такой описи судить, что
+/// пропало, нельзя.
+pub fn read_dump_elements(path: &Path) -> io::Result<HashSet<String>> {
+    use quick_xml::events::Event;
+
+    let invalid = |what: String| io::Error::new(ErrorKind::InvalidData, what);
+    let text = std::fs::read_to_string(path)?;
+    let mut reader = quick_xml::Reader::from_str(text.trim_start_matches('\u{feff}'));
+    let mut names = HashSet::new();
+    let mut seen_root = false;
+    loop {
+        match reader
+            .read_event()
+            .map_err(|error| invalid(error.to_string()))?
+        {
+            Event::Start(tag) | Event::Empty(tag) => {
+                if !seen_root {
+                    if tag.local_name().as_ref() != b"ConfigDumpInfo" {
+                        return Err(invalid("the root is not ConfigDumpInfo".to_owned()));
+                    }
+                    seen_root = true;
+                } else if tag.local_name().as_ref() == b"Metadata" {
+                    let name = tag
+                        .try_get_attribute("name")
+                        .map_err(|error| invalid(error.to_string()))?
+                        .ok_or_else(|| invalid("an element without a name".to_owned()))?;
+                    let name = name
+                        .unescape_value()
+                        .map_err(|error| invalid(error.to_string()))?;
+                    names.insert(name.into_owned());
+                }
+            }
+            Event::Eof if seen_root => return Ok(names),
+            Event::Eof => return Err(invalid("no root element".to_owned())),
+            _ => {}
+        }
+    }
+}
+
 /// Читает версию формата исходников из корня `Configuration.xml` (`<MetaDataObject …>`),
 /// не разбирая остального.
 pub fn read_sources_format(path: &Path) -> io::Result<RecordedFormat> {
@@ -175,10 +219,57 @@ fn root_version(head: &str, root: &str) -> Option<FormatVersion> {
 #[cfg(test)]
 mod tests {
     use super::{
-        known_format, read_recorded, read_sources_format, releases_in, root_version, written_in,
-        FormatVersion, RecordedFormat, WrittenFormat,
+        known_format, read_dump_elements, read_recorded, read_sources_format, releases_in,
+        root_version, written_in, FormatVersion, RecordedFormat, WrittenFormat,
     };
     use crate::platform::locator::PlatformVersion;
+
+    /// Опись элементов читается с вложенных `<Metadata>`; без файла, с чужим корнем и с
+    /// испорченным XML описи нет.
+    #[test]
+    fn the_dump_elements_are_read_at_every_depth() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/designer/configuration/ConfigDumpInfo.xml");
+        let names = read_dump_elements(&fixture).expect("the fixture is a version file");
+        for name in [
+            "Catalog.Справочник1",
+            "AccountingRegister.РегистрБухгалтерии1.Resource.Ресурс1",
+            "CommonForm.Форма.Form",
+        ] {
+            assert!(names.contains(name), "{name}");
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ConfigDumpInfo.xml");
+        assert_eq!(
+            read_dump_elements(&path).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::NotFound),
+            "no file"
+        );
+        std::fs::write(
+            &path,
+            "\u{feff}<ConfigDumpInfo version=\"2.20\"><ConfigVersions><Metadata name=\"Catalog.A\" id=\"1\"><Metadata name=\"Catalog.A.Form.F\" id=\"2\"/></Metadata></ConfigVersions></ConfigDumpInfo>",
+        )
+        .expect("write");
+        assert_eq!(
+            read_dump_elements(&path).expect("read"),
+            ["Catalog.A", "Catalog.A.Form.F"].map(str::to_owned).into()
+        );
+        std::fs::write(&path, "<ConfigDumpInfo version=\"2.20\"/>").expect("write");
+        assert!(read_dump_elements(&path).expect("read").is_empty());
+        for broken in [
+            "<Other><Metadata name=\"Catalog.A\"/></Other>",
+            "<ConfigDumpInfo><Metadata name=\"Catalog.A\"></ConfigDumpInfo>",
+            "<ConfigDumpInfo><Metadata id=\"1\"/></ConfigDumpInfo>",
+        ] {
+            std::fs::write(&path, broken).expect("write");
+            assert_eq!(
+                read_dump_elements(&path).map_err(|error| error.kind()),
+                Err(std::io::ErrorKind::InvalidData),
+                "{broken}"
+            );
+        }
+    }
 
     #[test]
     fn the_version_is_read_from_the_root_attribute_only() {
