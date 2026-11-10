@@ -749,6 +749,9 @@ mod tests {
         .expect("local layer");
         let infobase = InfobaseConfig::file(format!("File={}", base.display()));
         AppConfig {
+            local_path: fs::canonicalize(root)
+                .expect("canonical project")
+                .join(".local"),
             base_path: fs::canonicalize(root).expect("canonical project"),
             work_path: root.join("work"),
             format: SourceFormat::Designer,

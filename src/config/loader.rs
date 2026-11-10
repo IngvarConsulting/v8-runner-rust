@@ -398,6 +398,7 @@ fn build_config(
     if let Some(wd) = workdir_override {
         config.work_path = resolve_from(config_dir, Path::new(wd));
     }
+    crate::config::validate::validate_local_path(&config, config_dir)?;
     project_managed_standalone(&mut config, &validation_mode)?;
     project_managed_cluster(&mut config, &validation_mode)?;
 
@@ -1425,8 +1426,8 @@ fn reject_local_overlay_keys(root: &serde_yaml::Value) -> Result<(), ConfigLoadE
         match key {
             "source-set" => return Err(ConfigLoadError::LocalOverlayForbiddenKey("source-set")),
             "format" => return Err(ConfigLoadError::LocalOverlayForbiddenKey("format")),
-            "workPath" | "infobases" | "infobase" | "working-copy" | "tools" | "tests" | "mcp"
-            | "providers" => {}
+            "workPath" | "localPath" | "infobases" | "infobase" | "working-copy" | "tools"
+            | "tests" | "mcp" | "providers" => {}
             unsupported => {
                 return Err(ConfigLoadError::LocalOverlayUnsupportedKey(
                     unsupported.to_owned(),
@@ -1540,7 +1541,7 @@ fn project_managed_standalone(
         return Ok(());
     };
     let running =
-        crate::platform::service_record::running_standalone(&config.work_path, &infobase_name);
+        crate::platform::service_record::running_standalone(&config.local_dir(), &infobase_name);
     config.infobase.managed_memory = Some(format!("managed:{infobase_name}"));
     if let ConfigValidationMode::InfobaseCreate { .. } = validation_mode {
         if running.is_some() {
@@ -1614,7 +1615,7 @@ fn project_managed_cluster(
     }
     let name = managed.reference(&infobase_name);
     let running =
-        crate::platform::service_record::running_cluster(&config.work_path, &infobase_name);
+        crate::platform::service_record::running_cluster(&config.local_dir(), &infobase_name);
     let project = |config: &mut AppConfig, connection: String| {
         config.infobase.connection = connection;
         config.infobase.connection_projected = true;
@@ -1645,7 +1646,7 @@ fn project_managed_cluster(
                 .is_some_and(|dbms| dbms.managed.is_some());
             if dbms_managed
                 && !crate::platform::service_record::running_postgres(
-                    &config.work_path,
+                    &config.local_dir(),
                     &infobase_name,
                 )
             {
@@ -1663,6 +1664,7 @@ fn project_managed_cluster(
 fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
     config.base_path = resolve_from(config_dir, &config.base_path);
     config.work_path = resolve_from(config_dir, &config.work_path);
+    config.local_path = resolve_from(config_dir, &config.local_path);
     // Местный слой лежит рядом с проектным файлом: путь копии — от того же каталога.
     if let Some(working_copy) = config.working_copy.as_mut() {
         *working_copy = resolve_from(config_dir, working_copy);
@@ -3000,7 +3002,7 @@ mod tests {
             name: Some("demo_data".to_owned()),
             ..Default::default()
         });
-        let paths = ServicePaths::new(&config.work_path, "origin", "cluster");
+        let paths = ServicePaths::new(&config.local_dir(), "origin", "cluster");
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         let mut pins = ClusterPins {
@@ -3024,6 +3026,7 @@ mod tests {
                 bin: std::path::PathBuf::from("ragent"),
                 version: None,
                 agent: None,
+                location: paths.location(),
             },
         )
         .unwrap();
@@ -3051,7 +3054,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
-        let paths = ServicePaths::new(&config.work_path, "origin", "standalone");
+        let paths = ServicePaths::new(&config.local_dir(), "origin", "standalone");
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         write_json(&paths.pins(), &ServerPorts::from_first(24000)).unwrap();
@@ -3069,6 +3072,7 @@ mod tests {
                 bin: std::path::PathBuf::from("ibsrv"),
                 version: None,
                 agent: None,
+                location: paths.location(),
             },
         )
         .unwrap();
@@ -3088,7 +3092,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let mut config = managed_standalone_config(dir.path());
-        let paths = ServicePaths::new(&config.work_path, "origin", "standalone");
+        let paths = ServicePaths::new(&config.local_dir(), "origin", "standalone");
         let pid = std::process::id();
         let facts = crate::platform::service::process_facts(pid).unwrap();
         write_json(&paths.pins(), &ServerPorts::from_first(24000)).unwrap();
@@ -3106,6 +3110,7 @@ mod tests {
                 bin: std::path::PathBuf::from("ibsrv"),
                 version: None,
                 agent: None,
+                location: paths.location(),
             },
         )
         .unwrap();
@@ -3134,6 +3139,7 @@ mod tests {
             exchange: None,
         });
         crate::config::model::AppConfig {
+            local_path: dir.join(".local"),
             base_path: dir.to_path_buf(),
             work_path: dir.join("work"),
             format: crate::config::model::SourceFormat::Designer,

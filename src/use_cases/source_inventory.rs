@@ -412,6 +412,7 @@ mod tests {
             .expect("current dir")
             .join("target/source-inventory-tests");
         AppConfig {
+            local_path: root.join("base").join(".local"),
             base_path: root.join("base"),
             work_path: root.join("work"),
             format,

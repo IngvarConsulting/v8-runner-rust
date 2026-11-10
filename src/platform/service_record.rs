@@ -1,5 +1,5 @@
 //! Запись о процессе раннера, который переживает команду: служба стенда под
-//! `workPath/infobases/<база>/managed/<служба>/` или процесс в другом каталоге-корне, например
+//! `localPath/infobases/<база>/managed/<служба>/` или процесс в другом каталоге-корне, например
 //! в каталоге состояния учётной записи ОС. Единственный носитель такой записи: её вид, чтение,
 //! атомарная замена и опознание своего процесса.
 
@@ -12,7 +12,9 @@ use crate::platform::ibsrv::ServerPorts;
 use crate::platform::ragent::ClusterPorts;
 use crate::platform::service::{process_facts, ProcessFacts};
 use crate::support::fs::write_file_atomically;
+use crate::support::local_dir::LocalDir;
 use crate::support::machine::{machine_hash, machine_id};
+use crate::support::path::{nearest_existing_canonical_path, snapshot_path_identity};
 
 /// Где живёт служба: каталог `<корень>/<служба>/` с записью, журналом и данными.
 #[derive(Debug, Clone)]
@@ -20,15 +22,32 @@ pub struct ServicePaths {
     managed: PathBuf,
     root: PathBuf,
     service: String,
+    /// `localPath`, которому принадлежит служба стенда; у процесса под другим корнем его нет.
+    local: Option<LocalDir>,
+}
+
+/// Где записана служба стенда: канонический путь её каталога и каталог проекта. Запись,
+/// скопированная в другой `localPath` или проект, называет не своё место, и раннер считает её
+/// устаревшей, а сервер из неё — чужим (`INV.PLATFORM.A-SERVICE-IS-TOLD-APART-BY-ITS-IDENTITY`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceLocation {
+    pub root: String,
+    pub project: String,
 }
 
 impl ServicePaths {
-    /// Служба объявленной базы под `workPath/infobases/<база>/managed/`.
-    pub fn new(work_path: &Path, infobase: &str, service: &str) -> Self {
-        Self::under(
-            &work_path.join("infobases").join(infobase).join("managed"),
+    /// Служба объявленной базы под `localPath/infobases/<база>/managed/`.
+    pub fn new(local: &LocalDir, infobase: &str, service: &str) -> Self {
+        let mut paths = Self::under(
+            &local
+                .path()
+                .join("infobases")
+                .join(infobase)
+                .join("managed"),
             service,
-        )
+        );
+        paths.local = Some(local.clone());
+        paths
     }
 
     /// Служба под другим корнем: каталог службы — `<managed>/<service>/`, соседние службы
@@ -38,6 +57,43 @@ impl ServicePaths {
             managed: managed.to_path_buf(),
             root: managed.join(service),
             service: service.to_owned(),
+            local: None,
+        }
+    }
+
+    /// Соседняя служба той же базы: сервер над этой СУБД.
+    pub fn sibling(&self, service: &str) -> Self {
+        let mut sibling = Self::under(&self.managed, service);
+        sibling.local = self.local.clone();
+        sibling
+    }
+
+    /// Место, которое записывает и сверяет служба стенда; `None` — у процесса под другим
+    /// корнем.
+    pub fn location(&self) -> Option<ServiceLocation> {
+        let local = self.local.as_ref()?;
+        let identity = |path: &Path| {
+            let canonical =
+                nearest_existing_canonical_path(path).unwrap_or_else(|_| path.to_path_buf());
+            snapshot_path_identity(&canonical)
+        };
+        Some(ServiceLocation {
+            root: identity(&self.root),
+            project: identity(local.project()),
+        })
+    }
+
+    /// Запись о службе, если она записана здесь: по копии из чужого `localPath` или проекта
+    /// раннер ничего не снимает.
+    pub fn own_record(&self) -> Option<ServiceRecord> {
+        read_json::<ServiceRecord>(&self.record()).filter(|record| self.wrote(record))
+    }
+
+    /// Записана ли запись здесь: у службы стенда место в записи совпало с её местом.
+    fn wrote(&self, record: &ServiceRecord) -> bool {
+        match self.location() {
+            Some(location) => record.location.as_ref() == Some(&location),
+            None => true,
         }
     }
 
@@ -78,14 +134,13 @@ impl ServicePaths {
         self.managed.join(service).join("record.json")
     }
 
-    /// Каталог `managed/` со своим `.gitignore`: его содержимому в репозитории не место.
+    /// Каталог службы. Служба стенда — первый писатель в `localPath`: каталог заводит
+    /// [`LocalDir::prepare`] вместе со своим `.gitignore`.
     pub fn prepare(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.root)?;
-        let ignore = self.managed.join(".gitignore");
-        if !ignore.exists() {
-            std::fs::write(ignore, "*\n")?;
+        if let Some(local) = &self.local {
+            local.prepare()?;
         }
-        Ok(())
+        std::fs::create_dir_all(&self.root)
     }
 }
 
@@ -115,6 +170,9 @@ pub struct ServiceRecord {
     /// Живой агент Конфигуратора, которого держит этот процесс-сторож: у служб стенда его нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<LiveAgentFacts>,
+    /// Где записана служба стенда ([`ServicePaths::location`]); у сторожа агента его нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<ServiceLocation>,
 }
 
 /// Что запись сторожа говорит о его агенте: по этому команда находит агента и сверяет, тот ли
@@ -169,8 +227,8 @@ pub struct PreviousRegistry {
 }
 
 /// Работающий свой кластер объявленной базы. Посреди переноса реестра его нет.
-pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> {
-    let paths = ServicePaths::new(work_path, infobase, "cluster");
+pub fn running_cluster(local: &LocalDir, infobase: &str) -> Option<ClusterPins> {
+    let paths = ServicePaths::new(local, infobase, "cluster");
     let machine = machine_fingerprint();
     let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
         adopt_recorded_pid(record, &process_facts, machine.as_deref())
@@ -182,24 +240,21 @@ pub fn running_cluster(work_path: &Path, infobase: &str) -> Option<ClusterPins> 
 }
 
 /// Работает ли своя служба PostgreSQL этой базы.
-pub fn running_postgres(work_path: &Path, infobase: &str) -> bool {
-    let paths = ServicePaths::new(work_path, infobase, "postgres");
-    record_names_own_process(
-        &paths.record(),
-        machine_fingerprint().as_deref(),
-        &process_facts,
-    )
+pub fn running_postgres(local: &LocalDir, infobase: &str) -> bool {
+    let paths = ServicePaths::new(local, infobase, "postgres");
+    record_names_own_process(&paths, machine_fingerprint().as_deref(), &process_facts)
 }
 
 /// Запись называет живой свой процесс. Единственная такая проверка вне `observe_service`: ею
 /// отказывают, пока работает другая служба (`one-server-owns-a-database`, `dbms stop`). Запись
 /// `starting` без pid процесса не называет.
 pub fn record_names_own_process(
-    record: &Path,
+    paths: &ServicePaths,
     machine: Option<&str>,
     facts: &dyn Fn(u32) -> Option<ProcessFacts>,
 ) -> bool {
-    read_json::<ServiceRecord>(record)
+    paths
+        .own_record()
         .is_some_and(|record| adopt_recorded_pid(&record, facts, machine))
 }
 
@@ -237,6 +292,10 @@ pub fn observe_service(
     let Some(mut record) = read_json::<ServiceRecord>(&paths.record()) else {
         return Observed::Nothing;
     };
+    // Запись из другого места — копия чужого стенда: её процесс не наш, что бы он ни делал.
+    if !paths.wrote(&record) {
+        return Observed::Stale;
+    }
     if record.state == RecordState::Starting {
         let starter_alive = record
             .starter
@@ -270,8 +329,8 @@ pub fn adopt_recorded_pid(
 }
 
 /// Работающий свой сервер объявленной базы. Адрес такой цели не объявлен, его знает только запись.
-pub fn running_standalone(work_path: &Path, infobase: &str) -> Option<RunningServer> {
-    let paths = ServicePaths::new(work_path, infobase, "standalone");
+pub fn running_standalone(local: &LocalDir, infobase: &str) -> Option<RunningServer> {
+    let paths = ServicePaths::new(local, infobase, "standalone");
     let machine = machine_fingerprint();
     let observed = observe_service(&paths, machine.as_deref(), &process_facts, &|record| {
         adopt_recorded_pid(record, &process_facts, machine.as_deref())
@@ -404,6 +463,7 @@ mod tests {
             bin: PathBuf::from("bin"),
             version: None,
             agent: None,
+            location: None,
         }
     }
 
@@ -444,10 +504,14 @@ mod tests {
         );
     }
 
+    fn local(dir: &Path) -> LocalDir {
+        LocalDir::new(&dir.join(".local"), dir)
+    }
+
     #[test]
     fn a_service_under_another_root_keeps_the_same_layout() {
         let dir = tempfile::tempdir().unwrap();
-        let declared = ServicePaths::new(dir.path(), "origin", "postgres");
+        let declared = ServicePaths::new(&local(dir.path()), "origin", "postgres");
         let under = ServicePaths::under(declared.managed(), "postgres");
         assert_eq!(under.record(), declared.record());
         assert_eq!(under.log(), declared.log());
@@ -463,14 +527,87 @@ mod tests {
         assert_eq!(agent.log(), state.join("0f1e").join("0f1e.log"));
     }
 
+    /// Данные стенда лежат под `localPath`, а не под `workPath`
+    /// (`INV.PLATFORM.A-MANAGED-SERVER-KEEPS-ITS-OWN-DATA-DIRECTORY`).
     #[test]
-    fn the_managed_directory_ignores_its_own_content() {
+    fn a_stand_service_lives_under_the_local_path() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = ServicePaths::new(dir.path(), "origin", "postgres");
+        let local = local(dir.path());
+        for service in ["postgres", "standalone", "cluster", "ras"] {
+            let paths = ServicePaths::new(&local, "origin", service);
+            let root = dir
+                .path()
+                .join(".local")
+                .join("infobases")
+                .join("origin")
+                .join("managed")
+                .join(service);
+            assert_eq!(paths.root(), root.as_path());
+            assert_eq!(paths.data(), root.join("data"));
+            assert_eq!(paths.record(), root.join("record.json"));
+            assert_eq!(paths.pins(), root.join("ports.json"));
+        }
+    }
+
+    /// Каталог службы заводит `localPath` со своим `.gitignore`; у `managed/` своего нет
+    /// (`INV.USE-CASES.THE-LOCAL-DIRECTORY-IGNORES-ITSELF`).
+    #[test]
+    fn a_stand_service_prepares_the_local_directory_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ServicePaths::new(&local(dir.path()), "origin", "postgres");
         paths.prepare().unwrap();
+        assert!(paths.root().is_dir());
         assert_eq!(
-            std::fs::read_to_string(paths.managed().join(".gitignore")).unwrap(),
-            "*\n"
+            std::fs::read_to_string(dir.path().join(".local").join(".gitignore")).unwrap(),
+            "*
+"
+        );
+        assert!(!paths.managed().join(".gitignore").exists());
+    }
+
+    /// Запись помнит своё место: в другом `localPath` или проекте она устаревшая, и её процесс,
+    /// даже живой и совпавший во всём остальном, не свой.
+    #[test]
+    fn a_record_copied_to_another_place_names_a_foreign_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = ServicePaths::new(&local(&dir.path().join("a")), "origin", "postgres");
+        own.prepare().unwrap();
+        let mut written = record();
+        written.location = own.location();
+        write_json(&own.record(), &written).unwrap();
+        let alive = |_| Some(facts(10, "postgres.exe"));
+        assert!(matches!(
+            observe_service(&own, Some("m"), &alive, &|_| false),
+            Observed::Own(_)
+        ));
+        assert!(record_names_own_process(&own, Some("m"), &alive));
+
+        // Копия `.local` в другой проект.
+        let copy = ServicePaths::new(&local(&dir.path().join("b")), "origin", "postgres");
+        copy.prepare().unwrap();
+        std::fs::copy(own.record(), copy.record()).unwrap();
+        assert_eq!(
+            observe_service(&copy, Some("m"), &alive, &|_| true),
+            Observed::Stale
+        );
+        assert!(!record_names_own_process(&copy, Some("m"), &alive));
+        assert_eq!(copy.own_record(), None);
+
+        // Тот же `localPath`, другой проект: общий абсолютный каталог.
+        let shared = LocalDir::new(&dir.path().join("a").join(".local"), &dir.path().join("c"));
+        let elsewhere = ServicePaths::new(&shared, "origin", "postgres");
+        assert_eq!(
+            observe_service(&elsewhere, Some("m"), &alive, &|_| true),
+            Observed::Stale
+        );
+
+        // Запись без места у службы стенда — тоже не своя.
+        let mut unplaced = written.clone();
+        unplaced.location = None;
+        write_json(&own.record(), &unplaced).unwrap();
+        assert_eq!(
+            observe_service(&own, Some("m"), &alive, &|_| true),
+            Observed::Stale
         );
     }
 }

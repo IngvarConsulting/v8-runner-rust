@@ -301,7 +301,8 @@ impl Cluster<'_> {
 
     /// pid остатков для отчёта; без перечня процессов — ни одного.
     fn remnant_pids(&self) -> Vec<u32> {
-        read_json::<ServiceRecord>(&self.agent.record())
+        self.agent
+            .own_record()
             .and_then(|record| self.remnants(&record))
             .map(|remnants| remnants.into_iter().map(|(pid, _)| pid).collect())
             .unwrap_or_default()
@@ -410,7 +411,7 @@ impl Cluster<'_> {
 
     /// Устаревшая запись агента: снять остатки по ней, затем её саму.
     fn clear_stale(&self) -> Result<Vec<u32>, UseCaseError> {
-        let remnants = match read_json::<ServiceRecord>(&self.agent.record()) {
+        let remnants = match self.agent.own_record() {
             Some(record) => self.clear_remnants(&record)?,
             None => Vec::new(),
         };
@@ -573,7 +574,7 @@ impl Cluster<'_> {
     /// Свой автономный сервер той же базы: одна БД — один сервер.
     fn standalone_running(&self) -> bool {
         record_names_own_process(
-            &self.agent.sibling_record("standalone"),
+            &self.agent.sibling("standalone"),
             self.host.machine().as_deref(),
             &|pid| self.host.facts(pid),
         )
@@ -1044,6 +1045,7 @@ impl Cluster<'_> {
             bin: ragent_bin.clone(),
             version: platform_version(&ragent_bin),
             agent: None,
+            location: self.agent.location(),
         };
         write_record(&self.agent, &agent)?;
         let request = ragent::start_agent(&ragent_bin, &registry, pins.ports, &self.agent.log());
@@ -1092,6 +1094,7 @@ impl Cluster<'_> {
             bin: ras_bin.clone(),
             version: agent.version.clone(),
             agent: None,
+            location: self.ras.location(),
         };
         write_record(&self.ras, &ras)?;
         let request = ragent::start_ras(&ras_bin, port, ports, &self.ras.log());
@@ -1212,8 +1215,8 @@ fn cluster<'a>(
     locate: &'a dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> Result<Cluster<'a>, UseCaseError> {
     let declared = declared(config)?;
-    let agent = ServicePaths::new(&config.work_path, &declared.infobase, "cluster");
-    let ras = ServicePaths::new(&config.work_path, &declared.infobase, "ras");
+    let agent = ServicePaths::new(&config.local_dir(), &declared.infobase, "cluster");
+    let ras = ServicePaths::new(&config.local_dir(), &declared.infobase, "ras");
     Ok(Cluster {
         config,
         context,
@@ -1344,7 +1347,7 @@ fn mark_registered(cluster: &Cluster<'_>, pins: ClusterPins) -> Result<(), UseCa
 /// После `CREATEINFOBASE`: база создана в текущем реестре.
 pub(super) fn remember_registered(config: &AppConfig) -> Result<(), UseCaseError> {
     let declared = declared(config)?;
-    let paths = ServicePaths::new(&config.work_path, &declared.infobase, "cluster");
+    let paths = ServicePaths::new(&config.local_dir(), &declared.infobase, "cluster");
     let pins: ClusterPins = read_json(&paths.pins())
         .ok_or_else(|| validation("the ports of the cluster are not pinned"))?;
     write_json(
@@ -1674,6 +1677,7 @@ mod tests {
             ..Default::default()
         });
         let mut config = AppConfig {
+            local_path: root.path().join(".local"),
             base_path: root.path().to_path_buf(),
             work_path: root.path().join("work"),
             format: crate::config::model::SourceFormat::Designer,
@@ -1697,10 +1701,10 @@ mod tests {
 
     impl Setup {
         fn agent(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.work_path, "origin", "cluster")
+            ServicePaths::new(&self.config.local_dir(), "origin", "cluster")
         }
         fn ras(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.work_path, "origin", "ras")
+            ServicePaths::new(&self.config.local_dir(), "origin", "ras")
         }
         fn pins(&self) -> ClusterPins {
             read_json(&self.agent().pins()).expect("pinned")
@@ -1759,7 +1763,7 @@ mod tests {
             .unwrap()
         }
         fn dbms_record(&self) -> ServiceRecord {
-            read_json(&ServicePaths::new(&self.config.work_path, "origin", "postgres").record())
+            read_json(&ServicePaths::new(&self.config.local_dir(), "origin", "postgres").record())
                 .unwrap()
         }
         fn base(&self, host: &Host) -> Result<ClusterBase, UseCaseError> {
@@ -2345,7 +2349,7 @@ mod tests {
     }
 
     fn own_standalone(setup: &Setup, host: &Host) {
-        let standalone = ServicePaths::new(&setup.config.work_path, "origin", "standalone");
+        let standalone = ServicePaths::new(&setup.config.local_dir(), "origin", "standalone");
         standalone.prepare().unwrap();
         host.live(8100, "ibsrv.exe");
         write_json(
@@ -2362,6 +2366,7 @@ mod tests {
                 bin: PathBuf::from("ibsrv.exe"),
                 version: None,
                 agent: None,
+                location: standalone.location(),
             },
         )
         .unwrap();
@@ -2638,7 +2643,7 @@ mod tests {
 
     /// Работающий свой кластер другой базы.
     fn running_cluster_of(setup: &Setup, host: &Host, infobase: &str) {
-        let paths = ServicePaths::new(&setup.config.work_path, infobase, "cluster");
+        let paths = ServicePaths::new(&setup.config.local_dir(), infobase, "cluster");
         paths.prepare().unwrap();
         host.live(9200, "ragent.exe");
         write_json(
@@ -2655,6 +2660,7 @@ mod tests {
                 bin: PathBuf::from("ragent.exe"),
                 version: None,
                 agent: None,
+                location: paths.location(),
             },
         )
         .unwrap();

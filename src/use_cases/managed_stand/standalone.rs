@@ -315,6 +315,7 @@ impl Server<'_> {
             bin: ibsrv.clone(),
             version: None,
             agent: None,
+            location: self.paths.location(),
         };
         self.write_record(&record)?;
         let request = ibsrv::start_server(
@@ -567,7 +568,7 @@ pub(super) fn run_standalone(
     locate: &dyn Fn() -> Result<PathBuf, UseCaseError>,
 ) -> UseCaseResult<StandaloneResult> {
     let declared = declared(config).map_err(UseCaseFailure::without_payload)?;
-    let paths = ServicePaths::new(&config.work_path, &declared.infobase, "standalone");
+    let paths = ServicePaths::new(&config.local_dir(), &declared.infobase, "standalone");
     let server = Server {
         config,
         context,
@@ -619,7 +620,7 @@ pub(super) fn create_base(
     host: &dyn ServiceHost,
 ) -> Result<String, UseCaseError> {
     let declared = declared(config)?;
-    let paths = ServicePaths::new(&config.work_path, &declared.infobase, "standalone");
+    let paths = ServicePaths::new(&config.local_dir(), &declared.infobase, "standalone");
     let database = match &declared.storage {
         Storage::File(_) => {
             return Err(validation("a file infobase is created by its own path"));
@@ -936,6 +937,7 @@ mod tests {
             exchange: None,
         });
         let config = AppConfig {
+            local_path: root.path().join(".local"),
             base_path: root.path().to_path_buf(),
             work_path: root.path().join("work"),
             format: crate::config::model::SourceFormat::Designer,
@@ -958,7 +960,7 @@ mod tests {
 
     impl Setup {
         fn paths(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.work_path, "origin", "standalone")
+            ServicePaths::new(&self.config.local_dir(), "origin", "standalone")
         }
         fn run(
             &self,
@@ -1288,7 +1290,7 @@ mod tests {
     }
 
     fn dbms_record(setup: &Setup) -> ServiceRecord {
-        let paths = ServicePaths::new(&setup.config.work_path, "origin", "postgres");
+        let paths = ServicePaths::new(&setup.config.local_dir(), "origin", "postgres");
         read_json(&paths.record()).expect("the record of the PostgreSQL")
     }
 
@@ -1349,7 +1351,7 @@ mod tests {
         .map_err(|failure| failure.error)
         .unwrap();
         let pins: crate::platform::service_record::PinnedPorts =
-            read_json(&ServicePaths::new(&setup.config.work_path, "origin", "postgres").pins())
+            read_json(&ServicePaths::new(&setup.config.local_dir(), "origin", "postgres").pins())
                 .unwrap();
         host.foreign.borrow_mut().extend([
             (
@@ -1650,7 +1652,7 @@ mod tests {
         );
         assert!(!setup.paths().root().join("passfile").exists());
         assert!(
-            !ServicePaths::new(&setup.config.work_path, "origin", "postgres")
+            !ServicePaths::new(&setup.config.local_dir(), "origin", "postgres")
                 .passfile()
                 .exists(),
             "the second copy of the password is gone"

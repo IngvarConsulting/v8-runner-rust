@@ -1601,6 +1601,7 @@ fi"#;
         format: SourceFormat,
     ) -> AppConfig {
         AppConfig {
+            local_path: base.join(".local"),
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
             format,

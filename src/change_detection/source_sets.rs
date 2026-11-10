@@ -195,6 +195,7 @@ mod tests {
     /// Проект с одним набором `main` в `src` и рабочим каталогом `work_path`.
     fn single_set_config(format: SourceFormat, work_path: &str) -> AppConfig {
         AppConfig {
+            local_path: PathBuf::from(".").join(".local"),
             base_path: PathBuf::from("."),
             work_path: PathBuf::from(work_path),
             format,

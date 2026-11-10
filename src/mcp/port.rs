@@ -231,6 +231,7 @@ mod tests {
 
     fn sample_config(work_path: &Path) -> AppConfig {
         AppConfig {
+            local_path: work_path.join("base").join(".local"),
             base_path: work_path.join("base"),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Designer,

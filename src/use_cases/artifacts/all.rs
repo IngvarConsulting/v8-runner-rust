@@ -124,6 +124,7 @@ mod tests {
                 .expect("permissions");
         }
         let config = AppConfig {
+            local_path: base.join(".local"),
             base_path: base.clone(),
             work_path: dir.path().join("work"),
             format: SourceFormat::Designer,

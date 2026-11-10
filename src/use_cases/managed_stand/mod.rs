@@ -297,10 +297,8 @@ fn cluster_over(config: &AppConfig, host: &dyn ServiceHost, database: &Database)
 }
 
 fn cluster_runs(config: &AppConfig, host: &dyn ServiceHost, infobase: &str) -> bool {
-    let paths = ServicePaths::new(&config.work_path, infobase, "cluster");
-    record_names_own_process(&paths.record(), host.machine().as_deref(), &|pid| {
-        host.facts(pid)
-    })
+    let paths = ServicePaths::new(&config.local_dir(), infobase, "cluster");
+    record_names_own_process(&paths, host.machine().as_deref(), &|pid| host.facts(pid))
 }
 
 /// Свой работающий кластер другой объявленной базы над той же вашей БД. У PostgreSQL раннера
@@ -376,7 +374,7 @@ impl<'a> Stand<'a> {
         host: &'a dyn ServiceHost,
     ) -> Result<Self, UseCaseError> {
         let infobase = declared_base(config)?;
-        let paths = ServicePaths::new(&config.work_path, &infobase, "postgres");
+        let paths = ServicePaths::new(&config.local_dir(), &infobase, "postgres");
         Ok(Self {
             config,
             context,
@@ -613,6 +611,7 @@ impl<'a> Stand<'a> {
             bin: build.bin().to_path_buf(),
             version,
             agent: None,
+            location: self.paths.location(),
         };
         self.write_record(&record)?;
         let request = build.start(&self.paths.data(), &self.paths.log(), port);
@@ -794,11 +793,9 @@ impl<'a> Stand<'a> {
     fn running_server(&self) -> Option<(&'static str, &'static str)> {
         let machine = self.host.machine();
         SERVERS.into_iter().find(|(service, _)| {
-            record_names_own_process(
-                &self.paths.sibling_record(service),
-                machine.as_deref(),
-                &|pid| self.host.facts(pid),
-            )
+            record_names_own_process(&self.paths.sibling(service), machine.as_deref(), &|pid| {
+                self.host.facts(pid)
+            })
         })
     }
 
@@ -1304,6 +1301,7 @@ mod tests {
             ..Default::default()
         });
         let mut config = AppConfig {
+            local_path: root.path().join(".local"),
             base_path: root.path().to_path_buf(),
             work_path: root.path().join("work"),
             format: crate::config::model::SourceFormat::Designer,
@@ -1328,7 +1326,7 @@ mod tests {
 
     impl Setup {
         fn paths(&self) -> ServicePaths {
-            ServicePaths::new(&self.config.work_path, "origin", "postgres")
+            ServicePaths::new(&self.config.local_dir(), "origin", "postgres")
         }
 
         fn run(
@@ -1590,7 +1588,10 @@ mod tests {
         ] {
             let mut server = read_json::<ServiceRecord>(&setup.paths().record()).unwrap();
             server.pid = Some(777);
-            let record = setup.paths().sibling_record(service);
+            let sibling = setup.paths().sibling(service);
+            sibling.prepare().unwrap();
+            server.location = sibling.location();
+            let record = sibling.record();
             write_json(&record, &server).unwrap();
             for command in [ServiceCommand::Stop, ServiceCommand::Restart] {
                 let refused = setup.run(command, false, &runner, &host).unwrap_err();
@@ -1913,6 +1914,7 @@ mod tests {
                 bin: PathBuf::from("bin"),
                 version: None,
                 agent: None,
+                location: setup.paths().location(),
             },
         )
         .unwrap();
@@ -2155,6 +2157,7 @@ mod tests {
             }
         }
         let config = AppConfig {
+            local_path: dir.path().join(".local"),
             base_path: dir.path().to_path_buf(),
             work_path: dir.path().join("work"),
             format: SourceFormat::Designer,

@@ -267,6 +267,7 @@ mod tests {
 
     fn config(work_path: &Path, infobase: InfobaseConfig) -> AppConfig {
         AppConfig {
+            local_path: work_path.join(".local"),
             base_path: work_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
             format: SourceFormat::Designer,

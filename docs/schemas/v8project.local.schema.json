@@ -1182,6 +1182,10 @@
       },
       "type": "object"
     },
+    "localPath": {
+      "description": "Machine-local directory of the personal state of this checkout: data of managed stands\nand the default file infobase. Relative to the directory of v8project.yaml.",
+      "type": "string"
+    },
     "mcp": {
       "$ref": "#/$defs/McpSchema",
       "description": "Machine-local MCP runtime overrides."
