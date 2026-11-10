@@ -1015,7 +1015,7 @@ fn execute_source_set_step_ibcmd(
 #[cfg(test)]
 mod tests {
     use super::{run_build, BUILD_COMMAND};
-    use crate::change_detection::hash_storage::{HashStorage, FILES_MTIME};
+    use crate::change_detection::hash_storage::{commits_of, HashStorage, FILES_MTIME};
     use crate::change_detection::source_sets::SourceSetsService;
     use crate::config::model::{
         AppConfig, PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
@@ -2090,6 +2090,7 @@ mod tests {
         }
     }
 
+    /// Commits of the memory since it was created (its generation starts at a random epoch).
     fn storage_generation(config: &AppConfig, source_set_name: &str) -> u64 {
         let service = SourceSetsService::new(config);
         let context = service
@@ -2097,14 +2098,16 @@ mod tests {
             .into_iter()
             .find(|context| context.name() == source_set_name)
             .expect("context");
-        HashStorage::new(
-            context
-                .storage_path(&config.work_path)
-                .expect("memory path"),
+        commits_of(
+            HashStorage::new(
+                context
+                    .storage_path(&config.work_path)
+                    .expect("memory path"),
+            )
+            .load_snapshot()
+            .expect("snapshot")
+            .generation,
         )
-        .load_snapshot()
-        .expect("snapshot")
-        .generation
     }
 
     fn tool_extension_storage_generation(
@@ -2113,10 +2116,12 @@ mod tests {
         extension_name: &str,
     ) -> u64 {
         let storage_path = tool_extension_storage_path(config, source_path, extension_name);
-        HashStorage::new(storage_path)
-            .load_snapshot()
-            .expect("tool extension snapshot")
-            .generation
+        commits_of(
+            HashStorage::new(storage_path)
+                .load_snapshot()
+                .expect("tool extension snapshot")
+                .generation,
+        )
     }
 
     fn tool_extension_storage_path(
@@ -2159,14 +2164,16 @@ mod tests {
             .into_iter()
             .find(|context| context.name() == source_set_name)
             .expect("edt context");
-        HashStorage::new(
-            context
-                .storage_path(&config.work_path)
-                .expect("memory path"),
+        commits_of(
+            HashStorage::new(
+                context
+                    .storage_path(&config.work_path)
+                    .expect("memory path"),
+            )
+            .load_snapshot()
+            .expect("snapshot")
+            .generation,
         )
-        .load_snapshot()
-        .expect("snapshot")
-        .generation
     }
 
     #[cfg(unix)]

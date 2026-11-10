@@ -31,7 +31,7 @@ pub enum ChangeKind {
 pub struct PreparedStateUpdate {
     pub delta: StorageDelta,
     /// Files the scan found.
-    pub files: usize,
+    pub scanned_files: usize,
     pub scan_started_at: u64,
     pub observed_generation: u64,
 }
@@ -620,7 +620,11 @@ pub fn observe_dump_writes(
     };
     let storage = HashStorage::new(path);
     // Only the rows the dump changed are written, so the other rows are not read (#576).
-    // Unreadable memory is not repaired here: the next push falls back to a full load.
+    // The summary sees tables of different length: such memory is not repaired here, and the
+    // next push falls back to a full load. Damage that keeps the lengths equal — an orphan row
+    // next to a missing row of another key in the other table — passes the summary, and the
+    // delta commit keeps it; the next analysis reads every row, reports it as recoverable and
+    // falls back to a full load, whose commit repairs both tables (#571).
     let Some(summary) = load_bound_summary(context, &storage)? else {
         return Ok(writes(None));
     };
@@ -729,7 +733,9 @@ fn detect_changes(
 }
 
 /// The scan as rows that differ from `stored`: a file new or with another time or hash is
-/// written, a remembered file the scan did not find is forgotten.
+/// written, a remembered file the scan did not find is forgotten. This filter only keeps the
+/// delta small; the commit's `write_row` compares each named row again inside its write
+/// transaction, against what is committed then.
 fn build_prepared_state(
     scan: &scanner::ScanSnapshot,
     stored: &StorageSnapshot,
@@ -766,7 +772,7 @@ fn build_prepared_state(
         .collect();
     PreparedStateUpdate {
         delta: StorageDelta { upserts, removals },
-        files: scan.files.len(),
+        scanned_files: scan.files.len(),
         scan_started_at: scan.scan_started_at,
         observed_generation: stored.generation,
     }
@@ -1307,6 +1313,90 @@ mod tests {
             .expect("pull commit");
         assert_eq!(row_audit::take(), one_file, "after pull");
 
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    /// Damage that keeps both tables of equal length — an orphan row in one table next to a
+    /// missing row of another key in it — passes the summary a pull by changes reads, and its
+    /// delta commit keeps it. The next analysis reads every row and falls back to a full load,
+    /// and the full commit after it leaves both tables with the same keys (#571, #576).
+    #[test]
+    fn equal_length_damage_after_a_delta_commit_is_repaired_by_a_full_load() {
+        use crate::change_detection::hash_storage::{HashStorage, FILES_HASH, FILES_MTIME};
+        use redb::{Database, ReadableTable};
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        for name in ["A.bsl", "B.bsl", "C.bsl"] {
+            std::fs::write(root.join(name), "before").expect(name);
+        }
+        let context = SourceSetContext::new("main", root.clone(), "designer-main")
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
+        rescan_and_commit_full(&context, &work).expect("prime");
+        let path = context.storage_path(&work).expect("memory path");
+        {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            {
+                let mut mtime = tx.open_table(FILES_MTIME).expect("mtime");
+                mtime.remove("B.bsl").expect("missing row");
+                mtime.insert("Orphan.bsl", 1).expect("orphan row");
+            }
+            tx.commit().expect("damage");
+        }
+        let storage = HashStorage::new(path.clone());
+        assert!(
+            storage.load_summary().is_ok(),
+            "equal lengths pass the summary"
+        );
+
+        let start = mark_dump_start(&root).expect("dump start");
+        let watch = watch_before_dump(&context, &work, start).expect("memory of this base");
+        std::fs::write(root.join("C.bsl"), "from the base").expect("written");
+        record_dump_changes(&context, &work, &watch).expect("delta commit");
+        assert!(
+            storage
+                .load_snapshot()
+                .is_err_and(|error| error.is_recoverable()),
+            "the delta commit names only its rows and keeps the damage"
+        );
+
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::Fallback)
+        ));
+        rescan_and_commit_full(&context, &work).expect("full load commit");
+
+        let keys = |table: &dyn Fn(&redb::ReadTransaction) -> Vec<String>| {
+            let db = Database::open(&path).expect("open");
+            let tx = db.begin_read().expect("read");
+            let mut keys = table(&tx);
+            keys.sort();
+            keys
+        };
+        let mtime_keys = keys(&|tx| {
+            tx.open_table(FILES_MTIME)
+                .expect("mtime")
+                .iter()
+                .expect("iter")
+                .map(|row| row.expect("row").0.value().to_owned())
+                .collect()
+        });
+        let hash_keys = keys(&|tx| {
+            tx.open_table(FILES_HASH)
+                .expect("hash")
+                .iter()
+                .expect("iter")
+                .map(|row| row.expect("row").0.value().to_owned())
+                .collect()
+        });
+        assert_eq!(mtime_keys, ["A.bsl", "B.bsl", "C.bsl"]);
+        assert_eq!(hash_keys, mtime_keys);
         assert!(matches!(
             analyze_context(&context, &work, &mut || false).outcome,
             Ok(AnalysisOutcome::NoChanges)

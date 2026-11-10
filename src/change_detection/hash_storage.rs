@@ -308,7 +308,7 @@ impl HashStorage {
     }
 
     /// One write transaction: the generation check, the file rows `rows` writes, the identity,
-    /// the watermark and the next generation.
+    /// the watermark and the next generation — [`first_generation`] for a memory without one.
     fn commit_rows(
         &self,
         watermark: u64,
@@ -358,7 +358,12 @@ impl HashStorage {
 
             meta.insert(META_KEY_WATERMARK, watermark)
                 .map_err(|e| map_storage_error(&self.path, "write watermark", e))?;
-            meta.insert(META_KEY_GENERATION, expected_generation + 1)
+            let next_generation = if current_generation == 0 {
+                first_generation(&self.path)?
+            } else {
+                current_generation + 1
+            };
+            meta.insert(META_KEY_GENERATION, next_generation)
                 .map_err(|e| map_storage_error(&self.path, "write generation", e))?;
         }
 
@@ -414,7 +419,8 @@ impl HashStorage {
         })
     }
 
-    /// Replace a corrupt or missing storage file with a fresh snapshot.
+    /// Replace a corrupt or missing storage file with a fresh snapshot. The fresh memory starts
+    /// from a random generation, so a commit prepared against the replaced one is refused.
     pub fn recover_and_commit_snapshot_with_identity(
         &self,
         snapshot: &HashMap<String, StoredFileState>,
@@ -444,6 +450,28 @@ impl HashStorage {
         }
         Ok(())
     }
+}
+
+/// The generation of the first commit of a memory created anew: the first time, after its file
+/// was deleted, or after [`HashStorage::recover_and_commit_snapshot_with_identity`]. Counting
+/// from 1 again would let a delta prepared against an older memory of the same number land on a
+/// different base (#576); a random epoch in the high 31 bits makes that a 1-in-2^31 chance per
+/// recreation. The low 32 bits count the commits from 1, and the value never reaches `u64::MAX`.
+fn first_generation(path: &Path) -> Result<u64, StorageError> {
+    let mut seed = [0u8; 4];
+    getrandom::fill(&mut seed).map_err(|e| StorageError::Hard {
+        path: path.to_path_buf(),
+        reason: format!("random start of the memory generation: {e}"),
+    })?;
+    let epoch = u64::from(u32::from_le_bytes(seed) >> 1);
+    Ok((epoch << 32) | 1)
+}
+
+/// The commits since the memory was created, read from its generation: what a test compares
+/// when it counts commits.
+#[cfg(test)]
+pub(crate) fn commits_of(generation: u64) -> u64 {
+    generation & u64::from(u32::MAX)
 }
 
 /// A table that may not exist yet: the one reader both the snapshot and the summary use.
@@ -712,7 +740,10 @@ fn map_storage_error(path: &Path, context: &str, err: impl std::fmt::Display) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{row_audit, HashStorage, StorageDelta, StorageError, StoredFileState, FILES_MTIME};
+    use super::{
+        commits_of, row_audit, HashStorage, StorageDelta, StorageError, StoredFileState,
+        FILES_MTIME,
+    };
     use redb::Database;
     use std::collections::HashMap;
 
@@ -754,10 +785,11 @@ mod tests {
         assert_eq!(summary.watermark, full.watermark);
         assert_eq!(summary.files, full.entries.len() as u64);
         assert_eq!(summary.is_blank(), full.is_blank());
-        assert_eq!(storage.current_generation().expect("generation"), 1);
+        let generation = storage.current_generation().expect("generation");
+        assert_eq!(commits_of(generation), 1);
 
         storage
-            .commit_snapshot_with_identity(&HashMap::new(), 0, 1, Some("base"))
+            .commit_snapshot_with_identity(&HashMap::new(), 0, generation, Some("base"))
             .expect("empty commit");
         let emptied = storage.load_summary().expect("emptied");
         assert_eq!(emptied.files, 0);
@@ -856,6 +888,8 @@ mod tests {
                 .commit_snapshot_with_identity(&first, 1, 0, Some("base"))
                 .expect("first");
         }
+        let generation = storage.current_generation().expect("generation");
+        let full_generation = full.current_generation().expect("full generation");
         let mut second = first.clone();
         second.insert("f7.xml".to_owned(), state(1_000, "edited"));
         second.remove("f9.xml");
@@ -866,10 +900,10 @@ mod tests {
 
         row_audit::take();
         storage
-            .commit_delta_with_identity(&delta, 2, 1, Some("base"))
+            .commit_delta_with_identity(&delta, 2, generation, Some("base"))
             .expect("delta");
         let touched = row_audit::take();
-        full.commit_snapshot_with_identity(&second, 2, 1, Some("base"))
+        full.commit_snapshot_with_identity(&second, 2, full_generation, Some("base"))
             .expect("full");
         let whole = row_audit::take();
 
@@ -891,7 +925,7 @@ mod tests {
             rows(&loaded.entries),
             rows(&full.load_snapshot().expect("full").entries)
         );
-        assert_eq!(loaded.generation, 2);
+        assert_eq!(loaded.generation, generation + 1);
         assert_eq!(loaded.watermark, Some(2));
     }
 
@@ -910,6 +944,7 @@ mod tests {
                 Some("base"),
             )
             .expect("commit");
+        let generation = storage.current_generation().expect("generation");
         {
             let db = Database::open(&path).expect("open");
             let tx = db.begin_write().expect("write");
@@ -928,7 +963,7 @@ mod tests {
                     removals: Vec::new(),
                 },
                 2,
-                1,
+                generation,
                 Some("base"),
             )
             .expect("delta over damage");
@@ -951,8 +986,9 @@ mod tests {
         storage
             .commit_snapshot_with_identity(&many(3), 1, 0, Some("base"))
             .expect("first");
+        let read = storage.current_generation().expect("generation");
         storage
-            .commit_snapshot_with_identity(&many(3), 2, 1, Some("base"))
+            .commit_snapshot_with_identity(&many(3), 2, read, Some("base"))
             .expect("second");
         let error = storage
             .commit_delta_with_identity(
@@ -961,22 +997,73 @@ mod tests {
                     removals: Vec::new(),
                 },
                 3,
-                1,
+                read,
                 Some("base"),
             )
             .expect_err("moved");
-        assert!(matches!(
-            error,
-            StorageError::ConcurrentStateModified {
-                expected: 1,
-                actual: 2,
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                error,
+                StorageError::ConcurrentStateModified { expected, actual, .. }
+                    if expected == read && actual == read + 1
+            ),
+            "{error}"
+        );
         assert_eq!(
             storage.load_snapshot().expect("kept").entries["f0.xml"].hash,
             "same"
         );
+    }
+
+    /// A memory created anew — recovered, or its file deleted — does not count its generations
+    /// from 1 again: a delta prepared against the memory it replaced is refused, not written
+    /// onto a different base (#576).
+    #[test]
+    fn a_delta_prepared_before_the_memory_was_recreated_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.redb");
+        let storage = HashStorage::new(path.clone());
+        let late = StorageDelta {
+            upserts: HashMap::from([("f0.xml".to_owned(), state(9, "late"))]),
+            removals: Vec::new(),
+        };
+
+        for recreate in ["recover", "delete"] {
+            storage
+                .commit_snapshot_with_identity(&many(3), 1, 0, Some("base"))
+                .expect("memory");
+            let read = storage.current_generation().expect("generation");
+            assert_eq!(commits_of(read), 1, "{recreate}");
+
+            match recreate {
+                "recover" => storage
+                    .recover_and_commit_snapshot_with_identity(&many(3), 2, Some("base"))
+                    .expect("recovered"),
+                _ => {
+                    std::fs::remove_file(&path).expect("delete");
+                    storage
+                        .commit_snapshot_with_identity(&many(3), 2, 0, Some("base"))
+                        .expect("created anew");
+                }
+            }
+            let fresh = storage.current_generation().expect("fresh generation");
+            assert_eq!(commits_of(fresh), 1, "{recreate}");
+            assert_ne!(fresh, read, "{recreate}: a new memory, a new generation");
+
+            let error = storage
+                .commit_delta_with_identity(&late, 3, read, Some("base"))
+                .expect_err("prepared against the replaced memory");
+            assert!(
+                matches!(error, StorageError::ConcurrentStateModified { .. }),
+                "{recreate}: {error}"
+            );
+            assert_eq!(
+                storage.load_snapshot().expect("kept").entries["f0.xml"].hash,
+                "same",
+                "{recreate}"
+            );
+            std::fs::remove_file(&path).expect("next round starts without memory");
+        }
     }
 
     #[test]
@@ -992,6 +1079,7 @@ mod tests {
         storage
             .commit_snapshot_with_identity(&first, 1, 0, Some("base"))
             .expect("first");
+        let generation = storage.current_generation().expect("generation");
         let second = HashMap::from([
             ("kept.xml".to_owned(), state(1, "same")),
             ("touched.xml".to_owned(), state(9, "same")),
@@ -999,11 +1087,11 @@ mod tests {
             ("added.xml".to_owned(), state(5, "fresh")),
         ]);
         storage
-            .commit_snapshot_with_identity(&second, 2, 1, Some("base"))
+            .commit_snapshot_with_identity(&second, 2, generation, Some("base"))
             .expect("second");
         let loaded = storage.load_snapshot().expect("loaded");
         assert_eq!(rows(&loaded.entries), rows(&second));
-        assert_eq!(loaded.generation, 2);
+        assert_eq!(commits_of(loaded.generation), 2);
         assert_eq!(loaded.watermark, Some(2));
     }
 }
