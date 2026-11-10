@@ -1773,33 +1773,13 @@ fn execute_agent(
 
     let name = agent_command_name(command);
     let context = cli_context(config, name, cancellation);
-    let scope = |all: bool| {
-        if all {
-            AgentScope::Account
-        } else {
-            AgentScope::Project(config)
-        }
+    let scope = if agent_needs_no_project(command) {
+        AgentScope::Account
+    } else {
+        AgentScope::Project(config)
     };
-    match command {
-        AgentCommand::Stop(args) => {
-            return present_agent(
-                presenter,
-                name,
-                live_agent::stop(&context, scope(args.all)),
-                |result| result.duration_ms,
-                render_agent_stop_text,
-            )
-        }
-        AgentCommand::Status(args) => {
-            return present_agent(
-                presenter,
-                name,
-                live_agent::status(&context, scope(args.all)),
-                |result| result.duration_ms,
-                render_agent_status_text,
-            )
-        }
-        AgentCommand::Hold(_) | AgentCommand::Release(_) | AgentCommand::Keeper(_) => {}
+    if matches!(command, AgentCommand::Stop(_) | AgentCommand::Status(_)) {
+        return execute_agent_scoped(command, presenter, &context, scope);
     }
     with_cli_workspace_lock(
         config,
@@ -1824,7 +1804,7 @@ fn execute_agent(
                         },
                         result.key,
                         result.keeper_pid,
-                        holders_text(&result.holders)
+                        crate::domain::capability::LiveAgentHolder::list_text(&result.holders)
                     )]
                 },
             ),
@@ -1835,7 +1815,10 @@ fn execute_agent(
                 |result| result.duration_ms,
                 |result| {
                     vec![if result.released {
-                        format!("released; holders left: {}", holders_text(&result.holders))
+                        format!(
+                            "released; holders left: {}",
+                            crate::domain::capability::LiveAgentHolder::list_text(&result.holders)
+                        )
                     } else {
                         "nothing to release".to_owned()
                     }]
@@ -1864,30 +1847,43 @@ pub(crate) fn execute_agent_account(
     command: &crate::cli::args::AgentCommand,
     presenter: &Presenter,
 ) -> Result<(), UseCaseError> {
-    use crate::cli::args::AgentCommand;
-    use crate::use_cases::live_agent::{self, AgentScope};
+    use crate::use_cases::live_agent::AgentScope;
 
     let cancellation = CancellationToken::new();
     let _signal_guard = CliSignalGuard::install(cancellation.clone());
     let name = agent_command_name(command);
     let context = ExecutionContext::cli(name).with_cancellation(cancellation);
+    execute_agent_scoped(command, presenter, &context, AgentScope::Account)
+}
+
+/// `agent stop` и `agent status` в своей области: замка рабочего каталога не берут.
+fn execute_agent_scoped(
+    command: &crate::cli::args::AgentCommand,
+    presenter: &Presenter,
+    context: &ExecutionContext,
+    scope: crate::use_cases::live_agent::AgentScope<'_>,
+) -> Result<(), UseCaseError> {
+    use crate::cli::args::AgentCommand;
+    use crate::use_cases::live_agent;
+
+    let name = agent_command_name(command);
     match command {
         AgentCommand::Stop(_) => present_agent(
             presenter,
             name,
-            live_agent::stop(&context, AgentScope::Account),
+            live_agent::stop(context, scope),
             |result| result.duration_ms,
             render_agent_stop_text,
         ),
         AgentCommand::Status(_) => present_agent(
             presenter,
             name,
-            live_agent::status(&context, AgentScope::Account),
+            live_agent::status(context, scope),
             |result| result.duration_ms,
             render_agent_status_text,
         ),
         AgentCommand::Hold(_) | AgentCommand::Release(_) | AgentCommand::Keeper(_) => {
-            unreachable!("only stop --all and status --all go without a project")
+            unreachable!("only stop and status go without the workspace lock")
         }
     }
 }
@@ -1943,10 +1939,6 @@ fn render_agent_stop_text(result: &crate::domain::live_agent::AgentStopResult) -
     stopped.chain(refused).collect()
 }
 
-fn holders_text(holders: &[crate::domain::capability::LiveAgentHolder]) -> String {
-    crate::domain::capability::LiveAgentHolder::list_text(holders)
-}
-
 fn render_agent_status_text(result: &crate::domain::live_agent::AgentStatusResult) -> Vec<String> {
     if result.agents.is_empty() {
         return vec!["no live agents".to_owned()];
@@ -1969,7 +1961,7 @@ fn render_agent_status_text(result: &crate::domain::live_agent::AgentStatusResul
                     ""
                 },
                 agent.infobase.as_deref().unwrap_or("an unknown infobase"),
-                holders_text(&agent.holders),
+                crate::domain::capability::LiveAgentHolder::list_text(&agent.holders),
                 if agent.closing { ", closing" } else { "" }
             )
         })

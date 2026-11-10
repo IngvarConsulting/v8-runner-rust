@@ -155,7 +155,17 @@ pub struct LiveKeeper {
     pub client: KeeperClient,
 }
 
-/// Чем кончился `stop`.
+/// Чем кончился безусловный `stop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    /// Агент снят: сторож ответил или подтверждённо ушёл.
+    Done,
+    /// Сторож принял `stop`, но не ответил за срок или ожидание отменили: агент снимется после
+    /// команды, которую выполняет.
+    Pending,
+}
+
+/// Чем кончился `stop` с условием.
 #[derive(Debug)]
 pub enum Stopped {
     /// Агент снят: сторож ответил или подтверждённо ушёл.
@@ -286,8 +296,7 @@ impl KeeperClient {
         cancel: &CancellationToken,
         take: &Take<'_>,
     ) -> Result<Vec<Holder>, KeeperStartError> {
-        let client = self;
-        let key = client.home.key().to_owned();
+        let key = self.home.key().to_owned();
         let deadline =
             Instant::now() + Duration::from_millis(launch.startup_timeout_ms) + START_MARGIN;
         let mut respawns = 0;
@@ -296,19 +305,19 @@ impl KeeperClient {
             if cancel.is_cancelled() {
                 return Err(cancelled_waiting());
             }
-            match client.find(limit)? {
+            match self.find(limit)? {
                 Found::OverLimit => {
                     // Сверх предела снимается свой простаивающий агент без держателей;
                     // занятого раннер не снимает.
-                    if evictions > usize::from(limit) || !evict_idle(client.home.state(), &key) {
+                    if evictions > usize::from(limit) || !evict_idle(self.home.state(), &key) {
                         return Err(KeeperStartError::Limit { limit });
                     }
                     evictions += 1;
                     continue;
                 }
                 Found::Live(keeper) => {
-                    client.keeper = keeper;
-                    match client.take(take) {
+                    self.keeper = keeper;
+                    match self.take(take) {
                         Ok(holders) => return Ok(holders),
                         // Сторож закрывается, отказал учётным данным, его канал уже закрыт или
                         // он ещё поднимает агента: ждём, пока он ответит или уйдёт.
@@ -320,31 +329,31 @@ impl KeeperClient {
                 }
                 Found::Starting => {}
                 Found::Absent => {
-                    client.reused = false;
-                    let pid = match client.spawn(launch, credentials) {
+                    self.reused = false;
+                    let pid = match self.spawn(launch, credentials) {
                         Ok(pid) => pid,
                         Err(error) => {
-                            client.forget_start();
+                            self.forget_start();
                             return Err(error);
                         }
                     };
-                    client.keeper = pid;
-                    match client.await_start(pid, deadline, cancel)? {
-                        Started::Answered => match client.take(take) {
+                    self.keeper = pid;
+                    match self.await_start(pid, deadline, cancel)? {
+                        Started::Answered => match self.take(take) {
                             Ok(holders) => return Ok(holders),
                             // Поднятого агента сняли, не дав взять (простой, предел): ключ
                             // ищется заново, и при нужде поднимается новый сторож.
                             Err(KeeperStartError::Agent(
                                 AgentError::LiveAgentGone { .. }
                                 | AgentError::KeeperUnreachable { .. },
-                            )) => client.reused = true,
+                            )) => self.reused = true,
                             Err(error) => return Err(error),
                         },
                         Started::Exited if respawns < RESPAWNS => respawns += 1,
                         Started::Exited => {
                             return Err(unavailable(format!(
                                 "the keeper of the live agent exited before answering; see {}",
-                                client.home.paths().log().display()
+                                self.home.paths().log().display()
                             )))
                         }
                     }
@@ -353,7 +362,7 @@ impl KeeperClient {
             if Instant::now() >= deadline {
                 return Err(unavailable(format!(
                     "the keeper of the live agent did not answer in time; see {}",
-                    client.home.paths().log().display()
+                    self.home.paths().log().display()
                 )));
             }
             std::thread::sleep(WAIT_STEP);
@@ -766,10 +775,8 @@ impl KeeperClient {
             credentials: self.digest.clone(),
         };
         let critical = policy.is_critical();
-        // Срок прерывает только некритическую команду; критической он записывается отложенным
-        // после ответа (`run`). В отказе — срок, который команда получила, а не прошедшее время.
-        let deadline = policy.deadline.filter(|_| !critical);
-        let budget_ms = deadline.map_or(0, |deadline| {
+        // В отказе — срок, который команда получила, а не прошедшее время.
+        let budget_ms = policy.deadline.map_or(0, |deadline| {
             u64::try_from(
                 deadline
                     .saturating_duration_since(Instant::now())
@@ -777,7 +784,7 @@ impl KeeperClient {
             )
             .unwrap_or(u64::MAX)
         });
-        let deadline = deadline.map(tokio::time::Instant::from_std);
+        let deadline = policy.deadline.map(tokio::time::Instant::from_std);
         self.runtime.block_on(async {
             let stream = connect_within(&self.channel, self.keeper, QUERY_PATIENCE).await?;
             let (read, mut write) = tokio::io::split(stream);
@@ -786,64 +793,32 @@ impl KeeperClient {
                 .await
                 .map_err(|source| unreachable_at(&self.channel, source))?;
             policy.mark_work_given();
-            let mut messages = Vec::new();
-            let expired = async {
-                match deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending().await,
+            match await_reply(
+                &mut reader,
+                &policy.cancellation,
+                critical,
+                deadline,
+                on_batch,
+            )
+            .await
+            {
+                Ok(reply) => Ok(reply),
+                Err(Abandoned::Failed(error)) => Err(error),
+                Err(Abandoned::Cancelled) => {
+                    // Строка `cancel` доходит до сторожа и тогда, когда разрыв канала он
+                    // увидел бы не сразу.
+                    let _ = write_line(&mut write, &Request::Cancel).await;
+                    Err(AgentError::Cancelled {
+                        command: command.to_owned(),
+                        delivered: true,
+                    })
                 }
-            };
-            tokio::pin!(expired);
-            let mut deferral_noted = false;
-            loop {
-                // Пришедший кадр важнее срока и отмены: ответ, который уже здесь, не бросают.
-                let frame = tokio::select! {
-                    biased;
-                    frame = read_line::<_, Frame>(&mut reader) => frame,
-                    // Критическую команду отмена не прерывает: команда пишет, что откладывает
-                    // прерывание, как с разовым агентом, и ждёт исхода.
-                    () = policy.cancellation.cancelled(), if critical && !deferral_noted => {
-                        deferral_noted = true;
-                        // Команду в журнал не пишет: маски учётных данных у клиента нет.
-                        tracing::warn!(
-                            reason = ?ProcessInterruptionReason::Cancelled,
-                            "{}",
-                            crate::platform::process::CRITICAL_INTERRUPTION_DEFERRED
-                        );
-                        continue;
-                    }
-                    () = policy.cancellation.cancelled(), if !critical => {
-                        // Та же строка, что у разового агента: работа команды брошена.
-                        tracing::info!("{}", crate::platform::agent::AGENT_COMMAND_ABANDONED);
-                        // Строка `cancel` доходит до сторожа и тогда, когда разрыв канала
-                        // он увидел бы не сразу.
-                        let _ = write_line(&mut write, &Request::Cancel).await;
-                        return Err(AgentError::Cancelled {
-                            command: command.to_owned(),
-                            delivered: true,
-                        });
-                    }
-                    () = &mut expired => {
-                        let _ = write_line(&mut write, &Request::Cancel).await;
-                        return Err(AgentError::TimedOut {
-                            command: command.to_owned(),
-                            timeout_ms: budget_ms,
-                        });
-                    }
-                };
-                match frame {
-                    Ok(Some(Frame::Batch { messages: batch })) => {
-                        on_batch(&batch);
-                        messages.extend(batch);
-                    }
-                    Ok(Some(Frame::Done)) => return Ok(AgentReply { messages }),
-                    Ok(Some(Frame::Error { error })) => return Err(error.into_agent()),
-                    Ok(Some(other)) => return Err(unexpected(&other)),
-                    Ok(None) | Err(_) => {
-                        return Err(AgentError::LiveAgentGone {
-                            detail: "the keeper closed the channel before the reply".to_owned(),
-                        })
-                    }
+                Err(Abandoned::TimedOut) => {
+                    let _ = write_line(&mut write, &Request::Cancel).await;
+                    Err(AgentError::TimedOut {
+                        command: command.to_owned(),
+                        timeout_ms: budget_ms,
+                    })
                 }
             }
         })
@@ -866,12 +841,13 @@ impl KeeperClient {
 
     /// Сторож отпускает и снимает агента и выходит; ответ приходит, когда агент снят. Ждёт
     /// не дольше [`STOP_PATIENCE`] и до отмены `cancel`: не дождался — [`Stopped::Pending`].
-    pub fn stop(&self, cancel: &CancellationToken) -> Result<Stopped, AgentError> {
+    pub fn stop(&self, cancel: &CancellationToken) -> Result<Removal, AgentError> {
         match self.stop_if(false, false, cancel)? {
+            Stopped::Removed => Ok(Removal::Done),
+            Stopped::Pending => Ok(Removal::Pending),
             Stopped::InUse { .. } => Err(AgentError::Keeper {
                 detail: "the keeper refused an unconditional stop".to_owned(),
             }),
-            stopped => Ok(stopped),
         }
     }
 
@@ -956,6 +932,93 @@ impl KeeperClient {
             }
         })
     }
+}
+
+/// Почему клиент перестал ждать ответа на `run`.
+enum Abandoned {
+    /// Некритическую команду отменили: клиент пишет сторожу `cancel`.
+    Cancelled,
+    /// Срок некритической команды истёк: клиент пишет сторожу `cancel`.
+    TimedOut,
+    /// Сторож отказал или ушёл.
+    Failed(AgentError),
+}
+
+/// Кадры ответа на `run` до итогового. Чтение кадра создаётся один раз на кадр и переживает
+/// отмену и срок: `read_line` к отмене не устойчив, и брошенное посреди строки чтение теряло бы
+/// половину кадра. Пришедший кадр важнее отмены и срока. Некритическую команду отмена и срок
+/// бросают; критическую — нет: клиент один раз пишет строку отложенного прерывания, как
+/// разовый агент, и ждёт исхода.
+async fn await_reply<R>(
+    reader: &mut R,
+    cancellation: &CancellationToken,
+    critical: bool,
+    deadline: Option<tokio::time::Instant>,
+    on_batch: &mut dyn FnMut(&[AgentMessage]),
+) -> Result<AgentReply, Abandoned>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let expired = async {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(expired);
+    let mut cancel_noted = false;
+    let mut deadline_noted = false;
+    let mut messages = Vec::new();
+    loop {
+        let read = read_line::<_, Frame>(&mut *reader);
+        tokio::pin!(read);
+        let frame = loop {
+            tokio::select! {
+                biased;
+                frame = &mut read => break frame,
+                () = cancellation.cancelled(), if !cancel_noted => {
+                    if !critical {
+                        // Та же строка, что у разового агента: работа команды брошена.
+                        tracing::info!("{}", crate::platform::agent::AGENT_COMMAND_ABANDONED);
+                        return Err(Abandoned::Cancelled);
+                    }
+                    cancel_noted = true;
+                    note_deferral(ProcessInterruptionReason::Cancelled);
+                }
+                () = &mut expired, if !deadline_noted => {
+                    if !critical {
+                        return Err(Abandoned::TimedOut);
+                    }
+                    deadline_noted = true;
+                    note_deferral(ProcessInterruptionReason::TimedOut);
+                }
+            }
+        };
+        match frame {
+            Ok(Some(Frame::Batch { messages: batch })) => {
+                on_batch(&batch);
+                messages.extend(batch);
+            }
+            Ok(Some(Frame::Done)) => return Ok(AgentReply { messages }),
+            Ok(Some(Frame::Error { error })) => return Err(Abandoned::Failed(error.into_agent())),
+            Ok(Some(other)) => return Err(Abandoned::Failed(unexpected(&other))),
+            Ok(None) | Err(_) => {
+                return Err(Abandoned::Failed(AgentError::LiveAgentGone {
+                    detail: "the keeper closed the channel before the reply".to_owned(),
+                }))
+            }
+        }
+    }
+}
+
+/// Строка отложенного прерывания критической команды, как у разового агента. Команду в
+/// журнал не пишет: маски учётных данных у клиента нет.
+fn note_deferral(reason: ProcessInterruptionReason) {
+    tracing::warn!(
+        reason = ?reason,
+        "{}",
+        crate::platform::process::CRITICAL_INTERRUPTION_DEFERRED
+    );
 }
 
 /// Подключение к каналу сторожа не дольше `patience`.
@@ -1461,6 +1524,54 @@ mod tests {
             !client.interrupted(),
             "the finished command keeps the agent"
         );
+    }
+
+    /// Отмена критической команды посреди кадра его не рвёт: чтение кадра переживает отмену,
+    /// и ответ, дописанный после неё, приходит целым.
+    #[test]
+    fn a_cancellation_in_the_middle_of_a_frame_keeps_the_frame_whole() {
+        use tokio::io::AsyncWriteExt;
+        let runtime = runtime().unwrap();
+        runtime.block_on(async {
+            let (mut keeper, client) = tokio::io::duplex(1024);
+            let mut reader = BufReader::new(client);
+            let cancellation = CancellationToken::new();
+            let line = format!(
+                "{}\n{}\n",
+                serde_json::to_string(&Frame::Batch {
+                    messages: serde_json::from_str(
+                        r#"[{"type":"progress","body":{"message":"load","percent":50}}]"#
+                    )
+                    .unwrap(),
+                })
+                .unwrap(),
+                serde_json::to_string(&Frame::Done).unwrap()
+            );
+            let (head, tail) = line.split_at(line.len() / 3);
+            let (head, tail) = (head.to_owned(), tail.to_owned());
+            let writer = {
+                let cancellation = cancellation.clone();
+                async move {
+                    keeper.write_all(head.as_bytes()).await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    cancellation.cancel();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    keeper.write_all(tail.as_bytes()).await.unwrap();
+                    keeper
+                }
+            };
+            let mut batches = 0;
+            let mut count = |_: &[AgentMessage]| batches += 1;
+            let (reply, _keeper) = tokio::join!(
+                await_reply(&mut reader, &cancellation, true, None, &mut count),
+                writer
+            );
+            assert!(
+                matches!(&reply, Ok(reply) if reply.messages.len() == 1),
+                "the frame cut by the cancellation came whole"
+            );
+            assert_eq!(batches, 1);
+        });
     }
 
     /// Срок некритической команды истёк до отправки: команда сторожу не уходит, и агента ей не

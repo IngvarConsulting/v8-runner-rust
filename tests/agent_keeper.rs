@@ -1088,3 +1088,21 @@ fn the_former_stop_without_conditions_still_stops() {
     assert_eq!(stopped["frame"], "stopped", "{stopped}");
     assert!(keeper.exited_within(GONE_WITHIN));
 }
+
+/// Свежего агента, которого ещё не взяли ни `begin`, ни `hold`, условный `stop` не снимает:
+/// поднявший его клиент успевает взять агента, и два клиента на пределе не вытесняют свежих
+/// агентов друг друга (`INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`). Взятый и отпущенный
+/// агент снимается, как прежде.
+#[test]
+fn a_fresh_agent_is_not_evicted_before_it_is_taken() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let refused = keeper.last(json!({"op": "stop", "only_idle": true, "only_unheld": true}));
+    assert_eq!(refused["error"]["error"], "not_idle", "{refused}");
+    let session = keeper.begin();
+    assert_eq!(keeper.end(session)["frame"], "ended");
+    let stopped = keeper.last(json!({"op": "stop", "only_idle": true, "only_unheld": true}));
+    assert_eq!(stopped["frame"], "stopped", "{stopped}");
+    assert!(keeper.exited_within(GONE_WITHIN));
+}

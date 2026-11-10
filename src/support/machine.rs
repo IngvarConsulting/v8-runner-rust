@@ -257,16 +257,12 @@ pub mod account {
         windows_token::sid_of(windows_token::Which::User)
     }
 
-    /// Whether process `pid` runs as this OS account. A process the account may not even
-    /// query belongs to another account. `NotFound` — there is no such process.
+    /// Whether process `pid` runs as this OS account. A process whose token the account may
+    /// not query cannot be checked: that is an error, not another account. `NotFound` — there
+    /// is no such process.
     #[cfg(windows)]
     pub fn runs_as_this_account(pid: u32) -> std::io::Result<bool> {
-        const ERROR_ACCESS_DENIED: i32 = 5;
-        match windows_token::user_sid_of_process(pid) {
-            Ok(sid) => Ok(sid == account_id()?),
-            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => Ok(false),
-            Err(error) => Err(error),
-        }
+        Ok(windows_token::user_sid_of_process(pid)? == account_id()?)
     }
 
     /// Whether process `pid` runs as this OS account: by the owner of `/proc/<pid>` on Linux,
@@ -735,23 +731,51 @@ mod tests {
         assert!(is_process_alive(std::process::id()));
     }
 
-    /// Свой процесс — этой учётной записи, системный — другой: держателем живого агента он
-    /// быть не может (`INV.PLATFORM.AN-AGENT-HOLDER-IS-A-LIVE-PROCESS`).
+    /// Свой процесс — этой учётной записи; процесс другой учётной записи своим не назван
+    /// никогда: либо «чужой», либо «не проверить» — держателем живого агента он не станет
+    /// (`INV.PLATFORM.AN-AGENT-HOLDER-IS-A-LIVE-PROCESS`).
     #[cfg(any(unix, windows))]
     #[test]
     fn a_process_of_another_account_is_told_apart() {
         use super::account::runs_as_this_account;
         assert!(runs_as_this_account(std::process::id()).unwrap());
-        // SAFETY: `getuid` takes nothing and cannot fail.
-        #[cfg(unix)]
-        if unsafe { libc::getuid() } != 0 {
-            assert!(!runs_as_this_account(1).unwrap(), "init runs as root");
-        }
-        #[cfg(windows)]
+        let Some(foreign) = a_process_of_another_account() else {
+            eprintln!("skipped: no process of another OS account is visible here");
+            return;
+        };
+        let answer = runs_as_this_account(foreign);
         assert!(
-            !runs_as_this_account(4).unwrap(),
-            "the System process runs as LocalSystem"
+            !matches!(answer, Ok(true)),
+            "process {foreign} of another account is called own: {answer:?}"
         );
+    }
+
+    /// Процесс другой учётной записи, который видно наверняка: на Linux — по владельцу
+    /// `/proc/<pid>`, на прочих Unix — `launchd`/`init` у не-root, на Windows — процесс System у
+    /// всех, кроме LocalSystem.
+    #[cfg(target_os = "linux")]
+    fn a_process_of_another_account() -> Option<u32> {
+        use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: `getuid` takes nothing and cannot fail.
+        let own = unsafe { libc::getuid() };
+        std::fs::read_dir("/proc")
+            .ok()?
+            .flatten()
+            .find_map(|entry| {
+                let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+                (entry.metadata().ok()?.uid() != own).then_some(pid)
+            })
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn a_process_of_another_account() -> Option<u32> {
+        // SAFETY: `getuid` takes nothing and cannot fail.
+        (unsafe { libc::getuid() } != 0).then_some(1)
+    }
+
+    #[cfg(windows)]
+    fn a_process_of_another_account() -> Option<u32> {
+        (account_id().ok()? != "S-1-5-18").then_some(4)
     }
 
     #[cfg(unix)]

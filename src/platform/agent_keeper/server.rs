@@ -53,6 +53,10 @@ const FAILED_GRACE: Duration = Duration::from_secs(3);
 const STOP_FLUSH: Duration = Duration::from_millis(200);
 /// Сколько сторож ждёт первой строки подключения: молчащее подключение задачу не держит.
 const FIRST_LINE: Duration = Duration::from_secs(10);
+/// Сколько свежий агент, которого ещё никто не взял, не отдаётся условному `stop`: поднявший
+/// его клиент успевает открыть сессию или поставить держателя, и два клиента на пределе не
+/// снимают свежих агентов друг друга.
+const FRESH_GRACE: Duration = Duration::from_secs(30);
 
 /// Точка входа подкоманды: код выхода процесса.
 pub fn run_keeper(key: &str) -> i32 {
@@ -125,6 +129,9 @@ struct State {
     stop_requested: bool,
     /// Когда подъём агента не удался.
     failed_at: Option<Instant>,
+    /// До какого мгновения свежий агент, которого ещё не взяли ни `begin`, ни `hold`, не
+    /// снимается условным `stop`.
+    fresh_until: Option<Instant>,
 }
 
 /// Работа потоку агента.
@@ -242,6 +249,7 @@ async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<()
             close_requested: false,
             stop_requested: false,
             failed_at: None,
+            fresh_until: None,
         }),
         readiness,
         jobs: Mutex::new(jobs),
@@ -361,7 +369,11 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
     if let Err(error) = write_record(&shared.home, port, Some(facts)) {
         warn!(%error, "cannot write the live agent record");
     }
-    shared.lock().idle_since = Instant::now();
+    {
+        let mut state = shared.lock();
+        state.idle_since = Instant::now();
+        state.fresh_until = Some(Instant::now() + FRESH_GRACE);
+    }
     let _ = shared.readiness.send(Readiness::Ready {
         agent_pid,
         agent_started,
@@ -424,6 +436,7 @@ fn begin_session(
             });
         }
         // Сессия открыта с этой минуты: простой её не снимет и пока агент подключается.
+        state.fresh_until = None;
         state.session = Some(Session {
             id: session,
             last: None,
@@ -784,7 +797,10 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
 /// сессию между проверкой и снятием. Ответ — отказ, если условие не выполнено.
 fn stop(shared: &Shared, only_idle: bool, only_unheld: bool) -> Option<Frame> {
     let mut state = shared.lock();
-    let in_use = only_idle && (state.busy.is_some() || state.session.is_some());
+    let fresh = state
+        .fresh_until
+        .is_some_and(|until| Instant::now() < until);
+    let in_use = only_idle && (state.busy.is_some() || state.session.is_some() || fresh);
     let held = only_unheld && !state.holders.is_empty();
     if in_use || held {
         return Some(Frame::Error {
@@ -846,6 +862,7 @@ async fn hold(shared: &Shared, holder: Holder, credentials: Option<&str>) -> Fra
         Some(Holder::Process { .. }) => {}
         None => state.holders.push(holder),
     }
+    state.fresh_until = None;
     Frame::Holders {
         holders: state.holders.clone(),
     }

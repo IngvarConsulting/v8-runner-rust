@@ -18,7 +18,7 @@ use crate::domain::live_agent::{
     LiveAgentEntry,
 };
 use crate::platform::agent_keeper::client::{
-    live_keepers, KeeperClient, KeeperStartError, LiveKeeper, Stopped,
+    live_keepers, KeeperClient, KeeperStartError, LiveKeeper, Removal,
 };
 use crate::platform::agent_keeper::protocol::{Holder, KeeperStatus};
 use crate::platform::locator::UtilityType;
@@ -193,14 +193,21 @@ pub fn stop(
     let mut stopped = Vec::new();
     let mut refused = Vec::new();
     for (keeper, record) in live_keepers(&state) {
+        // Отмена кончает обход между агентами: остальные не тронуты.
+        if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
+            context,
+            crate::use_cases::interruption::SafePoint::Named("between live agents"),
+        ) {
+            return Err(cancel.into_error());
+        }
         if own.as_ref().is_some_and(|own| *own != keeper.key) {
             continue;
         }
         let status = keeper.client.status().ok();
         let mut found = entry(&keeper, &record, status.as_ref(), own.as_deref());
         match keeper.client.stop(&cancel) {
-            Ok(Stopped::Removed | Stopped::InUse { .. }) => stopped.push(found),
-            Ok(Stopped::Pending) => {
+            Ok(Removal::Done) => stopped.push(found),
+            Ok(Removal::Pending) => {
                 found.closing = true;
                 stopped.push(found);
             }
