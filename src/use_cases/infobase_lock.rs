@@ -76,34 +76,37 @@ pub(crate) fn acquire_infobase_lock(
             ErrorKind::InvalidInput,
             "the infobase directory has no parent to hold its lock",
         ),
-        Some(lock_path) => {
-            match take_command_lock(&lock_path, command_name, &canonical_work_path) {
-                Ok(guard) => {
-                    return Ok(InfobaseLock {
-                        _guard: Some(guard),
-                        warning: None,
-                    })
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::WouldBlock | ErrorKind::AlreadyExists
-                    ) =>
-                {
-                    let mut message =
-                        render_busy_message(command_name, &base_dir, &lock_path, &error);
-                    // Замок держит команда раннера; если её живой агент сейчас работает с
-                    // базой, отказ называет и его команду с держателями
-                    // (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
-                    if let Some(agents) = busy_live_agents(config) {
-                        message.push_str("; ");
-                        message.push_str(&agents);
-                    }
-                    return Err(AppError::InfobaseBusy(message));
-                }
-                Err(error) => error,
+        // Замок базы под `localPath` — первый писатель в нём: каталог заводится со своим
+        // `.gitignore` (`INV.USE-CASES.THE-LOCAL-DIRECTORY-IGNORES-ITSELF`).
+        Some(lock_path) => match config
+            .local_dir()
+            .prepare_for(&lock_path)
+            .and_then(|()| take_command_lock(&lock_path, command_name, &canonical_work_path))
+        {
+            Ok(guard) => {
+                return Ok(InfobaseLock {
+                    _guard: Some(guard),
+                    warning: None,
+                })
             }
-        }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::AlreadyExists
+                ) =>
+            {
+                let mut message = render_busy_message(command_name, &base_dir, &lock_path, &error);
+                // Замок держит команда раннера; если её живой агент сейчас работает с
+                // базой, отказ называет и его команду с держателями
+                // (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
+                if let Some(agents) = busy_live_agents(config) {
+                    message.push_str("; ");
+                    message.push_str(&agents);
+                }
+                return Err(AppError::InfobaseBusy(message));
+            }
+            Err(error) => error,
+        },
     };
     let beside = base_dir.parent().unwrap_or(&base_dir).display().to_string();
     if writes {

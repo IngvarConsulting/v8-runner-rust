@@ -311,7 +311,12 @@ fn check_as(
         version: OWNER_MARKER_VERSION,
         owners: kept,
     };
-    write_marker(&marker_path, &marker).map_err(|error| {
+    // Метка базы под `localPath` — тоже первый писатель в нём.
+    config
+        .local_dir()
+        .prepare_for(&marker_path)
+        .and_then(|()| write_marker(&marker_path, &marker))
+        .map_err(|error| {
         UseCaseError::new(
             UseCaseErrorKind::Runtime,
             format!(

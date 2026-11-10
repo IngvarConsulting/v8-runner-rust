@@ -41,6 +41,9 @@ pub struct SourceSetContext {
     /// Infobase memory lives under `workPath/infobases/<base>/hashes/<name>.redb` instead.
     storage_key: String,
     memory: SnapshotMemory,
+    /// `localPath` проекта набора: под корнем набора он не исходник. `None` — контекст собран
+    /// без настроек.
+    local_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +88,18 @@ impl SourceSetContext {
             path,
             storage_key,
             memory: SnapshotMemory::Shared,
+            local_path: None,
         }
+    }
+
+    /// Называет `localPath` проекта: обход корня набора его пропускает.
+    pub fn with_local_path(mut self, local_path: &Path) -> Self {
+        self.local_path = Some(local_path.to_path_buf());
+        self
+    }
+
+    pub fn local_path(&self) -> Option<&Path> {
+        self.local_path.as_deref()
     }
 
     /// Bind hash memory to an infobase: `infobase` names its directory under

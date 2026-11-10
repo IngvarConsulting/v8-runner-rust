@@ -9,7 +9,7 @@ use crate::use_cases::infobase_owner::{check_infobase_owner, OwnerCheck};
 use crate::use_cases::result::UseCaseError;
 #[cfg(test)]
 use crate::use_cases::result::UseCaseFailure;
-use crate::use_cases::workspace_lock::acquire_workspace_lock;
+use crate::use_cases::workspace_lock::{acquire_local_lock, acquire_workspace_lock};
 
 /// Отказ границы команды: шаг и ошибка. Сценарий не запускался.
 ///
@@ -119,6 +119,46 @@ pub fn preview_boundary(
         })
 }
 
+/// Замки каталогов команды: `localPath` снимается раньше `workPath`, порядок полей — порядок
+/// сброса.
+pub(crate) struct CommandLocks {
+    _local: Option<CommandLockGuard>,
+    _workspace: CommandLockGuard,
+}
+
+/// Меняет ли команда стенд под `localPath`: служебные команды, кроме `status`, и создание
+/// базы управляемого стенда.
+fn changes_the_stand(config: &AppConfig, command: CommandName) -> bool {
+    use CommandName as C;
+    match command {
+        C::DbmsStart
+        | C::DbmsStop
+        | C::DbmsRestart
+        | C::StandaloneStart
+        | C::StandaloneStop
+        | C::StandaloneRestart
+        | C::ClusterStart
+        | C::ClusterStop
+        | C::ClusterRestart => true,
+        C::Init => {
+            let infobase = &config.infobase;
+            infobase
+                .standalone
+                .as_ref()
+                .is_some_and(|standalone| standalone.managed.is_some())
+                || infobase
+                    .cluster
+                    .as_ref()
+                    .is_some_and(|cluster| cluster.managed.is_some())
+                || infobase
+                    .dbms
+                    .as_ref()
+                    .is_some_and(|dbms| dbms.managed.is_some())
+        }
+        _ => false,
+    }
+}
+
 /// Замок `workPath`, затем замок базы и под ним — чья база. Это единственная точка
 /// проверки владельца у команды, которая открывает файловую базу: проверки памяти и
 /// поколения идут позже, в сценарии. Порядок сброса обратный: база отпускается раньше
@@ -127,12 +167,26 @@ fn acquire(
     config: &AppConfig,
     command: CommandName,
     base: BaseAccess,
-) -> Result<(CommandLockGuard, InfobaseLock, Vec<BoundaryNote>), BoundaryRefusal> {
+) -> Result<(CommandLocks, InfobaseLock, Vec<BoundaryNote>), BoundaryRefusal> {
     let workspace_lock =
         acquire_workspace_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
             phase: InfobaseTransferPhase::WorkspaceLock,
             error: error.into(),
         })?;
+    let local_lock = if changes_the_stand(config, command) {
+        Some(
+            acquire_local_lock(config, command.as_str()).map_err(|error| BoundaryRefusal {
+                phase: InfobaseTransferPhase::WorkspaceLock,
+                error: error.into(),
+            })?,
+        )
+    } else {
+        None
+    };
+    let workspace_lock = CommandLocks {
+        _local: local_lock,
+        _workspace: workspace_lock,
+    };
     let infobase_lock =
         acquire_infobase_lock(config, command.as_str(), base).map_err(|error| BoundaryRefusal {
             phase: InfobaseTransferPhase::InfobaseLock,

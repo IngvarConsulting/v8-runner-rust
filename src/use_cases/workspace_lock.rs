@@ -37,6 +37,50 @@ pub(crate) fn acquire_workspace_lock(
     })
 }
 
+/// Замок `<localPath>/.lock` команды, меняющей стенд. Берётся после замка `workPath`: две
+/// рабочие копии с общим `localPath` не меняют один стенд разом
+/// (`INV.CLI.THE-LOCAL-LOCK-FOLLOWS-THE-WORKPATH-LOCK`). Замок — первый писатель в
+/// `localPath`: каталог заводит [`LocalDir::prepare`](crate::support::local_dir::LocalDir::prepare).
+pub(crate) fn acquire_local_lock(
+    config: &AppConfig,
+    command_name: &str,
+) -> Result<CommandLockGuard, AppError> {
+    let local = config.local_dir();
+    local.prepare().map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to prepare localPath '{}': {error}",
+            local.path().display()
+        ))
+    })?;
+    let lock_path = local.lock_path();
+    let canonical_work_path = nearest_existing_canonical_path(&config.work_path)
+        .unwrap_or_else(|_| config.work_path.clone());
+    take_command_lock(&lock_path, command_name, &canonical_work_path).map_err(|error| {
+        match error.kind() {
+            ErrorKind::WouldBlock | ErrorKind::AlreadyExists => {
+                let holder = match command_lock_holder(&lock_path) {
+                    Some(holder) => format!(
+                        "is already locked by '{}' of workspace '{}' (pid {}, started at {})",
+                        holder.command,
+                        holder.canonical_work_path.display(),
+                        holder.pid,
+                        holder.started_at.to_rfc3339(),
+                    ),
+                    None => "is already in use by another command".to_owned(),
+                };
+                AppError::WorkspaceBusy(format!(
+                    "cannot start {command_name}: localPath '{}' {holder}; {error}",
+                    local.path().display()
+                ))
+            }
+            _ => AppError::Runtime(format!(
+                "failed to acquire {command_name} localPath lock '{}': {error}",
+                lock_path.display()
+            )),
+        }
+    })
+}
+
 pub(crate) fn workspace_lock_path(work_path: &Path) -> PathBuf {
     work_path.join(WORKSPACE_LOCK_FILE_NAME)
 }

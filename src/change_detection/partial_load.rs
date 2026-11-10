@@ -1,3 +1,4 @@
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use std::collections::HashSet;
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
@@ -76,22 +77,23 @@ pub enum LoadDecision {
 
 /// Decide whether a partial or full load is appropriate for `changes`.
 pub fn decide(changes: &[FileChange], source_root: &Path) -> LoadDecision {
-    decide_in_scope(changes, source_root, None, ScanScope::Push)
+    decide_in_scope(changes, source_root, &[], ScanScope::Push)
 }
 
+/// Список частичной загрузки сборки: каталоги раннера под корнем в него не входят.
 pub(crate) fn decide_build(
     changes: &[FileChange],
     source_root: &Path,
-    work_path: &Path,
+    dirs: RunnerDirs<'_>,
 ) -> LoadDecision {
-    let excluded = scanner::work_path_inside(source_root, work_path);
-    decide_in_scope(changes, source_root, excluded.as_deref(), ScanScope::Build)
+    let excluded = runner_dirs_inside(source_root, dirs);
+    decide_in_scope(changes, source_root, &excluded, ScanScope::Build)
 }
 
 fn decide_in_scope(
     changes: &[FileChange],
     source_root: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     scope: ScanScope,
 ) -> LoadDecision {
     match expand_files(changes, source_root, excluded, scope) {
@@ -196,7 +198,7 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
             &payload,
             source_root,
             &root_real,
-            None,
+            &[],
             ScanScope::Push,
         )
         .ok_or_else(|| invalid(&payload))?;
@@ -207,7 +209,7 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
         &root_payload,
         source_root,
         &root_real,
-        None,
+        &[],
         ScanScope::Push,
     )
     .ok_or_else(|| invalid(&root_payload))?;
@@ -217,7 +219,7 @@ pub(crate) fn root_dependencies(source_root: &Path) -> io::Result<Vec<PathBuf>> 
 fn expand_files(
     changes: &[FileChange],
     source_root: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     scope: ScanScope,
 ) -> Option<Vec<PathBuf>> {
     let root_real = canonicalize_existing(source_root)?;
@@ -293,7 +295,7 @@ fn expand_optional_directory(
     directory: &Path,
     source_root: &Path,
     root_real: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     scope: ScanScope,
 ) -> Option<()> {
     match std::fs::symlink_metadata(directory) {
@@ -308,10 +310,13 @@ fn expand_directory(
     directory: &Path,
     source_root: &Path,
     root_real: &Path,
-    excluded: Option<&Path>,
+    excluded: &[PathBuf],
     scope: ScanScope,
 ) -> Option<()> {
-    if excluded.is_some_and(|excluded| directory.starts_with(excluded)) {
+    if excluded
+        .iter()
+        .any(|excluded| directory.starts_with(excluded))
+    {
         return Some(());
     }
     // The scanner does not select symlink directories within a source set.
@@ -719,7 +724,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        decide, dump_element_of, relative_paths, root_dependencies, write_list_file, LoadDecision,
+        decide, decide_build, dump_element_of, relative_paths, root_dependencies, write_list_file,
+        LoadDecision, RunnerDirs,
     };
     use crate::change_detection::analyzer::{ChangeKind, FileChange};
 
@@ -1266,6 +1272,29 @@ mod tests {
         let mut expected = vec![configuration, descriptor, form];
         expected.sort();
         assert_eq!(decision, LoadDecision::Partial(expected));
+    }
+
+    /// Список частичной загрузки сборки не несёт файлов `localPath` и `workPath`, даже если
+    /// они лежат в развёрнутом каталоге.
+    #[test]
+    fn a_build_list_leaves_the_runner_directories_out() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        let configuration = write_source(root, "Configuration.xml", "<xml/>");
+        let descriptor = write_source(root, "Catalogs/Items.xml", "<xml/>");
+        let form = write_source(root, "Catalogs/Items/Forms/Form/Ext/Form.xml", "<xml/>");
+        write_source(root, "Catalogs/Items/personal/db/1Cv8.1CD", "base");
+        write_source(root, "Catalogs/Items/service/state.xml", "<xml/>");
+        let local = root.join("Catalogs/Items/personal");
+        let work = root.join("Catalogs/Items/service");
+
+        let decision = decide_build(
+            &[change(&root.join("Catalogs/Items"), ChangeKind::Modified)],
+            root,
+            RunnerDirs::new(&work, Some(&local)),
+        );
+
+        assert_eq!(decision, sorted(vec![configuration, descriptor, form]));
     }
 
     #[test]

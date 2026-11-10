@@ -9,6 +9,7 @@
 use super::coordinator::SourceSetLoader;
 use super::helpers::apply_subject;
 use super::*;
+use crate::change_detection::runner_dirs::RunnerDirs;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
@@ -174,14 +175,14 @@ impl SourceSetLoader for AgentLoader {
                     &relative,
                     source_context.path(),
                     paths,
-                    &config.work_path,
+                    RunnerDirs::of(config),
                 ),
                 None => stage_dir(
                     handle,
                     &exchange,
                     &relative,
                     source_context.path(),
-                    &config.work_path,
+                    RunnerDirs::of(config),
                 ),
             };
             let exposed = match staged {
