@@ -154,6 +154,7 @@ impl Harness {
         let mut command = v8_runner_command();
         command
             .env("V8_RUNNER_STATE_DIR", &self.state)
+            .env_remove("V8_RUNNER_AGENT_IDLE_MS")
             .args([
                 "--config",
                 &self.config_path.display().to_string(),
@@ -465,4 +466,54 @@ fn a_busy_live_agent_holds_the_infobase_and_an_idle_one_does_not() {
         code, 0,
         "an idle live agent does not hold the infobase: {payload}"
     );
+}
+
+/// Две команды разных рабочих копий одновременно делят предел в один живой агент: обе
+/// работают — одна с живым агентом, другая с ним же после снятия простаивающего или с разовым
+/// (`reason: limit`, `busy`, `keeper_failed`), — и ни одна не падает оттого, что агента сняли
+/// между «взял» и «начал работать» (`INV.PLATFORM.A-COMMAND-OVER-THE-LIMIT-USES-A-ONE-SHOT-AGENT`).
+#[test]
+fn two_commands_sharing_the_limit_both_work() {
+    let state = State::new();
+    let first = harness(&state, None, "    live-max: 1\n", None);
+    let second = harness(&state, None, "    live-max: 1\n", None);
+    for _ in 0..3 {
+        let runs = [&first, &second].map(|harness| {
+            let output = harness
+                .dir
+                .path()
+                .join("dist")
+                .join(format!("{}.cf", uuid::Uuid::new_v4().simple()));
+            harness
+                .command(&[
+                    "download",
+                    "main",
+                    "--state",
+                    "working",
+                    "--output",
+                    &output.display().to_string(),
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn")
+        });
+        for run in runs {
+            let output = run.wait_with_output().expect("wait");
+            let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "no json envelope: {error}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+            assert!(output.status.success(), "{payload}");
+            let live = live(&payload);
+            assert!(
+                live["kept"] == true
+                    || ["limit", "busy", "keeper_failed", "removed"].contains(&live["reason"].as_str().unwrap_or("")),
+                "{payload}"
+            );
+        }
+    }
+    assert!(state.keepers().len() <= 1, "the limit holds");
 }

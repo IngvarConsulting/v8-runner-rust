@@ -22,6 +22,16 @@ pub enum Holder {
     Ttl { id: String, until_ms: u64 },
 }
 
+impl std::fmt::Display for Holder {
+    /// Держатель для людей: в отказе занятой базы и в ответе `agent status`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Process { pid, .. } => write!(f, "process {pid}"),
+            Self::Ttl { id, .. } => write!(f, "'{id}' with a term"),
+        }
+    }
+}
+
 impl Holder {
     /// Тот же ли это держатель: процесс — по pid и времени старта, срок — по `id`.
     pub fn same(&self, other: &Holder) -> bool {
@@ -72,7 +82,16 @@ pub enum Request {
         holder: Holder,
     },
     Status,
-    Stop,
+    /// Сторож снимает агента и выходит. `only_idle` — только если агент не выполняет команду и
+    /// сессии команды нет, `only_unheld` — только если у него нет держателей. Условие
+    /// проверяется под замком состояния сторожа, поэтому между проверкой и снятием команда
+    /// сессию не откроет; не выполнено — отказ [`KeeperError::NotIdle`].
+    Stop {
+        #[serde(default)]
+        only_idle: bool,
+        #[serde(default)]
+        only_unheld: bool,
+    },
 }
 
 /// Состояние сторожа, как он его отвечает на `status`.
@@ -91,6 +110,9 @@ pub struct KeeperStatus {
     #[serde(default)]
     pub last: Option<String>,
     pub holders: Vec<Holder>,
+    /// Сторож уже решил снять агента: после сессии, которая идёт, агент не останется.
+    #[serde(default)]
+    pub closing: bool,
     /// Сколько агент простаивает: без команды и без сессии; занятый — ноль.
     #[serde(default)]
     pub idle_ms: u64,
@@ -161,6 +183,11 @@ pub enum KeeperError {
     Busy { command: Option<String> },
     /// Процесса держателя нет или он не тот: держателем он быть не может.
     HolderGone,
+    /// `stop` с условием: агент выполняет команду, подключён сессией команды или его держат.
+    NotIdle {
+        command: Option<String>,
+        holders: Vec<Holder>,
+    },
     /// Отказ сессии агента.
     Agent { failure: AgentFailure },
     /// Запрос не читается.
@@ -437,6 +464,12 @@ impl KeeperError {
             },
             Self::HolderGone => AgentError::Keeper {
                 detail: "the holder process is not running".to_owned(),
+            },
+            Self::NotIdle { command, .. } => AgentError::Keeper {
+                detail: format!(
+                    "the live agent is in use{}",
+                    command.map_or_else(String::new, |command| format!(": {command}"))
+                ),
             },
             Self::Protocol { message } => AgentError::Keeper { detail: message },
         }

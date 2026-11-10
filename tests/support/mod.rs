@@ -67,29 +67,35 @@ pub fn commit_sources(dir: &Path) {
     git(&["commit", "-q", "--allow-empty", "-m", "sources"]);
 }
 
-/// Команда раннера с каталогом состояния учётной записи этого прогона тестов: живые агенты
-/// тестов не попадают в каталог состояния пользователя и не встречаются с ним.
+/// Срок простоя живых агентов тестов: сторож, оставшийся после теста, уходит сам вскоре после
+/// него, а команды одного теста, идущие подряд, агента ещё застают.
+pub const TEST_AGENT_IDLE_MS: &str = "10000";
+
+/// Команда раннера с каталогом состояния учётной записи этого теста: живые агенты тестов не
+/// попадают в каталог состояния пользователя, не встречаются с ним и друг с другом — предел
+/// живых агентов у каждого теста свой.
 pub fn v8_runner_command() -> Command {
     let mut command = Command::cargo_bin("v8-runner").expect("binary");
-    command.env("V8_RUNNER_STATE_DIR", test_state_dir());
+    command
+        .env("V8_RUNNER_STATE_DIR", test_state_dir())
+        .env("V8_RUNNER_AGENT_IDLE_MS", TEST_AGENT_IDLE_MS);
     command
 }
 
-/// Каталог состояния прогона тестов. На Unix — короткий путь в `/tmp`: путь сокета сторожа
-/// живого агента ограничен.
-pub fn test_state_dir() -> &'static Path {
-    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
-        if cfg!(unix) {
+/// Каталог состояния этого теста: свой у каждого потока теста, удаляется, когда тест кончился.
+/// На Unix — короткий путь в `/tmp`: путь сокета сторожа живого агента ограничен.
+pub fn test_state_dir() -> PathBuf {
+    thread_local! {
+        static DIR: tempfile::TempDir = if cfg!(unix) {
             tempfile::Builder::new()
                 .prefix("v8rs")
                 .tempdir_in("/tmp")
                 .expect("state dir")
         } else {
             tempfile::tempdir().expect("state dir")
-        }
-    })
-    .path()
+        };
+    }
+    DIR.with(|dir| dir.path().to_path_buf())
 }
 
 pub fn v8_runner_binary() -> PathBuf {

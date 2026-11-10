@@ -2409,6 +2409,45 @@ mod tests {
         );
     }
 
+    /// `live-max: 0` — не способ выключить живого агента: для этого `live: false`
+    /// (`INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF`).
+    #[test]
+    fn live_max_zero_is_refused_and_names_live_false() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: \"File=build/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\ntools:\n  designer_agent:\n    live-max: 0\n",
+        );
+        let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect_err("live-max: 0 is refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("live-max must be at least 1") && text.contains("live: false"),
+            "{text}"
+        );
+    }
+
+    /// Живой агент — только у агента, которого поднимает раннер: рядом с `attach` ключи `live`
+    /// и `live-max` — отказ, а не молчаливое неприменение.
+    #[test]
+    fn live_keys_next_to_attach_are_refused() {
+        for key in ["live: false", "live-max: 3"] {
+            let dir = tempdir().expect("tempdir");
+            let config_dir = dir.path().join("project");
+            let config_path = write_minimal_project_config(
+                &config_dir,
+                &format!("workPath: work\nformat: DESIGNER\ninfobase:\n  connection: \"File=build/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\ntools:\n  designer_agent:\n    attach: 127.0.0.1:1543\n    base-dir: /tmp/agent\n    {key}\n"),
+            );
+            let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+                .map(|loaded| loaded.config)
+                .expect_err("live keys next to attach are refused");
+            let name = key.split(':').next().unwrap();
+            assert!(error.to_string().contains(name), "{key}: {error}");
+        }
+    }
+
     #[test]
     fn load_config_rejects_local_null_for_required_fields() {
         let dir = tempdir().expect("tempdir");

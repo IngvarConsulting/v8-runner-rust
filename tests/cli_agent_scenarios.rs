@@ -123,7 +123,7 @@ fn harness_speaking(
     fs::write(
         &config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '{version}'\n  designer_agent:\n    port: {port}\n    live: false\n",
+            "workPath: {work}\nformat: DESIGNER\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '{version}'\n  designer_agent:\n    port: {port}\n",
             work = work_path.display(),
             password = AGENT_PASSWORD,
             platform = root.join("platform").display(),
@@ -206,7 +206,7 @@ fn a_managed_agent_session_is_named_in_the_receipt() {
         serde_json::json!({
             "mode": "managed",
             "address": format!("127.0.0.1:{}", harness.port),
-            "live": {"reused": false, "holders": [], "kept": false, "reason": "live_agent_off"},
+            "live": {"reused": false, "holders": [], "kept": true},
         }),
         "{payload}"
     );
@@ -398,6 +398,46 @@ fn infobase_restore_through_the_agent_survives_the_agent_closing_the_session() {
                 .map(|entries| entries.count() == 0)
                 .unwrap_or(true),
         "the DT copy is withdrawn"
+    );
+}
+
+/// Загрузка базы снимает простаивающего живого агента этой базы: его ключ больше ничему не
+/// отвечает, и `restore` работает с новым агентом
+/// (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
+#[test]
+fn infobase_restore_removes_the_idle_live_agent_of_its_infobase() {
+    let harness = harness();
+    let (code, payload) = run(&harness, &["extensions", "list"]);
+    assert_eq!(code, 0, "{payload}");
+    let before: u32 = read_or_empty(&harness.dir.path().join("designer.pid"))
+        .trim()
+        .parse()
+        .expect("designer pid");
+    assert!(process_is_alive(before), "the live agent outlives the command");
+    let input = harness.dir.path().join("transfer").join("base.dt");
+    fs::create_dir_all(input.parent().unwrap()).expect("transfer");
+    fs::write(&input, "payload-42").expect("dt");
+
+    let (code, payload) = run(
+        &harness,
+        &[
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--replace",
+        ],
+    );
+
+    assert_eq!(code, 0, "{payload}");
+    assert!(
+        !process_is_alive(before),
+        "the idle live agent of the restored infobase is removed"
+    );
+    assert_eq!(
+        read_or_empty(&harness.designer_args_log).lines().count(),
+        2,
+        "the restore launched its own agent"
     );
 }
 
@@ -1011,6 +1051,13 @@ fn a_cancellation_during_a_language_refusal_stops_the_synonym_forms() {
     assert_eq!(create_commands(&harness).len(), 1, "{payload}");
 }
 
+/// Разовый агент, как до живого: тест проверяет его подъём и снятие на каждую команду.
+/// Конфигурация кончается блоком `tools.designer_agent`, и ключ ложится в него.
+fn one_shot(harness: &Harness) {
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(&harness.config_path, format!("{config}    live: false\n")).expect("live off");
+}
+
 /// Процесс агента, поднятого раннером, после команды снят.
 fn assert_agent_removed(harness: &Harness) {
     let pid = read_or_empty(&harness.dir.path().join("designer.pid"));
@@ -1040,6 +1087,7 @@ fn a_managed_agent_is_released_and_removed_whatever_its_version() {
             &["ru", "en"],
             platform,
         );
+        one_shot(&harness);
 
         let began = std::time::Instant::now();
         let (code, payload) = run(&harness, &["extensions", "list"]);
@@ -1083,6 +1131,7 @@ fn a_refused_release_keeps_the_outcome_and_still_removes_the_agent() {
             &["ru", "en"],
             "8.3.27.2342",
         );
+        one_shot(&harness);
 
         let (code, payload) = run(&harness, arguments);
 

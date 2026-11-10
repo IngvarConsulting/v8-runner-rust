@@ -108,7 +108,7 @@ fn run(
         utilities,
     );
     let outcome = walk(context, config, request, &mut executor, started);
-    executor.finish();
+    executor.finish(context);
     crate::use_cases::provider_selection::attach(outcome, &receipt)
 }
 
@@ -604,9 +604,9 @@ impl Executor {
         )
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, context: &ExecutionContext) {
         if let Some((handle, wait)) = self.session.take() {
-            handle.finish(&wait);
+            handle.finish(context, &wait);
         }
     }
 }

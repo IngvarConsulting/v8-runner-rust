@@ -241,7 +241,7 @@ pub(crate) fn read_with_record_tool(
             };
             let token =
                 crate::use_cases::agent_session::generation_id(&mut handle, extension, &wait);
-            handle.finish(&wait);
+            handle.finish(context, &wait);
             return match token {
                 Ok(token) => Ok(RecordToolAnswer::Token(token)),
                 Err(error) if error.cancellation().is_some() => Err(error),

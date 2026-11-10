@@ -43,7 +43,7 @@ pub(super) fn run_dump_agent(
         &wait,
     )?;
     let outcome = dump_through(context, config, resolved, plan, objects, &mut handle, &wait);
-    handle.finish(&wait);
+    handle.finish(context, &wait);
     let (reply_transcript, notes, up_to_date) = outcome?;
 
     Ok((

@@ -2,6 +2,7 @@
 id: INV.PLATFORM.A-COMMAND-OVER-THE-LIMIT-USES-A-ONE-SHOT-AGENT
 check:
   - tests/cli_live_agent.rs::over_the_limit_an_idle_agent_gives_way_and_a_held_one_does_not
+  - tests/agent_keeper.rs::a_conditional_stop_spares_an_agent_in_use
 ---
 
 # Команда сверх предела работает с разовым агентом

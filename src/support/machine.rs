@@ -589,7 +589,19 @@ pub mod account {
     /// different tuples give the same message. The key names a record without holding its
     /// parts: a connection string may carry a password.
     pub fn account_key(state: &Path, parts: &[&str]) -> std::io::Result<String> {
-        let salt = account_salt(state)?;
+        key_with(&account_salt(state)?, parts)
+    }
+
+    /// [`account_key`] only when the account already has its salt: `None` without one, and
+    /// nothing is written. A key that needs no salt yet names no record either.
+    pub fn existing_account_key(state: &Path, parts: &[&str]) -> std::io::Result<Option<String>> {
+        match read_salt(&state.join(SALT_FILE))? {
+            Some(salt) => key_with(&salt, parts).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn key_with(salt: &[u8; SALT_LEN], parts: &[&str]) -> std::io::Result<String> {
         let account = account_id()?;
         let mut message = Vec::new();
         for part in std::iter::once(account.as_str()).chain(parts.iter().copied()) {
@@ -597,7 +609,7 @@ pub mod account {
             message.extend_from_slice(&length.to_be_bytes());
             message.extend_from_slice(part.as_bytes());
         }
-        Ok(hmac_sha256(&salt, &message)
+        Ok(hmac_sha256(salt, &message)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect())

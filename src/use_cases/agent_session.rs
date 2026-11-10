@@ -78,8 +78,6 @@ pub(crate) struct LiveHandle {
     /// Каталог на томе `workPath`, в котором ложится то, что агент пишет: агенту он выставлен
     /// ссылкой, и выгрузка не копируется между томами.
     exchange_root: PathBuf,
-    /// Контекст команды: в его слот сессии дописывается квитанция живого агента.
-    context: ExecutionContext,
     receipt: LiveAgentReceipt,
     /// Журнал разговора пишет команда, а не сторож.
     transcript: Option<std::fs::File>,
@@ -105,20 +103,29 @@ impl LiveHandle {
         outcome
     }
 
-    /// Закрывает сессию команды; агент остаётся сторожу, если его не сняли.
-    fn finish(mut self) {
-        self.client.end();
+    /// Закрывает сессию команды; агент остаётся сторожу, если тот не решил его снять.
+    /// Квитанция называет решение сторожа: `kept` — по его `status` после `end`.
+    fn finish(mut self, context: &ExecutionContext) {
+        let status = self.client.end();
         if self.receipt.kept {
-            if let Ok(status) = self.client.status() {
-                self.receipt.holders = status.holders.iter().map(holder_receipt).collect();
+            match status {
+                Some(status) if !status.closing => {
+                    self.receipt.holders = status.holders.iter().map(holder_receipt).collect();
+                }
+                // Сторож снимает агента (его сессия оборвалась, его остановили, ушёл последний
+                // держатель) или уже не отвечает.
+                _ => {
+                    self.receipt.kept = false;
+                    self.receipt.reason = Some(LiveAgentReason::Removed);
+                }
             }
         }
-        self.context.note_live(self.receipt);
+        context.note_live(self.receipt);
     }
 }
 
 /// Держатель живого агента в квитанции: процесс — номером и временем старта, срок — мгновением.
-fn holder_receipt(holder: &Holder) -> LiveAgentHolder {
+pub(crate) fn holder_receipt(holder: &Holder) -> LiveAgentHolder {
     let rfc3339 = |at: std::time::SystemTime| {
         chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     };
@@ -136,12 +143,11 @@ fn holder_receipt(holder: &Holder) -> LiveAgentHolder {
 impl AgentHandle {
     /// SSH-сессия точки входа: для обмена файлами по SFTP. У живого агента её держит сторож, и
     /// файлы с ним идут только каталогом.
-    pub(crate) fn ssh(&mut self) -> Result<&mut AgentSession, AgentError> {
+    pub(crate) fn ssh(&mut self) -> Result<&mut AgentSession, AppError> {
         match self {
-            Self::Live(_) => Err(AgentError::Keeper {
-                detail: "the live agent exchanges files through its directory, not over SFTP"
-                    .to_owned(),
-            }),
+            Self::Live(_) => Err(AppError::capability(
+                "the live agent exchanges files through its directory, not over SFTP",
+            )),
             Self::Managed(agent, _) => Ok(agent.session()),
             Self::Attached { session, .. } | Self::Gate { session, .. } => Ok(session),
         }
@@ -227,9 +233,9 @@ impl AgentHandle {
     ///
     /// Срок очистки урезан: прежде `disconnect` наследовал весь остаток бюджета
     /// команды и мог держать её столько же ещё раз.
-    pub(crate) fn finish(self, wait: &WaitPolicy) {
+    pub(crate) fn finish(self, context: &ExecutionContext, wait: &WaitPolicy) {
         match self {
-            Self::Live(live) => live.finish(),
+            Self::Live(live) => live.finish(context),
             Self::Managed(agent, _) => agent.release_and_remove(),
             Self::Attached { session, .. } | Self::Gate { session, .. } => session.release(wait),
         }
@@ -451,43 +457,87 @@ fn open_handle(
 /// раннера и учётная запись ОС (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`). Пароля
 /// базы в ключе нет: учётные данные сторож сверяет с каждым запросом.
 fn live_key(state: &Path, config: &AppConfig, v8: &Path) -> std::io::Result<String> {
-    let connection = config.v8_connection();
-    let address = connection.infobase_args().join("\u{1f}");
-    let platform = v8.display().to_string();
-    let user = connection.user.clone().unwrap_or_default();
-    let work_path = config.work_path.display().to_string();
-    crate::support::machine::account::account_key(
+    crate::support::machine::account::account_key(state, &live_key_parts(config, v8).as_parts())
+}
+
+/// Ключ живого агента, только если соль учётной записи уже есть: `None` без неё. Ничего не
+/// создаёт.
+pub(crate) fn existing_live_key(
+    state: &Path,
+    config: &AppConfig,
+    v8: &Path,
+) -> std::io::Result<Option<String>> {
+    crate::support::machine::account::existing_account_key(
         state,
-        &[
-            "live-agent",
-            &address,
-            &platform,
-            &user,
-            &work_path,
-            env!("CARGO_PKG_VERSION"),
-        ],
+        &live_key_parts(config, v8).as_parts(),
     )
 }
 
+/// Части ключа живого агента. Пути идут байтами ОС (шестнадцатерично), а не их показом: два
+/// разных пути с одинаковым показом — разные ключи.
+struct LiveKeyParts {
+    address: String,
+    platform: String,
+    user: String,
+    work_path: String,
+}
+
+impl LiveKeyParts {
+    fn as_parts(&self) -> [&str; 6] {
+        [
+            "live-agent",
+            &self.address,
+            &self.platform,
+            &self.user,
+            &self.work_path,
+            env!("CARGO_PKG_VERSION"),
+        ]
+    }
+}
+
+fn live_key_parts(config: &AppConfig, v8: &Path) -> LiveKeyParts {
+    let connection = config.v8_connection();
+    LiveKeyParts {
+        address: connection.infobase_args().join("\u{1f}"),
+        platform: hex(v8.as_os_str().as_encoded_bytes()),
+        user: connection.user.clone().unwrap_or_default(),
+        work_path: hex(config.work_path.as_os_str().as_encoded_bytes()),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Путь базы в каноническом виде: по нему находят живых агентов одной базы из разных рабочих
-/// копий.
+/// копий. Строка подключения иной формы может нести учётные данные (`Usr=`, `Pwd=`): в запись
+/// агента она идёт только отпечатком SHA-256.
 pub(crate) fn canonical_infobase(config: &AppConfig) -> String {
+    use sha2::{Digest, Sha256};
     let connection = config.v8_connection();
     connection
         .snapshot_identity(&config.base_path)
-        .unwrap_or_else(|| connection.infobase_args().join(" "))
+        .unwrap_or_else(|| {
+            let joined = connection.infobase_args().join("\u{1f}");
+            format!("connection:{}", hex(&Sha256::digest(joined.as_bytes())))
+        })
 }
 
-/// Поднимает или берёт живого агента. `Ok(Err(reason))` — живого агента не будет, и команда
-/// работает с разовым: раннер в Job без права выхода (`INV.PLATFORM.A-CLOSED-JOB-KEEPS-THE-AGENT-ONE-SHOT`)
-/// или живых агентов уже на пределе (`INV.PLATFORM.A-COMMAND-OVER-THE-LIMIT-USES-A-ONE-SHOT-AGENT`).
-fn open_live(
-    context: &ExecutionContext,
+/// Что нужно, чтобы взять или поднять живого агента цели проекта: ключ, запуск без учётных
+/// данных и учётные данные базы.
+pub(crate) struct LiveTarget {
+    pub key: String,
+    pub launch: KeeperLaunch,
+    pub credentials: Credentials,
+}
+
+/// Живой агент цели проекта: ключ (`INV.PLATFORM.A-LIVE-AGENT-IS-TAKEN-ONLY-BY-ITS-KEY`) и
+/// запуск. Объявленный ключ хоста проверяется до запуска, как у разового агента.
+pub(crate) fn live_target(
     config: &AppConfig,
     v8: &Path,
     port: Option<u16>,
-    transcript_log: &Path,
-) -> Result<Result<LiveHandle, LiveAgentReason>, AppError> {
+) -> Result<LiveTarget, AppError> {
     let agent = &config.tools.designer_agent;
     let connection = config.v8_connection();
     let state = crate::support::machine::account::account_state_dir().map_err(|error| {
@@ -498,7 +548,6 @@ fn open_live(
     })?;
     let key = live_key(&state, config, v8)
         .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
-    // Объявленный ключ хоста проверяется до запуска, как у разового агента.
     let host_key = match agent.host_key.clone() {
         Some(declared) => match launch_host_key(Some(declared), &config.work_path)? {
             LaunchHostKey::Declared(path) => Some(path),
@@ -518,6 +567,29 @@ fn open_live(
         user: connection.user.clone().unwrap_or_default(),
         password: connection.password.clone().unwrap_or_default(),
     };
+    Ok(LiveTarget {
+        key,
+        launch,
+        credentials,
+    })
+}
+
+/// Поднимает или берёт живого агента. `Ok(Err(reason))` — живого агента не будет, и команда
+/// работает с разовым: раннер в Job без права выхода (`INV.PLATFORM.A-CLOSED-JOB-KEEPS-THE-AGENT-ONE-SHOT`)
+/// или живых агентов уже на пределе (`INV.PLATFORM.A-COMMAND-OVER-THE-LIMIT-USES-A-ONE-SHOT-AGENT`).
+fn open_live(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    v8: &Path,
+    port: Option<u16>,
+    transcript_log: &Path,
+) -> Result<Result<LiveHandle, LiveAgentReason>, AppError> {
+    let agent = &config.tools.designer_agent;
+    let LiveTarget {
+        key,
+        launch,
+        credentials,
+    } = live_target(config, v8, port)?;
     let client = match KeeperClient::connect_or_start(
         &key,
         &launch,
@@ -528,6 +600,21 @@ fn open_live(
         Ok(client) => client,
         Err(KeeperStartError::Job) => return Ok(Err(LiveAgentReason::Job)),
         Err(KeeperStartError::Limit { .. }) => return Ok(Err(LiveAgentReason::Limit)),
+        // Живого агента взять нельзя, а разовый работает и так: команда не падает.
+        Err(error @ KeeperStartError::Busy { .. }) => {
+            tracing::warn!(%error, "the command works with a one-shot agent");
+            return Ok(Err(LiveAgentReason::Busy));
+        }
+        Err(error @ KeeperStartError::Unavailable { .. }) => {
+            tracing::warn!(%error, "the command works with a one-shot agent");
+            return Ok(Err(LiveAgentReason::KeeperFailed));
+        }
+        Err(KeeperStartError::Agent(
+            error @ (AgentError::LiveAgentGone { .. } | AgentError::KeeperUnreachable { .. }),
+        )) => {
+            tracing::warn!(%error, "the command works with a one-shot agent");
+            return Ok(Err(LiveAgentReason::KeeperFailed));
+        }
         Err(KeeperStartError::Agent(error)) => return Err(AppError::from(error)),
     };
     let port = client.port().ok_or_else(|| {
@@ -553,7 +640,6 @@ fn open_live(
             port,
         },
         exchange_root: config.work_path.join("agent").join("exchange"),
-        context: context.clone(),
         receipt,
         transcript,
         secrets: [credentials.user, credentials.password]
@@ -566,12 +652,18 @@ fn open_live(
 
 /// Снимает живого агента этой рабочей копии, если он есть: с `live: false` его не остаётся.
 /// Отказ снятия команду не останавливает: она работает с разовым агентом и так.
+/// Каталога состояния и соли учётной записи она не создаёт: без них живого агента нет.
 fn remove_live_agent(config: &AppConfig, v8: &Path) {
-    let Ok(state) = crate::support::machine::account::account_state_dir() else {
+    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
         return;
     };
-    let Ok(key) = live_key(&state, config, v8) else {
-        return;
+    let key = match existing_live_key(&state, config, v8) {
+        Ok(Some(key)) => key,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error, "the live agent of this working copy cannot be keyed");
+            return;
+        }
     };
     match crate::platform::agent_keeper::client::stop_keeper(&state, &key) {
         Ok(true) => tracing::info!("the live agent of this working copy is removed: live is off"),
@@ -865,7 +957,7 @@ pub(crate) fn with_session(
         .exchange(config)
         .and_then(|exchange| work(&mut handle, &wait, &exchange));
     let deferred = handle.deferred_interruption();
-    handle.finish(&wait);
+    handle.finish(context, &wait);
     match outcome {
         Ok(transcript) => Ok(platform_result(transcript, log, deferred)),
         Err(error) => Err(CommandFailure::after(

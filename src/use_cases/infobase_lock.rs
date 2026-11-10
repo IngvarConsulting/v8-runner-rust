@@ -6,6 +6,7 @@
 //! тот же замок команды, что у `workPath` ([`take_command_lock`]); живёт он, пока жив
 //! процесс: после `kill -9` следующая команда заменяет запись умершего владельца.
 
+use crate::platform::agent_keeper::protocol::Holder;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -133,52 +134,57 @@ pub(crate) fn settle_live_agents(
     };
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
     let found = crate::platform::agent_keeper::client::keepers_of(&state, &infobase);
-    for (_, status) in &found {
-        let Ok(status) = status else {
-            continue;
-        };
-        if status.holds_the_infobase() {
-            let holders = if status.holders.is_empty() {
-                "no holders".to_owned()
-            } else {
-                status
-                    .holders
-                    .iter()
-                    .map(|holder| match holder {
-                        crate::platform::agent_keeper::protocol::Holder::Process {
-                            pid, ..
-                        } => {
-                            format!("process {pid}")
-                        }
-                        crate::platform::agent_keeper::protocol::Holder::Ttl { id, .. } => {
-                            format!("'{id}' with a term")
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            return Err(AppError::InfobaseBusy(format!(
-                "cannot start {command_name}: infobase '{infobase}' is in use by the live Designer agent (pid {}) running '{}' ({holders}); retry when it finishes",
-                status
-                    .agent_pid
-                    .map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
-                status.command().unwrap_or("a command"),
-            )));
+    use crate::platform::agent_keeper::client::Stopped;
+    let busy = |agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]| {
+        AppError::InfobaseBusy(format!(
+            "cannot start {command_name}: infobase '{infobase}' is in use by the live Designer agent (pid {}) running '{}' ({}); retry when it finishes",
+            agent_pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
+            command.unwrap_or("a command"),
+            holders_text(holders),
+        ))
+    };
+    for (keeper, status) in &found {
+        match status {
+            Ok(status) if status.holds_the_infobase() => {
+                return Err(busy(status.agent_pid, status.command(), &status.holders));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(key = %keeper.key, %error, "a live agent of this infobase did not answer its status");
+            }
         }
     }
     if recreates {
-        for (keeper, _) in found {
-            match keeper.client.stop() {
-                Ok(()) => {
+        // Снимается только агент, который и сейчас не подключён к базе: сторож проверяет это
+        // под своим замком. Подключённый за это время — отказ занятой базы, а не снятие.
+        for (keeper, status) in found {
+            match keeper.client.stop_if(true, false) {
+                Ok(Stopped::Removed) => {
                     tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed")
                 }
+                Ok(Stopped::InUse { command, holders }) => {
+                    let agent_pid = status.ok().and_then(|status| status.agent_pid);
+                    return Err(busy(agent_pid, command.as_deref(), &holders));
+                }
                 Err(error) => {
-                    tracing::warn!(%error, "the live agent of the recreated infobase was not removed")
+                    tracing::warn!(key = %keeper.key, %error, "the live agent of the recreated infobase was not removed")
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Держатели живого агента для отказа: «no holders» без них.
+fn holders_text(holders: &[Holder]) -> String {
+    if holders.is_empty() {
+        return "no holders".to_owned();
+    }
+    holders
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Файл замка рядом с каталогом базы: `.<имя каталога>.v8-runner.infobase.lock`.

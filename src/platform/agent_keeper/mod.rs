@@ -66,13 +66,7 @@ impl KeeperHome {
     ///
     /// [`account_key`]: crate::support::machine::account::account_key
     pub fn open(state: &Path, key: &str) -> std::io::Result<Self> {
-        if key.len() < 16 || key.len() > 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("'{key}' is not a live agent key: 16 to 64 hexadecimal digits"),
-            ));
-        }
-        let key = key.to_ascii_lowercase();
+        let key = checked_key(key)?;
         let dir = agents_dir(state)?.join(&key);
         crate::support::machine::account::ensure_private_dir(&dir)?;
         let paths = ServicePaths::under(&dir, SERVICE);
@@ -82,6 +76,21 @@ impl KeeperHome {
             key,
             paths,
         })
+    }
+
+    /// Каталог сторожа ключа `key`, только если он уже есть: ничего не создаёт. Его нет —
+    /// сторожа этого ключа никогда не поднимали.
+    pub fn existing(state: &Path, key: &str) -> std::io::Result<Option<Self>> {
+        let key = checked_key(key)?;
+        let paths = ServicePaths::under(&state.join("agents").join(&key), SERVICE);
+        if !paths.root().is_dir() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            state: state.to_path_buf(),
+            key,
+            paths,
+        }))
     }
 
     pub fn state(&self) -> &Path {
@@ -120,6 +129,17 @@ impl KeeperHome {
                 .to_string()
         }
     }
+}
+
+/// Ключ сторожа — шестнадцатеричная строка: иное имя каталога из ключа не строится.
+fn checked_key(key: &str) -> std::io::Result<String> {
+    if key.len() < 16 || key.len() > 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{key}' is not a live agent key: 16 to 64 hexadecimal digits"),
+        ));
+    }
+    Ok(key.to_ascii_lowercase())
 }
 
 /// Отпечаток учётных данных базы: HMAC с солью учётной записи, а не сами данные. С ним каждый

@@ -123,7 +123,7 @@ fn harness_with(
             base.display()
         )
     } else {
-        format!("    port: {port}\n    live: false\n{extra_yaml}")
+        format!("    port: {port}\n{extra_yaml}")
     };
     let config_path = root.join("v8project.yaml");
     fs::write(
@@ -249,6 +249,13 @@ fn a_managed_agent_without_a_declared_key_refuses_a_foreign_key_on_its_port() {
     );
 }
 
+/// Разовый агент, как до живого: тест проверяет его подъём и снятие на каждую команду.
+/// Конфигурация кончается блоком `tools.designer_agent`, и ключ ложится в него.
+fn one_shot(harness: &Harness) {
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(&harness.config_path, format!("{config}    live: false\n")).expect("live off");
+}
+
 fn run_dump(harness: &Harness, extra: &[&str]) -> (i32, Value) {
     let output = v8_runner_command()
         .args([
@@ -282,6 +289,7 @@ fn commands(harness: &Harness) -> Vec<String> {
 #[test]
 fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from_disk() {
     let harness = harness(true, Some(true), false);
+    one_shot(&harness);
 
     let (code, payload) = run_dump(&harness, &["--force"]);
 

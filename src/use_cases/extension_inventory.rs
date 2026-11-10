@@ -210,7 +210,7 @@ fn read_extensions(
                 ExtensionInventoryScope::All => None,
                 ExtensionInventoryScope::Named { name } => Some(name.as_str()),
             });
-            agent.close();
+            agent.close(context);
             let extensions = inventory?;
             ensure_requested_record(&extensions, request)?;
             extensions
@@ -718,7 +718,7 @@ fn run_change(
                     agent.set_active(&action, name, *active, deferrals)
                 }
             };
-            agent.close();
+            agent.close(context);
             outcome
         }
         Executor::Ibcmd { binary, .. } => {

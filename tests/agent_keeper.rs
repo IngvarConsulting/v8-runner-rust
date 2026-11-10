@@ -973,3 +973,32 @@ fn a_dead_process_cannot_hold_the_agent() {
     }));
     assert_eq!(held["error"]["error"], "holder_gone", "{held}");
 }
+
+/// `stop` с условием сторож проверяет под своим замком: агента с открытой сессией команды или с
+/// держателем он не снимает, а отказывает `not_idle`; простаивающего без держателей — снимает.
+/// Так снятие ради предела или пересоздаваемой базы не обрывает команду, которая успела взять
+/// агента между вопросом о нём и снятием (`INV.CLI.AN-AGENT-HOLD-OVER-THE-LIMIT-IS-REFUSED`).
+#[test]
+fn a_conditional_stop_spares_an_agent_in_use() {
+    let bench = Bench::new(false);
+    let mut keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let session = keeper.begin();
+    let refused = keeper.last(json!({"op": "stop", "only_idle": true, "only_unheld": true}));
+    assert_eq!(refused["frame"], "error", "{refused}");
+    assert_eq!(refused["error"]["error"], "not_idle", "{refused}");
+    let status = ready(&keeper);
+    assert_eq!(status["connected"], true, "{status}");
+    assert_eq!(status["closing"], false, "{status}");
+    assert_eq!(keeper.end(session)["frame"], "ended");
+
+    let until = now_ms() + 600_000;
+    let held = keeper.last(json!({"op": "hold", "holder": {"kind": "ttl", "id": "t", "until_ms": until}}));
+    assert_eq!(held["frame"], "holders", "{held}");
+    let refused = keeper.last(json!({"op": "stop", "only_idle": true, "only_unheld": true}));
+    assert_eq!(refused["error"]["error"], "not_idle", "{refused}");
+    // Пересоздаваемая база снимает и держимого агента, если он не подключён к ней.
+    let stopped = keeper.last(json!({"op": "stop", "only_idle": true}));
+    assert_eq!(stopped["frame"], "stopped", "{stopped}");
+    assert!(keeper.exited_within(GONE_WITHIN));
+}

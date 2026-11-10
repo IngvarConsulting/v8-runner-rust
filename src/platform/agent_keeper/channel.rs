@@ -195,11 +195,24 @@ mod imp {
         }
     }
 
-    /// Подключение к сокету, который слушает процесс своей учётной записи. Номер процесса
-    /// сторожа здесь не сверяется: macOS его не называет, а сокет и так лежит в каталоге 0700.
-    pub async fn connect(name: &str, _keeper: u32) -> std::io::Result<Stream> {
+    /// Подключение к сокету, который слушает процесс своей учётной записи. На Linux сверяется
+    /// и номер процесса сторожа (`SO_PEERCRED`); macOS его не называет, а сокет и так лежит в
+    /// каталоге 0700.
+    pub async fn connect(name: &str, keeper: u32) -> std::io::Result<Stream> {
         let stream = UnixStream::connect(name).await?;
-        let peer = stream.peer_cred()?.uid();
+        let credentials = stream.peer_cred()?;
+        #[cfg(target_os = "linux")]
+        if let Some(server) = credentials.pid() {
+            if u32::try_from(server).ok() != Some(keeper) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("{name} is served by process {server}, not by the keeper {keeper}"),
+                ));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = keeper;
+        let peer = credentials.uid();
         // SAFETY: `getuid` takes nothing and cannot fail.
         let own = unsafe { libc::getuid() };
         if peer != own {

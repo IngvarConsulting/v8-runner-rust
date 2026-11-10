@@ -705,6 +705,9 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
                         connected: state.session.is_some(),
                         last: state.session.as_ref().and_then(|open| open.last.clone()),
                         holders: state.holders.clone(),
+                        closing: state.close_requested
+                            || state.stop_requested
+                            || shared.shutdown.is_cancelled(),
                         idle_ms: if state.busy.is_none() && state.session.is_none() {
                             u64::try_from(state.idle_since.elapsed().as_millis())
                                 .unwrap_or(u64::MAX)
@@ -729,19 +732,17 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
                 holders: state.holders.clone(),
             }
         }
-        Request::Stop => {
-            {
-                let mut state = shared.lock();
-                state.stop_requested = true;
-                state.close_requested = true;
-                if let Some((cancel, false)) = &state.current {
-                    cancel.cancel();
-                }
+        Request::Stop {
+            only_idle,
+            only_unheld,
+        } => match stop(&shared, only_idle, only_unheld) {
+            Some(refusal) => refusal,
+            None => {
+                let mut stopped = shared.stopped.subscribe();
+                let _ = stopped.wait_for(|stopped| *stopped).await;
+                Frame::Stopped
             }
-            let mut stopped = shared.stopped.subscribe();
-            let _ = stopped.wait_for(|stopped| *stopped).await;
-            Frame::Stopped
-        }
+        },
         Request::Begin { credentials } => {
             begin(&shared, &mut reader, &mut write, credentials).await;
             return;
@@ -768,6 +769,31 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
         },
     };
     let _ = write_line(&mut write, &answer).await;
+}
+
+/// `stop`: условие и решение снять — под одним замком состояния, поэтому команда не откроет
+/// сессию между проверкой и снятием. Ответ — отказ, если условие не выполнено.
+fn stop(shared: &Shared, only_idle: bool, only_unheld: bool) -> Option<Frame> {
+    let mut state = shared.lock();
+    let in_use = only_idle && (state.busy.is_some() || state.session.is_some());
+    let held = only_unheld && !state.holders.is_empty();
+    if in_use || held {
+        return Some(Frame::Error {
+            error: KeeperError::NotIdle {
+                command: state
+                    .busy
+                    .clone()
+                    .or_else(|| state.session.as_ref().and_then(|open| open.last.clone())),
+                holders: state.holders.clone(),
+            },
+        });
+    }
+    state.stop_requested = true;
+    state.close_requested = true;
+    if let Some((cancel, false)) = &state.current {
+        cancel.cancel();
+    }
+    None
 }
 
 /// `hold`: процесс, которого нет, держателем не становится.
