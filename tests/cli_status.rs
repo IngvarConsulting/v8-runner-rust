@@ -728,9 +728,16 @@ fn a_git_ignore_rule_hiding_a_set_file_refuses_the_command() {
         );
         assert_eq!(answer["error"]["kind"], "validation", "{answer}");
         let message = answer["error"]["message"].as_str().expect("message");
-        assert!(message.contains("'*.bsl'"), "{message}");
-        assert!(message.contains(".gitignore:3"), "{message}");
-        assert!(message.contains("Module.bsl"), "{message}");
+        assert!(message.contains("'*.bsl'"), "{args:?}: {message}");
+        assert!(message.contains(".gitignore:3"), "{args:?}: {message}");
+        // `make` собирает в своей базе: память `origin` не его, и правило сверяется с
+        // образцами путей выгрузки; остальные команды сверяют его с запомненными файлами.
+        let hidden = if args[0] == "make" {
+            "Configuration.bsl"
+        } else {
+            "Module.bsl"
+        };
+        assert!(message.contains(hidden), "{args:?}: {message}");
     }
     assert!(project.calls().is_empty(), "{}", project.calls());
 }
