@@ -145,12 +145,21 @@ impl SourceSetLoader for AgentLoader {
                 (Some(paths), Exchange::Sftp) => {
                     with_descriptors =
                         partial_load::with_module_descriptors(paths, source_context.path())
-                            .ok_or_else(|| {
-                                AppError::SourceLoadNotStarted(format!(
-                                    "descriptors of the partial load for source-set '{}' \
-                                     failed the path check",
-                                    source_set.name
-                                ))
+                            .map_err(|error| {
+                                AppError::SourceLoadNotStarted(match error {
+                                    partial_load::DescriptorWidening::Missing(path) => format!(
+                                        "'{}' of the partial load for source-set '{}' was \
+                                         removed after the load was planned",
+                                        path.display(),
+                                        source_set.name
+                                    ),
+                                    partial_load::DescriptorWidening::Rejected(path) => format!(
+                                        "descriptor '{}' of the partial load for source-set \
+                                         '{}' failed the path check",
+                                        path.display(),
+                                        source_set.name
+                                    ),
+                                })
                             })?;
                     Some(with_descriptors.as_slice())
                 }

@@ -430,6 +430,61 @@ fn a_partial_root_load_through_sftp_stages_dependencies_outside_the_load_list() 
     assert_eq!(lists, ["list: Configuration.xml"], "{commands:?}");
 }
 
+/// По SFTP изменённый модуль общего модуля едет с описанием владельца: в список и в
+/// передаваемые файлы возвращается `CommonModules/X.xml`
+/// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
+#[test]
+fn a_changed_module_through_sftp_takes_its_description_back() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let sources = harness.dir.path().join("project/configuration");
+    let module = sources.join("CommonModules/X/Ext/Module.bsl");
+    fs::create_dir_all(module.parent().expect("module directory")).expect("module directory");
+    fs::write(sources.join("CommonModules/X.xml"), "<CommonModule/>").expect("descriptor");
+    fs::write(
+        &module,
+        "Procedure A() Export
+EndProcedure",
+    )
+    .expect("module");
+    let (code, payload) = run(&harness, &["push", "main", "--force"]);
+    assert_eq!(code, 0, "{payload}");
+    let seen_before = commands(&harness).len();
+    fs::write(
+        &module,
+        "Procedure B() Export
+EndProcedure",
+    )
+    .expect("change the module");
+
+    let (code, payload) = run(&harness, &["push", "main"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let commands: Vec<_> = commands(&harness).into_iter().skip(seen_before).collect();
+    let writes: Vec<_> = commands
+        .iter()
+        .filter(|line| line.starts_with("sftp write "))
+        .collect();
+    for file in ["/CommonModules/X.xml", "/CommonModules/X/Ext/Module.bsl"] {
+        assert!(
+            writes.iter().any(|line| line.ends_with(file)),
+            "{file} is shipped: {commands:?}"
+        );
+    }
+    // Строка `list:` — записи списка через `;`, с разделителем пути платформы.
+    let mut listed: Vec<_> = commands
+        .iter()
+        .filter_map(|line| line.strip_prefix("list: "))
+        .flat_map(|list| list.split(';'))
+        .map(|entry| entry.replace('\\', "/"))
+        .collect();
+    listed.sort_unstable();
+    assert_eq!(
+        listed,
+        ["CommonModules/X.xml", "CommonModules/X/Ext/Module.bsl"],
+        "{commands:?}"
+    );
+}
+
 /// Инкрементальная выгрузка по SFTP не возит цель целиком: на сервер уходит только
 /// опись выгрузки, обратно приходят изменённые файлы поверх локальной цели.
 #[test]

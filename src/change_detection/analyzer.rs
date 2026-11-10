@@ -18,7 +18,7 @@ pub struct FileChange {
 }
 
 /// How a file changed relative to the stored state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
     Added,
     Modified,
@@ -1113,7 +1113,7 @@ mod tests {
             .map(|change| {
                 (
                     change.path.file_name().expect("name").to_owned(),
-                    change.kind.clone(),
+                    change.kind,
                 )
             })
             .collect();

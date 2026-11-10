@@ -11,6 +11,7 @@ check:
   - src/change_detection/partial_load.rs::paths_that_only_look_like_a_lone_module_keep_their_descriptions
   - src/change_detection/partial_load.rs::letter_case_does_not_change_which_module_loads_alone
   - src/change_detection/partial_load.rs::the_sftp_list_takes_the_module_descriptions_back
+  - tests/cli_agent_standalone.rs::a_changed_module_through_sftp_takes_its_description_back
 ---
 
 

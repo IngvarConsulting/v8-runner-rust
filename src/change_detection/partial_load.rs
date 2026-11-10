@@ -267,7 +267,7 @@ fn expand_files(
                     scope,
                 )?;
             }
-            let descriptors = ModuleDescriptors::of(&change.kind, relative);
+            let descriptors = ModuleDescriptors::of(change.kind, relative);
             push_with_descriptors(&mut paths, path, descriptors, source_root, &root_real)?;
         }
     }
@@ -504,8 +504,8 @@ enum ModuleDescriptors {
 }
 
 impl ModuleDescriptors {
-    fn of(change: &ChangeKind, relative: &Path) -> Self {
-        if *change == ChangeKind::Modified && module_loads_alone(relative) {
+    fn of(change: ChangeKind, relative: &Path) -> Self {
+        if change == ChangeKind::Modified && module_loads_alone(relative) {
             Self::Omitted
         } else {
             Self::Owners
@@ -555,26 +555,40 @@ fn module_loads_alone(relative: &Path) -> bool {
 /// the list for a channel where a module alone is not measured yet. The SFTP exchange of the
 /// agent loads modules with their descriptors, as before #599, until a live run shows the
 /// platform applies a lone module there too
-/// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`). `None` when a descriptor
-/// fails the path guard.
+/// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`).
 pub(crate) fn with_module_descriptors(
     paths: &[PathBuf],
     source_root: &Path,
-) -> Option<Vec<PathBuf>> {
-    let root_real = canonicalize_existing(source_root)?;
+) -> Result<Vec<PathBuf>, DescriptorWidening> {
+    let root_real = canonicalize_existing(source_root)
+        .ok_or_else(|| DescriptorWidening::Missing(source_root.to_path_buf()))?;
     let mut widened = Vec::with_capacity(paths.len());
     for path in paths {
-        push_with_descriptors(
-            &mut widened,
-            path.clone(),
-            ModuleDescriptors::Owners,
-            source_root,
-            &root_real,
-        )?;
+        // The planned files have passed the path guard; one that is gone now was removed
+        // between planning and staging.
+        if !path.is_file() {
+            return Err(DescriptorWidening::Missing(path.clone()));
+        }
+        if is_bsl(path) {
+            for descriptor in owner_descriptors(path, source_root) {
+                push_file_if_safe_if_exists(&mut widened, &descriptor, source_root, &root_real)
+                    .ok_or(DescriptorWidening::Rejected(descriptor))?;
+            }
+        }
+        widened.push(path.clone());
     }
     widened.sort_unstable();
     widened.dedup();
-    Some(widened)
+    Ok(widened)
+}
+
+/// Why [`with_module_descriptors`] could not widen a planned partial load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DescriptorWidening {
+    /// The planned file (or the source root) is gone: removed between planning and staging.
+    Missing(PathBuf),
+    /// An owner's descriptor failed the path guard: outside the source root or not a file.
+    Rejected(PathBuf),
 }
 
 fn push_with_descriptors(
@@ -589,15 +603,19 @@ fn push_with_descriptors(
         return None;
     }
     if is_bsl(&path) && descriptors == ModuleDescriptors::Owners {
-        if let Some(xml) = sibling_xml(&path) {
-            push_file_if_safe_if_exists(paths, &xml, source_root, root_real)?;
-        }
-        for descriptor in ancestor_xml_descriptors(path.parent(), source_root) {
+        for descriptor in owner_descriptors(&path, source_root) {
             push_file_if_safe_if_exists(paths, &descriptor, source_root, root_real)?;
         }
     }
     paths.push(path);
     Some(())
+}
+
+/// The sibling `<module>.xml` of a `.bsl` and every descriptor up the tree, existing or not.
+fn owner_descriptors(module: &Path, source_root: &Path) -> impl Iterator<Item = PathBuf> {
+    sibling_xml(module)
+        .into_iter()
+        .chain(ancestor_xml_descriptors(module.parent(), source_root))
 }
 
 fn push_file_if_safe(
@@ -1179,7 +1197,8 @@ mod tests {
     }
 
     /// По SFTP модуль без описаний не замерен: список возвращает описания владельцев каждого
-    /// `.bsl`, как до правила, и не трогает остальные файлы.
+    /// `.bsl`, как до правила, и не трогает остальные файлы: у изменённой справки
+    /// `Catalogs/Other/Ext/Help.xml` описание `Catalogs/Other.xml` в список не попадает.
     #[test]
     fn the_sftp_list_takes_the_module_descriptions_back() {
         let temp = tempdir().expect("tempdir");
@@ -1194,27 +1213,34 @@ mod tests {
             "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl",
             "module",
         );
+        write_source(root, "Catalogs/Other.xml", "<xml/>");
+        let help = write_source(root, "Catalogs/Other/Ext/Help.xml", "<xml/>");
         let lone = decide(
             &[
                 change(&module, ChangeKind::Modified),
                 change(&form_module, ChangeKind::Modified),
+                change(&help, ChangeKind::Modified),
             ],
             root,
         );
-        assert_eq!(lone, sorted(vec![module.clone(), form_module.clone()]));
+        assert_eq!(
+            lone,
+            sorted(vec![module.clone(), form_module.clone(), help.clone()])
+        );
         let LoadDecision::Partial(lone) = lone else {
             unreachable!("asserted above")
         };
 
         assert_eq!(
             super::with_module_descriptors(&lone, root).map(LoadDecision::Partial),
-            Some(sorted(vec![
+            Ok(sorted(vec![
                 common,
                 module,
                 object,
                 form,
                 layout,
-                form_module
+                form_module,
+                help
             ]))
         );
     }
