@@ -215,8 +215,8 @@ fn a_push_without_memory_of_the_base_is_refused_with_both_ways_out() {
     let payload = envelope(&refused);
 
     assert_eq!(refused.status.code(), Some(3), "{payload}");
-    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
-    assert_eq!(payload["error"]["kind"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["code"], "untracked_base", "{payload}");
+    assert_eq!(payload["error"]["kind"], "untracked_base", "{payload}");
     assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
     assert_eq!(payload["error"]["next"]["source_set"], "main", "{payload}");
     let message = payload["error"]["message"].as_str().expect("message");
@@ -845,7 +845,7 @@ fn a_first_pull_that_saw_the_base_change_leaves_the_next_push_refused() {
 }
 
 /// Память, записанная для другой базы под тем же именем, памятью не считается и у полной
-/// загрузки: `push --full` и `build_project` с `full_rebuild` отказывают `no_memory`, а не
+/// загрузки: `push --full` и `build_project` с `full_rebuild` отказывают `untracked_base`, а не
 /// грузят молча; выходы называют CLI-команду `push --force`, в том числе у MCP.
 #[test]
 fn a_full_push_with_memory_of_another_base_is_refused_as_no_memory() {
@@ -866,7 +866,7 @@ fn a_full_push_with_memory_of_another_base_is_refused_as_no_memory() {
     let payload = envelope(&refused);
 
     assert_eq!(refused.status.code(), Some(3), "{payload}");
-    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["code"], "untracked_base", "{payload}");
     assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
     let message = payload["error"]["message"].as_str().expect("message");
     assert!(message.contains("push --force`"), "{message}");
@@ -909,7 +909,7 @@ fn a_full_push_into_a_base_that_moved_ahead_is_refused() {
     assert!(!project.calls().contains("/LoadConfigFromFiles"));
 }
 
-/// Превью отправки без памяти о базе называет тот же отказ `no_memory`, что и прогон, и
+/// Превью отправки без памяти о базе называет тот же отказ `untracked_base`, что и прогон, и
 /// платформу для этого не запускает; с памятью превью проходит.
 #[test]
 fn a_preview_of_a_push_without_memory_names_the_refusal() {
@@ -920,7 +920,7 @@ fn a_preview_of_a_push_without_memory_names_the_refusal() {
     let payload = envelope(&refused);
 
     assert_eq!(refused.status.code(), Some(3), "{payload}");
-    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["code"], "untracked_base", "{payload}");
     assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
     assert!(project.calls().is_empty(), "{}", project.calls());
     assert!(
@@ -1156,7 +1156,7 @@ fn every_set_is_checked_before_the_first_load() {
 }
 
 /// Своя запись поколения не спасает чужую хеш-память: каталог от этой базы она не выводит,
-/// и `push` отказывает `no_memory`, а не идёт в анализ изменений.
+/// и `push` отказывает `untracked_base`, а не идёт в анализ изменений.
 #[test]
 fn a_generation_record_does_not_make_memory_of_another_pair_own() {
     let project = Project::new("File=ib");
@@ -1187,7 +1187,7 @@ fn a_generation_record_does_not_make_memory_of_another_pair_own() {
 
     let payload = envelope(&project.run(&["push"]));
 
-    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["code"], "untracked_base", "{payload}");
     let message = payload["error"]["message"].as_str().expect("message");
     assert!(message.contains("another infobase"), "{message}");
     assert!(project.calls().is_empty(), "{}", project.calls());
@@ -1202,7 +1202,7 @@ fn without_a_generation_answer_a_no_memory_refusal_offers_pull_force() {
 
     let payload = envelope(&project.run(&["push"]));
 
-    assert_eq!(payload["error"]["code"], "no_memory", "{payload}");
+    assert_eq!(payload["error"]["code"], "untracked_base", "{payload}");
     assert_eq!(payload["error"]["next"]["command"], "pull", "{payload}");
     assert_eq!(payload["error"]["next"]["source_set"], "main", "{payload}");
     assert_eq!(payload["error"]["next"]["keys"]["--force"], "", "{payload}");

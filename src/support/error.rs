@@ -488,7 +488,10 @@ impl From<AgentError> for AppError {
             | AgentError::Channel { .. }
             | AgentError::Launch(_)
             | AgentError::StartupTimedOut { .. }
-            | AgentError::ExitedBeforeSession { .. } => {
+            | AgentError::ExitedBeforeSession { .. }
+            | AgentError::LiveAgentGone { .. }
+            | AgentError::Keeper { .. }
+            | AgentError::KeeperUnreachable { .. } => {
                 Self::EnvironmentUnavailable(error.to_string())
             }
         }
@@ -517,6 +520,19 @@ impl From<DownloadError> for AppError {
             | DownloadError::Runtime(_) => Self::Runtime(error.to_string()),
         }
     }
+}
+
+/// Отказ с цепочкой причин через `: `: для ошибок, которые держат отказ ОС источником, а не
+/// в своём тексте.
+pub fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 #[cfg(test)]

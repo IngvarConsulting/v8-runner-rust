@@ -6,6 +6,7 @@
 //! тот же замок команды, что у `workPath` ([`take_command_lock`]); живёт он, пока жив
 //! процесс: после `kill -9` следующая команда заменяет запись умершего владельца.
 
+use crate::platform::agent_keeper::protocol::Holder;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -89,12 +90,16 @@ pub(crate) fn acquire_infobase_lock(
                         ErrorKind::WouldBlock | ErrorKind::AlreadyExists
                     ) =>
                 {
-                    return Err(AppError::InfobaseBusy(render_busy_message(
-                        command_name,
-                        &base_dir,
-                        &lock_path,
-                        &error,
-                    )));
+                    let mut message =
+                        render_busy_message(command_name, &base_dir, &lock_path, &error);
+                    // Замок держит команда раннера; если её живой агент сейчас работает с
+                    // базой, отказ называет и его команду с держателями
+                    // (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`).
+                    if let Some(agents) = busy_live_agents(config) {
+                        message.push_str("; ");
+                        message.push_str(&agents);
+                    }
+                    return Err(AppError::InfobaseBusy(message));
                 }
                 Err(error) => error,
             }
@@ -114,6 +119,104 @@ pub(crate) fn acquire_infobase_lock(
             base_dir.display()
         )),
     })
+}
+
+/// Живые агенты той же базы перед командой, которая её открывает
+/// (`INV.PLATFORM.ANOTHER-LAUNCH-MODE-WAITS-ONLY-FOR-A-BUSY-AGENT`). Простаивающий агент к базе
+/// не подключён и команде не мешает. Агент, подключённый к базе сессией другой команды, —
+/// отказ `infobase_busy`, называющий его команду и держателей. Команда, которая пересоздаёт
+/// базу (`recreates`), снимает простаивающих агентов этой базы: их ключ больше ничему не
+/// отвечает.
+pub(crate) fn settle_live_agents(
+    config: &AppConfig,
+    command_name: &str,
+    recreates: bool,
+) -> Result<(), AppError> {
+    // Нет каталога состояния — нет и живых агентов.
+    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+        return Ok(());
+    };
+    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
+    let found = crate::platform::agent_keeper::client::keepers_of(&state, &infobase);
+    use crate::platform::agent_keeper::client::Stopped;
+    let busy = |agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]| {
+        AppError::InfobaseBusy(format!(
+            "cannot start {command_name}: infobase '{infobase}' is in use: {}; retry when it finishes",
+            live_agent_text(agent_pid, command, holders),
+        ))
+    };
+    for (keeper, status) in &found {
+        match status {
+            Ok(status) if status.holds_the_infobase() => {
+                return Err(busy(status.agent_pid, status.command(), &status.holders));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(key = %keeper.key, %error, "a live agent of this infobase did not answer its status");
+            }
+        }
+    }
+    if recreates {
+        // Снимается только агент, который и сейчас не подключён к базе: сторож проверяет это
+        // под своим замком. Подключённый за это время — отказ занятой базы, а не снятие.
+        for (keeper, status) in found {
+            match keeper
+                .client
+                .stop_if(true, false, &tokio_util::sync::CancellationToken::new())
+            {
+                Ok(Stopped::Removed) => {
+                    tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed")
+                }
+                Ok(Stopped::Pending) => {
+                    tracing::warn!(key = %keeper.key, "the live agent of the recreated infobase did not confirm its removal in time")
+                }
+                Ok(Stopped::InUse { command, holders }) => {
+                    let agent_pid = status.ok().and_then(|status| status.agent_pid);
+                    return Err(busy(agent_pid, command.as_deref(), &holders));
+                }
+                Err(error) => {
+                    tracing::warn!(key = %keeper.key, %error, "the live agent of the recreated infobase was not removed")
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Живые агенты базы, которые сейчас с ней работают: их команда и держатели. Каталогов не
+/// создаёт; без живых агентов — `None`.
+fn busy_live_agents(config: &AppConfig) -> Option<String> {
+    let state = crate::support::machine::account::existing_account_state_dir()?;
+    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
+    let busy: Vec<String> = crate::platform::agent_keeper::client::keepers_of(&state, &infobase)
+        .into_iter()
+        .filter_map(|(_, status)| status.ok())
+        .filter(|status| status.holds_the_infobase())
+        .map(|status| live_agent_text(status.agent_pid, status.command(), &status.holders))
+        .collect();
+    (!busy.is_empty()).then(|| busy.join("; "))
+}
+
+/// Живой агент, занятый базой, для отказа: процесс, команда и держатели.
+fn live_agent_text(agent_pid: Option<u32>, command: Option<&str>, holders: &[Holder]) -> String {
+    format!(
+        "the live Designer agent (pid {}) is running '{}' ({})",
+        agent_pid.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string()),
+        command.unwrap_or("a command"),
+        holders_text(holders),
+    )
+}
+
+/// Держатели живого агента для отказа.
+fn holders_text(holders: &[Holder]) -> String {
+    let holders: Vec<_> = holders
+        .iter()
+        .map(crate::use_cases::agent_session::holder_receipt)
+        .collect();
+    format!(
+        "holders: {}",
+        crate::domain::capability::LiveAgentHolder::list_text(&holders)
+    )
 }
 
 /// Файл замка рядом с каталогом базы: `.<имя каталога>.v8-runner.infobase.lock`.

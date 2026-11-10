@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.INFOBASE-CREATE-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/infobase-create.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -23,6 +23,8 @@ check:
 У `infobase create --from` форма называет источник копии — поле `source`: имя базы-источника
 в местном слое (`infobase`) и абсолютный путь образа DT под `workPath` (`snapshot`); под
 превью — путь, куда образ лёг бы. Без `--from` и пока база-источник не найдена, поля нет.
+
+**Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
 
 **Что изменила версия 5.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 

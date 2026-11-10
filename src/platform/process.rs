@@ -92,6 +92,13 @@ pub struct ManagedSpawnResult {
 pub enum ManagedSpawnMode {
     Detached,
     Wait,
+    /// Как `Wait`, но процесс умирает вместе с этим процессом, даже если тот снят
+    /// (`INV.PLATFORM.A-LIVE-AGENT-DIES-WITH-ITS-KEEPER`). На Windows этот процесс входит в свой
+    /// Job с kill-on-close, и потомки рождаются в нём. На Linux у потомка стоит
+    /// `PR_SET_PDEATHSIG`: сигнал приходит, когда кончается вызвавший поток, поэтому звать этот
+    /// режим можно только из потока, живущего столько же, сколько процесс. На macOS механизма
+    /// нет (записанный разрыв): потомок переживает этот процесс.
+    Tied,
 }
 
 impl ManagedSpawnResult {
@@ -544,6 +551,14 @@ impl ProcessRunner for ProcessExecutor {
         let io_mode = match mode {
             ManagedSpawnMode::Detached => ProcessIoMode::ManagedDetached,
             ManagedSpawnMode::Wait => ProcessIoMode::ManagedWait,
+            ManagedSpawnMode::Tied => {
+                #[cfg(windows)]
+                children_die_with_this_process().map_err(|source| ProcessError::SpawnFailed {
+                    cmd: rendered_command.clone(),
+                    source,
+                })?;
+                ProcessIoMode::ManagedTied
+            }
         };
         let spawned = spawn_checked_child(request, io_mode, &rendered_command)?;
         if let Some(work) = work {
@@ -688,6 +703,8 @@ enum ProcessIoMode {
     UnicaOwnedDetached,
     ManagedDetached,
     ManagedWait,
+    /// `ManagedWait`, привязанный к жизни этого процесса (`ManagedSpawnMode::Tied`).
+    ManagedTied,
     Captured,
 }
 
@@ -697,7 +714,7 @@ impl ProcessIoMode {
             Self::Detached | Self::ManagedDetached => true,
             #[cfg(any(unix, windows))]
             Self::UnicaOwnedDetached => true,
-            Self::ManagedWait | Self::Captured => false,
+            Self::ManagedWait | Self::ManagedTied | Self::Captured => false,
         }
     }
 
@@ -862,7 +879,9 @@ fn spawn_checked_child(
             #[cfg(not(unix))]
             if matches!(
                 spawned.io_mode,
-                ProcessIoMode::ManagedDetached | ProcessIoMode::ManagedWait
+                ProcessIoMode::ManagedDetached
+                    | ProcessIoMode::ManagedWait
+                    | ProcessIoMode::ManagedTied
             ) {
                 terminate_child_group_gracefully(&mut spawned, Duration::from_millis(250));
                 let _ = spawned.child.wait();
@@ -1036,7 +1055,9 @@ fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<Chil
     {
         if matches!(
             io_mode,
-            ProcessIoMode::ManagedDetached | ProcessIoMode::ManagedWait
+            ProcessIoMode::ManagedDetached
+                | ProcessIoMode::ManagedWait
+                | ProcessIoMode::ManagedTied
         ) {
             use process_wrap::std::{CommandWrap, JobObject};
 
@@ -1103,7 +1124,10 @@ fn build_command(
             cmd.stderr(Stdio::null());
             set_child_process_group(&mut cmd);
         }
-        ProcessIoMode::ManagedWait => {
+        ProcessIoMode::ManagedWait | ProcessIoMode::ManagedTied => {
+            if matches!(io_mode, ProcessIoMode::ManagedTied) {
+                die_with_parent(&mut cmd);
+            }
             cmd.stdout(Stdio::null());
             let path =
                 request
@@ -1152,6 +1176,81 @@ fn set_child_process_group(cmd: &mut Command) {
     {
         let _ = cmd;
     }
+}
+
+/// Linux: потомок получает `SIGKILL`, когда кончается поток, который его запустил
+/// (`PR_SET_PDEATHSIG`). Родитель мог умереть до `prctl`: тогда потомок уже усыновлён, и
+/// запуск отказывает, а не оставляет его жить.
+#[cfg(target_os = "linux")]
+fn die_with_parent(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `getpid` takes nothing and cannot fail.
+    let parent = unsafe { libc::getpid() };
+    // SAFETY: between `fork` and `exec` only async-signal-safe `prctl` and `getppid` run; no
+    // memory is allocated.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                return Err(std::io::Error::other(
+                    "the parent died before the child started",
+                ));
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Windows ties the child through the Job of this process
+/// ([`children_die_with_this_process`]); macOS has no mechanism (a recorded gap).
+#[cfg(not(target_os = "linux"))]
+fn die_with_parent(_cmd: &mut Command) {}
+
+/// Windows: этот процесс входит в свой Job с kill-on-close, и все его потомки рождаются в нём.
+/// Дескриптор Job держит только этот процесс, поэтому, когда он кончается любым путём, система
+/// закрывает Job и снимает потомков. Вызывается один раз; повтор ничего не меняет.
+#[cfg(windows)]
+fn children_die_with_this_process() -> std::io::Result<()> {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    static TIED: OnceLock<Result<usize, i32>> = OnceLock::new();
+    let tied = TIED.get_or_init(|| {
+        let last = || std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+        // SAFETY: no name and default security; the result is checked.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(last());
+        }
+        // SAFETY: a zeroed structure is a valid value of this C type.
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `job` is open; the size matches the buffer; the pseudo handle of this
+        // process needs no closing. The Job handle stays open for the life of the process on
+        // purpose: closing it is what kills the children.
+        let assigned = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+                && AssignProcessToJobObject(job, GetCurrentProcess()) != 0
+        };
+        if assigned {
+            Ok(job as usize)
+        } else {
+            Err(last())
+        }
+    });
+    tied.map(|_| ()).map_err(std::io::Error::from_raw_os_error)
 }
 
 fn is_executable_busy(error: &std::io::Error) -> bool {

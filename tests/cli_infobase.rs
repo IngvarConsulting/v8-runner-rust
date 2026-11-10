@@ -2374,7 +2374,7 @@ exit 0"#,
         };
         fs::write(
             &config,
-            format!("{text}  designer_agent:\n    startup_timeout_ms: 60000\n{declared}"),
+            format!("{text}  designer_agent:\n    startup_timeout_ms: 60000\n    live: false\n{declared}"),
         )
         .expect("agent settings");
         let output = base.join("dist/main.cf");
@@ -2432,7 +2432,7 @@ fn a_taken_port_of_the_managed_agent_is_named() {
     let text = fs::read_to_string(&config).expect("config");
     fs::write(
         &config,
-        format!("{text}  designer_agent:\n    port: {port}\n"),
+        format!("{text}  designer_agent:\n    port: {port}\n    live: false\n"),
     )
     .expect("declared port");
     let output = base.join("dist/main.cf");

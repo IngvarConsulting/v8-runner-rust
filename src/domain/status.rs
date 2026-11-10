@@ -82,9 +82,9 @@ pub struct SourceSetStatus {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryState {
-    /// Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `no_memory`.
+    /// Своя запись поколения или своя хеш-память этой пары: `push` идёт без отказа `untracked_base`.
     Remembered,
-    /// Памяти нет: `push` откажет `no_memory`.
+    /// Памяти нет: `push` откажет `untracked_base`.
     #[serde(rename = "none")]
     Missing,
     /// Под именем базы лежит память другой пары «база ↔ каталог»; она не используется.

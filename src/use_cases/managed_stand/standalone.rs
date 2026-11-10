@@ -314,6 +314,7 @@ impl Server<'_> {
             explicit: true,
             bin: ibsrv.clone(),
             version: None,
+            agent: None,
         };
         self.write_record(&record)?;
         let request = ibsrv::start_server(

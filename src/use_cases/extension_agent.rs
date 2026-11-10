@@ -157,8 +157,8 @@ impl ExtensionAgent {
         self.run(action, &command, deferrals)
     }
 
-    pub(crate) fn close(self) {
-        self.handle.finish(&self.wait);
+    pub(crate) fn close(self, context: &ExecutionContext) {
+        self.handle.finish(context, &self.wait);
     }
 
     /// Команды, меняющие состав или свойства расширений: фаза критическая, её не

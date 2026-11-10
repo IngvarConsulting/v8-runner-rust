@@ -250,6 +250,11 @@ pub enum ConfigValidationError {
     #[error("tools.designer_agent.startup_timeout_ms must be greater than 0")]
     InvalidDesignerAgentStartupTimeoutMs,
 
+    #[error(
+        "tools.designer_agent.live-max must be at least 1; to keep no live agent set live: false"
+    )]
+    InvalidDesignerAgentLiveMax,
+
     #[error("format EDT requires at least one source-set with a valid EDT project path")]
     EdtNoProjects,
 
@@ -1726,6 +1731,9 @@ fn validate_designer_agent_config(config: &AppConfig) -> Result<(), ConfigValida
     }
     if agent.startup_timeout_ms == 0 {
         return Err(ConfigValidationError::InvalidDesignerAgentStartupTimeoutMs);
+    }
+    if agent.live_max == Some(0) {
+        return Err(ConfigValidationError::InvalidDesignerAgentLiveMax);
     }
     validate_host_fingerprint(
         "tools.designer_agent.host-fingerprint",
@@ -3414,7 +3422,7 @@ mod tests {
 
     /// Всякая цель, которую принимает проверка формы, помнится: адрес памяти у неё есть.
     /// Страж против «нераспознанного адреса»: форма, которую проверка пропустила бы без
-    /// адреса памяти, оставила бы базу без памяти навсегда, и отказ `no_memory` повторялся бы.
+    /// адреса памяти, оставила бы базу без памяти навсегда, и отказ `untracked_base` повторялся бы.
     #[test]
     fn every_accepted_target_has_a_memory_address() {
         let base = std::path::Path::new("/srv/project");

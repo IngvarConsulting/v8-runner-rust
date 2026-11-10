@@ -321,11 +321,11 @@ fn a_pull_from_one_base_does_not_mark_another_base_as_loaded() {
     let project = project("designer", false);
     pull(&project);
     // Память первой базы другой не достаётся: о второй памяти нет, и превью её отправки
-    // называет отказ `no_memory`, а не пропуск неизменившегося.
+    // называет отказ `untracked_base`, а не пропуск неизменившегося.
     let output = run(&project, &["--infobase", "second", "push", "--dry-run"]);
     let response: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     assert_eq!(
-        response["error"]["code"], "no_memory",
+        response["error"]["code"], "untracked_base",
         "another base inherited the first baseline: {response}"
     );
     assert_push_skips(&project);
@@ -357,8 +357,8 @@ fn foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_crede
     assert!(!output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     // Чужая память — отсутствие памяти (решение владельца от 06.10.2026): отказ
-    // `no_memory` называет её и оба выхода — выгрузку набора и перезапись.
-    assert_eq!(json["error"]["code"], "no_memory", "{json}");
+    // `untracked_base` называет её и оба выхода — выгрузку набора и перезапись.
+    assert_eq!(json["error"]["code"], "untracked_base", "{json}");
     let message = json.to_string();
     assert!(
         message.contains("written for another infobase or source directory"),
@@ -410,7 +410,7 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
     assert!(!output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     let message = json["error"]["message"].as_str().expect("message");
-    assert_eq!(json["error"]["code"], "no_memory", "{json}");
+    assert_eq!(json["error"]["code"], "untracked_base", "{json}");
     assert!(message.contains("another infobase"), "{message}");
     // Раннер называет конфиг каноническим путём: на macOS временный `/var/…` — ссылка на
     // `/private/var/…`.

@@ -225,7 +225,7 @@ fn an_apply_without_a_set_uses_one_managed_agent_session() {
         );
     fs::write(
         &project.config,
-        format!("{config}  designer_agent:\n    port: {port}\n"),
+        format!("{config}  designer_agent:\n    port: {port}\n    live: false\n"),
     )
     .expect("agent config");
     fs::write(

@@ -4002,10 +4002,10 @@ mod tests {
             .expect("memory path");
         std::fs::remove_file(&storage_path).expect("remove storage file");
         std::fs::create_dir_all(&storage_path).expect("replace with directory");
-        // Нечитаемая память — отсутствие памяти: `--full` отказал бы `no_memory`, не тронув её,
+        // Нечитаемая память — отсутствие памяти: `--full` отказал бы `untracked_base`, не тронув её,
         // а до записи состояния доходит только перезапись `--force`.
         let refused = run_build(&config, &build_args(true)).expect_err("no memory");
-        assert_eq!(refused.error.kind(), UseCaseErrorKind::NoMemory);
+        assert_eq!(refused.error.kind(), UseCaseErrorKind::UntrackedBase);
         assert!(storage_path.is_dir());
 
         let failure = run_build(

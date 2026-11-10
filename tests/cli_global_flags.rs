@@ -65,6 +65,11 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["diff"], "diff"),
     (&["mcp", "serve", "stdio"], "mcp serve stdio"),
     (&["mcp", "serve", "http"], "mcp serve http"),
+    (&["agent", "hold", "--ttl", "60"], "agent hold"),
+    (&["agent", "release", "--ttl"], "agent release"),
+    (&["agent", "stop"], "agent stop"),
+    (&["agent", "status"], "agent status"),
+    (&["agent", "keeper", "--key", "00"], "agent keeper"),
 ];
 
 /// Листья, которые базы не выбирают вовсе.
@@ -84,6 +89,8 @@ const IGNORING_THE_BASE: &[(&[&str], &str)] = &[
     (&["make", "main", "--output", "main.cf"], "make"),
     // `convert` переводит исходники и пакеты без базы проекта (#236).
     (&["convert", "main.cf", "--to", "xml"], "convert"),
+    // Сторож живого агента держит агента, которого ему назвали (#577).
+    (&["agent", "keeper", "--key", "00"], "agent keeper"),
 ];
 
 /// Листья, которые базу объявляют сами.

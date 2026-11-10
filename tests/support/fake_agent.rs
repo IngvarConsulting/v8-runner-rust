@@ -116,6 +116,9 @@ pub struct FakeAgent {
     pub dump_info: Arc<Mutex<Option<String>>>,
     /// Диагностика служебной команды подключения перед командой запроса.
     pub connect_log: Option<&'static str>,
+    /// Подключён ли агент к базе: повторный `common connect-ib` отвечает
+    /// `DesignerAlreadyConnectedToInfoBase`, как платформа.
+    pub connected: Arc<AtomicBool>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -179,6 +182,7 @@ impl FakeAgent {
             fail_dump: Arc::new(AtomicBool::new(false)),
             dump_info: Arc::new(Mutex::new(None)),
             connect_log: None,
+            connected: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -325,6 +329,16 @@ impl FakeAgent {
             || line == "common connect-ib"
             || line == "common disconnect-ib"
         {
+            if line == "common disconnect-ib" {
+                self.connected.store(false, Ordering::SeqCst);
+            }
+            if line == "common connect-ib" && self.connected.swap(true, Ordering::SeqCst) {
+                return (
+                    "[{\"type\":\"error\",\"error-type\":\"DesignerAlreadyConnectedToInfoBase\",\"message\":\"Конфигуратор уже подключен к информационной базе\"}]
+".to_owned(),
+                    false,
+                );
+            }
             if let Some(message) = self.connect_log.filter(|_| line == "common connect-ib") {
                 return (
                     format!(

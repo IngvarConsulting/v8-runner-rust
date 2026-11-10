@@ -550,7 +550,7 @@ fn a_planned_edt_build_refuses_when_the_utility_that_would_load_it_is_missing() 
             ),
         )
         .expect("config");
-        // Превью без памяти о базе отказало бы `no_memory` раньше поиска утилит.
+        // Превью без памяти о базе отказало бы `untracked_base` раньше поиска утилит.
         remember_edt_configuration(&work_path, &tmp, &base_path);
 
         let output = v8_runner_command()
@@ -666,7 +666,7 @@ fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
         .join("configuration.redb");
     fs::remove_file(&designer_state).expect("drop designer state");
     fs::remove_file(&v8_calls_log).expect("drop calls log");
-    // Без хеш-памяти и без ответа о поколении превью отказало бы `no_memory`: база здесь
+    // Без хеш-памяти и без ответа о поколении превью отказало бы `untracked_base`: база здесь
     // помнится записью поколения, как после её создания раннером.
     remember_edt_configuration(&work_path, &tmp, &base_path);
 
@@ -755,7 +755,7 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
         ),
     )
     .expect("config");
-    // Превью без памяти о базе отказало бы `no_memory`; сама память — не след превью.
+    // Превью без памяти о базе отказало бы `untracked_base`; сама память — не след превью.
     remember_edt_configuration(&work_path, &tmp, &base_path);
     let remembered = left_in_work_path(&work_path);
 
