@@ -515,10 +515,11 @@ impl ModuleDescriptors {
 
 /// A changed module the platform loads as a separate file, without its owner's descriptors
 /// (`INV.USE-CASES.A-CHANGED-MODULE-LOADS-WITHOUT-ITS-DESCRIPTION`): the module of a common
-/// module (`CommonModules/<M>/Ext/Module.bsl`) and a form module
-/// (`.../Forms/<F>/Ext/Form/Module.bsl`, `CommonForms/<F>/Ext/Form/Module.bsl`). `-partial`
-/// accepts a form module without the form description. Other modules keep their descriptors
-/// until a measurement shows the platform applies them alone.
+/// module (`CommonModules/<M>/Ext/Module.bsl`), a form module
+/// (`.../Forms/<F>/Ext/Form/Module.bsl`, `CommonForms/<F>/Ext/Form/Module.bsl`) and the object
+/// module of a top-level object (`Catalogs/<C>/Ext/ObjectModule.bsl`). The platform applies
+/// each of them alone (measured on КА). Manager, record set, value manager and command
+/// modules keep their descriptors until a measurement shows the platform applies them alone.
 fn module_loads_alone(relative: &Path) -> bool {
     let Some(element) = dump_element(relative) else {
         return false;
@@ -536,9 +537,13 @@ fn module_loads_alone(relative: &Path) -> bool {
     // module is `CommonModules/<M>` plus `Ext/Module.bsl` (four parts in all), a form is its
     // own folders plus `Ext/Form/Module.bsl` — five parts for a common form, seven for a form
     // of an object. Counting from the element keeps `Catalogs/Form/Ext/Form/Module.bsl` (a
-    // catalog named `Form`) and an object command's `Ext/...` out of the form branch.
+    // catalog named `Form`) and an object command's `Ext/...` out of the form branch. An object
+    // module belongs to a top-level object only: `<Group>/<Name>` plus `Ext/ObjectModule.bsl`.
     match (element.kind, inside.as_slice()) {
         ("CommonModule", [ext, module]) => is(ext, "Ext") && is(module, "Module.bsl"),
+        (_, [ext, module]) if element.folders == 2 => {
+            is(ext, "Ext") && is(module, "ObjectModule.bsl")
+        }
         ("CommonForm" | "Form", [ext, folder, module]) => {
             is(ext, "Ext") && is(folder, "Form") && is(module, "Module.bsl")
         }
@@ -1035,22 +1040,56 @@ mod tests {
         );
     }
 
-    /// Модуль объекта, менеджера, набора записей и команды объекта пока грузится с описаниями
-    /// владельцев: что платформа применяет их одних, не замерено.
+    /// Правка модуля объекта справочника или документа грузит один `.bsl`: на КА загрузка
+    /// `ObjectModule.bsl` без описания справочника применилась.
     #[test]
-    fn a_changed_object_module_still_loads_with_its_descriptions() {
+    fn a_changed_object_module_loads_without_its_description() {
         let temp = tempdir().expect("tempdir");
         let root = temp.path();
-        let object = write_source(root, "Documents/Order.xml", "<xml/>");
-        for module in [
-            "Documents/Order/Ext/ObjectModule.bsl",
-            "Documents/Order/Ext/ManagerModule.bsl",
-            "Documents/Order/Commands/Print/Ext/CommandModule.bsl",
+        for (module, descriptor) in [
+            ("Catalogs/Items/Ext/ObjectModule.bsl", "Catalogs/Items.xml"),
+            (
+                "Documents/Order/Ext/ObjectModule.bsl",
+                "Documents/Order.xml",
+            ),
         ] {
+            write_source(root, descriptor, "<xml/>");
+            let module = write_source(root, module, "module");
+
+            assert_eq!(
+                decide(&[change(&module, ChangeKind::Modified)], root),
+                LoadDecision::Partial(vec![module.clone()]),
+                "{}",
+                module.display()
+            );
+        }
+    }
+
+    /// Модуль менеджера, набора записей и команды объекта пока грузится с описаниями
+    /// владельцев: что платформа применяет их одних, не замерено.
+    #[test]
+    fn a_changed_manager_record_set_or_command_module_still_loads_with_its_descriptions() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        for (module, descriptor) in [
+            (
+                "Documents/Order/Ext/ManagerModule.bsl",
+                "Documents/Order.xml",
+            ),
+            (
+                "Documents/Order/Commands/Print/Ext/CommandModule.bsl",
+                "Documents/Order.xml",
+            ),
+            (
+                "InformationRegisters/Prices/Ext/RecordSetModule.bsl",
+                "InformationRegisters/Prices.xml",
+            ),
+        ] {
+            let descriptor = write_source(root, descriptor, "<xml/>");
             let module = write_source(root, module, "module");
             assert_eq!(
                 decide(&[change(&module, ChangeKind::Modified)], root),
-                sorted(vec![object.clone(), module.clone()]),
+                sorted(vec![descriptor, module.clone()]),
                 "{}",
                 module.display()
             );
@@ -1059,7 +1098,7 @@ mod tests {
 
     /// Пути, похожие на модуль общего модуля или формы, но принадлежащие другому элементу,
     /// грузятся с описаниями: модуль общей команды и команды объекта, справочник с именем
-    /// `Form`, форма внутри общего модуля.
+    /// `Form`, форма внутри общего модуля, `ObjectModule.bsl` в каталоге формы.
     #[test]
     fn paths_that_only_look_like_a_lone_module_keep_their_descriptions() {
         for (module, descriptor) in [
@@ -1072,6 +1111,10 @@ mod tests {
                 "Catalogs/Items.xml",
             ),
             ("Catalogs/Form/Ext/Form/Module.bsl", "Catalogs/Form.xml"),
+            (
+                "Catalogs/Items/Forms/ItemForm/Ext/ObjectModule.bsl",
+                "Catalogs/Items.xml",
+            ),
             ("Catalogs/Form/Ext/Module.bsl", "Catalogs/Form.xml"),
             (
                 "CommonModules/Tools/Ext/Form/Module.bsl",
@@ -1096,14 +1139,15 @@ mod tests {
         }
     }
 
-    /// Регистр букв в пути на решение не влияет, как и во всём планировщике: общий модуль и
-    /// форма в другом регистре грузятся одни, модуль объекта в другом регистре — с описанием.
+    /// Регистр букв в пути на решение не влияет, как и во всём планировщике: общий модуль,
+    /// форма и модуль объекта в другом регистре грузятся одни, модуль менеджера — с описанием.
     #[test]
     fn letter_case_does_not_change_which_module_loads_alone() {
         for module in [
             "commonmodules/Tools/EXT/module.BSL",
             "COMMONFORMS/Main/ext/FORM/Module.bsl",
             "catalogs/Items/forms/ItemForm/Ext/form/MODULE.bsl",
+            "DOCUMENTS/Order/ext/objectmodule.BSL",
         ] {
             let temp = tempdir().expect("tempdir");
             let root = temp.path();
@@ -1117,7 +1161,7 @@ mod tests {
             );
         }
         for (module, descriptor) in [
-            ("catalogs/Items/EXT/objectmodule.BSL", "catalogs/Items.xml"),
+            ("catalogs/Items/EXT/managermodule.BSL", "catalogs/Items.xml"),
             ("CATALOGS/Form/ext/form/module.bsl", "CATALOGS/Form.xml"),
         ] {
             let temp = tempdir().expect("tempdir");
