@@ -994,6 +994,7 @@ impl AgentSession {
                 command: self.display_command(command),
             });
         }
+        let started = Instant::now();
         self.send(command)?;
         // Команда ушла агенту: это работа команды, чем бы она ни кончилась. Служебные
         // команды сессии приходят без отметки.
@@ -1023,7 +1024,8 @@ impl AgentSession {
             }
         }
         let reply = AgentReply { messages };
-        debug!(command = %self.display_command(command), messages = reply.messages.len(), "agent replied");
+        let secrets: Vec<&str> = self.known_secrets.iter().map(String::as_str).collect();
+        log_reply(command, &secrets, &reply, started.elapsed());
         Ok(reply)
     }
 
@@ -1594,6 +1596,18 @@ fn excerpt(text: &str, limit: usize) -> String {
         result.push_str("\n[truncated]");
     }
     result
+}
+
+/// Отладочная строка `agent replied` об одной команде агента: команда с маской секретов, число
+/// сообщений ответа и время от отправки до последнего кадра. Её пишут и разовая сессия, и
+/// живой агент, чтобы трасса показывала, сколько шла загрузка и сколько применение.
+pub(crate) fn log_reply(command: &str, secrets: &[&str], reply: &AgentReply, elapsed: Duration) {
+    debug!(
+        command = %crate::platform::secrets::mask_text(command, secrets),
+        messages = reply.messages.len(),
+        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        "agent replied"
+    );
 }
 
 /// Protocol values stay intact; only this display copy masks decoded strings and keys.
