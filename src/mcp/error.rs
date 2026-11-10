@@ -2,6 +2,7 @@ use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::next_step::NextStep;
+use crate::domain::platforms::PlatformReleaseRefusal;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
 /// Stable machine-readable code for MCP-facing service failures.
@@ -28,7 +29,7 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
     fn from(value: UseCaseErrorKind) -> Self {
         match value {
             UseCaseErrorKind::Capability(_) => Self::Runtime,
-            UseCaseErrorKind::Environment
+            UseCaseErrorKind::Environment(_)
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
             | UseCaseErrorKind::NonFastForward
@@ -53,6 +54,10 @@ pub struct McpBusinessError {
     /// тот же самый: он про предмет, а не про транспорт.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<NextStep>,
+    /// Формат исходников и опись установок отказа выпуска: код у MCP — `runtime_failure`,
+    /// а поле то же, что у CLI (`INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_release: Option<Box<PlatformReleaseRefusal>>,
 }
 
 impl McpBusinessError {
@@ -61,7 +66,7 @@ impl McpBusinessError {
         let kind = error.kind();
         let code = match kind {
             UseCaseErrorKind::Capability(_) => McpErrorCode::RuntimeFailure,
-            UseCaseErrorKind::Environment
+            UseCaseErrorKind::Environment(_)
             | UseCaseErrorKind::WorkspaceBusy
             | UseCaseErrorKind::InfobaseBusy
             | UseCaseErrorKind::NonFastForward
@@ -78,6 +83,7 @@ impl McpBusinessError {
             kind: kind.into(),
             message: error.message().to_owned(),
             next: error.next().cloned(),
+            platform_release: error.platform_release().cloned().map(Box::new),
         }
     }
 }
@@ -154,7 +160,7 @@ mod tests {
     use super::{McpBusinessError, McpBusinessErrorKind, McpErrorCode};
     use crate::platform::locator::{LocatorError, UtilityType};
     use crate::support::error::AppError;
-    use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+    use crate::use_cases::result::{EnvironmentReason, UseCaseError, UseCaseErrorKind};
 
     /// У MCP нет рода `environment`: отсутствующая утилита отвечает `runtime_failure`, а не
     /// `platform_failure` (INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE).
@@ -164,12 +170,54 @@ mod tests {
             utility: UtilityType::Ibcmd,
             detail: None,
         }));
-        assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+        assert_eq!(
+            error.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+            "{error}"
+        );
 
         let mcp = McpBusinessError::from_use_case(&error);
 
         assert_eq!(mcp.code, McpErrorCode::RuntimeFailure);
         assert_eq!(mcp.kind, McpBusinessErrorKind::Runtime);
         assert_eq!(mcp.message, error.message());
+    }
+
+    /// Нет выпуска формата исходников: у MCP код тот же `runtime_failure`, а формат и опись
+    /// установок едут тем же полем, что в конверте CLI.
+    #[test]
+    fn a_missing_release_answers_a_runtime_failure_with_its_inventory_over_mcp() {
+        use crate::domain::platforms::SourceFormatInfo;
+        use crate::platform::locator::{PlatformReleaseMissing, RequiredRelease};
+
+        let error = UseCaseError::from(AppError::from(LocatorError::PlatformReleaseMissing(
+            Box::new(PlatformReleaseMissing {
+                required: RequiredRelease {
+                    releases: Vec::new(),
+                    source_format: SourceFormatInfo {
+                        version: Some("2.21".to_owned()),
+                        file: "/project/src/Configuration.xml".into(),
+                        release: Some("8.5.1".to_owned()),
+                    },
+                    unreadable: None,
+                },
+                installations: Vec::new(),
+            }),
+        )));
+        assert_eq!(
+            error.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::PlatformReleaseMissing)
+        );
+
+        let mcp = McpBusinessError::from_use_case(&error);
+
+        assert_eq!(mcp.code, McpErrorCode::RuntimeFailure);
+        assert_eq!(mcp.kind, McpBusinessErrorKind::Runtime);
+        assert_eq!(
+            mcp.platform_release
+                .as_ref()
+                .and_then(|release| release.source_format.release.as_deref()),
+            Some("8.5.1")
+        );
     }
 }

@@ -758,7 +758,7 @@
           "type": "boolean"
         },
         "version": {
-          "description": "Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true.",
+          "description": "Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true. `sources` selects the release that writes the sources format of the main Configuration set (DESIGNER format only) and refuses with `platform_release_missing` when it is not installed, inside `path` too; `strict` has no effect then.",
           "type": [
             "string",
             "null"

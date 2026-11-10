@@ -26,7 +26,9 @@ use crate::platform::service_record::{
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::interruption::interruption_before_safe_point;
-use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{
+    EnvironmentReason, UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult,
+};
 
 /// Сколько ждать готовности и конца процесса.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -129,7 +131,10 @@ fn validation(message: impl Into<String>) -> UseCaseError {
 }
 
 fn environment(message: impl Into<String>) -> UseCaseError {
-    UseCaseError::new(UseCaseErrorKind::Environment, message)
+    UseCaseError::new(
+        UseCaseErrorKind::Environment(EnvironmentReason::Unavailable),
+        message,
+    )
 }
 
 fn io_failure(what: &str, path: &Path, error: &std::io::Error) -> UseCaseError {
@@ -1037,7 +1042,9 @@ fn locate(
     crate::platform::utilities::PlatformUtilities::from_config(config)
         .locate(utility)
         .map(|location| location.path)
-        .map_err(|error| environment(error.to_string()))
+        // Род и код отказа решает сама ошибка поиска: отказ выпуска формата исходников
+        // остаётся собой, а не пересказом.
+        .map_err(|error| UseCaseError::from(crate::support::error::AppError::from(error)))
 }
 
 /// Какая из команд службы: `dbms`, `standalone` или `cluster`.
@@ -1676,14 +1683,20 @@ mod tests {
         let refused = setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         assert_names_where_to_get_a_build(&refused.to_string());
         let missing = setup.root.path().join("no-such");
         setup.config.tools.postgres.path = Some(missing.clone());
         let refused = setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         assert!(
             refused.to_string().contains(&missing.display().to_string()),
             "{refused}"
@@ -1705,7 +1718,10 @@ mod tests {
         let refused = setup
             .run(ServiceCommand::Restart, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         assert_names_where_to_get_a_build(&refused.to_string());
         let pid = started.pid.unwrap();
         assert!(
@@ -1741,7 +1757,10 @@ mod tests {
         let runner = FakeRunner::new(&host);
         for command in [ServiceCommand::Start, ServiceCommand::Restart] {
             let refused = setup.run(command, false, &runner, &host).unwrap_err();
-            assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+            assert_eq!(
+                refused.kind(),
+                UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+            );
         }
         assert!(runner.calls.borrow().is_empty());
         assert_eq!(host.spawned.get(), 0);
@@ -1756,7 +1775,10 @@ mod tests {
         let refused = setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         assert!(!setup.paths().record().exists());
     }
 
@@ -1849,7 +1871,10 @@ mod tests {
         let refused = setup
             .run(ServiceCommand::Start, false, &runner, &host)
             .unwrap_err();
-        assert_eq!(refused.kind(), UseCaseErrorKind::Environment);
+        assert_eq!(
+            refused.kind(),
+            UseCaseErrorKind::Environment(EnvironmentReason::Unavailable)
+        );
         let status = setup
             .run(ServiceCommand::Status, false, &runner, &host)
             .unwrap();

@@ -26,7 +26,7 @@ pub struct PlatformsResult {
 }
 
 /// Установка платформы: версия, каталог и состав.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlatformInstallation {
     pub version: String,
     /// Каталог версии.
@@ -35,7 +35,7 @@ pub struct PlatformInstallation {
 }
 
 /// Какие компоненты есть в установке.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct InstalledComponents {
     /// Конфигуратор и толстый клиент (`1cv8`).
     pub designer: bool,
@@ -50,7 +50,7 @@ pub struct InstalledComponents {
 /// `tools.platform` проекта вместе с местным слоем.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlatformRequirement {
-    /// Маска версии; `null` — не задана.
+    /// Маска версии или `sources` — выпуск по формату исходников; `null` — не задана.
     pub version: Option<String>,
     /// Путь к установке или утилите; `null` — не задан.
     pub path: Option<PathBuf>,
@@ -58,7 +58,7 @@ pub struct PlatformRequirement {
 }
 
 /// Формат исходников проекта.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceFormatInfo {
     /// Версия формата; `null`, если файл есть, а версии в его корне нет.
     pub version: Option<String>,
@@ -66,6 +66,17 @@ pub struct SourceFormatInfo {
     pub file: PathBuf,
     /// Выпуск платформы, который пишет этот формат; `null`, если раннер такого не знает.
     pub release: Option<String>,
+}
+
+/// Отказ `platform_release_missing`: при `tools.platform.version: sources` выпуска, который
+/// пишет формат исходников, среди установок нет. Установки — те, по которым решён отказ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PlatformReleaseRefusal {
+    /// Формат исходников основного набора и выпуск, который его пишет; `release` — `null`,
+    /// если раннер такого выпуска не знает, `version` — `null`, если формат не прочитан.
+    pub source_format: SourceFormatInfo,
+    /// Установки, среди которых выпуска не нашлось, новейшие первыми.
+    pub installations: Vec<PlatformInstallation>,
 }
 
 /// Выбор по утилитам: раннер ищет их по отдельности. `null` — утилиты нет ни в одной

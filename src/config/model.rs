@@ -1367,8 +1367,19 @@ pub struct PlatformToolConfig {
     /// `major.minor.patch.build` format.
     ///
     /// A 2- or 3-part value selects the highest matching version; a 4-part value
-    /// selects an exact build.
+    /// selects an exact build. `sources` selects the release that writes the format of the
+    /// main Configuration set and refuses when it is not installed.
     pub version: Option<String>,
+}
+
+impl PlatformToolConfig {
+    /// `version` разобранным: маска или `sources`. Значение, которое не разбирается, отвергает
+    /// проверка настроек до команды (`validate_platform_version`), поэтому здесь его нет.
+    pub fn version_setting(&self) -> Option<crate::platform::locator::PlatformVersionSetting> {
+        self.version
+            .as_deref()
+            .and_then(crate::platform::locator::PlatformVersionSetting::parse)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

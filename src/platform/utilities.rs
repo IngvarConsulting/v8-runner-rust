@@ -1,11 +1,12 @@
 use crate::config::model::{AppConfig, EdtCliConfig, SourceFormat, SourceSetPurpose};
-use crate::domain::platforms::PlatformChoice;
+use crate::domain::platforms::{PlatformChoice, SourceFormatInfo};
 use crate::platform::dump_format::{
     read_sources_format, releases_writing, FormatVersion, RecordedFormat,
 };
 use crate::platform::locator::{
     EdtVersion, Locator, LocatorOptions, PlatformResolutionPolicy, PlatformVersionRequirement,
-    UtilityLocation, UtilityType, UtilityVersion,
+    PlatformVersionSetting, RequiredRelease, SourceFormatRelease, UtilityLocation, UtilityType,
+    UtilityVersion,
 };
 use crate::platform::process::{ProcessExecutor, ProcessRunner};
 use tracing::{debug, warn};
@@ -45,30 +46,37 @@ impl PlatformUtilities {
                     .and_then(|path| path.to_str())
                     .and_then(EdtVersion::parse_lenient)
             });
-        let sources_format = (config.tools.platform.version.is_none()
-            && config.tools.platform.path.is_none())
-        .then(|| sources_format(config))
-        .flatten();
+        let setting = config.tools.platform.version_setting();
+        // Формат по умолчанию: версию не задали ни маской, ни путём. С ним расходится выбор
+        // новейшей, и расхождение называется предупреждением.
+        let sources_format = (setting.is_none() && config.tools.platform.path.is_none())
+            .then(|| sources_format(config))
+            .flatten();
+        let sources = setting == Some(PlatformVersionSetting::Sources);
+        let (platform_version, source_format) = match setting {
+            Some(PlatformVersionSetting::Mask(mask)) => (Some(mask), SourceFormatRelease::Unused),
+            Some(PlatformVersionSetting::Sources) => (None, required_release(config)),
+            None => (
+                None,
+                sources_format
+                    .as_ref()
+                    .map(|format| SourceFormatRelease::Preferred(format.releases()))
+                    .unwrap_or_default(),
+            ),
+        };
         Self {
             locator: Locator::new(LocatorOptions {
                 platform_hint: config.tools.platform.path.clone(),
-                platform_version: config
-                    .tools
-                    .platform
-                    .version
-                    .as_deref()
-                    .and_then(PlatformVersionRequirement::parse),
-                platform_policy: if config.tools.platform.strict {
+                platform_version,
+                // `strict` при `sources` не действует: выпуск обязателен и без него.
+                platform_policy: if config.tools.platform.strict && !sources {
                     PlatformResolutionPolicy::Strict
                 } else {
                     PlatformResolutionPolicy::Lenient
                 },
                 edt_hint,
                 edt_version,
-                format_releases: sources_format
-                    .as_ref()
-                    .map(SourcesFormat::releases)
-                    .unwrap_or_default(),
+                source_format,
             }),
             standard_runner: ProcessExecutor,
             sources_format,
@@ -142,7 +150,7 @@ impl PlatformUtilities {
     }
 
     #[cfg(test)]
-    fn with_locator(locator: Locator) -> Self {
+    pub(crate) fn with_locator(locator: Locator) -> Self {
         Self {
             locator,
             standard_runner: ProcessExecutor,
@@ -167,20 +175,22 @@ impl SourcesFormat {
     pub fn releases(&self) -> Vec<PlatformVersionRequirement> {
         self.version.map(releases_writing).unwrap_or_default()
     }
+
+    /// Формат в форме ответа: версия, файл и выпуск, который его пишет.
+    pub fn info(&self) -> SourceFormatInfo {
+        SourceFormatInfo {
+            version: self.version.map(|version| version.to_string()),
+            file: self.file.clone(),
+            release: self.releases().first().map(ToString::to_string),
+        }
+    }
 }
 
 /// Формат исходников проекта; `None`, если формат проекта не Конфигуратора, основного набора
 /// или его `Configuration.xml` нет или файл не читается.
 pub fn sources_format(config: &AppConfig) -> Option<SourcesFormat> {
-    if config.format != SourceFormat::Designer {
-        return None;
-    }
-    let main = config
-        .source_sets
-        .iter()
-        .find(|set| set.purpose == SourceSetPurpose::Configuration)?;
-    let file = main.root_in(&config.base_path).join("Configuration.xml");
-    let version = match read_sources_format(&file) {
+    let (file, read) = read_main_format(config)?;
+    let version = match read {
         Ok(RecordedFormat::Version(version)) => Some(version),
         Ok(RecordedFormat::Unrecognized) => None,
         Ok(RecordedFormat::Missing) => return None,
@@ -190,6 +200,62 @@ pub fn sources_format(config: &AppConfig) -> Option<SourcesFormat> {
         }
     };
     Some(SourcesFormat { file, version })
+}
+
+/// Выпуск, обязательный при `tools.platform.version: sources`. `Configuration.xml` основного
+/// набора ещё нет — проект до первой выгрузки, и ограничения нет; формат не прочитан или не
+/// распознан — выпуск не выбрать, и поиск откажет. Формат EDT и проект без основного набора
+/// отвергает проверка настроек, до команды.
+fn required_release(config: &AppConfig) -> SourceFormatRelease {
+    let Some((file, read)) = read_main_format(config) else {
+        return SourceFormatRelease::Unused;
+    };
+    let (format, unreadable) = match read {
+        Ok(RecordedFormat::Missing) => return SourceFormatRelease::Unused,
+        Ok(RecordedFormat::Version(version)) => (
+            SourcesFormat {
+                file,
+                version: Some(version),
+            },
+            None,
+        ),
+        Ok(RecordedFormat::Unrecognized) => (
+            SourcesFormat {
+                file,
+                version: None,
+            },
+            None,
+        ),
+        Err(error) => (
+            SourcesFormat {
+                file,
+                version: None,
+            },
+            Some(error.to_string()),
+        ),
+    };
+    SourceFormatRelease::Required(RequiredRelease {
+        releases: format.releases(),
+        source_format: format.info(),
+        unreadable,
+    })
+}
+
+/// `Configuration.xml` основного набора формата Конфигуратора и прочитанная из него версия
+/// формата; `None`, если формат проекта не Конфигуратора или основного набора нет.
+fn read_main_format(
+    config: &AppConfig,
+) -> Option<(std::path::PathBuf, std::io::Result<RecordedFormat>)> {
+    if config.format != SourceFormat::Designer {
+        return None;
+    }
+    let main = config
+        .source_sets
+        .iter()
+        .find(|set| set.purpose == SourceSetPurpose::Configuration)?;
+    let file = main.root_in(&config.base_path).join("Configuration.xml");
+    let read = read_sources_format(&file);
+    Some((file, read))
 }
 
 #[cfg(test)]

@@ -200,6 +200,17 @@ impl AppError {
         })
     }
 
+    /// Отказ выпуска формата исходников, если это он: ему положено дойти до ответа как есть
+    /// (`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`).
+    pub fn platform_release(&self) -> Option<&crate::platform::locator::PlatformReleaseMissing> {
+        match self {
+            Self::PlatformLocator(source) | Self::PlatformLocatorContext { source, .. } => {
+                source.platform_release()
+            }
+            _ => None,
+        }
+    }
+
     /// Отмена ли это и где она остановила команду — по самой ошибке, а не по сигналу:
     /// сигнал, пришедший во время чужого отказа, отказа отменой не делает. Здесь и только
     /// здесь отмена узнаётся, как бы глубоко платформа её ни завернула. Истёкший срок —

@@ -6,6 +6,7 @@ check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_platforms.rs::platforms_name_every_installation_and_the_choice_without_starting_anything
   - tests/cli_platforms.rs::without_a_version_the_sources_format_chooses_the_release
+  - tests/cli_platform_release.rs::platforms_name_the_release_refusal_in_the_warnings
 ---
 
 # `data` команды `platforms`
@@ -15,7 +16,8 @@ check:
 
 `installations` — каждая установка, которую видит поиск, новейшие первыми, с составом
 `components`; перечень не обрезается. `requirement` — `tools.platform` проекта вместе с
-местным слоем. `source_format` — формат исходников основного набора и выпуск, который его
+местным слоем; `requirement.version` — маска или `sources`, и при `sources` `strict`
+выбора не меняет, хотя назван как задан. `source_format` — формат исходников основного набора и выпуск, который его
 пишет. `selected` — утилита, которую выбрал бы тот же поиск, что у рабочих команд, по каждой
 из `designer`, `thin_client`, `ibcmd`, или `null`, если её нет ни в одной подходящей
 установке; `chosen_by` называет, почему выбрана эта версия: `version` — маска
@@ -23,7 +25,11 @@ check:
 версию ничто не задало. Расхождение формата исходников с выбранной платформой ответ
 называет в `warnings`, туда же попадает причина, по которой утилиту выбрать нельзя, например
 версия ниже минимума (`INV.PLATFORM.A-PLATFORM-BELOW-THE-MINIMUM-IS-REFUSED`): тогда в `selected`
-стоит `null`, а установка остаётся в `installations`. В примере выпуск формата закреплён за всеми утилитами, и тонкого
+стоит `null`, а установка остаётся в `installations`. Так же, одной строкой на все утилиты,
+приходит отказ выпуска при `sources`
+(`INV.PLATFORM.A-MISSING-RELEASE-OF-THE-SOURCES-FORMAT-IS-REFUSED`): `selected` по каждой
+утилите — `null`. Предупреждение о расхождении формата с выбранной новейшей бывает только
+без ключа: при `sources` новейшую не выбирают. В примере выпуск формата закреплён за всеми утилитами, и тонкого
 клиента и `ibcmd` в нём нет: их не берут из 8.5.4.
 
 ## Пример
