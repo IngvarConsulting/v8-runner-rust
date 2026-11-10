@@ -32,8 +32,9 @@ use super::protocol::{
 };
 use super::{credentials_digest, idle_limit, KeeperHome};
 use crate::platform::agent::{
-    free_managed_port, host_key_fallback_roots, AgentError, AgentLaunch, AgentSessionRequest,
-    EphemeralHostKey, HostKeyExpectation, LaunchHostKey, ManagedAgent, WaitPolicy,
+    free_managed_port, host_key_fallback_roots, AgentError, AgentLaunch, AgentMessage,
+    AgentSessionRequest, EphemeralHostKey, HostKeyExpectation, LaunchHostKey, ManagedAgent,
+    WaitPolicy,
 };
 use crate::platform::live_registry::lock_agent_registry;
 use crate::platform::process::ProcessExecutor;
@@ -130,7 +131,7 @@ struct State {
 enum Job {
     Begin {
         session: String,
-        reply: oneshot::Sender<Result<(), KeeperError>>,
+        reply: oneshot::Sender<Result<Vec<AgentMessage>, KeeperError>>,
     },
     Run {
         session: String,
@@ -405,12 +406,13 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
     info!("the live agent is released and removed");
 }
 
-/// Начало сессии команды: агент подключается к базе.
+/// Начало сессии команды: агент подключается к базе. Ответ — то, что агент сказал при
+/// подключении: команда пишет это в свой журнал.
 fn begin_session(
     shared: &Shared,
     agent: &mut ManagedAgent,
     session: String,
-) -> Result<(), KeeperError> {
+) -> Result<Vec<AgentMessage>, KeeperError> {
     {
         let mut state = shared.lock();
         if state.close_requested || state.stop_requested {
@@ -428,8 +430,12 @@ fn begin_session(
         });
     }
     let policy = WaitPolicy::for_keeper(CancellationToken::new(), false);
-    match agent.session().connect_infobase(&policy) {
-        Ok(()) => Ok(()),
+    let mut said = Vec::new();
+    match agent
+        .session()
+        .connect_infobase_reporting(&policy, &mut |batch| said.extend_from_slice(batch))
+    {
+        Ok(()) => Ok(said),
         Err(error) => {
             {
                 let mut state = shared.lock();
@@ -866,14 +872,18 @@ where
     } else {
         Err(KeeperError::Closing)
     };
-    if let Err(error) = outcome {
-        let _ = write_line(write, &Frame::Error { error }).await;
-        return;
-    }
+    let messages = match outcome {
+        Ok(messages) => messages,
+        Err(error) => {
+            let _ = write_line(write, &Frame::Error { error }).await;
+            return;
+        }
+    };
     if write_line(
         write,
         &Frame::Begun {
             session: session.clone(),
+            messages,
         },
     )
     .await

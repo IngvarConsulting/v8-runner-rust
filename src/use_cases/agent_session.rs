@@ -628,7 +628,7 @@ fn open_live(
         launch,
         credentials,
     } = live_target(config, v8, port)?;
-    let client = match KeeperClient::connect_or_start(
+    let mut client = match KeeperClient::connect_or_start(
         &key,
         &launch,
         &credentials,
@@ -654,11 +654,23 @@ fn open_live(
     let port = client.port().ok_or_else(|| {
         AppError::EnvironmentUnavailable("the live agent keeper names no agent port".to_owned())
     })?;
-    let transcript = std::fs::OpenOptions::new()
+    let mut transcript = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(transcript_log)
         .ok();
+    let secrets: Vec<String> = [credentials.user.clone(), credentials.password.clone()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect();
+    // Подключение к базе ведёт сторож: что агент сказал при нём, команда пишет в свой журнал,
+    // как с разовым агентом, с той же маской учётных данных.
+    let connect_reply = client.take_connect_reply();
+    if let (Some(log), false) = (transcript.as_mut(), connect_reply.is_empty()) {
+        use std::io::Write as _;
+        let masked: Vec<&str> = secrets.iter().map(String::as_str).collect();
+        let _ = writeln!(log, "{}", agent::transcript_line(&connect_reply, &masked));
+    }
     let receipt = LiveAgentReceipt {
         reused: client.reused(),
         holders: Vec::new(),
@@ -676,10 +688,7 @@ fn open_live(
         receipt,
         failure: None,
         transcript,
-        secrets: [credentials.user, credentials.password]
-            .into_iter()
-            .filter(|value| !value.is_empty())
-            .collect(),
+        secrets,
         client,
     }))
 }

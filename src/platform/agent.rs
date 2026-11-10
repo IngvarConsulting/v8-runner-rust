@@ -937,7 +937,20 @@ impl AgentSession {
     /// подключили раньше (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`). Служебная
     /// команда работы команды не отмечает.
     pub fn connect_infobase(&mut self, policy: &WaitPolicy) -> Result<(), AgentError> {
-        match self.run(CONNECT_COMMAND, &policy.without_work())?.outcome() {
+        self.connect_infobase_reporting(policy, &mut |_| {})
+    }
+
+    /// То же, что `connect_infobase`, но ответ агента на подключение, уже с маской секретов,
+    /// отдаётся `on_batch`: сторож живого агента передаёт его в журнал команды.
+    pub fn connect_infobase_reporting(
+        &mut self,
+        policy: &WaitPolicy,
+        on_batch: &mut dyn FnMut(&[AgentMessage]),
+    ) -> Result<(), AgentError> {
+        match self
+            .run_streaming(CONNECT_COMMAND, &policy.without_work(), on_batch)?
+            .outcome()
+        {
             Ok(_)
             | Err(AgentError::Command {
                 error_type: AgentErrorType::DesignerAlreadyConnectedToInfoBase,

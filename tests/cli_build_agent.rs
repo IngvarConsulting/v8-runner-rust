@@ -726,6 +726,9 @@ fn push_status_and_pull_share_one_live_agent() {
     ] {
         let (code, payload) = run(&harness, arguments);
         assert_eq!(code, 0, "{arguments:?}: {payload}");
+        // Выгрузка в исходники — правка рабочей копии: следующий `pull` без `--force`
+        // переписывает только то, что есть в истории.
+        support::commit_sources(project);
         let lives = lives(&payload);
         assert!(!opens || !lives.is_empty(), "{arguments:?}: {payload}");
         assert!(

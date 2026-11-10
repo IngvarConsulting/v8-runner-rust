@@ -115,6 +115,8 @@ const GONE_PATIENCE: Duration = Duration::from_secs(3);
 struct OpenSession {
     id: String,
     stream: BufReader<Stream>,
+    /// Ответ агента на подключение к базе, ещё не записанный в журнал команды.
+    connected: Vec<AgentMessage>,
 }
 
 /// Подключение команды к сторожу ключа.
@@ -383,6 +385,15 @@ impl KeeperClient {
         Self::detached(home, keeper).map(Some)
     }
 
+    /// Ответ агента на подключение к базе в начале сессии команды — один раз: для журнала
+    /// разговора команды.
+    pub fn take_connect_reply(&mut self) -> Vec<AgentMessage> {
+        self.session
+            .as_mut()
+            .map(|session| std::mem::take(&mut session.connected))
+            .unwrap_or_default()
+    }
+
     /// Взят ли уже живой агент.
     pub fn reused(&self) -> bool {
         self.reused
@@ -583,9 +594,10 @@ impl KeeperClient {
                 .await
                 .map_err(|source| unreachable_at(&channel, source))?;
             match read_line::<_, Frame>(&mut stream).await {
-                Ok(Some(Frame::Begun { session })) => Ok(OpenSession {
+                Ok(Some(Frame::Begun { session, messages })) => Ok(OpenSession {
                     id: session,
                     stream,
+                    connected: messages,
                 }),
                 Ok(Some(Frame::Error {
                     error: KeeperError::Busy { command },
@@ -1356,6 +1368,7 @@ mod tests {
         client.session = Some(OpenSession {
             id: "session".to_owned(),
             stream: BufReader::new(Box::new(tokio::io::duplex(64).0)),
+            connected: Vec::new(),
         });
         (client, seen_rx, done_tx, state)
     }
@@ -1460,6 +1473,7 @@ mod tests {
         client.session = Some(OpenSession {
             id: "session".to_owned(),
             stream: BufReader::new(Box::new(tokio::io::duplex(64).0)),
+            connected: Vec::new(),
         });
         let mut policy = WaitPolicy::for_keeper(tokio_util::sync::CancellationToken::new(), false);
         policy.deadline = Some(Instant::now() - Duration::from_millis(1));
