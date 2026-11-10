@@ -837,8 +837,10 @@ mod tests {
             (".build/x", "service"),
             (".yaxunit/x", "service"),
             ("Forms/Form.xml", "<f/>"),
+            ("Catalogs/Номенклатура.xml", "<n/>"),
         ]);
         project.write("Untracked.bsl", "new");
+        project.write("Catalogs/Номенклатура/Ext/ObjectModule.bsl", "новый");
         project.write(
             &format!("{}1", crate::change_detection::scanner::DUMP_START_PROBE),
             "probe",
