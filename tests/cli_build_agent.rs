@@ -532,8 +532,8 @@ fn a_managed_build_loads_and_updates_in_one_session_and_records_the_generation()
         1,
         "one agent process per command"
     );
-    // Журнал поколений лежит под памятью базы, запись — на набор.
-    let bases: Vec<_> = fs::read_dir(harness.dir.path().join("work/infobases"))
+    // Журнал поколений лежит под памятью базы в localPath, запись — на набор.
+    let bases: Vec<_> = fs::read_dir(harness.dir.path().join(".local/infobases"))
         .expect("base memory")
         .map(|entry| entry.expect("entry").path())
         .collect();
@@ -722,7 +722,7 @@ fn push_status_and_pull_share_one_live_agent() {
     support::commit_sources(project);
 
     for (arguments, opens) in [
-        (&["status", "--deep"][..], false),
+        (&["status", "--deep"][..], true),
         (&["pull", "--force"][..], true),
         (&["pull"][..], false),
     ] {

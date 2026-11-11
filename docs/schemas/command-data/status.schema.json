@@ -874,6 +874,17 @@
         "$ref": "#/$defs/InfobaseStatus"
       },
       "type": "array"
+    },
+    "provider": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProviderReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Квитанция исполнителя, подготовленного для чтения поколения у `--deep`."
     }
   },
   "required": [
