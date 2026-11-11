@@ -894,6 +894,7 @@ mod tests {
         };
         AppConfig {
             local_path: root.join(".local"),
+            project_file: crate::config::model::default_project_file(),
             base_path: root.to_path_buf(),
             work_path: root.to_path_buf(),
             format: SourceFormat::Designer,
