@@ -7,6 +7,7 @@ use crate::change_detection::hash_storage::HashStorage;
 use crate::change_detection::partial_load::{self, LoadDecision};
 use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
 use crate::domain::build::{BuildMode, BuildResult, BuildStep};
+use crate::domain::progress::ProgressPhase;
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::IbcmdError;
@@ -171,7 +172,7 @@ pub(super) fn plan_edt_export_step(
             );
             log_timeline_stage(
                 &source_set.name,
-                "changes",
+                ProgressPhase::Inspect,
                 "fallback to full export/load after recoverable issue",
                 TimelineStageStatus::Succeeded,
             );
@@ -255,7 +256,7 @@ fn plan_configurator_load_from_analysis(
             );
             log_timeline_stage(
                 &source_set.name,
-                "changes",
+                ProgressPhase::Inspect,
                 "fallback to full load after recoverable issue",
                 TimelineStageStatus::Succeeded,
             );
@@ -306,7 +307,7 @@ fn plan_generated_designer_load_from_analysis(
             );
             log_timeline_stage(
                 &source_set.name,
-                "changes",
+                ProgressPhase::Inspect,
                 "fallback to full load after recoverable issue",
                 TimelineStageStatus::Succeeded,
             );
@@ -448,7 +449,7 @@ pub(super) fn log_change_analysis(source_set_name: &str, changes: &[analyzer::Fi
 
     log_timeline_stage(
         source_set_name,
-        "changes",
+        ProgressPhase::Inspect,
         &format!(
             "Изменения: найдено {} (новых {added}, изменено {modified}, удалено {deleted})",
             changes.len()

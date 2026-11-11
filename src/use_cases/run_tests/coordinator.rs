@@ -1,5 +1,6 @@
 use super::helpers::{build_prerequisite_failure, EnterpriseFailure};
 use super::*;
+use crate::domain::progress::ProgressPhase;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::TestBuildPolicy;
 
@@ -98,6 +99,8 @@ pub(super) fn run_tests(
         TestBuildPolicy::BuildFirst => {
             debug!("running build prerequisite for tests");
             log_live_stage(
+                ProgressPhase::Infobase,
+                None,
                 "test: build prerequisite",
                 "[Build] preparing test infobase",
             );
@@ -297,7 +300,12 @@ pub(super) fn run_tests(
     };
 
     debug!(path = %artifacts.run_dir.display(), "launching enterprise test run");
-    log_live_stage("test: enterprise run", "[Enterprise] running test runner");
+    log_live_stage(
+        ProgressPhase::Test,
+        None,
+        "test: enterprise run",
+        "[Enterprise] running test runner",
+    );
     let run_started = Instant::now();
     let enterprise_runner = crate::platform::process::ProcessExecutor;
     let platform_launch = build_platform_launch(&args.execution.launch, &prepared_run, &artifacts);

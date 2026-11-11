@@ -20,6 +20,7 @@ use crate::domain::capability::{Operation, Provider, ProviderPlan};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
 };
+use crate::domain::progress::ProgressPhase;
 use crate::domain::runner::RunnerKind;
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
@@ -290,6 +291,8 @@ fn run_artifacts_selected(
             }
         }
         crate::use_cases::progress::log_live_stage(
+            ProgressPhase::Preview,
+            None,
             "make: preview",
             "[Artifacts] preview only, nothing built or published",
         );
@@ -799,6 +802,8 @@ fn build_external_in(
         stage_sidecars.push(metadata_sidecar_path(&staging_file));
 
         log_live_stage(
+            ProgressPhase::Package,
+            None,
             "make: external export",
             "[Конфигуратор] exporting external artifact package",
         );
@@ -836,6 +841,8 @@ fn build_external_in(
         }
 
         log_live_stage(
+            ProgressPhase::Package,
+            None,
             "make: external dump",
             "[Конфигуратор] dumping external artifact descriptor",
         );

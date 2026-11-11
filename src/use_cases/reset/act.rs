@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
+use crate::domain::progress::ProgressPhase;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::process::ProcessRunner;
 use crate::support::error::AppError;
@@ -82,7 +83,7 @@ pub(crate) fn roll_back(
     };
     log_timeline_stage(
         set,
-        "reset",
+        ProgressPhase::Reset,
         &format!("[{executor}] Возврат к конфигурации базы данных"),
         TimelineStageStatus::Running,
     );

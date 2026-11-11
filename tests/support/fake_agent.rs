@@ -116,6 +116,8 @@ pub struct FakeAgent {
     pub dump_info: Arc<Mutex<Option<String>>>,
     /// Диагностика служебной команды подключения перед командой запроса.
     pub connect_log: Option<&'static str>,
+    /// Строка журнала, которой выгрузка в файлы открывает свой ответ, — до хода и итога.
+    pub dump_log: Option<&'static str>,
     /// Подключён ли агент к базе: повторный `common connect-ib` отвечает
     /// `DesignerAlreadyConnectedToInfoBase`, как платформа.
     pub connected: Arc<AtomicBool>,
@@ -182,6 +184,7 @@ impl FakeAgent {
             fail_dump: Arc::new(AtomicBool::new(false)),
             dump_info: Arc::new(Mutex::new(None)),
             connect_log: None,
+            dump_log: None,
             connected: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
@@ -392,7 +395,18 @@ impl FakeAgent {
                     objects.split_whitespace().collect::<Vec<_>>().join(";")
                 ));
             }
-            return (progress_then_success("Выгрузка конфигурации"), false);
+            let progress = progress_then_success("Выгрузка конфигурации");
+            return match self.dump_log {
+                Some(message) => (
+                    format!(
+                        "{}
+{progress}",
+                        serde_json::json!([{"type": "log", "message": message}])
+                    ),
+                    false,
+                ),
+                None => (progress, false),
+            };
         }
         if line.starts_with("config load-config-from-files") {
             let dir = option("dir").unwrap_or_default();

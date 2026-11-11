@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
+use crate::domain::progress::ProgressPhase;
 use crate::platform::edt::EdtDsl;
 use crate::support::edt_project;
 use crate::support::error::AppError;
@@ -110,6 +111,8 @@ pub fn prepare_edt_external_artifacts(
             ))
         })?;
         log_live_stage(
+            ProgressPhase::Convert,
+            None,
             "edt: external export",
             "[EDT] exporting external project to Designer files",
         );

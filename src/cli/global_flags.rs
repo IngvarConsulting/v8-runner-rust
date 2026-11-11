@@ -403,6 +403,35 @@ pub fn refusal(path: &str, dry_run: bool, infobase: Option<&str>) -> Option<UseC
     }
 }
 
+/// `--events -` пишет ход команды в stdout перед конвертом JSON (`CTR.WIRE.PROGRESS-EVENTS`).
+/// Где stdout занят другим — протоколом MCP, кадрами `--publication-stdio` или текстом без
+/// `--json-message`, — ключ отвергается до начала работы.
+pub fn events_refusal(
+    path: &str,
+    json_message: bool,
+    publication_stdio: bool,
+) -> Option<UseCaseError> {
+    let refuse = |message: String| Some(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    if path.starts_with("mcp ") {
+        return refuse(format!(
+            "`{}` speaks its protocol on stdout, so --events - has nowhere to write; remove --events",
+            dictionary_path(path)
+        ));
+    }
+    if publication_stdio {
+        return refuse(
+            "--publication-stdio speaks its JSONL protocol on stdout, so --events - has nowhere to write; remove --events".to_owned(),
+        );
+    }
+    if !json_message {
+        return refuse(
+            "--events - streams progress before the JSON envelope and needs --json-message"
+                .to_owned(),
+        );
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

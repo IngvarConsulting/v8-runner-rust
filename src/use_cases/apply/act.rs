@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use super::sessions::{self, SessionsPolicy};
 use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
+use crate::domain::progress::ProgressPhase;
 use crate::domain::sessions::{SessionEntry, SessionsOutcome};
 use crate::platform::agent::{AgentError, AgentErrorType, WaitPolicy};
 use crate::platform::designer::DesignerDsl;
@@ -156,10 +157,6 @@ fn apply_with(
         tool = applier.tool().as_str(),
         "applying the main configuration to the database configuration"
     );
-    let stage = match &applier {
-        Applier::Ibcmd { .. } => "ibcmd_apply",
-        Applier::Designer { .. } | Applier::Agent { .. } => "update_db_cfg",
-    };
     let detail = match subject.kind {
         SubjectKind::ToolExtension => {
             format!("[{executor}] Применение расширения {}", subject.name)
@@ -168,7 +165,7 @@ fn apply_with(
     };
     log_timeline_stage(
         subject.timeline,
-        stage,
+        ProgressPhase::UpdateDb,
         &detail,
         TimelineStageStatus::Running,
     );

@@ -202,6 +202,8 @@ fn a_process_argument_loses_the_verbatim_prefix_only_at_the_launch() {
 fn a_response_reaches_stdout_only_through_its_owners() {
     const OWNERS: &[&str] = &[
         "src/output/text.rs",
+        // Поток `--events -`: события хода и конверт под одним замком (#579).
+        "src/output/events.rs",
         "src/cli/external_pull.rs",
         "src/support/logging.rs",
     ];
@@ -236,6 +238,7 @@ fn a_response_reaches_stdout_only_through_its_owners() {
     for (owner, gate) in [
         ("src/output/text.rs", "response_text ("),
         ("src/output/text.rs", "response_json ("),
+        ("src/output/events.rs", "response_json ("),
         ("src/cli/external_pull.rs", "response_json ("),
         ("src/mcp/server.rs", "response_value ("),
     ] {
