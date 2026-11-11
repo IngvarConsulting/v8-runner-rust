@@ -50,6 +50,9 @@ pub enum UseCaseErrorKind {
     LiveAgentOff,
     /// `agent hold` в Job, из которого сторож не может выйти.
     LiveAgentJob,
+    /// Правило игнорирования git прячет файл набора: изменения набора берутся у git, и
+    /// спрятанный файл не загрузился бы (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+    SourceSetIgnoredByGit,
     InvalidOutput,
     /// Отмена оператором; место остановки говорит, оборвана ли работа исполнителя.
     Cancelled(CancelledAt),
@@ -72,7 +75,7 @@ impl UseCaseErrorKind {
             | Self::InfobaseDesignerBusy => RUNTIME_EXIT_CODE,
             Self::NonFastForward | Self::UntrackedBase => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
-            Self::Validation => VALIDATION_EXIT_CODE,
+            Self::Validation | Self::SourceSetIgnoredByGit => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
             Self::Platform => PLATFORM_EXIT_CODE,
         }
@@ -150,6 +153,7 @@ impl UseCaseErrorKind {
             Self::AgentLimit => "agent_limit",
             Self::LiveAgentOff => "live_agent_off",
             Self::LiveAgentJob => "live_agent_job",
+            Self::SourceSetIgnoredByGit => "source_set_ignored_by_git",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled(_) => CANCELLED_ERROR_CODE,
             Self::TimedOut => "timed_out",
@@ -176,6 +180,7 @@ impl UseCaseErrorKind {
             | Self::AgentLimit
             | Self::LiveAgentOff
             | Self::LiveAgentJob
+            | Self::SourceSetIgnoredByGit
             | Self::Validation
             | Self::Runtime
             | Self::Platform => ExecutionStatus::Failed,
@@ -195,6 +200,7 @@ impl UseCaseErrorKind {
             Self::AgentLimit => "live agent limit",
             Self::LiveAgentOff => "live agent off",
             Self::LiveAgentJob => "live agent impossible in this job",
+            Self::SourceSetIgnoredByGit => "source set ignored by git",
             Self::InvalidOutput => "invalid output",
             Self::Cancelled(_) => "cancelled",
             Self::TimedOut => "timed out",

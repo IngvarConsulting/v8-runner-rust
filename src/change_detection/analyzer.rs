@@ -1,14 +1,20 @@
-use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::change_detection::file_state::mtime_nanos;
-use crate::change_detection::hash_storage::{
-    HashStorage, StorageDelta, StorageError, StorageSnapshot, StorageSummary, StoredFileState,
+use crate::change_detection::git_ignore::{dump_samples, HiddenBy, IgnoreRules};
+use crate::change_detection::git_tree::{
+    in_runner_dir, BlobHashError, BlobHasher, GitSource, ObserveError, ObservedFile, Spelling,
 };
+use crate::change_detection::hash_storage::{
+    HashKind, HashStorage, StorageDelta, StorageError, StorageSnapshot, StorageSummary,
+    StoredFileState,
+};
+use crate::change_detection::runner_dirs::{runner_dirs_inside, RunnerDirs};
 use crate::change_detection::scanner::{self, ScanError, ScanScope};
+use crate::domain::git_worktree::{ChangeDetection, GitWorktree, ScanReason};
 use crate::domain::source_set::SourceSetContext;
 
 /// A single detected file change.
@@ -37,6 +43,14 @@ pub struct PreparedStateUpdate {
     pub observed_generation: u64,
 }
 
+/// Where the changes of a set come from (#575).
+pub enum ChangeSource<'v, 'h> {
+    /// Every file is read; the reason is named when the caller knows why git is not asked.
+    Scan(Option<ScanReason>),
+    /// Git names the files and their blob ids.
+    Git(GitSource<'v, 'h>),
+}
+
 /// Result of analyzing one source-set against its persisted snapshot.
 #[derive(Debug, Clone)]
 pub enum AnalysisOutcome {
@@ -53,6 +67,8 @@ pub enum AnalysisOutcome {
 pub struct ContextAnalysis {
     pub context: SourceSetContext,
     pub outcome: Result<AnalysisOutcome, ChangeDetectionError>,
+    /// How the changes were found; `None` when the analysis stopped before it looked.
+    pub detection: Option<ChangeDetection>,
 }
 
 /// Hard failures that prevent normal change-detection flow.
@@ -90,74 +106,414 @@ pub enum ChangeDetectionError {
         expected: u64,
         actual: u64,
     },
+
+    /// A git ignore rule can hide a file the platform writes into the set: git would not report
+    /// it, and its change would never be loaded
+    /// (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
+    #[error("{}", hidden_message(source_set, hidden))]
+    HiddenByGit {
+        source_set: String,
+        hidden: Box<HiddenBy>,
+    },
 }
 
-/// Analyze one source-set context and produce either concrete changes or a safe fallback.
+fn hidden_message(source_set: &str, hidden: &HiddenBy) -> String {
+    let paths = if hidden.paths == ["."] {
+        "the set root itself".to_owned()
+    } else {
+        hidden
+            .paths
+            .iter()
+            .map(|path| format!("'{path}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "the git ignore rule '{}' at {}:{} hides files of source-set '{source_set}' ({paths}): git does not report a change of an ignored file, so it would never be loaded. Anchor the rule to the place it is meant for, for example '/build/' instead of 'build/', or remove it",
+        hidden.rule,
+        hidden.file.display(),
+        hidden.line,
+    )
+}
+
+/// Analyze one source-set context by reading every file and produce either concrete changes
+/// or a safe fallback.
 pub fn analyze_context(
     context: &SourceSetContext,
     work_path: &Path,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> ContextAnalysis {
+    analyze_context_from(context, work_path, ChangeSource::Scan(None), interrupted)
+}
+
+/// What one analysis found, before the final interruption check.
+struct Found {
+    outcome: Result<AnalysisOutcome, ChangeDetectionError>,
+    detection: Option<ChangeDetection>,
+}
+
+impl Found {
+    fn early(outcome: Result<AnalysisOutcome, ChangeDetectionError>) -> Self {
+        Self {
+            outcome,
+            detection: None,
+        }
+    }
+}
+
+/// Analyze one source-set context with its changes taken from `source` (#575): git names the
+/// files and their blob ids, or every file is read and hashed the way git hashes a file without
+/// filters. Memory written before #575 compares with nothing and gives a full load.
+pub fn analyze_context_from(
+    context: &SourceSetContext,
+    work_path: &Path,
+    source: ChangeSource<'_, '_>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> ContextAnalysis {
     // All outcomes, including storage and IO fallback, cross the same final
     // interruption check. No early return can turn cancellation into a full load.
-    let outcome = if interrupted() {
-        Err(ChangeDetectionError::Interrupted)
+    let found = if interrupted() {
+        Found::early(Err(ChangeDetectionError::Interrupted))
     } else {
-        (|| {
-            let snapshot = match context.storage_path(work_path) {
-                None => Default::default(),
-                Some(path) => match load_bound_snapshot(context, &HashStorage::new(path)) {
-                    Ok(Some(snapshot)) => snapshot,
-                    Ok(None) => return Ok(AnalysisOutcome::Fallback),
-                    Err(error) => return Err(error),
-                },
-            };
-            let excluded = runner_dirs(context, work_path);
-            let scan = match scan_sources(context, context.path(), &excluded, interrupted) {
-                Ok(scan) => scan,
-                Err(ScanError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
-                Err(error) => {
-                    tracing::warn!(source_set = %context.name(), error = %error, "scan failed, switching to fallback mode");
-                    return Ok(AnalysisOutcome::Fallback);
-                }
-            };
-            if scan.has_untracked_links {
-                return Ok(AnalysisOutcome::Fallback);
+        let snapshot = match context.storage_path(work_path) {
+            None => Ok(Some(StorageSnapshot::default())),
+            Some(path) => load_bound_snapshot(context, &HashStorage::new(path)),
+        };
+        match snapshot {
+            Ok(Some(snapshot)) => {
+                analyze_snapshot(context, work_path, &snapshot, source, interrupted)
             }
-            let mut changes = detect_changes(&scan.files, &snapshot.entries);
-            let seen_rel: HashSet<&str> = scan
-                .files
-                .iter()
-                .map(|file| file.rel_path.as_str())
-                .collect();
-            changes.extend(
-                snapshot
-                    .entries
-                    .iter()
-                    .filter(|(relative, _)| !seen_rel.contains(relative.as_str()))
-                    .map(|(relative, _)| FileChange {
-                        path: context.path().join(relative),
-                        kind: ChangeKind::Deleted,
-                    }),
-            );
-            Ok(if changes.is_empty() {
-                AnalysisOutcome::NoChanges
-            } else {
-                AnalysisOutcome::Changes {
-                    changes,
-                    prepared: build_prepared_state(&scan, &snapshot),
-                }
-            })
-        })()
+            Ok(None) => Found::early(Ok(AnalysisOutcome::Fallback)),
+            Err(error) => Found::early(Err(error)),
+        }
     };
+    let interrupted_now = interrupted();
     ContextAnalysis {
         context: context.clone(),
-        outcome: if interrupted() {
+        outcome: if interrupted_now {
             Err(ChangeDetectionError::Interrupted)
         } else {
-            outcome
+            found.outcome
         },
+        detection: found.detection,
     }
+}
+
+fn analyze_snapshot(
+    context: &SourceSetContext,
+    work_path: &Path,
+    snapshot: &StorageSnapshot,
+    source: ChangeSource<'_, '_>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Found {
+    // A memory of another hasher compares with nothing: the set loads whole (#575).
+    let other_kind = |kind: HashKind| !snapshot.entries.is_empty() && snapshot.hash_kind != kind;
+    let reason = match source {
+        ChangeSource::Scan(reason) => reason,
+        ChangeSource::Git(mut git) => {
+            let runner_dirs = runner_dirs_below(context, work_path);
+            if let Some(hidden) = hidden_by_git(git.view, &git.root, snapshot, &runner_dirs) {
+                return Found::early(Err(ChangeDetectionError::HiddenByGit {
+                    source_set: context.name().to_owned(),
+                    hidden: Box::new(hidden),
+                }));
+            }
+            let detection = ChangeDetection::git(git.view.fsmonitor);
+            let spelling = Spelling::new(&snapshot.entries, git.view.ignore_case);
+            match observe_by_git(
+                context,
+                snapshot,
+                &spelling,
+                &runner_dirs,
+                &mut git,
+                interrupted,
+            ) {
+                // Память хешей байтов — например, записанная до того, как каталог стал
+                // рабочей копией git, — сравнивается тем же хешером, чтением файлов: полная
+                // загрузка из-за смены хешера была бы ложной. Хешами git её заменит полная
+                // выгрузка или отправка.
+                Ok(_) if other_kind(HashKind::GitBlob) => Some(ScanReason::BytesMemory),
+                Ok(observed) => {
+                    let changes = git_changes(context, &observed, snapshot, &spelling);
+                    return Found {
+                        outcome: Ok(if changes.is_empty() {
+                            AnalysisOutcome::NoChanges
+                        } else {
+                            AnalysisOutcome::Changes {
+                                changes,
+                                prepared: git_prepared_state(&observed, snapshot, Some(&spelling)),
+                            }
+                        }),
+                        detection: Some(detection),
+                    };
+                }
+                Err(ObserveError::Interrupted) => {
+                    return Found::early(Err(ChangeDetectionError::Interrupted))
+                }
+                Err(ObserveError::Unusable { reason, detail }) => {
+                    tracing::warn!(
+                        source_set = %context.name(),
+                        reason = ?reason,
+                        detail,
+                        "git cannot describe the set; its files are read"
+                    );
+                    Some(reason)
+                }
+            }
+        }
+    };
+    let detection = reason.map(ChangeDetection::scan);
+    if other_kind(HashKind::RawBlob) {
+        return Found {
+            outcome: Ok(AnalysisOutcome::Fallback),
+            detection,
+        };
+    }
+    let mut found = scan_snapshot(context, work_path, snapshot, interrupted);
+    found.detection = detection;
+    found
+}
+
+/// The rule of an ignore file that can hide a file of the set: one of the remembered files —
+/// those a dump wrote — or, with nothing remembered, one of the files a dump writes. Files in
+/// the runner directories `runner_dirs` are no sources: the rule `*` that `localPath` hides
+/// itself with hides nothing of the set.
+fn hidden_by_git(
+    view: &GitWorktree,
+    root: &str,
+    snapshot: &StorageSnapshot,
+    runner_dirs: &[String],
+) -> Option<HiddenBy> {
+    let rules = IgnoreRules::read(&view.ignore_sources, view.ignore_case);
+    let source = |path: &&str| !in_runner_dir(path, runner_dirs, view.ignore_case);
+    if snapshot.entries.is_empty() {
+        let samples = dump_samples();
+        rules.hiding(root, samples.iter().map(String::as_str).filter(source))
+    } else {
+        let mut remembered: Vec<&str> = snapshot
+            .entries
+            .keys()
+            .map(String::as_str)
+            .filter(source)
+            .collect();
+        remembered.sort_unstable();
+        rules.hiding(root, remembered)
+    }
+}
+
+/// Whether a git ignore rule can hide a file of the set at `root` of the working tree `view`:
+/// one of the remembered files, or with no memory of the base — memory of another pair, of an
+/// old runner, unreadable — one of the files a dump writes
+/// (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`). For commands that compare
+/// nothing: a full pull, `push --full`, `make`.
+pub fn hidden_by_git_rules(
+    context: &SourceSetContext,
+    work_path: &Path,
+    view: &GitWorktree,
+    root: &str,
+) -> Result<(), ChangeDetectionError> {
+    let snapshot = context
+        .storage_path(work_path)
+        .and_then(|path| {
+            load_bound_snapshot(context, &HashStorage::new(path))
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_default();
+    match hidden_by_git(
+        view,
+        root,
+        &snapshot,
+        &runner_dirs_below(context, work_path),
+    ) {
+        Some(hidden) => Err(ChangeDetectionError::HiddenByGit {
+            source_set: context.name().to_owned(),
+            hidden: Box::new(hidden),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The set's files as git lists them, checked against the memory: a remembered file git does
+/// not list but the disk still holds means git's answer misses it, and the set is read. A
+/// remembered file in a runner directory is no source: it is gone, as for the walk.
+fn observe_by_git(
+    context: &SourceSetContext,
+    snapshot: &StorageSnapshot,
+    spelling: &Spelling<'_>,
+    runner_dirs: &[String],
+    git: &mut GitSource<'_, '_>,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Result<Vec<ObservedFile>, ObserveError> {
+    let observed = git.observe(context.path(), interrupted)?;
+    let seen: HashSet<&str> = observed
+        .iter()
+        .map(|file| {
+            spelling
+                .of(&file.rel_path)
+                .unwrap_or(file.rel_path.as_str())
+        })
+        .collect();
+    for relative in snapshot.entries.keys() {
+        if seen.contains(relative.as_str())
+            || in_runner_dir(relative, runner_dirs, git.view.ignore_case)
+        {
+            continue;
+        }
+        let path = context.path().join(relative);
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_file()) {
+            return Err(ObserveError::Unusable {
+                reason: ScanReason::GitFailed,
+                detail: format!(
+                    "'{}' is on disk, but git lists no such file",
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(observed)
+}
+
+/// Changes between git's listing and the memory of blob ids.
+fn git_changes(
+    context: &SourceSetContext,
+    observed: &[ObservedFile],
+    snapshot: &StorageSnapshot,
+    spelling: &Spelling<'_>,
+) -> Vec<FileChange> {
+    let mut seen = HashSet::new();
+    let mut changes: Vec<FileChange> = observed
+        .iter()
+        .filter_map(|file| {
+            let key = spelling.of(&file.rel_path);
+            if let Some(key) = key {
+                seen.insert(key);
+            }
+            let kind = match key.and_then(|key| snapshot.entries.get(key)) {
+                None => ChangeKind::Added,
+                Some(stored) if file.hash.as_deref() != Some(stored.hash.as_str()) => {
+                    ChangeKind::Modified
+                }
+                Some(_) => return None,
+            };
+            Some(FileChange {
+                path: file.path.clone(),
+                kind,
+            })
+        })
+        .collect();
+    changes.extend(
+        snapshot
+            .entries
+            .keys()
+            .filter(|relative| !seen.contains(relative.as_str()))
+            .map(|relative| FileChange {
+                path: context.path().join(relative),
+                kind: ChangeKind::Deleted,
+            }),
+    );
+    changes
+}
+
+/// Git's listing as rows of blob ids that differ from `stored`. A file whose id is unknown is
+/// neither remembered anew nor forgotten. With `spelling`, a file is remembered under the key
+/// the memory already spells it with; without it, the rows are a whole new memory.
+fn git_prepared_state(
+    observed: &[ObservedFile],
+    stored: &StorageSnapshot,
+    spelling: Option<&Spelling<'_>>,
+) -> PreparedStateUpdate {
+    let mut seen = HashSet::new();
+    let mut upserts = HashMap::new();
+    for file in observed {
+        let key = spelling
+            .and_then(|spelling| spelling.of(&file.rel_path))
+            .unwrap_or(file.rel_path.as_str());
+        seen.insert(key.to_owned());
+        let Some(hash) = &file.hash else {
+            continue;
+        };
+        let differs = spelling.is_none()
+            || stored
+                .entries
+                .get(key)
+                .is_none_or(|entry| entry.mtime_ns != 0 || &entry.hash != hash);
+        if differs {
+            upserts.insert(
+                key.to_owned(),
+                StoredFileState {
+                    // Git answers for the time; the memory of blob ids keeps none.
+                    mtime_ns: 0,
+                    hash: hash.clone(),
+                },
+            );
+        }
+    }
+    let removals = stored
+        .entries
+        .keys()
+        .filter(|key| !seen.contains(key.as_str()))
+        .cloned()
+        .collect();
+    PreparedStateUpdate {
+        delta: StorageDelta {
+            upserts,
+            removals,
+            hash_kind: HashKind::GitBlob,
+        },
+        scanned_files: observed.len(),
+        scan_started_at: now_ns(),
+        observed_generation: stored.generation,
+    }
+}
+
+fn now_ns() -> u64 {
+    mtime_nanos(std::time::SystemTime::now(), Path::new(".")).unwrap_or(0)
+}
+
+/// The analysis by reading every file: SHA-256 against the memory.
+fn scan_snapshot(
+    context: &SourceSetContext,
+    work_path: &Path,
+    snapshot: &StorageSnapshot,
+    interrupted: &mut dyn FnMut() -> bool,
+) -> Found {
+    let excluded = runner_dirs(context, work_path);
+    let scan = match scan_sources(context, context.path(), &excluded, interrupted) {
+        Ok(scan) => scan,
+        Err(ScanError::Interrupted) => return Found::early(Err(ChangeDetectionError::Interrupted)),
+        Err(error) => {
+            tracing::warn!(source_set = %context.name(), error = %error, "scan failed, switching to fallback mode");
+            return Found::early(Ok(AnalysisOutcome::Fallback));
+        }
+    };
+    if scan.has_untracked_links {
+        return Found::early(Ok(AnalysisOutcome::Fallback));
+    }
+    let mut changes = detect_changes(&scan.files, &snapshot.entries);
+    let seen_rel: HashSet<&str> = scan
+        .files
+        .iter()
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    changes.extend(
+        snapshot
+            .entries
+            .iter()
+            .filter(|(relative, _)| !seen_rel.contains(relative.as_str()))
+            .map(|(relative, _)| FileChange {
+                path: context.path().join(relative),
+                kind: ChangeKind::Deleted,
+            }),
+    );
+    Found::early(Ok(if changes.is_empty() {
+        AnalysisOutcome::NoChanges
+    } else {
+        AnalysisOutcome::Changes {
+            changes,
+            prepared: build_prepared_state(&scan, snapshot),
+        }
+    }))
 }
 
 /// Load the snapshot and check that it describes this context's base and sources.
@@ -175,7 +531,8 @@ fn load_bound_snapshot(
         snapshot.is_blank(),
         snapshot.identity.as_deref(),
     )?;
-    Ok(Some(snapshot))
+    // Memory written before #575 compares with nothing (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
+    Ok(Some(snapshot).filter(|snapshot| !snapshot.is_legacy()))
 }
 
 /// [`load_bound_snapshot`] without the file rows, for a commit that names only the rows it
@@ -193,7 +550,7 @@ fn load_bound_summary(
         summary.is_blank(),
         summary.identity.as_deref(),
     )?;
-    Ok(Some(summary))
+    Ok(Some(summary).filter(|summary| !summary.is_legacy()))
 }
 
 /// `Ok(None)` for a recoverable storage problem, a refusal for a hard one.
@@ -245,7 +602,8 @@ pub enum SnapshotMemory {
     Own,
     /// Память записана для другой базы или другого каталога.
     Foreign,
-    /// Хранилище не открывается: ответ даст анализ изменений своим отказом.
+    /// Хранилище не открывается — ответ даст анализ изменений своим отказом, — или память
+    /// записана раннером до #575, и её хеши ни с чем не сравнить.
     Unreadable,
 }
 
@@ -260,6 +618,8 @@ pub fn snapshot_memory(context: &SourceSetContext, work_path: &Path) -> Snapshot
     // The rows are not needed for this answer; the analysis that uses them reads them itself.
     match HashStorage::new(path).load_summary() {
         Ok(summary) if summary.is_blank() => SnapshotMemory::Nothing,
+        // Written before #575: its hashes compare with nothing, and it is no memory of the base.
+        Ok(summary) if summary.is_legacy() => SnapshotMemory::Unreadable,
         Ok(summary) if summary.identity.as_deref() == context.storage_identity() => {
             SnapshotMemory::Own
         }
@@ -280,21 +640,10 @@ pub fn commit_empty_snapshot(
         work_path,
         &FullSnapshot {
             snapshot: HashMap::new(),
+            hash_kind: HashKind::RawBlob,
             scan_started_at: 0,
         },
     )
-}
-
-/// Analyze multiple source-set contexts using the same work directory.
-pub fn analyze_contexts(
-    contexts: &[SourceSetContext],
-    work_path: &Path,
-    interrupted: &mut dyn FnMut() -> bool,
-) -> Vec<ContextAnalysis> {
-    contexts
-        .iter()
-        .map(|ctx| analyze_context(ctx, work_path, interrupted))
-        .collect()
 }
 
 /// Persist a prepared snapshot after the corresponding build/load step succeeded.
@@ -327,6 +676,148 @@ pub fn rescan_and_commit_full(
     }
     let prepared = prepare_source_snapshot(context, work_path)?;
     commit_full_snapshot(context, work_path, &prepared)
+}
+
+/// [`rescan_and_commit_full`] with the files and their ids taken from `source`: under git the
+/// memory is written as blob ids, so the next analysis asks git (#575). When git cannot
+/// describe the set, every file is read.
+pub fn rescan_and_commit_full_from(
+    context: &SourceSetContext,
+    work_path: &Path,
+    source: ChangeSource<'_, '_>,
+) -> Result<(), ChangeDetectionError> {
+    if !context.persists_snapshot() {
+        return Ok(());
+    }
+    if let ChangeSource::Git(git) = source {
+        if commit_full_from_git(context, work_path, git)? {
+            return Ok(());
+        }
+    }
+    let prepared = prepare_source_snapshot(context, work_path)?;
+    commit_full_snapshot(context, work_path, &prepared)
+}
+
+/// Replaces the memory of the set with the blob ids git gives its tree now; a file whose id is
+/// unknown — it moved while it was hashed — is not remembered and stays a change. `Ok(false)`:
+/// git cannot describe the set, and nothing is written.
+pub fn commit_full_from_git(
+    context: &SourceSetContext,
+    work_path: &Path,
+    mut git: GitSource<'_, '_>,
+) -> Result<bool, ChangeDetectionError> {
+    if !context.persists_snapshot() {
+        return Ok(true);
+    }
+    let observed = match git.observe(context.path(), &mut || false) {
+        Ok(observed) => observed,
+        Err(ObserveError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+        Err(ObserveError::Unusable { reason, detail }) => {
+            tracing::warn!(source_set = %context.name(), reason = ?reason, detail, "git cannot describe the set; its files are read");
+            return Ok(false);
+        }
+    };
+    let prepared = FullSnapshot {
+        snapshot: observed
+            .into_iter()
+            .filter_map(|file| {
+                Some((
+                    file.rel_path,
+                    StoredFileState {
+                        mtime_ns: 0,
+                        hash: file.hash?,
+                    },
+                ))
+            })
+            .collect(),
+        hash_kind: HashKind::GitBlob,
+        scan_started_at: now_ns(),
+    };
+    commit_full_snapshot(context, work_path, &prepared).map(|()| true)
+}
+
+/// The tree a full pull staged and then published into the set, as git would store it (#575).
+/// Git names the ids of the published files; a row of `prepared` keeps only when the published
+/// file still carries the time it had in staging — publication moves files, it does not
+/// rewrite them, — so an edit made after publication stays a change. `None`: git cannot
+/// describe the set, and the caller remembers `prepared` as read.
+pub fn full_snapshot_by_git(
+    context: &SourceSetContext,
+    prepared: &FullSnapshot,
+    mut git: GitSource<'_, '_>,
+) -> Result<Option<FullSnapshot>, ChangeDetectionError> {
+    let observed = match git.observe(context.path(), &mut || false) {
+        Ok(observed) => observed,
+        Err(ObserveError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+        Err(ObserveError::Unusable { reason, detail }) => {
+            tracing::warn!(source_set = %context.name(), reason = ?reason, detail, "git cannot describe the published set; it is remembered as read");
+            return Ok(None);
+        }
+    };
+    let ids: HashMap<String, String> = observed
+        .into_iter()
+        .filter_map(|file| Some((file.rel_path, file.hash?)))
+        .collect();
+    let snapshot = prepared
+        .snapshot
+        .iter()
+        .filter_map(|(rel_path, staged)| {
+            let path = context.path().join(rel_path);
+            let published = std::fs::metadata(&path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| mtime_nanos(modified, &path).ok());
+            (published == Some(staged.mtime_ns)).then_some(())?;
+            Some((
+                rel_path.clone(),
+                StoredFileState {
+                    mtime_ns: staged.mtime_ns,
+                    hash: ids.get(rel_path)?.clone(),
+                },
+            ))
+        })
+        .collect();
+    Ok(Some(FullSnapshot {
+        snapshot,
+        hash_kind: HashKind::GitBlob,
+        scan_started_at: prepared.scan_started_at,
+    }))
+}
+
+/// The tree of the set as `source` names it: under git the ids `git add` would store, else the
+/// ids of the bytes. A file whose id is unknown is not remembered (#575).
+pub fn prepare_source_snapshot_from(
+    context: &SourceSetContext,
+    work_path: &Path,
+    source: ChangeSource<'_, '_>,
+) -> Result<FullSnapshot, ChangeDetectionError> {
+    if let ChangeSource::Git(mut git) = source {
+        match git.observe(context.path(), &mut || false) {
+            Ok(observed) => {
+                return Ok(FullSnapshot {
+                    snapshot: observed
+                        .into_iter()
+                        .filter_map(|file| {
+                            Some((
+                                file.rel_path,
+                                StoredFileState {
+                                    mtime_ns: 0,
+                                    hash: file.hash?,
+                                },
+                            ))
+                        })
+                        .collect(),
+                    hash_kind: HashKind::GitBlob,
+                    scan_started_at: now_ns(),
+                })
+            }
+            Err(ObserveError::Interrupted) => return Err(ChangeDetectionError::Interrupted),
+            Err(ObserveError::Unusable { reason, detail }) => {
+                tracing::warn!(source_set = %context.name(), reason = ?reason, detail, "git cannot describe the set; its files are read");
+            }
+        }
+    }
+    prepare_source_snapshot(context, work_path)
 }
 
 /// Hash the source-set directory itself, which can hold `workPath`.
@@ -369,6 +860,7 @@ fn prepare_snapshot(
                 )
             })
             .collect(),
+        hash_kind: HashKind::RawBlob,
         scan_started_at: scan.scan_started_at,
     })
 }
@@ -389,6 +881,7 @@ pub fn commit_full_snapshot(
             return storage
                 .recover_and_commit_snapshot_with_identity(
                     &prepared.snapshot,
+                    prepared.hash_kind,
                     prepared.scan_started_at,
                     context.storage_identity(),
                 )
@@ -399,6 +892,7 @@ pub fn commit_full_snapshot(
     storage
         .commit_snapshot_with_identity(
             &prepared.snapshot,
+            prepared.hash_kind,
             prepared.scan_started_at,
             generation,
             context.storage_identity(),
@@ -412,6 +906,21 @@ fn runner_dirs(context: &SourceSetContext, work_path: &Path) -> Vec<std::path::P
         context.path(),
         RunnerDirs::new(work_path, context.local_path()),
     )
+}
+
+/// [`runner_dirs`] from the set root, `/`-separated: how git's answer names them (#575).
+pub(crate) fn runner_dirs_below(context: &SourceSetContext, work_path: &Path) -> Vec<String> {
+    runner_dirs(context, work_path)
+        .iter()
+        .filter_map(|dir| dir.strip_prefix(context.path()).ok())
+        .map(|below| {
+            below
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect()
 }
 
 fn scan_sources(
@@ -611,12 +1120,17 @@ pub struct DumpWrites {
 /// whose time moved while it was hashed stays a change too. An edit made while the dump ran
 /// cannot be told from the platform's writes and is remembered (#170). `listed` is the tree
 /// after the dump ([`list_after_dump`]).
+///
+/// Under git `blobs` hashes the written files, named from the set root `root` of the working
+/// tree, as `git add` stores them; without git they are hashed in-process the same way
+/// without filters (#575).
 pub fn observe_dump_writes(
     context: &SourceSetContext,
     work_path: &Path,
     watch: &DumpWatch,
     ended: Option<DumpStart>,
     listed: DumpListing,
+    blobs: Option<(&str, &mut BlobHasher<'_>)>,
     interrupted: &(dyn Fn() -> bool + Sync),
 ) -> Result<DumpWrites, ChangeDetectionError> {
     let writes = |rows| DumpWrites {
@@ -663,26 +1177,76 @@ pub fn observe_dump_writes(
         return Ok(writes(None));
     }
     // Файл, время которого сдвинулось, пока его читали, в ответ не попадает и остаётся изменением.
-    let upserts = scanner::hash_listed_unmoved(written, &mut || interrupted())
-        .map_err(|error| map_scan_error(context, error))?
-        .into_iter()
-        .map(|file| {
-            (
-                file.rel_path,
-                StoredFileState {
-                    mtime_ns: file.mtime_ns,
-                    hash: file.hash,
-                },
-            )
-        })
-        .collect();
+    // Записанное хешируется тем же хешером, что записал память: id двух хешеров в одной
+    // памяти не встречаются (#575). Память хешами git без git ничего не запоминает.
+    let upserts = match (summary.hash_kind, blobs) {
+        (HashKind::GitBlob, None) => return Ok(writes(None)),
+        (HashKind::GitBlob, Some((root, hash_blobs))) => {
+            blob_ids_unmoved(context, root, written, hash_blobs, interrupted)?
+        }
+        _ => scanner::hash_listed_unmoved(written, &mut || interrupted())
+            .map_err(|error| map_scan_error(context, error))?
+            .into_iter()
+            .map(|file| {
+                (
+                    file.rel_path,
+                    StoredFileState {
+                        mtime_ns: file.mtime_ns,
+                        hash: file.hash,
+                    },
+                )
+            })
+            .collect(),
+    };
+    let hash_kind = summary.hash_kind;
     Ok(writes(Some((
         summary,
         StorageDelta {
             upserts,
             removals: removed,
+            hash_kind,
         },
     ))))
+}
+
+/// Blob ids of `written` files whose time stayed put while they were hashed.
+fn blob_ids_unmoved(
+    context: &SourceSetContext,
+    root: &str,
+    written: Vec<scanner::Candidate>,
+    hash_blobs: &mut BlobHasher<'_>,
+    interrupted: &(dyn Fn() -> bool + Sync),
+) -> Result<HashMap<String, StoredFileState>, ChangeDetectionError> {
+    let names: Vec<String> = written
+        .iter()
+        .map(|file| {
+            if root.is_empty() {
+                file.rel_path.clone()
+            } else {
+                format!("{root}/{}", file.rel_path)
+            }
+        })
+        .collect();
+    let ids = hash_blobs(&names, &mut || interrupted()).map_err(|error| match error {
+        BlobHashError::Interrupted => ChangeDetectionError::Interrupted,
+        BlobHashError::Failed(reason) => ChangeDetectionError::StorageHard {
+            source_set: context.name().to_owned(),
+            storage_path: context.path().to_path_buf(),
+            reason: format!("git hash-object failed: {reason}"),
+        },
+    })?;
+    Ok(written
+        .into_iter()
+        .zip(ids)
+        .filter(|(file, _)| {
+            std::fs::metadata(&file.path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| mtime_nanos(modified, &file.path).ok())
+                == Some(file.mtime_ns)
+        })
+        .map(|(file, hash)| (file.rel_path, StoredFileState { mtime_ns: 0, hash }))
+        .collect())
 }
 
 impl DumpWrites {
@@ -716,7 +1280,7 @@ pub fn record_dump_changes(
     watch: &DumpWatch,
 ) -> Result<(), ChangeDetectionError> {
     let listed = list_after_dump(context, work_path, &|| false)?;
-    observe_dump_writes(context, work_path, watch, None, listed, &|| false)?
+    observe_dump_writes(context, work_path, watch, None, listed, None, &|| false)?
         .commit(context, work_path)
 }
 
@@ -779,7 +1343,11 @@ fn build_prepared_state(
         .cloned()
         .collect();
     PreparedStateUpdate {
-        delta: StorageDelta { upserts, removals },
+        delta: StorageDelta {
+            upserts,
+            removals,
+            hash_kind: HashKind::RawBlob,
+        },
         scanned_files: scan.files.len(),
         scan_started_at: scan.scan_started_at,
         observed_generation: stored.generation,
@@ -788,6 +1356,7 @@ fn build_prepared_state(
 
 pub struct FullSnapshot {
     snapshot: HashMap<String, StoredFileState>,
+    hash_kind: HashKind,
     scan_started_at: u64,
 }
 
@@ -845,6 +1414,52 @@ mod tests {
     use std::fs::File;
     use std::time::SystemTime;
     use tempfile::tempdir;
+
+    /// Память, которую записал раннер до #575 (хеши SHA-256, вида хеша в ней нет), — не память
+    /// о базе: `push` откажет `untracked_base`, анализ грузит набор целиком, а запись новой
+    /// памяти поверх неё — уже память хешами git.
+    #[test]
+    fn memory_written_before_git_ids_is_no_memory_of_the_base() {
+        use super::{snapshot_memory, SnapshotMemory};
+        use crate::change_detection::hash_storage::{HashStorage, META, META_KEY_HASH_KIND};
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("src");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(root.join("Module.bsl"), "module").expect("module");
+        let context = SourceSetContext::new("main", root, "designer-main")
+            .with_infobase_memory("ib", "file:/ib; source=src".to_owned());
+        rescan_and_commit_full(&context, &work).expect("memory");
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Own);
+
+        let path = context.storage_path(&work).expect("storage");
+        {
+            let db = redb::Database::open(&path).expect("open");
+            let tx = db.begin_write().expect("write");
+            tx.open_table(META)
+                .expect("meta")
+                .remove(META_KEY_HASH_KIND)
+                .expect("forget the kind");
+            tx.commit().expect("old memory");
+        }
+        assert!(HashStorage::new(path.clone())
+            .load_summary()
+            .expect("summary")
+            .is_legacy());
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Unreadable);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::Fallback)
+        ));
+
+        rescan_and_commit_full(&context, &work).expect("new memory");
+        assert_eq!(snapshot_memory(&context, &work), SnapshotMemory::Own);
+        assert!(matches!(
+            analyze_context(&context, &work, &mut || false).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
 
     #[test]
     fn partial_load_contract_stays_compatible_with_file_change() {
@@ -1136,10 +1751,12 @@ mod tests {
             .expect("later mtime");
 
         let listed = super::list_after_dump(&context, &work, &|| false).expect("listing");
-        super::observe_dump_writes(&context, &work, &watch, Some(ended), listed, &|| false)
-            .expect("observe")
-            .commit(&context, &work)
-            .expect("commit");
+        super::observe_dump_writes(&context, &work, &watch, Some(ended), listed, None, &|| {
+            false
+        })
+        .expect("observe")
+        .commit(&context, &work)
+        .expect("commit");
 
         let analysis = analyze_context(&context, &work, &mut || false);
         let Ok(AnalysisOutcome::Changes { changes, .. }) = analysis.outcome else {
@@ -1339,7 +1956,7 @@ mod tests {
         std::fs::write(root.join("M9.bsl"), "from the base").expect("written");
         let listed = super::list_after_dump(&context, &work, &|| false).expect("listing");
         row_audit::take();
-        super::observe_dump_writes(&context, &work, &watch, None, listed, &|| false)
+        super::observe_dump_writes(&context, &work, &watch, None, listed, None, &|| false)
             .expect("observe")
             .commit(&context, &work)
             .expect("pull commit");

@@ -26,6 +26,8 @@ pub mod dump;
 pub mod execution;
 /// Extension-management domain models.
 pub mod extensions;
+/// Разобранный ответ git о рабочей копии и путь поиска изменений набора.
+pub mod git_worktree;
 /// Information-base configuration package and snapshot export domain models.
 pub mod infobase_export;
 /// Init domain models.

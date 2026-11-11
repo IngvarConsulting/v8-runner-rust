@@ -25,6 +25,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "std"] }
 walkdir = "2"
+sha1 = "0.10"
 sha2 = "0.10"
 redb = "2"
 quick-xml = { version = "0.36", features = ["serialize"] }

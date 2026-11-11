@@ -12,6 +12,7 @@ check:
   - src/use_cases/dump_config.rs::the_command_keeps_an_edit_after_the_dump_as_a_change
   - src/change_detection/analyzer.rs::a_set_without_memory_of_the_base_is_not_watched
   - tests/cli_agent_standalone.rs::the_memory_forgets_the_files_an_sftp_dump_removed
+  - src/use_cases/source_changes.rs::a_pull_by_changes_under_git_remembers_what_it_wrote_by_git_ids
 ---
 
 # Выгрузка по изменившемуся запоминает то, что записала
@@ -21,6 +22,11 @@ check:
 записывает в память набора хеши файлов, которые выгрузка записала, и забывает файлы, которые
 она удалила. Остальная память не меняется. Поэтому `push` сразу после такого `pull` ничего не
 грузит, а правка человека, сделанная до выгрузки, остаётся изменением.
+
+Хеш записанного файла берёт тот хешер, которым записана память: у памяти git — тот, что
+сохранил бы `git add` (git во временном индексе рабочей копии), у памяти хешей байтов — раннер,
+как `git hash-object --no-filters`; память git без git ничего не запоминает
+(`INV.USE-CASES.CHANGES-ARE-DETECTED-ON-DEMAND`).
 
 Записанным считается файл, время изменения которого не раньше начала выгрузки и не позже её
 конца; начало и конец берутся по часам файловой системы набора. Файл, изменённый после конца

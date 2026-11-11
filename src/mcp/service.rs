@@ -1401,6 +1401,7 @@ mod tests {
     #[test]
     fn build_project_maps_success_request_and_response() {
         let port = StubPort::with_build_result(Ok(BuildResult {
+            detection: Default::default(),
             provider: None,
             provider_dispatched: true,
             ok: true,
@@ -1446,6 +1447,7 @@ mod tests {
         let port = StubPort::with_build_result(Err(UseCaseFailure::with_payload(
             UseCaseError::new(UseCaseErrorKind::Runtime, "builder failed"),
             BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: true,
                 ok: false,
@@ -2834,6 +2836,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: true,
                 ok: true,
@@ -2865,6 +2868,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                detection: Default::default(),
                 provider: None,
                 provider_dispatched: true,
                 ok: true,
