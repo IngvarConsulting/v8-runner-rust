@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
 use crate::config::model::{AppConfig, SourceFormat};
-use crate::domain::capability::{Operation, Provider};
+use crate::domain::capability::{Operation, Provider, ProviderReceipt};
 use crate::domain::git_worktree::ChangeDetection;
 use crate::domain::source_set::SourceSetContext;
 use crate::domain::status::{
@@ -50,6 +50,7 @@ pub fn execute(
     scope: StatusScope,
 ) -> UseCaseResult<StatusResult> {
     let started = Instant::now();
+    let mut provider = None;
     let infobases = match scope {
         StatusScope::All => declared(config)
             .iter()
@@ -62,12 +63,18 @@ pub fn execute(
         StatusScope::Deep => {
             let mut status =
                 from_memory(context, config, true).map_err(UseCaseFailure::without_payload)?;
-            deepen(context, config, &mut status).map_err(UseCaseFailure::without_payload)?;
+            tracing::debug!(
+                duration_ms = started.elapsed().as_millis(),
+                "status source analysis"
+            );
+            provider =
+                deepen(context, config, &mut status).map_err(UseCaseFailure::without_payload)?;
             vec![status]
         }
     };
     Ok(StatusResult {
         deep: scope == StatusScope::Deep,
+        provider,
         infobases,
         duration_ms: started.elapsed().as_millis() as u64,
     })
@@ -226,9 +233,10 @@ fn deepen(
     context: &ExecutionContext,
     config: &AppConfig,
     status: &mut InfobaseStatus,
-) -> Result<(), AppError> {
+) -> Result<Option<ProviderReceipt>, AppError> {
     let inventory = SourceSetInventory::new(config);
     let packages = inventory.configuration_packages();
+    let phase = Instant::now();
     let asker = Asker::open(context, config);
     let (tool, mut asker) = match asker {
         Ok(asker) => (Some(asker.tool), Ok(asker)),
@@ -238,6 +246,11 @@ fn deepen(
         Err((_, error)) if error.platform_release().is_some() => return Err(error),
         Err((tool, error)) => (tool, Err(error)),
     };
+    tracing::debug!(
+        ?tool,
+        duration_ms = phase.elapsed().as_millis(),
+        "status prepare generation executor"
+    );
     let mut outcome = Ok(());
     for set in &mut status.source_sets {
         if let Err(error) = interrupted(context, "the configuration generation") {
@@ -255,6 +268,7 @@ fn deepen(
         let scope = memory.map_or(TokenScope::OwnTool, |context| token_scope(config, context));
         set.base = Some(match asker.as_mut() {
             Ok(asker) => {
+                let phase = Instant::now();
                 let base = base_generation(
                     tool,
                     asker
@@ -264,9 +278,12 @@ fn deepen(
                     record.as_ref(),
                     scope,
                 );
+                tracing::debug!(?tool, source_set = %set.name, duration_ms = phase.elapsed().as_millis(), "status generation");
+                let phase = Instant::now();
                 let unapplied = asker
                     .unapplied(context, config, *extension)
                     .map_err(|error| error.to_string());
+                tracing::debug!(?tool, source_set = %set.name, duration_ms = phase.elapsed().as_millis(), "status unapplied");
                 with_unapplied(base, unapplied)
             }
             Err(error) => with_unapplied(
@@ -275,15 +292,33 @@ fn deepen(
             ),
         });
     }
-    if let Ok(asker) = asker {
-        asker.close(context);
-    }
+    // Состав расширений может открыть свою сессию. Снимаем квитанцию поколения
+    // после завершения её сессии и до запроса состава.
+    let phase = Instant::now();
+    let provider = asker.ok().map(|asker| asker.close(context));
+    tracing::debug!(
+        ?tool,
+        duration_ms = phase.elapsed().as_millis(),
+        "status finish generation executor"
+    );
     outcome?;
     interrupted(context, "the extension inventory")?;
-    status.extensions = Some(extensions(context, config, &packages));
+    let phase = Instant::now();
+    let extensions = extensions(context, config, &packages);
+    let extension_tool = extensions
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.selected);
+    tracing::debug!(tool = ?extension_tool, duration_ms = phase.elapsed().as_millis(), "status extension inventory");
+    status.extensions = Some(extensions);
     interrupted(context, "the owner marker")?;
+    let phase = Instant::now();
     status.holders = crate::use_cases::infobase_owner::holders(config);
-    Ok(())
+    tracing::debug!(
+        duration_ms = phase.elapsed().as_millis(),
+        "status owner marker"
+    );
+    Ok(provider)
 }
 
 /// Признак непринятого рядом с поколением; чего исполнитель не ответил — `null` с причиной.
@@ -396,6 +431,7 @@ fn extensions(
 struct Asker {
     tool: Provider,
     how: How,
+    receipt: ProviderReceipt,
 }
 
 enum How {
@@ -474,7 +510,11 @@ impl Asker {
                 ))
             }
         };
-        Ok(Self { tool, how })
+        Ok(Self {
+            tool,
+            how,
+            receipt: selected.receipt,
+        })
     }
 
     /// Поколение основной конфигурации или расширения `extension`; `None` — ответа нет.
@@ -551,10 +591,12 @@ impl Asker {
         }
     }
 
-    fn close(self, context: &ExecutionContext) {
+    fn close(mut self, context: &ExecutionContext) -> ProviderReceipt {
         if let How::Agent { handle, wait } = self.how {
             handle.finish(context, &wait);
+            self.receipt.endpoint = context.opened_session();
         }
+        self.receipt
     }
 }
 

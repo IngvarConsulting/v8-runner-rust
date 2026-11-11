@@ -200,9 +200,15 @@ pub fn create_private_dir(_path: &Path) -> std::io::Result<()> {
 
 /// Return the root temp directory inside `work_path`.
 pub fn temp_root(work_path: &Path) -> std::io::Result<PathBuf> {
-    let dir = work_path.join("temp");
+    let dir = temp_root_path(work_path);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Where [`temp_root`] and [`private_temp_dir`] put scratch space; creates nothing,
+/// so a preview can name the place without touching `work_path`.
+pub fn temp_root_path(work_path: &Path) -> PathBuf {
+    work_path.join("temp")
 }
 
 /// Return the platform log directory inside `work_path`.

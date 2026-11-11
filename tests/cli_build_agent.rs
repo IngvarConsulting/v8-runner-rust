@@ -750,7 +750,7 @@ fn push_status_and_pull_share_one_live_agent() {
     support::commit_sources(project);
 
     for (arguments, opens) in [
-        (&["status", "--deep"][..], false),
+        (&["status", "--deep"][..], true),
         (&["pull", "--force"][..], true),
         (&["pull"][..], false),
     ] {
