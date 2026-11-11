@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::{
-    await_gone, being_started, cluster_over, environment, first_taken, forget_record, io_failure,
-    owned_by_a_cluster, port_offsets, validation, write_record, Database, DbmsAccess,
-    ServiceCommand, ServiceHost, Stand, Taken,
+    await_gone, being_started, block_conflict, cluster_over, environment, first_taken,
+    forget_record, io_failure, owned_by_a_cluster, port_offsets, validation, write_record,
+    Database, DbmsAccess, MoveCause, ServiceCommand, ServiceHost, Stand,
 };
 use crate::config::model::AppConfig;
 use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
@@ -82,26 +82,9 @@ struct Moved {
     cause: MoveCause,
 }
 
-/// Почему закреплённый блок не годится.
-enum MoveCause {
-    /// Порт держит чужой процесс; он остаётся работать.
-    Taken(Taken),
-    /// В блок попал закреплённый порт PostgreSQL раннера: `ibsrv` на нём не поднимется.
-    Postgres(u16),
-}
-
 impl Moved {
     fn warning(&self, infobase: &str, ports: ServerPorts) -> String {
-        let reason = match self.cause {
-            MoveCause::Taken(taken) => format!(
-                "port {} of the server of '{infobase}' is taken by {}, which this runner did not start; it is left running",
-                taken.port,
-                taken.who()
-            ),
-            MoveCause::Postgres(port) => format!(
-                "port {port} of the server of '{infobase}' is the port of the runner's PostgreSQL"
-            ),
-        };
+        let reason = self.cause.reason(&format!("the server of '{infobase}'"));
         format!(
             "{reason}: the server moved from port {} to port {}, the gate key and its fingerprint stay; take the address from this answer, v8project*.yaml is not changed",
             self.previous.direct, ports.direct
@@ -254,14 +237,10 @@ impl Server<'_> {
         let Some(previous) = self.pins() else {
             return Ok(None);
         };
-        if let Some(port) = dbms.filter(|port| previous.all().any(|own| own == *port)) {
-            return Ok(Some(Moved {
-                previous,
-                cause: MoveCause::Postgres(port),
-            }));
-        }
-        let Some(taken) = first_taken(self.host, previous.all()) else {
-            return Ok(None);
+        let taken = match block_conflict(self.host, previous.all(), dbms) {
+            None => return Ok(None),
+            Some(MoveCause::Taken(taken)) => taken,
+            Some(cause @ MoveCause::Postgres(_)) => return Ok(Some(Moved { previous, cause })),
         };
         let busy = |message: String| UseCaseError::new(UseCaseErrorKind::WorkspaceBusy, message);
         let Some(rows) = self.host.processes(&[IBSRV_IMAGE]) else {

@@ -1201,14 +1201,12 @@ mod tests {
             stdout: String,
             stderr: String,
         },
-        FatalProcessExitAfter {
-            delay: Duration,
-        },
+        /// Процесс сеанса падает, когда тест отпустит `release`: тест успевает поставить в
+        /// очередь следующий вызов, как бы ни был загружен прогон.
+        FatalProcessExitWhenReleased { release: Arc<AtomicBool> },
         /// Предел команды истекает не по часам, а когда тест отпустит `release`: так тест
         /// успевает поставить в очередь следующий вызов, как бы ни был загружен прогон.
-        TimeOutWhenReleased {
-            release: Arc<AtomicBool>,
-        },
+        TimeOutWhenReleased { release: Arc<AtomicBool> },
         /// Команда кончается успехом, когда тест отпустит `release`: тест успевает посмотреть
         /// на состояние посреди неё, как бы ни был загружен прогон.
         CompleteWhenReleased {
@@ -1217,9 +1215,7 @@ mod tests {
         },
         /// Команда не слышит снятия и кончается, только когда тест отпустит `release`: так
         /// выглядит процесс, который снять не удалось.
-        HangUntilReleased {
-            release: Arc<AtomicBool>,
-        },
+        HangUntilReleased { release: Arc<AtomicBool> },
     }
 
     struct FakeSession {
@@ -1451,16 +1447,14 @@ mod tests {
                         stderr: String::new(),
                     })
                 }
-                CommandBehavior::FatalProcessExitAfter { delay } => {
-                    if sleep_until_finished_or_killed(self.killed.as_ref(), delay) {
-                        return Err(InteractiveProcessError::ProcessExited {
-                            exit_code: 9,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                        });
-                    }
+                CommandBehavior::FatalProcessExitWhenReleased { release } => {
+                    let exit_code = if wait_until_released(&release, self.killed.as_ref()) {
+                        17
+                    } else {
+                        9
+                    };
                     Err(InteractiveProcessError::ProcessExited {
-                        exit_code: 17,
+                        exit_code,
                         stdout: String::new(),
                         stderr: String::new(),
                     })
@@ -2843,9 +2837,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fatal_session_error_drains_queue_and_restarts_lazily() {
+        // Сеанс падает только после того, как второй вызов встал в очередь: иначе на
+        // загруженном прогоне он приходил уже после перезапуска и выполнялся в новом сеансе.
+        let release = Arc::new(AtomicBool::new(false));
         let factory = FakeSessionFactory::new(vec![
-            SessionPlan::Session(vec![CommandBehavior::FatalProcessExitAfter {
-                delay: Duration::from_millis(30),
+            SessionPlan::Session(vec![CommandBehavior::FatalProcessExitWhenReleased {
+                release: release.clone(),
             }]),
             SessionPlan::Session(vec![CommandBehavior::CompleteAfter {
                 delay: Duration::from_millis(5),
@@ -2869,6 +2866,8 @@ mod tests {
             let manager = manager.clone();
             async move { manager.execute(request("cmd-2", 200)).await }
         });
+        wait_until("cmd-2 to reach the queue", || queued_len(&manager) == 1).await;
+        release.store(true, Ordering::SeqCst);
 
         let first_result = first.await.expect("first join");
         assert!(matches!(

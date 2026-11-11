@@ -900,6 +900,7 @@ fn build_external_in(
             // Путь вывода — место для порождённого, а не для чьей-то работы.
             &crate::use_cases::destruction_guard::DestructionConsent::RunnerOwned,
             &[],
+            crate::use_cases::staged_publication::BackupRemoval::Inline,
         )
         .map_err(|error| {
             (

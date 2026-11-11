@@ -23,9 +23,8 @@ use crate::domain::capability::{
 };
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::agent::{
-    self, agent_reads_host_key_at, free_managed_port, host_key_fallback_roots, AgentEndpoint,
-    AgentError, AgentLaunch, AgentMessage, AgentReply, AgentSession, AgentSessionRequest,
-    EphemeralHostKey, HostKeyExpectation, LaunchHostKey, ManagedAgent, WaitPolicy,
+    self, agent_reads_host_key_at, AgentEndpoint, AgentError, AgentLaunch, AgentMessage,
+    AgentReply, AgentSession, AgentSessionRequest, HostKeyExpectation, ManagedAgent, WaitPolicy,
 };
 use crate::platform::agent_keeper::client::{
     Credentials, KeeperClient, KeeperLaunch, KeeperStartError,
@@ -230,6 +229,15 @@ impl AgentHandle {
         }
     }
 
+    /// Бросил ли второй сигнал команду чужого агента: свой агент и живой агент сторожа
+    /// ожидания не бросают.
+    pub(crate) fn abandoned(&self) -> bool {
+        match self {
+            Self::Live(_) | Self::Managed(..) => false,
+            Self::Attached { session, .. } | Self::Gate { session, .. } => session.abandoned(),
+        }
+    }
+
     /// Прерывание, которое отложила последняя команда.
     pub(crate) fn last_command_deferral(&self) -> Option<ProcessInterruptionReason> {
         match self {
@@ -326,15 +334,17 @@ fn open_gate_session(
 
 /// Отмена и класс безопасности сессии — с границы команды; срока там больше нет.
 ///
-/// Класс здесь не теряется: агентский транспорт обязан различать команду, которую можно
-/// бросить на полпути, и ту, что меняет базу. Класс по умолчанию — для команд без
-/// побочного эффекта; меняющие команды называют свой класс сами, через `run_critical`.
-/// Срока у агентской команды нет, и это выбор, а не упущение: команда его не имеет
+/// Класс по умолчанию — для команд без побочного эффекта; меняющие команды называют
+/// свой класс через `run_critical`. У своего агента можно прервать чтение и снять процесс,
+/// у чужого после отправки команды раннер ждёт итогового ответа, пока второй сигнал
+/// (`ExecutionContext::abandonment`) не велит бросить ожидание.
+/// Срока у агентской команды нет: команда его не имеет
 /// (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), а транспорту брать его неоткуда — замер
 /// 15.09.2026 дал тишине занятого агента нижнюю границу и не дал верхней. Ожидание
 /// заканчивает оператор, а мёртвый шлюз — таймаут записи TCP на keepalive-пакетах.
 pub(crate) fn wait_policy(context: &ExecutionContext) -> WaitPolicy {
     WaitPolicy::from_step(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None))
+        .with_abandonment(context.abandonment())
 }
 
 /// Журнал сессии рядом с журналами платформы, свежий на каждую команду.
@@ -457,36 +467,22 @@ fn open_handle(
                 remove_live_agent(config, v8);
                 LiveAgentReason::LiveAgentOff
             };
-            // Порт не объявлен — свободный на этот запуск: фиксированный порт отдал бы сессию
-            // первому, кто на нём слушает.
-            let port = match port {
-                Some(port) => port,
-                None => free_managed_port().map_err(AppError::from)?,
-            };
-            // Ключ не объявлен — одноразовый на этот запуск, и сессия закреплена на нём.
-            let host_key = launch_host_key(agent.host_key.clone(), &config.work_path)?;
             let launch = AgentLaunch {
                 v8: v8.to_path_buf(),
                 infobase_args: connection.infobase_args(),
                 port,
+                host_key: declared_launch_host_key(agent.host_key.clone())?,
+                key_work_path: config.work_path.clone(),
                 base_dir: config.work_path.join("agent").join("base"),
                 workdir: config.work_path.join("agent").join("workdir"),
                 process_log: transcript_log.with_extension("process"),
-                // Агент публикует ключ из отданного файла как есть, поэтому открытая часть
-                // файла и есть ожидание.
-                host_key,
-            };
-            let request = AgentSessionRequest {
-                endpoint: launch.endpoint(),
                 user,
                 password,
                 transcript_log: Some(transcript_log),
-                host_key: launch.host_key.expectation(),
             };
             let managed = ManagedAgent::launch(
                 utilities.runner_for(UtilityType::V8),
                 launch,
-                request,
                 Duration::from_millis(agent.startup_timeout_ms.max(1)),
                 wait,
             )
@@ -591,13 +587,7 @@ pub(crate) fn live_target(
     })?;
     let key = live_key(&state, config, v8)
         .map_err(|error| AppError::Runtime(format!("cannot key the live agent: {error}")))?;
-    let host_key = match agent.host_key.clone() {
-        Some(declared) => match launch_host_key(Some(declared), &config.work_path)? {
-            LaunchHostKey::Declared(path) => Some(path),
-            LaunchHostKey::OneTime(_) => None,
-        },
-        None => None,
-    };
+    let host_key = declared_launch_host_key(agent.host_key.clone())?;
     let launch = KeeperLaunch {
         v8: v8.to_path_buf(),
         infobase_args: connection.infobase_args(),
@@ -721,23 +711,18 @@ fn remove_live_agent(config: &AppConfig, v8: &Path) {
     }
 }
 
-/// Ключ хоста управляемого агента. Агент читает его только по пути в ASCII
-/// (`INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII`): объявленный ключ по другому пути — отказ до запуска,
-/// одноразовый — [`EphemeralHostKey::create_for`].
-fn launch_host_key(declared: Option<PathBuf>, work_path: &Path) -> Result<LaunchHostKey, AppError> {
-    match declared {
-        Some(declared) if !agent_reads_host_key_at(&declared) => {
+/// Объявленный ключ должен лежать по пути, с которого агент умеет его читать
+/// (INV.PLATFORM.A-HOST-KEY-PATH-IS-ASCII).
+fn declared_launch_host_key(declared: Option<PathBuf>) -> Result<Option<PathBuf>, AppError> {
+    match &declared {
+        Some(path) if !agent_reads_host_key_at(path) => {
             Err(AppError::EnvironmentUnavailable(format!(
                 "tools.designer_agent.host-key '{}' is not an ASCII path: the Designer agent \
                  cannot read its host key there and exits; move the key to an ASCII path",
-                declared.display()
+                path.display()
             )))
         }
-        Some(declared) => Ok(LaunchHostKey::Declared(declared)),
-        None => Ok(LaunchHostKey::OneTime(EphemeralHostKey::create_for(
-            work_path,
-            &host_key_fallback_roots(),
-        )?)),
+        _ => Ok(declared),
     }
 }
 
@@ -1376,6 +1361,9 @@ pub(crate) fn collect_file(
 }
 
 /// Убирает выставленный каталог со стороны точки входа (ссылку — как ссылку).
+///
+/// Ссылку снимает и после брошенной команды: это отрезает агента от чужого каталога, а не
+/// убирает за ним.
 pub(crate) fn unstage(handle: &mut AgentHandle, exchange: &Exchange, relative: &str) {
     match exchange {
         Exchange::Dir(user_dir) => withdraw_dir(user_dir, relative),
@@ -1384,7 +1372,17 @@ pub(crate) fn unstage(handle: &mut AgentHandle, exchange: &Exchange, relative: &
 }
 
 /// Убирает след прогона со стороны точки входа: путь и опустевшие родители.
+///
+/// След брошенной команды остаётся: агент, возможно, ещё пишет туда, и удаление шло бы
+/// наперегонки с ним — через SFTP это десятки секунд и всё равно отказ (живой прогон #296).
 pub(crate) fn tidy(handle: &mut AgentHandle, exchange: &Exchange, relative: &str) {
+    if handle.abandoned() {
+        tracing::debug!(
+            path = relative,
+            "the abandoned agent command keeps its exchange path"
+        );
+        return;
+    }
     match exchange {
         Exchange::Dir(user_dir) => tidy_run_path(user_dir, relative),
         Exchange::Sftp => {
@@ -1814,15 +1812,15 @@ mod tests {
     #[test]
     fn a_declared_host_key_outside_ascii_is_refused_before_the_launch() {
         let declared = PathBuf::from("ключи").join("host_ed25519");
-        let refused = launch_host_key(Some(declared), Path::new("work")).expect_err("refused");
+        let refused = declared_launch_host_key(Some(declared)).expect_err("refused");
         assert!(
             matches!(&refused, AppError::EnvironmentUnavailable(message)
                 if message.contains("ключи") && message.contains("ASCII")),
             "{refused}"
         );
         assert!(matches!(
-            launch_host_key(Some(PathBuf::from("keys/host_ed25519")), Path::new("work")),
-            Ok(LaunchHostKey::Declared(_))
+            declared_launch_host_key(Some(PathBuf::from("keys/host_ed25519"))),
+            Ok(Some(_))
         ));
     }
 

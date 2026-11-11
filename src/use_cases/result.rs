@@ -60,6 +60,10 @@ pub enum UseCaseErrorKind {
     Validation,
     Runtime,
     Platform,
+    /// Второй сигнал бросил ожидание итога команды чужого агента: агент, возможно, ещё её
+    /// выполняет (`INV.USE-CASES.AN-ATTACHED-AGENT-ANSWERS-CANCELLED-AFTER-ITS-COMMAND-ENDS`).
+    /// Конец не подтверждён, поэтому это сбой платформы, а не отмена.
+    AgentCommandAbandoned,
 }
 
 impl UseCaseErrorKind {
@@ -77,7 +81,7 @@ impl UseCaseErrorKind {
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation | Self::SourceSetIgnoredByGit => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
-            Self::Platform => PLATFORM_EXIT_CODE,
+            Self::Platform | Self::AgentCommandAbandoned => PLATFORM_EXIT_CODE,
         }
     }
 
@@ -108,6 +112,7 @@ impl UseCaseErrorKind {
             AppError::InfobaseBusy(_) => Self::InfobaseBusy,
             AppError::Refused(refusal) => refusal.kind(),
             AppError::Cancelled { at, .. } => Self::Cancelled(*at),
+            AppError::AgentAbandoned(_) => Self::AgentCommandAbandoned,
             AppError::TimedOut(_) => Self::TimedOut,
             AppError::InvalidOutput(_) => Self::InvalidOutput,
             // Путь, который процессу без приставки `\\?\` не передать, — вход команды, а не сбой
@@ -160,6 +165,7 @@ impl UseCaseErrorKind {
             Self::Validation => "invalid_argument",
             Self::Runtime => "runtime_failure",
             Self::Platform => "platform_failure",
+            Self::AgentCommandAbandoned => "agent_command_abandoned",
         }
     }
 
@@ -183,7 +189,8 @@ impl UseCaseErrorKind {
             | Self::SourceSetIgnoredByGit
             | Self::Validation
             | Self::Runtime
-            | Self::Platform => ExecutionStatus::Failed,
+            | Self::Platform
+            | Self::AgentCommandAbandoned => ExecutionStatus::Failed,
         }
     }
 
@@ -207,6 +214,7 @@ impl UseCaseErrorKind {
             Self::Validation => "validation error",
             Self::Runtime => "runtime error",
             Self::Platform => "platform error",
+            Self::AgentCommandAbandoned => "agent command abandoned",
         }
     }
 }
@@ -400,7 +408,8 @@ impl UseCaseError {
             | AppError::Validation(message)
             | AppError::Runtime(message)
             | AppError::SourceLoadNotStarted(message)
-            | AppError::Platform(message) => message,
+            | AppError::Platform(message)
+            | AppError::AgentAbandoned(message) => message,
             AppError::ValidationIbcmd(error) => error.to_string(),
             AppError::PlatformDesigner(error) => error.to_string(),
             AppError::PlatformLocator(error) => error.to_string(),

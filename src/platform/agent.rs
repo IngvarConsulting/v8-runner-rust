@@ -55,6 +55,13 @@ const WAIT_SLICE: Duration = Duration::from_millis(200);
 /// Строка журнала: отмена бросила ответ команды, которую не обязаны дожидаться.
 pub(crate) const AGENT_COMMAND_ABANDONED: &str =
     "agent command abandoned: the command was cancelled";
+/// Строка журнала первого сигнала у чужого агента: раннер ждёт итог и говорит, как перестать.
+const EXTERNAL_AGENT_WAITING_FOR_TERMINAL: &str =
+    "interruption requested after sending a command to an external agent; waiting for terminal reply; \
+     interrupt again to stop waiting (the agent may keep running the command)";
+/// Строка журнала второго сигнала: ожидание итога чужого агента брошено.
+const EXTERNAL_AGENT_COMMAND_ABANDONED: &str =
+    "external agent command abandoned: the runner stopped waiting for its terminal reply";
 
 /// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -346,6 +353,14 @@ pub enum AgentError {
         delivered: bool,
     },
 
+    /// Второй сигнал бросил ожидание итога команды чужого агента: раннер его не дождался, а
+    /// агент, возможно, ещё её выполняет. Это не отмена — конец команды не наблюдался.
+    #[error(
+        "stopped waiting for the agent after a second interrupt: command '{command}' was \
+         abandoned; the agent may still be running it and may still hold the infobase"
+    )]
+    Abandoned { command: String },
+
     /// Команда запроса, которую после отмены агенту не отдали: работы он не получил, и в
     /// базе она ничего не начинала.
     #[error("agent command '{command}' was not sent: the command was cancelled")]
@@ -507,6 +522,9 @@ pub struct AgentSessionRequest {
 pub struct WaitPolicy {
     pub deadline: Option<Instant>,
     pub cancellation: CancellationToken,
+    /// Второй сигнал: перестать ждать итог команды чужого агента, уже отменённой первым.
+    /// Свой агент и служебные команды его не слушают.
+    abandonment: CancellationToken,
     /// Класс безопасности меняет только сама платформа (`critical`, `cleanup`): критическую
     /// политику сценарий берёт у `critical()` там, где отсрочку потом называют
     /// (`agent_session::run_critical`, команды внутри `with_session`).
@@ -524,8 +542,18 @@ impl WaitPolicy {
         Self {
             deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
             cancellation: policy.cancellation,
+            abandonment: CancellationToken::new(),
             safety: policy.safety,
             work: policy.work,
+        }
+    }
+
+    /// Та же политика со вторым сигналом команды: по нему ожидание итога чужого агента
+    /// бросается.
+    pub fn with_abandonment(self, abandonment: CancellationToken) -> Self {
+        Self {
+            abandonment,
+            ..self
         }
     }
 
@@ -543,6 +571,7 @@ impl WaitPolicy {
         Self {
             deadline: Some(Instant::now() + grace),
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
             work: None,
         }
@@ -585,6 +614,7 @@ impl WaitPolicy {
         Self {
             deadline: None,
             cancellation,
+            abandonment: CancellationToken::new(),
             safety: if critical {
                 ProcessInterruptionSafety::CriticalNonAbortable
             } else {
@@ -630,6 +660,7 @@ impl Default for WaitPolicy {
         Self {
             deadline: None,
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
             work: Some(WorkGiven::for_command()),
         }
@@ -760,6 +791,12 @@ impl client::Handler for ClientEvents {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentOwnership {
+    Managed,
+    External,
+}
+
 /// Открытая сессия: соединение, канал shell и накопленный, ещё не разобранный ответ.
 pub struct AgentSession {
     runtime: tokio::runtime::Runtime,
@@ -770,6 +807,7 @@ pub struct AgentSession {
     pending: Vec<u8>,
     stderr: Vec<u8>,
     endpoint: AgentEndpoint,
+    ownership: AgentOwnership,
     transcript: Option<std::fs::File>,
     known_secrets: Vec<String>,
     ended: bool,
@@ -778,6 +816,13 @@ pub struct AgentSession {
     deferred_interruption: Option<ProcessInterruptionReason>,
     /// Прерывание, которое отложила последняя команда, — и когда её ответ не дочитан.
     command_deferral: Option<ProcessInterruptionReason>,
+    /// Прерывание, пришедшее после отправки команды чужому агенту, и когда его заметили:
+    /// снять команду раннер не может, поэтому дочитывает её итог через все батчи ответа.
+    /// Сбрасывает его следующая команда.
+    awaited_interruption: Option<(ProcessInterruptionReason, Instant)>,
+    /// Бросил ли второй сигнал команду этой сессии: агент, возможно, ещё пишет в свой
+    /// каталог, и убирать за ним след нельзя.
+    abandoned: bool,
     /// Пришёл ли от агента хоть один JSON-массив. До него проза — баннер и приглашение
     /// shell, а не ответ: конец сессии после неё — закрытая сессия, а не неверный ответ.
     json_seen: bool,
@@ -787,7 +832,7 @@ impl AgentSession {
     /// Открывает сессию и переводит её в машинный режим. Успех означает, что
     /// аутентификация прошла и агент ответил JSON, — этим и доказывается готовность.
     pub fn open(request: &AgentSessionRequest, policy: &WaitPolicy) -> Result<Self, AgentError> {
-        Self::open_within(request, policy, None)
+        Self::open_within(request, policy, AgentOwnership::External, None)
     }
 
     /// То же, но рукопожатие транспорта ограничено `handshake`: слушатель, который принял
@@ -796,6 +841,7 @@ impl AgentSession {
     fn open_within(
         request: &AgentSessionRequest,
         policy: &WaitPolicy,
+        ownership: AgentOwnership,
         handshake: Option<Duration>,
     ) -> Result<Self, AgentError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -914,6 +960,7 @@ impl AgentSession {
             pending: Vec::new(),
             stderr: Vec::new(),
             endpoint,
+            ownership,
             transcript,
             known_secrets: [&request.user, &request.password]
                 .into_iter()
@@ -923,6 +970,8 @@ impl AgentSession {
             ended: false,
             deferred_interruption: None,
             command_deferral: None,
+            awaited_interruption: None,
+            abandoned: false,
             json_seen: false,
         };
         // Режим ответа и подключение к базе — служебные команды открытия сессии: работы
@@ -986,6 +1035,7 @@ impl AgentSession {
         on_batch: &mut dyn FnMut(&[AgentMessage]),
     ) -> Result<AgentReply, AgentError> {
         self.command_deferral = None;
+        self.awaited_interruption = None;
         // Команду запроса после отмены агенту не отдают, как раннер не запускает процесс:
         // отмена до работы — безопасная точка. Служебные команды — открытие, закрытие —
         // идут и после неё, иначе сессию было бы не закрыть.
@@ -1026,6 +1076,24 @@ impl AgentSession {
         let reply = AgentReply { messages };
         let secrets: Vec<&str> = self.known_secrets.iter().map(String::as_str).collect();
         log_reply(command, &secrets, &reply, started.elapsed());
+        if let Some((reason, observed)) = self.awaited_interruption {
+            // Вопрос останавливает чтение, но не подтверждает конец команды. Отказ
+            // агента сохраняет свою причину; явная отмена агентом подтверждает конец.
+            match reply.outcome() {
+                Ok(_) | Err(AgentError::Canceled { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            return Err(match reason {
+                ProcessInterruptionReason::Cancelled => AgentError::Cancelled {
+                    command: self.display_command(command),
+                    delivered: true,
+                },
+                ProcessInterruptionReason::TimedOut => AgentError::TimedOut {
+                    command: self.display_command(command),
+                    timeout_ms: observed.saturating_duration_since(started).as_millis() as u64,
+                },
+            });
+        }
         Ok(reply)
     }
 
@@ -1388,6 +1456,12 @@ impl AgentSession {
             })
     }
 
+    /// Бросил ли второй сигнал команду этой сессии: тогда агент, возможно, ещё её
+    /// выполняет, и след прогона на его стороне остаётся ему.
+    pub fn abandoned(&self) -> bool {
+        self.abandoned
+    }
+
     /// Прерывание, защёлкнутое в критической фазе за время сессии.
     pub fn deferred_interruption(&self) -> Option<ProcessInterruptionReason> {
         self.deferred_interruption
@@ -1416,47 +1490,68 @@ impl AgentSession {
             policy.safety,
             ProcessInterruptionSafety::CriticalNonAbortable
         );
+        // Чужой процесс раннер не может снять и дождаться. Только доставленная
+        // команда запроса ждёт своего итога; служебная очистка сохраняет свой предел.
+        // Ожидание ограничивает второй сигнал (`policy.abandonment`): тогда команда брошена.
+        let wait_for_external_end =
+            self.ownership == AgentOwnership::External && policy.work.is_some() && !critical;
         loop {
-            if let Some(reply) = self.take_complete_array()? {
+            let reply = self.take_complete_array()?;
+            let now = Instant::now();
+            let remaining = policy
+                .deadline
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let reason = if policy.cancellation.is_cancelled() {
+                Some(ProcessInterruptionReason::Cancelled)
+            } else if remaining == Some(Duration::ZERO) {
+                Some(ProcessInterruptionReason::TimedOut)
+            } else {
+                None
+            };
+            let starts_waiting = wait_for_external_end && self.awaited_interruption.is_none();
+            if let Some(reason) = reason.filter(|_| starts_waiting) {
+                warn!(command = %self.display_command(command), ?reason, "{}", EXTERNAL_AGENT_WAITING_FOR_TERMINAL);
+                self.awaited_interruption = Some((reason, now));
+            }
+            if let Some(reply) = reply {
                 return Ok(reply);
             }
             if self.ended {
                 return Err(self.ended_without_reply());
             }
-            if policy.cancellation.is_cancelled() {
-                if !critical {
-                    // Служебные команды уборки тоже бросаются по отмене, но строка журнала —
-                    // о брошенной работе команды.
-                    if policy.work.is_some() {
-                        info!(command = %self.display_command(command), "{}", AGENT_COMMAND_ABANDONED);
-                    }
-                    // Ответ читается после отправки: команда запроса уже работа команды.
-                    return Err(AgentError::Cancelled {
-                        command: self.display_command(command),
-                        delivered: policy.work.is_some(),
-                    });
-                }
-                self.defer(command, ProcessInterruptionReason::Cancelled);
+            // Второй сигнал бросает только уже начатое ожидание: без первого его нет.
+            if self.awaited_interruption.is_some() && policy.abandonment.is_cancelled() {
+                warn!(command = %self.display_command(command), "{}", EXTERNAL_AGENT_COMMAND_ABANDONED);
+                self.abandoned = true;
+                return Err(AgentError::Abandoned {
+                    command: self.display_command(command),
+                });
             }
-            let wait = match policy.deadline {
-                Some(deadline) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    match (remaining.is_zero(), critical) {
-                        (true, false) => {
-                            return Err(AgentError::TimedOut {
-                                command: self.display_command(command),
-                                timeout_ms: started.elapsed().as_millis() as u64,
-                            })
+            // Свой агент и служебные команды прерываются сразу; чужой ждёт итога выше.
+            let interrupts_now = !wait_for_external_end;
+            if let Some(reason) = reason.filter(|_| interrupts_now) {
+                match reason {
+                    reason if critical => self.defer(command, reason),
+                    ProcessInterruptionReason::Cancelled => {
+                        if policy.work.is_some() {
+                            info!(command = %self.display_command(command), "{}", AGENT_COMMAND_ABANDONED);
                         }
-                        (true, true) => {
-                            self.defer(command, ProcessInterruptionReason::TimedOut);
-                            WAIT_SLICE
-                        }
-                        (false, _) => remaining.min(WAIT_SLICE),
+                        return Err(AgentError::Cancelled {
+                            command: self.display_command(command),
+                            delivered: policy.work.is_some(),
+                        });
+                    }
+                    ProcessInterruptionReason::TimedOut => {
+                        return Err(AgentError::TimedOut {
+                            command: self.display_command(command),
+                            timeout_ms: started.elapsed().as_millis() as u64,
+                        });
                     }
                 }
-                None => WAIT_SLICE,
-            };
+            }
+            let wait = remaining
+                .filter(|remaining| !remaining.is_zero())
+                .map_or(WAIT_SLICE, |remaining| remaining.min(WAIT_SLICE));
             let channel = &mut self.channel;
             let event = self
                 .runtime
@@ -1644,14 +1739,18 @@ fn mask_agent_display(value: &mut serde_json::Value, secrets: &[&str]) {
 
 /// Запуск Конфигуратора в агентском режиме. Из ключей базы берётся только адрес:
 /// `/N` и `/P` в этом режиме игнорируются, учётные данные идут через SSH.
-#[derive(Debug)]
 pub struct AgentLaunch {
     pub v8: PathBuf,
     pub infobase_args: Vec<String>,
-    pub port: u16,
-    /// Ключ хоста, который агент получит в `/AgentSSHHostKey`. Ключа платформы
-    /// (`/AgentSSHHostKeyAuto`) раннер не берёт: сессия закрепляется на отданном ключе.
-    pub host_key: LaunchHostKey,
+    /// Объявленный порт. Без него каждый запуск получает новый свободный порт.
+    pub port: Option<u16>,
+    /// Объявленный ключ для `/AgentSSHHostKey`. Иначе каждая попытка получает одноразовый.
+    pub host_key: Option<PathBuf>,
+    /// Корень для одноразовых ключей до применения ASCII fallback.
+    pub key_work_path: PathBuf,
+    pub user: String,
+    pub password: String,
+    pub transcript_log: Option<PathBuf>,
     pub base_dir: PathBuf,
     /// Текущий каталог процесса агента. Агент пишет туда файл настроек пользователя
     /// (`1cv8u.pfl`) при первой сессии, поэтому он свой, внутри `workPath`, а не каталог,
@@ -1664,16 +1763,16 @@ pub struct AgentLaunch {
 }
 
 impl AgentLaunch {
-    pub fn args(&self) -> Vec<String> {
+    fn args(&self, port: u16, host_key: &Path) -> Vec<String> {
         let mut args = vec!["DESIGNER".to_owned()];
         args.extend(self.infobase_args.iter().cloned());
         args.push("/AgentMode".to_owned());
         args.push("/AgentPort".to_owned());
-        args.push(self.port.to_string());
+        args.push(port.to_string());
         args.push("/AgentListenAddress".to_owned());
         args.push(MANAGED_LISTEN_HOST.to_string());
         args.push("/AgentSSHHostKey".to_owned());
-        args.push(self.host_key.path().display().to_string());
+        args.push(host_key.display().to_string());
         args.push("/AgentBaseDir".to_owned());
         args.push(self.base_dir.display().to_string());
         args.push("/Out".to_owned());
@@ -1682,10 +1781,10 @@ impl AgentLaunch {
     }
 
     /// Запрос процесса агента: программа, ключи, свой текущий каталог и журналы.
-    pub fn request(&self) -> ProcessRequest {
+    fn request(&self, port: u16, host_key: &Path) -> ProcessRequest {
         ProcessRequest {
             program: self.v8.clone(),
-            args: self.args(),
+            args: self.args(port, host_key),
             workdir: Some(self.workdir.clone()),
             stdout_log_path: Some(self.process_log.with_extension("stdout.log")),
             stderr_log_path: Some(self.process_log.with_extension("stderr.log")),
@@ -1695,14 +1794,15 @@ impl AgentLaunch {
     }
 
     /// Файл `/Out` агента.
-    pub fn out_file(&self) -> PathBuf {
+    fn out_file(&self) -> PathBuf {
         self.process_log.with_extension("out.log")
     }
 
-    pub fn endpoint(&self) -> AgentEndpoint {
-        AgentEndpoint {
-            host: Host::Address(MANAGED_LISTEN_HOST),
-            port: self.port,
+    fn host_key_for_attempt(&self) -> Result<LaunchHostKey, AgentError> {
+        match &self.host_key {
+            Some(path) => Ok(LaunchHostKey::Declared(path.clone())),
+            None => EphemeralHostKey::create_for(&self.key_work_path, &host_key_fallback_roots())
+                .map(LaunchHostKey::OneTime),
         }
     }
 }
@@ -1717,20 +1817,17 @@ pub struct ManagedAgent {
 }
 
 impl ManagedAgent {
-    /// Поднимает процесс и ждёт, пока он примет аутентифицированную сессию. Пока порт
-    /// не принимает соединений, агент ещё поднимается; любой другой отказ повтором
-    /// не лечится и останавливает ожидание сразу.
+    /// Поднимает процесс и ждёт аутентифицированную сессию. При коллизии на
+    /// автоматически выбранном порту один раз поднимает процесс на другом порту.
     pub fn launch(
         runner: &dyn ProcessRunner,
         launch: AgentLaunch,
-        session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
     ) -> Result<Self, AgentError> {
         Self::launch_in(
             runner,
             launch,
-            session,
             startup_timeout,
             policy,
             ManagedSpawnMode::Wait,
@@ -1743,14 +1840,12 @@ impl ManagedAgent {
     pub fn launch_for_keeper(
         runner: &dyn ProcessRunner,
         launch: AgentLaunch,
-        session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
     ) -> Result<Self, AgentError> {
         Self::launch_in(
             runner,
             launch,
-            session,
             startup_timeout,
             policy,
             ManagedSpawnMode::Tied,
@@ -1760,11 +1855,68 @@ impl ManagedAgent {
     fn launch_in(
         runner: &dyn ProcessRunner,
         launch: AgentLaunch,
-        session: AgentSessionRequest,
         startup_timeout: Duration,
         policy: &WaitPolicy,
         mode: ManagedSpawnMode,
     ) -> Result<Self, AgentError> {
+        let port = match launch.port {
+            Some(port) => port,
+            None => free_managed_port(None)?,
+        };
+        let started = Instant::now();
+        match Self::launch_once(
+            runner,
+            &launch,
+            port,
+            started,
+            startup_timeout,
+            policy,
+            mode,
+        ) {
+            Err(AgentError::ForeignAgentOnPort { .. } | AgentError::PortTaken { .. })
+                if launch.port.is_none()
+                    && started.elapsed() < startup_timeout
+                    && policy
+                        .deadline
+                        .is_none_or(|deadline| Instant::now() < deadline) =>
+            {
+                policy.refuse_if_cancelled("open")?;
+                debug!(port, "managed agent port collision; retrying on a new port");
+                let next_port = free_managed_port(Some(port))?;
+                Self::launch_once(
+                    runner,
+                    &launch,
+                    next_port,
+                    started,
+                    startup_timeout,
+                    policy,
+                    mode,
+                )
+            }
+            result => result,
+        }
+    }
+
+    fn launch_once(
+        runner: &dyn ProcessRunner,
+        launch: &AgentLaunch,
+        port: u16,
+        started: Instant,
+        startup_timeout: Duration,
+        policy: &WaitPolicy,
+        mode: ManagedSpawnMode,
+    ) -> Result<Self, AgentError> {
+        let host_key = launch.host_key_for_attempt()?;
+        let session = AgentSessionRequest {
+            endpoint: AgentEndpoint {
+                host: Host::Address(MANAGED_LISTEN_HOST),
+                port,
+            },
+            user: launch.user.clone(),
+            password: launch.password.clone(),
+            transcript_log: launch.transcript_log.clone(),
+            host_key: host_key.expectation(),
+        };
         for dir in [&launch.base_dir, &launch.workdir] {
             std::fs::create_dir_all(dir).map_err(|source| AgentError::Workspace {
                 path: dir.clone(),
@@ -1778,26 +1930,23 @@ impl ManagedAgent {
                 source,
             }
         })?;
-        let request = launch.request();
+        let request = launch.request(port, host_key.path());
         let mut process = runner
             // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
             .spawn_managed(&request, mode, None)
-            .map_err(|error| match port_taken(launch.port) {
-                Some(detail) => AgentError::PortTaken {
-                    port: launch.port,
-                    detail,
-                },
+            .map_err(|error| match port_taken(port) {
+                Some(detail) => AgentError::PortTaken { port, detail },
                 None => AgentError::Launch(error),
             })?;
-        debug!(
-            pid = process.pid(),
-            port = launch.port,
-            "designer agent launched"
-        );
+        debug!(pid = process.pid(), port, "designer agent launched");
 
-        let started = Instant::now();
         let opened = loop {
-            let last = match AgentSession::open_within(&session, policy, Some(HANDSHAKE_PROBE)) {
+            let last = match AgentSession::open_within(
+                &session,
+                policy,
+                AgentOwnership::Managed,
+                Some(HANDSHAKE_PROBE),
+            ) {
                 Ok(opened) => break opened,
                 Err(error @ AgentError::Unreachable { .. }) => error.to_string(),
                 Err(AgentError::HostKeyRejected {
@@ -1829,9 +1978,9 @@ impl ManagedAgent {
             // называет `/Out` агента.
             if let Some(status) = process.exited() {
                 let out = out_evidence(&launch.out_file());
-                return Err(match port_taken(launch.port) {
+                return Err(match port_taken(port) {
                     Some(detail) => AgentError::PortTaken {
-                        port: launch.port,
+                        port,
                         detail: format!("{detail}; /Out: {out}"),
                     },
                     None => AgentError::ExitedBeforeSession {
@@ -1852,8 +2001,8 @@ impl ManagedAgent {
         Ok(Self {
             process: Some(process),
             session: Some(opened),
-            base_dir: launch.base_dir,
-            host_key: launch.host_key,
+            base_dir: launch.base_dir.clone(),
+            host_key,
         })
     }
 
@@ -1937,11 +2086,19 @@ fn port_taken(port: u16) -> Option<String> {
 
 /// Свободный порт на адресе управляемого агента: система назначает его привязке к
 /// порту `0`, привязка тут же закрывается, и номер уходит агенту в `/AgentPort`.
-pub fn free_managed_port() -> Result<u16, AgentError> {
-    std::net::TcpListener::bind((MANAGED_LISTEN_HOST, 0))
-        .and_then(|listener| listener.local_addr())
-        .map(|address| address.port())
-        .map_err(|source| AgentError::NoFreePort { source })
+fn free_managed_port(exclude: Option<u16>) -> Result<u16, AgentError> {
+    let pick = || -> std::io::Result<_> {
+        let listener = std::net::TcpListener::bind((MANAGED_LISTEN_HOST, 0))?;
+        let port = listener.local_addr()?.port();
+        if Some(port) == exclude {
+            // Держим исключённый порт, пока ОС выбирает другой.
+            return Ok(std::net::TcpListener::bind((MANAGED_LISTEN_HOST, 0))?
+                .local_addr()?
+                .port());
+        }
+        Ok(port)
+    };
+    pick().map_err(|source| AgentError::NoFreePort { source })
 }
 
 /// Одноразовый ключ хоста управляемого агента.
@@ -1961,7 +2118,7 @@ pub struct EphemeralHostKey {
 
 /// Ключ хоста, который получает управляемый агент.
 #[derive(Debug)]
-pub enum LaunchHostKey {
+enum LaunchHostKey {
     /// `tools.designer_agent.host-key`: файл владельца, раннер его не трогает.
     Declared(PathBuf),
     /// Одноразовый ключ этого запуска.
@@ -2243,6 +2400,7 @@ mod tests {
         let base = WaitPolicy {
             deadline: Some(deadline),
             cancellation: cancellation.clone(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
             work: Some(WorkGiven::for_command()),
         };
@@ -2295,6 +2453,7 @@ mod tests {
         let capped = WaitPolicy {
             deadline: Some(soon),
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
             work: Some(WorkGiven::for_command()),
         }
@@ -2309,6 +2468,7 @@ mod tests {
         let bounded = WaitPolicy {
             deadline: Some(far),
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
             work: Some(WorkGiven::for_command()),
         }
@@ -2481,6 +2641,7 @@ mod tests {
         let wait = WaitPolicy {
             deadline: Some(Instant::now() + Duration::from_secs(60)),
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
             work: Some(WorkGiven::for_command()),
         };
@@ -2859,14 +3020,18 @@ mod tests {
         let launch = AgentLaunch {
             v8: PathBuf::from("/opt/1cv8/1cv8"),
             infobase_args: vec!["/F".to_owned(), "/tmp/ib".to_owned()],
-            port: 1543,
-            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
+            port: Some(1543),
+            host_key: Some(PathBuf::from("/work/host_key")),
+            key_work_path: PathBuf::from("/work"),
+            user: String::new(),
+            password: String::new(),
+            transcript_log: None,
             base_dir: PathBuf::from("/work/agent"),
             workdir: PathBuf::from("/work/agent/workdir"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
         assert_eq!(
-            launch.args(),
+            launch.args(1543, Path::new("/work/host_key")),
             vec![
                 "DESIGNER",
                 "/F",
@@ -2894,13 +3059,17 @@ mod tests {
         let launch = AgentLaunch {
             v8: PathBuf::from("/opt/1cv8/1cv8"),
             infobase_args: vec!["/F".to_owned(), "/tmp/ib".to_owned()],
-            port: 1543,
-            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
+            port: Some(1543),
+            host_key: Some(PathBuf::from("/work/host_key")),
+            key_work_path: PathBuf::from("/work"),
+            user: String::new(),
+            password: String::new(),
+            transcript_log: None,
             base_dir: PathBuf::from("/work/agent/base"),
             workdir: PathBuf::from("/work/agent/workdir"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
-        let request = launch.request();
+        let request = launch.request(1543, Path::new("/work/host_key"));
         assert_eq!(
             request.workdir.as_deref(),
             Some(Path::new("/work/agent/workdir"))
@@ -2918,13 +3087,17 @@ mod tests {
         let launch = AgentLaunch {
             v8: PathBuf::from("/opt/1cv8/1cv8"),
             infobase_args: connection.infobase_args(),
-            port: 1543,
-            host_key: LaunchHostKey::Declared(PathBuf::from("/work/host_key")),
+            port: Some(1543),
+            host_key: Some(PathBuf::from("/work/host_key")),
+            key_work_path: PathBuf::from("/work"),
+            user: String::new(),
+            password: String::new(),
+            transcript_log: None,
             base_dir: PathBuf::from("/work/agent"),
             workdir: PathBuf::from("/work/agent/workdir"),
             process_log: PathBuf::from("/work/logs/agent"),
         };
-        let args = launch.args();
+        let args = launch.args(1543, Path::new("/work/host_key"));
         assert_eq!(&args[..3], ["DESIGNER", "/S", "srv:1541\\demo"], "{args:?}");
         assert!(
             !args.iter().any(|arg| arg == "/IBConnectionString"),

@@ -346,6 +346,105 @@ fn in_a_closed_job(payload: &Value) -> bool {
     closed
 }
 
+/// Закрытый Job оставляет обычной команде разового агента и отказывает удержанию.
+#[cfg(windows)]
+#[test]
+fn a_closed_job_keeps_the_agent_one_shot() {
+    use std::io::{self, Read, Write};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::process::Stdio;
+    use std::ptr::null;
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    const COMPLETION_FILE: &str = "V8_RUNNER_CLOSED_JOB_COMPLETION_FILE";
+
+    if let Some(completion) = std::env::var_os(COMPLETION_FILE) {
+        // Родитель сначала помещает этот процесс в Job; команды наследуют его.
+        let mut start = [0; 2];
+        io::stdin().read_exact(&mut start).expect("Job admission");
+        assert_eq!(&start, b"go");
+
+        let download = Bench::new("");
+        let hold = Bench::new("");
+        let (download_code, receipt) = download.download();
+        let (hold_code, refusal) = hold.run(&["agent", "hold", "--ttl", "60"]);
+        assert_eq!(download_code, 0, "{receipt}");
+        assert_eq!(live(&receipt)["kept"], false, "{receipt}");
+        assert_eq!(live(&receipt)["reason"], "job", "{receipt}");
+        assert_eq!(download.launches(), 1, "download starts one fake 1cv8");
+        assert_eq!(hold_code, 2, "{refusal}");
+        assert_eq!(refusal["error"]["code"], "live_agent_job", "{refusal}");
+        assert_eq!(hold.launches(), 0, "the refused hold starts no fake 1cv8");
+        fs::write(completion, b"passed").expect("record fixture completion");
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("closed Job fixture dir");
+    let completion = temp.path().join("completed");
+    // SAFETY: null arguments create an unnamed Job with a non-inheritable handle.
+    let job = unsafe { CreateJobObjectW(null(), null()) };
+    assert!(!job.is_null(), "create Job: {}", io::Error::last_os_error());
+    // SAFETY: the successful creation returned a handle owned only by this test.
+    let job = unsafe { OwnedHandle::from_raw_handle(job) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: the Job is live and the pointer and length describe the expected structure.
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        )
+    };
+    assert_ne!(
+        configured,
+        0,
+        "set Job limits: {}",
+        io::Error::last_os_error()
+    );
+
+    let mut fixture = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "a_closed_job_keeps_the_agent_one_shot",
+            "--nocapture",
+        ])
+        .env(COMPLETION_FILE, &completion)
+        .env("TEMP", temp.path())
+        .env("TMP", temp.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start gated fixture");
+    // SAFETY: both handles are live and belong to this test.
+    if unsafe { AssignProcessToJobObject(job.as_raw_handle(), fixture.as_raw_handle()) } == 0 {
+        let error = io::Error::last_os_error();
+        let _ = fixture.kill();
+        let _ = fixture.wait();
+        panic!("assign fixture to closed Job: {error}");
+    }
+    fixture
+        .stdin
+        .take()
+        .expect("admission pipe")
+        .write_all(b"go")
+        .expect("admit fixture");
+    // SAFETY: the child process handle is valid throughout the bounded wait.
+    let wait = unsafe { WaitForSingleObject(fixture.as_raw_handle(), 60_000) };
+    // Closing the Job also ends any descendants left by a failure or timeout.
+    drop(job);
+    let status = fixture.wait().expect("reap closed Job fixture");
+    assert_eq!(wait, WAIT_OBJECT_0, "closed Job fixture wait: {wait:#x}");
+    assert!(status.success(), "closed Job fixture: {status}");
+    assert!(completion.is_file(), "closed Job fixture did not run");
+}
+
 /// Вторая команда берёт живого агента и на Windows: `1cv8` поднят один раз, агент живёт между
 /// командами (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`), квитанция говорит, был ли
 /// он живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
