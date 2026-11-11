@@ -8,6 +8,7 @@ check:
   - tests/cli_init.rs::init_dry_run_plans_the_infobase_without_creating_it
   - tests/cli_infobase_copy.rs::debugging_on_a_copy_of_the_base_leaves_the_neighbour_untouched
   - tests/cli_infobase_copy.rs::a_preview_names_the_snapshot_and_a_wrong_source_is_refused
+  - tests/cli_infobase_recreate.rs::a_recreated_file_base_is_new_and_keeps_a_foreign_file
 ---
 
 # `data` команды `infobase create`
@@ -24,7 +25,15 @@ check:
 в местном слое (`infobase`) и абсолютный путь образа DT под `workPath` (`snapshot`); под
 превью — путь, куда образ лёг бы. Без `--from` и пока база-источник не найдена, поля нет.
 
-**Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)).
+У `infobase create --recreate` первым идёт шаг `infobase recreate`, а поле `removed` называет
+каждую часть прежней базы: `kind` — `file` (запись `1Cv8*` каталога файловой базы),
+`database` (своя БД), `registration` (регистрация в кластере раннера) или `live_agent`
+(простаивающий живой агент); `name` — путь, БД с сервером, база в кластере или pid агента;
+`state` — `planned` (превью), `removed`, `restored` (возвращено после неудачи) или `left`
+(осталось не на месте, шаг говорит где). Пустой список — удалять было нечего; без
+`--recreate` поля нет.
+
+**Что изменила версия 6.** У квитанции исполнителя в `endpoint` управляемого агента новое поле `live`: взяла ли команда уже живого агента (`reused`), его держатели (`holders`), остался ли он жить (`kept`) и почему нет (`reason`) ([правило](a-receipt-says-whether-the-agent-was-live.md)). Появилось необязательное поле `removed` — части прежней базы у `infobase create --recreate`; ответ без ключа прежний.
 
 **Что изменила версия 5.** Общая квитанция `provider` получила необязательное поле `reason` (`whole` или `by_changes`) — почему цепочка умолчаний стоит в этом порядке. У этой команды поле допускается схемой, но не пишется: объём упорядочивает цепочку только у `push` и `pull` файловой базы ([правило](../use-cases/the-agent-leads-a-default-chain.md)).
 

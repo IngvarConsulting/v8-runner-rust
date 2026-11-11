@@ -186,8 +186,12 @@ fn acquire(
             error: error.into(),
         })?;
     if base != BaseAccess::Untouched {
-        let recreates = matches!(command, CommandName::Init | CommandName::InfobaseRestore);
+        // `infobase create` снимает простаивающих агентов сам, после своих проверок и перед
+        // тем, как тронуть базу (`INV.USE-CASES.RECREATE-REFUSES-A-BUSY-BASE-BEFORE-REMOVING`);
+        // здесь только отказ занятой базы.
+        let recreates = matches!(command, CommandName::InfobaseRestore);
         crate::use_cases::infobase_lock::settle_live_agents(config, command.as_str(), recreates)
+            .map(|_| ())
             .map_err(|error| BoundaryRefusal {
                 phase: InfobaseTransferPhase::InfobaseLock,
                 error: error.into(),

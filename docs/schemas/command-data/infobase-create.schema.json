@@ -318,6 +318,76 @@
       ],
       "type": "object"
     },
+    "RemovedEntry": {
+      "additionalProperties": false,
+      "description": "Одна часть старой базы у `infobase create --recreate`.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/RemovedKind"
+        },
+        "name": {
+          "description": "Путь файла, имя БД с сервером, имя базы в кластере или pid живого агента.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/RemovedState"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "state"
+      ],
+      "type": "object"
+    },
+    "RemovedKind": {
+      "oneOf": [
+        {
+          "const": "file",
+          "description": "Запись `1Cv8*` верхнего уровня каталога файловой базы.",
+          "type": "string"
+        },
+        {
+          "const": "database",
+          "description": "БД в PostgreSQL раннера.",
+          "type": "string"
+        },
+        {
+          "const": "registration",
+          "description": "Регистрация базы в кластере раннера.",
+          "type": "string"
+        },
+        {
+          "const": "live_agent",
+          "description": "Простаивающий живой агент этой базы.",
+          "type": "string"
+        }
+      ]
+    },
+    "RemovedState": {
+      "oneOf": [
+        {
+          "const": "planned",
+          "description": "Превью: было бы удалено.",
+          "type": "string"
+        },
+        {
+          "const": "removed",
+          "description": "Удалено после удачного создания.",
+          "type": "string"
+        },
+        {
+          "const": "restored",
+          "description": "Неудача: возвращено на место.",
+          "type": "string"
+        },
+        {
+          "const": "left",
+          "description": "Неудача: не возвращено; ответ называет, где оно осталось.",
+          "type": "string"
+        }
+      ]
+    },
     "SessionEndpoint": {
       "additionalProperties": false,
       "description": "Точка входа открытой сессии: режим и `host:port`, к которому раннер подключился.\n\nАдрес строится из разобранных хоста и порта, а не из записи конфига, поэтому\nучётных данных в нём нет: ни `user:pass@`, ни пароля строки соединения.",
@@ -410,6 +480,16 @@
     "provider_dispatched": {
       "description": "Whether an executor got this command's work: a process was started to do it, or the\nrequest's command was handed to a running session. Starting or opening a session and\nits own service commands are not work. `false` whenever the executor got none — a\npreview, a refusal or interruption before any work, a run with nothing to do, or a\nprocess that could not be started.\n\nAlways present, so an absent field never has to be read as \"no work was given\".",
       "type": "boolean"
+    },
+    "removed": {
+      "description": "Что `infobase create --recreate` отложило, удалило или вернуло на место. Пустой\nсписок — удалять было нечего; без `--recreate` поля нет.",
+      "items": {
+        "$ref": "#/$defs/RemovedEntry"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "source": {
       "anyOf": [

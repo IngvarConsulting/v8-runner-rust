@@ -2,10 +2,12 @@
 //! подъёма и отмены. Команды `dbms` здесь; `cluster` и `standalone` лягут на тот же механизм.
 
 mod cluster;
+mod recreate;
 mod standalone;
 
 pub(crate) use cluster::ClusterBase;
 pub use cluster::ClusterCommand;
+pub(crate) use recreate::{old_database, refuse_a_leftover_database, OldDatabase};
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -141,6 +143,19 @@ fn io_failure(what: &str, path: &Path, error: &std::io::Error) -> UseCaseError {
     UseCaseError::new(
         UseCaseErrorKind::Runtime,
         format!("{what} '{}': {error}", path.display()),
+    )
+}
+
+/// Отказ `infobase_sessions` управляемой базы: форму `error.sessions` строит владелец из
+/// применения (`apply::sessions::infobase_sessions`); раннер сеансы для пересоздания не
+/// завершает (`terminable: false`). `list: None` — признак занятости есть, а перечня нет.
+fn sessions_refusal(
+    config: &AppConfig,
+    message: String,
+    list: Option<Vec<crate::domain::sessions::SessionEntry>>,
+) -> UseCaseError {
+    UseCaseError::new(UseCaseErrorKind::InfobaseSessions, message).with_sessions(
+        crate::use_cases::apply::sessions::infobase_sessions(config, list, false),
     )
 }
 

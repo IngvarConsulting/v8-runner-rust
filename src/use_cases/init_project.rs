@@ -35,6 +35,7 @@ use crate::use_cases::throwaway_infobase::{edt_sources_to_xml, EdtConversion};
 use crate::use_cases::tool_extension;
 
 pub(crate) mod copy;
+mod recreate;
 
 pub fn execute(
     context: &ExecutionContext,
@@ -62,8 +63,176 @@ fn run_init(
     config: &AppConfig,
     args: &InitRequest,
 ) -> UseCaseResult<InitResult> {
-    let dry_run = args.dry_run;
     let started = Instant::now();
+    let answer = if args.recreate {
+        recreate_infobase(context, config, args, started)
+    } else {
+        // Простаивающие агенты базы снимаются до создания: их ключ ничему больше не отвечает.
+        let settled = if args.dry_run {
+            Ok(Vec::new())
+        } else {
+            crate::use_cases::infobase_lock::settle_live_agents(config, INFOBASE_CREATE, true)
+        };
+        match settled {
+            Ok(_) => create_infobase(context, config, args, started, false),
+            Err(error) => {
+                let error = UseCaseError::from(error);
+                let mut result = init_result(started, Vec::new(), false);
+                result.steps.push(InitStep {
+                    target: "infobase".to_owned(),
+                    action: "create".to_owned(),
+                    status: InitStepStatus::Failed,
+                    message: Some(error.message().to_owned()),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                });
+                Err(InitExecutionFailure::with_payload(error, result))
+            }
+        }
+    };
+    if args.dry_run {
+        // Строка о ходе остаётся в выводе, хотя ни база, ни рабочее пространство не
+        // тронуты: запись о вызове несёт конверт, журнала превью не ведёт.
+        log_live_stage("init: preview", "[Init] preview only, nothing created");
+    }
+    answer
+}
+
+/// `infobase create --recreate`: проверки, затем снятие агентов и откладывание прежней базы,
+/// затем обычное создание; после него отложенное удаляется или возвращается. Шаг
+/// `infobase recreate` идёт первым, `removed` называет каждую часть прежней базы.
+fn recreate_infobase(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &InitRequest,
+    started: Instant,
+) -> UseCaseResult<InitResult> {
+    let recreate_step = |status: InitStepStatus, message: String| InitStep {
+        target: "infobase".to_owned(),
+        action: "recreate".to_owned(),
+        status,
+        message: Some(message),
+        duration_ms: started.elapsed().as_millis() as u64,
+    };
+    let refuse = |error: UseCaseError, removed: Vec<crate::domain::init::RemovedEntry>| {
+        let mut result = init_result(
+            started,
+            vec![recreate_step(
+                InitStepStatus::Failed,
+                error.message().to_owned(),
+            )],
+            false,
+        );
+        result.removed = Some(removed);
+        Err(InitExecutionFailure::with_payload(error, result))
+    };
+    let recreation = match recreate::prepare(context, config, args.dry_run) {
+        Ok(recreation) => recreation,
+        Err(error) => return refuse(error, Vec::new()),
+    };
+    if args.dry_run {
+        let (message, removed) = recreation.plan();
+        let created = create_infobase(context, config, args, started, true);
+        return prepend(
+            created,
+            recreate_step(InitStepStatus::Planned, message),
+            removed,
+        );
+    }
+    // Создание, которое и так откажет (нет утилиты, неверный `--from`, источник на
+    // автономном сервере), отказывает до точки невозврата: его превью ничего не трогает.
+    let planned = create_infobase(
+        context,
+        config,
+        &InitRequest {
+            dry_run: true,
+            ..args.clone()
+        },
+        started,
+        true,
+    );
+    if let Err(failure) = planned {
+        return refuse(failure.error, Vec::new());
+    }
+    let set_aside = match recreation.set_aside(context, config) {
+        Ok(set_aside) => set_aside,
+        Err((error, removed)) => return refuse(error, removed),
+    };
+    let created = create_infobase(context, config, args, started, true);
+    let infobase_created = match &created {
+        Ok(result) => infobase_step_succeeded(result),
+        Err(failure) => failure
+            .payload
+            .as_ref()
+            .is_some_and(infobase_step_succeeded),
+    };
+    let finished = set_aside.finish(context, config, infobase_created);
+    let left = finished
+        .removed
+        .iter()
+        .any(|entry| entry.state == crate::domain::init::RemovedState::Left);
+    let (status, message) = match (infobase_created, left) {
+        (true, false) => (
+            InitStepStatus::Ok,
+            "the old infobase was set aside and, once the new one was created, removed",
+        ),
+        (true, true) => (
+            InitStepStatus::Ok,
+            "the new infobase was created, and part of the old one was not removed",
+        ),
+        (false, false) => (
+            InitStepStatus::Ok,
+            "the creation failed, and the old infobase was put back; the runner keeps no memory of it: pull <SET> --force or push --force before the next exchange",
+        ),
+        (false, true) => (
+            InitStepStatus::Failed,
+            "the creation failed, and the old infobase was not fully put back",
+        ),
+    };
+    let message = append_warnings(message.to_owned(), &finished.warnings);
+    prepend(created, recreate_step(status, message), finished.removed)
+}
+
+/// Создалась ли база: шаг `infobase create` прошёл.
+fn infobase_step_succeeded(result: &InitResult) -> bool {
+    result.steps.iter().any(|step| {
+        step.target == "infobase" && step.action == "create" && step.status == InitStepStatus::Ok
+    })
+}
+
+/// Ответ пересоздания: шаг `infobase recreate` перед шагами создания и `removed`.
+fn prepend(
+    created: UseCaseResult<InitResult>,
+    step: InitStep,
+    removed: Vec<crate::domain::init::RemovedEntry>,
+) -> UseCaseResult<InitResult> {
+    let complete = move |result: &mut InitResult| {
+        result.steps.insert(0, step);
+        result.removed = Some(removed);
+    };
+    match created {
+        Ok(mut result) => {
+            complete(&mut result);
+            Ok(result)
+        }
+        Err(mut failure) => {
+            if let Some(result) = failure.payload.as_mut() {
+                complete(result);
+            }
+            Err(failure)
+        }
+    }
+}
+
+/// Создание базы и рабочей области. `replaced` — база создаётся на месте отложенной
+/// `--recreate`: превью не отказывает существующей, остаток рядом с ней свой.
+fn create_infobase(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &InitRequest,
+    started: Instant,
+    replaced: bool,
+) -> UseCaseResult<InitResult> {
+    let dry_run = args.dry_run;
     let mut utilities = PlatformUtilities::from_config(config);
     // Исполнитель нужен только шагу создания базы, и тот сам сообщает об отсутствии
     // утилиты своим статусом: отказ выбора здесь не прерывает команду — у серверного
@@ -72,7 +241,7 @@ fn run_init(
     // Снимок источника делает Конфигуратор; исполнителя загрузки образа в базу команды
     // выбирает сценарий копирования по готовности и называет в квитанции.
     if args.from.is_some() {
-        return copy_infobase(context, config, args, &mut utilities, started);
+        return copy_infobase(context, config, args, &mut utilities, started, replaced);
     }
     let (provider, receipt) =
         match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Init)
@@ -137,6 +306,7 @@ fn run_init(
             provider,
             shared_edt.as_ref(),
             dry_run,
+            replaced,
         )
     };
     record_step(&mut steps, &mut first_error, infobase);
@@ -149,11 +319,6 @@ fn run_init(
     }
 
     let mut result = init_result(started, steps, first_error.is_none());
-    if dry_run {
-        // Строка о ходе остаётся в выводе, хотя ни база, ни рабочее пространство не
-        // тронуты: запись о вызове несёт конверт, журнала превью не ведёт.
-        log_live_stage("init: preview", "[Init] preview only, nothing created");
-    }
     result.provider = Some(receipt);
 
     match first_error {
@@ -172,6 +337,7 @@ fn copy_infobase(
     args: &InitRequest,
     utilities: &mut PlatformUtilities,
     started: Instant,
+    replaced: bool,
 ) -> UseCaseResult<InitResult> {
     let dry_run = args.dry_run;
     let refuse = |error: AppError, receipt: ProviderReceipt| {
@@ -216,7 +382,8 @@ fn copy_infobase(
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
     let mut shared_edt: Option<EdtDsl<'static>> = None;
-    let (step, source) = copy::ensure_copy(context, config, utilities, from, dry_run, select);
+    let (step, source) =
+        copy::ensure_copy(context, config, utilities, from, dry_run, replaced, select);
     record_step(&mut steps, &mut first_error, step);
     record_step(
         &mut steps,
@@ -226,9 +393,6 @@ fn copy_infobase(
     let mut result = init_result(started, steps, first_error.is_none());
     result.source = source;
     result.provider = Some(receipt);
-    if dry_run {
-        log_live_stage("init: preview", "[Init] preview only, nothing created");
-    }
     match first_error {
         Some(error) => Err(InitExecutionFailure::with_payload(error, result)),
         None => Ok(result),
@@ -291,6 +455,7 @@ fn init_result(started: Instant, steps: Vec<InitStep>, ok: bool) -> InitResult {
         provider_dispatched: false,
         steps,
         source: None,
+        removed: None,
         duration_ms: started.elapsed().as_millis() as u64,
     }
 }
@@ -422,8 +587,18 @@ fn ensure_infobase(
     provider: Provider,
     shared_edt: Option<&EdtDsl<'static>>,
     dry_run: bool,
+    replaced: bool,
 ) -> StepOutcome {
     let started = Instant::now();
+    // БД, отложенная пересозданием, которое оборвал аварийный выход раннера, держит прежнюю
+    // базу: простое создание её называет и не начинается.
+    if !dry_run && !replaced && (is_managed_standalone(config) || is_managed_cluster(config)) {
+        if let Err(error) =
+            crate::use_cases::managed_stand::refuse_a_leftover_database(context, config)
+        {
+            return StepOutcome::failed("infobase", "create", started, error);
+        }
+    }
     match config.target_kind() {
         // Базу автономного сервера создают до его запуска, на его машине: раннер к серверу
         // только подключается (`INV.CLI.INFOBASE-CREATE-FOLLOWS-THE-TARGET-KIND`).
@@ -435,7 +610,7 @@ fn ensure_infobase(
             }
         }
         TargetKind::Cluster if is_managed_cluster(config) => {
-            ensure_managed_cluster_base(context, config, utilities, dry_run)
+            ensure_managed_cluster_base(context, config, utilities, dry_run, replaced)
         }
         TargetKind::Cluster => ensure_cluster_infobase(context, config, utilities, dry_run),
         TargetKind::File => match config.v8_connection().file_path().map(PathBuf::from) {
@@ -447,6 +622,7 @@ fn ensure_infobase(
                 &infobase_dir,
                 shared_edt,
                 dry_run,
+                replaced,
             ),
             None => StepOutcome::failed(
                 "infobase",
@@ -474,12 +650,20 @@ fn ensure_managed_cluster_base(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     dry_run: bool,
+    replaced: bool,
 ) -> StepOutcome {
     use crate::use_cases::managed_stand::{cluster_base, remember_cluster_base, ClusterBase};
 
     let started = Instant::now();
     match cluster_base(context, config, dry_run) {
         Err(error) => StepOutcome::failed("infobase", "create", started, error),
+        // Превью пересоздания: регистрацию снимет откладывание, и база создастся заново.
+        Ok(ClusterBase::AlreadyRegistered(_)) if dry_run && replaced => StepOutcome::planned(
+            "infobase",
+            "create",
+            started,
+            "would create the infobase anew in the cluster with a new database via CREATEINFOBASE once the old one is set aside",
+        ),
         Ok(ClusterBase::AlreadyRegistered(message)) if dry_run => {
             StepOutcome::planned("infobase", "create", started, message)
         }
@@ -544,7 +728,7 @@ fn standalone_refusal() -> AppError {
 /// создаёт новую базу и чужую не трогает.
 fn existing_file_infobase(infobase_dir: &Path) -> AppError {
     AppError::Validation(format!(
-        "the file infobase '{}' already exists: infobase create creates a new infobase and leaves an existing one untouched; push loads the sources into it (push --force when the runner has no memory of it), or remove the directory and run infobase create again",
+        "the file infobase '{}' already exists: infobase create creates a new infobase and leaves an existing one untouched; push loads the sources into it (push --force when the runner has no memory of it), or infobase create --recreate replaces it",
         infobase_dir.display()
     ))
 }
@@ -557,11 +741,25 @@ fn ensure_file_infobase(
     infobase_dir: &Path,
     shared_edt: Option<&EdtDsl<'static>>,
     dry_run: bool,
+    replaced: bool,
 ) -> StepOutcome {
     let started = Instant::now();
     let marker = infobase_marker_path(infobase_dir);
     debug!("[Инфобаза] Подготовка: {}", infobase_dir.display());
-    if marker.exists() {
+    // Остаток пересоздания, оборванного аварийным выходом раннера, держит прежнюю базу.
+    if let Some(aside) = recreate::leftover_of(infobase_dir).filter(|_| !replaced) {
+        return StepOutcome::failed(
+            "infobase",
+            "create",
+            started,
+            AppError::Validation(format!(
+                "'{}' is left by an earlier infobase create --recreate that did not finish: it holds the files of the old infobase of '{}'; move them back into the infobase directory or delete the directory, then repeat",
+                aside.display(),
+                infobase_dir.display()
+            )),
+        );
+    }
+    if marker.exists() && !(dry_run && replaced) {
         return StepOutcome::failed(
             "infobase",
             "create",
@@ -1745,10 +1943,7 @@ mod tests {
             super::execute(
                 &ExecutionContext::cli(CommandName::Init).with_cancellation(cancellation),
                 config,
-                &crate::use_cases::request::InitRequest {
-                    dry_run: false,
-                    from: None,
-                },
+                &crate::use_cases::request::InitRequest::default(),
             )
         })
     }

@@ -129,15 +129,16 @@ pub(crate) fn acquire_infobase_lock(
 /// не подключён и команде не мешает. Агент, подключённый к базе сессией другой команды, —
 /// отказ `infobase_busy`, называющий его команду и держателей. Команда, которая пересоздаёт
 /// базу (`recreates`), снимает простаивающих агентов этой базы: их ключ больше ничему не
-/// отвечает.
+/// отвечает. Ответ — pid снятых агентов (у агента без процесса — `None`).
 pub(crate) fn settle_live_agents(
     config: &AppConfig,
     command_name: &str,
     recreates: bool,
-) -> Result<(), AppError> {
+) -> Result<Vec<Option<u32>>, AppError> {
+    let mut removed = Vec::new();
     // Нет каталога состояния — нет и живых агентов.
     let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
-        return Ok(());
+        return Ok(removed);
     };
     let infobase = crate::use_cases::agent_session::canonical_infobase(config);
     let found = crate::platform::agent_keeper::client::keepers_of(&state, &infobase);
@@ -168,7 +169,8 @@ pub(crate) fn settle_live_agents(
                 .stop_if(true, false, &tokio_util::sync::CancellationToken::new())
             {
                 Ok(Stopped::Removed) => {
-                    tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed")
+                    tracing::info!(key = %keeper.key, "the live agent of the recreated infobase is removed");
+                    removed.push(status.ok().and_then(|status| status.agent_pid));
                 }
                 Ok(Stopped::Pending) => {
                     tracing::warn!(key = %keeper.key, "the live agent of the recreated infobase did not confirm its removal in time")
@@ -183,7 +185,24 @@ pub(crate) fn settle_live_agents(
             }
         }
     }
-    Ok(())
+    Ok(removed)
+}
+
+/// Простаивающие живые агенты базы, которых сняла бы команда, пересоздающая её: pid каждого
+/// (`None` — агент без процесса). Каталогов не создаёт, никого не снимает — для превью.
+pub(crate) fn idle_live_agents(config: &AppConfig) -> Vec<Option<u32>> {
+    let Some(state) = crate::support::machine::account::existing_account_state_dir() else {
+        return Vec::new();
+    };
+    let infobase = crate::use_cases::agent_session::canonical_infobase(config);
+    crate::platform::agent_keeper::client::keepers_of(&state, &infobase)
+        .into_iter()
+        .filter_map(|(_, status)| match status {
+            Ok(status) if status.holds_the_infobase() => None,
+            Ok(status) => Some(status.agent_pid),
+            Err(_) => Some(None),
+        })
+        .collect()
 }
 
 /// Живые агенты базы, которые сейчас с ней работают: их команда и держатели. Каталогов не

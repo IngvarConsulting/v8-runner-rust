@@ -10,6 +10,7 @@ check:
   - src/use_cases/infobase_owner.rs::unreadable_declaration_errors_name_safe_causes_without_their_contents
   - src/use_cases/infobase_owner.rs::a_marker_with_this_copy_and_another_live_one_warns
   - tests/cli_infobase_owner.rs::reset_on_a_base_of_another_copy_warns_and_names_the_owner
+  - tests/cli_infobase_recreate.rs::a_base_of_another_copy_is_recreated_with_a_warning
 ---
 
 # Запись в базу другой копии идёт с предупреждением
@@ -23,7 +24,9 @@ check:
 выходы к своей базе, что отказ
 `INV.CLI.A-REFUSAL-WITHOUT-AN-OWN-BASE-NAMES-THE-WAYS-OUT`, с источником копии `upstream`. Кода
 отказа для базы другой копии нет. Так же — когда в метке записана и эта копия: предупреждает
-любая другая живая копия-владелец.
+любая другая живая копия-владелец. Так же идёт и `infobase create --recreate`: базу другой
+копии он заменяет с тем же предупреждением, а его превью его называет. База без метки
+владельца считается своей.
 
 Решение владельца от 07.10.2026 (#437): писать в базу другой копии — ответственность
 разработчика, и принятый ответ с предупреждением — его согласие.

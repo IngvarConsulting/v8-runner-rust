@@ -56,6 +56,7 @@ pub(super) fn ensure_copy(
     utilities: &mut PlatformUtilities,
     from: &str,
     dry_run: bool,
+    replaced: bool,
     select: impl FnOnce(&mut PlatformUtilities) -> Result<SelectedProvider, AppError>,
 ) -> (StepOutcome, Option<InitSource>) {
     let started = Instant::now();
@@ -80,6 +81,7 @@ pub(super) fn ensure_copy(
         from,
         snapshot: &snapshot,
         started,
+        replaced,
     };
     (copy.run(utilities, dry_run, select), answer)
 }
@@ -214,6 +216,8 @@ struct Copy<'a> {
     from: &'a str,
     snapshot: &'a Path,
     started: Instant,
+    /// `--recreate`: существующую базу команда заменяет, и превью её не отказывает.
+    replaced: bool,
 }
 
 /// Исполнитель `infobase restore`, выбранный для загрузки образа, и его утилита.
@@ -266,7 +270,7 @@ impl Copy<'_> {
                         "a file target names no infobase path".to_owned(),
                     ));
                 };
-                if infobase_marker_path(&dir).exists() {
+                if infobase_marker_path(&dir).exists() && !self.replaced {
                     return self.failed(existing_file_infobase(&dir));
                 }
                 Creator::File { dir }
