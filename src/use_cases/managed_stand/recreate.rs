@@ -192,6 +192,7 @@ impl OldDatabase {
                     self.name, self.server
                 ),
                 None,
+                crate::domain::sessions::SessionsEvidence::Executor,
             ),
             Err(Refused::Other(error)) => error,
         };

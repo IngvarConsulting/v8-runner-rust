@@ -96,13 +96,16 @@ const LABELS_NOT_VERDICTS: &[(&str, &str)] = &[
     ("src/parsers/edt_validation.rs", "триви"),
     // Vanessa Automation log: lines are extracted into the report, and nothing reads them back.
     ("src/parsers/vanessa_log.rs", "ошибк"),
-    // The list of sessions in a refusal of the database update (#211). Whether sessions hold
-    // the infobase is decided by state — the agent's `error-type` and the locks on the files of
-    // a file infobase — and never by these words; they only name the sessions in
-    // `error.sessions.list`, and a line they do not recognise drops the whole list to `null`.
+    // The list of sessions in a refusal of the database update (#211, #613). Whether sessions
+    // hold the infobase is decided by state — the agent's `error-type`, the locks on the files of
+    // a file infobase and the server's own session list — and never by these words; they only
+    // name the sessions in `error.sessions.list`, and a line they do not recognise drops the
+    // whole list to `null`.
     ("src/platform/session_list.rs", "Existing sessions:"),
     ("src/platform/session_list.rs", "session started"),
     ("src/platform/session_list.rs", "Активны сеансы:"),
+    ("src/platform/session_list.rs", "База данных заблокирована:"),
+    ("src/platform/session_list.rs", "по причине:"),
     (
         "src/platform/session_list.rs",
         "Активные сеансы и соединения:",

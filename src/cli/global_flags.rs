@@ -351,6 +351,12 @@ const LEAVES: &[Leaf] = &[
         preview: Preview::Absent("the keeper of a live agent is started by the runner itself"),
         base: Base::Ignores,
     },
+    // Фоновое удаление прежнего дерева запускает сам раннер после ответа команды (#616).
+    Leaf {
+        path: "remove-backup",
+        preview: Preview::Absent("the runner starts it itself after a publication has answered"),
+        base: Base::Ignores,
+    },
 ];
 
 fn leaf(path: &str) -> Option<&'static Leaf> {

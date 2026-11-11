@@ -9,7 +9,7 @@ check:
   - tests/cli_apply.rs::a_push_without_apply_loads_and_apply_applies_it
   - tests/contract_receipt.rs::a_file_base_picks_the_executor_by_the_size_of_the_operation
   - tests/cli_status.rs::status_and_push_name_how_the_changes_were_found
-  - tests/cli_apply_sessions.rs::force_on_a_cluster_ends_the_sessions_and_names_them
+  - tests/cli_apply_sessions.rs::force_nobody_held_names_no_terminated_sessions
 ---
 
 # `data` команды `push`

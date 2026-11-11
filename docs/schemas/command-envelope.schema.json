@@ -234,6 +234,11 @@
           "type": "string"
         },
         {
+          "const": "agent_command_abandoned",
+          "description": "Род `platform`: второй сигнал бросил ожидание команды чужого агента, и она, возможно,\nещё идёт.",
+          "type": "string"
+        },
+        {
           "const": "non_fast_forward",
           "description": "Пара к роду `non_fast_forward`: база ушла вперёд записанного поколения.",
           "type": "string"
@@ -362,6 +367,17 @@
           "description": "Строка соединения базы без учётных данных.",
           "type": "string"
         },
+        "evidence": {
+          "$ref": "#/$defs/SessionsEvidence",
+          "description": "Откуда известно, что базу держат сеансы."
+        },
+        "executor_error": {
+          "description": "Отказ исполнителя как он есть, когда признак — список сервера (`evidence: server_list`):\nбаза занята, но отказ мог быть и по другой причине. У `executor` — `null`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "from_this_machine": {
           "description": "Среди сеансов есть сеанс с этой машины.",
           "type": "boolean"
@@ -389,7 +405,8 @@
         "base",
         "from_this_machine",
         "terminable",
-        "lock"
+        "lock",
+        "evidence"
       ],
       "type": "object"
     },
@@ -584,6 +601,21 @@
         {
           "const": "unknown",
           "description": "Узнать нельзя.",
+          "type": "string"
+        }
+      ]
+    },
+    "SessionsEvidence": {
+      "description": "Источник признака «базу держат сеансы».",
+      "oneOf": [
+        {
+          "const": "executor",
+          "description": "Улика исполнителя или состояния базы: `error-type` агента, его вопрос, блокировка файлов\nфайловой базы, отказ СУБД из-за подключений, у пересоздания — сеансы в `rac`: другой\nпричины отказа нет. Отказ — точно из-за сеансов.",
+          "type": "string"
+        },
+        {
+          "const": "server_list",
+          "description": "Улики исполнителя нет, а собственный список сервера (`rac session list`, `ibcmd session\nlist`) называет чужие живые сеансы: база занята, но причина отказа может быть другой.",
           "type": "string"
         }
       ]

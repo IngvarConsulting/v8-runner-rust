@@ -17,9 +17,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 use support::fake_agent::{
-    fingerprint_of, process_is_alive, random_host_key, read_or_empty,
-    serve_managed_launches_on_a_reserved_port, start_fake_agent_with_host_key, write_fake_designer,
-    write_host_key_file, FakeAgent, FakeExtension, AGENT_PASSWORD,
+    collide_with_first_managed_launch, fingerprint_of, process_is_alive, random_host_key,
+    read_or_empty, serve_managed_launches_on_a_reserved_port, start_fake_agent_with_host_key,
+    write_fake_designer, write_host_key_file, FakeAgent, FakeExtension, AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command, wait_until};
 
@@ -282,6 +282,40 @@ fn commands(harness: &Harness) -> Vec<String> {
         .lines()
         .map(str::to_owned)
         .collect()
+}
+
+#[test]
+fn a_one_shot_agent_relaunches_after_a_foreign_agent_takes_its_automatic_port() {
+    let harness = harness(true, None, false);
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    fs::write(
+        &harness.config_path,
+        config.replace(&format!("    port: {}\n", harness.port), ""),
+    )
+    .expect("automatic port");
+    one_shot(&harness);
+    let ports = collide_with_first_managed_launch(FakeAgent::new(
+        true,
+        harness.commands_log.clone(),
+        None,
+        harness.base_dir_file.clone(),
+        harness.designer_pid_file.clone(),
+    ));
+
+    let (code, payload) = run_dump(&harness, &["--force"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let ports: Vec<_> = ports.try_iter().collect();
+    let [first, second] = ports.as_slice() else {
+        panic!("expected two launches, got {ports:?}");
+    };
+    assert_ne!(first, second);
+    assert_eq!(
+        payload["data"]["provider"]["endpoint"]["address"],
+        format!("127.0.0.1:{second}"),
+        "{payload}"
+    );
+    assert!(harness.target.join("Configuration.xml").is_file());
 }
 
 /// Управляемый агент: раннер поднимает Конфигуратор своими ключами, ведёт сессию

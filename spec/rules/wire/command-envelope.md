@@ -35,10 +35,14 @@ check:
 держит другая команда), `infobase_sessions` (обновлению конфигурации базы данных нужен
 монопольный доступ, а базу держат чужие сеансы) и `infobase_designer_busy` (файловую базу
 держит чужой Конфигуратор). Поле `sessions` у отказов «базу держат» называет базу, сеансы, можно ли их
-завершить и блокировку начала сеансов
+завершить, блокировку начала сеансов, источник признака (`evidence`) и, если признак — список
+сервера, отказ исполнителя (`executor_error`)
 (`INV.CLI.APPLY-SESSIONS-GOVERNS-FOREIGN-SESSIONS`). База другой рабочей копии отказом не служит: команда идёт, а
 `warnings` несёт предупреждение
-(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`).
+(`INV.USE-CASES.A-WRITE-ON-A-BASE-OF-ANOTHER-COPY-RUNS-WITH-A-WARNING`). У рода `platform`, код
+выхода 4, — `platform_failure` и `agent_command_abandoned`: второй сигнал бросил ожидание
+команды чужого агента, и она, возможно, ещё идёт
+(`INV.USE-CASES.AN-ATTACHED-AGENT-ANSWERS-CANCELLED-AFTER-ITS-COMMAND-ENDS`).
 
 Схема порождается из типов: `UPDATE_ENVELOPE_SCHEMA=1 cargo test
 generated_envelope_schema_is_current`. Руками её не правят — иначе закрытый набор
@@ -83,7 +87,7 @@ generated_envelope_schema_is_current`. Руками её не правят — �
 выключен `tools.designer_agent.live: false`; `live_agent_job` рода `environment`, код выхода
 2, — раннер в Job, из которого сторож не может выйти. Платформу ни один из них не запускает.
 
-**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он. В эту же версию вошёл код `source_set_ignored_by_git` рода `validation`, код выхода 2: правило игнорирования git прячет файл набора, изменения которого берутся у git ([правило](../use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md)). Рода `workspace` прибавили коды `infobase_sessions` и `infobase_designer_busy`, а у отказа — необязательное поле `sessions`, которое заполняют только они.
+**Что изменила версия 5.** Код и род отказа `no_memory` называются `untracked_base`: база этой рабочей копией не отслеживается — нет её памяти о базе, как у ветки без слежения в git. Условия отказа и выходы те же. Набор кодов вырос на три кода удержания живого агента: `agent_limit`, `live_agent_off` и `live_agent_job`; рода прежние. У рода `environment` появился и код `platform_release_missing`, а у отказа — необязательное поле `platform_release`, которое заполняет только он. В эту же версию вошёл код `source_set_ignored_by_git` рода `validation`, код выхода 2: правило игнорирования git прячет файл набора, изменения которого берутся у git ([правило](../use-cases/a-set-hidden-by-a-git-ignore-rule-is-refused.md)). Рода `workspace` прибавили коды `infobase_sessions` и `infobase_designer_busy`, а у отказа — необязательное поле `sessions`, которое заполняют только они. Роду `platform` прибавился код `agent_command_abandoned`, код выхода 4.
 
 **Что изменила версия 4.** Коды рода `workspace` — `workspace_busy` и `infobase_busy`: запись в
 базу другой рабочей копии не отказывает, а предупреждает в `warnings`.

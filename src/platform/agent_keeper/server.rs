@@ -32,9 +32,7 @@ use super::protocol::{
 };
 use super::{credentials_digest, idle_limit, KeeperHome};
 use crate::platform::agent::{
-    free_managed_port, host_key_fallback_roots, AgentError, AgentLaunch, AgentMessage,
-    AgentSessionRequest, EphemeralHostKey, HostKeyExpectation, LaunchHostKey, ManagedAgent,
-    WaitPolicy,
+    AgentError, AgentLaunch, AgentMessage, HostKeyExpectation, ManagedAgent, WaitPolicy,
 };
 use crate::platform::live_registry::lock_agent_registry;
 use crate::platform::process::ProcessExecutor;
@@ -317,7 +315,7 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
         .work_path
         .as_ref()
         .map(|path| path.display().to_string());
-    let (mut agent, port) = match launch(&shared.home, start) {
+    let mut agent = match launch(&shared.home, start) {
         Ok(launched) => launched,
         Err(error) => {
             warn!(%error, "the live agent did not start");
@@ -372,7 +370,7 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
         infobase,
         work_path,
     };
-    if let Err(error) = write_record(&shared.home, port, Some(facts)) {
+    if let Err(error) = write_record(&shared.home, agent.endpoint().port, Some(facts)) {
         warn!(%error, "cannot write the live agent record");
     }
     {
@@ -568,48 +566,32 @@ fn run_command(
 }
 
 /// Поднимает агента ключа и открывает его сессию.
-fn launch(home: &KeeperHome, start: KeeperStart) -> Result<(ManagedAgent, u16), AgentError> {
+fn launch(home: &KeeperHome, start: KeeperStart) -> Result<ManagedAgent, AgentError> {
     let KeeperStart {
         launch,
         credentials,
     } = start;
-    let port = match launch.port {
-        Some(port) => port,
-        None => free_managed_port()?,
-    };
-    let host_key = match launch.host_key {
-        Some(declared) => LaunchHostKey::Declared(declared),
-        None => LaunchHostKey::OneTime(EphemeralHostKey::create_for(
-            &home.key_dir(),
-            &host_key_fallback_roots(),
-        )?),
-    };
     let root = home.paths().root();
     let agent = AgentLaunch {
         v8: launch.v8,
         infobase_args: launch.infobase_args,
-        port,
-        host_key,
+        port: launch.port,
+        host_key: launch.host_key,
+        key_work_path: home.key_dir(),
         base_dir: home.base_dir(),
         workdir: root.join("workdir"),
         process_log: root.join("agent.process"),
-    };
-    let request = AgentSessionRequest {
-        endpoint: agent.endpoint(),
         user: credentials.user,
         password: credentials.password,
         // Журнал разговора пишет команда у себя: сторож журнала запросов не ведёт.
         transcript_log: None,
-        host_key: agent.host_key.expectation(),
     };
     ManagedAgent::launch_for_keeper(
         &ProcessExecutor,
         agent,
-        request,
         Duration::from_millis(launch.startup_timeout_ms.max(1)),
         &WaitPolicy::for_keeper(CancellationToken::new(), false),
     )
-    .map(|agent| (agent, port))
 }
 
 /// Жив ли процесс `pid`, стартовавший в `started`: повторно выданный pid тем же процессом

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use support::fake_agent::{
     fingerprint_of, fingerprint_with, random_host_key, read_or_empty,
-    start_fake_agent_with_host_key, FakeAgent, SftpHold, AGENT_PASSWORD,
+    start_fake_agent_with_host_key, FakeAgent, Hold, SftpHold, AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command};
 
@@ -103,15 +103,16 @@ fn harness_with(
     host_key: russh::keys::PrivateKey,
     declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
 ) -> Harness {
-    harness_holding_sftp(channel, host_key, declared, None)
+    harness_holding(channel, host_key, declared, None, None)
 }
 
-/// Стенд, шлюз которого держит первую запись по SFTP, пока тест её не отпустит.
-fn harness_holding_sftp(
+/// Стенд, который может удержать shell-команду или первую запись по SFTP.
+fn harness_holding(
     channel: Channel,
     host_key: russh::keys::PrivateKey,
     declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
     sftp_hold: Option<SftpHold>,
+    hold: Option<Hold>,
 ) -> Harness {
     let declared_fingerprint = declared(&host_key);
     let dir = temp_workspace();
@@ -145,6 +146,7 @@ fn harness_holding_sftp(
     let mut gate = FakeAgent::gate(commands_log.clone(), GATE_USER, user_dir.clone());
     gate.sftp_read_only = channel == Channel::SftpReadOnly;
     gate.sftp_hold = sftp_hold;
+    gate.hold = hold;
     let dump_info = Arc::clone(&gate.dump_info);
     let generation = Arc::clone(&gate.generation);
     let port = start_fake_agent_with_host_key(gate, host_key);
@@ -1481,7 +1483,7 @@ fn via_connection_without_the_direct_gate_names_the_connection_string() {
 fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
     let marks = temp_workspace();
     let (started, release) = (marks.path().join("started"), marks.path().join("release"));
-    let harness = harness_holding_sftp(
+    let harness = harness_holding(
         Channel::Sftp,
         random_host_key(),
         |_| None,
@@ -1489,6 +1491,7 @@ fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
             started: started.clone(),
             release: release.clone(),
         }),
+        None,
     );
     let mut runner = v8_runner_command();
     runner.args([
@@ -1517,4 +1520,294 @@ fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
             .any(|line| line.starts_with("config load-config-from-files")),
         "the load must not reach the agent after the interrupt: {lines:?}"
     );
+}
+
+/// Строка журнала первого сигнала у чужого агента: раннер ждёт итог команды.
+const WAITING_FOR_EXTERNAL_AGENT: &str =
+    "interruption requested after sending a command to an external agent; waiting for terminal reply";
+
+/// Чужая точка входа выгрузки: шлюз автономного сервера или подключённый агент.
+#[derive(Clone, Copy, Debug)]
+enum Entry {
+    Gate,
+    Attached,
+}
+
+/// Выгрузка `pull main --force` через точку входа `Entry`, чью команду
+/// `config dump-config-to-files` двойник держит до `release`.
+struct HeldDump {
+    harness: Harness,
+    marks: tempfile::TempDir,
+    started: PathBuf,
+    release: PathBuf,
+}
+
+impl HeldDump {
+    fn new(entry: Entry, reply: support::fake_agent::HoldReply) -> Self {
+        let marks = temp_workspace();
+        let started = marks.path().join("started");
+        let release = marks.path().join("release");
+        let harness = harness_holding(
+            Channel::Dir,
+            random_host_key(),
+            |_| None,
+            None,
+            Some(Hold {
+                command: "config dump-config-to-files".into(),
+                started: started.clone(),
+                release: release.clone(),
+                reply,
+            }),
+        );
+        if let Entry::Attached = entry {
+            let root = harness.dir.path();
+            let base = harness.user_dir.parent().expect("agent base directory");
+            fs::write(
+                base.join("agentbasedir.json"),
+                r#"{"usersInfo":[{"name":"agent","dir":"agent"}]}"#,
+            )
+            .expect("write attached user map");
+            write_config(
+                &harness,
+                &format!(
+                    "  connection: 'File={}'\n  user: {GATE_USER}\n  password: '{AGENT_PASSWORD}'\n",
+                    root.join("ib").display(),
+                ),
+                &format!(
+                    "providers:\n  pull: agent\ntools:\n  designer_agent:\n    attach: 127.0.0.1:{}\n    base-dir: '{}'\n",
+                    harness.port,
+                    base.display(),
+                ),
+            );
+        }
+        Self {
+            harness,
+            marks,
+            started,
+            release,
+        }
+    }
+
+    fn runner(&self) -> std::process::Command {
+        let mut runner = v8_runner_command();
+        runner.args([
+            "--config",
+            self.harness.config_path.to_str().expect("config path"),
+            "--json-message",
+            "pull",
+            "main",
+            "--force",
+        ]);
+        runner
+    }
+
+    fn action_log(&self) -> PathBuf {
+        self.marks.path().join("actions.log")
+    }
+
+    fn transcript(&self) -> String {
+        fs::read_to_string(
+            self.harness
+                .dir
+                .path()
+                .join("work/logs/platform/dump-main-agent.log"),
+        )
+        .expect("agent transcript")
+    }
+
+    /// Прерванная выгрузка не публикуется: исходники набора остаются прежними.
+    fn assert_not_published(&self) {
+        assert_eq!(
+            fs::read_to_string(
+                self.harness
+                    .dir
+                    .path()
+                    .join("project/configuration/Configuration.xml")
+            )
+            .unwrap(),
+            "<Configuration/>",
+            "an interrupted dump must not be published"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_of_an_external_agent_waits_for_a_terminal_reply() {
+    use support::fake_agent::HoldReply;
+
+    const REPLIES: &str = concat!(
+        "[{\"type\":\"progress\",\"message\":\"dump still running\"}]\n",
+        "[{\"type\":\"success\",\"message\":\"held dump finished\"}]\n",
+    );
+    for entry in [Entry::Gate, Entry::Attached] {
+        for (reply, expected, evidence) in [
+            (
+                HoldReply::JsonMessages(REPLIES),
+                "cancelled",
+                "held dump finished",
+            ),
+            (
+                HoldReply::JsonMessages(
+                    r#"[{"type":"canceled","message":"held dump stopped by platform"}]"#,
+                ),
+                "cancelled",
+                "held dump stopped by platform",
+            ),
+            (HoldReply::Close, "platform_failure", "ended before a reply"),
+            (HoldReply::Error, "platform_failure", "held command failed"),
+            (
+                HoldReply::JsonMessages(
+                    r#"[{"type":"question","message":"waiting for held dump input"}]"#,
+                ),
+                "platform_failure",
+                "waiting for held dump input",
+            ),
+        ] {
+            let held = HeldDump::new(entry, reply);
+            let (code, payload) = support::interrupt_at_hold_waiting_for_any(
+                held.runner(),
+                &held.action_log(),
+                &held.started,
+                &held.release,
+                &[WAITING_FOR_EXTERNAL_AGENT, support::AGENT_COMMAND_ABANDONED],
+            );
+            if expected == "cancelled" {
+                let transcript = held.transcript();
+                assert!(
+                    transcript.contains(evidence),
+                    "external agent cancellation returned without reading the terminal reply ({entry:?}): {transcript}"
+                );
+                assert_eq!(code, 4, "{payload}");
+            } else {
+                assert!(error_message(&payload).contains(evidence), "{payload}");
+            }
+            assert_eq!(payload["error"]["code"], expected, "{payload}");
+            held.assert_not_published();
+        }
+    }
+}
+
+/// Второй сигнал во время ожидания итога чужого агента бросает ожидание: раннер выходит, не
+/// дождавшись команды, и отвечает не отменой, а исходом `agent_command_abandoned` рода
+/// `platform` с кодом выхода 4 — агент, возможно, ещё работает.
+#[cfg(unix)]
+#[test]
+fn a_second_interrupt_abandons_the_wait_for_an_external_agent() {
+    use support::fake_agent::HoldReply;
+
+    for entry in [Entry::Gate, Entry::Attached] {
+        let held = HeldDump::new(
+            entry,
+            HoldReply::JsonMessages(
+                r#"[{"type":"success","message":"held dump finished after abandonment"}]"#,
+            ),
+        );
+        let (code, payload) = support::interrupt_twice_at_hold(
+            held.runner(),
+            &held.action_log(),
+            &held.started,
+            &held.release,
+            WAITING_FOR_EXTERNAL_AGENT,
+        );
+        assert_eq!(payload["ok"], false, "{payload}");
+        assert_eq!(
+            payload["error"]["code"], "agent_command_abandoned",
+            "{entry:?}: {payload}"
+        );
+        assert_eq!(payload["error"]["kind"], "platform", "{payload}");
+        assert!(
+            error_message(&payload).contains("may still be running"),
+            "{payload}"
+        );
+        assert_eq!(code, 4, "{payload}");
+        assert!(
+            !held
+                .transcript()
+                .contains("held dump finished after abandonment"),
+            "the runner must not have waited for the terminal reply ({entry:?})"
+        );
+        held.assert_not_published();
+    }
+}
+
+/// `CTRL_BREAK` — прерывание оператора на Windows, как `Ctrl+C`: тот, кто запустил раннер в
+/// своей группе процессов (`CREATE_NEW_PROCESS_GROUP`), иначе прервать его не может, а по
+/// умолчанию `CTRL_BREAK` обрывает процесс без ответа. Раннер ждёт итог чужого агента и
+/// отвечает конвертом `cancelled`.
+#[cfg(windows)]
+#[test]
+fn a_ctrl_break_from_another_process_group_cancels_like_ctrl_c() {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::time::Duration;
+    use support::fake_agent::HoldReply;
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, GenerateConsoleCtrlEvent, GetConsoleWindow, CTRL_BREAK_EVENT,
+    };
+    use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
+    // Событие доходит только до процессов той же консоли; у теста без консоли её заводят.
+    // SAFETY: вызовы без аргументов-указателей; консоль своего процесса тестов.
+    unsafe {
+        if GetConsoleWindow().is_null() {
+            AllocConsole();
+        }
+    }
+    for entry in [Entry::Gate, Entry::Attached] {
+        let held = HeldDump::new(
+            entry,
+            HoldReply::JsonMessages(r#"[{"type":"success","message":"held dump finished"}]"#),
+        );
+        let action_log = held.action_log();
+        let mut command = held.runner();
+        command
+            .env("V8TR_ACTION_LOG_FILE", &action_log)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP);
+        let mut runner = support::RunnerGuard(command.spawn().expect("spawn runner"));
+        let mut stdout = runner.0.stdout.take().expect("piped stdout");
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            stdout.read_to_string(&mut text).map(|_| text)
+        });
+        let timeout = Duration::from_secs(30);
+        assert!(
+            support::wait_for_file(&held.started, timeout),
+            "the held work never started"
+        );
+        // SAFETY: группа процессов раннера — его pid (`CREATE_NEW_PROCESS_GROUP`).
+        let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, runner.0.id()) };
+        assert_ne!(sent, 0, "CTRL_BREAK was not delivered");
+        let waited = support::wait_until(timeout, Duration::from_millis(20), || {
+            fs::read_to_string(&action_log)
+                .is_ok_and(|log| log.contains(WAITING_FOR_EXTERNAL_AGENT))
+        });
+        assert!(
+            waited,
+            "the runner never waited for the agent ({entry:?}): {}",
+            fs::read_to_string(&action_log).unwrap_or_default()
+        );
+        fs::write(&held.release, "").expect("release the held work");
+        let exited =
+            support::wait_until(Duration::from_secs(60), Duration::from_millis(20), || {
+                runner.0.try_wait().expect("wait runner").is_some()
+            });
+        assert!(exited, "the runner did not exit after the release");
+        let code = runner.0.wait().expect("exit status").code().unwrap_or(-1);
+        let stdout = reader.join().expect("reader").expect("stdout");
+        let payload: Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|error| panic!("no json envelope: {error}: {stdout}"));
+        assert_eq!(
+            payload["error"]["code"], "cancelled",
+            "{entry:?}: {payload}"
+        );
+        assert_eq!(code, 4, "{payload}");
+        assert!(
+            held.transcript().contains("held dump finished"),
+            "the runner answered before the agent's terminal reply ({entry:?})"
+        );
+        held.assert_not_published();
+    }
 }

@@ -29,6 +29,9 @@ pub enum StatusScope {
 pub struct StatusResult {
     /// Спрашивали ли платформу (`--deep`). `false` — ответ собран из памяти под `workPath`.
     pub deep: bool,
+    /// Квитанция исполнителя, подготовленного для чтения поколения у `--deep`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderReceipt>,
     /// Базы ответа: выбранная или, у `--all`, все объявленные в местном слое по имени.
     pub infobases: Vec<InfobaseStatus>,
     pub duration_ms: u64,

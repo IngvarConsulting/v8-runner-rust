@@ -136,6 +136,9 @@ pub struct Session {
     pub host: String,
     pub user: String,
     pub started: String,
+    /// Сеанс спит (`hibernate : yes`): клиент пропал, например убит. Спящий сеанс обновлению
+    /// конфигурации БД не мешает и платформа его в отказе не называет (замер #613).
+    pub asleep: bool,
 }
 
 /// Сеансы из ответа `session list`: блок без `session` пропускается.
@@ -154,6 +157,7 @@ pub fn sessions(answer: &str) -> Vec<Session> {
                 host: value("host"),
                 user: value("user-name"),
                 started: value("started-at"),
+                asleep: value("hibernate") == "yes",
             })
         })
         .collect()
@@ -220,7 +224,10 @@ mod tests {
         assert_eq!(found[0].application, "1CV8C");
         assert_eq!(found[0].user, "Иванов");
         assert_eq!(found[1].user, "");
+        assert!(!found[0].asleep && !found[1].asleep);
         assert!(sessions("").is_empty());
+        let asleep = sessions("session   : s3\napp-id    : 1CV8C\nhibernate : yes\n");
+        assert!(asleep[0].asleep);
     }
 
     #[test]

@@ -128,6 +128,17 @@ pub enum Command {
     Mcp(McpArgs),
     /// Hold, release, stop or list the live Designer agent that outlives commands
     Agent(AgentArgs),
+    /// Remove the replaced tree of a finished publication: the runner starts it itself after
+    /// answering
+    #[command(name = "remove-backup", hide = true)]
+    RemoveBackup(RemoveBackupArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct RemoveBackupArgs {
+    /// The superseded backup directory beside the published target
+    #[arg(long, value_name = "DIR")]
+    pub path: std::path::PathBuf,
 }
 
 #[derive(Args, Debug)]
@@ -2015,8 +2026,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Скрытые служебные подкоманды (путь, имя): сторож живого агента (#577).
-    const INTERNAL_COMMANDS: &[(&[&str], &str)] = &[(&["agent"], "keeper")];
+    /// Скрытые служебные подкоманды (путь, имя): сторож живого агента (#577) и фоновое удаление
+    /// прежнего дерева (#616).
+    const INTERNAL_COMMANDS: &[(&[&str], &str)] = &[(&["agent"], "keeper"), (&[], "remove-backup")];
 
     /// Скрытое имя дерева разбора: где живёт, что скрыто и чьё оно, если это псевдоним.
     type Hidden = (Vec<String>, crate::cli::synonyms::Previous, Option<String>);

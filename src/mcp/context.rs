@@ -10,6 +10,9 @@ pub struct McpCallContext {
     transport: ExecutionTransport,
     edt_timeout: Option<Duration>,
     cancellation: CancellationToken,
+    /// Второй сигнал вызова — повторная отмена того же запроса: перестать ждать команду
+    /// чужого агента, которую раннер снять не может.
+    abandonment: CancellationToken,
     /// Глобальные ключи, с которыми запущен сервер: совет отказа называет команду строки,
     /// и она должна попасть в тот же проект, ту же базу и тот же рабочий каталог.
     command_line: CommandLineTarget,
@@ -22,6 +25,7 @@ impl McpCallContext {
             transport,
             edt_timeout: None,
             cancellation: CancellationToken::new(),
+            abandonment: CancellationToken::new(),
             command_line: CommandLineTarget::default(),
         }
     }
@@ -56,6 +60,17 @@ impl McpCallContext {
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    /// Привязывает второй сигнал вызова.
+    pub fn with_abandonment(mut self, abandonment: CancellationToken) -> Self {
+        self.abandonment = abandonment;
+        self
+    }
+
+    /// Второй сигнал вызова.
+    pub fn abandonment(&self) -> CancellationToken {
+        self.abandonment.clone()
     }
 
     /// Attaches the global keys the server was started with.
