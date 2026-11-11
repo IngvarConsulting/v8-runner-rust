@@ -14,12 +14,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STANDS_DIR = os.path.join(HERE, "stands")
 SCENARIOS_FILE = os.path.join(HERE, "scenarios.toml")
 
-KINDS = ("push", "pull", "status")
+KINDS = ("push", "pull", "status", "pair")
 EXECUTORS = ("runner", "runner-live", "agent", "batch", "ibcmd")
 # What each executor can do; a scenario may list only these.
 CAN = {
-    "runner": {"push", "pull", "status"},
-    "runner-live": {"push", "pull", "status"},
+    "runner": {"push", "pull", "status", "pair"},
+    "runner-live": {"push", "pull", "status", "pair"},
     "agent": {"push", "pull", "status"},
     "batch": {"push", "pull", "status"},
     "ibcmd": {"push", "status"},

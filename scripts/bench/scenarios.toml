@@ -39,3 +39,9 @@ title = "push модуля объекта"
 kind = "push"
 modules = "object"
 executors = ["runner", "runner-live", "agent", "batch", "ibcmd"]
+
+[pair-common2]
+title = "push --no-apply двух общих модулей и следующий pull (#646)"
+kind = "pair"
+modules = "common2"
+executors = ["runner-live"]

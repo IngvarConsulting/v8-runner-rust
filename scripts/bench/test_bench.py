@@ -130,11 +130,12 @@ class DescriptionTest(unittest.TestCase):
         scenarios = describe.load_scenarios()
         used = {e for s in scenarios.values() for e in s.executors}
         self.assertEqual(used, set(describe.EXECUTORS))
-        kinds = {s.modules: s.kind for s in scenarios.values() if s.modules}
+        kinds = {s.modules: s.kind for s in scenarios.values() if s.modules and s.kind != "pair"}
         self.assertEqual(kinds.get("common2"), "push")
         self.assertEqual(kinds.get("form"), "push")
         self.assertEqual(kinds.get("object"), "push")
         self.assertIn("pull", kinds.values())
+        self.assertEqual(scenarios["pair-common2"].executors, ["runner-live"])
 
     def write(self, text):
         d = tempfile.TemporaryDirectory()
