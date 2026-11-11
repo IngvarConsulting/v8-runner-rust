@@ -12,6 +12,8 @@ to guess which Markdown file is authoritative.
   `docs/CONFIGURATION.md`, `docs/DEEP_DIVE.md`). Users read them as the contract, so when they
   disagree with the code, the gap is either a defect or a public-contract change — decided as
   "When a Rule and the Code Disagree" in `AGENTS.md` describes — never a silent doc edit.
+- **What a release publishes and how to verify it**: [`RELEASES.md`](RELEASES.md) — archives,
+  manifest, attestations and the history of release file names.
 - **How it is built**: `spec/arc42/`; its section 5 is the only module map. It describes
   and promises nothing; when it disagrees with the code, it is updated.
 - **Raw external 1C references and measurements taken on a live platform**:
