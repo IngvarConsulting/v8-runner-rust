@@ -1,0 +1,268 @@
+{
+  "$defs": {
+    "AgentProgressKind": {
+      "description": "Вид промежуточного сообщения агента, которое раннер передаёт как ход работы.",
+      "oneOf": [
+        {
+          "const": "progress",
+          "description": "`progress` агента: сколько сделано.",
+          "type": "string"
+        },
+        {
+          "const": "log",
+          "description": "`log` агента: строка журнала.",
+          "type": "string"
+        },
+        {
+          "const": "loading_issue",
+          "description": "`loading-issue` агента: замечание к загружаемому объекту.",
+          "type": "string"
+        }
+      ]
+    },
+    "CancelReason": {
+      "description": "Почему команду отменили.",
+      "oneOf": [
+        {
+          "const": "cancelled",
+          "description": "Прерывание оператора: `Ctrl+C`, `SIGTERM`, `CTRL_BREAK`.",
+          "type": "string"
+        },
+        {
+          "const": "timed_out",
+          "description": "Истёк срок команды. У команды командной строки срока нет\n(`DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`), и раннер этой причиной пока не отвечает.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProgressPhase": {
+      "description": "Что делает шаг долгой команды. Перечень закрыт: новая фаза меняет форму событий.\n\nС шагами итогового конверта (`steps`) фаза не сверяется: шаг хода — то, что раннер\nначал делать, а шаг конверта — то, чем это кончилось.",
+      "oneOf": [
+        {
+          "const": "preview",
+          "description": "Превью: показывает план и ничего не запускает.",
+          "type": "string"
+        },
+        {
+          "const": "session",
+          "description": "Открытие сессии исполнителя — агента Конфигуратора.",
+          "type": "string"
+        },
+        {
+          "const": "wait",
+          "description": "Ожидание: живой агент ещё поднимается или занят.",
+          "type": "string"
+        },
+        {
+          "const": "inspect",
+          "description": "Чтение базы без изменений: совместимость, установленные расширения, найденные изменения.",
+          "type": "string"
+        },
+        {
+          "const": "forecast",
+          "description": "Вопрос исполнителю, чем будет выгрузка.",
+          "type": "string"
+        },
+        {
+          "const": "convert",
+          "description": "Преобразование формата исходников средствами EDT.",
+          "type": "string"
+        },
+        {
+          "const": "dump",
+          "description": "Выгрузка конфигурации в файлы.",
+          "type": "string"
+        },
+        {
+          "const": "load",
+          "description": "Загрузка в базу.",
+          "type": "string"
+        },
+        {
+          "const": "update_db",
+          "description": "Обновление конфигурации базы данных.",
+          "type": "string"
+        },
+        {
+          "const": "reset",
+          "description": "Возврат к конфигурации базы данных.",
+          "type": "string"
+        },
+        {
+          "const": "extensions",
+          "description": "Действие над расширением базы.",
+          "type": "string"
+        },
+        {
+          "const": "check",
+          "description": "Проверка синтаксиса или проекта.",
+          "type": "string"
+        },
+        {
+          "const": "package",
+          "description": "Сборка или выгрузка пакета конфигурации.",
+          "type": "string"
+        },
+        {
+          "const": "infobase",
+          "description": "Создание, снимок или восстановление базы.",
+          "type": "string"
+        },
+        {
+          "const": "test",
+          "description": "Прогон тестов.",
+          "type": "string"
+        },
+        {
+          "const": "launch",
+          "description": "Запуск клиента.",
+          "type": "string"
+        },
+        {
+          "const": "publish",
+          "description": "Публикация на веб-сервере.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/progress-event.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Одно событие хода. Ключи идут в порядке формы: `version`, `event`, `at`, `command`,\nдальше поля события.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "description": "Команда начала шаг.",
+      "properties": {
+        "at": {
+          "description": "Мгновение события, RFC 3339 в UTC.",
+          "type": "string"
+        },
+        "command": {
+          "description": "Имя команды, как его называет итоговый конверт.",
+          "type": "string"
+        },
+        "event": {
+          "const": "step",
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/ProgressPhase"
+        },
+        "set": {
+          "description": "Набор исходников шага; `null`, если шаг не о наборе.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "step_count": {
+          "description": "Сколько шагов известно сейчас: не меньше `step_index` и может расти.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "step_index": {
+          "description": "Номер шага с единицы; растёт на единицу с каждым шагом.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "version": {
+          "format": "uint32",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "event",
+        "at",
+        "command",
+        "phase",
+        "set",
+        "step_index",
+        "step_count"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Промежуточное сообщение агента Конфигуратора.",
+      "properties": {
+        "agent_type": {
+          "$ref": "#/$defs/AgentProgressKind"
+        },
+        "at": {
+          "description": "Мгновение события, RFC 3339 в UTC.",
+          "type": "string"
+        },
+        "command": {
+          "description": "Имя команды, как его называет итоговый конверт.",
+          "type": "string"
+        },
+        "event": {
+          "const": "agent",
+          "type": "string"
+        },
+        "text": {
+          "description": "Текст сообщения с маской учётных данных.",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "event",
+        "at",
+        "command",
+        "agent_type",
+        "text"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Команду отменили: пишется один раз, при первом сигнале.",
+      "properties": {
+        "at": {
+          "description": "Мгновение события, RFC 3339 в UTC.",
+          "type": "string"
+        },
+        "command": {
+          "description": "Имя команды, как его называет итоговый конверт.",
+          "type": "string"
+        },
+        "event": {
+          "const": "cancel",
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/CancelReason"
+        },
+        "version": {
+          "format": "uint32",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "event",
+        "at",
+        "command",
+        "reason"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "v8-runner progress event",
+  "type": "object"
+}

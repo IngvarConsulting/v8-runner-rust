@@ -10,6 +10,7 @@ use super::coordinator::SourceSetLoader;
 use super::helpers::apply_subject;
 use super::*;
 use crate::change_detection::runner_dirs::RunnerDirs;
+use crate::domain::progress::ProgressPhase;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
@@ -95,11 +96,11 @@ impl AgentLoader {
         if self.session.is_none() {
             let wait = wait_policy(context);
             let transcript = transcript_log(config, "build")?;
-            log_timeline_stage(
-                "agent",
-                "session",
+            crate::use_cases::progress::log_live_stage(
+                ProgressPhase::Session,
+                None,
+                "agent:",
                 "[агент] opening the Designer agent session",
-                TimelineStageStatus::Running,
             );
             let handle = connect(
                 context,
@@ -326,16 +327,14 @@ fn load_and_update(
         ));
         log_timeline_stage(
             &source_set.name,
-            &build_mode_label(&BuildMode::Partial {
-                file_count: paths.len(),
-            }),
+            ProgressPhase::Load,
             "[агент] Загрузка изменений в базу",
             TimelineStageStatus::Running,
         );
     } else {
         log_timeline_stage(
             &source_set.name,
-            "full",
+            ProgressPhase::Load,
             "[агент] Загрузка в базу",
             TimelineStageStatus::Running,
         );

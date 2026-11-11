@@ -1,6 +1,7 @@
 use super::helpers::{fail_with_remaining_steps, AnalysisByName};
 use super::*;
 use crate::domain::capability::{Operation, Provider};
+use crate::domain::progress::ProgressPhase;
 use crate::use_cases::context::shell_word;
 use crate::use_cases::exchange_guard::{GenerationGate, LoadExtent};
 use crate::use_cases::request::ApplyPolicy;
@@ -1289,7 +1290,7 @@ pub(super) fn run_build_edt(
             }
             log_timeline_stage(
                 &source_set.name,
-                "edt_export",
+                ProgressPhase::Convert,
                 "[EDT] Конвертация внешних объектов в файлы конфигуратора",
                 TimelineStageStatus::Running,
             );
@@ -1503,7 +1504,7 @@ pub(super) fn run_build_edt(
                 let export_started = Instant::now();
                 log_timeline_stage(
                     &source_set.name,
-                    "edt_export",
+                    ProgressPhase::Convert,
                     "[EDT] Конвертация в файлы конфигуратора",
                     TimelineStageStatus::Running,
                 );

@@ -39,9 +39,17 @@ use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::{CommandFailure, Deferrals};
 
-/// Открытая точка входа: живой агент через сторожа, свой разовый процесс с сессией или
-/// только сессия к чужому.
-pub(crate) enum AgentHandle {
+/// Открытая точка входа и учётные данные, которые ход её команд не показывает.
+pub(crate) struct AgentHandle {
+    point: AgentPoint,
+    /// Известные секреты для маски хода: учётные данные базы, СУБД и кластера
+    /// ([`progress_secrets`]). Учётные данные SSH агента — те же, что у базы.
+    secrets: Vec<String>,
+}
+
+/// Точка входа: живой агент через сторожа, свой разовый процесс с сессией или только сессия
+/// к чужому.
+pub(crate) enum AgentPoint {
     /// Живой агент: процесс и сессию SSH держит сторож, команда владеет только подключением к
     /// базе (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`).
     Live(Box<LiveHandle>),
@@ -86,17 +94,25 @@ pub(crate) struct LiveHandle {
 }
 
 impl LiveHandle {
-    fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
+    fn run(
+        &mut self,
+        command: &str,
+        policy: &WaitPolicy,
+        on_batch: &mut dyn FnMut(&[AgentMessage]),
+    ) -> Result<AgentReply, AgentError> {
         use std::io::Write as _;
         let secrets: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
         let transcript = &mut self.transcript;
         let started = std::time::Instant::now();
+        // Кадры сторожа приходят по мере ответа агента, и каждый сразу уходит дальше — в журнал
+        // разговора и в ход команды, а не копится до итога.
         let outcome = self
             .client
             .run(command, policy, &mut |batch: &[AgentMessage]| {
                 if let Some(log) = transcript.as_mut() {
                     let _ = writeln!(log, "{}", agent::transcript_line(batch, &secrets));
                 }
+                on_batch(batch);
             });
         if let Ok(reply) = &outcome {
             agent::log_reply(command, &secrets, reply, started.elapsed());
@@ -195,12 +211,12 @@ impl AgentHandle {
     /// SSH-сессия точки входа: для обмена файлами по SFTP. У живого агента её держит сторож, и
     /// файлы с ним идут только каталогом.
     pub(crate) fn ssh(&mut self) -> Result<&mut AgentSession, AppError> {
-        match self {
-            Self::Live(_) => Err(AppError::capability(
+        match &mut self.point {
+            AgentPoint::Live(_) => Err(AppError::capability(
                 "the live agent exchanges files through its directory, not over SFTP",
             )),
-            Self::Managed(agent, _) => Ok(agent.session()),
-            Self::Attached { session, .. } | Self::Gate { session, .. } => Ok(session),
+            AgentPoint::Managed(agent, _) => Ok(agent.session()),
+            AgentPoint::Attached { session, .. } | AgentPoint::Gate { session, .. } => Ok(session),
         }
     }
 
@@ -210,21 +226,27 @@ impl AgentHandle {
         command: &str,
         wait: &WaitPolicy,
     ) -> Result<AgentReply, AgentError> {
-        match self {
-            Self::Live(live) => live.run(command, wait),
-            Self::Managed(agent, _) => agent.session().run(command, wait),
-            Self::Attached { session, .. } | Self::Gate { session, .. } => {
-                session.run(command, wait)
+        let secrets: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
+        let mut progress = |batch: &[AgentMessage]| {
+            crate::use_cases::progress::log_agent_messages(batch, &secrets)
+        };
+        match &mut self.point {
+            AgentPoint::Live(live) => live.run(command, wait, &mut progress),
+            AgentPoint::Managed(agent, _) => {
+                agent.session().run_streaming(command, wait, &mut progress)
+            }
+            AgentPoint::Attached { session, .. } | AgentPoint::Gate { session, .. } => {
+                session.run_streaming(command, wait, &mut progress)
             }
         }
     }
 
     /// Прерывание, отложенное в критической фазе за всю сессию.
     pub(crate) fn deferred_interruption(&self) -> Option<ProcessInterruptionReason> {
-        match self {
-            Self::Live(live) => live.client.deferred_interruption(),
-            Self::Managed(agent, _) => agent.session_ref().deferred_interruption(),
-            Self::Attached { session, .. } | Self::Gate { session, .. } => {
+        match &self.point {
+            AgentPoint::Live(live) => live.client.deferred_interruption(),
+            AgentPoint::Managed(agent, _) => agent.session_ref().deferred_interruption(),
+            AgentPoint::Attached { session, .. } | AgentPoint::Gate { session, .. } => {
                 session.deferred_interruption()
             }
         }
@@ -233,18 +255,20 @@ impl AgentHandle {
     /// Бросил ли второй сигнал команду чужого агента: свой агент и живой агент сторожа
     /// ожидания не бросают.
     pub(crate) fn abandoned(&self) -> bool {
-        match self {
-            Self::Live(_) | Self::Managed(..) => false,
-            Self::Attached { session, .. } | Self::Gate { session, .. } => session.abandoned(),
+        match &self.point {
+            AgentPoint::Live(_) | AgentPoint::Managed(..) => false,
+            AgentPoint::Attached { session, .. } | AgentPoint::Gate { session, .. } => {
+                session.abandoned()
+            }
         }
     }
 
     /// Прерывание, которое отложила последняя команда.
     pub(crate) fn last_command_deferral(&self) -> Option<ProcessInterruptionReason> {
-        match self {
-            Self::Live(live) => live.client.last_command_deferral(),
-            Self::Managed(agent, _) => agent.session_ref().last_command_deferral(),
-            Self::Attached { session, .. } | Self::Gate { session, .. } => {
+        match &self.point {
+            AgentPoint::Live(live) => live.client.last_command_deferral(),
+            AgentPoint::Managed(agent, _) => agent.session_ref().last_command_deferral(),
+            AgentPoint::Attached { session, .. } | AgentPoint::Gate { session, .. } => {
                 session.last_command_deferral()
             }
         }
@@ -253,13 +277,17 @@ impl AgentHandle {
     /// Режим и адрес, к которому открыта сессия: адрес — тот, к которому подключился
     /// SSH-клиент, напечатанный из хоста и порта; учётных данных в нём нет.
     pub(crate) fn endpoint(&self) -> SessionEndpoint {
-        match self {
-            Self::Live(live) => session_endpoint(SessionMode::Managed, &live.endpoint),
-            Self::Managed(agent, _) => session_endpoint(SessionMode::Managed, agent.endpoint()),
-            Self::Attached { session, .. } => {
+        match &self.point {
+            AgentPoint::Live(live) => session_endpoint(SessionMode::Managed, &live.endpoint),
+            AgentPoint::Managed(agent, _) => {
+                session_endpoint(SessionMode::Managed, agent.endpoint())
+            }
+            AgentPoint::Attached { session, .. } => {
                 session_endpoint(SessionMode::Attached, session.endpoint())
             }
-            Self::Gate { session, .. } => session_endpoint(SessionMode::Gate, session.endpoint()),
+            AgentPoint::Gate { session, .. } => {
+                session_endpoint(SessionMode::Gate, session.endpoint())
+            }
         }
     }
 
@@ -267,11 +295,11 @@ impl AgentHandle {
     /// пользователя из карты `AgentBaseDir`, у шлюза автономного сервера — то, что
     /// объявил конфиг.
     pub(crate) fn exchange(&self, config: &AppConfig) -> Result<Exchange, AppError> {
-        let base_dir = match self {
-            Self::Live(live) => live.base_dir.as_path(),
-            Self::Managed(agent, _) => agent.base_dir(),
-            Self::Attached { base_dir, .. } => base_dir,
-            Self::Gate { exchange, .. } => return Ok(exchange.clone()),
+        let base_dir = match &self.point {
+            AgentPoint::Live(live) => live.base_dir.as_path(),
+            AgentPoint::Managed(agent, _) => agent.base_dir(),
+            AgentPoint::Attached { base_dir, .. } => base_dir,
+            AgentPoint::Gate { exchange, .. } => return Ok(exchange.clone()),
         };
         agent::user_dir(base_dir, &agent_user(config))
             .map(Exchange::Dir)
@@ -286,10 +314,12 @@ impl AgentHandle {
     /// Срок очистки урезан: прежде `disconnect` наследовал весь остаток бюджета
     /// команды и мог держать её столько же ещё раз.
     pub(crate) fn finish(self, context: &ExecutionContext, wait: &WaitPolicy) {
-        match self {
-            Self::Live(live) => live.finish(context),
-            Self::Managed(agent, _) => agent.release_and_remove(),
-            Self::Attached { session, .. } | Self::Gate { session, .. } => session.release(wait),
+        match self.point {
+            AgentPoint::Live(live) => live.finish(context),
+            AgentPoint::Managed(agent, _) => agent.release_and_remove(),
+            AgentPoint::Attached { session, .. } | AgentPoint::Gate { session, .. } => {
+                session.release(wait)
+            }
         }
     }
 }
@@ -490,19 +520,50 @@ pub(crate) fn connect(
     wait: &WaitPolicy,
     early: Option<EarlyAgent>,
 ) -> Result<AgentHandle, AppError> {
-    let handle = open_handle(context, config, utilities, v8, transcript_log, wait, early)?;
+    let handle = AgentHandle {
+        point: open_handle(context, config, utilities, v8, transcript_log, wait, early)?,
+        secrets: progress_secrets(config),
+    };
     context.note_session(handle.endpoint());
-    match &handle {
-        AgentHandle::Live(live) => context.note_live(live.receipt.clone()),
-        AgentHandle::Managed(_, reason) => context.note_live(LiveAgentReceipt {
+    match &handle.point {
+        AgentPoint::Live(live) => context.note_live(live.receipt.clone()),
+        AgentPoint::Managed(_, reason) => context.note_live(LiveAgentReceipt {
             reused: false,
             holders: Vec::new(),
             kept: false,
             reason: Some(*reason),
         }),
-        AgentHandle::Attached { .. } | AgentHandle::Gate { .. } => {}
+        AgentPoint::Attached { .. } | AgentPoint::Gate { .. } => {}
     }
     Ok(handle)
+}
+
+/// Учётные данные, которых ни ход команды, ни журнал разговора с агентом не показывают:
+/// пользователь и пароль базы — они же учётные данные SSH агента, — СУБД и администраторов
+/// кластера. Список один на точку входа: его берут и [`AgentHandle`], и журнал живого агента.
+fn progress_secrets(config: &AppConfig) -> Vec<String> {
+    let infobase = &config.infobase;
+    let dbms = infobase.dbms.as_ref();
+    let cluster = infobase.cluster.as_ref();
+    let cluster_agent = cluster.and_then(|cluster| cluster.agent.as_ref());
+    let mut secrets: Vec<String> = [
+        infobase.user.as_ref(),
+        infobase.password.as_ref(),
+        dbms.and_then(|dbms| dbms.user.as_ref()),
+        dbms.and_then(|dbms| dbms.password.as_ref()),
+        cluster.and_then(|cluster| cluster.user.as_ref()),
+        cluster.and_then(|cluster| cluster.password.as_ref()),
+        cluster_agent.and_then(|agent| agent.user.as_ref()),
+        cluster_agent.and_then(|agent| agent.password.as_ref()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|value| !value.is_empty())
+    .cloned()
+    .collect();
+    secrets.sort();
+    secrets.dedup();
+    secrets
 }
 
 /// Отказ агенту, выбранному рядом с объявленной строкой прямого шлюза, когда канала нет:
@@ -517,7 +578,7 @@ fn open_handle(
     transcript_log: PathBuf,
     wait: &WaitPolicy,
     early: Option<EarlyAgent>,
-) -> Result<AgentHandle, AppError> {
+) -> Result<AgentPoint, AppError> {
     let agent = &config.tools.designer_agent;
     let connection = config.v8_connection();
     let user = connection.user.clone().unwrap_or_default();
@@ -547,7 +608,7 @@ fn open_handle(
             host_key: declared_expectation(standalone.host_fingerprint.as_deref())?,
         };
         let session = open_gate_session(&request, wait)?;
-        return Ok(AgentHandle::Gate { session, exchange });
+        return Ok(AgentPoint::Gate { session, exchange });
     }
 
     let mode = agent.mode().map_err(AppError::Validation)?;
@@ -567,7 +628,7 @@ fn open_handle(
             };
             // Чужая точка входа не поднимается заново: недоступная — типизированный отказ.
             let session = AgentSession::open(&request, wait).map_err(AppError::from)?;
-            Ok(AgentHandle::Attached { session, base_dir })
+            Ok(AgentPoint::Attached { session, base_dir })
         }
         DesignerAgentMode::Managed { port } => {
             let v8 = v8.ok_or_else(|| {
@@ -578,7 +639,7 @@ fn open_handle(
             })?;
             let reason = if agent.live_enabled() {
                 match open_live(context, config, v8, port, &transcript_log, early)? {
-                    Ok(live) => return Ok(AgentHandle::Live(Box::new(live))),
+                    Ok(live) => return Ok(AgentPoint::Live(Box::new(live))),
                     Err(reason) => reason,
                 }
             } else {
@@ -607,7 +668,7 @@ fn open_handle(
                 wait,
             )
             .map_err(AppError::from)?;
-            Ok(AgentHandle::Managed(Box::new(managed), reason))
+            Ok(AgentPoint::Managed(Box::new(managed), reason))
         }
     }
 }
@@ -778,10 +839,8 @@ fn open_live(
         .append(true)
         .open(transcript_log)
         .ok();
-    let secrets: Vec<String> = [credentials.user.clone(), credentials.password.clone()]
-        .into_iter()
-        .filter(|value| !value.is_empty())
-        .collect();
+    // Учётные данные сторожа — те же пользователь и пароль базы, что в общем списке.
+    let secrets = progress_secrets(config);
     // Подключение к базе ведёт сторож: что агент сказал при нём, команда пишет в свой журнал,
     // как с разовым агентом, с той же маской учётных данных.
     let connect_reply = client.take_connect_reply();

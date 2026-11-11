@@ -29,6 +29,7 @@ Read next when the task reaches it:
 | A response form, a CLI flag, a config key or the MCP surface changes | `spec/rules/{wire,cli,config,mcp}/`; `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`, `docs/DEEP_DIVE.md` |
 | Work touches a 1C platform adapter | [`references/1c/`](references/1c/README.md) — hidden from plain `rg` except the measurements file; use `rg -uu` or `git grep` |
 | CI is red or does not start | The failed job's log if there is one, then [`scripts/test/README.md`](scripts/test/README.md) |
+| Speed is measured on a stand: the runner against Designer, the agent or `ibcmd` | [`scripts/bench/README.md`](scripts/bench/README.md) — stands, scenarios and the measuring flag `E:\stands\.measuring` |
 | The site under `docs/site/` changes | [`docs/site/README.md`](docs/site/README.md) |
 | You need why something was chosen | Git history — it explains and does not bind. The removed decisions are at `4639a92~1:spec/arch/decisions/`; `DEC.<date>.<NAME>` is the file `<date>-<name>.md` in lower case |
 | The fork's migration history or a `quarantine/*` branch | [`docs/provenance/upstream-migration/README.md`](docs/provenance/upstream-migration/README.md) — those branches are a locked record; never delete them |
