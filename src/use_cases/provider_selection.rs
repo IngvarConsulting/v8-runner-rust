@@ -126,6 +126,7 @@ pub fn select_from(
         }
         match not_ready {
             None => {
+                release_for_another_executor(config, operation, provider);
                 let receipt = plan.receipt_for(provider, skipped);
                 return Ok(SelectedProvider {
                     provider,
@@ -139,6 +140,21 @@ pub fn select_from(
 
     let error = nobody_ready(config, &plan, &skipped, release);
     Err((error, plan.receipt_for_nobody(skipped)))
+}
+
+/// Выбран исполнитель операции, и это не агент: живые агенты этой базы, оставшиеся
+/// подключёнными после прошлой команды, отключаются от неё, чтобы он не застал базу занятой
+/// (#644, `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`). Единственное место
+/// этого решения у всех выборщиков исполнителя; операции, которые базу проекта не открывают,
+/// агента не трогают.
+pub(crate) fn release_for_another_executor(
+    config: &AppConfig,
+    operation: Operation,
+    provider: Provider,
+) {
+    if provider != Provider::Agent && operation.opens_the_infobase() {
+        crate::use_cases::agent_session::release_live_connections(config, operation.as_str(), None);
+    }
 }
 
 /// Отказ выпуска формата исходников, замеченный при переборе исполнителей. Выпуск закреплён

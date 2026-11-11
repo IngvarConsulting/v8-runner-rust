@@ -438,6 +438,12 @@ pub(crate) fn split_arg_string(raw: &str) -> Vec<String> {
     args
 }
 
+/// Идентичность серверной базы (`server:…`), как её строит `snapshot_identity`: по ней находят
+/// живых агентов баз кластера.
+pub fn is_server_identity(identity: &str) -> bool {
+    identity.starts_with("server:")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ClusterInfobaseCreation, V8Connection};

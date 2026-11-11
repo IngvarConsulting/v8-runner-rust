@@ -392,6 +392,9 @@ impl EarlyAgent {
             launch,
             credentials,
         } = live_target(config, v8, port).ok()?;
+        // Базу, подключённую к живому агенту другого ключа, свой агент не получит: тот
+        // отключается до раннего подключения (#644).
+        release_live_connections(config, context.command().as_str(), Some(&key));
         let limit = agent.live_limit();
         let cancel = context.cancellation();
         // Отмена команды останавливает и ожидание: `stop` — её дочерний знак.
@@ -440,7 +443,7 @@ impl EarlyAgent {
     }
 
     /// Команда выбрала другого исполнителя: агент отпускается до его работы. Ожидание не
-    /// обрывается — начатое подключение к базе доводится и закрывается (`common disconnect-ib`),
+    /// обрывается — начатое подключение к базе доводится и снимается (`common disconnect-ib`),
     /// чтобы `ibcmd` или Конфигуратор не застали базу подключённой к агенту. Ожидание
     /// ограничено сроком подъёма и отменой команды.
     pub(crate) fn release_before_another_executor(mut self) {
@@ -451,14 +454,18 @@ impl EarlyAgent {
             if client.has_session() {
                 let _ = client.end();
             }
+            // Сессия команды подключения не снимает (#644): агент отключается от базы явно.
+            if let Err(error) = client.disconnect() {
+                tracing::warn!(%error, "the live agent started early stays connected to the infobase");
+            }
             tracing::debug!("the live agent started early gave way to another executor");
         }
     }
 }
 
 impl Drop for EarlyAgent {
-    /// Не взятый агент: ожидание кончается, открытая им сессия закрывается (`common
-    /// disconnect-ib`), а сам агент остаётся сторожу. Ожидание ограничено: и подъём, и начало
+    /// Не взятый агент: ожидание кончается, открытая им сессия команды закрывается, а сам агент
+    /// остаётся сторожу подключённым к базе (#644). Ожидание ограничено: и подъём, и начало
     /// сессии смотрят на `stop`.
     fn drop(&mut self) {
         self.stop.cancel();
@@ -471,6 +478,19 @@ impl Drop for EarlyAgent {
             }
             tracing::debug!("the live agent started early was not needed by the command");
         }
+    }
+}
+
+/// Базой займётся не живой агент: другой исполнитель (пакетный Конфигуратор, `ibcmd`), разовый
+/// или подключённый агент. Живые агенты этой базы, оставшиеся подключёнными, отключаются от неё,
+/// кроме агента ключа `keep` (#644, `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
+/// Агент, занятый другой командой, не отключается: исполнитель получит отказ платформы, а отказ
+/// «базу держат» назовёт агента ([`crate::use_cases::infobase_lock::attached_live_agents_hint`]).
+pub(crate) fn release_live_connections(config: &AppConfig, command_name: &str, keep: Option<&str>) {
+    if let Err(error) =
+        crate::use_cases::infobase_lock::release_idle_connections(config, command_name, keep)
+    {
+        tracing::warn!(%error, "a live agent of this infobase stays connected to it");
     }
 }
 
@@ -553,6 +573,7 @@ fn open_handle(
     let mode = agent.mode().map_err(AppError::Validation)?;
     match mode {
         DesignerAgentMode::Attached { host, port } => {
+            release_live_connections(config, context.command().as_str(), None);
             let base_dir = agent.base_dir.clone().ok_or_else(|| {
                 AppError::capability(
                     "working through an attached agent exchanges files through its base dir and needs tools.designer_agent.base-dir".to_owned(),
@@ -579,12 +600,16 @@ fn open_handle(
             let reason = if agent.live_enabled() {
                 match open_live(context, config, v8, port, &transcript_log, early)? {
                     Ok(live) => return Ok(AgentHandle::Live(Box::new(live))),
-                    Err(reason) => reason,
+                    Err(reason) => {
+                        release_live_connections(config, context.command().as_str(), None);
+                        reason
+                    }
                 }
             } else {
                 // Живой агент выключен: живой агент этой рабочей копии, если остался, снимается
                 // (`INV.CONFIG.A-LIVE-AGENT-IS-ON-UNLESS-TURNED-OFF`).
                 remove_live_agent(config, v8);
+                release_live_connections(config, context.command().as_str(), None);
                 LiveAgentReason::LiveAgentOff
             };
             let launch = AgentLaunch {
@@ -745,6 +770,9 @@ fn open_live(
         launch,
         credentials,
     } = live_target(config, v8, port)?;
+    // База, подключённая к живому агенту другого ключа (другая рабочая копия, платформа или
+    // версия раннера), своему агенту не дастся: тот отключается.
+    release_live_connections(config, context.command().as_str(), Some(&key));
     let connect_or_start = || {
         KeeperClient::connect_or_start(
             &key,
@@ -1970,6 +1998,7 @@ mod tests {
             fingerprint: None,
             busy: None,
             connected: false,
+            attached: false,
             last: None,
             holders: Vec::new(),
             closing,

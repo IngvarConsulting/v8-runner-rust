@@ -1062,6 +1062,9 @@ fn select_provider(
             utility,
         ) {
             Ok(executable) => {
+                crate::use_cases::provider_selection::release_for_another_executor(
+                    config, operation, provider,
+                );
                 let receipt = plan.receipt_for(provider, skipped);
                 return Ok(PreparedTransferProvider {
                     receipt,

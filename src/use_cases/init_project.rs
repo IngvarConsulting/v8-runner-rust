@@ -71,7 +71,11 @@ fn run_init(
         let settled = if args.dry_run {
             Ok(Vec::new())
         } else {
-            crate::use_cases::infobase_lock::settle_live_agents(config, INFOBASE_CREATE, true)
+            crate::use_cases::infobase_lock::settle_live_agents(
+                config,
+                INFOBASE_CREATE,
+                crate::use_cases::infobase_lock::LiveAgents::Remove,
+            )
         };
         match settled {
             Ok(_) => create_infobase(context, config, args, started, false),

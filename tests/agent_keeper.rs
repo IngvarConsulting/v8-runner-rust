@@ -12,6 +12,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -610,8 +612,9 @@ fn a_second_client_reuses_the_live_agent_without_a_new_launch() {
     assert_eq!(bench.launches(), 1, "one 1cv8 for both commands");
     let log = fs::read_to_string(&bench.commands_log).unwrap();
     assert_eq!(log.matches("config generation-id").count(), 2, "{log}");
-    // Агент подключён к базе только в сессиях команд: после подъёма и после каждой сессии
-    // сторож его отключает (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`).
+    // Агент подключается к базе при подъёме и остаётся подключённым между сессиями команд:
+    // вторая сессия `common connect-ib` не шлёт
+    // (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
     let session_lines = log
         .lines()
         .filter(|line| line.starts_with("common ") || line.starts_with("config "))
@@ -620,17 +623,14 @@ fn a_second_client_reuses_the_live_agent_without_a_new_launch() {
         session_lines,
         [
             "common connect-ib",
-            "common disconnect-ib",
-            "common connect-ib",
             "config generation-id",
-            "common disconnect-ib",
-            "common connect-ib",
             "config generation-id",
-            "common disconnect-ib",
         ],
         "{log}"
     );
-    assert_eq!(ready(&keeper)["connected"], false);
+    let status = ready(&keeper);
+    assert_eq!(status["connected"], false, "{status}");
+    assert_eq!(status["attached"], true, "{status}");
     let record: Value = serde_json::from_slice(&fs::read(keeper.record()).unwrap()).unwrap();
     assert_eq!(record["pid"], keeper.child.id(), "{record}");
     assert_eq!(
@@ -955,25 +955,120 @@ fn an_open_session_keeps_the_agent_from_idling_out() {
     assert!(keeper.exited_within(GONE_WITHIN), "the idle keeper left");
 }
 
-/// Агент, которого `push` поднимает заранее (#574), к базе не подключается, пока команда не
-/// начнёт сессию: подъём без `common connect-ib` и без отключения после него
-/// (`INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`).
+/// Агент, поднятый без подключения (#574), к базе не подключается, пока его не подключат сессией
+/// команды или `attach`; подключённый, он остаётся подключённым и после конца сессии
+/// (`INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`,
+/// `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
 #[test]
 fn an_agent_started_idle_connects_only_when_a_session_begins() {
     let bench = Bench::new(false);
     let keeper = Keeper::start_idle(&bench, 600_000);
     ready(&keeper);
-    assert_eq!(ready(&keeper)["connected"], false);
+    assert_eq!(ready(&keeper)["attached"], false);
     let log = fs::read_to_string(&bench.commands_log).unwrap_or_default();
     assert_eq!(log.matches("common connect-ib").count(), 0, "{log}");
     assert_eq!(log.matches("common disconnect-ib").count(), 0, "{log}");
     let session = keeper.begin();
     assert_eq!(ready(&keeper)["connected"], true);
     assert_eq!(keeper.end(session)["frame"], "ended");
+    assert_eq!(ready(&keeper)["attached"], true);
     let log = fs::read_to_string(&bench.commands_log).unwrap();
     assert_eq!(log.matches("common connect-ib").count(), 1, "{log}");
-    assert_eq!(log.matches("common disconnect-ib").count(), 1, "{log}");
+    assert_eq!(log.matches("common disconnect-ib").count(), 0, "{log}");
     assert_eq!(bench.launches(), 1);
+}
+
+/// `attach` подключает агента к базе без сессии команды — так `push` подключает его, пока идёт
+/// разбор, — и следующая сессия берёт это подключение без `common connect-ib` (#644,
+/// `INV.PLATFORM.A-LIVE-AGENT-STARTS-WHILE-THE-COMMAND-PREPARES`).
+#[test]
+fn an_attach_connects_without_a_session_and_the_session_takes_it() {
+    let bench = Bench::new(false);
+    let keeper = Keeper::start_idle(&bench, 600_000);
+    ready(&keeper);
+    let attached = keeper.last(json!({"op": "attach", "credentials": keeper.credentials()}));
+    assert_eq!(attached["frame"], "attached", "{attached}");
+    let status = ready(&keeper);
+    assert_eq!(status["attached"], true, "{status}");
+    assert_eq!(status["connected"], false, "{status}");
+    let frames = keeper.once("config generation-id");
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    let log = fs::read_to_string(&bench.commands_log).unwrap();
+    assert_eq!(log.matches("common connect-ib").count(), 1, "{log}");
+}
+
+/// `disconnect` отключает простаивающего агента от базы, а сам агент остаётся; занятый сессией
+/// команды — отказ `not_idle`, и подключение остаётся. Следующая сессия подключается заново
+/// (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
+#[test]
+fn a_disconnect_spares_a_session_and_releases_an_idle_agent() {
+    let bench = Bench::new(false);
+    let keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let session = keeper.begin();
+    let refused = keeper.last(json!({"op": "disconnect"}));
+    assert_eq!(refused["error"]["error"], "not_idle", "{refused}");
+    assert_eq!(keeper.end(session)["frame"], "ended");
+    assert_eq!(ready(&keeper)["attached"], true);
+
+    let released = keeper.last(json!({"op": "disconnect"}));
+    assert_eq!(released, json!({"frame": "disconnected", "was": true}));
+    assert_eq!(ready(&keeper)["attached"], false);
+    let again = keeper.last(json!({"op": "disconnect"}));
+    assert_eq!(again, json!({"frame": "disconnected", "was": false}));
+
+    let frames = keeper.once("config generation-id");
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    let log = fs::read_to_string(&bench.commands_log).unwrap();
+    assert_eq!(log.matches("common connect-ib").count(), 2, "{log}");
+    assert_eq!(log.matches("common disconnect-ib").count(), 1, "{log}");
+    assert_eq!(bench.launches(), 1, "the agent itself stays");
+}
+
+/// Подключение, которое устарело между командами (сеанс завершили, сервер перезапустили),
+/// чинится первой некритической командой сессии: сторож переподключает агента и повторяет её
+/// один раз, и команда получает ответ, а не отказ (#644).
+#[test]
+fn the_first_read_on_a_stale_connection_reconnects_and_repeats() {
+    let (bench, stale) = Bench::with_server(false, |agent| {
+        let connected = Arc::clone(&agent.connected);
+        agent.require_connection.store(true, Ordering::SeqCst);
+        serve_managed_launches(agent, None);
+        connected
+    });
+    let keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let frames = keeper.once("config generation-id");
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    // Сеанс агента завершили снаружи.
+    stale.store(false, Ordering::SeqCst);
+
+    let frames = keeper.once("config generation-id");
+
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["frame"] != "batch" || frame["messages"][0]["type"] == "success"),
+        "the failed first try is not shown: {frames:?}"
+    );
+    let log = fs::read_to_string(&bench.commands_log).unwrap();
+    let lines = log
+        .lines()
+        .filter(|line| line.starts_with("common ") || line.starts_with("config "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "common connect-ib",
+            "config generation-id",
+            "config generation-id",
+            "common disconnect-ib",
+            "common connect-ib",
+            "config generation-id",
+        ],
+        "{log}"
+    );
 }
 
 /// Агент, поднятый без подключения, чьё первое подключение не удалось, не остаётся держать сеанс
@@ -995,8 +1090,45 @@ fn an_agent_started_idle_that_cannot_connect_is_removed() {
     );
 }
 
-/// Команда, ушедшая без `end`, не оставляет агента подключённым к базе: сторож отключает его
-/// сам, и агент остаётся следующей команде (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`).
+/// Критическую команду на устаревшем подключении сторож не повторяет: отказ доходит до команды,
+/// а следующая сессия подключается заново (#644).
+#[test]
+fn a_critical_command_on_a_stale_connection_is_not_repeated_and_the_next_session_reconnects() {
+    let (bench, stale) = Bench::with_server(false, |agent| {
+        let connected = Arc::clone(&agent.connected);
+        agent.require_connection.store(true, Ordering::SeqCst);
+        serve_managed_launches(agent, None);
+        connected
+    });
+    let keeper = Keeper::start(&bench, 600_000);
+    ready(&keeper);
+    let frames = keeper.once("config generation-id");
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    stale.store(false, Ordering::SeqCst);
+
+    let session = keeper.begin();
+    let frames = keeper.run(&session.id, "config update-db-cfg --dynamic-disable", true);
+    assert_eq!(keeper.end(session)["frame"], "ended");
+    let frames_text = format!("{frames:?}");
+    assert!(
+        frames_text.contains("DesignerNotConnectedToInfoBase"),
+        "the refusal reaches the command: {frames_text}"
+    );
+    let frames = keeper.once("config generation-id");
+
+    assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
+    let log = fs::read_to_string(&bench.commands_log).unwrap();
+    assert_eq!(
+        log.matches("config update-db-cfg").count(),
+        1,
+        "a critical command is never repeated: {log}"
+    );
+    assert_eq!(log.matches("common connect-ib").count(), 2, "{log}");
+}
+
+/// Команда, ушедшая без `end`, не оставляет агента подключённым к базе: сторож не знает, в каком
+/// состоянии она его оставила, отключает его сам, и агент остаётся следующей команде
+/// (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`).
 #[test]
 fn a_session_left_without_end_disconnects_the_agent() {
     let bench = Bench::new(false);
@@ -1006,12 +1138,12 @@ fn a_session_left_without_end_disconnects_the_agent() {
     assert_eq!(ready(&keeper)["connected"], true);
     drop(session);
     assert!(
-        wait_until(Duration::from_secs(10), || ready(&keeper)["connected"]
+        wait_until(Duration::from_secs(10), || ready(&keeper)["attached"]
             == false),
         "the keeper ended the session its client left"
     );
     let log = fs::read_to_string(&bench.commands_log).unwrap();
-    assert_eq!(log.matches("common disconnect-ib").count(), 2, "{log}");
+    assert_eq!(log.matches("common disconnect-ib").count(), 1, "{log}");
     let frames = keeper.once("config generation-id");
     assert_eq!(frames.last().unwrap()["frame"], "done", "{frames:?}");
     assert_eq!(bench.launches(), 1);

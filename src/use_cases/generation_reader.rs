@@ -271,6 +271,12 @@ pub(crate) fn read_with_record_tool(
             )))
         }
     };
+    // Процесс не застанет базу подключённой к живому агенту (#644).
+    crate::use_cases::agent_session::release_live_connections(
+        config,
+        context.command().as_str(),
+        None,
+    );
     let runner = utilities.runner_for(process);
     let read = read_generation(
         context,

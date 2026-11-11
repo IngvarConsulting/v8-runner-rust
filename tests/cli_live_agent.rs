@@ -237,8 +237,9 @@ fn ask_keeper(record: &Value, request: &Value) -> Value {
     serde_json::from_str(line.trim_end()).expect("keeper answer json")
 }
 
-/// Вторая команда берёт живого агента: `1cv8` поднят один раз, а между командами агент
-/// отключён от базы (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`); квитанция говорит,
+/// Вторая команда берёт живого агента: `1cv8` поднят один раз, и его подключение к базе тоже
+/// (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`,
+/// `INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`); квитанция говорит,
 /// был ли агент живым (`INV.WIRE.A-RECEIPT-SAYS-WHETHER-THE-AGENT-WAS-LIVE`).
 #[test]
 fn a_second_command_reuses_the_live_agent() {
@@ -270,9 +271,12 @@ fn a_second_command_reuses_the_live_agent() {
         "{commands:?}"
     );
     assert_eq!(
-        commands.last().map(String::as_str),
-        Some("common disconnect-ib"),
-        "the idle agent holds no connection to the infobase: {commands:?}"
+        commands
+            .iter()
+            .filter(|line| line.as_str() == "common connect-ib")
+            .count(),
+        1,
+        "the second command takes the kept connection: {commands:?}"
     );
     assert!(
         process_is_alive(harness.designer_pid()),

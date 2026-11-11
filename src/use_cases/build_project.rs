@@ -129,8 +129,8 @@ fn run_build_branch(
         return Err(refused_before_work(error));
     }
     let memory = require_memory(context, config, args);
-    // Живой агент поднимается, пока идёт разбор (#574), но к базе не подключается, пока разбор
-    // не найдёт работы. Без памяти о базе платформа не запускается
+    // Живой агент поднимается и подключается к базе, пока идёт разбор (#574, #644), а работу
+    // получает, только когда разбор её нашёл. Без памяти о базе платформа не запускается
     // (`INV.USE-CASES.OWNERSHIP-IS-CHECKED-BEFORE-MEMORY-AND-GENERATION`).
     let mut early = match &memory {
         Ok(()) => agent::start_early(context, config, args),

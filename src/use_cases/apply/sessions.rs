@@ -330,6 +330,12 @@ pub(crate) fn refusal(
         }
     };
     let executor_error = (evidence == SessionsEvidence::ServerList).then(|| cause.to_string());
+    // Живой агент раннера, оставшийся подключённым к базе, — тоже её сеанс Конфигуратора (#644):
+    // отказ называет его и выход `agent release`, не утверждая, что держит именно он.
+    let headline = match crate::use_cases::infobase_lock::attached_live_agents_hint(config) {
+        Some(agents) => format!("{headline}; {agents}"),
+        None => headline,
+    };
     let mut refusal = UseCaseError::new(kind, format!("{headline}; {cause}")).with_sessions(
         infobase_sessions(config, list, terminable, evidence, executor_error),
     );

@@ -12,9 +12,10 @@
 //! во время долгого `run`. Срок простоя считает тикер
 //! (`INV.PLATFORM.A-LIVE-AGENT-CLOSES-WHEN-NOBODY-HOLDS-IT`, `…-CLOSES-WITH-ITS-HOLDER`).
 //!
-//! Между сессиями команд агент к базе не подключён (`INV.PLATFORM.A-MANAGED-AGENT-OUTLIVES-THE-COMMAND`):
-//! подключение — часть сессии команды, и сторож закрывает его и тогда, когда команда ушла, не
-//! закрыв сессии.
+//! Подключение агента к базе живёт дольше сессии команды
+//! (`INV.PLATFORM.A-LIVE-AGENT-STAYS-CONNECTED-BETWEEN-COMMANDS`, #644): следующая сессия берёт
+//! его без `common connect-ib`. Отключают агента `disconnect` (команда, которой база нужна
+//! монопольно), уход команды без `end` и снятие агента.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,7 +33,8 @@ use super::protocol::{
 };
 use super::{credentials_digest, idle_limit, KeeperHome};
 use crate::platform::agent::{
-    AgentError, AgentLaunch, AgentMessage, AtOpen, HostKeyExpectation, ManagedAgent, WaitPolicy,
+    AgentError, AgentErrorType, AgentLaunch, AgentMessage, AtOpen, HostKeyExpectation,
+    ManagedAgent, WaitPolicy,
 };
 use crate::platform::live_registry::lock_agent_registry;
 use crate::platform::process::ProcessExecutor;
@@ -108,6 +110,9 @@ struct Session {
     id: String,
     /// Последняя команда сессии.
     last: Option<String>,
+    /// Сессия взяла подключение, оставшееся от прежней, и её команд агент ещё не выполнял:
+    /// первая из них проверяет, живо ли оно ([`run_command`]).
+    reused: bool,
 }
 
 /// Что знает только сторож.
@@ -130,6 +135,11 @@ struct State {
     /// До какого мгновения свежий агент, которого ещё не взяли ни `begin`, ни `hold`, не
     /// снимается условным `stop`.
     fresh_until: Option<Instant>,
+    /// Агент подключён к базе: в сессии команды или между командами.
+    attached: bool,
+    /// Подключение под подозрением: первая критическая команда на нём упала, и следующая
+    /// сессия подключается заново.
+    reconnect: bool,
     /// Подключался ли агент к базе хоть раз: при подъёме или сессией команды. Агент, поднятый
     /// без подключения (#574), чьё первое подключение не удалось, не годится и снимается, как
     /// агент, который не поднялся: сеанс лицензии он зря не держит.
@@ -153,6 +163,14 @@ enum Job {
     End {
         session: String,
         reply: Option<oneshot::Sender<()>>,
+        /// Команда ушла без `end`: агента отключают от базы, его состояние неизвестно.
+        abandoned: bool,
+    },
+    Attach {
+        reply: oneshot::Sender<Result<Vec<AgentMessage>, KeeperError>>,
+    },
+    Disconnect {
+        reply: oneshot::Sender<Result<bool, KeeperError>>,
     },
     Close,
 }
@@ -252,6 +270,8 @@ async fn keep(home: KeeperHome, start: KeeperStart, digest: String) -> Result<()
             stop_requested: false,
             failed_at: None,
             fresh_until: None,
+            attached: false,
+            reconnect: false,
             ever_connected: false,
         }),
         readiness,
@@ -346,25 +366,20 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
                             let _ = reply.send(());
                         }
                     }
+                    Job::Attach { reply } => {
+                        let _ = reply.send(Err(failure.clone()));
+                    }
+                    Job::Disconnect { reply } => {
+                        let _ = reply.send(Ok(false));
+                    }
                     Job::Close => break,
                 }
             }
             return;
         }
     };
-    // Сессия открылась с подключением к базе; простаивающий агент базу не держит. Агент,
-    // поднятый без подключения (#574), отключать не от чего.
-    if at_open == AtOpen::Connect {
-        if let Err(error) = agent
-            .session()
-            .disconnect_infobase(&WaitPolicy::for_keeper_release())
-        {
-            warn!(%error, "the live agent did not confirm common disconnect-ib after its launch");
-            if breaks_the_session(&error) {
-                shared.request_close("the agent session broke off");
-            }
-        }
-    }
+    // Агент, поднятый с подключением, остаётся подключённым: первая сессия команды берёт его
+    // без `common connect-ib` (#644).
     let fingerprint = match agent.host_key_expectation() {
         HostKeyExpectation::Pinned(fingerprint) => Some(fingerprint.to_string()),
         HostKeyExpectation::Unpinned => None,
@@ -387,6 +402,7 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
         state.idle_since = Instant::now();
         state.fresh_until = Some(Instant::now() + FRESH_GRACE);
         state.ever_connected = at_open == AtOpen::Connect;
+        state.attached = at_open == AtOpen::Connect;
     }
     let _ = shared.readiness.send(Readiness::Ready {
         agent_pid,
@@ -420,11 +436,21 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
                     let _ = frames.send(frame);
                 }
             }
-            Job::End { session, reply } => {
-                end_session(shared, &mut agent, &session);
+            Job::End {
+                session,
+                reply,
+                abandoned,
+            } => {
+                end_session(shared, &mut agent, &session, abandoned);
                 if let Some(reply) = reply {
                     let _ = reply.send(());
                 }
+            }
+            Job::Attach { reply } => {
+                let _ = reply.send(attach(shared, &mut agent));
+            }
+            Job::Disconnect { reply } => {
+                let _ = reply.send(disconnect(shared, &mut agent));
             }
         }
     }
@@ -432,14 +458,15 @@ fn work(shared: &Shared, start: KeeperStart, queue: &std::sync::mpsc::Receiver<J
     info!("the live agent is released and removed");
 }
 
-/// Начало сессии команды: агент подключается к базе. Ответ — то, что агент сказал при
-/// подключении: команда пишет это в свой журнал.
+/// Начало сессии команды: агент подключается к базе, если ещё не подключён. Ответ — то, что
+/// агент сказал при подключении (пусто, если подключение осталось от прежней сессии): команда
+/// пишет это в свой журнал.
 fn begin_session(
     shared: &Shared,
     agent: &mut ManagedAgent,
     session: String,
 ) -> Result<Vec<AgentMessage>, KeeperError> {
-    {
+    let attached = {
         let mut state = shared.lock();
         if state.close_requested || state.stop_requested {
             return Err(KeeperError::Closing);
@@ -451,11 +478,33 @@ fn begin_session(
         }
         // Сессия открыта с этой минуты: простой её не снимет и пока агент подключается.
         state.fresh_until = None;
+        let stale = state.attached && std::mem::take(&mut state.reconnect);
+        let attached = state.attached && !stale;
         state.session = Some(Session {
             id: session,
             last: None,
+            reused: attached,
         });
+        (attached, stale)
+    };
+    match attached {
+        (true, _) => {
+            debug!("the command session takes the connection left by the previous one");
+            return Ok(Vec::new());
+        }
+        (false, true) => drop_connection(shared, agent),
+        (false, false) => {}
     }
+    connect(shared, agent).inspect_err(|_| {
+        let mut state = shared.lock();
+        state.session = None;
+        state.idle_since = Instant::now();
+    })
+}
+
+/// Подключает агента к базе (`common connect-ib`). Отказ у агента, который ни разу не
+/// подключался (#574), снимает его, как не поднявшегося: сеанса лицензии он зря не держит.
+fn connect(shared: &Shared, agent: &mut ManagedAgent) -> Result<Vec<AgentMessage>, KeeperError> {
     let policy = WaitPolicy::for_keeper(CancellationToken::new(), false);
     let mut said = Vec::new();
     match agent
@@ -463,16 +512,14 @@ fn begin_session(
         .connect_infobase_reporting(&policy, &mut |batch| said.extend_from_slice(batch))
     {
         Ok(()) => {
-            shared.lock().ever_connected = true;
+            let mut state = shared.lock();
+            state.ever_connected = true;
+            state.attached = true;
+            state.reconnect = false;
             Ok(said)
         }
         Err(error) => {
-            let never_connected = {
-                let mut state = shared.lock();
-                state.session = None;
-                state.idle_since = Instant::now();
-                !state.ever_connected
-            };
+            let never_connected = !shared.lock().ever_connected;
             if breaks_the_session(&error) {
                 shared.request_close("the agent session broke off");
             } else if never_connected {
@@ -483,9 +530,75 @@ fn begin_session(
     }
 }
 
-/// Конец сессии команды: агент отключается от базы. Агента, которого снимают, не отключают:
-/// его сессия могла оборваться посреди ответа, а снятие само его отпустит.
-fn end_session(shared: &Shared, agent: &mut ManagedAgent, session: &str) {
+/// `attach`: агент подключается к базе без сессии команды (#644). Пока он подключается, он
+/// занят: `disconnect` и условный `stop` его не трогают.
+fn attach(shared: &Shared, agent: &mut ManagedAgent) -> Result<Vec<AgentMessage>, KeeperError> {
+    {
+        let mut state = shared.lock();
+        if state.close_requested || state.stop_requested {
+            return Err(KeeperError::Closing);
+        }
+        // Свежий агент остаётся свежим: сессию команда откроет, когда разбор найдёт работу, и
+        // до тех пор условный `stop` другой команды на пределе его не снимает.
+        if state.attached || state.session.is_some() {
+            return Ok(Vec::new());
+        }
+        state.busy = Some(CONNECT.to_owned());
+    }
+    let outcome = connect(shared, agent);
+    let mut state = shared.lock();
+    state.busy = None;
+    state.idle_since = Instant::now();
+    outcome
+}
+
+/// `disconnect`: агент отключается от базы, сам остаётся. Условие проверяется здесь, в потоке
+/// агента: сессия, вставшая в очередь раньше, уже открыта, и её подключение не снимается.
+fn disconnect(shared: &Shared, agent: &mut ManagedAgent) -> Result<bool, KeeperError> {
+    {
+        let state = shared.lock();
+        if state.busy.is_some() || state.session.is_some() {
+            return Err(KeeperError::NotIdle {
+                command: state
+                    .busy
+                    .clone()
+                    .or_else(|| state.session.as_ref().and_then(|open| open.last.clone())),
+                holders: state.holders.clone(),
+            });
+        }
+        if !state.attached {
+            return Ok(false);
+        }
+    }
+    drop_connection(shared, agent);
+    info!("the live agent is disconnected from the infobase on request");
+    Ok(true)
+}
+
+/// Отключает агента от базы. Отказ, после которого сессия SSH не годится, снимает агента.
+fn drop_connection(shared: &Shared, agent: &mut ManagedAgent) {
+    if let Err(error) = agent
+        .session()
+        .disconnect_infobase(&WaitPolicy::for_keeper_release())
+    {
+        warn!(%error, "the live agent did not confirm common disconnect-ib");
+        if breaks_the_session(&error) {
+            shared.request_close("the agent session broke off");
+        }
+    }
+    let mut state = shared.lock();
+    state.attached = false;
+    state.reconnect = false;
+}
+
+/// Команда подключения: ею занят агент, пока `attach` его подключает.
+const CONNECT: &str = "common connect-ib";
+
+/// Конец сессии команды. Агент остаётся подключённым к базе (#644); команда, ушедшая без `end`
+/// (`abandoned`), могла оставить агента в любом состоянии, и сторож отключает его. Агента,
+/// которого снимают, не отключают: его сессия могла оборваться посреди ответа, а снятие само
+/// его отпустит.
+fn end_session(shared: &Shared, agent: &mut ManagedAgent, session: &str, abandoned: bool) {
     let removing = {
         let state = shared.lock();
         if state.session.as_ref().is_none_or(|open| open.id != session) {
@@ -493,16 +606,8 @@ fn end_session(shared: &Shared, agent: &mut ManagedAgent, session: &str) {
         }
         state.close_requested || state.stop_requested
     };
-    if !removing {
-        if let Err(error) = agent
-            .session()
-            .disconnect_infobase(&WaitPolicy::for_keeper_release())
-        {
-            warn!(%error, "the live agent did not confirm common disconnect-ib");
-            if breaks_the_session(&error) {
-                shared.request_close("the agent session broke off");
-            }
-        }
+    if abandoned && !removing {
+        drop_connection(shared, agent);
     }
     let mut state = shared.lock();
     state.session = None;
@@ -532,7 +637,7 @@ fn run_command(
         cancel,
         started,
     } = job;
-    {
+    let first_on_kept = {
         let mut state = shared.lock();
         if cancel.is_cancelled() {
             return None;
@@ -542,27 +647,93 @@ fn run_command(
                 error: KeeperError::Closing,
             });
         }
-        match state.session.as_mut() {
-            Some(open) if open.id == session => open.last = Some(command.clone()),
+        let first_on_kept = match state.session.as_mut() {
+            Some(open) if open.id == session => {
+                open.last = Some(command.clone());
+                std::mem::take(&mut open.reused)
+            }
             _ => {
                 return Some(Frame::Error {
                     error: KeeperError::NoSession,
                 })
             }
-        }
+        };
         started.store(true, Ordering::Release);
         state.busy = Some(command.clone());
         state.current = Some((cancel.clone(), critical));
-    }
+        first_on_kept
+    };
     debug!(%command, critical, "running a command for a client");
     let policy = WaitPolicy::for_keeper(cancel, critical);
-    let result = agent
+    let forward = |batch: &[AgentMessage]| {
+        let _ = frames.send(Frame::Batch {
+            messages: batch.to_vec(),
+        });
+    };
+    // Первая некритическая команда на подключении, оставшемся от прежней сессии, проверяет, живо
+    // ли оно: подключение могло устареть (сеанс завершили, сервер перезапустили). Её ответ из
+    // одного массива придерживается, пока не ясен исход (#644).
+    let heal = first_on_kept && !critical;
+    let mut held: Option<Vec<AgentMessage>> = None;
+    let mut forwarded = false;
+    let mut result = agent
         .session()
         .run_streaming(&command, &policy, &mut |batch| {
-            let _ = frames.send(Frame::Batch {
-                messages: batch.to_vec(),
-            });
+            if heal && !forwarded && held.is_none() {
+                held = Some(batch.to_vec());
+                return;
+            }
+            if let Some(held) = held.take() {
+                forward(&held);
+            }
+            forwarded = true;
+            forward(batch);
         });
+    let stale = matches!(
+        &result,
+        Ok(reply) if matches!(
+            reply.outcome(),
+            Err(AgentError::Command {
+                error_type: AgentErrorType::DesignerNotConnectedToInfoBase,
+                ..
+            })
+        )
+    );
+    if heal && !forwarded && stale {
+        warn!(%command, "the first command on the kept connection failed: the agent reconnects to the infobase and repeats it once");
+        drop_connection(shared, agent);
+        let closing = {
+            let state = shared.lock();
+            state.close_requested || state.stop_requested
+        };
+        // Сторож уже решил снять агента: его сессию не переподключают.
+        let reconnected = if closing {
+            Err(KeeperError::Closing)
+        } else {
+            connect(shared, agent).map(drop)
+        };
+        result = match reconnected {
+            Ok(()) => agent
+                .session()
+                .run_streaming(&command, &policy, &mut |batch| forward(batch)),
+            Err(error) => {
+                let mut state = shared.lock();
+                state.busy = None;
+                state.current = None;
+                return Some(Frame::Error { error });
+            }
+        };
+    } else {
+        if let Some(held) = held.take() {
+            forward(&held);
+        }
+        // Критическую команду не повторяют; если она первой упала на старом подключении,
+        // следующая сессия подключается заново.
+        if first_on_kept && critical && stale {
+            warn!(%command, "the first command on the kept connection failed: the next session reconnects to the infobase");
+            shared.lock().reconnect = true;
+        }
+    }
     let frame = match result {
         Ok(_) => Frame::Done,
         Err(error) => {
@@ -728,6 +899,7 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
                         fingerprint,
                         busy: state.busy.clone(),
                         connected: state.session.is_some(),
+                        attached: state.attached,
                         last: state.session.as_ref().and_then(|open| open.last.clone()),
                         holders: state.holders.clone(),
                         closing: state.close_requested
@@ -778,6 +950,8 @@ async fn handle(shared: Arc<Shared>, stream: Stream) {
             begin(&shared, &mut reader, &mut write, credentials).await;
             return;
         }
+        Request::Attach { credentials } => attach_request(&shared, &credentials).await,
+        Request::Disconnect => disconnect_request(&shared).await,
         Request::Run {
             session,
             command,
@@ -877,6 +1051,40 @@ async fn hold(shared: &Shared, holder: Holder, credentials: Option<&str>) -> Fra
     }
 }
 
+/// `attach`: агент подключается к базе без сессии команды. Агента, которого снимают, не
+/// подключают.
+async fn attach_request(shared: &Shared, credentials: &str) -> Frame {
+    if let Err(error) = shared.open_for_work(credentials, false).await {
+        return Frame::Error { error };
+    }
+    let (reply, answer) = oneshot::channel();
+    if !shared.send(Job::Attach { reply }) {
+        return Frame::Error {
+            error: KeeperError::Closing,
+        };
+    }
+    match answer.await.unwrap_or(Err(KeeperError::Closing)) {
+        Ok(messages) => Frame::Attached { messages },
+        Err(error) => Frame::Error { error },
+    }
+}
+
+/// `disconnect`: агент отключается от базы, если не занят. Учётных данных не нужно: отключение
+/// у базы ничего не берёт.
+async fn disconnect_request(shared: &Shared) -> Frame {
+    if shared.ready().await.is_err() {
+        return Frame::Disconnected { was: false };
+    }
+    let (reply, answer) = oneshot::channel();
+    if !shared.send(Job::Disconnect { reply }) {
+        return Frame::Disconnected { was: false };
+    }
+    match answer.await.unwrap_or(Ok(false)) {
+        Ok(was) => Frame::Disconnected { was },
+        Err(error) => Frame::Error { error },
+    }
+}
+
 /// `begin`: сессия команды живёт, пока открыто её подключение. `end` по нему закрывает её с
 /// ответом; разрыв или чужая строка закрывают её без ответа — команда ушла.
 async fn begin<R, W>(shared: &Shared, reader: &mut R, write: &mut W, credentials: String)
@@ -918,6 +1126,7 @@ where
         shared.send(Job::End {
             session,
             reply: None,
+            abandoned: true,
         });
         return;
     }
@@ -931,6 +1140,7 @@ where
         if shared.send(Job::End {
             session,
             reply: Some(reply),
+            abandoned: false,
         }) {
             let _ = done.await;
         }
@@ -940,6 +1150,7 @@ where
         shared.send(Job::End {
             session,
             reply: None,
+            abandoned: true,
         });
     }
 }

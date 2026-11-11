@@ -203,13 +203,27 @@ fn acquire(
         // `infobase create` снимает простаивающих агентов сам, после своих проверок и перед
         // тем, как тронуть базу (`INV.USE-CASES.RECREATE-REFUSES-A-BUSY-BASE-BEFORE-REMOVING`);
         // здесь только отказ занятой базы.
-        let recreates = matches!(command, CommandName::InfobaseRestore);
-        crate::use_cases::infobase_lock::settle_live_agents(config, command.as_str(), recreates)
+        // Команда, которая открывает базу клиентом 1С, отключает простаивающих живых агентов
+        // этой базы от неё; та, что выбирает исполнителя, решает это при выборе (#644).
+        use crate::use_cases::infobase_lock::LiveAgents;
+        let agents = if matches!(command, CommandName::InfobaseRestore) {
+            LiveAgents::Remove
+        } else if command.opens_the_infobase_without_an_executor() {
+            LiveAgents::Disconnect
+        } else {
+            LiveAgents::Keep
+        };
+        crate::use_cases::infobase_lock::settle_live_agents(config, command.as_str(), agents)
             .map(|_| ())
             .map_err(|error| BoundaryRefusal {
                 phase: InfobaseTransferPhase::InfobaseLock,
                 error: error.into(),
             })?;
+    }
+    if command.restarts_a_server() {
+        // Остановка кластера или его СУБД оставила бы подключение живых агентов к серверным
+        // базам устаревшим: следующая сессия взяла бы его без `common connect-ib` (#644).
+        crate::use_cases::infobase_lock::release_server_connections();
     }
     let mut notes: Vec<BoundaryNote> = infobase_lock
         .warning()
