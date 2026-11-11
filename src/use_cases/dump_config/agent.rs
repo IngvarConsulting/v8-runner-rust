@@ -440,14 +440,23 @@ fn dump_through(
                     } else {
                         None
                     };
-                    handle.finish(context, wait);
-                    debug!("the agent session of the dump was closed");
-                    // Выгрузка удалась: копия файла версий пишется, пока перечисляется каталог.
-                    version_copy = version_file.map(|version_file| {
-                        let warning = version_file.record();
-                        debug!("the runner copy of the version file was recorded");
-                        VersionCopy { warning }
-                    });
+                    // Выгрузка удалась: копия файла версий пишется, пока перечисляется каталог и
+                    // агент отключается от базы (#637).
+                    let ((), copy) = beside(
+                        "version-copy",
+                        || {
+                            version_file.map(|version_file| {
+                                let warning = version_file.record();
+                                debug!("the runner copy of the version file was recorded");
+                                VersionCopy { warning }
+                            })
+                        },
+                        || {
+                            handle.finish(context, wait);
+                            debug!("the agent session of the dump was closed");
+                        },
+                    );
+                    version_copy = copy;
                     after
                 },
             );
