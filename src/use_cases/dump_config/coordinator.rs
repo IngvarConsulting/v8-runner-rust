@@ -94,6 +94,10 @@ pub(super) fn run_dump_with_context(
         if resolved.platform_target_path == resolved.target_path {
             crate::use_cases::ignored_files::refuse_tracked_version_file(&resolved.target_path)?;
         }
+        // Внешняя стадия Unica лежит у неё, а не в `workPath`: её том сверяет она.
+        if context.external_full_pull().is_none() {
+            super::helpers::refuse_a_work_path_on_another_volume(&resolved)?;
+        }
         Ok(resolved)
     }) {
         Ok(resolved) => resolved,
@@ -958,7 +962,7 @@ fn runner_version_file(
 ) -> Option<RunnerVersionFile> {
     SourceSetInventory::new(config)
         .designer_context(&resolved.source_set_name)
-        .and_then(|source| RunnerVersionFile::of(config, source))
+        .and_then(RunnerVersionFile::of)
 }
 
 /// Чего не делает полная выгрузка поверх каталога Конфигуратора: лишнего не удаляет и

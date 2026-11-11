@@ -53,6 +53,10 @@ pub enum UseCaseErrorKind {
     /// Правило игнорирования git прячет файл набора: изменения набора берутся у git, и
     /// спрятанный файл не загрузился бы (`INV.USE-CASES.A-SET-HIDDEN-BY-A-GIT-IGNORE-RULE-IS-REFUSED`).
     SourceSetIgnoredByGit,
+    /// Каталог набора и `workPath` на разных томах: промежуточный каталог выгрузки лежит в
+    /// `workPath`, и публикация не была бы переименованием
+    /// (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+    WorkPathOnAnotherVolume,
     InvalidOutput,
     /// Отмена оператором; место остановки говорит, оборвана ли работа исполнителя.
     Cancelled(CancelledAt),
@@ -75,7 +79,9 @@ impl UseCaseErrorKind {
             | Self::InfobaseDesignerBusy => RUNTIME_EXIT_CODE,
             Self::NonFastForward | Self::UntrackedBase => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
-            Self::Validation | Self::SourceSetIgnoredByGit => VALIDATION_EXIT_CODE,
+            Self::Validation | Self::SourceSetIgnoredByGit | Self::WorkPathOnAnotherVolume => {
+                VALIDATION_EXIT_CODE
+            }
             Self::Runtime => RUNTIME_EXIT_CODE,
             Self::Platform => PLATFORM_EXIT_CODE,
         }
@@ -154,6 +160,7 @@ impl UseCaseErrorKind {
             Self::LiveAgentOff => "live_agent_off",
             Self::LiveAgentJob => "live_agent_job",
             Self::SourceSetIgnoredByGit => "source_set_ignored_by_git",
+            Self::WorkPathOnAnotherVolume => "work_path_on_another_volume",
             Self::InvalidOutput => "invalid_output",
             Self::Cancelled(_) => CANCELLED_ERROR_CODE,
             Self::TimedOut => "timed_out",
@@ -181,6 +188,7 @@ impl UseCaseErrorKind {
             | Self::LiveAgentOff
             | Self::LiveAgentJob
             | Self::SourceSetIgnoredByGit
+            | Self::WorkPathOnAnotherVolume
             | Self::Validation
             | Self::Runtime
             | Self::Platform => ExecutionStatus::Failed,
@@ -201,6 +209,7 @@ impl UseCaseErrorKind {
             Self::LiveAgentOff => "live agent off",
             Self::LiveAgentJob => "live agent impossible in this job",
             Self::SourceSetIgnoredByGit => "source set ignored by git",
+            Self::WorkPathOnAnotherVolume => "workPath on another volume",
             Self::InvalidOutput => "invalid output",
             Self::Cancelled(_) => "cancelled",
             Self::TimedOut => "timed out",

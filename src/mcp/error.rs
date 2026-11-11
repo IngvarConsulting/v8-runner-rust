@@ -42,9 +42,9 @@ impl From<UseCaseErrorKind> for McpBusinessErrorKind {
             UseCaseErrorKind::InvalidOutput
             | UseCaseErrorKind::Cancelled(_)
             | UseCaseErrorKind::TimedOut => Self::Platform,
-            UseCaseErrorKind::Validation | UseCaseErrorKind::SourceSetIgnoredByGit => {
-                Self::Validation
-            }
+            UseCaseErrorKind::Validation
+            | UseCaseErrorKind::SourceSetIgnoredByGit
+            | UseCaseErrorKind::WorkPathOnAnotherVolume => Self::Validation,
             UseCaseErrorKind::Runtime => Self::Runtime,
             UseCaseErrorKind::Platform => Self::Platform,
         }
@@ -86,9 +86,9 @@ impl McpBusinessError {
             UseCaseErrorKind::InvalidOutput
             | UseCaseErrorKind::Cancelled(_)
             | UseCaseErrorKind::TimedOut => McpErrorCode::PlatformFailure,
-            UseCaseErrorKind::Validation | UseCaseErrorKind::SourceSetIgnoredByGit => {
-                McpErrorCode::InvalidArgument
-            }
+            UseCaseErrorKind::Validation
+            | UseCaseErrorKind::SourceSetIgnoredByGit
+            | UseCaseErrorKind::WorkPathOnAnotherVolume => McpErrorCode::InvalidArgument,
             UseCaseErrorKind::Runtime => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::Platform => McpErrorCode::PlatformFailure,
         };

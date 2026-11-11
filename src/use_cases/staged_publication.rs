@@ -69,7 +69,27 @@ impl StagedPublication {
         Ok(publication)
     }
 
+    /// Промежуточный каталог рядом с целью, в её родителе.
     pub fn prepare_dir(
+        target_path: &Path,
+        target_identity: &str,
+        stage_prefix: &str,
+    ) -> Result<Self, AppError> {
+        let target_parent = crate::support::fs::parent_dir(target_path).ok_or_else(|| {
+            AppError::Runtime(format!(
+                "target path has no parent: {}",
+                target_path.display()
+            ))
+        })?;
+        Self::prepare_dir_in(target_parent, target_path, target_identity, stage_prefix)
+    }
+
+    /// Промежуточный каталог в `stage_root`, а не рядом с целью: так выгрузка не оставляет
+    /// временных файлов в дереве исходников. Публикация остаётся переименованием, пока
+    /// `stage_root` на томе цели — это проверяет разрешение цели выгрузки
+    /// (`INV.USE-CASES.THE-DUMP-STAGE-LIES-IN-THE-WORK-PATH-ON-THE-SET-VOLUME`).
+    pub fn prepare_dir_in(
+        stage_root: &Path,
         target_path: &Path,
         target_identity: &str,
         stage_prefix: &str,
@@ -83,12 +103,17 @@ impl StagedPublication {
         ensure_dir(target_parent).map_err(|error| {
             AppError::Runtime(format!("failed to create target parent dir: {error}"))
         })?;
-
+        ensure_dir(stage_root).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to create the stage directory '{}': {error}",
+                stage_root.display()
+            ))
+        })?;
         let run_id = make_run_id();
         let publication = Self::new(
             target_path,
             target_identity,
-            target_parent.join(format!("{stage_prefix}-{run_id}")),
+            stage_root.join(format!("{stage_prefix}-{run_id}")),
             run_id,
         );
         if publication.staging_path.exists() {

@@ -453,7 +453,7 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
     );
     assert_native_edt_project(&base_path.join("main"));
     assert!(!base_path.join("main").join("old.txt").exists());
-    // Снимок Конфигуратора лежит под памятью выбранной базы.
+    // Снимок Конфигуратора лежит в `workPath` по ключу выбранной базы.
     let bases: Vec<_> = fs::read_dir(work_path.join("infobases"))
         .expect("base memory")
         .map(|entry| entry.expect("entry").path())

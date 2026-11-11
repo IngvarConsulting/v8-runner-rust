@@ -352,12 +352,10 @@ fn refuse_existing(targets: &[&Path], force: bool) -> Result<(), AppError> {
 const WORK_PATH_LOGS_DIR: &str = "logs";
 
 /// Клон пишет проект только в пустой каталог: пустым считается каталог, где нет ничего,
-/// кроме `.git`. Проверка идёт после замка, а замок и журнал уже могут лежать в `workPath`
-/// нового проекта. Поэтому `workPath` не в счёт, только пока в нём нет ничего, кроме файлов
-/// замка, каталога журналов `logs/` (его содержимое не проверяется) и признака нового
-/// владельца в памяти о базе; любой другой файл или каталог в нём — «не пуст». Так же не в
-/// счёт `localPath`, пока в нём лишь `.gitignore` и файлы замков: его заводит замок прерванного
-/// прежнего клона.
+/// кроме `.git`. Проверка идёт после замков, а замок и журнал уже могут лежать в `workPath`
+/// нового проекта, а признак нового владельца и замок памяти — в `localPath`. Поэтому они не
+/// в счёт, только пока в них нет ничего, кроме того, что называет [`foreign_in`]; любой другой
+/// файл или каталог — «не пуст».
 /// `--force` снимает отказ, как и запрет перезаписи. Каталога ещё нет — он пуст.
 fn refuse_a_non_empty_project_dir(
     paths: &BootstrapPaths,
@@ -381,60 +379,59 @@ fn refuse_a_non_empty_project_dir(
         if entry.file_name() == ".git" {
             continue;
         }
-        let path = entry.path();
-        let foreign = if path == work_path {
-            directory_entries(work_path)?
-                .into_iter()
-                .find(|inner| !is_lock_file_or_logs_dir(inner))
-                .map(|inner| inner.path())
-        } else if local_path.starts_with(&path) {
-            foreign_on_the_way_to_local(&path, local_path)?
-        } else {
-            return Err(refuse(path));
-        };
-        if let Some(foreign) = foreign {
+        if let Some(foreign) = foreign_in(&entry.path(), work_path, local_path)? {
             return Err(refuse(foreign));
         }
     }
     Ok(())
 }
 
-/// Запись `workPath`, которую проверка пустоты пропускает: файл замка, каталог журналов
-/// `logs/` целиком, с любым содержимым и чьим бы он ни был, и память о базах, в которой
-/// граница записала только признак нового владельца.
-fn is_lock_file_or_logs_dir(entry: &std::fs::DirEntry) -> bool {
-    let name = entry.file_name();
-    is_workspace_lock_file(&name)
-        || (name == WORK_PATH_LOGS_DIR && entry.path().is_dir())
-        || (name == "infobases"
-            && crate::use_cases::exchange_guard::holds_only_new_owner_marks(&entry.path()))
-}
-
-/// Что лежит на пути к `localPath`, кроме него самого, и в нём, кроме того, что заводит
-/// подготовка каталога: `.gitignore` и файлы замков. Вложенный `localPath` проверяется так же:
-/// каталоги над ним не держат ничего другого.
-fn foreign_on_the_way_to_local(
+/// Первое чужое под `path`. Сам `workPath` держит только файлы замка, каталог журналов `logs/`
+/// целиком и свой `.gitignore`; `localPath` — то, что заводит подготовка каталога (`.gitignore`
+/// и файлы замков), и память о базах, в которой граница записала только признак нового
+/// владельца и замок памяти. Каталоги на пути к ним не держат ничего другого; на пути к
+/// `workPath` лежит и `.gitignore` родителя `.build`, которого раннер завёл сам.
+fn foreign_in(
     path: &Path,
+    work_path: &Path,
     local_path: &Path,
 ) -> Result<Option<PathBuf>, AppError> {
-    if !path.is_dir() {
+    let entries = if path == work_path || path == local_path {
+        directory_entries(path)?
+    } else if work_path.starts_with(path) || local_path.starts_with(path) {
+        if !path.is_dir() {
+            return Ok(Some(path.to_path_buf()));
+        }
+        directory_entries(path)?
+    } else {
         return Ok(Some(path.to_path_buf()));
-    }
-    for inner in directory_entries(path)? {
+    };
+    for inner in entries {
+        let name = inner.file_name();
         let inner_path = inner.path();
-        if path == local_path {
-            let prepared = inner_path.is_file()
-                && (crate::support::local_dir::is_own_file(&inner.file_name())
-                    || crate::use_cases::infobase_lock::is_infobase_lock_file(&inner.file_name()));
-            if !prepared {
-                return Ok(Some(inner_path));
-            }
-        } else if local_path.starts_with(&inner_path) {
-            if let Some(foreign) = foreign_on_the_way_to_local(&inner_path, local_path)? {
-                return Ok(Some(foreign));
-            }
+        let prepared = if path == work_path {
+            is_workspace_lock_file(&name)
+                || (name == WORK_PATH_LOGS_DIR && inner_path.is_dir())
+                || (name == crate::support::local_dir::LOCAL_DIR_GITIGNORE && inner_path.is_file())
+        } else if path == local_path {
+            (inner_path.is_file()
+                && (crate::support::local_dir::is_own_file(&name)
+                    || crate::use_cases::infobase_lock::is_infobase_lock_file(&name)))
+                || (name == "infobases"
+                    && crate::use_cases::exchange_guard::holds_only_new_owner_marks(&inner_path))
         } else {
+            work_path.starts_with(path)
+                && name == crate::support::local_dir::LOCAL_DIR_GITIGNORE
+                && inner_path.is_file()
+        };
+        if prepared {
+            continue;
+        }
+        if path == work_path || path == local_path {
             return Ok(Some(inner_path));
+        }
+        if let Some(foreign) = foreign_in(&inner_path, work_path, local_path)? {
+            return Ok(Some(foreign));
         }
     }
     Ok(None)
@@ -488,7 +485,7 @@ fn write_bootstrap_files(paths: &BootstrapPaths, text: &ProjectText<'_>) -> Resu
 
 fn render_main_config(paths: &BootstrapPaths, request: &BootstrapRequest) -> String {
     format!(
-        "# yaml-language-server: $schema={}\n# Generated by v8-runner clone\nworkPath: 'build'\nformat: DESIGNER\nsource-set:\n  - name: 'main'\n    type: CONFIGURATION\n    path: '{}'\ntools:\n  platform:\n    version: '{}'\n",
+        "# yaml-language-server: $schema={}\n# Generated by v8-runner clone\nformat: DESIGNER\nsource-set:\n  - name: 'main'\n    type: CONFIGURATION\n    path: '{}'\ntools:\n  platform:\n    version: '{}'\n",
         main_config_schema_url(),
         escape_yaml(&paths.source_path_in_config),
         escape_yaml(&request.platform_version),

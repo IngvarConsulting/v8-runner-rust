@@ -94,7 +94,7 @@ fn harness_holding_credentials(hold: Option<Hold>, user: &str, password: &str) -
     )
     .expect("write config");
     support::memory::remember_base(
-        &work_path,
+        &root,
         "origin",
         support::memory::Base::File(&root.join("ib")),
         &[support::memory::Set::configuration("main", &sources)],
@@ -843,7 +843,7 @@ fn an_agent_push_into_a_base_that_moved_ahead_is_refused_before_the_load() {
     let ledger_path = harness
         .dir
         .path()
-        .join("work")
+        .join(".local")
         .join("infobases")
         .join("origin")
         .join("generation.json");
@@ -944,7 +944,7 @@ fn harness_with_an_extension_recorded_by_ibcmd(answer: Option<&str>) -> Harness 
     )
     .expect("config");
     support::memory::remember_base(
-        &root.join("work"),
+        &root,
         "origin",
         support::memory::Base::File(&root.join("ib")),
         &[
@@ -952,7 +952,7 @@ fn harness_with_an_extension_recorded_by_ibcmd(answer: Option<&str>) -> Harness 
             support::memory::Set::extension("ext", &ext),
         ],
     );
-    let ledger_path = root.join("work/infobases/origin/generation.json");
+    let ledger_path = root.join(".local/infobases/origin/generation.json");
     let mut ledger: Value =
         serde_json::from_str(&fs::read_to_string(&ledger_path).expect("ledger")).expect("json");
     ledger["ext"]["tool"] = Value::from("ibcmd");

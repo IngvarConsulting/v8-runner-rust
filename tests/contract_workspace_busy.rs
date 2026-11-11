@@ -113,9 +113,9 @@ fn locking_leaves(
     let mut rows: Vec<_> = with_preview(dir)
         .into_iter()
         .map(|row| {
-            // У `clone` рабочий каталог — `build` проекта, которого ещё нет.
+            // У `clone` рабочий каталог — `.build/v8-runner` проекта, которого ещё нет.
             let work_path = if row.leaf == "clone" {
-                row.trace.join("build")
+                row.trace.join(".build").join("v8-runner")
             } else {
                 work.clone()
             };

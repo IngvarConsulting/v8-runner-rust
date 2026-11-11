@@ -38,7 +38,7 @@ pub struct SourceSetContext {
     /// Absolute root directory of the sources.
     path: PathBuf,
     /// Key naming a shared redb hash-storage file (`workPath/hash-storages/<key>.redb`).
-    /// Infobase memory lives under `workPath/infobases/<base>/hashes/<name>.redb` instead.
+    /// Infobase memory lives under `localPath/infobases/<base>/hashes/<name>.redb` instead.
     storage_key: String,
     memory: SnapshotMemory,
     /// `localPath` проекта набора: под корнем набора он не исходник. `None` — контекст собран
@@ -55,7 +55,8 @@ enum SnapshotMemory {
         identity: String,
     },
     Infobase {
-        base: String,
+        /// Каталог памяти базы: `localPath/infobases/<ключ>`.
+        dir: PathBuf,
         identity: String,
         subject: MemorySubject,
     },
@@ -103,14 +104,19 @@ impl SourceSetContext {
     }
 
     /// Bind hash memory to an infobase: `infobase` names its directory under
-    /// `workPath/infobases/` (a declared name or [`connection_memory_key`]); `identity` is
+    /// `localPath/infobases/` (a declared name or [`connection_memory_key`]); `identity` is
     /// stored and compared with the snapshot.
-    pub fn with_infobase_memory(mut self, infobase: &str, identity: String) -> Self {
+    pub fn with_infobase_memory(
+        mut self,
+        local_path: &Path,
+        infobase: &str,
+        identity: String,
+    ) -> Self {
         assert!(
             is_safe_path_segment(&self.name),
             "source set name must be a safe path segment"
         );
-        self.memory = infobase_memory(infobase, identity, MemorySubject::SourceSet);
+        self.memory = infobase_memory(local_path, infobase, identity, MemorySubject::SourceSet);
         self
     }
 
@@ -118,6 +124,7 @@ impl SourceSetContext {
     /// of its source sets but never sharing a file with one of them.
     pub fn with_tool_extension_memory(
         mut self,
+        local_path: &Path,
         infobase: &str,
         extension: &str,
         identity: String,
@@ -127,6 +134,7 @@ impl SourceSetContext {
             "tool extension name must be a safe path segment"
         );
         self.memory = infobase_memory(
+            local_path,
             infobase,
             identity,
             MemorySubject::ToolExtension(extension.to_owned()),
@@ -173,13 +181,14 @@ impl SourceSetContext {
     }
 
     /// Absolute path to the redb hash-storage file for this context, or `None` when the
-    /// context keeps no memory. Every storage access goes through this answer.
+    /// context keeps no memory. Every storage access goes through this answer. `work_path`
+    /// places only the shared cache: the memory of an infobase lies under `localPath`.
     pub fn storage_path(&self, work_path: &Path) -> Option<PathBuf> {
         match &self.memory {
             SnapshotMemory::Disabled => None,
             SnapshotMemory::Build { path, .. } => Some(path.clone()),
-            SnapshotMemory::Infobase { base, subject, .. } => {
-                let hashes = infobase_memory_dir(work_path, base).join("hashes");
+            SnapshotMemory::Infobase { dir, subject, .. } => {
+                let hashes = dir.join("hashes");
                 Some(match subject {
                     MemorySubject::SourceSet => hashes.join(format!("{}.redb", self.name)),
                     MemorySubject::ToolExtension(extension) => {
@@ -195,35 +204,31 @@ impl SourceSetContext {
         }
     }
 
-    /// Каталог копии файла версий этого набора: `workPath/infobases/<база>/dump-info/<набор>`.
+    /// Каталог копии файла версий этого набора: `localPath/infobases/<база>/dump-info/<набор>`.
     /// Копия описывает пару «база ↔ каталог», поэтому есть только у набора с памятью базы.
-    pub fn version_file_copy_dir(&self, work_path: &Path) -> Option<PathBuf> {
-        self.source_set_base().map(|base| {
-            infobase_memory_dir(work_path, base)
-                .join("dump-info")
-                .join(&self.name)
-        })
+    pub fn version_file_copy_dir(&self) -> Option<PathBuf> {
+        self.base_memory_dir()
+            .map(|dir| dir.join("dump-info").join(&self.name))
     }
 
-    /// Журнал поколений базы этого набора: `workPath/infobases/<база>/generation.json`.
-    pub fn generation_file(&self, work_path: &Path) -> Option<PathBuf> {
-        self.base_memory_dir(work_path)
+    /// Журнал поколений базы этого набора: `localPath/infobases/<база>/generation.json`.
+    pub fn generation_file(&self) -> Option<PathBuf> {
+        self.base_memory_dir()
             .map(|dir| dir.join(GENERATION_FILE_NAME))
     }
 
-    /// Память базы этого набора: `workPath/infobases/<база>`; `None` у набора без памяти базы.
-    pub fn base_memory_dir(&self, work_path: &Path) -> Option<PathBuf> {
-        self.source_set_base()
-            .map(|base| infobase_memory_dir(work_path, base))
+    /// Память базы этого набора: `localPath/infobases/<база>`; `None` у набора без памяти базы.
+    pub fn base_memory_dir(&self) -> Option<PathBuf> {
+        self.source_set_base().map(Path::to_path_buf)
     }
 
-    fn source_set_base(&self) -> Option<&str> {
+    fn source_set_base(&self) -> Option<&Path> {
         match &self.memory {
             SnapshotMemory::Infobase {
-                base,
+                dir,
                 subject: MemorySubject::SourceSet,
                 ..
-            } => Some(base),
+            } => Some(dir),
             SnapshotMemory::Infobase { .. }
             | SnapshotMemory::Shared
             | SnapshotMemory::Disabled
@@ -235,35 +240,44 @@ impl SourceSetContext {
 /// Имя журнала поколений под каталогом базы.
 pub const GENERATION_FILE_NAME: &str = "generation.json";
 
-fn infobase_memory(infobase: &str, identity: String, subject: MemorySubject) -> SnapshotMemory {
+fn infobase_memory(
+    local_path: &Path,
+    infobase: &str,
+    identity: String,
+    subject: MemorySubject,
+) -> SnapshotMemory {
     assert!(
         is_safe_path_segment(infobase),
         "infobase memory key must be a safe path segment"
     );
     SnapshotMemory::Infobase {
-        base: infobase.to_owned(),
+        dir: infobase_memory_dir(local_path, infobase),
         identity,
         subject,
     }
 }
 
-/// Корень памяти о базах: `workPath/infobases`. Всё под ним — состояние раннера.
-pub fn infobases_dir(work_path: &Path) -> PathBuf {
-    work_path.join("infobases")
+/// Каталог по базам под корнем `root`: `<root>/infobases`. Под `localPath` это память о
+/// базах, под `workPath` — снимки Конфигуратора наборов EDT по базам.
+pub fn infobases_dir(root: &Path) -> PathBuf {
+    root.join("infobases")
 }
 
-/// Память об одной базе: `workPath/infobases/<ключ>`, где ключ — имя объявленной базы или
-/// [`connection_memory_key`] базы, названной строкой соединения.
-pub fn infobase_memory_dir(work_path: &Path, infobase: &str) -> PathBuf {
-    infobases_dir(work_path).join(infobase)
+/// Память об одной базе: `localPath/infobases/<ключ>`, где ключ — имя объявленной базы или
+/// [`connection_memory_key`] базы, названной строкой соединения. Её не пересчитать без базы,
+/// поэтому она лежит под `localPath`, а не в `workPath`
+/// (`INV.USE-CASES.MEMORY-LIVES-UNDER-THE-BASE-IT-DESCRIBES`).
+pub fn infobase_memory_dir(local_path: &Path, infobase: &str) -> PathBuf {
+    infobases_dir(local_path).join(infobase)
 }
 
-/// Снимок Конфигуратора набора формата EDT. Он описывает обмен с базой и лежит под её
-/// памятью: `workPath/infobases/<ключ>/designer/<набор>`. У набора без памяти базы —
-/// внешних обработок и отчётов — `workPath/designer/<набор>`.
+/// Снимок Конфигуратора набора формата EDT. Он описывает обмен с базой, но пересчитывается
+/// из исходников, поэтому лежит в `workPath` по ключу базы:
+/// `workPath/infobases/<ключ>/designer/<набор>`. У набора без памяти базы — внешних обработок
+/// и отчётов — `workPath/designer/<набор>`.
 pub fn designer_copy_dir(work_path: &Path, infobase: Option<&str>, source_set: &str) -> PathBuf {
     match infobase {
-        Some(infobase) => infobase_memory_dir(work_path, infobase),
+        Some(infobase) => infobases_dir(work_path).join(infobase),
         None => work_path.to_path_buf(),
     }
     .join("designer")

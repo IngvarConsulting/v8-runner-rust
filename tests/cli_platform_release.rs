@@ -75,7 +75,7 @@ fn project(format: &str) -> Project {
     )
     .expect("config");
     support::memory::remember_base(
-        &root.join("work"),
+        &root,
         "origin",
         support::memory::Base::File(&root.join("ib")),
         &[support::memory::Set::configuration("main", &sources)],
@@ -214,7 +214,7 @@ fn a_foreign_generation_record_answers_the_release_refusal_not_non_fast_forward(
     )
     .expect("standalone config");
     support::memory::remember_base(
-        &root.join("work"),
+        &root,
         "origin",
         support::memory::Base::Standalone {
             host: "127.0.0.1",
@@ -225,7 +225,7 @@ fn a_foreign_generation_record_answers_the_release_refusal_not_non_fast_forward(
             &project.sources,
         )],
     );
-    let ledger_path = root.join("work/infobases/origin/generation.json");
+    let ledger_path = root.join(".local/infobases/origin/generation.json");
     let mut ledger: Value =
         serde_json::from_str(&fs::read_to_string(&ledger_path).expect("ledger")).expect("json");
     ledger["main"]["tool"] = Value::from("ibcmd");

@@ -67,6 +67,8 @@ pub enum ErrorCode {
     LiveAgentJob,
     /// Правило игнорирования git прячет файл набора; род `validation`.
     SourceSetIgnoredByGit,
+    /// Каталог набора и `workPath` на разных томах: выгрузка не начинается; род `validation`.
+    WorkPathOnAnotherVolume,
 }
 
 impl ErrorKind {
@@ -132,6 +134,7 @@ impl ErrorCode {
             Self::LiveAgentOff => "live_agent_off",
             Self::LiveAgentJob => "live_agent_job",
             Self::SourceSetIgnoredByGit => "source_set_ignored_by_git",
+            Self::WorkPathOnAnotherVolume => "work_path_on_another_volume",
         }
     }
 
@@ -161,6 +164,7 @@ impl ErrorCode {
         Self::LiveAgentOff,
         Self::LiveAgentJob,
         Self::SourceSetIgnoredByGit,
+        Self::WorkPathOnAnotherVolume,
     ];
 }
 
@@ -462,6 +466,11 @@ mod schema_tests {
             (
                 UseCaseErrorKind::SourceSetIgnoredByGit,
                 "source_set_ignored_by_git",
+                "validation",
+            ),
+            (
+                UseCaseErrorKind::WorkPathOnAnotherVolume,
+                "work_path_on_another_volume",
                 "validation",
             ),
             (

@@ -48,6 +48,13 @@ exit 0"#,
     )
 }
 
+impl Project {
+    /// `localPath` по умолчанию: память о базе лежит под ним.
+    fn local(&self) -> PathBuf {
+        self.config.with_file_name(".local")
+    }
+}
+
 fn project(provider: &str, extension: bool) -> Project {
     let dir = temp_workspace();
     let root = dir.path();
@@ -263,7 +270,7 @@ fn commit_project(project: &Project) {
 }
 
 fn snapshot(project: &Project) -> PathBuf {
-    project.work.join("infobases/origin/hashes/main.redb")
+    project.local().join("infobases/origin/hashes/main.redb")
 }
 
 #[test]
@@ -387,7 +394,7 @@ fn foreign_memory_advice_runs_as_written_against_the_same_base() {
         &project,
         &["--infobase", "second", "pull", "main", "--force"],
     ));
-    let second_memory = project.work.join("infobases/second/hashes/main.redb");
+    let second_memory = project.local().join("infobases/second/hashes/main.redb");
     let old_memory = fs::read(&second_memory).expect("memory of the second base");
     assert!(
         !snapshot(&project).exists(),
@@ -494,7 +501,7 @@ fn an_ad_hoc_base_is_remembered_by_its_connection_string() {
     assert_eq!(fs::read(snapshot(&project)).expect("named memory"), memory);
     let again = succeeded(run(&project, &["--infobase", &connection, "push"]));
     assert_eq!(again["data"]["steps"][0]["mode"], "skipped", "{again}");
-    let mut bases: Vec<_> = fs::read_dir(project.work.join("infobases"))
+    let mut bases: Vec<_> = fs::read_dir(project.local().join("infobases"))
         .expect("bases")
         .map(|entry| {
             entry
@@ -671,7 +678,7 @@ fn version_project(provider: &str) -> Project {
 
 fn runner_copy(project: &Project) -> PathBuf {
     project
-        .work
+        .local()
         .join("infobases/origin/dump-info/main/ConfigDumpInfo.xml")
 }
 
@@ -800,7 +807,7 @@ fn a_push_that_writes_no_version_file_keeps_the_runner_copy() {
 #[test]
 fn a_failed_copy_write_is_a_warning_not_a_refusal() {
     let project = version_project("designer");
-    let memory = project.work.join("infobases/origin");
+    let memory = project.local().join("infobases/origin");
     fs::create_dir_all(&memory).expect("memory dir");
     fs::write(memory.join("dump-info"), "not a directory").expect("block the copy dir");
 
@@ -1072,7 +1079,7 @@ fn a_full_dump_over_the_directory_names_the_memory_it_does_not_write() {
     );
     assert!(
         !project
-            .work
+            .local()
             .join("infobases/origin/hashes/main.redb")
             .exists(),
         "a dump over the directory records no hashes"

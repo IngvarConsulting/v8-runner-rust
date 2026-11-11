@@ -262,6 +262,11 @@
           "const": "source_set_ignored_by_git",
           "description": "Правило игнорирования git прячет файл набора; род `validation`.",
           "type": "string"
+        },
+        {
+          "const": "work_path_on_another_volume",
+          "description": "Каталог набора и `workPath` на разных томах: выгрузка не начинается; род `validation`.",
+          "type": "string"
         }
       ]
     },

@@ -326,8 +326,16 @@ where
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MainConfigSchema {
-    /// Working directory for generated state, logs, temporary files, and hash storages.
-    work_path: PathBuf,
+    /// Working directory for what the runner can compute again: logs, temporary files, the
+    /// dump stage, caches. Relative to the directory of v8project.yaml; `.build/v8-runner` by
+    /// default. The memory of the infobase lives under localPath, not here.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "PathBuf")]
+    work_path: Option<PathBuf>,
     /// Directory of the personal state of this checkout: data of managed stands and the
     /// default file infobase. Deleting workPath leaves it intact. Relative to the directory of
     /// v8project.yaml; `.local` by default. It must not hold that directory or a source set,
@@ -1589,9 +1597,7 @@ mod tests {
         assert!(
             !main_schema["required"]
                 .as_array()
-                .expect("required")
-                .iter()
-                .any(|key| key == "infobase"),
+                .is_some_and(|required| required.iter().any(|key| key == "infobase")),
             "the project file no longer requires a base section"
         );
         assert!(

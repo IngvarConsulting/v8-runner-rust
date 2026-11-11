@@ -18,7 +18,10 @@ pub struct AppConfig {
     /// Root path of the project sources
     pub base_path: PathBuf,
 
-    /// Working directory for temp files and hash storages
+    /// Рабочий каталог (`workPath`, по умолчанию `.build/v8-runner`): то, что раннер считает
+    /// заново, — журналы, временные файлы, промежуточный каталог выгрузки, кеши. Память о
+    /// базе в нём не лежит (`INV.CONFIG.WORKPATH-DEFAULTS-TO-THE-BUILD-DIRECTORY`).
+    #[serde(default = "default_work_path")]
     pub work_path: PathBuf,
 
     /// Личное состояние рабочей копии (`localPath`, по умолчанию `.local`): данные стендов и
@@ -1001,6 +1004,14 @@ impl AppConfig {
     pub fn mcp_admission_timeout_duration(&self) -> Duration {
         Duration::from_millis(self.mcp.execution.admission_timeout_ms.max(1))
     }
+}
+
+/// `workPath` по умолчанию: от каталога `v8project.yaml`. Каталог `.build` делят инструменты
+/// рабочей копии, у раннера в нём свой подкаталог.
+pub const DEFAULT_WORK_PATH: &str = ".build/v8-runner";
+
+fn default_work_path() -> PathBuf {
+    PathBuf::from(DEFAULT_WORK_PATH)
 }
 
 /// `localPath` по умолчанию: от каталога `v8project.yaml`.

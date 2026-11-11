@@ -140,14 +140,12 @@ fn from_memory(
                 name: set.name.clone(),
                 purpose: set.purpose,
                 memory,
-                recorded: recorded_generation(context, &config.work_path).map(|record| {
-                    RecordedGeneration {
-                        token: record.token,
-                        tool: record.tool,
-                        after: record.after,
-                        applied: record.applied,
-                        recorded_at: record.recorded_at,
-                    }
+                recorded: recorded_generation(context).map(|record| RecordedGeneration {
+                    token: record.token,
+                    tool: record.tool,
+                    after: record.after,
+                    applied: record.applied,
+                    recorded_at: record.recorded_at,
                 }),
                 changed_files,
                 detection,
@@ -251,7 +249,7 @@ fn deepen(
             continue;
         };
         let memory = inventory.designer_context(&declared.name);
-        let record = memory.and_then(|context| recorded_generation(context, &config.work_path));
+        let record = memory.and_then(recorded_generation);
         let scope = memory.map_or(TokenScope::OwnTool, |context| token_scope(config, context));
         set.base = Some(match asker.as_mut() {
             Ok(asker) => {
