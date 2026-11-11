@@ -327,6 +327,8 @@ command-specific validation, а не ослабление `push`, source `pull`,
   `temp/throwaway-infobases`
 - `workPath/stage` — промежуточные каталоги выгрузки `pull` (`.dump-stage-<запуск>`)
 - `workPath/hash-storages` — общий кеш EDT и внешних артефактов
+- `workPath/ignore-check` — запомненная проверка правил игнорирования git по наборам; пока ни
+  файлы правил, ни память о базе не менялись, проверка не повторяется
 - `workPath/edt-workspace`
 - `workPath/designer/<набор>` — выгрузки внешних обработок и отчётов формата EDT
 - `workPath/infobases/<база>/designer/<набор>` — у формата EDT выгрузка набора в формат

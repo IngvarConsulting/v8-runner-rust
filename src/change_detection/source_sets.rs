@@ -549,6 +549,7 @@ mod tests {
         crate::use_cases::source_changes::refuse_hidden_sets(
             std::slice::from_ref(&context),
             &config.work_path,
+            false,
         )
         .expect("no source_set_ignored_by_git");
         let Ok(AnalysisOutcome::Changes { changes, prepared }) =

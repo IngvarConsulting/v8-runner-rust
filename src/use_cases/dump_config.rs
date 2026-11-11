@@ -132,7 +132,7 @@ pub(super) fn refuse_hidden_sets(config: &AppConfig, args: &DumpArgs) -> Result<
         })
         .cloned()
         .collect();
-    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path, args.dry_run)
 }
 
 #[derive(Debug, Clone)]

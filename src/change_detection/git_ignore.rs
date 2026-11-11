@@ -9,10 +9,12 @@
 //! `core.excludesFile` are the weakest.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use regex::{Regex, RegexSet};
+use serde::{Deserialize, Serialize};
 
+use crate::change_detection::hash_storage::{StorageSnapshot, StorageSummary};
 use crate::domain::git_worktree::GitIgnoreSource;
 
 /// File extensions a Designer dump writes (#575): the paths a rule is tried on while the set
@@ -408,6 +410,259 @@ fn glob_to_regex(pattern: &str) -> String {
     regex
 }
 
+/// Version of what a [`CheckInput`] describes. Raise it with every change of the matching
+/// ([`IgnoreRules`]), of [`dump_samples`] or of the paths a check is tried on: builds of one
+/// version share their records, and a record of the old answer must not be taken.
+const CHECK_FORMAT: u32 = 1;
+
+/// A rules file younger than this may still change within the same time stamp and size — FAT
+/// keeps the time in steps of two seconds — so a check that read it is not recorded (#645).
+const SETTLED_NS: u64 = 3_000_000_000;
+
+/// Everything the answer of the ignore check of one set depends on (#645): the build of the
+/// runner, the set root and the runner directories below it, how names compare, every rules
+/// file with its time and size, and the memory the rules were tried on. The same input gives
+/// the same answer, so a check that hid nothing is not repeated while its input stays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CheckInput {
+    format: u32,
+    runner: String,
+    root: String,
+    ignore_case: bool,
+    runner_dirs: Vec<String>,
+    sources: Vec<SourceStamp>,
+    memory: MemoryStamp,
+}
+
+/// A rules file as the check saw it; `None` — absent or unreadable, which holds no rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SourceStamp {
+    file: PathBuf,
+    base: String,
+    modified_ns: Option<u64>,
+    len: Option<u64>,
+}
+
+/// The paths the rules were tried on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum MemoryStamp {
+    /// No remembered file: the samples of a dump ([`dump_samples`]).
+    Samples,
+    /// The files of the memory of this generation; a commit always changes the generation.
+    Remembered {
+        identity: Option<String>,
+        generation: u64,
+        files: u64,
+    },
+}
+
+impl MemoryStamp {
+    /// The paths of `snapshot` the rules are tried on.
+    pub(crate) fn of_snapshot(snapshot: &StorageSnapshot) -> Self {
+        if snapshot.entries.is_empty() {
+            Self::Samples
+        } else {
+            Self::Remembered {
+                identity: snapshot.identity.clone(),
+                generation: snapshot.generation,
+                files: snapshot.entries.len() as u64,
+            }
+        }
+    }
+
+    /// The same answer as [`Self::of_snapshot`] for the snapshot `summary` describes.
+    pub(crate) fn of_summary(summary: Option<&StorageSummary>) -> Self {
+        match summary {
+            Some(summary) if summary.files > 0 => Self::Remembered {
+                identity: summary.identity.clone(),
+                generation: summary.generation,
+                files: summary.files,
+            },
+            _ => Self::Samples,
+        }
+    }
+}
+
+impl CheckInput {
+    /// The input of the check of the set at `root`, and whether every rules file is old enough
+    /// for the answer to be recorded.
+    pub(crate) fn of(
+        sources: &[GitIgnoreSource],
+        root: &str,
+        runner_dirs: &[String],
+        ignore_case: bool,
+        memory: MemoryStamp,
+    ) -> (Self, bool) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+            });
+        let mut settled = true;
+        let sources = sources
+            .iter()
+            .map(|source| {
+                let meta = std::fs::metadata(&source.file).ok();
+                let modified_ns = meta
+                    .as_ref()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|since| u64::try_from(since.as_nanos()).ok());
+                if modified_ns.is_some_and(|at| at.saturating_add(SETTLED_NS) > now) {
+                    settled = false;
+                }
+                SourceStamp {
+                    file: source.file.clone(),
+                    base: source.base.clone(),
+                    modified_ns,
+                    len: meta.map(|meta| meta.len()),
+                }
+            })
+            .collect();
+        let input = Self {
+            format: CHECK_FORMAT,
+            runner: env!("CARGO_PKG_VERSION").to_owned(),
+            root: root.to_owned(),
+            ignore_case,
+            runner_dirs: runner_dirs.to_vec(),
+            sources,
+            memory,
+        };
+        (input, settled)
+    }
+
+    /// The same input tried on another memory.
+    pub(crate) fn with_memory(mut self, memory: MemoryStamp) -> Self {
+        self.memory = memory;
+        self
+    }
+}
+
+/// The record of a check that hid nothing, one file per set under `workPath` (#645). A record
+/// that cannot be read or does not match is no record; one that cannot be written is skipped.
+pub(crate) struct CheckRecord {
+    work_path: PathBuf,
+    path: PathBuf,
+}
+
+impl CheckRecord {
+    /// The record of the set whose memory — or, without memory, whose directory — is `place`,
+    /// under `work_path`.
+    pub(crate) fn at(work_path: &Path, place: &Path) -> Self {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(place.to_string_lossy().as_bytes());
+        let name: String = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Self {
+            work_path: work_path.to_path_buf(),
+            path: work_path.join("ignore-check").join(format!("{name}.json")),
+        }
+    }
+
+    fn read(&self) -> Option<CheckInput> {
+        std::fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    }
+
+    /// Whether the check already ran on `input` and hid nothing.
+    pub(crate) fn holds(&self, input: &CheckInput) -> bool {
+        self.read().is_some_and(|recorded| recorded == *input)
+    }
+
+    /// Carries the record over a commit of the memory (#645). The memory of `generation` the
+    /// record was taken on became `to`; its files are those it held and those the commit wrote,
+    /// `written`. The rules files still as recorded, a check of `written` alone gives the answer
+    /// of the whole memory: the record then describes `to`. Anything else leaves the record as
+    /// it is, and the next command checks the whole memory.
+    pub(crate) fn carry<'p>(
+        &self,
+        generation: u64,
+        to: MemoryStamp,
+        written: impl IntoIterator<Item = &'p str>,
+    ) {
+        let Some(recorded) = self.read() else {
+            return;
+        };
+        let carried = match (&recorded.memory, &to) {
+            (
+                MemoryStamp::Remembered {
+                    identity: before,
+                    generation: was,
+                    ..
+                },
+                MemoryStamp::Remembered { identity, .. },
+            ) => *was == generation && before == identity,
+            _ => false,
+        };
+        if !carried {
+            return;
+        }
+        let sources: Vec<GitIgnoreSource> = recorded
+            .sources
+            .iter()
+            .map(|source| GitIgnoreSource {
+                file: source.file.clone(),
+                base: source.base.clone(),
+            })
+            .collect();
+        let (now, settled) = CheckInput::of(
+            &sources,
+            &recorded.root,
+            &recorded.runner_dirs,
+            recorded.ignore_case,
+            to.clone(),
+        );
+        if !settled || now != recorded.clone().with_memory(to) {
+            return;
+        }
+        let rules = IgnoreRules::read(&sources, recorded.ignore_case);
+        let mut written: Vec<&str> = written
+            .into_iter()
+            .filter(|path| {
+                !crate::change_detection::git_tree::in_runner_dir(
+                    path,
+                    &recorded.runner_dirs,
+                    recorded.ignore_case,
+                )
+            })
+            .collect();
+        written.sort_unstable();
+        if rules.hiding(&recorded.root, written).is_none() {
+            self.keep(&now);
+            tracing::debug!(
+                record = %self.path.display(),
+                "the recorded ignore check was carried over to the new memory"
+            );
+        }
+    }
+
+    /// Records that the check of `input` hid nothing. The `workPath` itself is not created: a
+    /// command that has none yet records nothing.
+    pub(crate) fn keep(&self, input: &CheckInput) {
+        if !self.work_path.is_dir() {
+            return;
+        }
+        let written = serde_json::to_vec(input)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| {
+                if let Some(dir) = self.path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                crate::support::fs::write_file_atomically(&self.path, |file| {
+                    use std::io::Write;
+                    file.write_all(&bytes)
+                })
+            });
+        if let Err(error) = written {
+            tracing::debug!(record = %self.path.display(), %error, "the ignore check was not recorded");
+        }
+    }
+}
+
 /// The paths a dump of a configuration writes, as samples below a set root: every folder of
 /// the dump layout ([`crate::change_detection::partial_load::dump_layout_folders`]) with an
 /// element, its `Ext` folder and a file of every extension a dump writes. A set without
@@ -434,7 +689,7 @@ pub(crate) fn dump_samples() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dump_samples, IgnoreRules};
+    use super::{dump_samples, CheckInput, CheckRecord, IgnoreRules, MemoryStamp};
     use crate::domain::git_worktree::GitIgnoreSource;
     use std::fs;
 
@@ -459,6 +714,56 @@ mod tests {
 
     fn memory<'a>(paths: &[&'a str]) -> Vec<&'a str> {
         paths.to_vec()
+    }
+
+    /// Запись проверки отвечает только на тот же вход: другая память, другой корень или другой
+    /// файл правил — записи нет. Без `workPath` запись не создаётся (#645).
+    #[test]
+    fn a_check_record_answers_only_the_same_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rules = dir.path().join(".gitignore");
+        fs::write(
+            &rules, "*.log
+",
+        )
+        .expect("rules");
+        let sources = [GitIgnoreSource {
+            file: rules.clone(),
+            base: String::new(),
+        }];
+        let remembered = MemoryStamp::Remembered {
+            identity: None,
+            generation: 7,
+            files: 3,
+        };
+        let (input, settled) = CheckInput::of(&sources, "src/cf", &[], false, remembered.clone());
+        assert!(!settled, "a file written just now is not settled");
+        let work = dir.path().join("work");
+        let record = CheckRecord::at(&work, &dir.path().join("memory.redb"));
+        record.keep(&input);
+        assert!(!record.holds(&input), "no workPath, no record");
+
+        fs::create_dir_all(&work).expect("work");
+        record.keep(&input);
+        assert!(record.holds(&input));
+        assert!(!record.holds(&input.clone().with_memory(MemoryStamp::Samples)));
+        let next = MemoryStamp::Remembered {
+            identity: None,
+            generation: 8,
+            files: 3,
+        };
+        assert!(!record.holds(&input.clone().with_memory(next)));
+        let (other_root, _) = CheckInput::of(&sources, "src/other", &[], false, remembered.clone());
+        assert!(!record.holds(&other_root));
+        fs::write(
+            &rules,
+            "*.log
+*.tmp
+",
+        )
+        .expect("rules");
+        let (edited, _) = CheckInput::of(&sources, "src/cf", &[], false, remembered);
+        assert!(!record.holds(&edited));
     }
 
     #[test]
