@@ -202,8 +202,8 @@ fn run_build_branch(
 /// Разбор изменений до выбора исполнителя — там, где объём выбирает исполнителя: у исходников
 /// Конфигуратора, у отправки по изменившемуся и у цепочки, которую раннер упорядочивает по
 /// объёму. Иначе `None`, и разбирает, как прежде, сам исполнитель. Неверно названный набор и
-/// опись версий в индексе гита тоже дают `None`: их отказ — дело исполнителя, а разбор до
-/// него был бы лишней работой.
+/// опись версий в индексе гита тоже дают `None`: их отказ — дело исполнителя. Вопрос гиту об
+/// описи идёт рядом с разбором (#645); найдя опись в индексе, разбор отбрасывается.
 fn analysis_before_selection(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -212,7 +212,6 @@ fn analysis_before_selection(
     if config.format != SourceFormat::Designer
         || args.load.is_whole()
         || !config.orders_by_size(Operation::Build)
-        || refuse_tracked_version_files(config, args).is_err()
     {
         return Ok(None);
     }
@@ -222,7 +221,16 @@ fn analysis_before_selection(
         return Ok(None);
     };
     let contexts = designer_contexts_for_source_sets(&inventory, &source_sets);
-    analyze_contexts_by_name(context, &inventory, &contexts, args.dry_run).map(Some)
+    let (tracked, analysis) = std::thread::scope(|scope| {
+        let tracked = scope.spawn(|| refuse_tracked_version_files(config, args).is_err());
+        let analysis = analyze_contexts_by_name(context, &inventory, &contexts, args.dry_run);
+        (tracked.join(), analysis)
+    });
+    // Поток, который упал, ответа не дал: опись проверит исполнитель.
+    if tracked.unwrap_or(true) {
+        return Ok(None);
+    }
+    analysis.map(Some)
 }
 
 /// Отказ до работы исполнителя с пустой формой ответа: без формы конверт `--json-message`
@@ -255,7 +263,7 @@ fn refuse_hidden_sets_of_a_full_push(config: &AppConfig, args: &BuildArgs) -> Re
         return Ok(());
     };
     let contexts = designer_contexts_for_source_sets(&inventory, &source_sets);
-    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path)
+    crate::use_cases::source_changes::refuse_hidden_sets(&contexts, &config.work_path, args.dry_run)
 }
 
 /// Объём отправки (#559): целиком, если каждый набор, который она загрузит, идёт целиком —
@@ -367,9 +375,14 @@ fn run_build_selected(
         return run_build_edt(context, config, args, provider);
     }
 
-    if let Some(error) = validate_designer_supported_matrix(config, provider)
-        .or_else(|| refuse_tracked_version_files(config, args).err())
-    {
+    // Разбор до выбора исполнителя уже спросил гит об описи версий: найди он её, разбора бы
+    // не было.
+    if let Some(error) = validate_designer_supported_matrix(config, provider).or_else(|| {
+        analysis
+            .is_none()
+            .then(|| refuse_tracked_version_files(config, args).err())
+            .flatten()
+    }) {
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {

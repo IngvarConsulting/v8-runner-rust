@@ -41,6 +41,8 @@ enum Choice {
 struct Lookup {
     repos: Vec<GitWorktree>,
     choices: Vec<Choice>,
+    /// Whether an ignore check that hid nothing may be recorded: a preview writes nothing.
+    record: bool,
 }
 
 impl Lookup {
@@ -60,6 +62,7 @@ impl Lookup {
                     root: root.clone(),
                     runner_dirs: runner_dirs.clone(),
                     hash_blobs: &mut hasher,
+                    record_ignore_check: self.record,
                 }))
             }
         }
@@ -79,16 +82,31 @@ pub(crate) fn analyze(
     designer: bool,
 ) -> Result<Vec<ContextAnalysis>, AppError> {
     let mut interrupted = || pending_interruption_error(execution, PLACE).is_some();
+    // Память наборов читается, пока отвечает git (#645): ни то ни другое друг друга не ждёт.
+    let mut memories: Vec<Option<analyzer::Memory>> = Vec::new();
     let lookup = if designer {
-        lookup(
-            contexts,
-            work_path,
-            Ask::Status {
-                optional_locks: !preview,
-            },
-            &mut interrupted,
-        )
-        .ok_or_else(|| interruption(execution))?
+        let (lookup, read) = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                contexts
+                    .iter()
+                    .map(|context| analyzer::read_memory(context, work_path))
+                    .collect::<Vec<_>>()
+            });
+            let lookup = lookup(
+                contexts,
+                work_path,
+                Ask::Status {
+                    optional_locks: !preview,
+                },
+                &mut interrupted,
+            );
+            (lookup, reader.join())
+        });
+        // Поток чтения, который упал, памяти не даёт: анализ прочтёт её сам.
+        if let Ok(read) = read {
+            memories = read.into_iter().map(Some).collect();
+        }
+        lookup.ok_or_else(|| interruption(execution))?
     } else {
         // Исходники EDT: в базу идёт их копия под `workPath`, и изменения ищет чтение файлов.
         Lookup {
@@ -97,14 +115,22 @@ pub(crate) fn analyze(
                 .iter()
                 .map(|_| Choice::Scan(ScanReason::EdtFormat))
                 .collect(),
+            record: false,
         }
     };
     let analyses: Vec<ContextAnalysis> = contexts
         .iter()
         .enumerate()
         .map(|(index, context)| {
+            let memory = memories.get_mut(index).and_then(Option::take);
             lookup.with_source(index, |source| {
-                analyzer::analyze_context_from(context, work_path, source, &mut interrupted)
+                analyzer::analyze_remembered(
+                    context,
+                    work_path,
+                    || memory.unwrap_or_else(|| analyzer::read_memory(context, work_path)),
+                    source,
+                    &mut interrupted,
+                )
             })
         })
         .collect();
@@ -135,6 +161,8 @@ fn hidden_refusal(error: &ChangeDetectionError) -> AppError {
 /// Отказывает, если правило игнорирования git прячет файл одного из наборов `contexts` — у
 /// команд, которые изменений не разбирают, но пишут или читают наборы целиком: полный `pull`,
 /// `push --full`, `make`. `git status` не спрашивается, только настройки и список `.gitignore`.
+/// Проверка, которая ничего не нашла, запоминается в `workPath` и не повторяется, пока не
+/// изменились ни файлы правил, ни память (#645); `preview` ничего не запоминает.
 ///
 /// Отмену проверка не замечает: она идёт до первой безопасной точки команды, и отмену,
 /// пришедшую раньше, называет эта точка, как и до #575
@@ -142,18 +170,19 @@ fn hidden_refusal(error: &ChangeDetectionError) -> AppError {
 pub(crate) fn refuse_hidden_sets(
     contexts: &[SourceSetContext],
     work_path: &Path,
+    preview: bool,
 ) -> Result<(), AppError> {
-    let Some(lookup) = lookup(contexts, work_path, Ask::IgnoreRules, &mut || false) else {
+    let ask = Ask::IgnoreRules { record: !preview };
+    let Some(lookup) = lookup(contexts, work_path, ask, &mut || false) else {
         return Ok(());
     };
     for (context, choice) in contexts.iter().zip(&lookup.choices) {
         if let Choice::Git { repo, root, .. } = choice {
-            analyzer::hidden_by_git_rules(context, work_path, &lookup.repos[*repo], root).map_err(
-                |error| match error {
+            analyzer::hidden_by_git_rules(context, work_path, &lookup.repos[*repo], root, !preview)
+                .map_err(|error| match error {
                     error @ ChangeDetectionError::HiddenByGit { .. } => hidden_refusal(&error),
                     other => AppError::Runtime(other.to_string()),
-                },
-            )?;
+                })?;
         }
     }
     Ok(())
@@ -319,8 +348,8 @@ fn blob_hasher<'v>(
 /// Что спросить у git о рабочей копии.
 #[derive(Clone, Copy)]
 enum Ask {
-    /// Только правила игнорирования.
-    IgnoreRules,
+    /// Только правила игнорирования; `record` разрешает запомнить проверку.
+    IgnoreRules { record: bool },
     /// Индекс и `git status`; `optional_locks` разрешает обновить индекс.
     Status { optional_locks: bool },
 }
@@ -332,6 +361,7 @@ fn lookup(
     ask: Ask,
     interrupted: &mut dyn FnMut() -> bool,
 ) -> Option<Lookup> {
+    let started = std::time::Instant::now();
     let work_real = work_path.canonicalize().ok();
     struct Repo {
         toplevel: PathBuf,
@@ -404,11 +434,17 @@ fn lookup(
         });
     }
 
+    tracing::debug!(
+        sets = contexts.len(),
+        repos = repos.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "the sets were placed in their working trees"
+    );
     let mut views = Vec::with_capacity(repos.len());
     let mut unusable = vec![None; repos.len()];
     for (index, repo) in repos.into_iter().enumerate() {
         let answer = match ask {
-            Ask::IgnoreRules => {
+            Ask::IgnoreRules { .. } => {
                 git::ignore_view(&repo.toplevel, &repo.info_exclude, &repo.roots, interrupted)
             }
             Ask::Status { optional_locks } => git::worktree_under(
@@ -445,6 +481,11 @@ fn lookup(
     Some(Lookup {
         repos: views,
         choices,
+        // Превью спрашивает git без необязательных блокировок и проверку не запоминает.
+        record: match ask {
+            Ask::IgnoreRules { record } => record,
+            Ask::Status { optional_locks } => optional_locks,
+        },
     })
 }
 
@@ -844,7 +885,7 @@ mod tests {
             "{message}"
         );
 
-        assert!(refuse_hidden_sets(&[project.set()], &project.work()).is_err());
+        assert!(refuse_hidden_sets(&[project.set()], &project.work(), false).is_err());
     }
 
     /// `.gitignore` внутри набора — отказ; правило `ConfigDumpInfo.xml` — нет: этот файл раннер
@@ -858,7 +899,8 @@ mod tests {
             .expect("the version file is not read anyway");
 
         project.write(".gitignore", "*.bsl\n");
-        let Err(AppError::Refused(refusal)) = refuse_hidden_sets(&[project.set()], &project.work())
+        let Err(AppError::Refused(refusal)) =
+            refuse_hidden_sets(&[project.set()], &project.work(), false)
         else {
             panic!("expected a refusal");
         };
@@ -960,6 +1002,246 @@ mod tests {
         let analysis = project.analyze();
         assert_eq!(analysis.detection, Some(ChangeDetection::git(false)));
         assert_eq!(changes(&analysis), BTreeMap::new());
+    }
+
+    /// Файл правил с временем часом раньше: проверка, прочитавшая только такие файлы,
+    /// запоминается (#645). Время каждого следующего — на секунду позже, чтобы правка была
+    /// видна и при той же длине.
+    fn settle(path: &Path, age: u64) {
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(3600 - age);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(at))
+            .expect("settle");
+    }
+
+    /// Проверка правил игнорирования, которая ничего не нашла, не повторяется, пока не
+    /// изменились ни файлы правил — `.gitignore`, `.git/info/exclude`, `core.excludesFile`, —
+    /// ни память о базе; изменение любого из них проверку повторяет, а правило, которое
+    /// прячет файл набора, по-прежнему даёт отказ — и у команд без разбора (полный `pull`,
+    /// `push --full`, `make`), и у разбора изменений (#645).
+    #[test]
+    fn an_unchanged_ignore_check_is_not_repeated_and_any_changed_input_repeats_it() {
+        use crate::change_detection::analyzer::ignore_check_audit;
+
+        let project = Project::new(&[("Module.bsl", "m")]);
+        let top = project.dir.path();
+        let excludes = top.join("excludes");
+        fs::write(
+            &excludes, "# none
+",
+        )
+        .expect("excludes");
+        run_git(top, &["config", "core.excludesFile", "excludes"]);
+        let gitignore = top.join(".gitignore");
+        let info = top.join(".git").join("info");
+        fs::create_dir_all(&info).expect("info");
+        let exclude = info.join("exclude");
+        fs::write(
+            &exclude, "# none
+",
+        )
+        .expect("exclude");
+        project.remember();
+        for file in [&gitignore, &exclude, &excludes] {
+            settle(file, 0);
+        }
+        let refuse = || refuse_hidden_sets(&[project.set()], &project.work(), false);
+        ignore_check_audit::take();
+
+        refuse().expect("nothing hidden");
+        assert_eq!(ignore_check_audit::take(), 1, "the first check runs");
+        refuse().expect("nothing hidden");
+        project.analyze_with(false).expect("analysis");
+        assert_eq!(
+            ignore_check_audit::take(),
+            0,
+            "nothing changed: neither a command without analysis nor the analysis checks again"
+        );
+
+        let mut age = 0;
+        let mut edit = |file: &Path, text: &str| {
+            fs::write(file, text).expect("rules");
+            age += 1;
+            settle(file, age);
+        };
+        edit(
+            &gitignore,
+            "/.work/
+#x
+",
+        );
+        refuse().expect("nothing hidden");
+        assert_eq!(ignore_check_audit::take(), 1, ".gitignore changed");
+        edit(
+            &exclude, "# one
+",
+        );
+        refuse().expect("nothing hidden");
+        assert_eq!(ignore_check_audit::take(), 1, ".git/info/exclude changed");
+        edit(
+            &excludes, "# one
+",
+        );
+        refuse().expect("nothing hidden");
+        assert_eq!(ignore_check_audit::take(), 1, "core.excludesFile changed");
+        let other = top.join("other-excludes");
+        fs::write(
+            &other, "# none
+",
+        )
+        .expect("excludes");
+        settle(&other, 0);
+        run_git(top, &["config", "core.excludesFile", "other-excludes"]);
+        refuse().expect("nothing hidden");
+        assert_eq!(
+            ignore_check_audit::take(),
+            1,
+            "core.excludesFile names another file"
+        );
+        refuse().expect("nothing hidden");
+        assert_eq!(ignore_check_audit::take(), 0, "recorded again");
+
+        project.write("Second.bsl", "s");
+        project.remember();
+        refuse().expect("nothing hidden");
+        assert_eq!(ignore_check_audit::take(), 1, "the memory changed");
+
+        // Превью не запоминает проверку.
+        edit(
+            &gitignore,
+            "/.work/
+#y
+",
+        );
+        refuse_hidden_sets(&[project.set()], &project.work(), true).expect("nothing hidden");
+        refuse_hidden_sets(&[project.set()], &project.work(), true).expect("nothing hidden");
+        assert_eq!(ignore_check_audit::take(), 2, "a preview records nothing");
+
+        // Правило, которое прячет файл набора, отказывает после запомненной проверки.
+        refuse().expect("nothing hidden");
+        edit(
+            &gitignore,
+            "/.work/
+*.bsl
+",
+        );
+        let Err(AppError::Refused(refusal)) = refuse() else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(refusal.kind(), UseCaseErrorKind::SourceSetIgnoredByGit);
+        let Err(AppError::Refused(refusal)) = project.analyze_with(false) else {
+            panic!("expected a refusal of the analysis");
+        };
+        assert_eq!(refusal.kind(), UseCaseErrorKind::SourceSetIgnoredByGit);
+    }
+
+    /// Запись памяти после отправки или выгрузки по изменившемуся переносит запомненную
+    /// проверку на новую память, проверив только записанные строки; запись файла, который
+    /// прячет правило, проверку не переносит, и следующая команда отказывает (#645).
+    #[test]
+    fn a_commit_carries_the_recorded_check_unless_it_writes_a_hidden_file() {
+        use crate::change_detection::analyzer::PreparedStateUpdate;
+        use crate::change_detection::analyzer::{commit_success, ignore_check_audit};
+        use crate::change_detection::hash_storage::{
+            HashKind, HashStorage, StorageDelta, StoredFileState,
+        };
+
+        let project = Project::new(&[("Module.bsl", "m")]);
+        let top = project.dir.path();
+        let gitignore = top.join(".gitignore");
+        fs::write(
+            &gitignore,
+            "/.work/
+*.tmp
+",
+        )
+        .expect("rules");
+        let excludes = top.join("excludes");
+        fs::write(
+            &excludes, "# none
+",
+        )
+        .expect("excludes");
+        run_git(top, &["config", "core.excludesFile", "excludes"]);
+        let exclude = top.join(".git").join("info").join("exclude");
+        fs::create_dir_all(exclude.parent().expect("info")).expect("info");
+        fs::write(
+            &exclude, "# none
+",
+        )
+        .expect("exclude");
+        project.remember();
+        for file in [&gitignore, &excludes, &exclude] {
+            settle(file, 0);
+        }
+        let refuse = || refuse_hidden_sets(&[project.set()], &project.work(), false);
+        refuse().expect("nothing hidden");
+        ignore_check_audit::take();
+
+        project.write("Module.bsl", "m2");
+        let Ok(AnalysisOutcome::Changes { prepared, .. }) = project.analyze().outcome else {
+            panic!("expected a change");
+        };
+        commit_success(&project.set(), &project.work(), &prepared).expect("commit");
+        refuse().expect("nothing hidden");
+        assert_eq!(
+            ignore_check_audit::take(),
+            0,
+            "the record follows the memory over a commit of a remembered file"
+        );
+
+        let storage =
+            HashStorage::new(project.set().storage_path(&project.work()).expect("memory"));
+        let generation = storage.current_generation().expect("generation");
+        let written = PreparedStateUpdate {
+            delta: StorageDelta {
+                upserts: [(
+                    "New.tmp".to_owned(),
+                    StoredFileState {
+                        mtime_ns: 0,
+                        hash: "0".repeat(40),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                removals: Vec::new(),
+                hash_kind: HashKind::GitBlob,
+            },
+            scanned_files: 1,
+            scan_started_at: 0,
+            observed_generation: generation,
+        };
+        commit_success(&project.set(), &project.work(), &written).expect("commit");
+        let Err(AppError::Refused(refusal)) = refuse() else {
+            panic!("a hidden file written into the memory refuses");
+        };
+        assert_eq!(refusal.kind(), UseCaseErrorKind::SourceSetIgnoredByGit);
+        assert!(
+            refusal.message().contains("New.tmp"),
+            "{}",
+            refusal.message()
+        );
+    }
+
+    /// Свежий файл правил может измениться в ту же отметку времени с той же длиной: проверку,
+    /// которая его прочла, раннер не запоминает (#645).
+    #[test]
+    fn a_check_of_a_fresh_rules_file_is_not_recorded() {
+        use crate::change_detection::analyzer::ignore_check_audit;
+
+        let project = Project::new(&[("Module.bsl", "m")]);
+        project.remember();
+        fs::File::options()
+            .write(true)
+            .open(project.dir.path().join(".gitignore"))
+            .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+            .expect("fresh");
+        ignore_check_audit::take();
+        refuse_hidden_sets(&[project.set()], &project.work(), false).expect("nothing hidden");
+        refuse_hidden_sets(&[project.set()], &project.work(), false).expect("nothing hidden");
+        assert_eq!(ignore_check_audit::take(), 2);
     }
 
     /// Неотслеживаемый `.gitignore` git применяет так же, как отслеживаемый.
@@ -1127,7 +1409,7 @@ mod tests {
                 ("Stand.xml".to_owned(), ChangeKind::Deleted),
             ])
         );
-        refuse_hidden_sets(std::slice::from_ref(&set), &work)
+        refuse_hidden_sets(std::slice::from_ref(&set), &work, false)
             .expect("a full pull is not refused either");
 
         rescan_and_commit_full(&set, &work).expect("memory");
