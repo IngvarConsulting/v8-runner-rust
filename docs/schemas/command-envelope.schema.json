@@ -257,6 +257,11 @@
           "const": "live_agent_job",
           "description": "`agent hold` в Job, из которого сторож не может выйти.",
           "type": "string"
+        },
+        {
+          "const": "source_set_ignored_by_git",
+          "description": "Правило игнорирования git прячет файл набора; род `validation`.",
+          "type": "string"
         }
       ]
     },

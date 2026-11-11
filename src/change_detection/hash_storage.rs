@@ -20,6 +20,48 @@ const IDENTITY_KEY: &str = "target";
 pub const META_KEY_WATERMARK: &str = "watermark";
 /// Metadata key storing optimistic-lock generation.
 pub const META_KEY_GENERATION: &str = "generation";
+/// Metadata key naming how the file hashes were taken ([`HashKind`]); absent in memory written
+/// before #575.
+pub const META_KEY_HASH_KIND: &str = "hash_kind";
+/// [`META_KEY_HASH_KIND`] of a memory of the ids `git add` stores.
+const GIT_BLOB_KIND: u64 = 1;
+/// [`META_KEY_HASH_KIND`] of a memory of blob ids of the bytes, without git's filters.
+const RAW_BLOB_KIND: u64 = 2;
+
+/// How the hashes of one memory were taken. One memory holds one kind (#575): ids of two
+/// hashers never meet in one memory, and a memory of another kind compares with nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HashKind {
+    /// Written before #575: SHA-256 of the bytes, or a kind this runner does not know. The
+    /// runner no longer compares with such memory: it is no memory of the base
+    /// (`INV.USE-CASES.WHAT-COUNTS-AS-MEMORY-OF-THE-BASE`).
+    Legacy,
+    /// The blob ids `git add` would store: git's filters and line-ending conversion applied,
+    /// as the index of the working tree decides them.
+    GitBlob,
+    /// Blob ids of the bytes as they lie, like `git hash-object --no-filters`: the runner reads
+    /// the files itself.
+    #[default]
+    RawBlob,
+}
+
+impl HashKind {
+    fn from_stored(value: Option<u64>) -> Self {
+        match value {
+            Some(GIT_BLOB_KIND) => Self::GitBlob,
+            Some(RAW_BLOB_KIND) => Self::RawBlob,
+            _ => Self::Legacy,
+        }
+    }
+
+    const fn stored(self) -> u64 {
+        match self {
+            Self::GitBlob => GIT_BLOB_KIND,
+            // Legacy is never written: a commit names the hasher it used.
+            Self::RawBlob | Self::Legacy => RAW_BLOB_KIND,
+        }
+    }
+}
 
 /// Persisted state for one file entry inside the storage snapshot.
 #[derive(Debug, Clone)]
@@ -35,12 +77,18 @@ pub struct StorageSnapshot {
     pub watermark: Option<u64>,
     pub generation: u64,
     pub identity: Option<String>,
+    pub hash_kind: HashKind,
 }
 
 impl StorageSnapshot {
     /// Nothing has ever been committed: there is no memory to be foreign.
     pub fn is_blank(&self) -> bool {
         self.generation == 0 && self.watermark.is_none() && self.entries.is_empty()
+    }
+
+    /// Committed by a runner before #575: its hashes compare with nothing.
+    pub fn is_legacy(&self) -> bool {
+        !self.is_blank() && self.hash_kind == HashKind::Legacy
     }
 }
 
@@ -51,6 +99,9 @@ pub struct StorageDelta {
     pub upserts: HashMap<String, StoredFileState>,
     /// Files forgotten.
     pub removals: Vec<String>,
+    /// The hasher of `upserts`. A delta of another kind than the memory's is the whole new
+    /// memory: the rows it does not name are forgotten.
+    pub hash_kind: HashKind,
 }
 
 /// Rows of the file tables read and written by the current thread, so a test can prove which
@@ -105,12 +156,18 @@ pub struct StorageSummary {
     pub watermark: Option<u64>,
     /// Files remembered, as the table header counts them.
     pub files: u64,
+    pub hash_kind: HashKind,
 }
 
 impl StorageSummary {
     /// The same answer as [`StorageSnapshot::is_blank`] for the same storage.
     pub fn is_blank(&self) -> bool {
         self.generation == 0 && self.watermark.is_none() && self.files == 0
+    }
+
+    /// The same answer as [`StorageSnapshot::is_legacy`] for the same storage.
+    pub fn is_legacy(&self) -> bool {
+        !self.is_blank() && self.hash_kind == HashKind::Legacy
     }
 }
 
@@ -191,6 +248,7 @@ impl HashStorage {
                     entries: HashMap::new(),
                     watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
                     generation: read_generation(meta_tbl.as_ref(), &self.path)?,
+                    hash_kind: read_hash_kind(meta_tbl.as_ref(), &self.path)?,
                 });
             }
             return Err(StorageError::Recoverable {
@@ -250,6 +308,7 @@ impl HashStorage {
             entries,
             watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
             generation: read_generation(meta_tbl.as_ref(), &self.path)?,
+            hash_kind: read_hash_kind(meta_tbl.as_ref(), &self.path)?,
         })
     }
 
@@ -260,13 +319,18 @@ impl HashStorage {
     pub fn commit_snapshot_with_identity(
         &self,
         snapshot: &HashMap<String, StoredFileState>,
+        hash_kind: HashKind,
         watermark: u64,
         expected_generation: u64,
         identity: Option<&str>,
     ) -> Result<(), StorageError> {
-        self.commit_rows(watermark, expected_generation, identity, |mtime, hash| {
-            sync_file_tables(&self.path, mtime, hash, snapshot)
-        })
+        self.commit_rows(
+            watermark,
+            expected_generation,
+            identity,
+            hash_kind,
+            |mtime, hash, _| sync_file_tables(&self.path, mtime, hash, snapshot),
+        )
     }
 
     /// Persist only the rows a delta names if the caller still owns the expected generation:
@@ -287,24 +351,34 @@ impl HashStorage {
     ) -> Result<(), StorageError> {
         use redb::ReadableTableMetadata;
 
-        self.commit_rows(watermark, expected_generation, identity, |mtime, hash| {
-            let mtime_rows = mtime
-                .len()
-                .map_err(|e| map_storage_error(&self.path, "count mtime rows", e))?;
-            let hash_rows = hash
-                .len()
-                .map_err(|e| map_storage_error(&self.path, "count hash rows", e))?;
-            if mtime_rows != hash_rows {
-                remove_orphan_rows(&self.path, mtime, hash)?;
-            }
-            for key in &delta.removals {
-                remove_row(&self.path, mtime, hash, key)?;
-            }
-            for (key, state) in &delta.upserts {
-                write_row(&self.path, mtime, hash, key, state)?;
-            }
-            Ok(())
-        })
+        self.commit_rows(
+            watermark,
+            expected_generation,
+            identity,
+            delta.hash_kind,
+            |mtime, hash, stored| {
+                if stored != delta.hash_kind {
+                    // Rows of another kind compare with nothing: the delta is the whole memory.
+                    return sync_file_tables(&self.path, mtime, hash, &delta.upserts);
+                }
+                let mtime_rows = mtime
+                    .len()
+                    .map_err(|e| map_storage_error(&self.path, "count mtime rows", e))?;
+                let hash_rows = hash
+                    .len()
+                    .map_err(|e| map_storage_error(&self.path, "count hash rows", e))?;
+                if mtime_rows != hash_rows {
+                    remove_orphan_rows(&self.path, mtime, hash)?;
+                }
+                for key in &delta.removals {
+                    remove_row(&self.path, mtime, hash, key)?;
+                }
+                for (key, state) in &delta.upserts {
+                    write_row(&self.path, mtime, hash, key, state)?;
+                }
+                Ok(())
+            },
+        )
     }
 
     /// One write transaction: the generation check, the file rows `rows` writes, the identity,
@@ -314,9 +388,11 @@ impl HashStorage {
         watermark: u64,
         expected_generation: u64,
         identity: Option<&str>,
+        hash_kind: HashKind,
         rows: impl FnOnce(
             &mut redb::Table<&str, u64>,
             &mut redb::Table<&str, &str>,
+            HashKind,
         ) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
         self.ensure_parent_dir()?;
@@ -342,13 +418,20 @@ impl HashStorage {
                 });
             }
 
+            let stored_kind = HashKind::from_stored(
+                meta.get(META_KEY_HASH_KIND)
+                    .map_err(|e| map_storage_error(&self.path, "read hash kind", e))?
+                    .map(|v| v.value()),
+            );
             let mut mtime = tx
                 .open_table(FILES_MTIME)
                 .map_err(|e| map_table_error(&self.path, e))?;
             let mut hash = tx
                 .open_table(FILES_HASH)
                 .map_err(|e| map_table_error(&self.path, e))?;
-            rows(&mut mtime, &mut hash)?;
+            rows(&mut mtime, &mut hash, stored_kind)?;
+            meta.insert(META_KEY_HASH_KIND, hash_kind.stored())
+                .map_err(|e| map_storage_error(&self.path, "write hash kind", e))?;
             if let Some(identity) = identity {
                 tx.open_table(IDENTITY)
                     .map_err(|e| map_table_error(&self.path, e))?
@@ -416,6 +499,7 @@ impl HashStorage {
             generation: read_generation(meta_tbl.as_ref(), &self.path)?,
             watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
             files,
+            hash_kind: read_hash_kind(meta_tbl.as_ref(), &self.path)?,
         })
     }
 
@@ -424,6 +508,7 @@ impl HashStorage {
     pub fn recover_and_commit_snapshot_with_identity(
         &self,
         snapshot: &HashMap<String, StoredFileState>,
+        hash_kind: HashKind,
         watermark: u64,
         identity: Option<&str>,
     ) -> Result<(), StorageError> {
@@ -438,7 +523,7 @@ impl HashStorage {
                 reason: format!("failed to rename corrupt db to '{}': {e}", backup.display()),
             })?;
         }
-        self.commit_snapshot_with_identity(snapshot, watermark, 0, identity)
+        self.commit_snapshot_with_identity(snapshot, hash_kind, watermark, 0, identity)
     }
 
     fn ensure_parent_dir(&self) -> Result<(), StorageError> {
@@ -510,6 +595,21 @@ fn read_watermark(
             reason: format!("read watermark: {e}"),
         })
         .map(|opt| opt.map(|v| v.value()))
+}
+
+fn read_hash_kind(
+    meta: Option<&redb::ReadOnlyTable<&str, u64>>,
+    path: &Path,
+) -> Result<HashKind, StorageError> {
+    let Some(meta) = meta else {
+        return Ok(HashKind::Legacy);
+    };
+    meta.get(META_KEY_HASH_KIND)
+        .map_err(|e| StorageError::Recoverable {
+            path: path.to_path_buf(),
+            reason: format!("read hash kind: {e}"),
+        })
+        .map(|value| HashKind::from_stored(value.map(|v| v.value())))
 }
 
 fn read_generation(
@@ -776,7 +876,7 @@ mod tests {
             ("b.bsl".to_owned(), state(2, "h2")),
         ]);
         storage
-            .commit_snapshot_with_identity(&snapshot, 7, 0, Some("base"))
+            .commit_snapshot_with_identity(&snapshot, super::HashKind::RawBlob, 7, 0, Some("base"))
             .expect("commit");
         let summary = storage.load_summary().expect("summary");
         let full = storage.load_snapshot().expect("snapshot");
@@ -789,7 +889,13 @@ mod tests {
         assert_eq!(commits_of(generation), 1);
 
         storage
-            .commit_snapshot_with_identity(&HashMap::new(), 0, generation, Some("base"))
+            .commit_snapshot_with_identity(
+                &HashMap::new(),
+                super::HashKind::RawBlob,
+                0,
+                generation,
+                Some("base"),
+            )
             .expect("empty commit");
         let emptied = storage.load_summary().expect("emptied");
         assert_eq!(emptied.files, 0);
@@ -804,6 +910,7 @@ mod tests {
         storage
             .commit_snapshot_with_identity(
                 &HashMap::from([("a.xml".to_owned(), state(1, "h1"))]),
+                super::HashKind::RawBlob,
                 1,
                 0,
                 Some("base"),
@@ -836,6 +943,7 @@ mod tests {
                     ("a.xml".to_owned(), state(1, "h1")),
                     ("x.xml".to_owned(), state(2, "h2")),
                 ]),
+                super::HashKind::RawBlob,
                 1,
                 0,
                 Some("base"),
@@ -858,6 +966,7 @@ mod tests {
                     ("a.xml".to_owned(), state(1, "h1")),
                     ("b.xml".to_owned(), state(3, "h3")),
                 ]),
+                super::HashKind::RawBlob,
                 2,
                 generation,
                 Some("base"),
@@ -885,7 +994,7 @@ mod tests {
         let first = many(200);
         for memory in [&storage, &full] {
             memory
-                .commit_snapshot_with_identity(&first, 1, 0, Some("base"))
+                .commit_snapshot_with_identity(&first, super::HashKind::RawBlob, 1, 0, Some("base"))
                 .expect("first");
         }
         let generation = storage.current_generation().expect("generation");
@@ -894,6 +1003,7 @@ mod tests {
         second.insert("f7.xml".to_owned(), state(1_000, "edited"));
         second.remove("f9.xml");
         let delta = StorageDelta {
+            hash_kind: super::HashKind::RawBlob,
             upserts: HashMap::from([("f7.xml".to_owned(), state(1_000, "edited"))]),
             removals: vec!["f9.xml".to_owned()],
         };
@@ -903,8 +1013,14 @@ mod tests {
             .commit_delta_with_identity(&delta, 2, generation, Some("base"))
             .expect("delta");
         let touched = row_audit::take();
-        full.commit_snapshot_with_identity(&second, 2, full_generation, Some("base"))
-            .expect("full");
+        full.commit_snapshot_with_identity(
+            &second,
+            super::HashKind::RawBlob,
+            2,
+            full_generation,
+            Some("base"),
+        )
+        .expect("full");
         let whole = row_audit::take();
 
         // One changed file: its two rows looked up and rewritten; one removed file: two rows.
@@ -939,6 +1055,7 @@ mod tests {
         storage
             .commit_snapshot_with_identity(
                 &HashMap::from([("a.xml".to_owned(), state(1, "h1"))]),
+                super::HashKind::RawBlob,
                 1,
                 0,
                 Some("base"),
@@ -959,6 +1076,7 @@ mod tests {
         storage
             .commit_delta_with_identity(
                 &StorageDelta {
+                    hash_kind: super::HashKind::RawBlob,
                     upserts: HashMap::from([("b.xml".to_owned(), state(2, "h2"))]),
                     removals: Vec::new(),
                 },
@@ -984,15 +1102,22 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = HashStorage::new(dir.path().join("memory.redb"));
         storage
-            .commit_snapshot_with_identity(&many(3), 1, 0, Some("base"))
+            .commit_snapshot_with_identity(&many(3), super::HashKind::RawBlob, 1, 0, Some("base"))
             .expect("first");
         let read = storage.current_generation().expect("generation");
         storage
-            .commit_snapshot_with_identity(&many(3), 2, read, Some("base"))
+            .commit_snapshot_with_identity(
+                &many(3),
+                super::HashKind::RawBlob,
+                2,
+                read,
+                Some("base"),
+            )
             .expect("second");
         let error = storage
             .commit_delta_with_identity(
                 &StorageDelta {
+                    hash_kind: super::HashKind::RawBlob,
                     upserts: HashMap::from([("f0.xml".to_owned(), state(9, "late"))]),
                     removals: Vec::new(),
                 },
@@ -1024,25 +1149,43 @@ mod tests {
         let path = dir.path().join("memory.redb");
         let storage = HashStorage::new(path.clone());
         let late = StorageDelta {
+            hash_kind: super::HashKind::RawBlob,
             upserts: HashMap::from([("f0.xml".to_owned(), state(9, "late"))]),
             removals: Vec::new(),
         };
 
         for recreate in ["recover", "delete"] {
             storage
-                .commit_snapshot_with_identity(&many(3), 1, 0, Some("base"))
+                .commit_snapshot_with_identity(
+                    &many(3),
+                    super::HashKind::RawBlob,
+                    1,
+                    0,
+                    Some("base"),
+                )
                 .expect("memory");
             let read = storage.current_generation().expect("generation");
             assert_eq!(commits_of(read), 1, "{recreate}");
 
             match recreate {
                 "recover" => storage
-                    .recover_and_commit_snapshot_with_identity(&many(3), 2, Some("base"))
+                    .recover_and_commit_snapshot_with_identity(
+                        &many(3),
+                        super::HashKind::RawBlob,
+                        2,
+                        Some("base"),
+                    )
                     .expect("recovered"),
                 _ => {
                     std::fs::remove_file(&path).expect("delete");
                     storage
-                        .commit_snapshot_with_identity(&many(3), 2, 0, Some("base"))
+                        .commit_snapshot_with_identity(
+                            &many(3),
+                            super::HashKind::RawBlob,
+                            2,
+                            0,
+                            Some("base"),
+                        )
                         .expect("created anew");
                 }
             }
@@ -1077,7 +1220,7 @@ mod tests {
             ("removed.xml".to_owned(), state(4, "gone")),
         ]);
         storage
-            .commit_snapshot_with_identity(&first, 1, 0, Some("base"))
+            .commit_snapshot_with_identity(&first, super::HashKind::RawBlob, 1, 0, Some("base"))
             .expect("first");
         let generation = storage.current_generation().expect("generation");
         let second = HashMap::from([
@@ -1087,7 +1230,13 @@ mod tests {
             ("added.xml".to_owned(), state(5, "fresh")),
         ]);
         storage
-            .commit_snapshot_with_identity(&second, 2, generation, Some("base"))
+            .commit_snapshot_with_identity(
+                &second,
+                super::HashKind::RawBlob,
+                2,
+                generation,
+                Some("base"),
+            )
             .expect("second");
         let loaded = storage.load_snapshot().expect("loaded");
         assert_eq!(rows(&loaded.entries), rows(&second));

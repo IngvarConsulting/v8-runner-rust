@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use crate::change_detection::analyzer::{self, ContextAnalysis};
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::source_set::{connection_memory_key, designer_copy_dir, SourceSetContext};
 
@@ -156,14 +155,6 @@ impl<'a> SourceSetsService<'a> {
                     .with_local_path(&self.config.local_path)
             })
             .collect()
-    }
-    /// Analyze all provided contexts and return context-tagged outcomes.
-    pub fn analyze_contexts(
-        &self,
-        contexts: &[SourceSetContext],
-        interrupted: &mut dyn FnMut() -> bool,
-    ) -> Vec<ContextAnalysis> {
-        analyzer::analyze_contexts(contexts, &self.config.work_path, interrupted)
     }
 }
 

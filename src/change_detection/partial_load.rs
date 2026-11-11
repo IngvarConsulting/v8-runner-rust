@@ -399,6 +399,19 @@ const NESTED_ELEMENTS: &[(&str, &str, Option<&str>)] = &[
     ),
 ];
 
+/// The folders of a Designer dump: those of the top-level metadata kinds ([`METADATA_TYPES`])
+/// and those nested under an element ([`NESTED_ELEMENTS`]). One vocabulary for the dump
+/// layout, read also by the git ignore check (#575).
+pub(crate) fn dump_layout_folders() -> (Vec<&'static str>, Vec<&'static str>) {
+    (
+        METADATA_TYPES.iter().map(|(folder, _)| *folder).collect(),
+        NESTED_ELEMENTS
+            .iter()
+            .map(|(folder, _, _)| *folder)
+            .collect(),
+    )
+}
+
 /// The kind of a folder nested under an element of `owner_kind`, if a dump lays one out there.
 fn nested_kind(owner_kind: &str, folder: &str) -> Option<&'static str> {
     let nested = NESTED_ELEMENTS.iter().find_map(|(directory, kind, owner)| {

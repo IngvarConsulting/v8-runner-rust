@@ -1215,7 +1215,7 @@ fn snapshot_of(
                 "missing change-detection context for source-set '{source_set}'"
             ))
         })?;
-    analyzer::prepare_source_snapshot(context, work_path)
+    crate::use_cases::source_changes::prepare_source_snapshot(context, work_path)
         .map_err(|error| AppError::Runtime(error.to_string()))
 }
 

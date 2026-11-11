@@ -73,6 +73,9 @@ pub struct SourceSetStatus {
     /// Файлы каталога, изменившиеся с тех пор, как раннер его последний раз читал; `null` —
     /// сравнить не с чем.
     pub changed_files: Option<u64>,
+    /// Каким путём найдены изменения: у git (`git`, `git+fsmonitor`) или чтением файлов
+    /// (`scan`) с причиной; `null` — изменений не искали.
+    pub detection: Option<crate::domain::git_worktree::ChangeDetection>,
     /// Что о поколении ответила платформа; только у `--deep`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<BaseGeneration>,
