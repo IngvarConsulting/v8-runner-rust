@@ -70,6 +70,7 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["agent", "stop"], "agent stop"),
     (&["agent", "status"], "agent status"),
     (&["agent", "keeper", "--key", "00"], "agent keeper"),
+    (&["remove-backup", "--path", "missing"], "remove-backup"),
 ];
 
 /// Листья, которые базы не выбирают вовсе.
@@ -91,6 +92,8 @@ const IGNORING_THE_BASE: &[(&[&str], &str)] = &[
     (&["convert", "main.cf", "--to", "xml"], "convert"),
     // Сторож живого агента держит агента, которого ему назвали (#577).
     (&["agent", "keeper", "--key", "00"], "agent keeper"),
+    // Фоновое удаление прежнего дерева удаляет каталог, который ему назвали (#616).
+    (&["remove-backup", "--path", "missing"], "remove-backup"),
 ];
 
 /// Листья, которые базу объявляют сами.

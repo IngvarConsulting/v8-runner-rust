@@ -6,8 +6,8 @@ use chrono::Utc;
 use crate::support::error::AppError;
 use crate::support::fs::{
     ensure_dir, is_known_tool_name, metadata_sidecar_path, move_file, read_temp_dir_metadata,
-    remove_path_if_exists, replace_dir_atomically, replace_file_atomically,
-    write_temp_dir_metadata, ReplaceFileFailureState, TempDirKind, TempDirMetadata,
+    remove_path_if_exists, replace_file_atomically, swap_dir_atomically, write_temp_dir_metadata,
+    ReplaceFileFailureState, SupersededBackup, TempDirKind, TempDirMetadata,
 };
 use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
 use crate::use_cases::destruction_guard::{
@@ -34,6 +34,18 @@ pub(super) struct StagedPublicationOutcome {
     pub discarded: Losses,
     pub deferred_interruption: Option<ExecutionInterruption>,
     pub previous_target_present: bool,
+}
+
+/// Как уходит прежнее дерево после успешной подмены каталога.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BackupRemoval {
+    /// На месте, до ответа команды.
+    Inline,
+    /// Отделённым процессом раннера, который переживает ответ команды (#616,
+    /// `INV.USE-CASES.A-REPLACED-TREE-IS-REMOVED-IN-THE-BACKGROUND`). Чего он не успел, доберёт
+    /// уборка остатков следующей команды: прежнее дерево помечено `superseded`. Процесс не
+    /// запустился — дерево удаляется на месте.
+    Background,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +171,7 @@ impl StagedPublication {
         error_prefix: &str,
         consent: &DestructionConsent,
         regenerated: &[&str],
+        removal: BackupRemoval,
     ) -> Result<StagedPublicationOutcome, AppError> {
         // Сторож спрашивает до подмены: после неё прежнего содержимого уже нет.
         let discarded = guard_replacement(
@@ -171,8 +184,9 @@ impl StagedPublication {
         if let Some(error) = interruption_before_publish(context, "staged directory publication") {
             return Err(error);
         }
+        tracing::debug!(target = %self.target_path.display(), "replacing the target directory");
         let publish_phase = context.run_no_process_critical_phase(|| {
-            replace_dir_atomically(
+            swap_dir_atomically(
                 &self.staging_path,
                 &self.target_path,
                 &self.run_id,
@@ -181,8 +195,17 @@ impl StagedPublication {
             )
             .map_err(|error| AppError::Runtime(format!("{error_prefix}: {error}")))
         })?;
+        let swapped = publish_phase.value;
+        let removal_warning = swapped
+            .backup
+            .and_then(|backup| remove_superseded(backup, removal));
+        let warnings: Vec<String> = swapped
+            .cleanup_warning
+            .into_iter()
+            .chain(removal_warning)
+            .collect();
         Ok(StagedPublicationOutcome {
-            cleanup_warning: publish_phase.value.cleanup_warning,
+            cleanup_warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
             discarded,
             deferred_interruption: publish_phase.deferred_interruption,
             previous_target_present: self.previous_target_present,
@@ -306,6 +329,27 @@ impl StagedPublication {
     }
 }
 
+/// Убирает прежнее дерево успешной подмены так, как велено; текст — предупреждение ответа.
+fn remove_superseded(backup: SupersededBackup, removal: BackupRemoval) -> Option<String> {
+    match removal {
+        BackupRemoval::Inline => backup.remove(),
+        BackupRemoval::Background => match crate::platform::backup_removal::spawn(backup.path()) {
+            Ok(pid) => {
+                tracing::debug!(
+                    backup = %backup.path().display(),
+                    pid,
+                    "removing the replaced tree in the background"
+                );
+                None
+            }
+            Err(refusal) => {
+                tracing::debug!(%refusal, "removing the replaced tree in place");
+                backup.remove()
+            }
+        },
+    }
+}
+
 /// Переносит дерево `source` поверх `target`, кроме файла `skip` в корне: каталоги
 /// создаются, файлы заменяются переименованием, лишнее в `target` остаётся.
 fn move_tree_over(source: &Path, target: &Path, skip: &Path) -> std::io::Result<()> {
@@ -380,12 +424,7 @@ pub(super) fn cleanup_owned_orphan_files(
             {
                 continue;
             }
-            if (Utc::now() - metadata.created_at)
-                .to_std()
-                .unwrap_or_default()
-                < ORPHAN_TTL
-                || backup_is_the_only_copy(&metadata.kind, &temp_path, &metadata.target_path)
-            {
+            if !is_a_leftover(&metadata, &temp_path) {
                 continue;
             }
 
@@ -404,6 +443,25 @@ pub(super) fn cleanup_owned_orphan_files(
         }
     }
     Ok(())
+}
+
+/// A backup of a finished replacement is a leftover at any age: its tree is older than the
+/// target, and the background removal (#616) may have left part of it. Anything else is a
+/// leftover once stale, unless it is the only copy of its target.
+fn is_a_leftover(metadata: &TempDirMetadata, temp_path: &Path) -> bool {
+    if is_superseded_backup(metadata) {
+        return true;
+    }
+    (Utc::now() - metadata.created_at)
+        .to_std()
+        .unwrap_or_default()
+        >= ORPHAN_TTL
+        && !backup_is_the_only_copy(&metadata.kind, temp_path, &metadata.target_path)
+}
+
+/// The previous tree of a finished replacement: marked once the new tree took its place.
+pub(super) fn is_superseded_backup(metadata: &TempDirMetadata) -> bool {
+    matches!(metadata.kind, TempDirKind::Backup) && metadata.superseded
 }
 
 /// A process that died between the two renames of a replacement leaves the backup and no
@@ -538,6 +596,7 @@ mod tests {
                 "failed to publish staged test dir",
                 &DestructionConsent::RunnerOwned,
                 &[],
+                super::BackupRemoval::Inline,
             )
             .expect("publish");
 
@@ -733,6 +792,69 @@ mod tests {
         );
     }
 
+    /// Прежнее дерево завершённой замены — остаток в любом возрасте (#616): фоновое удаление
+    /// могло не успеть, и следующая команда добирает его той же уборкой.
+    #[test]
+    fn cleanup_removes_a_fresh_superseded_backup() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        fs::create_dir_all(&target).expect("target");
+        let backup = dir.path().join(".backup-run");
+        fs::create_dir_all(backup.join("nested")).expect("backup");
+        fs::write(backup.join("nested").join("old.txt"), "old").expect("old");
+        write_temp_dir_metadata(&backup, TempDirKind::Backup, "run", &target, "identity")
+            .expect("metadata");
+        let sidecar = metadata_sidecar_path(&backup);
+        let mut metadata = read_temp_dir_metadata(&backup).expect("metadata");
+        metadata.superseded = true;
+        fs::write(&sidecar, serde_json::to_vec(&metadata).expect("json")).expect("mark");
+
+        cleanup_owned_orphan_files(
+            &[dir.path().to_path_buf()],
+            &target,
+            "identity",
+            &[],
+            &[".backup-"],
+            false,
+        )
+        .expect("cleanup");
+
+        assert!(!backup.exists());
+        assert!(!sidecar.exists());
+    }
+
+    /// Успешная подмена с фоновым удалением в процессе, который раннером не является, удаляет
+    /// прежнее дерево на месте, как раньше.
+    #[test]
+    fn background_removal_outside_the_runner_removes_the_previous_tree_in_place() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        fs::create_dir_all(&target).expect("target");
+        fs::write(target.join("old.txt"), "old").expect("old");
+        let publication =
+            StagedPublication::prepare_dir(&target, "identity", ".stage").expect("prepare");
+        fs::write(publication.staging_path().join("payload.txt"), "payload").expect("payload");
+
+        let outcome = publication
+            .publish_dir(
+                &ExecutionContext::cli(CommandName::Dump),
+                ".backup",
+                "failed to publish staged test dir",
+                &DestructionConsent::RunnerOwned,
+                &[],
+                super::BackupRemoval::Background,
+            )
+            .expect("publish");
+
+        assert_eq!(outcome.cleanup_warning, None);
+        assert!(target.join("payload.txt").exists());
+        let left: Vec<_> = fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("target")]);
+    }
+
     /// Проверяется цель из записи резерва, а не корень уборки: у потомка он есть всегда.
     #[test]
     fn cleanup_looks_at_the_target_named_by_the_backup() {
@@ -795,6 +917,7 @@ mod tests {
                 "failed to publish staged test dir",
                 &DestructionConsent::RunnerOwned,
                 &[],
+                super::BackupRemoval::Inline,
             )
             .expect_err("cancelled publication");
 

@@ -10,6 +10,8 @@ check:
   - src/use_cases/dump_config.rs::cleanup_orphan_dirs_removes_a_stale_backup_beside_its_target
   - src/use_cases/staged_publication.rs::cleanup_keeps_a_stale_backup_when_its_target_is_gone
   - src/use_cases/staged_publication.rs::cleanup_looks_at_the_target_named_by_the_backup
+  - src/use_cases/staged_publication.rs::cleanup_removes_a_fresh_superseded_backup
+  - src/use_cases/dump_config.rs::cleanup_orphan_dirs_removes_a_fresh_superseded_backup
   - src/use_cases/dump_config.rs::cleanup_orphan_dirs_ignores_foreign_metadata
   - src/use_cases/dump_config.rs::cleanup_orphan_dirs_ignores_metadata_of_another_target
   - src/use_cases/dump_config.rs::cleanup_orphan_dirs_ignores_malformed_metadata
@@ -37,5 +39,7 @@ check:
 копия, поэтому в любом возрасте она не удаляется. `pull` под замком цели возвращает свою
 резервную копию на место раньше, чем что-либо создаст цель: иначе пустой или частичный каталог
 выдал бы её за обычный след. Если вернуть не удалось или цель не удалось осмотреть, команда
-отказывает. Копия, оставшаяся от завершённой замены, помечена и не возвращается: она старше цели.
+отказывает. Копия, оставшаяся от завершённой замены, помечена и не возвращается: она старше цели. Такую
+копию уборка удаляет в любом возрасте — её не успело удалить фоновое удаление
+(`INV.USE-CASES.A-REPLACED-TREE-IS-REMOVED-IN-THE-BACKGROUND`).
 Уборка других команд резервную копию при цели, которую не удалось осмотреть, не удаляет.

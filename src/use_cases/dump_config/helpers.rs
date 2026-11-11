@@ -16,7 +16,7 @@ use crate::support::edt_project;
 use crate::support::error::AppError;
 use crate::support::fs::{
     is_known_tool_name, metadata_sidecar_path, read_temp_dir_metadata, remove_path_if_exists,
-    TempDirKind,
+    remove_tree_in_parallel, TempDirKind,
 };
 use crate::support::path::{is_filesystem_root, nearest_existing_canonical_path};
 use crate::support::temp::{dump_object_list_file, platform_logs_dir};
@@ -24,6 +24,7 @@ use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption;
 use crate::use_cases::source_inventory::SourceSetInventory;
+use crate::use_cases::staged_publication::is_superseded_backup;
 
 use super::ResolvedDumpTarget;
 
@@ -186,16 +187,17 @@ fn cleanup_orphan_dirs_for(target_path: &Path, target_identity: &str) -> Result<
         let entry = entry
             .map_err(|error| AppError::Runtime(format!("failed to read dir entry: {error}")))?;
         let path = entry.path();
-        if !entry
+        let is_dir = entry
             .file_type()
             .map_err(|error| AppError::Runtime(format!("failed to stat dir entry: {error}")))?
-            .is_dir()
-        {
-            continue;
-        }
+            .is_dir();
         let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
+        if !is_dir {
+            remove_metadata_of_a_removed_backup(&path, file_name, target_identity)?;
+            continue;
+        }
         if !file_name.starts_with(".dump-stage-") && !file_name.starts_with(".dump-backup-") {
             continue;
         }
@@ -206,20 +208,25 @@ fn cleanup_orphan_dirs_for(target_path: &Path, target_identity: &str) -> Result<
         if !is_known_tool_name(&metadata.tool) || metadata.target_identity != target_identity {
             continue;
         }
-        if (chrono::Utc::now() - metadata.created_at)
-            .to_std()
-            .unwrap_or_default()
-            < super::ORPHAN_TTL
+        // Прежнее дерево завершённой замены — остаток в любом возрасте: его не успело или не
+        // смогло удалить фоновое удаление (#616), или оно удаляет его прямо сейчас.
+        if !is_superseded_backup(&metadata)
+            && (chrono::Utc::now() - metadata.created_at)
+                .to_std()
+                .unwrap_or_default()
+                < super::ORPHAN_TTL
         {
             continue;
         }
 
-        remove_path_if_exists(&path).map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to remove stale temp dir '{}': {error}",
-                path.display()
-            ))
-        })?;
+        remove_tree_in_parallel(&path)
+            .or_else(already_gone)
+            .map_err(|error| {
+                AppError::Runtime(format!(
+                    "failed to remove stale temp dir '{}': {error}",
+                    path.display()
+                ))
+            })?;
         remove_path_if_exists(&metadata_sidecar_path(&path)).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to remove stale temp metadata '{}': {error}",
@@ -229,6 +236,49 @@ fn cleanup_orphan_dirs_for(target_path: &Path, target_identity: &str) -> Result<
     }
 
     Ok(())
+}
+
+/// Фоновое удаление уже убрало дерево, или его убирает тот, кто удаляет его одновременно.
+fn already_gone(error: std::io::Error) -> std::io::Result<()> {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+/// Метаданные прежнего дерева, которое удалили, а метаданные — нет: процесс фонового удаления
+/// оборвался между ними (#616).
+fn remove_metadata_of_a_removed_backup(
+    path: &Path,
+    file_name: &str,
+    target_identity: &str,
+) -> Result<(), AppError> {
+    let Some(backup_name) = file_name
+        .strip_suffix(".meta.json")
+        .filter(|name| name.starts_with(".dump-backup-"))
+    else {
+        return Ok(());
+    };
+    let backup = path.with_file_name(backup_name);
+    if std::fs::symlink_metadata(&backup).is_ok() {
+        return Ok(());
+    }
+    let Ok(metadata) = read_temp_dir_metadata(&backup) else {
+        return Ok(());
+    };
+    if !is_known_tool_name(&metadata.tool)
+        || metadata.target_identity != target_identity
+        || !is_superseded_backup(&metadata)
+    {
+        return Ok(());
+    }
+    remove_path_if_exists(path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to remove the metadata of a removed backup '{}': {error}",
+            path.display()
+        ))
+    })
 }
 
 pub(super) fn resolve_dump_edt_base_project_name(
